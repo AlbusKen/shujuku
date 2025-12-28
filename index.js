@@ -52,7 +52,7 @@
   // !!! 请将下面的 'biaozhunbanv2_v1' 更改为一个【全新的、唯一的】英文名称。
   // !!! 例如: 'my_sci_fi_db', 'fantasy_world_db' 等。
   // !!! 同时，请务必修改上面的 @name 以便在菜单中区分它们。
-  const UNIQUE_SCRIPT_ID = 'shujuku_v90'; // <--- 为每个副本修改这里
+  const UNIQUE_SCRIPT_ID = 'shujuku_v91'; // <--- 为每个副本修改这里
   const SCRIPT_ID_PREFIX_ACU = UNIQUE_SCRIPT_ID;
 
   const POPUP_ID_ACU = `${SCRIPT_ID_PREFIX_ACU}-popup`;
