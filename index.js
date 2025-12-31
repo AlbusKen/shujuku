@@ -7048,6 +7048,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     const PERSON_ENTRY_PREFIX = isoPrefix + basePersonEntryPrefix;
     const basePersonIndexComment = isImport ? `${IMPORT_PREFIX}TavernDB-ACU-ImportantPersonsIndex` : 'TavernDB-ACU-ImportantPersonsIndex';
     const PERSON_INDEX_COMMENT = isoPrefix + basePersonIndexComment;
+    const PERSONS_FIXED_SYSTEM_DEPTH = 10000; // 用户指定：PersonsHeader + 重要人物条目固定深度（@D⚙）
 
     try {
         const allEntries = await TavernHelper_API_ACU.getLorebookEntries(primaryLorebookName);
@@ -7102,7 +7103,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             }
 
             const content = `| ${rowData.join(' | ')} |`
-            const newEntryData = {
+            const newEntryData = applySystemDepthInjection_ACU({
                 comment: `${PERSON_ENTRY_PREFIX}${i + 1}`,
                 content: content,
                 keys: keys,
@@ -7111,7 +7112,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 // [优化] order(插入深度) 避免与任何现有条目重复（人物条目按序分配）
                 order: null,
                 prevent_recursion: true
-            };
+            }, PERSONS_FIXED_SYSTEM_DEPTH);
             personEntriesToCreate.push(newEntryData);
         });
 
@@ -7119,7 +7120,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
         // 2.1.5 创建重要人物表表头条目
         const personsHeaderContent = `# ${importantPersonsTable.name}\n\n| ${headers.join(' | ')} |\n|${headers.map(() => '---').join('|')}|`;
-        const personsHeaderEntryData = {
+        const personsHeaderEntryData = applySystemDepthInjection_ACU({
             // [修复] 外部导入时 PersonsHeader 也必须带外部导入前缀，避免被清理逻辑误删
             comment: isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-PersonsHeader` : 'TavernDB-ACU-PersonsHeader'),
             content: personsHeaderContent,
@@ -7128,7 +7129,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             type: 'constant',
             order: null,
             prevent_recursion: true
-        };
+        }, PERSONS_FIXED_SYSTEM_DEPTH);
         personEntriesToCreate.unshift(personsHeaderEntryData);
 
         // 2.2 准备要创建的索引条目
@@ -7167,8 +7168,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 const index = latest.find(e => e.comment === PERSON_INDEX_COMMENT);
                 const rows = latest.filter(e => (e?.comment || '').startsWith(PERSON_ENTRY_PREFIX));
                 const updates = [];
-                if (header?.uid) updates.push({ uid: header.uid, order: personsOrderBlockBase });
-                rows.forEach(e => { if (e?.uid) updates.push({ uid: e.uid, order: personsOrderBlockBase + 1 }); });
+                if (header?.uid) updates.push(applySystemDepthInjection_ACU({ uid: header.uid, order: personsOrderBlockBase }, PERSONS_FIXED_SYSTEM_DEPTH));
+                rows.forEach(e => { if (e?.uid) updates.push(applySystemDepthInjection_ACU({ uid: e.uid, order: personsOrderBlockBase + 1 }, PERSONS_FIXED_SYSTEM_DEPTH)); });
                 if (index?.uid) updates.push({ uid: index.uid, order: personsOrderBlockBase + 2 });
                 if (updates.length > 0) {
                     await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, updates);
