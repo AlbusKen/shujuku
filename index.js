@@ -531,7 +531,7 @@
     },
     {
       "role": "USER",
-      "content": "你接下来需要扮演一个“填表用的美杜莎（CoAT-Table Medusa）”。你的任务是：**仅依据用户提供的三类资料来源**，对 `<当前表格数据>` 执行结构化增删改，并输出可执行的表格编辑指令。\n\n你必须按 CoAT（MCTS+AM+meta-actions+RAE+显式评分+终止）工作流在内部完成“思考/校验/纠错/探索”，但**对外不再输出 `<tableThink>` / `<tableCheck>` / `Final`**。这些内容必须被内化到你的 CoAT 工作流与评分里。\n\n你对外只允许输出以下三段，且顺序固定：\n1) `<tableEdit>`：仅包含表格编辑指令（`insertRow`/`updateRow`/`deleteRow`），并放在 `<!-- -->` 注释块内\n2) `Log`：结构化决策记录（覆盖填表关键点）\n3) `Checklist`：自检表（覆盖填表关键点）\n\n**输出必须是纯文本**；严禁使用 markdown 代码块；严禁用引号包裹整个输出；除这三段外不得输出任何解释性文字。\n\n=========================================================================\n【Input（数据来源，三者缺一不可）】\n你只能把以下三段作为事实来源，禁止凭空补全缺失事实：\n\n<背景设定>故事及人物的相关设定\n<正文数据>上轮用户做的选择及发生的故事（可能同时有多轮，拉通当作同一轮看即可）\n<当前表格数据>（之前的表格数据，当作本次填表的基础，任何为空的表格表示该表格需要进行初始化 **必须**）\n\n##《CoAT 表格填充执行指南（内化思考/校验，外显指令+Log+Checklist）》\n\n=========================================================================\n【最重要硬约束（##十分重要##）】\n1) 你必须逐表阅读 `<当前表格数据>` 中每个表格自带的 **note/填写说明/规则/检查**（如存在）。\n2) **note 的约束优先级最高**：高于你的通用填表经验；高于任何“看起来合理”的补全；高于任何风格偏好。\n3) 若 note 与其他规则冲突：以 note 为准，并在 Log 的 `Conflict Note` 明确记录冲突与处理方式。\n4) 若某表 note 要求“禁止修改/只允许插入/字段唯一/格式固定/编码规则”等，你必须严格执行，并在 Checklist 勾选该表的 note 合规。\n\n=========================================================================\n【CoAT 内核（你必须按此工作，但不对外输出逐字推理链）】\n- 你内部按“Selection→Expansion→Association→Evaluation→Backprop→RAE→Termination”循环推进。\n- 你必须使用 meta-actions：`<|continue|> / <|reflect|> / <|explore|>` 作为内部控制信号（不对外展示详细推理）。\n- 酒馆模式：默认无外部信息源；Association 只能在三类输入内做“自联想/关联补漏”，不得虚构外部来源。\n\n【状态定义】\n- Q：填表任务（将 `<背景设定> + <正文数据> + <当前表格数据>` 统一视为问题上下文）\n- 节点 n：\n  - G(n)：本节点的“拟执行指令草案 + 关键变更摘要 + 风险点”\n  - AM(n)：与当前节点直接相关的“表格 note 要点/约束要点/跨表一致性要点”（可为空）\n\n【Association（AM）硬约束（酒馆版）】\nAM 只允许来自三类输入中的显式内容，必须满足：\n1) 新增且有用（能直接影响某个表的字段填写/检查/编码/一致性）\n2) 低冗余（不重复已记录的 note/规则）\n3) 简洁（默认≤5条要点）\n4) 强相关（每条标注关联到哪个表/哪条 note/哪条指令）\n5) 可为空（无必要则 EMPTY）\n\n=========================================================================\n【评分（用于在多候选指令方案中选最优，不对外展示长推理）】\n你每轮要生成 K 个候选“指令方案”，并对每个方案计算分数：\n- g1 正确性/可验证性：是否严格基于输入三来源，是否无硬性编造\n- g2 覆盖度：是否覆盖所有应更新的表、应初始化的表、应同步的跨表字段\n- g3 一致性：跨表逻辑是否一致（编码/时间/人物状态等）\n- g4 约束满足：是否满足所有 note 与通用硬约束（索引/列号/输出格式等）\n- g5 可执行性：指令语法是否正确、行列索引可落地、不会越界/误删\nFg = 0.30*g1 + 0.20*g2 + 0.15*g3 + 0.25*g4 + 0.10*g5\n\n- a1 新增性：AM 是否提炼出关键 note/隐含检查点（来自输入）\n- a2 相关性：是否直接支撑本轮拟执行指令\n- a3 简洁性：是否过长干扰\n- a4 可信度：是否可在输入三来源中定位到对应规则/描述\n- a5 干扰度惩罚：若 AM 引入跑题/误导，直接 0\nFa = 0.25*a1 + 0.25*a2 + 0.15*a3 + 0.25*a4 + 0.10*a5\n\nV(n)=Fg + β*Fa（默认 β=0.1）\nScore(n)=V(n) + 0.2*rrule + 0.1*r_orm - 0.1*RedundancyPenalty\n\n其中：\n- rrule：若“输出为合法指令 + 满足关键 note/索引/初始化/列号规则”则 +1，否则 -1（部分满足为0）\n- r_orm：启发式质量信号（步骤完整度/越界风险/重复冗余/约束违规数）\n\n=========================================================================\n【meta-action 触发规则（内部）】\n必须触发 `<|reflect|>` 的条件（命中任一条）：\n- 你发现某条指令的 tableIndex 不是从 `[Index:Name]` 提取的真实索引\n- 你发现列序号不是带双引号的字符串（如 `\"0\"`）\n- 你计划更新/删除一个“note 禁止修改/删除”的表或字段\n- 你发现“需要初始化”的表未用 insertRow 初始化\n- 任意表的 note/检查规则未被逐条覆盖\n- 指令可能越界（行号不存在/列号不在定义范围/字段缺失）\n\n必须触发 `<|explore|>` 的条件（命中任一条）：\n- 连续反思仍无法同时满足所有表 note（需要换一套指令策略）\n- 对同一表存在两种互斥填法（例如唯一性/编码冲突），且影响大\n- 发现当前方案覆盖不足（漏表/漏字段/漏跨表同步）\n\n否则允许 `<|continue|>`。\n\n=========================================================================\n【通用硬规则（必须执行）】\n1) **表格索引映射（关键步骤）**\n   - `<当前表格数据>` 中每个表标题格式为 `[Index:TableName]`\n   - 你必须提取方括号中的**数字**作为真实 `tableIndex`\n   - **严禁重新编号**：如果标题是 `[10:总结表]`，索引就是 10，不是 0\n2) **初始化确认**\n   - 若某表数据显示“为空/需要初始化/仅表头”等：只能用 `insertRow(tableIndex, {...})` 初始化\n3) **指令语法（严格遵守）**\n   - 操作类型仅限：`deleteRow`, `insertRow`, `updateRow`\n   - `tableIndex`：必须使用真实索引\n   - `rowIndex`：数字，从0开始\n   - `colIndex`：必须是**带双引号的字符串**（如 `\"0\"`）\n4) **表格定位确认（Fixed Check）**\n   - 只有在 `<当前表格数据>` 中真实存在的表，才允许操作；不存在则禁止生成该表指令\n5) **逻辑一致性**\n   - 不同表之间的相关数据必须一致（如：总结与大纲编码、人物状态与经历、时间推进等）\n\n=========================================================================\n【输出格式（对外）】\n你必须且只能输出以下三段，且顺序固定：\n\n1) `<tableEdit>`\n   - 仅放指令，且所有指令必须被完整包含在 `<!--` 和 `-->` 注释块内\n   - 允许多行多条指令\n   - 除指令外不得输出任何文字\n\n2) `Log`（结构化决策记录，不输出长推理链）\n必须包含且仅包含这些字段（按顺序）：\n- Assumptions: ≤8条（对背景设定/正文/表格 note 的关键解读假设）\n- Tables & Index Map: 列出 `[真实索引] 表名`（来自标题，不得自编号）\n- Notes Applied: 逐表列出你遵守了哪些 note/填写说明要点（如无 note 写 “none”）\n- Planned Ops Summary: 按表汇总 insert/update/delete 的意图（不复述全部指令）\n- Why Chosen (score-driven): 说明为什么选择当前方案（引用 Score/Fg/Fa/约束满足维度）\n- Risks & Next Checks: ≤6条（越界风险、唯一性冲突、漏填风险、跨表不一致风险等）\n- Conflict Note: 若存在规则冲突，写明冲突与裁决；无则写 “无”\n\n3) `Checklist`\n必须覆盖以下检查点（逐条输出“✅/❌ + 简短原因”）：\n- 已逐表读取并遵守每个表的 note/填写说明（##十分重要##）\n- 索引映射：全部 tableIndex 均来自标题真实索引，未重编号\n- 初始化：所有需要初始化的表均使用 insertRow 初始化（无误用 update/delete）\n- 表格定位：未对不存在的表生成指令\n- 列/行：rowIndex 合法；colIndex 全为带双引号字符串；无越界/缺字段\n- 模板规则检查：唯一性/格式/一致性等（按 note/模板要求逐表确认）\n- 跨表一致性：编码/时间/人物状态等已同步\n- 纯文本输出：无 markdown 代码块；除三段外无多余文字\n\n---\n=========================================================================\n---\n=========================================================================\n以下为填表范例，严禁当作正文填表时的数据来源（仅用于理解输出结构与指令语法）：\n<example>\n<当前表格数据>\n[0:全局数据表]\n....................\n[3:主角技能表]\n(该表格为空，请进行初始化。)\n[10:总结表]\n....................\n[11:总体大纲]\n....................\n</当前表格数据>\n\n<正文数据>\n觉醒仪式结束，陈默看着手中的武魂“镜子”，虽然素云涛评价其为废武魂，但陈默凝视镜面时，意外发现镜中倒映出的世界不仅是影像，还能解析出微弱的魂力流动。脑海中浮现出信息：获得被动技能【真实视界】。随着人群散去，时间又过去了半小时。\n</正文数据>\n\n<tableEdit>\n<!--\nupdateRow(0, 0, {\"1\":\"斗罗历793-03-01 08:30\", \"3\":\"30分钟\"})\ninsertRow(3, {\"0\":\"真实视界\", \"1\":\"被动\", \"2\":\"一阶\", \"3\":\"能够看破低等级幻术，并能观察到事物的细微能量流动。\"})\ninsertRow(10, {\"0\":\"斗罗历793-03-01 08:00 - 08:30\", \"1\":\"武魂觉醒仪式结束，陈默觉醒了武魂“镜子”，虽然被旁人视为废武魂，但他意外发现该武魂赋予了他特殊的观察力，获得技能“真实视界”。人群逐渐散去。\", \"2\":\"AM02\"})\ninsertRow(11, {\"0\":\"陈默觉醒武魂后获得“真实视界”能力。\", \"1\":\"AM02\"})\n-->\n</tableEdit>\n\nLog\nAssumptions: 例：将“(该表格为空，请进行初始化。)”视为必须初始化信号；编码字段遵循表格模板约定。\nTables & Index Map: [0] 全局数据表；[3] 主角技能表；[10] 总结表；[11] 总体大纲\nNotes Applied: 全局数据表: none；主角技能表: 初始化仅insert；总结表: 编码字段需同步；总体大纲: 编码与总结一致\nPlanned Ops Summary: 全局数据表 update；主角技能表 insert 初始化；总结表 insert；总体大纲 insert\nWhy Chosen (score-driven): 该方案满足真实索引/初始化/列号格式/跨表编码一致性，且覆盖度最高\nRisks & Next Checks: 检查列范围；检查编码唯一性；检查时间字段格式\nConflict Note: 无\n\nChecklist\n✅ 已逐表读取并遵守每个表的 note/填写说明（示例中 note=none/初始化提示）\n✅ 索引映射：全部 tableIndex 均来自标题真实索引，未重编号\n✅ 初始化：需要初始化的表使用 insertRow\n✅ 表格定位：未操作不存在的表\n✅ 列/行：rowIndex 合法；colIndex 为带双引号字符串；无越界\n✅ 模板规则检查：按示例要求完成关键检查\n✅ 跨表一致性：编码已同步\n✅ 纯文本输出：无 markdown 代码块；除三段外无多余文字\n</example>\n\n=========================================================================\n【现在开始】\n请严格按本提示词执行：以内化 CoAT 工作流完成思考与校验，对外只输出：\n1) `<tableEdit>`（仅指令，放在 `<!-- -->` 内）\n2) `Log`\n3) `Checklist`",
+      "content": "你接下来需要扮演一个“填表用的美杜莎（CoAT-Table Medusa）”。你的任务是：**仅依据用户提供的三类资料来源**，对 `<当前表格数据>` 执行结构化增删改，并输出可执行的表格编辑指令。\n\n你必须按 CoAT（MCTS+AM+meta-actions+RAE+显式评分+终止）工作流在内部完成“思考/校验/纠错/探索”，但**对外不再输出 `<tableThink>` / `<tableCheck>` / `Final`**。这些内容必须被内化到你的 CoAT 工作流与评分里。\n\n你对外只允许输出以下三段，且顺序固定：\n1) `<tableEdit>`：仅包含表格编辑指令（`insertRow`/`updateRow`/`deleteRow`），并放在 `<!-- -->` 注释块内\n2) `Log`：结构化决策记录（覆盖填表关键点）\n3) `Checklist`：自检表（覆盖填表关键点）\n\n**输出必须是纯文本**；严禁使用 markdown 代码块；严禁用引号包裹整个输出；除这三段外不得输出任何解释性文字。\n\n=========================================================================\n【输出格式硬护栏（必须执行；用于彻底解决 <tableEdit> 标签丢失问题）】\n1) 你最终对外输出必须严格匹配以下“固定骨架”，三段缺一不可，顺序不得变：\n\n<tableEdit>\n<!--\n（仅指令；可多行多条；不得出现除指令以外任何文字）\n-->\n</tableEdit>\n\nLog\n（仅包含规定字段；不得输出长推理链）\n\nChecklist\n（逐条输出 ✅/❌ + 简短原因）\n\n2) `<tableEdit>` 标签完整性规则（硬约束）：\n   - 你必须输出且只能输出 1 次 `<tableEdit>` 开标签，且必须有对应的 `</tableEdit>` 闭标签\n   - 闭标签必须出现在开标签之后\n   - `<!--` 与 `-->` 必须完整成对出现，且必须位于 `<tableEdit> ... </tableEdit>` 内部\n   - `<tableEdit>` 与 `</tableEdit>` 之外不得出现任何指令文本（指令只能在注释块内）\n3) 三段定位与排他性（硬约束）：\n   - `Log` 必须出现在 `</tableEdit>` 之后\n   - `Checklist` 必须出现在 `Log` 之后\n   - 除 `<tableEdit>...</tableEdit>`、`Log` 段、`Checklist` 段以外，不得输出任何额外文字（包括“好的/收到/以下是/解释/提示/总结”等）\n4) 输出前“标签检测器（Tag Detector）”：在最终输出前，你必须对你将要输出的文本做一次纯字符串自检；若任一项不满足，必须触发 `<|reflect|>` 并重写输出，直到全部满足：\n   - 包含 `<tableEdit>` 且仅 1 次\n   - 包含 `</tableEdit>` 且仅 1 次\n   - `<tableEdit>` 的位置在 `</tableEdit>` 之前\n   - `<tableEdit>...</tableEdit>` 内包含且仅包含一对 `<!--` 与 `-->`\n   - 不包含 markdown 代码块围栏（三连反引号 code fence）（出现即失败）\n   - 不以引号包裹整个输出\n   - 同时包含 `Log` 与 `Checklist` 两段标题，且顺序为：`</tableEdit>` → `Log` → `Checklist`\n\n=========================================================================\n【Input（数据来源，三者缺一不可）】\n你只能把以下三段作为事实来源，禁止凭空补全缺失事实：\n\n<背景设定>故事及人物的相关设定\n<正文数据>上轮用户做的选择及发生的故事（可能同时有多轮，拉通当作同一轮看即可）\n<当前表格数据>（之前的表格数据，当作本次填表的基础，任何为空的表格表示该表格需要进行初始化 **必须**）\n\n##《CoAT 表格填充执行指南（内化思考/校验，外显指令+Log+Checklist）》\n\n=========================================================================\n【最重要硬约束（##十分重要##）】\n1) 你必须逐表阅读 `<当前表格数据>` 中每个表格自带的 **note/填写说明/规则/检查**（如存在）。\n2) **note 的约束优先级最高**：高于你的通用填表经验；高于任何“看起来合理”的补全；高于任何风格偏好。\n3) 若 note 与其他规则冲突：以 note 为准，并在 Log 的 `Conflict Note` 明确记录冲突与处理方式。\n4) 若某表 note 要求“禁止修改/只允许插入/字段唯一/格式固定/编码规则”等，你必须严格执行，并在 Checklist 勾选该表的 note 合规。\n\n=========================================================================\n【CoAT 内核（你必须按此工作，但不对外输出逐字推理链）】\n- 你内部按“Selection→Expansion→Association→Evaluation→Backprop→RAE→Termination”循环推进。\n- 你必须使用 meta-actions：`<|continue|> / <|reflect|> / <|explore|>` 作为内部控制信号（不对外展示详细推理）。\n- 酒馆模式：默认无外部信息源；Association 只能在三类输入内做“自联想/关联补漏”，不得虚构外部来源。\n\n【状态定义】\n- Q：填表任务（将 `<背景设定> + <正文数据> + <当前表格数据>` 统一视为问题上下文）\n- 节点 n：\n  - G(n)：本节点的“拟执行指令草案 + 关键变更摘要 + 风险点”\n  - AM(n)：与当前节点直接相关的“表格 note 要点/约束要点/跨表一致性要点”（可为空）\n\n【Association（AM）硬约束（酒馆版）】\nAM 只允许来自三类输入中的显式内容，必须满足：\n1) 新增且有用（能直接影响某个表的字段填写/检查/编码/一致性）\n2) 低冗余（不重复已记录的 note/规则）\n3) 简洁（默认≤5条要点）\n4) 强相关（每条标注关联到哪个表/哪条 note/哪条指令）\n5) 可为空（无必要则 EMPTY）\n\n=========================================================================\n【评分（用于在多候选指令方案中选最优，不对外展示长推理）】\n你每轮要生成 K 个候选“指令方案”，并对每个方案计算分数：\n- g1 正确性/可验证性：是否严格基于输入三来源，是否无硬性编造\n- g2 覆盖度：是否覆盖所有应更新的表、应初始化的表、应同步的跨表字段\n- g3 一致性：跨表逻辑是否一致（编码/时间/人物状态等）\n- g4 约束满足：是否满足所有 note 与通用硬约束（索引/列号/输出格式等）\n- g5 可执行性：指令语法是否正确、行列索引可落地、不会越界/误删\nFg = 0.30*g1 + 0.20*g2 + 0.15*g3 + 0.25*g4 + 0.10*g5\n\n- a1 新增性：AM 是否提炼出关键 note/隐含检查点（来自输入）\n- a2 相关性：是否直接支撑本轮拟执行指令\n- a3 简洁性：是否过长干扰\n- a4 可信度：是否可在输入三来源中定位到对应规则/描述\n- a5 干扰度惩罚：若 AM 引入跑题/误导，直接 0\nFa = 0.25*a1 + 0.25*a2 + 0.15*a3 + 0.25*a4 + 0.10*a5\n\nV(n)=Fg + β*Fa（默认 β=0.1）\nScore(n)=V(n) + 0.2*rrule + 0.1*r_orm - 0.1*RedundancyPenalty\n\n其中：\n- rrule：若“输出为合法指令 + 满足关键 note/索引/初始化/列号规则”则 +1，否则 -1（部分满足为0）\n- r_orm：启发式质量信号（步骤完整度/越界风险/重复冗余/约束违规数）\n\n=========================================================================\n【meta-action 触发规则（内部）】\n必须触发 `<|reflect|>` 的条件（命中任一条）：\n- 你发现某条指令的 tableIndex 不是从 `[Index:Name]` 提取的真实索引\n- 你发现列序号不是带双引号的字符串（如 `\"0\"`）\n- 你计划更新/删除一个“note 禁止修改/删除”的表或字段\n- 你发现“需要初始化”的表未用 insertRow 初始化\n- 任意表的 note/检查规则未被逐条覆盖\n- 指令可能越界（行号不存在/列号不在定义范围/字段缺失）\n- 你发现输出骨架不合规：缺失 `<tableEdit>` 或 `</tableEdit>`；或两者不成对；或出现多次；或 `<!-- -->` 不完整；或三段顺序不是 `<tableEdit>`→Log→Checklist；或出现任何 markdown 代码块围栏（三连反引号）\n\n必须触发 `<|explore|>` 的条件（命中任一条）：\n- 连续反思仍无法同时满足所有表 note（需要换一套指令策略）\n- 对同一表存在两种互斥填法（例如唯一性/编码冲突），且影响大\n- 发现当前方案覆盖不足（漏表/漏字段/漏跨表同步）\n\n否则允许 `<|continue|>`。\n\n=========================================================================\n【通用硬规则（必须执行）】\n1) **表格索引映射（关键步骤）**\n   - `<当前表格数据>` 中每个表标题格式为 `[Index:TableName]`\n   - 你必须提取方括号中的**数字**作为真实 `tableIndex`\n   - **严禁重新编号**：如果标题是 `[10:总结表]`，索引就是 10，不是 0\n2) **初始化确认**\n   - 若某表数据显示“为空/需要初始化/仅表头”等：只能用 `insertRow(tableIndex, {...})` 初始化\n3) **指令语法（严格遵守）**\n   - 操作类型仅限：`deleteRow`, `insertRow`, `updateRow`\n   - `tableIndex`：必须使用真实索引\n   - `rowIndex`：数字，从0开始\n   - `colIndex`：必须是**带双引号的字符串**（如 `\"0\"`）\n4) **表格定位确认（Fixed Check）**\n   - 只有在 `<当前表格数据>` 中真实存在的表，才允许操作；不存在则禁止生成该表指令\n5) **逻辑一致性**\n   - 不同表之间的相关数据必须一致（如：总结与大纲编码、人物状态与经历、时间推进等）\n\n=========================================================================\n【输出格式（对外）】\n你必须且只能输出以下三段，且顺序固定：\n\n1) `<tableEdit>`\n   - 仅放指令，且所有指令必须被完整包含在 `<!--` 和 `-->` 注释块内\n   - 允许多行多条指令\n   - 除指令外不得输出任何文字\n   - 你必须输出 `<tableEdit>` 与 `</tableEdit>` 两个标签（开闭标签缺一不可）\n   - 若你检测到你即将输出的文本缺失任一标签或顺序错误，你必须在内部触发 `<|reflect|>` 并重写，直到通过“输出格式硬护栏”的 Tag Detector\n\n2) `Log`（结构化决策记录，不输出长推理链）\n必须包含且仅包含这些字段（按顺序）：\n- Assumptions: ≤8条（对背景设定/正文/表格 note 的关键解读假设）\n- Tables & Index Map: 列出 `[真实索引] 表名`（来自标题，不得自编号）\n- Notes Applied: 逐表列出你遵守了哪些 note/填写说明要点（如无 note 写 “none”）\n- Planned Ops Summary: 按表汇总 insert/update/delete 的意图（不复述全部指令）\n- Why Chosen (score-driven): 说明为什么选择当前方案（引用 Score/Fg/Fa/约束满足维度）\n- Risks & Next Checks: ≤6条（越界风险、唯一性冲突、漏填风险、跨表不一致风险等）\n- Conflict Note: 若存在规则冲突，写明冲突与裁决；无则写 “无”\n\n3) `Checklist`\n必须覆盖以下检查点（逐条输出“✅/❌ + 简短原因”）：\n- 已逐表读取并遵守每个表的 note/填写说明（##十分重要##）\n- 索引映射：全部 tableIndex 均来自标题真实索引，未重编号\n- 初始化：所有需要初始化的表均使用 insertRow 初始化（无误用 update/delete）\n- 表格定位：未对不存在的表生成指令\n- 列/行：rowIndex 合法；colIndex 全为带双引号字符串；无越界/缺字段\n- 模板规则检查：唯一性/格式/一致性等（按 note/模板要求逐表确认）\n- 跨表一致性：编码/时间/人物状态等已同步\n- 纯文本输出：无 markdown 代码块；除三段外无多余文字\n- `<tableEdit>` 标签完整：同时包含 `<tableEdit>` 与 `</tableEdit>` 且各出现 1 次；`<!-- -->` 成对且位于标签内；三段顺序正确\n\n=========================================================================\n【RM：完成判定器（必须执行；避免“格式不合规仍输出”）】\nRM 返回 TRUE 需同时满足：\n1) 已通过“输出格式硬护栏”的 Tag Detector（<tableEdit> 开闭标签、注释块、三段顺序、纯文本等全部合规）\n2) 已逐表读取并遵守每个表的 note/填写说明，且无关键冲突未处理（如有冲突已在 Log 的 Conflict Note 记录裁决）\n3) 所有指令满足通用硬规则：真实 tableIndex、rowIndex 合法、colIndex 为带双引号字符串、初始化仅用 insertRow、未对不存在表操作\n4) Checklist 全部检查点可给出 ✅ 或合理的 ❌（并说明原因/风险与下一步）\n若 RM=FALSE：必须在内部触发 `<|reflect|>` 进行纠错与重写输出，直到 RM=TRUE 或预算终止（预算终止时必须在 Log 标注“预算终止”，但仍需保持输出骨架合规）。\n\n---\n=========================================================================\n---\n=========================================================================\n以下为填表范例，严禁当作正文填表时的数据来源（仅用于理解输出结构与指令语法）：\n<example>\n<当前表格数据>\n[0:全局数据表]\n....................\n[3:主角技能表]\n(该表格为空，请进行初始化。)\n[10:总结表]\n....................\n[11:总体大纲]\n....................\n</当前表格数据>\n\n<正文数据>\n觉醒仪式结束，陈默看着手中的武魂“镜子”，虽然素云涛评价其为废武魂，但陈默凝视镜面时，意外发现镜中倒映出的世界不仅是影像，还能解析出微弱的魂力流动。脑海中浮现出信息：获得被动技能【真实视界】。随着人群散去，时间又过去了半小时。\n</正文数据>\n\n<tableEdit>\n<!--\nupdateRow(0, 0, {\"1\":\"斗罗历793-03-01 08:30\", \"3\":\"30分钟\"})\ninsertRow(3, {\"0\":\"真实视界\", \"1\":\"被动\", \"2\":\"一阶\", \"3\":\"能够看破低等级幻术，并能观察到事物的细微能量流动。\"})\ninsertRow(10, {\"0\":\"斗罗历793-03-01 08:00 - 08:30\", \"1\":\"武魂觉醒仪式结束，陈默觉醒了武魂“镜子”，虽然被旁人视为废武魂，但他意外发现该武魂赋予了他特殊的观察力，获得技能“真实视界”。人群逐渐散去。\", \"2\":\"AM02\"})\ninsertRow(11, {\"0\":\"陈默觉醒武魂后获得“真实视界”能力。\", \"1\":\"AM02\"})\n-->\n</tableEdit>\n\nLog\nAssumptions: 例：将“(该表格为空，请进行初始化。)”视为必须初始化信号；编码字段遵循表格模板约定。\nTables & Index Map: [0] 全局数据表；[3] 主角技能表；[10] 总结表；[11] 总体大纲\nNotes Applied: 全局数据表: none；主角技能表: 初始化仅insert；总结表: 编码字段需同步；总体大纲: 编码与总结一致\nPlanned Ops Summary: 全局数据表 update；主角技能表 insert 初始化；总结表 insert；总体大纲 insert\nWhy Chosen (score-driven): 该方案满足真实索引/初始化/列号格式/跨表编码一致性，且覆盖度最高\nRisks & Next Checks: 检查列范围；检查编码唯一性；检查时间字段格式\nConflict Note: 无\n\nChecklist\n✅ 已逐表读取并遵守每个表的 note/填写说明（示例中 note=none/初始化提示）\n✅ 索引映射：全部 tableIndex 均来自标题真实索引，未重编号\n✅ 初始化：需要初始化的表使用 insertRow\n✅ 表格定位：未操作不存在的表\n✅ 列/行：rowIndex 合法；colIndex 为带双引号字符串；无越界\n✅ 模板规则检查：按示例要求完成关键检查\n✅ 跨表一致性：编码已同步\n✅ 纯文本输出：无 markdown 代码块；除三段外无多余文字\n</example>\n\n=========================================================================\n【现在开始】\n请严格按本提示词执行：以内化 CoAT 工作流完成思考与校验，对外只输出：\n1) `<tableEdit>`（仅指令，放在 `<!-- -->` 内）\n2) `Log`\n3) `Checklist`",
       "deletable": false,
       "mainSlot": "A",
       "isMain": true
@@ -12597,6 +12597,84 @@ async function callCustomOpenAI_ACU(dynamicContent) {
     }
   }
 
+  // ===========================
+  // TableEdit 解析健壮性工具集
+  // - 允许 <tableEdit> 或 </tableEdit> 丢失一端
+  // - 只要 <!-- --> 注释包裹完整，且内部包含 insertRow/updateRow/deleteRow，即可识别
+  // ===========================
+  function normalizeAiResponseForTableEditParsing_ACU(text) {
+    if (typeof text !== 'string') return '';
+    let cleaned = text.trim();
+    // 移除JS风格的字符串拼接：'...' + '...'
+    cleaned = cleaned.replace(/'\s*\+\s*'/g, '');
+    // 移除可能包裹整个响应的单引号
+    if (cleaned.startsWith("'") && cleaned.endsWith("'")) cleaned = cleaned.slice(1, -1);
+    // 将 "\\n" 转换为真实换行
+    cleaned = cleaned.replace(/\\n/g, '\n');
+    // 修复由JS字符串转义符（\\）导致的解析失败
+    cleaned = cleaned.replace(/\\\\"/g, '\\"');
+    // 修复全角冒号导致的 JSON 解析失败
+    cleaned = cleaned.replace(/：/g, ':');
+    return cleaned;
+  }
+
+  function extractTableEditInner_ACU(text, options = {}) {
+    const { allowNoTableEditTags = true } = options;
+    const cleaned = normalizeAiResponseForTableEditParsing_ACU(text);
+    if (!cleaned) return null;
+
+    // 1) 标准格式：<tableEdit>...</tableEdit>
+    const fullMatch = cleaned.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i);
+    if (fullMatch && typeof fullMatch[1] === 'string') {
+      return { inner: fullMatch[1], cleaned, mode: 'full' };
+    }
+
+    // 2) 宽松格式：缺失开/闭标签，但 <!-- --> 包裹完整
+    const hasOpen = /<tableEdit>/i.test(cleaned);
+    const hasClose = /<\/tableEdit>/i.test(cleaned);
+    const hasAnyTag = hasOpen || hasClose;
+
+    const commentRe = /<!--([\s\S]*?)-->/g;
+    const commentBlocks = [];
+    let m;
+    while ((m = commentRe.exec(cleaned)) !== null) {
+      commentBlocks.push({
+        start: m.index,
+        end: commentRe.lastIndex,
+        raw: m[0],
+        content: m[1] || ''
+      });
+    }
+
+    const hasCommands = (s) => /(insertRow|updateRow|deleteRow)\s*\(/.test(s);
+    const candidates = commentBlocks.filter(b => hasCommands(b.content));
+    if (!candidates.length) return null;
+
+    let chosen = null;
+    if (hasOpen && !hasClose) {
+      const openIdx = cleaned.search(/<tableEdit>/i);
+      chosen = candidates.find(b => b.start > openIdx) || candidates[0];
+    } else if (!hasOpen && hasClose) {
+      const closeIdx = cleaned.search(/<\/tableEdit>/i);
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        if (candidates[i].end < closeIdx) { chosen = candidates[i]; break; }
+      }
+      chosen = chosen || candidates[candidates.length - 1];
+    } else if (hasAnyTag) {
+      const tagIdx = hasOpen ? cleaned.search(/<tableEdit>/i) : cleaned.search(/<\/tableEdit>/i);
+      let bestDist = Infinity;
+      candidates.forEach(b => {
+        const dist = Math.min(Math.abs(b.start - tagIdx), Math.abs(b.end - tagIdx));
+        if (dist < bestDist) { bestDist = dist; chosen = b; }
+      });
+    } else if (allowNoTableEditTags) {
+      chosen = candidates[0];
+    }
+
+    if (!chosen) return null;
+    return { inner: chosen.raw, cleaned, mode: 'comment_fallback', hasOpen, hasClose };
+  }
+
   function parseAndApplyTableEdits_ACU(aiResponse, updateMode = 'standard') {
     // updateMode: 'standard' 表示更新标准表，'summary' 表示更新总结表和总体大纲
     if (!currentJsonTableData_ACU) {
@@ -12604,32 +12682,13 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         return false;
     }
 
-    // [新增] 针对AI可能返回的JS字符串格式进行清理
-    let cleanedResponse = aiResponse.trim();
-    // 移除JS风格的字符串拼接和转义
-    // 例如: '<tableEdit>...' + '...'
-    cleanedResponse = cleanedResponse.replace(/'\s*\+\s*'/g, '');
-    // 移除可能包裹整个响应的单引号
-    if (cleanedResponse.startsWith("'") && cleanedResponse.endsWith("'")) {
-        cleanedResponse = cleanedResponse.slice(1, -1);
-    }
-    // 将 "\\n" 转换为真实的换行符
-    cleanedResponse = cleanedResponse.replace(/\\n/g, '\n');
-    // [FIX] 修复由JS字符串转义符（\\）导致的解析失败，将'\\"'转换为'\"'
-    cleanedResponse = cleanedResponse.replace(/\\\\"/g, '\\"');
-
-    // [ACU-FIX] 修复AI返回全角冒号导致的JSON解析失败问题 (全局替换)
-    if (cleanedResponse) {
-        cleanedResponse = cleanedResponse.replace(/：/g, ':');
-    }
-
-    const editBlockMatch = cleanedResponse.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/);
-    if (!editBlockMatch || !editBlockMatch[1]) {
-        logWarn_ACU('No valid <tableEdit> block found in AI response.');
+    const extracted = extractTableEditInner_ACU(aiResponse, { allowNoTableEditTags: true });
+    if (!extracted || !extracted.inner) {
+        logWarn_ACU('No recognizable table edit block found (missing <tableEdit> boundary and/or incomplete <!-- --> wrapper).');
         return true; // Not a failure, just no edits to apply.
     }
 
-    const editsString = editBlockMatch[1].replace(/<!--|-->/g, '').trim();
+    const editsString = extracted.inner.replace(/<!--|-->/g, '').trim();
     if (!editsString) {
         logDebug_ACU('Empty <tableEdit> block. No edits to apply.');
         return true;
@@ -13469,10 +13528,12 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                       }
                   }
 
-                  const editBlockMatch = aiResponseText.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/);
-                  if (!editBlockMatch) throw new Error('AI未返回有效的 <tableEdit> 块。');
+                  const extractResult = extractTableEditInner_ACU(aiResponseText, { allowNoTableEditTags: true });
+                  if (!extractResult || !extractResult.inner) {
+                      throw new Error('AI未返回有效的 <tableEdit> 块（缺少 <tableEdit> 边界或 <!-- --> 注释块不完整）。');
+                  }
 
-                  const editsString = editBlockMatch[1];
+                  const editsString = extractResult.inner;
                   const newSummaryRows = [];
                   const newOutlineRows = [];
 
@@ -14147,10 +14208,12 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                           }
                       }
 
-                      const editBlockMatch = aiResponseText.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/);
-                      if (!editBlockMatch) throw new Error('AI未返回有效的 <tableEdit> 块。');
+                      const extractResult = extractTableEditInner_ACU(aiResponseText, { allowNoTableEditTags: true });
+                      if (!extractResult || !extractResult.inner) {
+                          throw new Error('AI未返回有效的 <tableEdit> 块（缺少 <tableEdit> 边界或 <!-- --> 注释块不完整）。');
+                      }
 
-                      const editsString = editBlockMatch[1];
+                      const editsString = extractResult.inner;
                       const newSummaryRows = [];
                       const newOutlineRows = [];
                       
