@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>接力流程编辑器 - 剧情优化大师</title>
+    <link rel="stylesheet" href="./style.css" />
+    <style>
+      body { padding: 12px; }
+      /* flow-editor 不在 #qrf_settings_panel 内，补一份基础表单样式 */
+      .text_pole, select, textarea {
+        width: 100%;
+        background-color: var(--background-color, #1A1A1A);
+        color: var(--text_color, #E0E0E0);
+        border: 1px solid var(--border-color, #444);
+        border-radius: 8px;
+        padding: 12px;
+        box-sizing: border-box;
+        transition: all 0.2s ease-in-out;
+      }
+      .text_pole:focus, select:focus, textarea:focus {
+        outline: none;
+        border-color: var(--primary, #00BFFF);
+        box-shadow: 0 0 8px rgba(0, 191, 255, 0.25);
+      }
+      .qrf_flow_editor_header { display:flex; align-items:center; justify-content:space-between; gap: 10px; margin-bottom: 10px; }
+      .qrf_flow_editor_header input { flex: 1; }
+      .qrf_flow_editor_toolbar { display:flex; gap: 8px; margin: 10px 0; justify-content: center; }
+      .qrf_flow_editor_hint { color: var(--text_secondary); font-size: 12px; margin: 6px 0 10px; }
+      .qrf_flow_editor_error { color: #ff6b6b; }
+    </style>
+  </head>
+  <body>
+    <div id="qrf_flow_editor_root"></div>
+
+    <script>
+      (function () {
+        const root = document.getElementById('qrf_flow_editor_root');
+        const params = new URLSearchParams(location.search);
+        const flowId = params.get('flowId');
+
+        function el(tag, attrs = {}, children = []) {
+          const node = document.createElement(tag);
+          Object.entries(attrs).forEach(([k, v]) => {
+            if (k === 'class') node.className = v;
+            else if (k === 'text') node.textContent = v;
+            else if (k === 'html') node.innerHTML = v;
+            else node.setAttribute(k, v);
+          });
+          children.forEach(c => node.appendChild(c));
+          return node;
+        }
+
+        function deepClone(obj) {
+          return JSON.parse(JSON.stringify(obj));
+        }
+
+        function getApi() {
+          return window.opener && window.opener.QRFRelayFlowApi;
+        }
+
+        function renderError(msg) {
+          root.innerHTML = '';
+          root.appendChild(el('div', { class: 'qrf_flow_editor_error', text: msg }));
+        }
+
+        if (!flowId) {
+          renderError('缺少 flowId 参数，无法打开流程编辑器。');
+          return;
+        }
+        const api = getApi();
+        if (!api || typeof api.getFlow !== 'function' || typeof api.saveFlow !== 'function') {
+          renderError('无法连接到主窗口（QRFRelayFlowApi 不存在）。请在酒馆内从插件设置面板打开此窗口。');
+          return;
+        }
+
+        const flow = api.getFlow(flowId);
+        if (!flow) {
+          renderError('找不到对应流程，可能已被删除。');
+          return;
+        }
+
+        let working = deepClone(flow);
+        if (!Array.isArray(working.prompts)) working.prompts = [];
+
+        function renderPrompts() {
+          const container = root.querySelector('#qrf_flow_prompts_container');
+          container.innerHTML = '';
+
+          working.prompts.forEach((p, idx) => {
+            const seg = el('div', { class: 'qrf_prompt_segment', 'data-id': String(p.id ?? '') });
+
+            const header = el('div', { class: 'qrf_prompt_header' });
+            const nameInput = el('input', { type: 'text', class: 'text_pole qrf_prompt_name', placeholder: 'Prompt Name' });
+            nameInput.value = p.name || `Prompt ${idx + 1}`;
+            nameInput.addEventListener('input', () => (p.name = nameInput.value));
+
+            const roleSelect = el('select', { class: 'text_pole qrf_prompt_role' });
+            ['system', 'user', 'assistant'].forEach(r => {
+              const opt = el('option', { value: r, text: r[0].toUpperCase() + r.slice(1) });
+              if ((p.role || 'system') === r) opt.selected = true;
+              roleSelect.appendChild(opt);
+            });
+            roleSelect.addEventListener('change', () => (p.role = roleSelect.value));
+
+            const controls = el('div', { class: 'qrf_prompt_controls' });
+            const upBtn = el('button', { class: 'menu_button', title: 'Move Up', type: 'button' });
+            upBtn.innerHTML = '<i class="fa-solid fa-arrow-up"></i>';
+            upBtn.disabled = idx === 0;
+            upBtn.addEventListener('click', () => {
+              if (idx === 0) return;
+              const tmp = working.prompts[idx - 1];
+              working.prompts[idx - 1] = working.prompts[idx];
+              working.prompts[idx] = tmp;
+              renderPrompts();
+            });
+
+            const downBtn = el('button', { class: 'menu_button', title: 'Move Down', type: 'button' });
+            downBtn.innerHTML = '<i class="fa-solid fa-arrow-down"></i>';
+            downBtn.disabled = idx === working.prompts.length - 1;
+            downBtn.addEventListener('click', () => {
+              if (idx >= working.prompts.length - 1) return;
+              const tmp = working.prompts[idx + 1];
+              working.prompts[idx + 1] = working.prompts[idx];
+              working.prompts[idx] = tmp;
+              renderPrompts();
+            });
+
+            const delBtn = el('button', { class: 'menu_button', title: 'Delete', type: 'button' });
+            delBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+            delBtn.addEventListener('click', () => {
+              if (!confirm('确定要删除这个提示词吗？')) return;
+              working.prompts.splice(idx, 1);
+              renderPrompts();
+            });
+
+            controls.appendChild(upBtn);
+            controls.appendChild(downBtn);
+            controls.appendChild(delBtn);
+
+            header.appendChild(nameInput);
+            header.appendChild(roleSelect);
+            header.appendChild(controls);
+
+            const textarea = el('textarea', { class: 'text_pole qrf_prompt_content', rows: '6' });
+            textarea.value = p.content || '';
+            textarea.addEventListener('input', () => (p.content = textarea.value));
+
+            seg.appendChild(header);
+            seg.appendChild(textarea);
+            container.appendChild(seg);
+          });
+        }
+
+        function render() {
+          root.innerHTML = '';
+
+          const header = el('div', { class: 'qrf_flow_editor_header' });
+          const name = el('input', { type: 'text', class: 'text_pole', placeholder: '流程名称' });
+          name.value = working.name || '';
+          name.addEventListener('input', () => (working.name = name.value));
+
+          const token = el('div', { class: 'qrf_flow_editor_hint', html: `<b>注入符号：</b> <code>${working.injectKey || ''}</code>` });
+          header.appendChild(name);
+          header.appendChild(token);
+
+          const extractRow = el('div', { class: 'qrf_flow_editor_header' });
+          const extract = el('input', { type: 'text', class: 'text_pole', placeholder: '标签摘取（逗号分隔，例如 think,plot；留空=全量注入）' });
+          extract.value = working.extractTags || '';
+          extract.addEventListener('input', () => (working.extractTags = extract.value));
+          const extractHint = el('div', { class: 'qrf_flow_editor_hint', html: `<b>注入内容：</b> 将只注入“最后一段匹配到的标签块”（跨多个标签名一起取最后出现的那段）。` });
+          extractRow.appendChild(extract);
+          extractRow.appendChild(extractHint);
+
+          const hint = el('div', {
+            class: 'qrf_flow_editor_hint',
+            html: `保存后，流程输出会写入 <code>${working.injectKey || ''}</code>。在基础提示词或任意流程提示词里写入它即可注入。`,
+          });
+
+          const promptsContainer = el('div', { id: 'qrf_flow_prompts_container', class: 'qrf_prompts_list' });
+
+          const toolbar = el('div', { class: 'qrf_flow_editor_toolbar' });
+          const addBtn = el('button', { class: 'menu_button', type: 'button' });
+          addBtn.innerHTML = '<i class="fa-solid fa-plus"></i> 添加提示词';
+          addBtn.addEventListener('click', () => {
+            working.prompts.push({
+              id: String(Date.now()),
+              name: 'New Prompt',
+              role: 'system',
+              content: '',
+              deletable: true,
+            });
+            renderPrompts();
+          });
+
+          const saveBtn = el('button', { class: 'menu_button', type: 'button' });
+          saveBtn.innerHTML = '<i class="fa-solid fa-save"></i> 保存';
+          saveBtn.addEventListener('click', () => {
+            if (!working.name || !working.name.trim()) {
+              alert('请填写流程名称。');
+              return;
+            }
+            Promise.resolve(api.saveFlow(working)).then(() => {
+              alert('已保存。');
+            });
+          });
+
+          const saveCloseBtn = el('button', { class: 'menu_button', type: 'button' });
+          saveCloseBtn.innerHTML = '<i class="fa-solid fa-check"></i> 保存并关闭';
+          saveCloseBtn.addEventListener('click', () => {
+            if (!working.name || !working.name.trim()) {
+              alert('请填写流程名称。');
+              return;
+            }
+            Promise.resolve(api.saveFlow(working)).then(() => window.close());
+          });
+
+          toolbar.appendChild(addBtn);
+          toolbar.appendChild(saveBtn);
+          toolbar.appendChild(saveCloseBtn);
+
+          root.appendChild(header);
+          root.appendChild(extractRow);
+          root.appendChild(hint);
+          root.appendChild(toolbar);
+          root.appendChild(promptsContainer);
+
+          renderPrompts();
+        }
+
+        render();
+      })();
+    </script>
+  </body>
+</html>
+
+

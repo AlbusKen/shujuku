@@ -1,0 +1,839 @@
+/* --- 剧情规划大师 UI 优化 --- */
+
+/* 1. 基础与字体设置 */
+#qrf_settings_panel {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+    color: var(--text_color, #E0E0E0);
+    line-height: 1.6;
+    font-size: 14px;
+    letter-spacing: 0.01em;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+/* 2. 滚动条美化 */
+#qrf_settings_panel ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+#qrf_settings_panel ::-webkit-scrollbar-track {
+    background: var(--background-color-tertiary, #2a2a2a);
+    border-radius: 4px;
+}
+
+#qrf_settings_panel ::-webkit-scrollbar-thumb {
+    background: var(--primary, #00BFFF);
+    border-radius: 4px;
+    transition: background 0.3s ease;
+}
+
+#qrf_settings_panel ::-webkit-scrollbar-thumb:hover {
+    background: var(--primary-hover, #4FC3F7);
+}
+
+/* 3. 头部与尾部 */
+#qrf_settings_panel .qrf-header {
+    text-align: center;
+    padding: 20px 0 15px;
+    margin-bottom: 25px;
+    border-bottom: 2px solid var(--border-color, #3a3a3a);
+    position: relative;
+    background: linear-gradient(135deg, rgba(0, 191, 255, 0.05), rgba(79, 195, 247, 0.05));
+    border-radius: 12px 12px 0 0;
+}
+
+#qrf_settings_panel .qrf-header h4 {
+    margin: 0;
+    font-size: 1.5em;
+    font-weight: 500;
+    color: var(--text_color, #FFFFFF);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    letter-spacing: 0.02em;
+}
+
+#qrf_settings_panel .qrf-header h4 i {
+    margin-right: 12px;
+    color: var(--primary, #00BFFF);
+    font-size: 1.2em;
+    animation: pulse 2s infinite ease-in-out;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+#qrf_settings_panel .qrf_footer {
+    text-align: center;
+    padding: 15px 0;
+    margin-top: 25px;
+    border-top: 2px solid var(--border-color, #3a3a3a);
+    font-size: 0.85em;
+    color: var(--text_secondary, #999);
+    background: linear-gradient(135deg, rgba(0, 191, 255, 0.02), rgba(79, 195, 247, 0.02));
+    border-radius: 0 0 12px 12px;
+}
+
+/* 4. 设置组 (Fieldset) */
+#qrf_settings_panel .settings-group {
+    background: linear-gradient(135deg, var(--background-color-secondary, rgba(40, 40, 40, 0.9)), var(--background-color-secondary, rgba(50, 50, 50, 0.9)));
+    border: 1px solid var(--border-color, #3a3a3a);
+    padding: 20px 25px;
+    margin: 0 0 25px 0;
+    border-radius: 12px;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    position: relative;
+    overflow: hidden;
+    box-sizing: border-box;
+    width: auto;
+}
+
+#qrf_settings_panel .settings-group::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary, #00BFFF), var(--primary-hover, #4FC3F7), var(--primary, #00BFFF));
+    background-size: 200% 100%;
+    animation: shimmer 3s infinite linear;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+@keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+#qrf_settings_panel .settings-group:hover {
+    border-color: var(--primary-hover, #4FC3F7);
+    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+    transform: translateY(-2px);
+}
+
+#qrf_settings_panel .settings-group:hover::before {
+    opacity: 1;
+}
+
+#qrf_settings_panel .settings-group legend {
+    font-weight: 600;
+    font-size: 1.15em;
+    padding: 0 10px;
+    color: var(--text_color, #F0F0F0);
+    background: var(--background-color-secondary, rgba(40, 40, 40, 0.9));
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    cursor: pointer; /* Add pointer cursor for clickable legend */
+    user-select: none;
+    display: flex;
+    align-items: center;
+}
+
+#qrf_settings_panel .settings-group legend i {
+    margin-right: 10px;
+    color: var(--primary, #00BFFF);
+    font-size: 1.1em;
+}
+
+#qrf_settings_panel .settings-group legend .toggle-icon {
+    margin-right: 8px;
+    font-size: 0.8em;
+    transition: transform 0.3s ease;
+}
+
+#qrf_settings_panel .settings-group.collapsed legend .toggle-icon {
+    transform: rotate(-90deg);
+}
+
+#qrf_settings_panel .qrf-collapsible-content {
+    transition: max-height 0.3s ease-out, opacity 0.3s ease-out, padding 0.3s ease;
+    max-height: 2000px; /* Arbitrary large value */
+    opacity: 1;
+    overflow: hidden; /* 保持 hidden 用于折叠动画 */
+}
+
+#qrf_settings_panel .settings-group.collapsed .qrf-collapsible-content {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin: 0;
+}
+
+/* 4. 设置项布局与标签 */
+#qrf_settings_panel .qrf_settings_block,
+#qrf_settings_panel .qrf_settings_block_radio {
+    margin-bottom: 22px;
+}
+
+#qrf_settings_panel .qrf_settings_block label,
+#qrf_settings_panel .qrf_settings_block_radio > label {
+    display: block;
+    margin-bottom: 10px;
+    font-weight: 500;
+    color: var(--text_secondary, #CCCCCC);
+    font-size: 0.9em;
+}
+
+#qrf_settings_panel .qrf_settings_block .notes,
+#qrf_settings_panel .qrf_settings_block_hint {
+    font-size: 0.8em;
+    color: var(--text_tertiary, #999);
+    margin-top: 8px;
+    line-height: 1.5;
+}
+
+/* 5. 通用表单元素 (输入框, 下拉框) */
+#qrf_settings_panel .text_pole,
+#qrf_settings_panel select {
+    width: 100%;
+    background-color: var(--background-color, #1A1A1A);
+    color: var(--text_color, #E0E0E0);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 8px;
+    padding: 12px;
+    box-sizing: border-box;
+    transition: all 0.2s ease-in-out;
+}
+
+#qrf_settings_panel .text_pole:focus,
+#qrf_settings_panel select:focus {
+    outline: none;
+    border-color: var(--primary, #00BFFF);
+    box-shadow: 0 0 8px rgba(0, 191, 255, 0.25);
+}
+
+#qrf_settings_panel textarea.text_pole {
+    resize: vertical;
+    min-height: 90px;
+}
+
+/* 6. 特殊组合控件 */
+#qrf_settings_panel .qrf_model_selector_wrapper,
+#qrf_settings_panel .qrf_preset_selector_wrapper {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+#qrf_settings_panel .qrf_model_selector_wrapper input,
+#qrf_settings_panel .qrf_preset_selector_wrapper select {
+    flex-grow: 1;
+}
+
+#qrf_settings_panel .qrf_label_with_button_wrapper {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#qrf_settings_panel .qrf_label_with_controls_wrapper {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px; /* 与下方列表的间距 */
+}
+
+#qrf_settings_panel #qrf_worldbook_entry_controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#qrf_settings_panel #qrf_worldbook_entry_count {
+    font-size: 0.9em;
+    color: var(--text_secondary, #ccc);
+    margin-right: 5px; /* 与按钮的间距 */
+}
+
+/* 7. 开关 (Toggle Switch) */
+#qrf_settings_panel .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+    flex-shrink: 0;
+}
+#qrf_settings_panel .toggle-switch input {
+    opacity: 0; width: 0; height: 0;
+}
+#qrf_settings_panel .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: var(--background-color-tertiary, #555);
+    transition: .3s;
+    border-radius: 26px;
+}
+#qrf_settings_panel .slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    border-radius: 50%;
+}
+#qrf_settings_panel input:checked + .slider {
+    background-color: var(--primary, #00BFFF);
+}
+#qrf_settings_panel input:checked + .slider:before {
+    transform: translateX(22px);
+}
+
+/* 总开关特殊样式 */
+#qrf_settings_panel .settings-group > .qrf_settings_block:first-child {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    background-color: rgba(0,0,0,0.2);
+    padding: 15px;
+    border-radius: 10px;
+    margin-top: -5px; /*向上微调*/
+}
+#qrf_settings_panel .settings-group > .qrf_settings_block:first-child label {
+    margin-bottom: 0;
+}
+#qrf_settings_panel .settings-group > .qrf_settings_block:first-child strong {
+    font-size: 1.05em;
+    color: var(--text_color, #FFFFFF);
+}
+
+/* 8. 滑块 (Range Input) */
+#qrf_settings_panel input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 6px;
+    background: var(--background-color-tertiary, #555);
+    border-radius: 6px;
+    outline: none;
+    transition: opacity .2s;
+}
+#qrf_settings_panel input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    background: #FFFFFF;
+    border: 3px solid var(--primary, #00BFFF);
+    cursor: pointer;
+    border-radius: 50%;
+    transition: background 0.2s;
+}
+#qrf_settings_panel input[type="range"]:hover::-webkit-slider-thumb {
+    background: #E0E0E0;
+}
+#qrf_settings_panel input[type="range"]::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    background: #FFFFFF;
+    border: 3px solid var(--primary, #00BFFF);
+    cursor: pointer;
+    border-radius: 50%;
+}
+
+/* 9. 单选按钮 */
+#qrf_settings_panel .qrf_radio_group {
+    display: flex;
+    gap: 10px 20px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 5px;
+    background-color: var(--background-color, #1A1A1A);
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color, #3a3a3a);
+}
+#qrf_settings_panel .qrf_radio_group label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font-size: 0.9em;
+    margin-bottom: 0;
+}
+#qrf_settings_panel .qrf_radio_group input[type="radio"] {
+    margin-right: 8px;
+    accent-color: var(--primary, #00BFFF);
+}
+
+/* API模式 - 2x2 网格布局 */
+#qrf_settings_panel .qrf_api_mode_grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px; /* 网格间距 */
+    padding: 15px;
+}
+#qrf_settings_panel .qrf_api_mode_grid .qrf_radio_option {
+    display: flex;
+    align-items: center;
+    background-color: var(--background-color-tertiary, #2a2a2a);
+    padding: 10px;
+    border-radius: 6px;
+    transition: background-color 0.2s ease;
+}
+#qrf_settings_panel .qrf_api_mode_grid .qrf_radio_option:hover {
+    background-color: var(--background-color-hover, #3a3a3a);
+}
+#qrf_settings_panel .qrf_api_mode_grid .qrf_radio_option label {
+    margin-bottom: 0;
+    width: 100%;
+}
+
+
+/* 10. 世界书筛选框 */
+.qrf_worldbook_filter_wrapper {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    align-items: center;
+}
+
+.qrf_worldbook_filter_wrapper input {
+    flex-grow: 1;
+}
+
+.qrf_worldbook_filter_wrapper button {
+    flex-shrink: 0;
+    width: 38px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* 11. 世界书条目列表 */
+.qrf_worldbook_entry_list {
+    max-height: 350px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color, #444);
+    padding: 10px;
+    border-radius: 8px;
+    background-color: var(--background-color, #1A1A1A);
+}
+
+.qrf_worldbook_entry_item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 5px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    transition: background-color 0.2s ease;
+}
+
+.qrf_worldbook_entry_item:hover {
+    background-color: var(--primary-hover-faded, rgba(0, 191, 255, 0.1));
+}
+
+.qrf_worldbook_entry_item.filtered-out {
+    display: none;
+}
+
+.qrf_worldbook_entry_item input[type="checkbox"] {
+    margin-right: 12px;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--primary, #00BFFF);
+}
+
+.qrf_worldbook_entry_item label {
+    font-size: 0.9em;
+    cursor: pointer;
+    user-select: none;
+    color: var(--text_secondary, #ccc);
+    margin-bottom: 0;
+}
+
+.qrf_worldbook_entry_item.highlighted {
+    background-color: var(--primary-hover-faded, rgba(0, 191, 255, 0.15));
+    border-left: 3px solid var(--primary, #00BFFF);
+    padding-left: 9px;
+}
+
+.qrf_worldbook_no_results {
+    text-align: center;
+    color: var(--text_tertiary, #999);
+    font-style: italic;
+    padding: 20px;
+}
+
+/* 12. 菜单按钮统一样式 */
+#qrf_settings_panel .menu_button {
+    height: 38px; /* 与输入框高度接近 */
+    padding: 0 15px; /* 增加水平内边距 */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    min-width: 90px; /* 增加最小宽度以确保按钮等宽并容纳内容 */
+    white-space: nowrap; /* 防止文字换行 */
+    background: linear-gradient(135deg, var(--primary, #00BFFF), var(--primary-hover, #4FC3F7));
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 0.9em;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+    position: relative;
+    overflow: hidden;
+}
+
+#qrf_settings_panel .menu_button:hover {
+    background: linear-gradient(135deg, var(--primary-hover, #4FC3F7), var(--primary, #00BFFF));
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+#qrf_settings_panel .menu_button:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+#qrf_settings_panel .menu_button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+#qrf_settings_panel .menu_button i {
+    margin-right: 5px;
+}
+
+#qrf_settings_panel .menu_button i:last-child {
+    margin-right: 0;
+}
+
+/* 12.1 Toast 终止按钮（与 menu_button 同风格，但使用危险色） */
+.qrf-abort-btn {
+    height: 32px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    box-sizing: border-box;
+    white-space: nowrap;
+    background: linear-gradient(135deg, #dc3545, #c82333);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.25);
+}
+
+.qrf-abort-btn:hover {
+    background: linear-gradient(135deg, #c82333, #dc3545);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.32);
+}
+
+.qrf-abort-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.22);
+}
+
+.qrf-abort-btn:focus-visible {
+    outline: 2px solid rgba(220, 53, 69, 0.55);
+    outline-offset: 2px;
+}
+
+.qrf-abort-btn i {
+    font-size: 12px;
+    line-height: 1;
+}
+
+/* 13. 预设区域按钮特殊样式 */
+#qrf_settings_panel .qrf_preset_selector_wrapper .menu_button {
+    min-width: auto;
+    padding: 0 8px;
+    font-size: 0.85em;
+    height: 32px;
+    flex-shrink: 0;
+}
+
+#qrf_settings_panel .qrf_preset_selector_wrapper .menu_button i {
+    margin-right: 0;
+}
+
+/* 14. 重置按钮特殊样式 */
+#qrf_settings_panel .qrf_reset_button {
+    background: linear-gradient(135deg, #6c757d, #868e96);
+    min-width: auto;
+    padding: 5px 10px;
+    font-size: 0.8em;
+    height: 28px;
+}
+
+#qrf_settings_panel .qrf_reset_button:hover {
+    background: linear-gradient(135deg, #868e96, #6c757d);
+}
+
+/* 14. 输入框和下拉菜单增强样式 */
+#qrf_settings_panel .text_pole,
+#qrf_settings_panel select {
+    width: 100%;
+    background-color: var(--background-color, #1A1A1A);
+    color: var(--text_color, #E0E0E0);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 8px;
+    padding: 12px;
+    box-sizing: border-box;
+    transition: all 0.3s ease;
+    font-family: inherit;
+    font-size: 0.9em;
+}
+
+#qrf_settings_panel .text_pole:focus,
+#qrf_settings_panel select:focus {
+    outline: none;
+    border-color: var(--primary, #00BFFF);
+    box-shadow: 0 0 0 3px rgba(0, 191, 255, 0.2);
+    transform: translateY(-1px);
+}
+
+#qrf_settings_panel textarea.text_pole {
+    resize: vertical;
+    min-height: 90px;
+    line-height: 1.5;
+}
+
+/* 15. 下拉菜单优化 */
+#qrf_settings_panel select {
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text_color, #E0E0E0) 50%),
+                      linear-gradient(135deg, var(--text_color, #E0E0E0) 50%, transparent 50%);
+    background-position: calc(100% - 15px) calc(1em + 2px),
+                         calc(100% - 10px) calc(1em + 2px);
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    padding-right: 35px;
+}
+
+#qrf_settings_panel select[multiple] {
+    background-image: none;
+    padding-right: 12px;
+}
+
+/* 16. 数字输入框优化 */
+#qrf_settings_panel input[type="number"] {
+    -moz-appearance: textfield;
+}
+
+#qrf_settings_panel input[type="number"]::-webkit-outer-spin-button,
+#qrf_settings_panel input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* 17. 密码输入框优化 */
+#qrf_settings_panel input[type="password"] {
+    letter-spacing: 0.05em;
+}
+
+/* 18. 动态提示词列表 */
+.qrf_prompts_list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    margin-bottom: 15px;
+    max-height: 600px; /* 设置最大高度 */
+    overflow-y: auto; /* 允许垂直滚动 */
+    overflow-x: hidden; /* 禁止水平滚动 */
+    padding-right: 5px; /* 为滚动条留出空间 */
+}
+
+/* 18.1 接力思考流程列表 */
+.qrf_relay_flows_list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.qrf_relay_flow_item {
+    background: var(--background-color-tertiary, rgba(0,0,0,0.08));
+    border: 1px solid var(--border-color, #444);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.qrf_relay_flow_row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.qrf_relay_flow_row .qrf_relay_flow_name {
+    flex: 1;
+    min-width: 180px;
+}
+
+.qrf_relay_flow_badge {
+    font-size: 12px;
+    color: var(--text_secondary, #ccc);
+    background: rgba(0, 191, 255, 0.08);
+    border: 1px solid rgba(0, 191, 255, 0.25);
+    padding: 4px 8px;
+    border-radius: 999px;
+}
+
+.qrf_relay_flow_preview {
+    font-size: 12px;
+    color: var(--text_tertiary, #999);
+    max-height: 3.2em;
+    overflow: hidden;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-left: 2px solid rgba(0, 191, 255, 0.35);
+    padding-left: 10px;
+}
+
+.qrf_relay_flow_controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.qrf_relay_flow_controls .menu_button {
+    height: 32px;
+    padding: 0 10px;
+}
+
+.qrf_relay_flow_controls .qrf_danger_btn {
+    background: linear-gradient(135deg, #dc3545, #c82333);
+}
+
+.qrf_relay_flow_controls .qrf_danger_btn:hover:not(:disabled) {
+    background: linear-gradient(135deg, #c82333, #bd2130);
+}
+
+.qrf_prompt_segment {
+    background: var(--background-color-tertiary, rgba(0,0,0,0.1));
+    border: 1px solid var(--border-color, #444);
+    border-radius: 8px;
+    padding: 15px;
+    transition: all 0.3s ease;
+    box-sizing: border-box;
+    width: auto;
+}
+
+.qrf_prompt_segment:hover {
+    border-color: var(--primary, #00BFFF);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.qrf_prompt_header {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.qrf_prompt_header .qrf_prompt_name {
+    flex: 2;
+    min-width: 150px;
+}
+
+.qrf_prompt_header .qrf_prompt_role {
+    flex: 1;
+    min-width: 100px;
+}
+
+.qrf_prompt_controls {
+    display: flex;
+    gap: 5px;
+}
+
+.qrf_prompt_controls .menu_button {
+    min-width: 32px;
+    width: 32px;
+    padding: 0;
+    height: 32px;
+}
+
+/* Up/Down buttons style override */
+.qrf_prompt_controls .qrf_prompt_up_btn,
+.qrf_prompt_controls .qrf_prompt_down_btn {
+    background: var(--background-color, #333);
+    color: var(--text_secondary, #ccc);
+    box-shadow: none;
+    border: 1px solid var(--border-color, #555);
+}
+
+.qrf_prompt_controls .qrf_prompt_up_btn:hover:not(:disabled),
+.qrf_prompt_controls .qrf_prompt_down_btn:hover:not(:disabled) {
+    background: var(--background-color-hover, #444);
+    color: var(--text_color, #fff);
+}
+
+.qrf_prompt_controls .qrf_prompt_delete_btn {
+    background: linear-gradient(135deg, #dc3545, #c82333);
+}
+
+.qrf_prompt_controls .qrf_prompt_delete_btn:hover:not(:disabled) {
+    background: linear-gradient(135deg, #c82333, #bd2130);
+}
+
+.qrf_prompt_controls .menu_button:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+/* 19. 特殊提示词 (指令) 样式 */
+.qrf_special_prompt_directive {
+    background: linear-gradient(135deg, rgba(255, 152, 0, 0.1), rgba(255, 193, 7, 0.1));
+    border-color: rgba(255, 152, 0, 0.5);
+    box-shadow: 0 0 10px rgba(255, 152, 0, 0.1);
+}
+
+.qrf_special_prompt_directive:hover {
+    border-color: #ff9800;
+    box-shadow: 0 0 15px rgba(255, 152, 0, 0.2);
+}
+
+.qrf_special_prompt_directive .qrf_prompt_role {
+    opacity: 0.7;
+}
+
+.qrf_prompt_note {
+    padding-top: 8px;
+    border-top: 1px dashed rgba(255, 152, 0, 0.3);
+    margin-top: 10px;
+}
+
+/* 20. Toast 中止按钮样式 */
+#toast-container .qrf-abort-btn {
+    margin-left: 5px;
+    padding: 2px 8px;
+    background-color: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 4px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.85em;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+#toast-container .qrf-abort-btn:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+}
