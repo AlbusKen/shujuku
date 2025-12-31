@@ -5687,6 +5687,38 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
   }
 
   // =========================
+  // [世界书] 注入位置：强制改为 @D 系统深度（避免默认“角色定义之前”）
+  // 说明：
+  // - 根据 TavernHelper 的 LorebookEntry 类型定义：
+  //   - `position` 使用枚举值（非 @D 符号）
+  //   - “@D 系统深度”对应 position='at_depth_as_system' 且 depth 为数字
+  // - 仅用于：OutlineTable、总结条目(含外部导入)、MemoryStart/MemoryEnd
+  // =========================
+  function buildSystemDepthInjection_ACU(depth) {
+      const d = parseInt(depth, 10);
+      return {
+          // @D⚙：系统身份 + 固定深度
+          position: 'at_depth_as_system',
+          depth: Number.isFinite(d) ? d : 2,
+      };
+  }
+
+  function applySystemDepthInjection_ACU(entry, depth) {
+      if (!entry || typeof entry !== 'object') return entry;
+      return { ...entry, ...buildSystemDepthInjection_ACU(depth) };
+  }
+
+  function isSystemDepthInjected_ACU(entry, expectedDepth = null) {
+      if (!entry || typeof entry !== 'object') return false;
+      if (entry.position !== 'at_depth_as_system') return false;
+      const d = typeof entry.depth === 'number' ? entry.depth : parseInt(String(entry.depth ?? ''), 10);
+      if (!Number.isFinite(d)) return false;
+      if (expectedDepth === null || expectedDepth === undefined) return true;
+      const exp = parseInt(expectedDepth, 10);
+      return Number.isFinite(exp) ? d === exp : true;
+  }
+
+  // =========================
   // [世界书] order(插入深度) 分配工具
   // 目标：
   // - 本插件创建的条目之间不重复
@@ -6084,28 +6116,31 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
         const finalContent = `<剧情大纲编码索引>\n\n${content.trim()}\n\n</剧情大纲编码索引>`;
 
+        const OUTLINE_FIXED_SYSTEM_DEPTH = 9998; // 用户指定：总结大纲固定深度
+
         if (existingEntry) {
             const needsUpdate =
                 existingEntry.content !== finalContent ||
                 existingEntry.enabled !== outlineEntryEnabled ||
                 existingEntry.type !== 'constant' ||
-                existingEntry.prevent_recursion !== true;
+                existingEntry.prevent_recursion !== true ||
+                !isSystemDepthInjected_ACU(existingEntry, OUTLINE_FIXED_SYSTEM_DEPTH);
 
             if (needsUpdate) {
-                const updatedEntry = {
+                const updatedEntry = applySystemDepthInjection_ACU({
                     uid: existingEntry.uid,
                     content: finalContent,
                     enabled: outlineEntryEnabled,
                     type: 'constant',
                     prevent_recursion: true,
-                };
+                }, OUTLINE_FIXED_SYSTEM_DEPTH);
                 await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [updatedEntry]);
                 logDebug_ACU(`Successfully updated the outline table lorebook entry. enabled=${outlineEntryEnabled} (0TK占用模式=${zeroTkOccupyMode})`);
             } else {
                 logDebug_ACU('Outline table lorebook entry is already up-to-date.');
             }
         } else {
-            const newEntry = {
+            const newEntry = applySystemDepthInjection_ACU({
                 comment: OUTLINE_COMMENT,
                 content: finalContent,
                 keys: [OUTLINE_COMMENT + '-Key'],
@@ -6114,7 +6149,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 // [优化] order(插入深度) 避免与任何现有条目重复
                 order: allocOrder_ACU(usedOrders, 99985, 1, 99999),
                 prevent_recursion: true,
-            };
+            }, OUTLINE_FIXED_SYSTEM_DEPTH);
             await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [newEntry]);
             logDebug_ACU(`Outline table lorebook entry not found. Created a new one. enabled=${outlineEntryEnabled} (0TK占用模式=${zeroTkOccupyMode})`);
         }
@@ -6172,6 +6207,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         }
 
         const entriesToCreate = [];
+        const SUMMARY_FIXED_SYSTEM_DEPTH = 9999; // 用户指定：总结表+记忆包裹固定深度
         // [优化] 总结表“按表占深度”：所有总结行共用同一个 order(深度)，避免 N 行占 N 个深度
         // 注意：MemoryStart / MemoryEnd 的“3深度成组”会在 updateReadableLorebookEntry_ACU 中统一对齐并保证连续
         const sharedSummaryDataOrder = allocOrder_ACU(usedOrders, 99987, 1, 99999);
@@ -6186,7 +6222,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
             // 行条目只包含行数据，不包含表头
             const content = `| ${rowData.join(' | ')} |\n`;
-            const newEntryData = {
+            const newEntryData = applySystemDepthInjection_ACU({
                 comment: `${SUMMARY_ENTRY_PREFIX}${i + 1}`,
                 content: content,
                 keys: keywords,
@@ -6195,7 +6231,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 // [优化] 同表所有行条目共用同一深度
                 order: sharedSummaryDataOrder,
                 prevent_recursion: true
-            };
+            }, SUMMARY_FIXED_SYSTEM_DEPTH);
             entriesToCreate.push(newEntryData);
         });
         
@@ -6213,7 +6249,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 if (toFix.length > 0) {
                     await TavernHelper_API_ACU.setLorebookEntries(
                         primaryLorebookName,
-                        toFix.map(e => ({ uid: e.uid, order: sharedSummaryDataOrder }))
+                        toFix.map(e => applySystemDepthInjection_ACU({ uid: e.uid, order: sharedSummaryDataOrder }, SUMMARY_FIXED_SYSTEM_DEPTH))
                     );
                 }
             } catch (e) {
@@ -6407,6 +6443,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             // [新增] 创建或更新 MemoryStart 条目（整合总结表表头）
             const MEMORY_START_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-MemoryStart` : 'TavernDB-ACU-MemoryStart');
             const memoryStartEntry = entries.find(e => e.comment === MEMORY_START_COMMENT);
+            const SUMMARY_FIXED_SYSTEM_DEPTH = 9999; // 用户指定：总结表+记忆包裹固定深度
             
             // 准备总结表表头内容
             let summaryHeaderContent = '';
@@ -6445,33 +6482,40 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             if (summaryEntriesToReorder.length > 0) {
                 await TavernHelper_API_ACU.setLorebookEntries(
                     primaryLorebookName,
-                    summaryEntriesToReorder.map(e => ({ uid: e.uid, order: summaryDataOrder }))
+                    summaryEntriesToReorder.map(e => applySystemDepthInjection_ACU({ uid: e.uid, order: summaryDataOrder }, SUMMARY_FIXED_SYSTEM_DEPTH))
                 );
             }
             
             if (!memoryStartEntry) {
                 // 创建新条目
                 await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [{
-                    comment: MEMORY_START_COMMENT,
-                    content: memoryStartContent,
-                    keys: ['AM'],
-                    enabled: true,
-                    type: 'keyword',
-                    order: memoryStartOrder,
-                    prevent_recursion: true,
+                    ...applySystemDepthInjection_ACU({
+                        comment: MEMORY_START_COMMENT,
+                        content: memoryStartContent,
+                        keys: ['AM'],
+                        enabled: true,
+                        type: 'keyword',
+                        order: memoryStartOrder,
+                        prevent_recursion: true,
+                    }, SUMMARY_FIXED_SYSTEM_DEPTH)
                 }]);
             } else {
                 // 更新现有条目（内容/深度）
-                const needsUpdate = (memoryStartEntry.content !== memoryStartContent) || (getEntryOrderNumber_ACU(memoryStartEntry) !== memoryStartOrder);
+                const needsUpdate =
+                    (memoryStartEntry.content !== memoryStartContent) ||
+                    (getEntryOrderNumber_ACU(memoryStartEntry) !== memoryStartOrder) ||
+                    !isSystemDepthInjected_ACU(memoryStartEntry, SUMMARY_FIXED_SYSTEM_DEPTH);
                 if (needsUpdate) {
                     await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [{
-                        uid: memoryStartEntry.uid,
-                        content: memoryStartContent,
-                        order: memoryStartOrder,
-                        enabled: true,
-                        type: 'keyword',
-                        prevent_recursion: true,
-                        keys: memoryStartEntry.keys || memoryStartEntry.key || ['AM'],
+                        ...applySystemDepthInjection_ACU({
+                            uid: memoryStartEntry.uid,
+                            content: memoryStartContent,
+                            order: memoryStartOrder,
+                            enabled: true,
+                            type: 'keyword',
+                            prevent_recursion: true,
+                            keys: memoryStartEntry.keys || memoryStartEntry.key || ['AM'],
+                        }, SUMMARY_FIXED_SYSTEM_DEPTH)
                     }]);
                 }
             }
@@ -6481,24 +6525,30 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             const memoryEndEntry = entries.find(e => e.comment === MEMORY_END_COMMENT);
             if (!memoryEndEntry) {
                 await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [{
-                    comment: MEMORY_END_COMMENT,
-                    content: '</过往记忆>',
-                    keys: ['AM'],
-                    enabled: true,
-                    type: 'keyword',
-                    order: memoryEndOrder,
-                    prevent_recursion: true,
-                }]);
-            } else {
-                const needsUpdate = (getEntryOrderNumber_ACU(memoryEndEntry) !== memoryEndOrder);
-                if (needsUpdate) {
-                    await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [{
-                        uid: memoryEndEntry.uid,
-                        order: memoryEndOrder,
+                    ...applySystemDepthInjection_ACU({
+                        comment: MEMORY_END_COMMENT,
+                        content: '</过往记忆>',
+                        keys: ['AM'],
                         enabled: true,
                         type: 'keyword',
+                        order: memoryEndOrder,
                         prevent_recursion: true,
-                        keys: memoryEndEntry.keys || memoryEndEntry.key || ['AM'],
+                    }, SUMMARY_FIXED_SYSTEM_DEPTH)
+                }]);
+            } else {
+                const needsUpdate =
+                    (getEntryOrderNumber_ACU(memoryEndEntry) !== memoryEndOrder) ||
+                    !isSystemDepthInjected_ACU(memoryEndEntry, SUMMARY_FIXED_SYSTEM_DEPTH);
+                if (needsUpdate) {
+                    await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [{
+                        ...applySystemDepthInjection_ACU({
+                            uid: memoryEndEntry.uid,
+                            order: memoryEndOrder,
+                            enabled: true,
+                            type: 'keyword',
+                            prevent_recursion: true,
+                            keys: memoryEndEntry.keys || memoryEndEntry.key || ['AM'],
+                        }, SUMMARY_FIXED_SYSTEM_DEPTH)
                     }]);
                 }
             }
