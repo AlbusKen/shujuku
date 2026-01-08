@@ -11697,7 +11697,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     
     createACUWindow({
       id: windowId,
-      title: '神·数据库 V9',
+      title: '神·数据库 VX',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度
