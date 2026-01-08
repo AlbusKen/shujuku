@@ -179,6 +179,7 @@
         }
         .acu-window-controls {
           gap: 6px;
+          margin-right: 4px; /* 窄屏模式下关闭按钮往左移动 */
         }
         .acu-window-btn {
           width: 32px;
@@ -198,6 +199,9 @@
         .acu-window-header {
           padding: 8px 10px;
           min-height: 44px; /* 确保头部高度足够 */
+        }
+        .acu-window-controls {
+          margin-right: 6px; /* 超窄屏模式下关闭按钮往左移动更多 */
         }
         .acu-window-title {
           font-size: 13px;
@@ -460,6 +464,8 @@
     const initialY = Math.max(20, Math.min((viewH - initialH) / 2, viewH - initialH - 20));
     
     // 构建窗口HTML
+    // ═══ 窄屏模式下不显示全屏按钮，只显示关闭按钮 ═══
+    const showMaximizeBtn = maximizable && !isNarrowScreen;
     const windowHtml = `
       <div class="acu-window" id="${id}" style="left:${initialX}px; top:${initialY}px; width:${initialW}px; height:${initialH}px;">
         <div class="acu-window-header">
@@ -468,7 +474,7 @@
             <span>${title}</span>
           </div>
           <div class="acu-window-controls">
-            ${maximizable ? '<button class="acu-window-btn maximize" title="最大化/还原"><i class="fa-solid fa-expand"></i></button>' : ''}
+            ${showMaximizeBtn ? '<button class="acu-window-btn maximize" title="最大化/还原"><i class="fa-solid fa-expand"></i></button>' : ''}
             <button class="acu-window-btn close" title="关闭"><i class="fa-solid fa-times"></i></button>
           </div>
         </div>
