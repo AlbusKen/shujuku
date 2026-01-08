@@ -17704,20 +17704,22 @@ async function callCustomOpenAI_ACU(dynamicContent) {
             flex-direction: column;
         }
         
-        /* 侧边栏变为顶部横向滚动 */
+        /* 侧边栏变为顶部横向 - 自动填满 */
         .acu-vis-sidebar {
             flex: 0 0 auto;
             width: 100%;
-            max-height: 120px;
+            max-height: none; /* 移除高度限制，允许换行 */
+            min-height: 50px;
             border-right: none;
             border-bottom: 1px solid rgba(255,255,255,0.06);
             flex-direction: row;
-            flex-wrap: nowrap;
-            overflow-x: auto;
-            overflow-y: hidden;
+            flex-wrap: wrap; /* 允许换行 */
+            overflow-x: hidden; /* 不需要横向滚动了 */
+            overflow-y: auto;
             gap: 8px;
             padding: 12px;
             -webkit-overflow-scrolling: touch;
+            align-content: flex-start;
         }
         
         .acu-vis-sidebar::before {
@@ -17726,29 +17728,30 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         
         .acu-vis-sidebar::-webkit-scrollbar {
             height: 4px;
-            width: auto;
+            width: 4px;
         }
         
-        /* 表格导航项 - 横向布局 */
+        /* 表格导航项 - 自动伸展填满 */
         .acu-table-nav-item {
-            flex-shrink: 0;
+            flex: 1 1 auto; /* 允许伸展和收缩 */
+            min-width: 120px; /* 最小宽度 */
+            max-width: 100%; /* 最大不超过容器 */
             padding: 8px 12px;
-            width: auto; /* 横向滚动时宽度由内容决定 */
-            min-width: fit-content; /* 确保最小宽度包裹内容 */
+            justify-content: flex-start;
         }
         
         .acu-table-nav-content {
             gap: 6px;
-            flex: 0 0 auto; /* 横向滚动时不伸缩，保持内容宽度 */
-            width: auto; /* 重置宽度 */
+            flex: 1 1 0; /* 允许伸展填满 */
+            min-width: 0;
         }
         
         .acu-table-name {
-            white-space: nowrap; /* 确保表格名不换行 */
-            overflow: visible; /* 窄屏下不截断，完整显示 */
-            text-overflow: clip;
-            flex: 0 0 auto; /* 不伸缩，宽度由内容决定 */
-            width: auto; /* 重置宽度 */
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1 1 0;
+            min-width: 0;
         }
         
         .acu-table-index {
@@ -17758,9 +17761,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-table-nav-actions {
             opacity: 1;
             gap: 2px;
-            flex: 0 0 auto; /* 不允许伸缩 */
-            margin-left: 8px; /* 横向模式下固定间距 */
-            padding-left: 0;
+            flex-shrink: 0;
+            margin-left: auto;
+            padding-left: 6px;
         }
         
         .acu-table-order-btn {
@@ -17769,9 +17772,10 @@ async function callCustomOpenAI_ACU(dynamicContent) {
             font-size: 9px;
         }
         
-        /* 新增表格按钮 */
+        /* 新增表格按钮 - 也伸展填满 */
         .acu-add-table-btn {
-            flex-shrink: 0;
+            flex: 1 1 auto;
+            min-width: 120px;
             padding: 8px 12px;
             margin-top: 0;
         }
@@ -17879,7 +17883,8 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         }
         
         .acu-vis-sidebar {
-            max-height: 100px;
+            max-height: none; /* 移除高度限制 */
+            min-height: 40px;
             padding: 8px;
             gap: 6px;
         }
@@ -17887,15 +17892,16 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-table-nav-item {
             padding: 6px 10px;
             font-size: 11px;
-            width: auto; /* 横向滚动时宽度由内容决定 */
-            min-width: fit-content;
+            flex: 1 1 auto; /* 允许伸展填满 */
+            min-width: 100px;
         }
         
         .acu-table-name {
             white-space: nowrap;
-            overflow: visible;
-            text-overflow: clip;
-            width: auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1 1 0;
+            min-width: 0;
         }
         
         .acu-table-order-btn {
@@ -18001,7 +18007,8 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         }
         
         .acu-vis-sidebar {
-            max-height: 75px;
+            max-height: none; /* 移除高度限制 */
+            min-height: 36px;
             padding: 4px;
             gap: 4px;
         }
@@ -18009,6 +18016,8 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-table-nav-item {
             padding: 4px 6px;
             font-size: 10px;
+            flex: 1 1 auto; /* 允许伸展 */
+            min-width: 80px;
         }
         
         .acu-table-order-btn {
@@ -18020,6 +18029,8 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-add-table-btn {
             padding: 4px 8px;
             font-size: 10px;
+            flex: 1 1 auto;
+            min-width: 80px;
         }
         
         .acu-vis-main {
@@ -18129,13 +18140,16 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         }
         
         .acu-vis-sidebar {
-            max-height: 65px;
+            max-height: none; /* 移除高度限制 */
+            min-height: 32px;
             padding: 3px;
         }
         
         .acu-table-nav-item {
             padding: 3px 5px;
             font-size: 9px;
+            flex: 1 1 auto; /* 允许伸展 */
+            min-width: 70px;
         }
         
         .acu-vis-main {
