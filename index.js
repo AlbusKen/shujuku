@@ -10993,6 +10993,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                             max-height: none; /* 移除高度限制 */
                             flex-shrink: 0; /* 导航条不收缩 */
                             -webkit-overflow-scrolling: touch; /* iOS平滑滚动 */
+                            /* 窄屏模式下使用不透明背景，避免滚动时内容透出 */
+                            background: #0d1117;
+                            border-color: rgba(255, 255, 255, 0.12);
                         }
                         #${POPUP_ID_ACU} .acu-nav-section-title { display: none; }
                         #${POPUP_ID_ACU} .acu-tab-button { width: auto; white-space: nowrap; }
@@ -11027,6 +11030,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                             flex-shrink: 0; 
                             /* 导航条不应该溢出 */
                             max-height: none;
+                            /* 窄屏模式下使用不透明背景 */
+                            background: #0d1117;
+                            border-color: rgba(255, 255, 255, 0.12);
                         }
                     }
                     
@@ -17718,11 +17724,19 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-table-nav-item {
             flex-shrink: 0;
             padding: 8px 12px;
-            min-width: max-content;
+            width: fit-content; /* 使用 fit-content 让宽度紧密包裹内容 */
         }
         
         .acu-table-nav-content {
             gap: 6px;
+            flex: 0 0 auto; /* 不允许伸缩，保持内容宽度 */
+        }
+        
+        .acu-table-name {
+            white-space: nowrap; /* 确保表格名不换行 */
+            overflow: visible; /* 窄屏下不截断，完整显示 */
+            text-overflow: clip;
+            flex: 0 0 auto; /* 不伸缩，宽度由内容决定 */
         }
         
         .acu-table-index {
@@ -17732,6 +17746,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-table-nav-actions {
             opacity: 1;
             gap: 2px;
+            flex: 0 0 auto; /* 不允许伸缩 */
         }
         
         .acu-table-order-btn {
@@ -17858,6 +17873,13 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-table-nav-item {
             padding: 6px 10px;
             font-size: 11px;
+            width: fit-content; /* 宽度紧密包裹内容 */
+        }
+        
+        .acu-table-name {
+            white-space: nowrap;
+            overflow: visible;
+            text-overflow: clip;
         }
         
         .acu-table-order-btn {
