@@ -179,7 +179,7 @@
         }
         .acu-window-controls {
           gap: 6px;
-          margin-right: 4px; /* 窄屏模式下关闭按钮往左移动 */
+          margin-right: 19px; /* 窄屏模式下关闭按钮移到原双按钮中间位置 */
         }
         .acu-window-btn {
           width: 32px;
@@ -201,7 +201,7 @@
           min-height: 44px; /* 确保头部高度足够 */
         }
         .acu-window-controls {
-          margin-right: 6px; /* 超窄屏模式下关闭按钮往左移动更多 */
+          margin-right: 21px; /* 超窄屏模式下关闭按钮移到原双按钮中间位置 */
         }
         .acu-window-title {
           font-size: 13px;
@@ -232,14 +232,25 @@
         display: flex;
         align-items: center;
         gap: 10px;
+        flex: 1;           /* 允许标题区域伸缩 */
+        min-width: 0;      /* 允许收缩到小于内容宽度 */
+        overflow: hidden;  /* 隐藏溢出内容 */
       }
       .acu-window-title i {
         color: rgba(123, 183, 255, 0.85);
+        flex-shrink: 0;    /* 图标不收缩 */
+      }
+      .acu-window-title span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;  /* 标题过长时显示省略号 */
       }
       
       .acu-window-controls {
         display: flex;
         gap: 8px;
+        flex-shrink: 0;    /* 按钮区域永不收缩，确保始终可见 */
+        margin-left: 8px;  /* 与标题保持间距 */
       }
       
       .acu-window-btn {
