@@ -3074,11 +3074,213 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       });
   }
 
-  // [表格顺序新机制] 获取表格 keys：按“编号(orderNo)从小到大”排序；缺编号则回退到模板编号/模板顺序
-  function getSortedSheetKeys_ACU(dataObj) {
+  // =========================
+  // [新增] 聊天记录第一层：空白“指导表”（仅表头+参数，无数据行）
+  // 目标：
+  // - 不再维护“表头清单”这种轻量结构，而是保存一份“包含所有表格的更新参数/表头/顺序”的空白表集合
+  // - 仅用于本插件：为表格编辑/填表参数提供稳定来源；不暴露到 exportTableAsJson 等外部接口
+  // - 保存位置：chat[0]（第一层消息对象）上挂载一个内部字段
+  // - 按隔离标签分槽：tags[isolationKey]
+  // 备注：此处的“空白表”指 content 只保留表头行（content[0]），不含任何数据行
+  // =========================
+  const CHAT_SHEET_GUIDE_FIELD_ACU = 'TavernDB_ACU_InternalSheetGuide';
+  const CHAT_SHEET_GUIDE_VERSION_ACU = 1;
+  // 兼容：若用户曾使用过旧“表头清单”字段，可在读取时迁移
+  const LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU = 'TavernDB_ACU_TableHeaderGuide';
+
+  function getChatFirstLayerMessage_ACU(chat) {
+      if (!Array.isArray(chat) || chat.length === 0) return null;
+      return chat[0] || null;
+  }
+
+  function getChatSheetGuideContainer_ACU(chat) {
+      const first = getChatFirstLayerMessage_ACU(chat);
+      if (!first) return null;
+      const raw = first[CHAT_SHEET_GUIDE_FIELD_ACU];
+      if (!raw) return null;
+      const obj = (typeof raw === 'string') ? safeJsonParse_ACU(raw, null) : raw;
+      return (obj && typeof obj === 'object') ? obj : null;
+  }
+
+  function normalizeGuideData_ACU(dataObj) {
+      if (!dataObj || typeof dataObj !== 'object') return null;
+      const out = { mate: { type: 'chatSheets', version: 1 } };
+      // mate 允许覆盖
+      if (dataObj.mate && typeof dataObj.mate === 'object') {
+          out.mate = dataObj.mate;
+      }
+      Object.keys(dataObj).forEach(k => {
+          if (!k.startsWith('sheet_')) return;
+          const s = dataObj[k];
+          if (!s || typeof s !== 'object') return;
+          // content 只保留表头行
+          const headerRow = Array.isArray(s.content) && Array.isArray(s.content[0]) ? s.content[0] : [null];
+          const keep = {
+              uid: s.uid || k,
+              name: s.name || k,
+              sourceData: s.sourceData || { note: '', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
+              content: [headerRow],
+              updateConfig: s.updateConfig || { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
+              exportConfig: s.exportConfig || { enabled: false, splitByRow: false, entryName: s.name || k, entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '' },
+          };
+          if (s[TABLE_ORDER_FIELD_ACU] !== undefined) keep[TABLE_ORDER_FIELD_ACU] = s[TABLE_ORDER_FIELD_ACU];
+          out[k] = keep;
+      });
+      return out;
+  }
+
+  function getChatSheetGuideDataForIsolationKey_ACU(isolationKey) {
+      const chat = SillyTavern_API_ACU?.chat;
+      const container = getChatSheetGuideContainer_ACU(chat);
+      if (container && typeof container === 'object') {
+          const tags = container.tags;
+          const slot = (tags && typeof tags === 'object') ? tags[String(isolationKey ?? '')] : null;
+          const data = slot?.data;
+          const normalized = normalizeGuideData_ACU(data);
+          if (normalized && Object.keys(normalized).some(k => k.startsWith('sheet_'))) return normalized;
+      }
+
+      // 兼容迁移：旧字段仅保存表头清单，这里按清单顺序从模板构建空白指导表（不强制持久化）
+      try {
+          const first = getChatFirstLayerMessage_ACU(chat);
+          const legacyRaw = first ? first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU] : null;
+          const legacyObj = legacyRaw ? ((typeof legacyRaw === 'string') ? safeJsonParse_ACU(legacyRaw, null) : legacyRaw) : null;
+          const legacyTags = legacyObj?.tags;
+          const legacySlot = (legacyTags && typeof legacyTags === 'object') ? legacyTags[String(isolationKey ?? '')] : null;
+          const legacyHeaders = Array.isArray(legacySlot?.headers) ? legacySlot.headers : null;
+          if (legacyHeaders && legacyHeaders.length > 0) {
+              const orderedUids = legacyHeaders
+                  .map(h => h?.uid)
+                  .filter(uid => typeof uid === 'string' && uid.startsWith('sheet_'));
+              if (orderedUids.length > 0) {
+                  const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: true });
+                  const out = { mate: { type: 'chatSheets', version: 1 } };
+                  orderedUids.forEach((uid, idx) => {
+                      const base = (templateObj && templateObj[uid]) ? JSON.parse(JSON.stringify(templateObj[uid])) : { uid, name: uid, content: [[null]], sourceData: {}, updateConfig: {}, exportConfig: {} };
+                      // 空白化 + 编号
+                      if (Array.isArray(base.content) && base.content.length > 1) base.content = [base.content[0]];
+                      if (!Array.isArray(base.content) || base.content.length === 0) base.content = [[null]];
+                      base.uid = uid;
+                      if (!Number.isFinite(base[TABLE_ORDER_FIELD_ACU])) base[TABLE_ORDER_FIELD_ACU] = idx;
+                      out[uid] = base;
+                  });
+                  return normalizeGuideData_ACU(out);
+              }
+          }
+      } catch (e) {}
+
+      return null;
+  }
+
+  function setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, { reason = '' } = {}) {
+      const chat = SillyTavern_API_ACU?.chat;
+      const first = getChatFirstLayerMessage_ACU(chat);
+      if (!first) return false;
+
+      const normalized = normalizeGuideData_ACU(guideData);
+      if (!normalized || !Object.keys(normalized).some(k => k.startsWith('sheet_'))) return false;
+      const container = getChatSheetGuideContainer_ACU(chat) || { version: CHAT_SHEET_GUIDE_VERSION_ACU, tags: {} };
+      if (!container.tags || typeof container.tags !== 'object') container.tags = {};
+      container.version = CHAT_SHEET_GUIDE_VERSION_ACU;
+      container.tags[String(isolationKey ?? '')] = {
+          data: normalized,
+          updatedAt: Date.now(),
+          reason: String(reason || ''),
+      };
+      first[CHAT_SHEET_GUIDE_FIELD_ACU] = container;
+      return true;
+  }
+
+  // [新增] 用“当前数据”构建空白指导表：只保留表头行 + 参数（顺序由 getSortedSheetKeys_ACU 的旧逻辑决定，避免递归）
+  function buildChatSheetGuideDataFromData_ACU(dataObj) {
+      if (!dataObj || typeof dataObj !== 'object') return null;
+      const keys = getSortedSheetKeys_ACU(dataObj, { ignoreChatGuide: true });
+      const out = { mate: { type: 'chatSheets', version: 1 } };
+      keys.forEach(k => {
+          const s = dataObj[k];
+          if (!s) return;
+          const headerRow = Array.isArray(s.content) && Array.isArray(s.content[0]) ? JSON.parse(JSON.stringify(s.content[0])) : [null];
+          const blank = {
+              uid: s.uid || k,
+              name: s.name || k,
+              sourceData: s.sourceData ? JSON.parse(JSON.stringify(s.sourceData)) : { note: '', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
+              content: [headerRow],
+              updateConfig: s.updateConfig ? JSON.parse(JSON.stringify(s.updateConfig)) : { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
+              exportConfig: s.exportConfig ? JSON.parse(JSON.stringify(s.exportConfig)) : { enabled: false, splitByRow: false, entryName: s.name || k, entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '' },
+          };
+          if (Number.isFinite(s?.[TABLE_ORDER_FIELD_ACU])) blank[TABLE_ORDER_FIELD_ACU] = Math.trunc(s[TABLE_ORDER_FIELD_ACU]);
+          out[k] = blank;
+      });
+      return normalizeGuideData_ACU(out);
+  }
+
+  // [新增] 用“模板对象”构建空白指导表：只保留表头行 + 参数（模板已有顺序编号）
+  function buildChatSheetGuideDataFromTemplateObj_ACU(templateObj, { stripSeedRows = true } = {}) {
+      if (!templateObj || typeof templateObj !== 'object') return null;
+      const keys = Object.keys(templateObj).filter(k => k.startsWith('sheet_'));
+      if (keys.length === 0) return null;
+      // 确保模板编号稳定（缺失则补齐）
+      try { ensureSheetOrderNumbers_ACU(templateObj, { baseOrderKeys: keys, forceRebuild: false }); } catch (e) {}
+      const sorted = keys.sort((a, b) => {
+          const ao = Number.isFinite(templateObj?.[a]?.[TABLE_ORDER_FIELD_ACU]) ? Math.trunc(templateObj[a][TABLE_ORDER_FIELD_ACU]) : Infinity;
+          const bo = Number.isFinite(templateObj?.[b]?.[TABLE_ORDER_FIELD_ACU]) ? Math.trunc(templateObj[b][TABLE_ORDER_FIELD_ACU]) : Infinity;
+          if (ao !== bo) return ao - bo;
+          return String(a).localeCompare(String(b));
+      });
+      const out = { mate: { type: 'chatSheets', version: 1 } };
+      sorted.forEach((k, idx) => {
+          const base = JSON.parse(JSON.stringify(templateObj[k] || {}));
+          base.uid = base.uid || k;
+          base.name = base.name || k;
+          if (!Array.isArray(base.content) || base.content.length === 0) base.content = [[null]];
+          if (stripSeedRows && Array.isArray(base.content) && base.content.length > 1) base.content = [base.content[0]];
+          if (!Number.isFinite(base[TABLE_ORDER_FIELD_ACU])) base[TABLE_ORDER_FIELD_ACU] = idx;
+          out[k] = base;
+      });
+      return normalizeGuideData_ACU(out);
+  }
+
+  // [新增] 覆盖式更新：用模板写入当前聊天第一层“空白指导表”
+  async function overwriteChatSheetGuideFromTemplate_ACU(templateObj, { reason = 'template_changed' } = {}) {
+      const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateObj, { stripSeedRows: true });
+      if (!guideData) return false;
+      const isolationKey = getCurrentIsolationKey_ACU();
+      const ok = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, { reason });
+      if (!ok) return false;
+      try { await SillyTavern_API_ACU.saveChat(); } catch (e) {}
+      try { await refreshMergedDataAndNotify_ACU(); } catch (e) {}
+      return true;
+  }
+
+  // [表格顺序新机制] 获取表格 keys：
+  // - 若当前聊天已存在“空白指导表”：优先按指导表的 orderNo 顺序（可过滤不在指导表里的表）
+  // - 否则：按“编号(orderNo)从小到大”排序；缺编号则回退到模板编号/模板顺序
+  function getSortedSheetKeys_ACU(dataObj, { ignoreChatGuide = false, includeMissingFromGuide = false } = {}) {
       if (!dataObj || typeof dataObj !== 'object') return [];
       const existingKeys = Object.keys(dataObj).filter(k => k.startsWith('sheet_'));
       if (existingKeys.length === 0) return [];
+
+      // [新增] 聊天级空白指导表：一旦存在，则该聊天不再按模板顺序合并/显示，而是按此指导表作为总指导
+      if (!ignoreChatGuide) {
+          try {
+              const isolationKey = (typeof getCurrentIsolationKey_ACU === 'function') ? getCurrentIsolationKey_ACU() : '';
+              const guideData = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+              if (guideData && typeof guideData === 'object') {
+                  const guideKeys = Object.keys(guideData).filter(k => k.startsWith('sheet_'));
+                  if (guideKeys.length > 0) {
+                      const sorted = guideKeys.sort((a, b) => {
+                          const ao = Number.isFinite(guideData?.[a]?.[TABLE_ORDER_FIELD_ACU]) ? Math.trunc(guideData[a][TABLE_ORDER_FIELD_ACU]) : Infinity;
+                          const bo = Number.isFinite(guideData?.[b]?.[TABLE_ORDER_FIELD_ACU]) ? Math.trunc(guideData[b][TABLE_ORDER_FIELD_ACU]) : Infinity;
+                          if (ao !== bo) return ao - bo;
+                          return String(a).localeCompare(String(b));
+                      });
+                      return includeMissingFromGuide ? sorted : sorted.filter(k => dataObj[k]);
+                  }
+              }
+          } catch (e) {
+              // ignore guide failures; fallback to legacy ordering
+          }
+      }
 
       // 尝试拿模板做兜底（比如老数据/导入数据缺编号）
       const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: false });
@@ -3112,6 +3314,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           if (c !== 0) return c;
           return String(a).localeCompare(String(b));
       });
+  }
+
+  // [新增] 基于“空白指导表”构建可合并的骨架数据（深拷贝，避免后续修改污染原对象）
+  function buildGuidedBaseDataFromSheetGuide_ACU(guideData) {
+      const normalized = normalizeGuideData_ACU(guideData);
+      if (!normalized) return { mate: { type: 'chatSheets', version: 1 } };
+      try { return JSON.parse(JSON.stringify(normalized)); } catch (e) { return normalized; }
   }
 
   // [修复] 按指定顺序重建对象键，避免 Object.keys()/合并/深拷贝导致的顺序漂移
@@ -3341,6 +3550,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       const currentIsolationKey = getCurrentIsolationKey_ACU();
       logDebug_ACU(`[Merge] Loading data for isolation key: [${currentIsolationKey || '无标签'}]`);
 
+      // [新增] 聊天级“空白指导表”：一旦存在，本聊天合并/显示顺序都按指导表，不再按模板
+      // 注意：该指导表按隔离标签分槽，因此切换标识时可拥有不同的“参数/表头/顺序总指导”
+      const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
+      const hasSheetGuide = !!(sheetGuideData && typeof sheetGuideData === 'object' && Object.keys(sheetGuideData).some(k => k.startsWith('sheet_')));
+
       // 1. [优化] 不使用模板作为基础，动态收集聊天记录中的所有实际数据
       let mergedData = {};
       const foundSheets = {};
@@ -3455,8 +3669,38 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       const foundCount = Object.keys(foundSheets).length;
       logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history.`);
 
-      // 如果没有任何数据，返回null，让调用方使用模板初始化
-      if (foundCount <= 0) return null;
+      // 如果没有任何数据：
+      // - 若存在"空白指导表"，则优先用模板预置数据填充各表，再按指导表参数/顺序返回
+      // - 否则返回 null，让调用方按旧逻辑用模板初始化
+      if (foundCount <= 0) {
+          if (hasSheetGuide) {
+              const base = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideData);
+              // [优化] 尝试用模板预置数据填充没有历史数据的表
+              const templateDataForFallback = parseTableTemplateJson_ACU({ stripSeedRows: false });
+              const guideKeys = getSortedSheetKeys_ACU(base, { ignoreChatGuide: true, includeMissingFromGuide: true });
+              guideKeys.forEach(k => {
+                  if (!k || !k.startsWith('sheet_')) return;
+                  const guideSheet = base[k];
+                  const templateSheet = templateDataForFallback?.[k];
+                  const templateHasPresetData = templateSheet?.content && Array.isArray(templateSheet.content) && templateSheet.content.length > 1;
+                  if (templateHasPresetData) {
+                      // 使用模板的完整数据（包括预置数据行），但参数以指导表为准
+                      const fromTemplate = JSON.parse(JSON.stringify(templateSheet));
+                      fromTemplate.uid = k;
+                      if (guideSheet?.name) fromTemplate.name = guideSheet.name;
+                      if (guideSheet?.sourceData) fromTemplate.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+                      if (guideSheet?.updateConfig) fromTemplate.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+                      if (guideSheet?.exportConfig) fromTemplate.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) fromTemplate[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                      base[k] = fromTemplate;
+                      logDebug_ACU(`[Merge] No history data at all, table ${k} using template preset data (${templateSheet.content.length - 1} rows).`);
+                  }
+              });
+              const orderedKeys = getSortedSheetKeys_ACU(base);
+              return reorderDataBySheetKeys_ACU(base, orderedKeys);
+          }
+          return null;
+      }
 
       // [兼容迁移] 旧版：updateConfig 的 0 表示“沿用UI”；新版：-1 表示“沿用UI”
       // 注意：聊天记录里保存的是“单表对象”，没有 mate 标记，因此用 updateConfig.uiSentinel 作为表级标记。
@@ -3473,6 +3717,65 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           }
           uc.uiSentinel = -1;
       });
+
+      // [新增] 若存在"空白指导表"，则：
+      // 1) 过滤掉不在指导表里的表（UI/填表只以指导表为准，避免旧表复活）
+      // 2) 对指导表中缺失的表，优先使用模板预置数据（如果模板有的话），否则用指导表的空白结构补齐
+      // 3) 对于存在历史数据的表：以历史数据为主，但用指导表补齐缺失的参数/表头，并强制顺序编号与指导表一致
+      if (hasSheetGuide) {
+          const guided = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideData);
+          const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
+          // [优化] 预先获取模板数据（含预置数据），用于在没有历史数据时提供初始值
+          const templateDataForFallback = parseTableTemplateJson_ACU({ stripSeedRows: false });
+          guideKeys.forEach(k => {
+              if (!k || !k.startsWith('sheet_')) return;
+              const guideSheet = guided[k];
+              const hist = mergedData[k];
+              if (hist && typeof hist === 'object') {
+                  const next = JSON.parse(JSON.stringify(hist));
+                  next.uid = k;
+                  // 用指导表补齐缺失参数（以历史数据为主，不强行覆盖用户已保存的参数）
+                  if (!next.name && guideSheet?.name) next.name = guideSheet.name;
+                  if (!next.sourceData && guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+                  if (!next.updateConfig && guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+                  if (!next.exportConfig && guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+                  // 表头兜底：若历史数据缺 header 行，则使用指导表
+                  if (!Array.isArray(next.content) || !Array.isArray(next.content[0])) {
+                      const headerRow = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
+                          ? JSON.parse(JSON.stringify(guideSheet.content[0]))
+                          : [null];
+                      next.content = [headerRow];
+                  }
+                  // 顺序编号以指导表为准
+                  if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                  guided[k] = next;
+              } else {
+                  // [优化] 无历史数据：优先使用模板中可能带的预置数据，否则保留指导表的空白结构
+                  // 部分表格模板为了指导后续填表会自带基础数据，这些数据应被用作初始值
+                  const templateSheet = templateDataForFallback?.[k];
+                  const templateHasPresetData = templateSheet?.content && Array.isArray(templateSheet.content) && templateSheet.content.length > 1;
+                  if (templateHasPresetData) {
+                      // 使用模板的完整数据（包括预置数据行），但参数以指导表为准
+                      const fromTemplate = JSON.parse(JSON.stringify(templateSheet));
+                      fromTemplate.uid = k;
+                      // 表名以指导表为准（用户可能已修改）
+                      if (guideSheet?.name) fromTemplate.name = guideSheet.name;
+                      // 参数以指导表为准（用户可能已调整填表参数）
+                      if (guideSheet?.sourceData) fromTemplate.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+                      if (guideSheet?.updateConfig) fromTemplate.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+                      if (guideSheet?.exportConfig) fromTemplate.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+                      // 顺序编号以指导表为准
+                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) fromTemplate[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                      guided[k] = fromTemplate;
+                      logDebug_ACU(`[Merge] Table ${k} has no history data, using template preset data (${templateSheet.content.length - 1} rows).`);
+                  } else {
+                      // 模板也没有预置数据，保留指导表的空白结构
+                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                  }
+              }
+          });
+          mergedData = guided;
+      }
 
       // [修复] 合并结果按“用户手动顺序/模板顺序”重排，避免合并过程导致的随机乱序
       const orderedKeys = getSortedSheetKeys_ACU(mergedData);
@@ -6144,6 +6447,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
    // [新增] 清理超出保留层数的旧本地数据（表格数据 + 剧情推进数据）
    // 按AI楼层计数，仅保留最近N层的数据，更早楼层的 TavernDB_ACU_* 和 qrf_plot 字段将被删除
+   // [重要] 此函数不会删除聊天第一层的"空白指导表"（TavernDB_ACU_InternalSheetGuide），
+   //        指导表用于保存表头结构和填表参数，作为该聊天的总指导。
    async function purgeOldLayerData_ACU() {
        const retainCount = settings_ACU.retainRecentLayers || 0;
        // 0 或空 = 全部保留，不执行清理
@@ -6159,8 +6464,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
        }
 
        // 1) 收集所有 AI 消息的索引（按时间顺序，从旧到新）
+       // [保护] 排除 chat[0]，确保第一层的指导表数据不被触及
        const aiMessageIndices = [];
-       for (let i = 0; i < chat.length; i++) {
+       for (let i = 1; i < chat.length; i++) {
            if (!chat[i].is_user) {
                aiMessageIndices.push(i);
            }
@@ -6968,8 +7274,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             return;
         }
 
-        if (!coreApisAreReady_ACU || !currentJsonTableData_ACU) {
-            showToastr_ACU('error', '数据库未加载或API未就绪。');
+        if (!coreApisAreReady_ACU) {
+            showToastr_ACU('error', 'API未就绪。');
             return;
         }
 
@@ -6981,7 +7287,15 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
         collectManualExtraHint_ACU();
 
+        // [修复] 在填表前先刷新数据，确保 currentJsonTableData_ACU 与聊天记录的指导表一致
+        // 这解决了用户切换模板后回到聊天记录时，数据可能不一致的问题
         await loadAllChatMessages_ACU();
+        await refreshMergedDataAndNotify_ACU();
+        
+        if (!currentJsonTableData_ACU) {
+            showToastr_ACU('error', '数据库未加载。');
+            return;
+        }
         const liveChat = SillyTavern_API_ACU.chat;
         if (!liveChat || liveChat.length === 0) {
             showToastr_ACU('warning', '聊天记录为空，无法更新。');
@@ -7434,6 +7748,30 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
       let changedAny = false;
       let changedCount = 0;
+
+      // [新增] 同步清理：聊天第一层的“空白指导表”
+      try {
+          const first = getChatFirstLayerMessage_ACU(chat);
+          if (first && first[CHAT_SHEET_GUIDE_FIELD_ACU]) {
+              const container = parseMaybeJson(first[CHAT_SHEET_GUIDE_FIELD_ACU]);
+              if (container && typeof container === 'object' && container.tags && typeof container.tags === 'object') {
+                  const nextContainer = safeClone(container) || {};
+                  Object.keys(nextContainer.tags).forEach(tagKey => {
+                      const slot = nextContainer.tags[tagKey];
+                      if (!slot || typeof slot !== 'object') return;
+                      const slotData = parseMaybeJson(slot.data);
+                      if (!slotData || typeof slotData !== 'object') return;
+                      const nextData = safeClone(slotData) || {};
+                      keys.forEach(k => { if (nextData[k]) delete nextData[k]; });
+                      slot.data = nextData;
+                  });
+                  first[CHAT_SHEET_GUIDE_FIELD_ACU] = nextContainer;
+                  changedAny = true;
+              }
+          }
+      } catch (e) {
+          // ignore
+      }
 
       for (let i = 0; i < chat.length; i++) {
           const msg = chat[i];
@@ -8750,6 +9088,21 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     // [数据隔离核心] 获取当前隔离标签键名
     // 无标签使用空字符串 ""，有标签使用标签代码
     const currentIsolationKey = getCurrentIsolationKey_ACU();
+
+    // [新增] 首次填表后：在聊天记录第一层写入“空白指导表”（仅表头+参数，无数据行）
+    // 说明：只在当前隔离标签槽位未存在时写入；后续不会自动覆盖，避免无意漂移
+    try {
+        const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
+        if (!existingGuide || !Object.keys(existingGuide).some(k => k.startsWith('sheet_'))) {
+            const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU);
+            if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
+                setChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey, guideData, { reason: 'first_fill' });
+                logDebug_ACU(`[SheetGuide] Created chat sheet guide for tag [${currentIsolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}).`);
+            }
+        }
+    } catch (e) {
+        logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
+    }
 
     // [数据隔离核心] 使用按标签分组的存储结构
     // 结构: targetMessage.TavernDB_ACU_IsolatedData = { 
@@ -13783,7 +14136,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
     }
 
     try {
-      const sheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
+      const sheetKeys = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
       const tableCount = sheetKeys.length;
       let totalRowCount = 0;
       let nextUpdates = [];
@@ -14246,13 +14599,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
 
     // 1. Format the current JSON table data into a human-readable text block for $0
     let tableDataText = '';
-    const tableIndexes = Object.keys(currentJsonTableData_ACU)
-        .filter(k => k.startsWith('sheet_'))
-        .sort((a, b) => {
-            const numA = parseInt(a.replace('sheet_', ''), 10);
-            const numB = parseInt(b.replace('sheet_', ''), 10);
-            return numA - numB;
-        });
+    const tableIndexes = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
     tableIndexes.forEach((sheetKey, tableIndex) => {
         const table = currentJsonTableData_ACU[sheetKey];
         if (!table || !table.name || !table.content) return;
@@ -14757,14 +15104,8 @@ async function callCustomOpenAI_ACU(dynamicContent) {
     let appliedEdits = 0;
     const editCountsByTable = {}; // Map<tableName, count>
 
-    const sheets = Object.keys(currentJsonTableData_ACU)
-                         .filter(k => k.startsWith('sheet_'))
-                         .sort((a, b) => {
-                             const numA = parseInt(a.replace('sheet_', ''), 10);
-                             const numB = parseInt(b.replace('sheet_', ''), 10);
-                             return numA - numB;
-                         })
-                         .map(k => currentJsonTableData_ACU[k]);
+    const sheetKeysForIndexing = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
+    const sheets = sheetKeysForIndexing.map(k => currentJsonTableData_ACU[k]).filter(Boolean);
 
     // [新增] 重置本次参与更新的表格的统计信息
     // 由于我们不知道哪些表会更新，只能在实际更新时设置。
@@ -15063,23 +15404,34 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           // [核心修复] 多批次更新时，必须为每个表格单独查找其最新数据
           // 这确保了即使上一批次只更新了部分表格，当前批次也能获得所有表格的完整数据
           
-          // Step 1: 从模板初始化完整的表格结构作为基础
+          // Step 1: 优先使用聊天记录的"空白指导表"作为基础，否则回退到模板
+          // [关键修复] 用户切换模板后回到聊天记录时，应使用该聊天的指导表，而不是新模板
           let mergedBatchData = null;
           try {
-              // [修复] 批处理合并基底也只使用“表结构”（header-only）
-              mergedBatchData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+              const batchIsoKey = getCurrentIsolationKey_ACU();
+              const sheetGuideForBatch = getChatSheetGuideDataForIsolationKey_ACU(batchIsoKey);
+              if (sheetGuideForBatch && typeof sheetGuideForBatch === 'object' && Object.keys(sheetGuideForBatch).some(k => k.startsWith('sheet_'))) {
+                  // 使用聊天记录的指导表作为基础（深拷贝）
+                  mergedBatchData = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideForBatch);
+                  logDebug_ACU(`[Batch ${batchNumber}] Using chat sheet guide as merge base.`);
+              } else {
+                  // [兜底] 没有指导表时使用模板（header-only）
+                  mergedBatchData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+                  logDebug_ACU(`[Batch ${batchNumber}] No chat sheet guide found, using template as merge base.`);
+              }
           } catch (e) {
-              logError_ACU(`[Batch ${batchNumber}] Failed to parse template for batch merge base.`, e);
-              showToastr_ACU('error', "无法解析数据库模板，操作已终止。");
+              logError_ACU(`[Batch ${batchNumber}] Failed to build merge base from guide/template.`, e);
+              showToastr_ACU('error', "无法构建合并基底，操作已终止。");
               overallSuccess = false;
               break;
           }
           if (!mergedBatchData) {
-              showToastr_ACU('error', "无法解析数据库模板，操作已终止。");
+              showToastr_ACU('error', "无法构建合并基底，操作已终止。");
               overallSuccess = false;
               break;
           }
 
+          // [修复] 使用指导表感知的排序获取 keys
           const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
           
           // [数据隔离核心] 获取当前隔离标签键名
@@ -16544,6 +16896,10 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                 TABLE_TEMPLATE_ACU = templateString;
                 // [Profile] 模板随标识(profile)保存
                 saveCurrentProfileTemplate_ACU(templateString);
+
+                // [新增] 同步覆盖：更新当前聊天第一层的“空白指导表”（仅表头+参数）
+                try { await overwriteChatSheetGuideFromTemplate_ACU(sanitizedTemplate, { reason: 'import_combined' }); } catch (e) {}
+
                 showToastr_ACU('success', '表格模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
 
                 // [优化] 不再触发表格数据初始化，仅修改当前插件模板
@@ -16561,6 +16917,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
   }
 
   // [新增] 删除聊天记录中的本地数据
+  // [重要] 此函数只删除各楼层的表格数据（TavernDB_ACU_Data/IsolatedData等），
+  //        不会删除聊天第一层的"空白指导表"（TavernDB_ACU_InternalSheetGuide），
+  //        指导表用于保存表头结构和填表参数，作为该聊天的总指导。
   async function deleteLocalDataInChat_ACU(mode = 'current', startFloor = null, endFloor = null) {
       // mode: 'current' (删除当前标识的数据) | 'all' (删除所有数据)
       // startFloor/endFloor: 楼层范围 (1-based, null表示不限制)
@@ -16574,8 +16933,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       const targetIdentity = settings_ACU.dataIsolationEnabled ? settings_ACU.dataIsolationCode : null;
 
       // 计算AI消息索引列表（只计算AI楼层）
+      // [保护] 排除 chat[0]，确保第一层的指导表数据不被触及
       const aiMessageIndices = chat
-          .map((msg, index) => !msg.is_user ? index : -1)
+          .map((msg, index) => (!msg.is_user && index > 0) ? index : -1)
           .filter(index => index !== -1);
 
       if (aiMessageIndices.length === 0) {
@@ -16832,6 +17192,14 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           // [Profile] 保存默认模板到当前标识(profile)
           saveCurrentProfileTemplate_ACU(TABLE_TEMPLATE_ACU);
 
+          // [新增] 同步覆盖：更新当前聊天第一层的“空白指导表”（仅表头+参数）
+          try {
+              const obj = safeJsonParse_ACU(TABLE_TEMPLATE_ACU, null);
+              if (obj && typeof obj === 'object') {
+                  await overwriteChatSheetGuideFromTemplate_ACU(obj, { reason: 'reset_all_defaults' });
+              }
+          } catch (e) {}
+
           logDebug_ACU('Prompt and Table template have been reset to defaults.');
 
           // 3. UI Update (Settings & Prompt)
@@ -16959,6 +17327,15 @@ async function callCustomOpenAI_ACU(dynamicContent) {
             // [Profile] 保存到当前标识(profile)
             saveCurrentProfileTemplate_ACU(TABLE_TEMPLATE_ACU);
         }
+
+        // [新增] 同步覆盖：更新当前聊天第一层的“空白指导表”（仅表头+参数）
+        try {
+            const templateObj = obj && typeof obj === 'object' ? obj : safeJsonParse_ACU(TABLE_TEMPLATE_ACU, null);
+            if (templateObj && typeof templateObj === 'object') {
+                await overwriteChatSheetGuideFromTemplate_ACU(templateObj, { reason: 'reset_template' });
+            }
+        } catch (e) {}
+
         showToastr_ACU('success', '模板已恢复为默认值！模板已更新，但不会影响当前聊天记录的本地数据。');
         logDebug_ACU('Table template has been reset to default and saved to config storage and memory.');
 
@@ -17040,6 +17417,10 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                 TABLE_TEMPLATE_ACU = normalized; // <-- FIX: Update in-memory variable
                 // [Profile] 保存到当前标识(profile)
                 saveCurrentProfileTemplate_ACU(TABLE_TEMPLATE_ACU);
+
+                // [新增] 同步覆盖：更新当前聊天第一层的“空白指导表”（仅表头+参数）
+                try { await overwriteChatSheetGuideFromTemplate_ACU(sanitized, { reason: 'import_template' }); } catch (e) {}
+
                 showToastr_ACU('success', '模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
                 logDebug_ACU('New table template loaded and saved to config storage and memory.');
 
@@ -17708,6 +18089,11 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         .acu-vis-sidebar {
             flex: 0 0 auto;
             width: 100%;
+            /* 关键修复：基础样式里存在 max-width:400px/min-width:280px，
+               在移动端会把“顶部横条”宽度卡死，导致右侧出现空白背景区域 */
+            max-width: none !important;
+            min-width: 0 !important;
+            box-sizing: border-box;
             max-height: 120px;
             border-right: none;
             border-bottom: 1px solid rgba(255,255,255,0.06);
@@ -18903,6 +19289,19 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       
       // First, apply changes to local variable (使用排序后的数据)
       currentJsonTableData_ACU = JSON.parse(JSON.stringify(orderedData));
+
+      // [新增] 可视化编辑器属于“用户显式修改表结构/表名/顺序”的入口：
+      // 覆盖式更新聊天第一层的“空白指导表”（仅表头+参数，无数据行），让后续合并/显示/填表参数都以此为准。
+      try {
+          const isolationKey = getCurrentIsolationKey_ACU();
+          const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU);
+          if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
+              setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, { reason: saveToTemplate ? 'visualizer_save_to_template' : 'visualizer_save' });
+              logDebug_ACU(`[SheetGuide] Overwrote chat sheet guide from visualizer for tag [${isolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}).`);
+          }
+      } catch (e) {
+          logWarn_ACU('[SheetGuide] Failed to overwrite sheet guide from visualizer:', e);
+      }
 
       // [新机制] 不再使用 settings_ACU.tableKeyOrder 强制固定顺序（顺序由每张表的 orderNo 决定）
       // 记录本次需要彻底清理的 key（真正清理会在“写回所有楼层”之后执行，防止后续写回把旧表带回）
