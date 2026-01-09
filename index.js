@@ -18765,12 +18765,30 @@ async function callCustomOpenAI_ACU(dynamicContent) {
   // [新增] 表格顺序管理 - 存储有序的表格键列表
   function getOrderedSheetKeys_ACU() {
       // 新机制：顺序由每张表的 orderNo 决定；编辑器内部仍保留一个数组用于“上移/下移”
+      //
+      // 重要：getSortedSheetKeys_ACU() 在“聊天已存在空白指导表(guide)”时，默认会按 guide 排序并且
+      // 过滤掉不在 guide 里的表。可视化编辑器允许用户新增表格，因此这里必须把“当前数据里存在但 guide
+      // 里不存在”的新表追加进顺序列表，否则新增表会立刻被过滤掉，进而导致“UI不显示/保存后丢失”。
+
+      // allKeys：忽略聊天 guide，拿到 tempData 里真实存在的全部表（含刚新增的表）
+      const allKeys = getSortedSheetKeys_ACU(_acuVisState.tempData, { ignoreChatGuide: true });
+      // guidedKeys：若 guide 存在，则为 guide 内已存在且在 tempData 中也存在的表（用于保持既有聊天顺序）
+      const guidedKeys = getSortedSheetKeys_ACU(_acuVisState.tempData, { ignoreChatGuide: false });
+      const baseOrder = (() => {
+          // guidedKeys 可能为空（无 guide 或 guide 读取失败），此时用 allKeys 作为基准
+          const base = (Array.isArray(guidedKeys) && guidedKeys.length) ? guidedKeys : allKeys;
+          // 追加不在 guide 里的新表，确保新增表可见且可保存
+          const missing = allKeys.filter(k => !base.includes(k));
+          return [...base, ...missing];
+      })();
+
       if (!_acuVisState.sheetOrder || !Array.isArray(_acuVisState.sheetOrder)) {
-          _acuVisState.sheetOrder = getSortedSheetKeys_ACU(_acuVisState.tempData);
+          _acuVisState.sheetOrder = baseOrder;
       }
+
       // 确保顺序列表包含所有当前存在的表格，并移除已删除的表格
       // existingKeys 使用 orderNo 排序（已对缺失编号做兜底补齐）
-      const existingKeys = getSortedSheetKeys_ACU(_acuVisState.tempData);
+      const existingKeys = allKeys;
       // 过滤掉已删除的
       _acuVisState.sheetOrder = _acuVisState.sheetOrder.filter(k => existingKeys.includes(k));
       // 添加新增的（未在顺序列表中的）
