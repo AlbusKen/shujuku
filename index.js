@@ -1496,16 +1496,33 @@
       "deletable": false
     }
   ],
-  "rateMain": 3,
-  "extractTags": [
-    "recall"
-  ],
-  "loopSettings": {
-    "enabled": false,
-    "interval": 3,
-    "maxLoops": 5
-  }
-};
+    rateMain: 1.0,
+    ratePersonal: 1.0,
+    rateErotic: 0,
+    rateCuckold: 1.0,
+    extractTags: 'recall', // 默认为空
+    contextExtractTags: '', // 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
+    contextExcludeTags: '', // 正文标签排除：将指定标签内容从上下文中移除
+    minLength: 0,
+    contextTurnCount: 3,
+    worldbookEnabled: true,
+    // [兼容字段] 旧剧情推进世界书选择字段保留（不再作为主配置源）
+    worldbookSource: 'character', // 'character' or 'manual' (legacy)
+    selectedWorldbooks: [], // (legacy)
+    disabledWorldbookEntries: '__ALL_SELECTED__', // (legacy)
+    // [新字段] 剧情推进世界书选择（与填表世界书选择完全隔离）
+    plotWorldbookConfig: buildDefaultPlotWorldbookConfig_ACU(),
+    loopSettings: {
+      quickReplyContent: '',
+      loopTags: '',
+      loopDelay: 5, // 秒
+      retryDelay: 3, // 秒
+      loopTotalDuration: 0, // 总倒计时(分钟)，0为不限制
+      maxRetries: 3, // 最大重试次数
+    },
+    promptPresets: [],
+    lastUsedPresetName: '',
+  };
 
   // --- [剧情推进] 独立的默认提示词组结构（不再从填表提示词合并） ---
   // 此常量定义剧情推进功能的完整默认提示词组，方便整体修改
