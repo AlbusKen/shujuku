@@ -1579,7 +1579,7 @@
   },
   {
     "role": "assistant",
-    "content": "<think>\n现在我的所有思考都已经完成即将直接开始输出<content>部分\n</thought>\n<content>",
+    "content": "OK，let's think step by step\n<thought>\n",
     "deletable": true
   }
 ];
@@ -4770,14 +4770,29 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       return '';
     }
 
-    // 从后往前遍历查找
+    // [优化] 从后往前遍历查找最新的剧情规划数据
+    // 确保不受上下文层数设置影响，始终返回最新的上轮剧情规划内容
+    // 跳过当前轮次的消息（通常是最后一条用户消息），从最新的AI消息开始查找
+    let latestPlotContent = '';
+    let latestPlotIndex = -1;
+    
+    // 从后往前遍历整个聊天记录，找到所有包含 qrf_plot 的消息
     for (let i = chat.length - 1; i >= 0; i--) {
       const message = chat[i];
-      if (message.qrf_plot) {
-        logDebug_ACU(`[剧情推进] [Plot] ✓ 在消息 ${i} 找到plot数据，长度:`, message.qrf_plot.length);
-        return message.qrf_plot;
+      if (message && message.qrf_plot) {
+        // 找到第一个（最新的）包含剧情规划数据的消息
+        latestPlotContent = message.qrf_plot;
+        latestPlotIndex = i;
+        logDebug_ACU(`[剧情推进] [Plot] ✓ 在消息 ${i} 找到最新的plot数据，长度:`, latestPlotContent.length);
+        break; // 找到最新的就立即返回，确保始终是最新的上轮规划数据
       }
     }
+    
+    if (latestPlotContent) {
+      logDebug_ACU(`[剧情推进] [Plot] 返回最新的上轮剧情规划数据，消息索引: ${latestPlotIndex}, 长度: ${latestPlotContent.length}`);
+      return latestPlotContent;
+    }
+    
     logDebug_ACU('[剧情推进] [Plot] 未在任何消息中找到plot数据');
     return '';
   }
@@ -4785,14 +4800,14 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
   /**
    * 将plot附加到最新的AI消息上。
    */
-  async function savePlotToLatestMessage_ACU() {
+  async function savePlotToLatestMessage_ACU(force = false) {
     logDebug_ACU('[剧情推进] [Plot] savePlotToLatestMessage_ACU 被调用');
     logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.inProgress:', planningGuard_ACU.inProgress);
     logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.ignoreNextGenerationEndedCount:', planningGuard_ACU.ignoreNextGenerationEndedCount);
     logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU:', tempPlotToSave_ACU ? `长度=${tempPlotToSave_ACU.length}` : '(空)');
 
     // 忽略规划阶段触发的生成结束事件，避免把 plot 附加到错误楼层
-    if (planningGuard_ACU.inProgress) {
+    if (!force && planningGuard_ACU.inProgress) {
       logDebug_ACU('[剧情推进] [Plot] Planning in progress, ignoring GENERATION_ENDED.');
       return;
     }
@@ -5306,6 +5321,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             }
           }
         }
+
+        // [新增] 在标签提取完成后立即保存 Plot
+        await savePlotToLatestMessage_ACU(true);
 
         // 使用可能被处理过的 messageForTavern 构建最终消息
         // [改动] 不再代码层面强制拼接本轮用户输入；是否/放置位置由最终注入指令中的 $8 决定。
@@ -9540,7 +9558,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 }
 
                 // [剧情推进] 保存Plot到消息和循环检测
-                savePlotToLatestMessage_ACU();
+                // savePlotToLatestMessage_ACU(); // Moved to runOptimizationLogic_ACU
                 onLoopGenerationEnded_ACU();
             });
         }
@@ -19698,4 +19716,5 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       }
   }
 })();
+
 
