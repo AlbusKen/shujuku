@@ -2657,6 +2657,172 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 logError_ACU('Error executing a table fill start callback:', e);
             }
         });
+    },
+
+    // =========================
+    // 剧情推进预设管理 API
+    // =========================
+
+    /**
+     * 获取所有剧情预设列表
+     * @returns {Array<{name: string, ...}>} 预设数组，每个预设包含 name 及其他配置
+     */
+    getPlotPresets: function() {
+        try {
+            const presets = settings_ACU.plotSettings?.promptPresets || [];
+            // 返回预设列表的深拷贝，防止外部直接修改内部数据
+            return JSON.parse(JSON.stringify(presets));
+        } catch (e) {
+            logError_ACU('getPlotPresets failed:', e);
+            return [];
+        }
+    },
+
+    /**
+     * 获取当前正在使用的预设名称
+     * @returns {string} 当前预设名称，如果没有选择任何预设则返回空字符串
+     */
+    getCurrentPlotPreset: function() {
+        try {
+            return settings_ACU.plotSettings?.lastUsedPresetName || '';
+        } catch (e) {
+            logError_ACU('getCurrentPlotPreset failed:', e);
+            return '';
+        }
+    },
+
+    /**
+     * 切换到指定的剧情预设
+     * @param {string} presetName - 要切换到的预设名称
+     * @returns {boolean} 切换是否成功
+     */
+    switchPlotPreset: function(presetName) {
+        try {
+            if (!presetName || typeof presetName !== 'string') {
+                logError_ACU('switchPlotPreset: Invalid preset name provided.');
+                return false;
+            }
+
+            const presets = settings_ACU.plotSettings?.promptPresets || [];
+            const targetPreset = presets.find(p => p.name === presetName);
+
+            if (!targetPreset) {
+                logError_ACU(`switchPlotPreset: Preset "${presetName}" not found.`);
+                return false;
+            }
+
+            // 更新 lastUsedPresetName
+            settings_ACU.plotSettings.lastUsedPresetName = presetName;
+
+            // 应用预设设置到 plotSettings（与 loadPlotPresetToUI_ACU 中的逻辑一致）
+            const getLegacyPromptFromThree = (p, id) => {
+                if (!p) return '';
+                if (Array.isArray(p)) return (p.find(x => x && x.id === id)?.content) || '';
+                if (typeof p === 'object') return p[id] || '';
+                return '';
+            };
+            const looksLikePromptGroupSegments = (arr) => {
+                if (!Array.isArray(arr) || arr.length === 0) return false;
+                const x = arr[0];
+                return x && typeof x === 'object' && 'role' in x && 'content' in x && !('id' in x);
+            };
+
+            let promptGroup = null;
+            if (Array.isArray(targetPreset.promptGroup) && targetPreset.promptGroup.length) {
+                promptGroup = JSON.parse(JSON.stringify(targetPreset.promptGroup));
+            } else if (looksLikePromptGroupSegments(targetPreset.prompts)) {
+                promptGroup = JSON.parse(JSON.stringify(targetPreset.prompts));
+            } else {
+                const legacyMain = targetPreset.mainPrompt || getLegacyPromptFromThree(targetPreset.prompts, 'mainPrompt') || '';
+                const legacySystem = targetPreset.systemPrompt || getLegacyPromptFromThree(targetPreset.prompts, 'systemPrompt') || '';
+                promptGroup = buildDefaultPlotPromptGroup_ACU({ mainAContent: legacyMain, mainBContent: legacySystem });
+            }
+
+            const finalDirective =
+                targetPreset.finalSystemDirective ||
+                targetPreset.finalDirective ||
+                getLegacyPromptFromThree(targetPreset.prompts, 'finalSystemDirective') ||
+                '';
+
+            // 保存到设置
+            ensurePlotPromptsArray_ACU(settings_ACU.plotSettings);
+            settings_ACU.plotSettings.promptGroup = JSON.parse(JSON.stringify(promptGroup || []));
+            setPlotPromptContentById_ACU('finalSystemDirective', finalDirective);
+            settings_ACU.plotSettings.rateMain = targetPreset.rateMain ?? 1.0;
+            settings_ACU.plotSettings.ratePersonal = targetPreset.ratePersonal ?? 1.0;
+            settings_ACU.plotSettings.rateErotic = targetPreset.rateErotic ?? 0;
+            settings_ACU.plotSettings.rateCuckold = targetPreset.rateCuckold ?? 1.0;
+            settings_ACU.plotSettings.extractTags = targetPreset.extractTags || '';
+            settings_ACU.plotSettings.minLength = targetPreset.minLength ?? 0;
+            settings_ACU.plotSettings.contextTurnCount = targetPreset.contextTurnCount ?? 3;
+            if (targetPreset.loopSettings) {
+                settings_ACU.plotSettings.loopSettings = { ...settings_ACU.plotSettings.loopSettings, ...targetPreset.loopSettings };
+            }
+
+            saveSettings_ACU();
+
+            // 如果设置面板已打开，同步更新 UI
+            if ($popupInstance_ACU) {
+                loadPlotPresetSelect_ACU();
+                renderPlotPromptSegments_ACU(promptGroup);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-final-directive`).val(finalDirective);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-main`).val(targetPreset.rateMain ?? 1.0);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val(targetPreset.ratePersonal ?? 1.0);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(targetPreset.rateErotic ?? 0);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(targetPreset.rateCuckold ?? 1.0);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(targetPreset.extractTags || '');
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(targetPreset.minLength ?? 0);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(targetPreset.contextTurnCount ?? 3);
+                if (targetPreset.loopSettings) {
+                    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content`).val(targetPreset.loopSettings.quickReplyContent || '');
+                    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(targetPreset.loopSettings.loopTags || '');
+                    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(targetPreset.loopSettings.loopDelay ?? 5);
+                    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(targetPreset.loopSettings.loopTotalDuration ?? 0);
+                    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(targetPreset.loopSettings.maxRetries ?? 3);
+                }
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-preset-select`).val(presetName);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-delete-preset`).show();
+            }
+
+            logDebug_ACU(`Successfully switched to plot preset: "${presetName}"`);
+            return true;
+        } catch (e) {
+            logError_ACU('switchPlotPreset failed:', e);
+            return false;
+        }
+    },
+
+    /**
+     * 获取预设的详细信息
+     * @param {string} presetName - 预设名称
+     * @returns {Object|null} 预设对象的深拷贝，如果未找到则返回 null
+     */
+    getPlotPresetDetails: function(presetName) {
+        try {
+            if (!presetName || typeof presetName !== 'string') {
+                return null;
+            }
+            const presets = settings_ACU.plotSettings?.promptPresets || [];
+            const preset = presets.find(p => p.name === presetName);
+            return preset ? JSON.parse(JSON.stringify(preset)) : null;
+        } catch (e) {
+            logError_ACU('getPlotPresetDetails failed:', e);
+            return null;
+        }
+    },
+
+    /**
+     * 获取预设名称列表（简化版，仅返回名称数组）
+     * @returns {Array<string>} 预设名称数组
+     */
+    getPlotPresetNames: function() {
+        try {
+            const presets = settings_ACU.plotSettings?.promptPresets || [];
+            return presets.map(p => p.name);
+        } catch (e) {
+            logError_ACU('getPlotPresetNames failed:', e);
+            return [];
+        }
     }
   };
   // --- [核心改造] 结束 ---
@@ -4770,30 +4936,68 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       return '';
     }
 
+    // [新增] 获取当前使用的预设名称，用于过滤匹配的剧情规划数据
+    const currentPresetName = settings_ACU.plotSettings?.lastUsedPresetName || '';
+    logDebug_ACU('[剧情推进] [Plot] 当前预设名称:', currentPresetName || '(未设置)');
+
     // [优化] 从后往前遍历查找最新的剧情规划数据
     // 确保不受上下文层数设置影响，始终返回最新的上轮剧情规划内容
-    // 跳过当前轮次的消息（通常是最后一条用户消息），从最新的AI消息开始查找
+    // [新增] 只匹配带有当前预设名称标签的数据，实现预设间数据隔离
     let latestPlotContent = '';
     let latestPlotIndex = -1;
     
-    // 从后往前遍历整个聊天记录，找到所有包含 qrf_plot 的消息
+    // [优化] 两次遍历策略：
+    // 1. 第一次遍历：优先寻找【精确匹配】当前预设名称的数据
+    // 2. 第二次遍历（如果没找到）：寻找【无标签】的旧数据（兼容性回退）
+    
+    // 1. 优先寻找精确匹配
     for (let i = chat.length - 1; i >= 0; i--) {
       const message = chat[i];
       if (message && message.qrf_plot) {
-        // 找到第一个（最新的）包含剧情规划数据的消息
-        latestPlotContent = message.qrf_plot;
-        latestPlotIndex = i;
-        logDebug_ACU(`[剧情推进] [Plot] ✓ 在消息 ${i} 找到最新的plot数据，长度:`, latestPlotContent.length);
-        break; // 找到最新的就立即返回，确保始终是最新的上轮规划数据
+        const plotPresetName = message.qrf_plot_preset || '';
+        
+        // 如果当前预设为空，则匹配所有数据（向后兼容逻辑）
+        if (currentPresetName === '') {
+            latestPlotContent = message.qrf_plot;
+            latestPlotIndex = i;
+            logDebug_ACU(`[剧情推进] [Plot] (无预设模式) ✓ 在消息 ${i} 找到最新的plot数据`);
+            break;
+        }
+
+        // 精确匹配
+        if (plotPresetName === currentPresetName) {
+          latestPlotContent = message.qrf_plot;
+          latestPlotIndex = i;
+          logDebug_ACU(`[剧情推进] [Plot] ✓ 在消息 ${i} (is_user=${message.is_user}) 找到精确匹配预设 "${currentPresetName}" 的plot数据`);
+          break;
+        }
       }
+    }
+
+    // 2. 如果没找到精确匹配，且当前有预设，尝试寻找无标签的旧数据（回退机制）
+    if (!latestPlotContent && currentPresetName !== '') {
+        logDebug_ACU(`[剧情推进] [Plot] 未找到精确匹配预设 "${currentPresetName}" 的数据，尝试寻找无标签旧数据...`);
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const message = chat[i];
+            if (message && message.qrf_plot) {
+                const plotPresetName = message.qrf_plot_preset || '';
+                // 寻找无标签数据
+                if (plotPresetName === '') {
+                    latestPlotContent = message.qrf_plot;
+                    latestPlotIndex = i;
+                    logDebug_ACU(`[剧情推进] [Plot] (兼容模式) ✓ 在消息 ${i} 找到无标签的旧plot数据作为回退`);
+                    break;
+                }
+            }
+        }
     }
     
     if (latestPlotContent) {
-      logDebug_ACU(`[剧情推进] [Plot] 返回最新的上轮剧情规划数据，消息索引: ${latestPlotIndex}, 长度: ${latestPlotContent.length}`);
+      logDebug_ACU(`[剧情推进] [Plot] 返回匹配预设 "${currentPresetName || '(无)'}" 的最新剧情规划数据，消息索引: ${latestPlotIndex}, 长度: ${latestPlotContent.length}`);
       return latestPlotContent;
     }
     
-    logDebug_ACU('[剧情推进] [Plot] 未在任何消息中找到plot数据');
+    logDebug_ACU(`[剧情推进] [Plot] 未找到匹配预设 "${currentPresetName || '(无)'}" 的plot数据`);
     return '';
   }
 
@@ -4818,40 +5022,52 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     }
 
     if (tempPlotToSave_ACU) {
-      const chat = SillyTavern_API_ACU.chat;
-      // 在SillyTavern的事件触发时，chat数组应该已经更新
-      if (chat && chat.length > 0) {
-        const lastMessage = chat[chat.length - 1];
-        logDebug_ACU('[剧情推进] [Plot] 最后一条消息:', lastMessage ? `is_user=${lastMessage.is_user}, name=${lastMessage.name}` : '(空)');
+      // [时序修复] 增加一个短暂延迟，等待SillyTavern将用户输入写入聊天记录
+      setTimeout(() => {
+        const chat = SillyTavern_API_ACU.chat;
+        // 在SillyTavern的事件触发时，chat数组应该已经更新
+        if (chat && chat.length > 0) {
+          const lastMessage = chat[chat.length - 1];
+          logDebug_ACU('[剧情推进] [Plot] (延迟后) 最后一条消息:', lastMessage ? `is_user=${lastMessage.is_user}, name=${lastMessage.name}` : '(空)');
 
-        // 优先附加到“最后一条 AI 消息”，避免因 /stop 或中止导致最后一条变成用户消息而丢失 plot
-        const activeChar = SillyTavern_API_ACU.characters?.[SillyTavern_API_ACU.this_chid];
-        const activeCharName = activeChar?.name;
-        let target = null;
-        for (let i = chat.length - 1; i >= 0; i--) {
-          const msg = chat[i];
-          if (!msg || msg.is_user) continue;
-          // 若能取到当前角色名，则只附加到当前角色的AI回复，避免污染其他扩展/虚拟角色
-          if (activeCharName && msg.name && msg.name !== activeCharName) continue;
-          target = msg;
-          break;
-        }
+          // [再修改] 寻找最新的、且【尚未附加plot数据】的用户消息
+          // 这样可以精确地将本次生成的plot附加到触发它的那个用户输入上，避免时序问题
+          let target = null;
+          for (let i = chat.length - 1; i >= 0; i--) {
+            const msg = chat[i];
+            // 寻找一个用户消息
+            if (msg && msg.is_user) {
+              // 检查它是否已经有 plot 数据
+              if (!msg.qrf_plot) {
+                // 找到了！这个就是本次规划所对应的用户输入
+                target = msg;
+                logDebug_ACU(`[剧情推进] [Plot] 找到目标用户消息于索引 ${i}`);
+                break;
+              }
+              // 如果已经有 plot，说明这是更早一轮的，继续往前找
+              logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的用户消息已有plot，跳过`);
+            }
+          }
 
-        if (target) {
-          target.qrf_plot = tempPlotToSave_ACU;
-          logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已附加到最近的AI消息，长度:', tempPlotToSave_ACU.length);
-          // SillyTavern should handle saving automatically after generation ends.
+          if (target) {
+            target.qrf_plot = tempPlotToSave_ACU;
+            // [新增] 同时保存当前使用的预设名称，用于后续读取时的预设匹配
+            const currentPresetName = settings_ACU.plotSettings?.lastUsedPresetName || '';
+            target.qrf_plot_preset = currentPresetName;
+            logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已附加到目标用户消息，长度:', tempPlotToSave_ACU.length, '，预设:', currentPresetName || '(无)');
+            // SillyTavern should handle saving automatically after generation ends.
+          } else {
+            // 非致命：可能是生成刚结束、消息尚未同步。避免弹错与刷屏。
+            logWarn_ACU('[剧情推进] [Plot] 未找到可附加 plot 的【无数据】用户消息，可能所有用户消息都已有plot，或时序问题。将在下一次事件中重试。');
+            return; // 保留 tempPlotToSave_ACU，等待下一次触发
+          }
         } else {
-          // 非致命：可能是生成刚结束、消息尚未同步。避免弹错与刷屏。
-          logWarn_ACU('[剧情推进] [Plot] 未找到可附加 plot 的AI消息，将在下一次事件中重试。');
+          logWarn_ACU('[剧情推进] [Plot] 聊天记录为空，无法附加plot');
           return; // 保留 tempPlotToSave_ACU，等待下一次触发
         }
-      } else {
-        logWarn_ACU('[剧情推进] [Plot] 聊天记录为空，无法附加plot');
-        return; // 保留 tempPlotToSave_ACU，等待下一次触发
-      }
-      // 无论成功或失败，都清空临时变量，避免污染下一次生成
-      tempPlotToSave_ACU = null;
+        // 无论成功或失败，都清空临时变量，避免污染下一次生成
+        tempPlotToSave_ACU = null;
+      }, 100); // 延迟100毫秒
     } else {
       logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU 为空，无需保存');
     }
@@ -6523,31 +6739,38 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
            return;
        }
 
-       // 1) 收集所有 AI 消息的索引（按时间顺序，从旧到新）
+       // 1) 收集所有 包含本地数据(TavernDB_ACU_Data/qrf_plot) 的消息索引（按时间顺序，从旧到新）
        // [保护] 排除 chat[0]，确保第一层的指导表数据不被触及
-       const aiMessageIndices = [];
+       // [修改] 适配用户层保存逻辑：不再仅检查 AI 消息，而是检查所有可能包含数据的消息（包括用户消息）
+       const dataMessageIndices = [];
        for (let i = 1; i < chat.length; i++) {
-           if (!chat[i].is_user) {
-               aiMessageIndices.push(i);
+           const msg = chat[i];
+           // 检查是否包含本插件生成的任何本地数据
+           if (msg && (
+               msg.TavernDB_ACU_Data ||
+               msg.TavernDB_ACU_SummaryData ||
+               msg.qrf_plot
+           )) {
+               dataMessageIndices.push(i);
            }
        }
 
-       if (aiMessageIndices.length <= retainCount) {
-           logDebug_ACU(`[数据清理] AI消息总数(${aiMessageIndices.length}) <= 保留层数(${retainCount})，无需清理。`);
+       if (dataMessageIndices.length <= retainCount) {
+           logDebug_ACU(`[数据清理] 含数据消息总数(${dataMessageIndices.length}) <= 保留层数(${retainCount})，无需清理。`);
            return;
        }
 
        // 2) 确定需要清理的楼层：保留最近 retainCount 层，清理更早的
-      const cutoffIndex = aiMessageIndices.length - retainCount; // 从这个位置开始是要保留的
+      const cutoffIndex = dataMessageIndices.length - retainCount; // 从这个位置开始是要保留的
       // [优化] 移除"永远保留第一层"的逻辑，严格按照填写的楼层数来保留数据
-      const indicesToPurge = aiMessageIndices.slice(0, cutoffIndex); // 这些是要清理的
+      const indicesToPurge = dataMessageIndices.slice(0, cutoffIndex); // 这些是要清理的
 
       if (indicesToPurge.length === 0) {
           logDebug_ACU('[数据清理] 无需清理的楼层。');
            return;
        }
 
-       logDebug_ACU(`[数据清理] 将清理 ${indicesToPurge.length} 层AI消息的本地数据（保留最近 ${retainCount} 层）...`);
+       logDebug_ACU(`[数据清理] 将清理 ${indicesToPurge.length} 层消息的本地数据（保留最近 ${retainCount} 层）...`);
 
        // 3) 遍历需要清理的楼层，删除本地数据字段
        let purgedCount = 0;
@@ -6559,7 +6782,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
            'TavernDB_ACU_UpdateGroupKeys',
            'TavernDB_ACU_IsolatedData',
            'TavernDB_ACU_Identity',
-           'qrf_plot'
+           'qrf_plot',
+           'qrf_plot_preset'  // [新增] 清理剧情规划预设名称标签
        ];
 
        for (const idx of indicesToPurge) {
@@ -14865,12 +15089,17 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       charInfoContent_Table = '';
     }
 
+    // [新增] 读取上一轮剧情规划数据，用于$6占位符
+    const lastPlotContent = getPlotFromHistory_ACU();
+    logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
+
     // Interpolate placeholders in each segment
     promptSegments.forEach(segment => {
         let finalContent = segment.content;
         finalContent = finalContent.replace('$0', dynamicContent.tableDataText);
         finalContent = finalContent.replace('$1', dynamicContent.messagesText);
         finalContent = finalContent.replace('$4', dynamicContent.worldbookContent);
+        finalContent = finalContent.replace(/\$6/g, lastPlotContent || ''); // [新增] $6 占位符替换为上一轮剧情规划数据（全局替换）
         finalContent = finalContent.replace('$8', dynamicContent.manualExtraHint || '');
         // [新增] $U 和 $C 占位符替换
         finalContent = finalContent.replace(/\$U/g, userInfoContent_Table);
