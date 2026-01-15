@@ -429,6 +429,155 @@ await window.AutoCardUpdaterAPI.syncWorldbookEntries({ createIfNeeded: true });
 
 ---
 
+### `getTableTemplate()`
+
+获取当前使用的表格模板。
+
+**返回值**: `Object | null` - 模板对象的深拷贝，如果未设置则返回 `null`
+
+**示例**:
+```javascript
+const template = window.AutoCardUpdaterAPI.getTableTemplate();
+if (template) {
+    console.log("当前模板表格数量:", Object.keys(template).filter(k => k.startsWith('sheet_')).length);
+}
+```
+
+---
+
+### `importTemplateFromData(templateData)`
+
+通过前端直接导入表格模板（无需文件选择器）。
+
+**参数**:
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| templateData | Object \| string | 是 | 模板数据，可以是 JSON 对象或 JSON 字符串 |
+
+**返回值**: `Promise<{success: boolean, message: string}>` - 导入结果
+
+**模板数据结构要求**:
+- 必须包含 `mate` 对象且 `mate.type` 为 `"chatSheets"`
+- 必须包含至少一个 `sheet_*` 键
+- 每个 sheet 必须包含 `name`, `content`, `sourceData` 字段
+
+**示例**:
+```javascript
+const template = {
+    mate: { type: "chatSheets", version: 1 },
+    sheet_0: {
+        name: "角色状态",
+        content: [["属性", "值"], ["生命值", "100"]],
+        sourceData: { headers: ["属性", "值"] }
+    }
+};
+
+const result = await window.AutoCardUpdaterAPI.importTemplateFromData(template);
+if (result.success) {
+    console.log("模板导入成功:", result.message);
+} else {
+    console.error("模板导入失败:", result.message);
+}
+```
+
+---
+
+## 前端导入 API（无需文件选择器）
+
+### `importPlotPresetFromData(presetData, options)`
+
+通过前端直接导入剧情推进预设（无需文件选择器）。
+
+**参数**:
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| presetData | Object \| string | 是 | 预设数据，可以是 JSON 对象或 JSON 字符串 |
+| options.overwrite | boolean | 否 | 如果预设已存在，是否覆盖（默认 `false`，会自动重命名） |
+| options.switchTo | boolean | 否 | 导入后是否立即切换到该预设（默认 `false`） |
+
+**返回值**: `Promise<{success: boolean, message: string, presetName?: string}>` - 导入结果
+
+**预设数据结构要求**:
+- 必须包含 `name` 字段（预设名称）
+- 其他字段参考 `getPlotPresetDetails()` 返回的对象结构
+
+**示例**:
+```javascript
+const preset = {
+    name: "战斗场景预设",
+    promptGroup: [
+        { role: "system", content: "你是战斗场景的规划师...", enabled: true }
+    ],
+    rateMain: 1.2,
+    ratePersonal: 0.8,
+    rateErotic: 0,
+    rateCuckold: 0
+};
+
+// 导入并切换到该预设
+const result = await window.AutoCardUpdaterAPI.importPlotPresetFromData(preset, {
+    overwrite: false,
+    switchTo: true
+});
+
+if (result.success) {
+    console.log(`预设 "${result.presetName}" 导入成功`);
+} else {
+    console.error("导入失败:", result.message);
+}
+```
+
+---
+
+### `importPlotPresetsFromData(presetsArray, options)`
+
+批量导入多个剧情推进预设。
+
+**参数**:
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| presetsArray | Array<Object \| string> | 是 | 预设数据数组 |
+| options.overwrite | boolean | 否 | 如果预设已存在，是否覆盖（默认 `false`） |
+
+**返回值**: `Promise<{success: boolean, message: string, imported: number, failed: number, details: Array}>` - 批量导入结果
+
+**示例**:
+```javascript
+const presets = [
+    { name: "战斗预设", promptGroup: [...], rateMain: 1.2 },
+    { name: "日常预设", promptGroup: [...], rateMain: 1.0 },
+    { name: "浪漫预设", promptGroup: [...], rateMain: 0.8 }
+];
+
+const result = await window.AutoCardUpdaterAPI.importPlotPresetsFromData(presets, { overwrite: false });
+console.log(`批量导入完成：成功 ${result.imported} 个，失败 ${result.failed} 个`);
+
+// 查看每个预设的导入结果
+result.details.forEach((detail, index) => {
+    console.log(`预设 ${index + 1}:`, detail.success ? `成功 (${detail.presetName})` : `失败 (${detail.message})`);
+});
+```
+
+---
+
+### `exportAllPlotPresets()`
+
+导出所有剧情推进预设。
+
+**返回值**: `Array<Object>` - 所有预设的深拷贝数组
+
+**示例**:
+```javascript
+const allPresets = window.AutoCardUpdaterAPI.exportAllPlotPresets();
+console.log(`共有 ${allPresets.length} 个预设`);
+
+// 可以将预设保存为 JSON 文件
+const jsonString = JSON.stringify(allPresets, null, 2);
+console.log(jsonString);
+```
+
+---
+
 ## 其他功能 API
 
 ### `mergeSummaryNow()`
@@ -564,6 +713,58 @@ function createPresetSelector() {
 
 ---
 
+### 示例 4: 从外部导入模板和预设
+
+```javascript
+const api = window.AutoCardUpdaterAPI;
+
+// 假设从服务器获取了模板和预设数据
+async function loadFromServer() {
+    // 导入模板
+    const templateResponse = await fetch('/api/template.json');
+    const templateData = await templateResponse.json();
+    const templateResult = await api.importTemplateFromData(templateData);
+    console.log("模板导入:", templateResult.message);
+    
+    // 导入预设
+    const presetResponse = await fetch('/api/presets.json');
+    const presetsData = await presetResponse.json();
+    const presetsResult = await api.importPlotPresetsFromData(presetsData);
+    console.log(`预设导入: 成功 ${presetsResult.imported} 个`);
+}
+```
+
+### 示例 5: 备份和恢复预设
+
+```javascript
+const api = window.AutoCardUpdaterAPI;
+
+// 备份当前所有预设
+function backupPresets() {
+    const allPresets = api.exportAllPlotPresets();
+    const backup = JSON.stringify(allPresets, null, 2);
+    
+    // 保存到 localStorage
+    localStorage.setItem('plot_presets_backup', backup);
+    console.log(`已备份 ${allPresets.length} 个预设`);
+}
+
+// 从备份恢复预设
+async function restorePresets() {
+    const backup = localStorage.getItem('plot_presets_backup');
+    if (!backup) {
+        console.log("未找到备份");
+        return;
+    }
+    
+    const presets = JSON.parse(backup);
+    const result = await api.importPlotPresetsFromData(presets, { overwrite: true });
+    console.log(`已恢复 ${result.imported} 个预设`);
+}
+```
+
+---
+
 ## 注意事项
 
 1. **API 可用性检查**: 在调用任何 API 方法前，请先检查 `window.AutoCardUpdaterAPI` 是否存在。
@@ -576,6 +777,10 @@ function createPresetSelector() {
 
 5. **错误处理**: 所有 API 方法都有内置错误处理，失败时会返回 `false` 或空值，不会抛出异常。
 
+6. **前端导入 API**: `importTemplateFromData()` 和 `importPlotPresetFromData()` 返回包含 `success` 和 `message` 的对象，便于前端展示导入结果。
+
+7. **数据隔离**: 切换预设后，`$6` 占位符会自动回溯查找匹配当前预设名称标签的历史数据，实现不同预设间的剧情规划隔离。
+
 ---
 
 ## 版本历史
@@ -584,3 +789,4 @@ function createPresetSelector() {
 |------|----------|
 | 1.0 | 初始 API：数据导入导出、设置管理、世界书操作 |
 | 1.1 | 新增剧情推进预设管理 API：`getPlotPresets()`, `getPlotPresetNames()`, `getCurrentPlotPreset()`, `switchPlotPreset()`, `getPlotPresetDetails()` |
+| 1.2 | 新增前端导入 API：`importTemplateFromData()`, `importPlotPresetFromData()`, `importPlotPresetsFromData()`, `getTableTemplate()`, `exportAllPlotPresets()` |

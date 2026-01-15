@@ -17,9 +17,11 @@
   // --- 安全存储 & 顶层窗口 ---
   const topLevelWindow_ACU = (typeof window.parent !== 'undefined' ? window.parent : window);
 
-  // --- 存储策略（按你的要求：除“外部导入暂存”外，禁止任何本地持久化存储） ---
-  // - 跨浏览器保存：写入 SillyTavern 服务端设置（extensionSettings + saveSettings），同一酒馆服务端下所有浏览器一致。
-  // - 禁止本地存储：不使用 localStorage / sessionStorage / IndexedDB（除外部导入暂存）。
+  // --- 存储策略 ---
+  // - 主存：写入 SillyTavern 服务端设置（extensionSettings + saveSettings），同一酒馆服务端下所有浏览器一致。
+  // - 本地副本：同时写入 IndexedDB（仅本浏览器可用，用作酒馆设置读取失败时的回退）。
+  // - 读取顺序：酒馆设置 -> IndexedDB -> 默认设置。
+  // - 禁止 localStorage / sessionStorage（除非手动关闭禁用开关）。
   const FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU = true;
   const ALLOW_LEGACY_LOCALSTORAGE_MIGRATION_ACU = false; // 如需把旧 localStorage 设置迁移到酒馆设置，可改为 true（迁移后仍不再写 localStorage）
 
@@ -837,13 +839,15 @@
   // --- [New] Profile 化存储：全局元信息 + 按“标识代码”分组的设置/模板 ---
   const STORAGE_KEY_GLOBAL_META_ACU = `${SCRIPT_ID_PREFIX_ACU}_globalMeta_v1`;
   const STORAGE_KEY_PROFILE_PREFIX_ACU = `${SCRIPT_ID_PREFIX_ACU}_profile_v1`;
+  // --- [新增] 表格模板预设库（多份模板存储 + 下拉切换） ---
+  const STORAGE_KEY_TEMPLATE_PRESETS_ACU = `${SCRIPT_ID_PREFIX_ACU}_templatePresets_v1`;
   const STORAGE_KEY_IMPORTED_ENTRIES_ACU = `${SCRIPT_ID_PREFIX_ACU}_importedTxtEntries`; // Key for imported TXT entries
   const STORAGE_KEY_IMPORTED_STATUS_ACU = `${SCRIPT_ID_PREFIX_ACU}_importedTxtStatus`; // [新增] Key for import status
   const STORAGE_KEY_IMPORTED_STATUS_STANDARD_ACU = `${SCRIPT_ID_PREFIX_ACU}_importedTxtStatus_standard`; // [新增] 标准模式断点续行状态
   const STORAGE_KEY_IMPORTED_STATUS_SUMMARY_ACU = `${SCRIPT_ID_PREFIX_ACU}_importedTxtStatus_summary`; // [新增] 总结模式断点续行状态
   const STORAGE_KEY_IMPORTED_STATUS_FULL_ACU = `${SCRIPT_ID_PREFIX_ACU}_importedTxtStatus_full`; // [新增] 整体模式断点续行状态
 
-  // --- [新增] 设置存储后端：优先写入酒馆设置(extensionSettings)，兜底 localStorage ---
+  // --- [新增] 设置存储后端：优先写入酒馆设置(extensionSettings)，本地回退走 IndexedDB ---
   // 说明：
   // - 本脚本是 Tampermonkey 用户脚本，不是标准 SillyTavern 扩展目录，因此历史上用 localStorage 存设置。
   // - 在 SillyTavern 环境中，我们可以把设置写入 SillyTavern 的 extensionSettings，并调用 saveSettings() 持久化到酒馆设置文件。
@@ -983,21 +987,154 @@
       }
   }
 
+  // --- [新增] 配置本地副本：IndexedDB（仅本浏览器） ---
+  const CONFIG_IDB_DB_NAME_ACU = `${SCRIPT_ID_PREFIX_ACU}_config_v1`;
+  const CONFIG_IDB_STORE_NAME_ACU = 'kv';
+  let configIdbPromise_ACU = null;
+  const configIdbCache_ACU = new Map();
+  const configIdbDeletedKeys_ACU = new Set();
+  let configIdbCacheLoaded_ACU = false;
+  let configIdbCacheLoadingPromise_ACU = null;
+  let configIdbCacheLoadFailed_ACU = false;
+  let pendingSettingsReloadFromIdb_ACU = false;
+
+  function openConfigDb_ACU() {
+      if (!isIndexedDbAvailable_ACU()) return Promise.resolve(null);
+      if (configIdbPromise_ACU) return configIdbPromise_ACU;
+      configIdbPromise_ACU = new Promise((resolve, reject) => {
+          try {
+              const req = topLevelWindow_ACU.indexedDB.open(CONFIG_IDB_DB_NAME_ACU, 1);
+              req.onupgradeneeded = () => {
+                  const db = req.result;
+                  if (!db.objectStoreNames.contains(CONFIG_IDB_STORE_NAME_ACU)) {
+                      db.createObjectStore(CONFIG_IDB_STORE_NAME_ACU);
+                  }
+              };
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
+          } catch (e) {
+              reject(e);
+          }
+      });
+      return configIdbPromise_ACU;
+  }
+
+  function loadConfigIdbCache_ACU() {
+      if (configIdbCacheLoaded_ACU || configIdbCacheLoadFailed_ACU) return Promise.resolve();
+      if (configIdbCacheLoadingPromise_ACU) return configIdbCacheLoadingPromise_ACU;
+      if (!isIndexedDbAvailable_ACU()) {
+          configIdbCacheLoaded_ACU = true;
+          return Promise.resolve();
+      }
+      configIdbCacheLoadingPromise_ACU = new Promise(async (resolve) => {
+          try {
+              const db = await openConfigDb_ACU();
+              if (!db) {
+                  configIdbCacheLoaded_ACU = true;
+                  resolve();
+                  return;
+              }
+              const tx = db.transaction(CONFIG_IDB_STORE_NAME_ACU, 'readonly');
+              const store = tx.objectStore(CONFIG_IDB_STORE_NAME_ACU);
+              const req = store.openCursor();
+              req.onsuccess = () => {
+                  const cursor = req.result;
+                  if (cursor) {
+                      const key = cursor.key;
+                      if (!configIdbDeletedKeys_ACU.has(key) && !configIdbCache_ACU.has(key)) {
+                          configIdbCache_ACU.set(key, cursor.value);
+                      }
+                      cursor.continue();
+                  } else {
+                      configIdbCacheLoaded_ACU = true;
+                      resolve();
+                  }
+              };
+              req.onerror = () => {
+                  console.warn('[ACU] IndexedDB config cache load failed:', req.error);
+                  configIdbCacheLoadFailed_ACU = true;
+                  configIdbCacheLoaded_ACU = true;
+                  resolve();
+              };
+          } catch (e) {
+              console.warn('[ACU] IndexedDB config cache load failed:', e);
+              configIdbCacheLoadFailed_ACU = true;
+              configIdbCacheLoaded_ACU = true;
+              resolve();
+          }
+      });
+      return configIdbCacheLoadingPromise_ACU;
+  }
+
+  function ensureConfigIdbCacheLoaded_ACU() {
+      return loadConfigIdbCache_ACU();
+  }
+
+  function configIdbGetCached_ACU(key) {
+      return configIdbCache_ACU.has(key) ? configIdbCache_ACU.get(key) : null;
+  }
+
+  async function configIdbSetCached_ACU(key, value) {
+      configIdbCache_ACU.set(key, value);
+      configIdbDeletedKeys_ACU.delete(key);
+      try {
+          if (!isIndexedDbAvailable_ACU()) return;
+          const db = await openConfigDb_ACU();
+          if (!db) return;
+          const tx = db.transaction(CONFIG_IDB_STORE_NAME_ACU, 'readwrite');
+          const store = tx.objectStore(CONFIG_IDB_STORE_NAME_ACU);
+          await idbRequestToPromise_ACU(store.put(value, key));
+      } catch (e) {
+          console.warn('[ACU] IndexedDB config set failed:', e);
+      }
+  }
+
+  async function configIdbRemoveCached_ACU(key) {
+      configIdbCache_ACU.delete(key);
+      configIdbDeletedKeys_ACU.add(key);
+      try {
+          if (!isIndexedDbAvailable_ACU()) return;
+          const db = await openConfigDb_ACU();
+          if (!db) return;
+          const tx = db.transaction(CONFIG_IDB_STORE_NAME_ACU, 'readwrite');
+          const store = tx.objectStore(CONFIG_IDB_STORE_NAME_ACU);
+          await idbRequestToPromise_ACU(store.delete(key));
+      } catch (e) {
+          console.warn('[ACU] IndexedDB config delete failed:', e);
+      }
+  }
+
   function getConfigStorage_ACU() {
-      if (!USE_TAVERN_SETTINGS_STORAGE_ACU) return storage_ACU;
-      const ns = getTavernSettingsNamespace_ACU();
-      if (!ns) return storage_ACU;
+      const ns = USE_TAVERN_SETTINGS_STORAGE_ACU ? getTavernSettingsNamespace_ACU() : null;
+      const hasTavern = !!ns;
       return {
-          getItem: key => (Object.prototype.hasOwnProperty.call(ns, key) ? ns[key] : null),
+          getItem: key => {
+              if (hasTavern && Object.prototype.hasOwnProperty.call(ns, key)) return ns[key];
+              const cached = configIdbGetCached_ACU(key);
+              if (cached !== null && typeof cached !== 'undefined') return cached;
+              if (!FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU && storage_ACU?.getItem) return storage_ACU.getItem(key);
+              return null;
+          },
           setItem: (key, value) => {
-              ns[key] = String(value);
-              persistTavernSettings_ACU();
+              const v = String(value);
+              if (hasTavern) {
+                  ns[key] = v;
+                  persistTavernSettings_ACU();
+              } else if (!FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU && storage_ACU?.setItem) {
+                  storage_ACU.setItem(key, v);
+              }
+              void configIdbSetCached_ACU(key, v);
           },
           removeItem: key => {
-              delete ns[key];
-              persistTavernSettings_ACU();
+              if (hasTavern) {
+                  delete ns[key];
+                  persistTavernSettings_ACU();
+              } else if (!FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU && storage_ACU?.removeItem) {
+                  storage_ACU.removeItem(key);
+              }
+              void configIdbRemoveCached_ACU(key);
           },
-          _isTavern: true,
+          _isTavern: hasTavern,
       };
   }
 
@@ -1042,6 +1179,174 @@
 
   function safeJsonStringify_ACU(obj, fallback = '{}') {
       try { return JSON.stringify(obj); } catch (e) { return fallback; }
+  }
+
+  // =========================
+  // [新增] 表格模板预设库（多份模板存储 + 下拉切换）
+  // - 存储位置：酒馆 settings（getConfigStorage_ACU）
+  // - 结构：{ version:1, presets: { [name]: { templateStr, updatedAt } } }
+  // =========================
+  function derivePresetNameFromFilename_ACU(filename) {
+      const raw = String(filename || '').trim();
+      if (!raw) return '';
+      // 去掉最后一个扩展名（.json 等）
+      const idx = raw.lastIndexOf('.');
+      const base = (idx > 0 ? raw.slice(0, idx) : raw).trim();
+      return base;
+  }
+
+  function sanitizeFilenameComponent_ACU(name) {
+      // Windows/macOS 常见非法字符：\ / : * ? " < > |
+      const s = String(name || '').trim();
+      const out = s.replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim();
+      // 避免过长文件名
+      return out.length > 80 ? out.slice(0, 80).trim() : out;
+  }
+
+  function getTemplatePresetSelectJQ_ACU() {
+      try {
+          if (!$popupInstance_ACU || !$popupInstance_ACU.length) return null;
+          const $sel = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-select`);
+          return $sel && $sel.length ? $sel : null;
+      } catch (e) {
+          return null;
+      }
+  }
+
+  function refreshTemplatePresetSelectInUI_ACU({ selectName = '', keepValue = false } = {}) {
+      const $sel = getTemplatePresetSelectJQ_ACU();
+      if (!$sel || !$sel.length) return;
+      renderTemplatePresetSelect_ACU($sel, { keepValue: !!keepValue });
+      const name = String(selectName || '').trim();
+      if (name) $sel.val(name);
+  }
+
+  function ensureUniqueTemplatePresetName_ACU(baseNameRaw) {
+      const baseName = String(baseNameRaw || '').trim();
+      if (!baseName) return '';
+      const names = new Set(listTemplatePresetNames_ACU().map(n => String(n)));
+      if (!names.has(baseName)) return baseName;
+      for (let i = 2; i <= 99; i++) {
+          const candidate = `${baseName} (${i})`;
+          if (!names.has(candidate)) return candidate;
+      }
+      return `${baseName} (${Date.now()})`;
+  }
+
+  function buildDefaultTemplatePresetsStore_ACU() {
+      return { version: 1, presets: {} };
+  }
+
+  function loadTemplatePresetsStore_ACU() {
+      const store = getConfigStorage_ACU();
+      const raw = store?.getItem?.(STORAGE_KEY_TEMPLATE_PRESETS_ACU);
+      const parsed = raw ? safeJsonParse_ACU(raw, null) : null;
+      const base = buildDefaultTemplatePresetsStore_ACU();
+      if (!parsed || typeof parsed !== 'object') return base;
+      const out = { ...base, ...parsed };
+      if (!out.presets || typeof out.presets !== 'object') out.presets = {};
+      return out;
+  }
+
+  function saveTemplatePresetsStore_ACU(obj) {
+      try {
+          const store = getConfigStorage_ACU();
+          store?.setItem?.(STORAGE_KEY_TEMPLATE_PRESETS_ACU, safeJsonStringify_ACU(obj, '{}'));
+          return true;
+      } catch (e) {
+          logWarn_ACU('[TemplatePresets] Failed to save:', e);
+          return false;
+      }
+  }
+
+  function listTemplatePresetNames_ACU() {
+      const s = loadTemplatePresetsStore_ACU();
+      return Object.keys(s.presets || {}).sort((a, b) => String(a).localeCompare(String(b)));
+  }
+
+  function getTemplatePreset_ACU(name) {
+      const s = loadTemplatePresetsStore_ACU();
+      const p = s?.presets?.[String(name || '')];
+      return p && typeof p === 'object' ? p : null;
+  }
+
+  function upsertTemplatePreset_ACU(nameRaw, templateStr) {
+      const name = String(nameRaw || '').trim();
+      if (!name) return false;
+      const s = loadTemplatePresetsStore_ACU();
+      s.presets = s.presets && typeof s.presets === 'object' ? s.presets : {};
+      s.presets[name] = { templateStr: String(templateStr || ''), updatedAt: Date.now() };
+      return saveTemplatePresetsStore_ACU(s);
+  }
+
+  function deleteTemplatePreset_ACU(nameRaw) {
+      const name = String(nameRaw || '').trim();
+      if (!name) return false;
+      const s = loadTemplatePresetsStore_ACU();
+      if (!s.presets || typeof s.presets !== 'object') return false;
+      if (!Object.prototype.hasOwnProperty.call(s.presets, name)) return false;
+      delete s.presets[name];
+      return saveTemplatePresetsStore_ACU(s);
+  }
+
+  function normalizeTemplateForPresetSave_ACU() {
+      // 返回：{ templateObj, templateStr } 或 null
+      const obj = parseTableTemplateJson_ACU({ stripSeedRows: false });
+      if (!obj || typeof obj !== 'object') return null;
+      try {
+          const sheetKeys = Object.keys(obj).filter(k => k.startsWith('sheet_'));
+          ensureSheetOrderNumbers_ACU(obj, { baseOrderKeys: sheetKeys, forceRebuild: false });
+      } catch (e) {}
+      const sanitized = sanitizeChatSheetsObject_ACU(obj, { ensureMate: true });
+      const str = safeJsonStringify_ACU(sanitized, '');
+      if (!str) return null;
+      return { templateObj: sanitized, templateStr: str };
+  }
+
+  function renderTemplatePresetSelect_ACU($select, { keepValue = true } = {}) {
+      try {
+          if (!$select || !$select.length) return;
+          const prev = keepValue ? String($select.val() || '') : '';
+          const names = listTemplatePresetNames_ACU();
+          $select.empty();
+          $select.append(jQuery_API_ACU('<option/>').val('').text('（选择预设以切换）'));
+          names.forEach(n => {
+              // 注意：value/text 必须用 DOM 赋值，避免 HTML 转义导致取值失真（比如 &、<、" 等）
+              $select.append(jQuery_API_ACU('<option/>').val(String(n)).text(String(n)));
+          });
+          if (keepValue && prev && names.includes(prev)) {
+              $select.val(prev);
+          } else {
+              $select.val('');
+          }
+      } catch (e) {}
+  }
+
+  async function applyTemplatePresetToCurrent_ACU(presetName) {
+      const name = String(presetName || '').trim();
+      if (!name) return false;
+      const preset = getTemplatePreset_ACU(name);
+      const raw = preset?.templateStr;
+      if (!raw) return false;
+      let obj = safeJsonParse_ACU(raw, null);
+      if (!obj || typeof obj !== 'object') return false;
+      // 规范化：补齐编号 + 清洗冗余字段（保持与导入/导出一致）
+      try {
+          const sheetKeys = Object.keys(obj).filter(k => k.startsWith('sheet_'));
+          ensureSheetOrderNumbers_ACU(obj, { baseOrderKeys: sheetKeys, forceRebuild: false });
+      } catch (e) {}
+      const sanitized = sanitizeChatSheetsObject_ACU(obj, { ensureMate: true });
+      const normalizedStr = safeJsonStringify_ACU(sanitized, '');
+      if (!normalizedStr) return false;
+
+      // 应用为当前模板，并按 profile 保存
+      TABLE_TEMPLATE_ACU = normalizedStr;
+      saveCurrentProfileTemplate_ACU(TABLE_TEMPLATE_ACU);
+
+      // 需求6：下拉切换也要触发指导表修改逻辑（覆盖写入：表头+参数+seedRows）
+      try { await overwriteChatSheetGuideFromTemplate_ACU(sanitized, { reason: 'template_preset_switch' }); } catch (e) {}
+      try { await refreshMergedDataAndNotify_ACU(); } catch (e) {}
+      return true;
   }
 
   // 全局元信息：跨标识共享（用于“标识列表/快速切换”）
@@ -2599,6 +2904,33 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     exportCombinedSettings: async function() { try { return await exportCombinedSettings_ACU(); } catch (e) { logError_ACU('exportCombinedSettings failed:', e); return false; } },
     overrideWithTemplate: async function() { try { return await overrideLatestLayerWithTemplate_ACU(); } catch (e) { logError_ACU('overrideWithTemplate failed:', e); return false; } },
 
+    // =========================
+    // 表格模板预设（列表/切换）API
+    // =========================
+    getTemplatePresetNames: function() {
+        try {
+            return listTemplatePresetNames_ACU();
+        } catch (e) {
+            logError_ACU('getTemplatePresetNames failed:', e);
+            return [];
+        }
+    },
+    switchTemplatePreset: async function(presetName) {
+        try {
+            const name = String(presetName || '').trim();
+            if (!name) return { success: false, message: '预设名为空' };
+            const ok = await applyTemplatePresetToCurrent_ACU(name);
+            if (ok) {
+                refreshTemplatePresetSelectInUI_ACU({ selectName: name, keepValue: false });
+                return { success: true, message: `模板预设已切换：${name}` };
+            }
+            return { success: false, message: `模板预设切换失败：${name}` };
+        } catch (e) {
+            logError_ACU('switchTemplatePreset failed:', e);
+            return { success: false, message: `模板预设切换失败：${e.message}` };
+        }
+    },
+
     // 导入TXT链路（等价于“导入/注入/清理”相关按钮）
     importTxtAndSplit: async function() { try { return await handleTxtImportAndSplit_ACU(); } catch (e) { logError_ACU('importTxtAndSplit failed:', e); return false; } },
     injectImportedSelected: async function() { try { return await handleInjectImportedTxtSelected_ACU(); } catch (e) { logError_ACU('injectImportedSelected failed:', e); return false; } },
@@ -2821,6 +3153,237 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             return presets.map(p => p.name);
         } catch (e) {
             logError_ACU('getPlotPresetNames failed:', e);
+            return [];
+        }
+    },
+
+    // =========================
+    // 前端导入 API（无需文件选择器）
+    // =========================
+
+    /**
+     * 通过前端直接导入表格模板（无需文件选择器）
+     * @param {Object|string} templateData - 模板数据，可以是 JSON 对象或 JSON 字符串
+     * @returns {Promise<{success: boolean, message: string}>} 导入结果
+     */
+    importTemplateFromData: async function(templateData) {
+        try {
+            let jsonData;
+            
+            // 支持字符串或对象格式
+            if (typeof templateData === 'string') {
+                try {
+                    jsonData = JSON.parse(templateData);
+                } catch (parseError) {
+                    return { success: false, message: `JSON解析错误: ${parseError.message}` };
+                }
+            } else if (typeof templateData === 'object' && templateData !== null) {
+                jsonData = JSON.parse(JSON.stringify(templateData)); // 深拷贝
+            } else {
+                return { success: false, message: '无效的模板数据：必须是 JSON 对象或 JSON 字符串' };
+            }
+
+            // 结构验证
+            if (!jsonData.mate || !jsonData.mate.type || jsonData.mate.type !== 'chatSheets') {
+                return { success: false, message: '缺少 "mate" 对象或 "type" 属性不正确。模板必须包含 `"mate": {"type": "chatSheets", ...}`。' };
+            }
+
+            const sheetKeys = Object.keys(jsonData).filter(k => k.startsWith('sheet_'));
+            if (sheetKeys.length === 0) {
+                return { success: false, message: '模板中未找到任何表格数据 (缺少 "sheet_..." 键)。' };
+            }
+
+            for (const key of sheetKeys) {
+                const sheet = jsonData[key];
+                if (!sheet.name || !sheet.content || !sheet.sourceData || !Array.isArray(sheet.content)) {
+                    return { success: false, message: `表格 "${key}" 结构不完整，缺少 "name"、"content" 或 "sourceData" 关键属性。` };
+                }
+            }
+
+            // [迁移] 旧版：0=沿用UI；新版：-1=沿用UI
+            try {
+                if (!jsonData.mate || typeof jsonData.mate !== 'object') jsonData.mate = { type: 'chatSheets', version: 1 };
+                if (jsonData.mate.updateConfigUiSentinel !== -1) {
+                    const sheetKeys2 = Object.keys(jsonData).filter(k => k.startsWith('sheet_'));
+                    for (const k of sheetKeys2) {
+                        const s = jsonData[k];
+                        const uc = s && typeof s === 'object' ? s.updateConfig : null;
+                        if (!uc || typeof uc !== 'object') continue;
+                        if (uc.uiSentinel !== -1) uc.uiSentinel = -1;
+                        for (const field of ['contextDepth', 'updateFrequency', 'batchSize', 'skipFloors']) {
+                            if (Object.prototype.hasOwnProperty.call(uc, field) && uc[field] === 0) uc[field] = -1;
+                        }
+                    }
+                    jsonData.mate.updateConfigUiSentinel = -1;
+                }
+            } catch (e) {}
+
+            // 规范化处理
+            ensureSheetOrderNumbers_ACU(jsonData, { baseOrderKeys: sheetKeys, forceRebuild: false });
+            const sanitized = sanitizeChatSheetsObject_ACU(jsonData, { ensureMate: true });
+            const normalized = JSON.stringify(sanitized);
+            TABLE_TEMPLATE_ACU = normalized;
+            saveCurrentProfileTemplate_ACU(TABLE_TEMPLATE_ACU);
+
+            // 同步覆盖当前聊天第一层的"空白指导表"
+            try { await overwriteChatSheetGuideFromTemplate_ACU(sanitized, { reason: 'api_import_template' }); } catch (e) {}
+
+            logDebug_ACU('[API] importTemplateFromData: 模板已成功导入。');
+            return { success: true, message: '模板已成功导入！' };
+
+        } catch (e) {
+            logError_ACU('importTemplateFromData failed:', e);
+            return { success: false, message: `导入失败: ${e.message}` };
+        }
+    },
+
+    /**
+     * 通过前端直接导入剧情推进预设（无需文件选择器）
+     * @param {Object|string} presetData - 预设数据，可以是 JSON 对象或 JSON 字符串
+     * @param {Object} options - 可选配置
+     * @param {boolean} options.overwrite - 如果预设已存在，是否覆盖（默认 false，会自动重命名）
+     * @param {boolean} options.switchTo - 导入后是否立即切换到该预设（默认 false）
+     * @returns {Promise<{success: boolean, message: string, presetName?: string}>} 导入结果
+     */
+    importPlotPresetFromData: async function(presetData, options = {}) {
+        try {
+            const { overwrite = false, switchTo = false } = options;
+            let preset;
+
+            // 支持字符串或对象格式
+            if (typeof presetData === 'string') {
+                try {
+                    preset = JSON.parse(presetData);
+                } catch (parseError) {
+                    return { success: false, message: `JSON解析错误: ${parseError.message}` };
+                }
+            } else if (typeof presetData === 'object' && presetData !== null) {
+                preset = JSON.parse(JSON.stringify(presetData)); // 深拷贝
+            } else {
+                return { success: false, message: '无效的预设数据：必须是 JSON 对象或 JSON 字符串' };
+            }
+
+            // 验证预设数据必须包含 name 字段
+            if (!preset.name || typeof preset.name !== 'string' || preset.name.trim() === '') {
+                return { success: false, message: '预设数据无效：缺少 "name" 字段或名称为空' };
+            }
+
+            const presetName = preset.name.trim();
+            const presets = settings_ACU.plotSettings?.promptPresets || [];
+            const existingIndex = presets.findIndex(p => p.name === presetName);
+
+            let finalName = presetName;
+
+            if (existingIndex !== -1) {
+                if (overwrite) {
+                    // 覆盖现有预设
+                    presets[existingIndex] = preset;
+                    logDebug_ACU(`[API] importPlotPresetFromData: 覆盖已存在的预设 "${presetName}"`);
+                } else {
+                    // 自动重命名
+                    let counter = 1;
+                    while (presets.some(p => p.name === finalName)) {
+                        finalName = `${presetName} (${counter})`;
+                        counter++;
+                    }
+                    preset.name = finalName;
+                    presets.push(preset);
+                    logDebug_ACU(`[API] importPlotPresetFromData: 预设已存在，重命名为 "${finalName}"`);
+                }
+            } else {
+                // 新增预设
+                presets.push(preset);
+                logDebug_ACU(`[API] importPlotPresetFromData: 新增预设 "${presetName}"`);
+            }
+
+            settings_ACU.plotSettings.promptPresets = presets;
+            saveSettings_ACU();
+
+            // 如果需要，切换到新导入的预设
+            if (switchTo) {
+                this.switchPlotPreset(finalName);
+            }
+
+            // 如果设置面板已打开，刷新预设选择器
+            if ($popupInstance_ACU) {
+                loadPlotPresetSelect_ACU();
+            }
+
+            return { success: true, message: `预设 "${finalName}" 已成功导入！`, presetName: finalName };
+
+        } catch (e) {
+            logError_ACU('importPlotPresetFromData failed:', e);
+            return { success: false, message: `导入失败: ${e.message}` };
+        }
+    },
+
+    /**
+     * 批量导入多个剧情推进预设
+     * @param {Array<Object|string>} presetsArray - 预设数据数组
+     * @param {Object} options - 可选配置
+     * @param {boolean} options.overwrite - 如果预设已存在，是否覆盖（默认 false）
+     * @returns {Promise<{success: boolean, message: string, imported: number, failed: number, details: Array}>} 导入结果
+     */
+    importPlotPresetsFromData: async function(presetsArray, options = {}) {
+        try {
+            if (!Array.isArray(presetsArray)) {
+                return { success: false, message: '输入必须是数组', imported: 0, failed: 0, details: [] };
+            }
+
+            const details = [];
+            let imported = 0;
+            let failed = 0;
+
+            for (const presetData of presetsArray) {
+                const result = await this.importPlotPresetFromData(presetData, { ...options, switchTo: false });
+                details.push(result);
+                if (result.success) {
+                    imported++;
+                } else {
+                    failed++;
+                }
+            }
+
+            return {
+                success: failed === 0,
+                message: `批量导入完成：成功 ${imported} 个，失败 ${failed} 个`,
+                imported,
+                failed,
+                details
+            };
+
+        } catch (e) {
+            logError_ACU('importPlotPresetsFromData failed:', e);
+            return { success: false, message: `批量导入失败: ${e.message}`, imported: 0, failed: 0, details: [] };
+        }
+    },
+
+    /**
+     * 获取当前使用的表格模板
+     * @returns {Object|null} 模板对象的深拷贝
+     */
+    getTableTemplate: function() {
+        try {
+            if (TABLE_TEMPLATE_ACU) {
+                return JSON.parse(TABLE_TEMPLATE_ACU);
+            }
+            return null;
+        } catch (e) {
+            logError_ACU('getTableTemplate failed:', e);
+            return null;
+        }
+    },
+
+    /**
+     * 导出所有剧情推进预设
+     * @returns {Array<Object>} 所有预设的深拷贝数组
+     */
+    exportAllPlotPresets: function() {
+        try {
+            const presets = settings_ACU.plotSettings?.promptPresets || [];
+            return JSON.parse(JSON.stringify(presets));
+        } catch (e) {
+            logError_ACU('exportAllPlotPresets failed:', e);
             return [];
         }
     }
@@ -3240,7 +3803,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
   // 备注：此处的“空白表”指 content 只保留表头行（content[0]），不含任何数据行
   // =========================
   const CHAT_SHEET_GUIDE_FIELD_ACU = 'TavernDB_ACU_InternalSheetGuide';
-  const CHAT_SHEET_GUIDE_VERSION_ACU = 1;
+  // v2: 在“空白指导表”中额外保存模板的基础数据（seedRows），用于“空数据回溯/占位符注入”时的基底恢复
+  const CHAT_SHEET_GUIDE_VERSION_ACU = 2;
   // 兼容：若用户曾使用过旧“表头清单”字段，可在读取时迁移
   const LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU = 'TavernDB_ACU_TableHeaderGuide';
 
@@ -3258,13 +3822,19 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       return (obj && typeof obj === 'object') ? obj : null;
   }
 
+  const CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU = 'seedRows';
+
   function normalizeGuideData_ACU(dataObj) {
       if (!dataObj || typeof dataObj !== 'object') return null;
-      const out = { mate: { type: 'chatSheets', version: 1 } };
+      const out = { mate: { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU } };
       // mate 允许覆盖
       if (dataObj.mate && typeof dataObj.mate === 'object') {
           out.mate = dataObj.mate;
       }
+      // 兜底补齐 mate 关键字段（避免旧调用方传入 version=1 导致无法识别新结构）
+      if (!out.mate || typeof out.mate !== 'object') out.mate = { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU };
+      if (!out.mate.type) out.mate.type = 'chatSheets';
+      if (!Number.isFinite(out.mate.version) || Math.trunc(out.mate.version) < CHAT_SHEET_GUIDE_VERSION_ACU) out.mate.version = CHAT_SHEET_GUIDE_VERSION_ACU;
       Object.keys(dataObj).forEach(k => {
           if (!k.startsWith('sheet_')) return;
           const s = dataObj[k];
@@ -3279,8 +3849,36 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               updateConfig: s.updateConfig || { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
               exportConfig: s.exportConfig || { enabled: false, splitByRow: false, entryName: s.name || k, entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '' },
           };
+          // v2: 基础数据（仅模板预置/seedRows）；注意：这里绝不从 content 派生，避免把真实数据误当作“基础数据”写入指导表
+          if (Array.isArray(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])) {
+              try {
+                  keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]));
+              } catch (e) {
+                  keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = [];
+              }
+          }
           if (s[TABLE_ORDER_FIELD_ACU] !== undefined) keep[TABLE_ORDER_FIELD_ACU] = s[TABLE_ORDER_FIELD_ACU];
           out[k] = keep;
+      });
+      return out;
+  }
+
+  function materializeDataFromSheetGuide_ACU(guideData, { includeSeedRows = true } = {}) {
+      const normalized = normalizeGuideData_ACU(guideData);
+      if (!normalized) return { mate: { type: 'chatSheets', version: 1 } };
+      const out = { mate: normalized.mate || { type: 'chatSheets', version: 1 } };
+      Object.keys(normalized).forEach(k => {
+          if (!k.startsWith('sheet_')) return;
+          const s = normalized[k];
+          const headerRow = Array.isArray(s?.content?.[0]) ? JSON.parse(JSON.stringify(s.content[0])) : [null];
+          const next = JSON.parse(JSON.stringify(s));
+          // content: header + (可选) seedRows
+          const seedRows = includeSeedRows && Array.isArray(s?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])
+              ? JSON.parse(JSON.stringify(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]))
+              : [];
+          next.content = [headerRow, ...seedRows];
+          // 保留 seedRows 字段本身（便于后续再次写回/二次处理），但不会影响表格使用者（他们只看 content）
+          out[k] = next;
       });
       return out;
   }
@@ -3347,11 +3945,133 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       return true;
   }
 
+  // =========================
+  // [新增] seedRows 解析/兜底：用于 $0 注入与“无数据初始化”场景
+  // 目标：
+  // - 新对话首次填表时，即使 currentJsonTableData_ACU 仅有表结构，也能从“内部指导表/模板”取到 seedRows
+  // - 支持隔离标签切换或初始化早期 chat 尚未加载导致的“指导表未命中”情况
+  // 注意：这里只把 seedRows 挂在表对象字段上，不会写入 content（不把模板基础数据当作真实聊天数据）
+  // =========================
+  let _seedRowsTemplateCacheStr_ACU = null;
+  let _seedRowsTemplateCacheObj_ACU = null;
+
+  function getTemplateObjForSeedRows_ACU() {
+      try {
+          if (_seedRowsTemplateCacheStr_ACU === TABLE_TEMPLATE_ACU && _seedRowsTemplateCacheObj_ACU) return _seedRowsTemplateCacheObj_ACU;
+          const obj = parseTableTemplateJson_ACU({ stripSeedRows: false });
+          _seedRowsTemplateCacheStr_ACU = TABLE_TEMPLATE_ACU;
+          _seedRowsTemplateCacheObj_ACU = obj;
+          return obj;
+      } catch (e) {
+          return null;
+      }
+  }
+
+  async function ensureChatSheetGuideSeeded_ACU({ reason = 'auto_seed_seedRows', force = false } = {}) {
+      try {
+          const isolationKey = getCurrentIsolationKey_ACU();
+          const existing = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+          const hasExisting = !!(existing && typeof existing === 'object' && Object.keys(existing).some(k => k.startsWith('sheet_')));
+          if (hasExisting && !force) return existing;
+
+          const chat = SillyTavern_API_ACU?.chat;
+          if (!chat || !Array.isArray(chat) || chat.length === 0) return existing || null;
+
+          const templateObj = getTemplateObjForSeedRows_ACU();
+          if (!templateObj) return existing || null;
+
+          // 用模板构建指导表（content 保留表头；seedRows 写入字段）
+          const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateObj, { stripSeedRows: true });
+          if (!guideData) return existing || null;
+
+          const ok = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, { reason });
+          if (ok) {
+              try { await SillyTavern_API_ACU.saveChat(); } catch (e) {}
+              logDebug_ACU(`[SheetGuide] Auto-seeded chat sheet guide for tag [${isolationKey || '无标签'}], reason=${reason}`);
+          }
+          return guideData;
+      } catch (e) {
+          return null;
+      }
+  }
+
+  function pickAnyGuideSeedRowsSlot_ACU(sheetKey) {
+      try {
+          const chat = SillyTavern_API_ACU?.chat;
+          const container = getChatSheetGuideContainer_ACU(chat);
+          const tags = container?.tags;
+          if (!tags || typeof tags !== 'object') return null;
+          let best = null; // { ts, seedRows }
+          Object.keys(tags).forEach(tagKey => {
+              const slot = tags[tagKey];
+              const ts = Number(slot?.updatedAt) || 0;
+              const data = normalizeGuideData_ACU(slot?.data);
+              const sr = data?.[sheetKey]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+              if (Array.isArray(sr) && sr.length > 0) {
+                  if (!best || ts > best.ts) best = { ts, seedRows: sr };
+              }
+          });
+          return best ? JSON.parse(JSON.stringify(best.seedRows)) : null;
+      } catch (e) {
+          return null;
+      }
+  }
+
+  function getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData = null, allowTemplateFallback = true } = {}) {
+      try {
+          if (!sheetKey || !String(sheetKey).startsWith('sheet_')) return [];
+          const direct = currentJsonTableData_ACU?.[sheetKey]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+          if (Array.isArray(direct) && direct.length > 0) return JSON.parse(JSON.stringify(direct));
+
+          const g = guideData || (() => {
+              const isolationKey = getCurrentIsolationKey_ACU();
+              return getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+          })();
+          const sr1 = g?.[sheetKey]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+          if (Array.isArray(sr1) && sr1.length > 0) return JSON.parse(JSON.stringify(sr1));
+
+          const any = pickAnyGuideSeedRowsSlot_ACU(sheetKey);
+          if (Array.isArray(any) && any.length > 0) return any;
+
+          if (!allowTemplateFallback) return [];
+          const templateObj = getTemplateObjForSeedRows_ACU();
+          const tplRows = templateObj?.[sheetKey]?.content;
+          if (Array.isArray(tplRows) && tplRows.length > 1) return JSON.parse(JSON.stringify(tplRows.slice(1)));
+          return [];
+      } catch (e) {
+          return [];
+      }
+  }
+
+  function attachSeedRowsToCurrentDataFromGuide_ACU(guideData) {
+      try {
+          if (!currentJsonTableData_ACU || typeof currentJsonTableData_ACU !== 'object') return false;
+          const g = normalizeGuideData_ACU(guideData);
+          if (!g) return false;
+          let changed = false;
+          Object.keys(currentJsonTableData_ACU).forEach(k => {
+              if (!k.startsWith('sheet_')) return;
+              const table = currentJsonTableData_ACU[k];
+              if (!table || typeof table !== 'object') return;
+              const existing = table?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+              if (Array.isArray(existing) && existing.length > 0) return;
+              const sr = g?.[k]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+              if (Array.isArray(sr) && sr.length > 0) {
+                  table[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(sr));
+                  changed = true;
+              }
+          });
+          return changed;
+      } catch (e) {
+          return false;
+      }
+  }
+
   // [新增] 用“当前数据”构建空白指导表：只保留表头行 + 参数（顺序由 getSortedSheetKeys_ACU 的旧逻辑决定，避免递归）
-  function buildChatSheetGuideDataFromData_ACU(dataObj) {
+  function buildChatSheetGuideDataFromData_ACU(dataObj, { preserveSeedRowsFromGuideData = null, seedRowsFromTemplateObj = null } = {}) {
       if (!dataObj || typeof dataObj !== 'object') return null;
       const keys = getSortedSheetKeys_ACU(dataObj, { ignoreChatGuide: true });
-      const out = { mate: { type: 'chatSheets', version: 1 } };
+      const out = { mate: { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU } };
       keys.forEach(k => {
           const s = dataObj[k];
           if (!s) return;
@@ -3364,6 +4084,17 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               updateConfig: s.updateConfig ? JSON.parse(JSON.stringify(s.updateConfig)) : { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
               exportConfig: s.exportConfig ? JSON.parse(JSON.stringify(s.exportConfig)) : { enabled: false, splitByRow: false, entryName: s.name || k, entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '' },
           };
+          // 需求4：结构/表名/参数变更时，仅更新指导表元信息，不修改“基础数据(seedRows)”
+          const preserved = preserveSeedRowsFromGuideData?.[k]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+          if (Array.isArray(preserved)) {
+              blank[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(preserved));
+          } else {
+              // 需求1：首次生成指导表时，把模板预置数据写入 seedRows（仅在未能从既有指导表继承时）
+              const tplRows = seedRowsFromTemplateObj?.[k]?.content;
+              if (Array.isArray(tplRows) && tplRows.length > 1) {
+                  blank[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(tplRows.slice(1)));
+              }
+          }
           if (Number.isFinite(s?.[TABLE_ORDER_FIELD_ACU])) blank[TABLE_ORDER_FIELD_ACU] = Math.trunc(s[TABLE_ORDER_FIELD_ACU]);
           out[k] = blank;
       });
@@ -3383,12 +4114,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           if (ao !== bo) return ao - bo;
           return String(a).localeCompare(String(b));
       });
-      const out = { mate: { type: 'chatSheets', version: 1 } };
+      const out = { mate: { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU } };
       sorted.forEach((k, idx) => {
           const base = JSON.parse(JSON.stringify(templateObj[k] || {}));
           base.uid = base.uid || k;
           base.name = base.name || k;
           if (!Array.isArray(base.content) || base.content.length === 0) base.content = [[null]];
+          // v2: 保存模板预置数据为 seedRows，但指导表本体 content 仍只保留表头
+          if (Array.isArray(base.content) && base.content.length > 1) {
+              base[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(base.content.slice(1)));
+          }
           if (stripSeedRows && Array.isArray(base.content) && base.content.length > 1) base.content = [base.content[0]];
           if (!Number.isFinite(base[TABLE_ORDER_FIELD_ACU])) base[TABLE_ORDER_FIELD_ACU] = idx;
           out[k] = base;
@@ -3826,32 +4561,12 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history.`);
 
       // 如果没有任何数据：
-      // - 若存在"空白指导表"，则优先用模板预置数据填充各表，再按指导表参数/顺序返回
-      // - 否则返回 null，让调用方按旧逻辑用模板初始化
+      // - 若存在"空白指导表"：优先返回“指导表物化结构”（表头+参数；seedRows 仅保留字段，不默认展开到 content）
+      // - 否则返回 null，让调用方按旧逻辑处理（例如用完整模板结构作为占位符）
       if (foundCount <= 0) {
           if (hasSheetGuide) {
-              const base = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideData);
-              // [优化] 尝试用模板预置数据填充没有历史数据的表
-              const templateDataForFallback = parseTableTemplateJson_ACU({ stripSeedRows: false });
-              const guideKeys = getSortedSheetKeys_ACU(base, { ignoreChatGuide: true, includeMissingFromGuide: true });
-              guideKeys.forEach(k => {
-                  if (!k || !k.startsWith('sheet_')) return;
-                  const guideSheet = base[k];
-                  const templateSheet = templateDataForFallback?.[k];
-                  const templateHasPresetData = templateSheet?.content && Array.isArray(templateSheet.content) && templateSheet.content.length > 1;
-                  if (templateHasPresetData) {
-                      // 使用模板的完整数据（包括预置数据行），但参数以指导表为准
-                      const fromTemplate = JSON.parse(JSON.stringify(templateSheet));
-                      fromTemplate.uid = k;
-                      if (guideSheet?.name) fromTemplate.name = guideSheet.name;
-                      if (guideSheet?.sourceData) fromTemplate.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-                      if (guideSheet?.updateConfig) fromTemplate.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
-                      if (guideSheet?.exportConfig) fromTemplate.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) fromTemplate[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-                      base[k] = fromTemplate;
-                      logDebug_ACU(`[Merge] No history data at all, table ${k} using template preset data (${templateSheet.content.length - 1} rows).`);
-                  }
-              });
+              // 直接物化：仅表头（seedRows 保留在字段中，但不作为“当前对话真实数据行”展示）
+              const base = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
               const orderedKeys = getSortedSheetKeys_ACU(base);
               return reorderDataBySheetKeys_ACU(base, orderedKeys);
           }
@@ -3876,13 +4591,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
       // [新增] 若存在"空白指导表"，则：
       // 1) 过滤掉不在指导表里的表（UI/填表只以指导表为准，避免旧表复活）
-      // 2) 对指导表中缺失的表，优先使用模板预置数据（如果模板有的话），否则用指导表的空白结构补齐
-      // 3) 对于存在历史数据的表：以历史数据为主，但用指导表补齐缺失的参数/表头，并强制顺序编号与指导表一致
+      // 2) 对指导表中缺失的表：使用指导表结构作为初始值（seedRows 仅保留字段，不默认展开到 content）
+      // 3) 对于存在历史数据的表：以历史数据为主，但表名/表头/参数/顺序以指导表为准；不把 seedRows 合并进真实数据行
       if (hasSheetGuide) {
-          const guided = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideData);
+          const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
           const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
-          // [优化] 预先获取模板数据（含预置数据），用于在没有历史数据时提供初始值
-          const templateDataForFallback = parseTableTemplateJson_ACU({ stripSeedRows: false });
           guideKeys.forEach(k => {
               if (!k || !k.startsWith('sheet_')) return;
               const guideSheet = guided[k];
@@ -3890,44 +4603,37 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               if (hist && typeof hist === 'object') {
                   const next = JSON.parse(JSON.stringify(hist));
                   next.uid = k;
-                  // 用指导表补齐缺失参数（以历史数据为主，不强行覆盖用户已保存的参数）
-                  if (!next.name && guideSheet?.name) next.name = guideSheet.name;
-                  if (!next.sourceData && guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-                  if (!next.updateConfig && guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
-                  if (!next.exportConfig && guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-                  // 表头兜底：若历史数据缺 header 行，则使用指导表
-                  if (!Array.isArray(next.content) || !Array.isArray(next.content[0])) {
-                      const headerRow = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
-                          ? JSON.parse(JSON.stringify(guideSheet.content[0]))
-                          : [null];
-                      next.content = [headerRow];
+                  // 需求4（视觉编辑器改名/改表头/改参数）：合并展示以指导表为准（不影响历史真实数据行，仅覆盖“元信息/表头/参数/顺序”）
+                  if (guideSheet?.name) next.name = guideSheet.name;
+                  if (guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+                  if (guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+                  if (guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+                  // 表头：以指导表为准，并对行做简单对齐（pad/truncate）
+                  const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
+                      ? JSON.parse(JSON.stringify(guideSheet.content[0]))
+                      : null;
+                  if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [[null]];
+                  if (guideHeader) {
+                      next.content[0] = guideHeader;
+                      const targetLen = guideHeader.length;
+                      for (let r = 1; r < next.content.length; r++) {
+                          const row = next.content[r];
+                          if (!Array.isArray(row)) continue;
+                          if (row.length < targetLen) {
+                              while (row.length < targetLen) row.push('');
+                          } else if (row.length > targetLen) {
+                              row.splice(targetLen);
+                          }
+                      }
                   }
                   // 顺序编号以指导表为准
                   if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                  // 保留 seedRows 字段（不参与实际 content 合并）
+                  if (Array.isArray(guideSheet?.seedRows)) next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
                   guided[k] = next;
               } else {
-                  // [优化] 无历史数据：优先使用模板中可能带的预置数据，否则保留指导表的空白结构
-                  // 部分表格模板为了指导后续填表会自带基础数据，这些数据应被用作初始值
-                  const templateSheet = templateDataForFallback?.[k];
-                  const templateHasPresetData = templateSheet?.content && Array.isArray(templateSheet.content) && templateSheet.content.length > 1;
-                  if (templateHasPresetData) {
-                      // 使用模板的完整数据（包括预置数据行），但参数以指导表为准
-                      const fromTemplate = JSON.parse(JSON.stringify(templateSheet));
-                      fromTemplate.uid = k;
-                      // 表名以指导表为准（用户可能已修改）
-                      if (guideSheet?.name) fromTemplate.name = guideSheet.name;
-                      // 参数以指导表为准（用户可能已调整填表参数）
-                      if (guideSheet?.sourceData) fromTemplate.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-                      if (guideSheet?.updateConfig) fromTemplate.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
-                      if (guideSheet?.exportConfig) fromTemplate.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-                      // 顺序编号以指导表为准
-                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) fromTemplate[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-                      guided[k] = fromTemplate;
-                      logDebug_ACU(`[Merge] Table ${k} has no history data, using template preset data (${templateSheet.content.length - 1} rows).`);
-                  } else {
-                      // 模板也没有预置数据，保留指导表的空白结构
-                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-                  }
+                  // 无历史数据：直接使用指导表物化结果（不展开 seedRows）
+                  if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
               }
           });
           mergedData = guided;
@@ -3947,31 +4653,27 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     // 合并数据 (使用新的独立表合并逻辑)
     let mergedData = await mergeAllIndependentTables_ACU();
 
-    // [修复] 当回溯找不到任何表格数据时（mergedData 为 null），
-    // 使用"完整模板结构"（包含预置数据），如果模板本身有数据则直接使用这些数据。
-    // 后续的世界书更新逻辑（hasAnyNonEmptyCell_ACU）会根据实际内容判断是否注入：
-    // - 模板有预置数据 → 检测到非空单元格 → 正常注入世界书
-    // - 模板只有表头（空数据行）→ 没有非空单元格 → 不注入世界书
+    // 当回溯找不到任何表格数据时（mergedData 为 null），
+    // 优先用“已保存指导表的物化结构（不展开 seedRows）”作为基底；
+    // 若不存在指导表，才使用“模板结构（不展开预置数据）”。
     if (!mergedData) {
-        logDebug_ACU('[回溯空数据] 聊天记录中无任何表格数据，将使用完整模板结构（包含预置数据，如果有的话）。');
-        const templateData = parseTableTemplateJson_ACU({ stripSeedRows: false }); // [优化] 保留模板预置数据
-        if (templateData) {
-            mergedData = templateData;
-            currentJsonTableData_ACU = templateData;
-            // 检查模板是否包含预置数据
-            const hasPresetData = Object.keys(templateData).filter(k => k.startsWith('sheet_')).some(k => {
-                const table = templateData[k];
-                return table?.content && Array.isArray(table.content) && table.content.length > 1;
-            });
-            if (hasPresetData) {
-                logDebug_ACU('[回溯空数据] currentJsonTableData_ACU 已使用包含预置数据的模板结构。');
-            } else {
-                logDebug_ACU('[回溯空数据] currentJsonTableData_ACU 已使用空模板结构（模板本身无预置数据）。');
-            }
+        const currentIsolationKey = getCurrentIsolationKey_ACU();
+        const guide = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
+        if (guide && typeof guide === 'object' && Object.keys(guide).some(k => k.startsWith('sheet_'))) {
+            logDebug_ACU('[回溯空数据] 无历史表格数据：使用已保存指导表物化结构（不展开 seedRows）作为基底。');
+            mergedData = materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: false });
+            currentJsonTableData_ACU = mergedData;
         } else {
-            // 极端兜底：模板也解析失败，设为空对象
-            currentJsonTableData_ACU = { mate: { type: 'chatSheets', version: 1 } };
-            logWarn_ACU('[回溯空数据] 模板解析失败，currentJsonTableData_ACU 设为最小空结构。');
+            logDebug_ACU('[回溯空数据] 无历史表格数据且无指导表：使用模板结构（不展开预置数据）。');
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }); // 仅结构，不携带模板预置数据行
+            if (templateData) {
+                mergedData = templateData;
+                currentJsonTableData_ACU = templateData;
+            } else {
+                // 极端兜底：模板也解析失败，设为空对象
+                currentJsonTableData_ACU = { mate: { type: 'chatSheets', version: 1 } };
+                logWarn_ACU('[回溯空数据] 模板解析失败，currentJsonTableData_ACU 设为最小空结构。');
+            }
         }
         // 刷新 UI 选择器
         if ($manualTableSelector_ACU) {
@@ -4135,13 +4837,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
   }
 
   function shouldSuppressWorldbookInjection_ACU() {
-      const chat = SillyTavern_API_ACU?.chat;
-      // 监视点优先：只要满足“单AI且无User”，永远抑制注入（无论是否切换过对话）
-      if (isSingleAiNoUserChat_ACU(chat)) return true;
-
-      // 其次才使用“开场白阶段抑制开关”（用于其他可能的特殊流程）
-      if (!suppressWorldbookInjectionInGreeting_ACU) return false;
-      return isNewChatGreetingStage_ACU(chat);
+      // 用户要求：取消“首楼填表后不注入世界书”的限制。
+      // 因此这里永不抑制世界书创建/更新（外部导入仍由 isImport 分支独立处理）。
+      return false;
   }
 
   function maybeLiftWorldbookSuppression_ACU() {
@@ -4219,8 +4917,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           // 标记幂等
           greetingMsg._acu_local_template_base_state_seeded = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
 
-          // [健全性] 在开场白阶段启用世界书注入抑制，避免任何异步/延迟流程自动创建世界书条目
-          suppressWorldbookInjectionInGreeting_ACU = true;
+          // [变更] 不再在开场白阶段抑制世界书注入（用户要求首楼填表后也要注入世界书）
+          suppressWorldbookInjectionInGreeting_ACU = false;
 
           await SillyTavern_API_ACU.saveChat();
 
@@ -4361,9 +5059,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         if (store && store._isTavern) {
             logDebug_ACU(`[Profile] Settings saved for code: ${code || '(default)'}`);
         } else {
-            console.warn(`[${SCRIPT_ID_PREFIX_ACU}] 未连接到可持久化的 extension_settings：本次保存仅在内存中生效，刷新会丢失。请检查顶层 bridge 是否注入成功。`);
-            // showToastr_ACU 可能尚未初始化，故 try/catch
-            try { showToastr_ACU('warning', '⚠️ 当前未连接到酒馆服务端设置，本次修改刷新后会丢失。请打开控制台查看原因。', { timeOut: 8000 }); } catch (e) {}
+            if (isIndexedDbAvailable_ACU()) {
+                console.warn(`[${SCRIPT_ID_PREFIX_ACU}] 未连接到酒馆服务端设置：已保存到 IndexedDB（仅本浏览器可用，跨浏览器不同步）。请检查顶层 bridge 是否注入成功。`);
+                try { showToastr_ACU('info', '当前未连接酒馆设置：已保存到 IndexedDB（仅本浏览器可用）。', { timeOut: 6000 }); } catch (e) {}
+            } else {
+                console.warn(`[${SCRIPT_ID_PREFIX_ACU}] 未连接到可持久化的 extension_settings，且 IndexedDB 不可用：本次保存仅在内存中生效，刷新会丢失。`);
+                try { showToastr_ACU('warning', '⚠️ 当前未连接酒馆设置且 IndexedDB 不可用，本次修改刷新后会丢失。', { timeOut: 8000 }); } catch (e) {}
+            }
             // 异步再尝试一次初始化（不阻塞 UI）
             void initTavernSettingsBridge_ACU();
         }
@@ -5959,6 +6661,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
   function loadSettings_ACU() {
       // 确保酒馆设置桥接已就绪（best-effort，不阻塞）
       void initTavernSettingsBridge_ACU();
+      // 尝试预载 IndexedDB 配置缓存（best-effort，不阻塞）
+      void ensureConfigIdbCacheLoaded_ACU().then(() => {
+          if (pendingSettingsReloadFromIdb_ACU) {
+              pendingSettingsReloadFromIdb_ACU = false;
+              loadSettings_ACU();
+          }
+      });
       // 可选迁移：把旧 localStorage 的设置/模板搬迁到酒馆设置（迁移开关默认为 false）
       migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_ALL_SETTINGS_ACU);
       migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_CUSTOM_TEMPLATE_ACU);
@@ -5968,6 +6677,17 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
       const store = getConfigStorage_ACU();
       const legacySettingsJson = store?.getItem?.(STORAGE_KEY_ALL_SETTINGS_ACU);
+      if (!legacySettingsJson && !configIdbCacheLoaded_ACU && isIndexedDbAvailable_ACU()) {
+          if (!pendingSettingsReloadFromIdb_ACU) {
+              pendingSettingsReloadFromIdb_ACU = true;
+              void ensureConfigIdbCacheLoaded_ACU().then(() => {
+                  if (pendingSettingsReloadFromIdb_ACU) {
+                      pendingSettingsReloadFromIdb_ACU = false;
+                      loadSettings_ACU();
+                  }
+              });
+          }
+      }
       const legacySettingsObj = legacySettingsJson ? safeJsonParse_ACU(legacySettingsJson, null) : null;
       const legacyCode = normalizeIsolationCode_ACU(legacySettingsObj?.dataIsolationCode || '');
 
@@ -7725,23 +8445,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     
     if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
 
-    // [新功能] 新建对话：优先把“模板基础状态”写入开场白楼层的本地数据。
-    // 关键：此动作不能触发世界书注入，所以这里不走 loadOrCreateJsonTableFromChatHistory_ACU（它会触发 refreshMergedDataAndNotify -> updateReadableLorebookEntry）。
-    // 对于非新建对话，则按原流程加载/合并并刷新世界书。
-    try {
-        const isSeeded = await seedGreetingLocalDataFromTemplate_ACU();
-        if (!isSeeded) {
-            await loadOrCreateJsonTableFromChatHistory_ACU();
-        } else {
-            // 新建对话已写入基底：仅刷新可视化/面板，不进行世界书更新
-            setTimeout(() => {
-                jQuery_API_ACU(document).trigger('acu-visualizer-refresh-data');
-            }, 100);
-        }
-    } catch (e) {
-        logWarn_ACU('[GreetingLocalBaseState] Failed in chat reset flow, falling back to normal load:', e);
-        await loadOrCreateJsonTableFromChatHistory_ACU();
-    }
+    // 需求3：不再把“模板基础状态/基础表格数据”写入聊天第一层的楼层本地数据（开场白种子写入已废弃）。
+    // 说明：直接走统一加载链路；开场白阶段的世界书注入会被 shouldSuppressWorldbookInjection_ACU 抑制（仅清理旧条目，不创建/更新）。
+    await loadOrCreateJsonTableFromChatHistory_ACU();
 
   // [核心修复] 切换聊天时，强制刷新可视化编辑器数据
     // 这确保了无论编辑器是否打开（即是否绑定了事件），数据源都被更新，并且如果有监听者则触发
@@ -9378,7 +10084,12 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     try {
         const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
         if (!existingGuide || !Object.keys(existingGuide).some(k => k.startsWith('sheet_'))) {
-            const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU);
+            // 需求1：首次生成指导表时，把模板预置数据写入指导表基础数据(seedRows)
+            const templateObjForSeed = parseTableTemplateJson_ACU({ stripSeedRows: false });
+            const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU, {
+                preserveSeedRowsFromGuideData: null,
+                seedRowsFromTemplateObj: templateObjForSeed,
+            });
             if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
                 setChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey, guideData, { reason: 'first_fill' });
                 logDebug_ACU(`[SheetGuide] Created chat sheet guide for tag [${currentIsolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}).`);
@@ -9561,6 +10272,18 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     // [逻辑优化] 不再将空白模板保存到聊天记录中。
     // 数据库将在内存中初始化，并在第一次成功更新后，连同更新内容一起保存到对应的AI消息中。
     logDebug_ACU('Database initialized in memory. It will be saved to chat history on the first update.');
+
+    // [新增] 新对话初始化阶段：确保“第一层空白指导表”存在，并把模板预置数据写入 seedRows 字段
+    // 关键点：只写 seedRows 字段，不写入 content（避免新对话误显示为“已有数据”）
+    try {
+        const guideData = await ensureChatSheetGuideSeeded_ACU({ reason: 'init_chat_seedrows' });
+        // 同步把 seedRows 字段挂到 currentJsonTableData_ACU（只挂字段，不改变 content），确保新对话首次 $0 就能读到
+        if (guideData) {
+            attachSeedRowsToCurrentDataFromGuide_ACU(guideData);
+        }
+    } catch (e) {
+        logWarn_ACU('[SheetGuide] Failed to ensure sheet guide during initialization:', e);
+    }
 
     // 步骤4：删除所有由本插件生成的旧世界书条目
     try {
@@ -11823,6 +12546,71 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                         #${POPUP_ID_ACU} hr { margin: 8px 0; }
                         #${POPUP_ID_ACU} .notes { font-size: 10px !important; line-height: 1.4; }
                     }
+
+                    /* 表格模板预设：下拉旁的小工具条按钮（导入/导出/另存为等） */
+                    #${POPUP_ID_ACU} .acu-template-presets {
+                        border: 1px solid var(--acu-border);
+                        background: rgba(255, 255, 255, 0.03);
+                        box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
+                        backdrop-filter: blur(10px);
+                        -webkit-backdrop-filter: blur(10px);
+                    }
+                    #${POPUP_ID_ACU} .acu-template-preset-toolbar {
+                        display: flex;
+                        gap: 10px;
+                        align-items: center;
+                        flex-wrap: wrap;
+                    }
+                    #${POPUP_ID_ACU} .acu-template-preset-toolbar .acu-template-preset-left {
+                        display: flex;
+                        gap: 8px;
+                        align-items: center;
+                        flex: 1;
+                        min-width: 240px;
+                    }
+                    #${POPUP_ID_ACU} .acu-template-preset-toolbar .acu-template-preset-actions {
+                        display: flex;
+                        gap: 8px;
+                        align-items: center;
+                        flex-wrap: wrap;
+                        justify-content: flex-end;
+                    }
+                    #${POPUP_ID_ACU} .acu-mini-btn {
+                        height: 32px;
+                        padding: 0 10px;
+                        border-radius: 10px;
+                        border: 1px solid rgba(255, 255, 255, 0.14);
+                        background: rgba(255, 255, 255, 0.06);
+                        color: var(--acu-text-1);
+                        cursor: pointer;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 8px;
+                        font-size: 12px;
+                        font-weight: 650;
+                        letter-spacing: 0.2px;
+                        transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+                        white-space: nowrap;
+                    }
+                    #${POPUP_ID_ACU} .acu-mini-btn:hover {
+                        transform: translateY(-1px);
+                        background: rgba(255, 255, 255, 0.09);
+                        border-color: rgba(255, 255, 255, 0.20);
+                        box-shadow: 0 10px 26px rgba(0, 0, 0, 0.25);
+                    }
+                    #${POPUP_ID_ACU} .acu-mini-btn:active {
+                        transform: translateY(0px);
+                    }
+                    #${POPUP_ID_ACU} .acu-mini-btn.primary {
+                        border-color: rgba(123, 183, 255, 0.35);
+                        background: linear-gradient(180deg, rgba(123, 183, 255, 0.22), rgba(123, 183, 255, 0.10));
+                        box-shadow: 0 10px 26px rgba(123, 183, 255, 0.14);
+                    }
+                    #${POPUP_ID_ACU} .acu-mini-btn.danger {
+                        border-color: rgba(255, 107, 107, 0.35);
+                        background: linear-gradient(180deg, rgba(255, 107, 107, 0.22), rgba(255, 107, 107, 0.10));
+                    }
+                    #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
                     
                     /* 超极小屏幕 (≤320px) */
                     @media screen and (max-width: 320px) {
@@ -12170,11 +12958,41 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                         <hr style="border-color: var(--border-normal); margin: 15px 0;">
                         <div class="button-group acu-data-mgmt-buttons acu-cols-3">
                             <button id="${SCRIPT_ID_PREFIX_ACU}-export-json-data">导出JSON数据</button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-import-template">导入新模板</button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-export-template">导出当前模板</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-reset-template">恢复默认模板</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-reset-all-defaults" class="btn-warning">恢复默认模板及提示词</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-override-with-template" class="btn-danger">模板覆盖最新层数据</button>
+                        </div>
+                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
+                        <div class="acu-template-presets" style="background: var(--background-color-light); padding: 12px; border-radius: 8px;">
+                            <h4 style="margin: 0 0 10px 0; font-size: 0.95em; font-weight: 600;">表格模板预设（多份存储/切换）</h4>
+                            <div class="acu-template-preset-toolbar">
+                                <div class="acu-template-preset-left">
+                                    <select id="${SCRIPT_ID_PREFIX_ACU}-template-preset-select" class="text_pole" style="min-width: 220px; flex: 1;">
+                                        <option value="">（选择预设以切换）</option>
+                                    </select>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-import-template" class="acu-mini-btn" title="导入模板（自动按文件名保存为预设，重名覆盖）">
+                                        <i class="fa-solid fa-file-import"></i><span>导入</span>
+                                    </button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-export-template" class="acu-mini-btn" title="导出模板（优先导出当前选中的预设）">
+                                        <i class="fa-solid fa-file-export"></i><span>导出</span>
+                                    </button>
+                                </div>
+                                <div class="acu-template-preset-actions">
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-template-preset-save" class="acu-mini-btn primary" title="保存当前模板到指定预设（可覆盖同名）">
+                                        <i class="fa-solid fa-floppy-disk"></i><span>保存</span>
+                                    </button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-template-preset-saveas" class="acu-mini-btn" title="将当前模板另存为新预设（自动避免重名）">
+                                        <i class="fa-solid fa-copy"></i><span>另存为</span>
+                                    </button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-template-preset-rename" class="acu-mini-btn" title="重命名当前选中预设">
+                                        <i class="fa-solid fa-i-cursor"></i><span>重命名</span>
+                                    </button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-template-preset-delete" class="acu-mini-btn danger" title="删除当前选中预设">
+                                        <i class="fa-solid fa-trash"></i><span>删除</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="notes" style="margin-top: 8px;">切换预设会立即应用为“当前通用模板”，并同步更新本聊天第一层的指导表（含基础数据 seedRows）。</p>
                         </div>
                         <!-- 楼层范围选择 -->
                         <div style="background: var(--background-color-light); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
@@ -12675,6 +13493,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       const $importTemplateButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-template`);
       const $exportTemplateButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-export-template`);
       const $resetTemplateButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-reset-template`);
+      const $templatePresetSelect_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-select`);
+      const $templatePresetSaveBtn_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-save`);
+      const $templatePresetSaveAsBtn_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-saveas`);
+      const $templatePresetRenameBtn_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-rename`);
+      const $templatePresetDeleteBtn_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-delete`);
       const $resetAllDefaultsButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-reset-all-defaults`);
       const $exportJsonDataButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-export-json-data`);
       const $importCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-combined-settings`);
@@ -13364,6 +14187,95 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         if ($importTemplateButton_ACU.length) $importTemplateButton_ACU.on('click', importTableTemplate_ACU);
         if ($exportTemplateButton_ACU.length) $exportTemplateButton_ACU.on('click', exportTableTemplate_ACU);
         if ($resetTemplateButton_ACU.length) $resetTemplateButton_ACU.on('click', resetTableTemplate_ACU);
+        
+        // --- [新增] 模板预设库（多份模板存储/切换） ---
+        if ($templatePresetSelect_ACU && $templatePresetSelect_ACU.length) {
+            renderTemplatePresetSelect_ACU($templatePresetSelect_ACU, { keepValue: false });
+            $templatePresetSelect_ACU.off('change.acu_template_preset').on('change.acu_template_preset', async function() {
+                const name = String(jQuery_API_ACU(this).val() || '').trim();
+                if (!name) return;
+                showToastr_ACU('info', `正在切换模板预设：${name}...`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                const ok = await applyTemplatePresetToCurrent_ACU(name);
+                if (ok) {
+                    showToastr_ACU('success', `模板预设已切换：${name}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                } else {
+                    showToastr_ACU('error', `模板预设切换失败：${name}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    // 回退：重新渲染并清空选择
+                    renderTemplatePresetSelect_ACU($templatePresetSelect_ACU, { keepValue: false });
+                }
+            });
+        }
+        if ($templatePresetSaveBtn_ACU && $templatePresetSaveBtn_ACU.length) {
+            $templatePresetSaveBtn_ACU.off('click.acu_template_preset').on('click.acu_template_preset', function() {
+                const name = prompt('请输入要保存的模板预设名称：', (jQuery_API_ACU($templatePresetSelect_ACU).val() || '').toString() || '新模板预设');
+                if (!name) return;
+                const norm = normalizeTemplateForPresetSave_ACU();
+                if (!norm) {
+                    showToastr_ACU('error', '保存预设失败：无法解析当前模板。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    return;
+                }
+                upsertTemplatePreset_ACU(name, norm.templateStr);
+                renderTemplatePresetSelect_ACU($templatePresetSelect_ACU, { keepValue: false });
+                if ($templatePresetSelect_ACU && $templatePresetSelect_ACU.length) $templatePresetSelect_ACU.val(String(name).trim());
+                showToastr_ACU('success', `已保存模板预设：${String(name).trim()}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+            });
+        }
+        if ($templatePresetSaveAsBtn_ACU && $templatePresetSaveAsBtn_ACU.length) {
+            $templatePresetSaveAsBtn_ACU.off('click.acu_template_preset').on('click.acu_template_preset', function() {
+                const cur = String(jQuery_API_ACU($templatePresetSelect_ACU).val() || '').trim();
+                const defaultName = cur ? `${cur}_副本` : '新模板预设';
+                const raw = prompt('另存为预设名称：', defaultName);
+                if (!raw) return;
+                const norm = normalizeTemplateForPresetSave_ACU();
+                if (!norm) {
+                    showToastr_ACU('error', '另存为失败：无法解析当前模板。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    return;
+                }
+                const requested = String(raw).trim();
+                if (!requested) return;
+                const finalName = ensureUniqueTemplatePresetName_ACU(requested);
+                if (finalName !== requested) {
+                    if (!confirm(`预设名已存在，将自动另存为 "${finalName}"。是否继续？`)) return;
+                }
+                upsertTemplatePreset_ACU(finalName, norm.templateStr);
+                renderTemplatePresetSelect_ACU($templatePresetSelect_ACU, { keepValue: false });
+                if ($templatePresetSelect_ACU && $templatePresetSelect_ACU.length) $templatePresetSelect_ACU.val(finalName);
+                showToastr_ACU('success', `已另存为模板预设：${finalName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+            });
+        }
+        if ($templatePresetRenameBtn_ACU && $templatePresetRenameBtn_ACU.length) {
+            $templatePresetRenameBtn_ACU.off('click.acu_template_preset').on('click.acu_template_preset', function() {
+                const oldName = String(jQuery_API_ACU($templatePresetSelect_ACU).val() || '').trim();
+                if (!oldName) {
+                    showToastr_ACU('warning', '请先在下拉框选择一个预设。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                    return;
+                }
+                const preset = getTemplatePreset_ACU(oldName);
+                if (!preset?.templateStr) return;
+                const newName = prompt(`将预设 "${oldName}" 重命名为：`, oldName);
+                if (!newName) return;
+                const nn = String(newName).trim();
+                if (!nn) return;
+                upsertTemplatePreset_ACU(nn, preset.templateStr);
+                deleteTemplatePreset_ACU(oldName);
+                renderTemplatePresetSelect_ACU($templatePresetSelect_ACU, { keepValue: false });
+                if ($templatePresetSelect_ACU && $templatePresetSelect_ACU.length) $templatePresetSelect_ACU.val(nn);
+                showToastr_ACU('success', `预设已重命名：${oldName} → ${nn}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+            });
+        }
+        if ($templatePresetDeleteBtn_ACU && $templatePresetDeleteBtn_ACU.length) {
+            $templatePresetDeleteBtn_ACU.off('click.acu_template_preset').on('click.acu_template_preset', function() {
+                const name = String(jQuery_API_ACU($templatePresetSelect_ACU).val() || '').trim();
+                if (!name) {
+                    showToastr_ACU('warning', '请先在下拉框选择一个预设。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                    return;
+                }
+                if (!confirm(`确定要删除模板预设 "${name}" 吗？此操作不可撤销。`)) return;
+                const ok = deleteTemplatePreset_ACU(name);
+                renderTemplatePresetSelect_ACU($templatePresetSelect_ACU, { keepValue: false });
+                showToastr_ACU(ok ? 'success' : 'warning', ok ? `已删除预设：${name}` : `删除失败或预设不存在：${name}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+            });
+        }
         if ($resetAllDefaultsButton_ACU.length) $resetAllDefaultsButton_ACU.on('click', resetAllToDefaults_ACU);
         if ($exportJsonDataButton_ACU.length) $exportJsonDataButton_ACU.on('click', exportCurrentJsonData_ACU);
 
@@ -14881,8 +15793,19 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         return null;
     }
 
+    // [修复] 生成 $0 之前，确保 seedRows 可用（新对话首次填表、或指导表未命中时也能兜底）
+    // - 只把 seedRows 挂到表对象字段，不写入 content
+    let _seedGuideDataForThisPrepare_ACU = null;
+    try {
+        _seedGuideDataForThisPrepare_ACU = await ensureChatSheetGuideSeeded_ACU({ reason: 'prepare_ai_input_seedrows' });
+        if (_seedGuideDataForThisPrepare_ACU) {
+            attachSeedRowsToCurrentDataFromGuide_ACU(_seedGuideDataForThisPrepare_ACU);
+        }
+    } catch (e) {}
+
     // 1. Format the current JSON table data into a human-readable text block for $0
     let tableDataText = '';
+    let _seedRowsTablesUsed_ACU = [];
     const tableIndexes = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
     tableIndexes.forEach((sheetKey, tableIndex) => {
         const table = currentJsonTableData_ACU[sheetKey];
@@ -14924,9 +15847,22 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         }
 
         const allRows = table.content.slice(1);
+        // seedRows 统一从“当前数据/指导表/模板”解析（避免 seedRows 丢失导致误判为空表）
+        const seedRows = getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData: _seedGuideDataForThisPrepare_ACU, allowTemplateFallback: true });
+        // 把 seedRows 字段挂回 table，便于后续 applyEdits 物化
+        try {
+            if ((!Array.isArray(table.seedRows) || table.seedRows.length === 0) && Array.isArray(seedRows) && seedRows.length > 0) {
+                table.seedRows = JSON.parse(JSON.stringify(seedRows));
+            }
+        } catch (e) {}
+        const isUsingSeedRows = (allRows.length === 0 && seedRows.length > 0);
+        if (isUsingSeedRows) {
+            try { _seedRowsTablesUsed_ACU.push(String(table.name || sheetKey)); } catch (e) {}
+        }
+        const effectiveAllRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
 
         // [新增] 当表格数据为空时，简化输出并提示初始化
-        if (allRows.length === 0) {
+        if (effectiveAllRows.length === 0) {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
             
             // [修正] 即使表格为空，也必须输出表头列名，以便AI知道如何初始化（列结构）
@@ -14950,15 +15886,18 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
                 tableDataText += `  - Update Trigger: ${table.sourceData.updateNode || 'N/A'}\n`;
                 tableDataText += `  - Delete Trigger: ${table.sourceData.deleteNode || 'N/A'}\n`;
             }
+            if (isUsingSeedRows) {
+                tableDataText += `  - SeedRows: 已提供模板基础数据（尚未写入聊天楼层数据；本次填表可直接基于这些行更新）\n`;
+            }
 
-            let rowsToProcess = allRows;
+            let rowsToProcess = effectiveAllRows;
             let startIndex = 0;
 
             // [新增] 如果是总结表并且行数超过10，则只提取最新的10条
-            if (table.name.trim() === '总结表' && allRows.length > 10) {
-                startIndex = allRows.length - 10;
-                rowsToProcess = allRows.slice(-10);
-                tableDataText += `  - Note: Showing last ${rowsToProcess.length} of ${allRows.length} entries.\n`;
+            if (table.name.trim() === '总结表' && effectiveAllRows.length > 10) {
+                startIndex = effectiveAllRows.length - 10;
+                rowsToProcess = effectiveAllRows.slice(-10);
+                tableDataText += `  - Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries.\n`;
             }
 
             if (rowsToProcess.length > 0) {
@@ -14973,6 +15912,9 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
             tableDataText += '\n';
         }
     });
+    if (_seedRowsTablesUsed_ACU.length > 0) {
+        logDebug_ACU(`[SeedRows] $0 使用 seedRows 作为基础数据：${_seedRowsTablesUsed_ACU.join('、')}`);
+    }
     
     // 2. Format the messages for $1
     let messagesText = '当前最新对话内容:\n';
@@ -15449,6 +16391,27 @@ async function callCustomOpenAI_ACU(dynamicContent) {
     const sheetKeysForIndexing = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
     const sheets = sheetKeysForIndexing.map(k => currentJsonTableData_ACU[k]).filter(Boolean);
 
+    // 如果某表 content 为空，但指导表/模板提供了 seedRows，则在真正应用编辑前先物化到 content，
+    // 避免 AI 基于 $0 中的 seed rows 进行 updateRow/deleteRow 时“找不到行”。
+    const materializeSeedRowsIfNeeded_ACU = (table) => {
+        try {
+            if (!table || typeof table !== 'object') return;
+            if (!Array.isArray(table.content) || table.content.length !== 1) return;
+            // [修复] seedRows 可能未挂到表对象：这里按 uid(sheetKey) 再兜底一次
+            let sr = (Array.isArray(table.seedRows) && table.seedRows.length > 0) ? table.seedRows : null;
+            if (!sr && table.uid && String(table.uid).startsWith('sheet_')) {
+                sr = getEffectiveSeedRowsForSheet_ACU(String(table.uid), { guideData: null, allowTemplateFallback: true });
+                if (Array.isArray(sr) && sr.length > 0) {
+                    try { table.seedRows = JSON.parse(JSON.stringify(sr)); } catch (e) {}
+                }
+            }
+            if (!Array.isArray(sr) || sr.length === 0) return;
+            const headerRow = Array.isArray(table.content[0]) ? JSON.parse(JSON.stringify(table.content[0])) : [null];
+            const seed = JSON.parse(JSON.stringify(sr));
+            table.content = [headerRow, ...seed];
+        } catch (e) {}
+    };
+
     // [新增] 重置本次参与更新的表格的统计信息
     // 由于我们不知道哪些表会更新，只能在实际更新时设置。
     // 但为了清除旧状态，也许应该在保存时处理？
@@ -15539,6 +16502,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping insertRow.`);
                         break;
                     }
+                    materializeSeedRowsIfNeeded_ACU(table);
                     // [新增] 根据更新模式和表格名称屏蔽不相关的表格操作
                     // [修复] 统一更新模式（'full'）允许所有操作，不阻止任何表
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
@@ -15584,6 +16548,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping deleteRow.`);
                         break;
                     }
+                    materializeSeedRowsIfNeeded_ACU(table);
                     // [新增] 根据更新模式和表格名称屏蔽不相关的表格操作
                     // [修复] 统一更新模式（'full'）允许所有操作，不阻止任何表
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
@@ -15632,6 +16597,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping updateRow.`);
                         break;
                     }
+                    materializeSeedRowsIfNeeded_ACU(table);
                     // [新增] 根据更新模式和表格名称屏蔽不相关的表格操作
                     // [修复] 统一更新模式（'full'）允许所有操作，不阻止任何表
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
@@ -17275,9 +18241,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       const targetIdentity = settings_ACU.dataIsolationEnabled ? settings_ACU.dataIsolationCode : null;
 
       // 计算AI消息索引列表（只计算AI楼层）
-      // [保护] 排除 chat[0]，确保第一层的指导表数据不被触及
+      // [修复] 处理所有AI消息，包括 chat[0]，但在删除时会排除空白指导表字段
       const aiMessageIndices = chat
-          .map((msg, index) => (!msg.is_user && index > 0) ? index : -1)
+          .map((msg, index) => (!msg.is_user) ? index : -1)
           .filter(index => index !== -1);
 
       if (aiMessageIndices.length === 0) {
@@ -17314,6 +18280,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
           if (shouldDelete) {
               let modified = false;
+              
+              // [保护] 注意：TavernDB_ACU_InternalSheetGuide（空白指导表）字段不会被删除，不在删除列表中
+              
               if (msg.TavernDB_ACU_Data) {
                   delete msg.TavernDB_ACU_Data;
                   modified = true;
@@ -17470,8 +18439,25 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
   function exportTableTemplate_ACU() {
     try {
-        // [修复] 导出当前模板（兼容旧模板缺少顺序编号；并避免直接 JSON.parse 失败导致导出旧默认）
-        const jsonData = parseTableTemplateJson_ACU({ stripSeedRows: false });
+        // [优化] 优先导出“当前下拉选中的预设”；未选择则导出“当前模板”
+        let fromPresetName = '';
+        let jsonData = null;
+        try {
+            const selected = String(getTemplatePresetSelectJQ_ACU()?.val?.() || '').trim();
+            if (selected) {
+                const preset = getTemplatePreset_ACU(selected);
+                const obj = preset?.templateStr ? safeJsonParse_ACU(preset.templateStr, null) : null;
+                if (obj && typeof obj === 'object') {
+                    jsonData = obj;
+                    fromPresetName = selected;
+                }
+            }
+        } catch (e) {}
+
+        // [修复] 兜底：导出当前模板（兼容旧模板缺少顺序编号；并避免直接 JSON.parse 失败导致导出旧默认）
+        if (!jsonData || typeof jsonData !== 'object') {
+            jsonData = parseTableTemplateJson_ACU({ stripSeedRows: false });
+        }
         if (!jsonData || typeof jsonData !== 'object') {
             throw new Error('无法解析当前模板。');
         }
@@ -17507,12 +18493,17 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'TavernDB_template.json';
+        if (fromPresetName) {
+            const safePart = sanitizeFilenameComponent_ACU(fromPresetName) || 'template';
+            a.download = `TavernDB_template_${safePart}.json`;
+        } else {
+            a.download = 'TavernDB_template.json';
+        }
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        showToastr_ACU('success', '表格模板已成功导出！(已包含最新导出参数)');
+        showToastr_ACU('success', fromPresetName ? `表格模板预设已成功导出：${fromPresetName}` : '表格模板已成功导出！(已包含最新导出参数)');
     } catch (error) {
         logError_ACU('导出模板失败:', error);
         showToastr_ACU('error', '导出模板失败，请检查控制台获取详情。');
@@ -17763,7 +18754,19 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                 // [新增] 同步覆盖：更新当前聊天第一层的“空白指导表”（仅表头+参数）
                 try { await overwriteChatSheetGuideFromTemplate_ACU(sanitized, { reason: 'import_template' }); } catch (e) {}
 
-                showToastr_ACU('success', '模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
+                // [新增] 导入时自动按文件名保存为“模板预设”（同名覆盖）
+                try {
+                    const presetName = derivePresetNameFromFilename_ACU(file?.name) || `导入模板_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+                    const ok = upsertTemplatePreset_ACU(presetName, normalized);
+                    if (ok) {
+                        refreshTemplatePresetSelectInUI_ACU({ selectName: presetName, keepValue: false });
+                        showToastr_ACU('success', `模板已导入，并保存为预设：${presetName}（同名自动覆盖）`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                    } else {
+                        showToastr_ACU('success', '模板已成功导入！模板已更新，但保存为预设失败（请检查设置存储权限）。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                    }
+                } catch (e) {
+                    showToastr_ACU('success', '模板已成功导入！模板已更新，但保存为预设时发生异常（详情见控制台）。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                }
                 logDebug_ACU('New table template loaded and saved to config storage and memory.');
 
                 // [优化] 不再触发表格数据初始化，仅修改当前插件模板
@@ -19654,7 +20657,15 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       // 覆盖式更新聊天第一层的“空白指导表”（仅表头+参数，无数据行），让后续合并/显示/填表参数都以此为准。
       try {
           const isolationKey = getCurrentIsolationKey_ACU();
-          const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU);
+          // 需求4（澄清版）：可视化编辑器触发指导表更新时，只更新表名/表头/表格参数，不修改指导表基础数据（seedRows）。
+          // - 若当前聊天/标签已存在指导表：必须继承其 seedRows
+          // - 若不存在指导表：从当前模板提取预置数据作为 seedRows（需求1）
+          const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+          const templateObjForSeed = parseTableTemplateJson_ACU({ stripSeedRows: false });
+          const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU, {
+              preserveSeedRowsFromGuideData: existingGuide,
+              seedRowsFromTemplateObj: templateObjForSeed,
+          });
           if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
               setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, { reason: saveToTemplate ? 'visualizer_save_to_template' : 'visualizer_save' });
               logDebug_ACU(`[SheetGuide] Overwrote chat sheet guide from visualizer for tag [${isolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}).`);
