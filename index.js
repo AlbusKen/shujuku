@@ -10897,7 +10897,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     $menuItemContainer = jQuery_API_ACU(
       `<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`,
     );
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VXII</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VX</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
       e.stopPropagation();
@@ -13556,7 +13556,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     
     createACUWindow({
       id: windowId,
-      title: '神·数据库 VXII',
+      title: '神·数据库 VX',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度
@@ -17724,9 +17724,14 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                     // [合并更新逻辑] 传递 targetSheetKeys 作为合并更新组
                     // 只要组内有任意一个表被修改，整组表都视为已更新
                     // 首次初始化时，updateGroupKeys 使用实际被修改的表
+                    // [新增] 仅对总结表/总体大纲：未写入则视为未更新
                     const updateGroupKeysRaw = isFirstTimeInit ? keysToPersist : targetSheetKeys;
                     const updateGroupKeysToUse = Array.isArray(updateGroupKeysRaw)
-                        ? updateGroupKeysRaw.filter(k => keysToActuallySave.includes(k))
+                        ? updateGroupKeysRaw.filter(sheetKey => {
+                            const table = currentJsonTableData_ACU?.[sheetKey];
+                            if (!table || !isSummaryOrOutlineTable_ACU(table.name)) return true;
+                            return keysToActuallySave.includes(sheetKey);
+                        })
                         : updateGroupKeysRaw;
                     const saveSuccess = await saveIndependentTableToChatHistory_ACU(saveTargetIndex, keysToActuallySave, updateGroupKeysToUse);
                     if (!saveSuccess) throw new Error('无法将更新后的数据库保存到聊天记录。');
