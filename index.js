@@ -2034,7 +2034,7 @@ $A
 
 $B
 
-<已精简的数据> (你需要在此基础上插入，新增的编码索引从AM01开始，每次插入时+1，即AM02、AM03....依次类推，确保两个表对应的编码索引完全一致。字数要求，每条总结内容不低于300个中文字符不超过400个中文字符，每条总结大纲不低于40个中文字符不超过50个中文字符。):
+<已精简的数据> (你需要在此基础上插入，新增的编码索引从AM0001开始，每次插入时+1，即AM0002、AM0003....依次类推，确保两个表对应的编码索引完全一致。字数要求，每条总结内容不低于300个中文字符不超过400个中文字符，每条总结大纲不低于40个中文字符不超过50个中文字符。):
 
 $BASE_DATA
 
@@ -2082,9 +2082,9 @@ $BASE_DATA
 
 <!--
 
-insertRow(0, {"0":"时间跨度1", "1":"总结内容", "2":"AM01"})
+insertRow(0, {"0":"时间跨度1", "1":"总结内容", "2":"AM0001"})
 
-insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
+insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
 
 -->
 
@@ -2195,7 +2195,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       tableContextExcludeTags: '',
       importSplitSize: 10000,
       skipUpdateFloors: 0, // 全局有效楼层 (UI参数) - 影响所有表
-      retainRecentLayers: 0, // [新增] 保留最近N层本地数据 (0或空=全部保留，按AI楼层计数)
+      retainRecentLayers: 100, // [新增] 保留最近N层本地数据 (0或空=全部保留，按AI楼层计数)
       // [新增] 表格顺序（用户手动调整后持久化）。为空时使用模板顺序。
       tableKeyOrder: [], // ['sheet_xxx', 'sheet_yyy', ...]
       manualSelectedTables: [], // 手动更新时使用UI参数的表格key列表
@@ -2949,6 +2949,147 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
     // 合并总结
     mergeSummaryNow: async function() { try { return await handleManualMergeSummary_ACU(); } catch (e) { logError_ACU('mergeSummaryNow failed:', e); return false; } },
+
+    // =========================
+    // 表格锁定 API
+    // =========================
+    getTableLockState: function(sheetKey) {
+        try {
+            if (!sheetKey) return null;
+            const lockState = getTableLocksForSheet_ACU(sheetKey);
+            return {
+                rows: Array.from(lockState.rows || []),
+                cols: Array.from(lockState.cols || []),
+                cells: Array.from(lockState.cells || []),
+            };
+        } catch (e) {
+            logError_ACU('getTableLockState failed:', e);
+            return null;
+        }
+    },
+    setTableLockState: function(sheetKey, lockState = {}, { merge = false } = {}) {
+        try {
+            if (!sheetKey) return false;
+            const base = merge ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
+            const rows = Array.isArray(lockState.rows) ? lockState.rows : [];
+            const cols = Array.isArray(lockState.cols) ? lockState.cols : [];
+            const cells = Array.isArray(lockState.cells) ? lockState.cells : [];
+
+            rows.forEach(v => { if (Number.isFinite(v)) base.rows.add(v); });
+            cols.forEach(v => { if (Number.isFinite(v)) base.cols.add(v); });
+            cells.forEach(v => {
+                if (typeof v === 'string') base.cells.add(v);
+                else if (Array.isArray(v) && v.length >= 2 && Number.isFinite(v[0]) && Number.isFinite(v[1])) {
+                    base.cells.add(`${v[0]}:${v[1]}`);
+                }
+            });
+
+            saveTableLocksForSheet_ACU(sheetKey, base);
+            return true;
+        } catch (e) {
+            logError_ACU('setTableLockState failed:', e);
+            return false;
+        }
+    },
+    clearTableLocks: function(sheetKey) {
+        try {
+            if (!sheetKey) return false;
+            saveTableLocksForSheet_ACU(sheetKey, { rows: new Set(), cols: new Set(), cells: new Set() });
+            return true;
+        } catch (e) {
+            logError_ACU('clearTableLocks failed:', e);
+            return false;
+        }
+    },
+    lockTableRow: function(sheetKey, rowIndex, locked = true) {
+        try {
+            if (!sheetKey || !Number.isFinite(rowIndex)) return false;
+            const lockState = getTableLocksForSheet_ACU(sheetKey);
+            if (locked) lockState.rows.add(rowIndex);
+            else lockState.rows.delete(rowIndex);
+            saveTableLocksForSheet_ACU(sheetKey, lockState);
+            return true;
+        } catch (e) {
+            logError_ACU('lockTableRow failed:', e);
+            return false;
+        }
+    },
+    lockTableCol: function(sheetKey, colIndex, locked = true) {
+        try {
+            if (!sheetKey || !Number.isFinite(colIndex)) return false;
+            const lockState = getTableLocksForSheet_ACU(sheetKey);
+            if (locked) lockState.cols.add(colIndex);
+            else lockState.cols.delete(colIndex);
+            saveTableLocksForSheet_ACU(sheetKey, lockState);
+            return true;
+        } catch (e) {
+            logError_ACU('lockTableCol failed:', e);
+            return false;
+        }
+    },
+    lockTableCell: function(sheetKey, rowIndex, colIndex, locked = true) {
+        try {
+            if (!sheetKey || !Number.isFinite(rowIndex) || !Number.isFinite(colIndex)) return false;
+            const lockState = getTableLocksForSheet_ACU(sheetKey);
+            const key = `${rowIndex}:${colIndex}`;
+            if (locked) lockState.cells.add(key);
+            else lockState.cells.delete(key);
+            saveTableLocksForSheet_ACU(sheetKey, lockState);
+            return true;
+        } catch (e) {
+            logError_ACU('lockTableCell failed:', e);
+            return false;
+        }
+    },
+    toggleTableRowLock: function(sheetKey, rowIndex) {
+        try {
+            if (!sheetKey || !Number.isFinite(rowIndex)) return false;
+            toggleRowLock_ACU(sheetKey, rowIndex);
+            return true;
+        } catch (e) {
+            logError_ACU('toggleTableRowLock failed:', e);
+            return false;
+        }
+    },
+    toggleTableColLock: function(sheetKey, colIndex) {
+        try {
+            if (!sheetKey || !Number.isFinite(colIndex)) return false;
+            toggleColLock_ACU(sheetKey, colIndex);
+            return true;
+        } catch (e) {
+            logError_ACU('toggleTableColLock failed:', e);
+            return false;
+        }
+    },
+    toggleTableCellLock: function(sheetKey, rowIndex, colIndex) {
+        try {
+            if (!sheetKey || !Number.isFinite(rowIndex) || !Number.isFinite(colIndex)) return false;
+            toggleCellLock_ACU(sheetKey, rowIndex, colIndex);
+            return true;
+        } catch (e) {
+            logError_ACU('toggleTableCellLock failed:', e);
+            return false;
+        }
+    },
+    getSpecialIndexLockEnabled: function(sheetKey) {
+        try {
+            if (!sheetKey) return null;
+            return isSpecialIndexLockEnabled_ACU(sheetKey);
+        } catch (e) {
+            logError_ACU('getSpecialIndexLockEnabled failed:', e);
+            return null;
+        }
+    },
+    setSpecialIndexLockEnabled: function(sheetKey, enabled) {
+        try {
+            if (!sheetKey) return false;
+            setSpecialIndexLockEnabled_ACU(sheetKey, !!enabled);
+            return true;
+        } catch (e) {
+            logError_ACU('setSpecialIndexLockEnabled failed:', e);
+            return false;
+        }
+    },
     // 注册表格更新回调
     registerTableUpdateCallback: function(callback) {
         if (typeof callback === 'function' && !tableUpdateCallbacks_ACU.includes(callback)) {
@@ -4531,7 +4672,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
   function formatSummaryIndexCode_ACU(num) {
       const n = Math.max(1, parseInt(num, 10) || 1);
-      return `AM${String(n).padStart(2, '0')}`;
+      return `AM${String(n).padStart(4, '0')}`;
   }
 
   function applySummaryIndexSequenceToTable_ACU(table, colIndex) {
@@ -6767,7 +6908,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           removeTags: '',
           importSplitSize: 10000,
           skipUpdateFloors: 0, // 跳过更新楼层（全局）
-          retainRecentLayers: 0, // [新增] 保留最近N层本地数据 (0或空=全部保留)
+          retainRecentLayers: 100, // [新增] 保留最近N层本地数据 (0或空=全部保留)
           manualSelectedTables: [],
           // [新增] 表格更新锁定（按聊天+隔离标签存储；仅对 updateRow 生效）
           tableUpdateLocks: {},
@@ -10897,7 +11038,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     $menuItemContainer = jQuery_API_ACU(
       `<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`,
     );
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VX</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VXII</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
       e.stopPropagation();
@@ -13556,7 +13697,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     
     createACUWindow({
       id: windowId,
-      title: '神·数据库 VX',
+      title: '神·数据库 VXII',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度
@@ -17245,7 +17386,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
           // [修复] 自动合并总结：$BASE_DATA 的“固定基底”要取“最新的 auto_merged”。
           // 重要：auto_merged 行的 ID 列（row[0]）在部分路径下会是 null，导致基于 row[0]/autoMergedOrder 的排序失效，
-          // 从而可能误选到最早的 AM01。这里改为优先按“编码索引 AMxx”的数值大小排序，取最大者作为最新。
+          // 从而可能误选到最早的 AM0001。这里改为优先按“编码索引 AMxxxx”的数值大小排序，取最大者作为最新。
           // 若无法解析 AM 编码，则回退到存储顺序的末尾 N 条。
           const getExistingAutoMergedRows = (tableKey, tableObj, count = 1) => {
               if (!tableObj || !tableObj.content) return [];
@@ -17260,7 +17401,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                // 1) 优先按 AM 编码排序（更符合“最新合并总结”的语义）
                const parseAmNumber = (row) => {
                    if (!Array.isArray(row)) return null;
-                   // 常见：最后一列是 'auto_merged'，其前一列是 'AM01' / 'AM12' 等
+                   // 常见：最后一列是 'auto_merged'，其前一列是 'AM0001' / 'AM0012' 等
                    const candidates = row.slice(1).filter(v => typeof v === 'string');
                    for (let i = candidates.length - 1; i >= 0; i--) {
                        const m = candidates[i].trim().match(/^AM(\d+)\b/i);
@@ -20697,7 +20838,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                           <input type="checkbox" id="cfg-special-index-lock" ${specialIndexLocked ? 'checked' : ''}>
                           启用编码索引列特殊锁定
                       </label>
-                      <div class="acu-hint">锁定时该列由系统按 AM01、AM02... 自动生成，仅对AI更新生效。</div>
+                      <div class="acu-hint">锁定时该列由系统按 AM0001、AM0002... 自动生成，仅对AI更新生效。</div>
                       ${specialIndexCol >= 0
                           ? `<div class="acu-hint">当前识别列: [${specialIndexCol}] ${escapeHtml_ACU(String(specialIndexHeader || ''))}</div>`
                           : `<div class="acu-hint" style="color:#f6c177;">未识别到编码索引列，将默认使用最后一列。</div>`}

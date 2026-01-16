@@ -23,6 +23,7 @@ if (window.AutoCardUpdaterAPI) {
 - [设置与更新 API](#设置与更新-api)
 - [世界书操作 API](#世界书操作-api)
 - [TXT导入链路 API](#txt导入链路-api)
+- [表格锁定 API](#表格锁定-api)
 - [回调注册 API](#回调注册-api)
 
 ---
@@ -585,6 +586,119 @@ console.log(jsonString);
 立即执行合并总结操作。
 
 **返回值**: `Promise<boolean>`
+
+---
+
+## 表格锁定 API
+
+> 说明：表格锁定数据按“当前聊天 + 数据隔离标识”分槽存储，外部调用等价于 UI 锁定/解锁行为。
+
+### `getTableLockState(sheetKey)`
+
+获取指定表格的锁定状态。
+
+**参数**:
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| sheetKey | string | 是 | 表格 key（如 `sheet_xxx`） |
+
+**返回值**: `Object | null`
+
+**返回结构**:
+```javascript
+{ rows: number[], cols: number[], cells: string[] }
+```
+
+---
+
+### `setTableLockState(sheetKey, lockState, options)`
+
+设置指定表格的锁定状态。
+
+**参数**:
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| sheetKey | string | 是 | 表格 key |
+| lockState | Object | 是 | `{ rows, cols, cells }` |
+| options.merge | boolean | 否 | `true` 为追加到现有锁定（默认 `false` 覆盖） |
+
+**说明**:
+- `rows`/`cols` 为索引数组
+- `cells` 支持 `"row:col"` 或 `[row, col]`
+
+**返回值**: `boolean`
+
+---
+
+### `clearTableLocks(sheetKey)`
+
+清空指定表格的所有锁定。
+
+**返回值**: `boolean`
+
+---
+
+### `lockTableRow(sheetKey, rowIndex, locked)`
+
+锁定/解锁指定行。
+
+**返回值**: `boolean`
+
+---
+
+### `lockTableCol(sheetKey, colIndex, locked)`
+
+锁定/解锁指定列。
+
+**返回值**: `boolean`
+
+---
+
+### `lockTableCell(sheetKey, rowIndex, colIndex, locked)`
+
+锁定/解锁指定单元格。
+
+**返回值**: `boolean`
+
+---
+
+### `toggleTableRowLock(sheetKey, rowIndex)`
+
+切换指定行锁定状态。
+
+**返回值**: `boolean`
+
+---
+
+### `toggleTableColLock(sheetKey, colIndex)`
+
+切换指定列锁定状态。
+
+**返回值**: `boolean`
+
+---
+
+### `toggleTableCellLock(sheetKey, rowIndex, colIndex)`
+
+切换指定单元格锁定状态。
+
+**返回值**: `boolean`
+
+---
+
+### `getSpecialIndexLockEnabled(sheetKey)`
+
+获取“编码索引列特殊锁定”状态。
+
+**返回值**: `boolean | null`
+
+---
+
+### `setSpecialIndexLockEnabled(sheetKey, enabled)`
+
+设置“编码索引列特殊锁定”状态。
+
+**返回值**: `boolean`
 
 ---
 
