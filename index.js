@@ -2137,6 +2137,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     $updateBatchSizeInput_ACU, // [新增] 批处理大小输入
     $saveUpdateBatchSizeButton_ACU, // [新增] 批处理大小保存按钮
     $autoUpdateEnabledCheckbox_ACU, // 新增UI元素
+    $standardizedTableFillEnabledCheckbox_ACU, // [新增] 规范填表功能
     $toastMuteEnabledCheckbox_ACU, // [新增] 静默提示框
     $manualUpdateCardButton_ACU, // New manual update button
     $statusMessageSpan_ACU,
@@ -2183,6 +2184,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
       updateBatchSize: 3,
       autoUpdateEnabled: true,
+      standardizedTableFillEnabled: true, // [新增] 规范填表功能
       // [新增] UI提示框静默模式：勾选后，除白名单提示外，其余 toast 全部不显示
       toastMuteEnabled: false,
       // [剧情推进] 设置
@@ -2203,6 +2205,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       // [外部导入] 注入时自选表格（与手动填表一致的交互，但独立存储）
       importSelectedTables: [], // 外部导入注入时保留的表格key列表
       hasImportTableSelection: false, // 是否用户显式选择过（全选/全不选/自选）
+      // [新增] 表格更新锁定（按聊天+隔离标签存储；仅对 updateRow 生效）
+      tableUpdateLocks: {}, // { [chatScopeKey]: { [sheetKey]: { rows:[], cols:[], cells:[] } } }
+      // [新增] 总结表/总体大纲“编码索引列”特殊锁定（默认锁定）
+      specialIndexLocks: {}, // { [chatScopeKey]: { [sheetKey]: boolean } }
       
       // [新增] 外部导入专用的世界书配置
       importWorldbookTarget: '', // 导入数据注入目标世界书名称
@@ -4428,6 +4434,128 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       return !isSummaryOrOutlineTable_ACU(tableName);
   }
 
+  // =========================
+  // [新增] 表格更新锁定与总结索引锁定（按聊天+隔离标签存储）
+  // =========================
+  function getTableLockScopeKey_ACU() {
+      const chatKey = (currentChatFileIdentifier_ACU || 'default').trim() || 'default';
+      const isolationKey = getCurrentIsolationKey_ACU() || '';
+      return `${chatKey}::${isolationKey}`;
+  }
+
+  function ensureTableLockStore_ACU() {
+      if (!settings_ACU.tableUpdateLocks || typeof settings_ACU.tableUpdateLocks !== 'object') {
+          settings_ACU.tableUpdateLocks = {};
+      }
+      if (!settings_ACU.specialIndexLocks || typeof settings_ACU.specialIndexLocks !== 'object') {
+          settings_ACU.specialIndexLocks = {};
+      }
+  }
+
+  function getTableLocksForSheet_ACU(sheetKey) {
+      const scopeKey = getTableLockScopeKey_ACU();
+      const bucket = settings_ACU?.tableUpdateLocks?.[scopeKey]?.[sheetKey] || {};
+      return {
+          rows: new Set(Array.isArray(bucket.rows) ? bucket.rows : []),
+          cols: new Set(Array.isArray(bucket.cols) ? bucket.cols : []),
+          cells: new Set(Array.isArray(bucket.cells) ? bucket.cells : []),
+      };
+  }
+
+  function saveTableLocksForSheet_ACU(sheetKey, lockState) {
+      if (!sheetKey) return;
+      ensureTableLockStore_ACU();
+      const scopeKey = getTableLockScopeKey_ACU();
+      if (!settings_ACU.tableUpdateLocks[scopeKey]) settings_ACU.tableUpdateLocks[scopeKey] = {};
+      settings_ACU.tableUpdateLocks[scopeKey][sheetKey] = {
+          rows: Array.from(lockState.rows || []),
+          cols: Array.from(lockState.cols || []),
+          cells: Array.from(lockState.cells || []),
+      };
+      saveSettings_ACU();
+  }
+
+  function toggleRowLock_ACU(sheetKey, rowIndex) {
+      const lockState = getTableLocksForSheet_ACU(sheetKey);
+      if (lockState.rows.has(rowIndex)) lockState.rows.delete(rowIndex);
+      else lockState.rows.add(rowIndex);
+      saveTableLocksForSheet_ACU(sheetKey, lockState);
+  }
+
+  function toggleColLock_ACU(sheetKey, colIndex) {
+      const lockState = getTableLocksForSheet_ACU(sheetKey);
+      if (lockState.cols.has(colIndex)) lockState.cols.delete(colIndex);
+      else lockState.cols.add(colIndex);
+      saveTableLocksForSheet_ACU(sheetKey, lockState);
+  }
+
+  function toggleCellLock_ACU(sheetKey, rowIndex, colIndex) {
+      const lockState = getTableLocksForSheet_ACU(sheetKey);
+      const key = `${rowIndex}:${colIndex}`;
+      if (lockState.cells.has(key)) lockState.cells.delete(key);
+      else lockState.cells.add(key);
+      saveTableLocksForSheet_ACU(sheetKey, lockState);
+  }
+
+  function isSpecialIndexLockEnabled_ACU(sheetKey) {
+      const scopeKey = getTableLockScopeKey_ACU();
+      const bucket = settings_ACU?.specialIndexLocks?.[scopeKey] || {};
+      if (typeof bucket[sheetKey] === 'boolean') return bucket[sheetKey];
+      return true; // 默认锁定
+  }
+
+  function setSpecialIndexLockEnabled_ACU(sheetKey, enabled) {
+      if (!sheetKey) return;
+      ensureTableLockStore_ACU();
+      const scopeKey = getTableLockScopeKey_ACU();
+      if (!settings_ACU.specialIndexLocks[scopeKey]) settings_ACU.specialIndexLocks[scopeKey] = {};
+      settings_ACU.specialIndexLocks[scopeKey][sheetKey] = !!enabled;
+      saveSettings_ACU();
+  }
+
+  function getSummaryIndexColumnIndex_ACU(table) {
+      try {
+          if (!table || !Array.isArray(table.content) || !Array.isArray(table.content[0])) return -1;
+          const headers = table.content[0].slice(1);
+          if (!headers.length) return -1;
+          let idx = headers.findIndex(h => {
+              if (typeof h !== 'string') return false;
+              return /编码|索引/.test(h);
+          });
+          if (idx === -1) idx = headers.length - 1;
+          return idx;
+      } catch (e) {
+          return -1;
+      }
+  }
+
+  function formatSummaryIndexCode_ACU(num) {
+      const n = Math.max(1, parseInt(num, 10) || 1);
+      return `AM${String(n).padStart(2, '0')}`;
+  }
+
+  function applySummaryIndexSequenceToTable_ACU(table, colIndex) {
+      if (!table || !Array.isArray(table.content) || colIndex < 0) return;
+      for (let i = 1; i < table.content.length; i++) {
+          const row = table.content[i];
+          if (!Array.isArray(row)) continue;
+          row[colIndex + 1] = formatSummaryIndexCode_ACU(i);
+      }
+  }
+
+  function applySpecialIndexSequenceToSummaryTables_ACU(dataObj) {
+      if (!dataObj || typeof dataObj !== 'object') return;
+      Object.keys(dataObj).forEach(sheetKey => {
+          if (!sheetKey.startsWith('sheet_')) return;
+          const table = dataObj[sheetKey];
+          if (!table || !isSummaryOrOutlineTable_ACU(table.name)) return;
+          if (!isSpecialIndexLockEnabled_ACU(sheetKey)) return;
+          const colIndex = getSummaryIndexColumnIndex_ACU(table);
+          if (colIndex < 0) return;
+          applySummaryIndexSequenceToTable_ACU(table, colIndex);
+      });
+  }
+
   // [重构] 辅助函数：全表数据合并 (从独立存储中恢复完整状态)
   // [数据隔离核心] 严格按照当前隔离标签读取数据，无标签也是标签的一种
   async function mergeAllIndependentTables_ACU() {
@@ -6628,6 +6756,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
           updateBatchSize: 3,
           autoUpdateEnabled: true,
+          standardizedTableFillEnabled: true, // [新增] 规范填表功能
           toastMuteEnabled: false,
           // [剧情推进] 设置
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
@@ -6640,6 +6769,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           skipUpdateFloors: 0, // 跳过更新楼层（全局）
           retainRecentLayers: 0, // [新增] 保留最近N层本地数据 (0或空=全部保留)
           manualSelectedTables: [],
+          // [新增] 表格更新锁定（按聊天+隔离标签存储；仅对 updateRow 生效）
+          tableUpdateLocks: {},
+          // [新增] 总结表/总体大纲“编码索引列”特殊锁定（默认锁定）
+          specialIndexLocks: {},
           // [Profile] dataIsolationEnabled/code 由当前 profile 决定；history 走 globalMeta
           dataIsolationCode: '',
           dataIsolationHistory: [], // legacy 字段保留但不再持久化
@@ -6840,6 +6973,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           const $importSplitSizeInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-split-size`);
           if ($importSplitSizeInput.length) $importSplitSizeInput.val(settings_ACU.importSplitSize);
           if ($autoUpdateEnabledCheckbox_ACU) $autoUpdateEnabledCheckbox_ACU.prop('checked', settings_ACU.autoUpdateEnabled);
+          if ($standardizedTableFillEnabledCheckbox_ACU) $standardizedTableFillEnabledCheckbox_ACU.prop('checked', settings_ACU.standardizedTableFillEnabled !== false);
           if ($toastMuteEnabledCheckbox_ACU) $toastMuteEnabledCheckbox_ACU.prop('checked', !!settings_ACU.toastMuteEnabled);
 
           // [新增] 更新所有合并相关设置
@@ -10763,7 +10897,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     $menuItemContainer = jQuery_API_ACU(
       `<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`,
     );
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VX</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VXII</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
       e.stopPropagation();
@@ -12714,6 +12848,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">启用自动更新</label>
                                 </div>
                                 <div class="checkbox-group">
+                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox">规范填表功能（总结表与总体大纲必须同步新增）</label>
+                                </div>
+                                <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox">静默提示框（除填表/规划/导入/报错外，其它提示不弹窗）</label>
                                 </div>
@@ -13418,7 +13556,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     
     createACUWindow({
       id: windowId,
-      title: '神·数据库 VX',
+      title: '神·数据库 VXII',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度
@@ -13478,6 +13616,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       $retainRecentLayersInput_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-retain-recent-layers`);
       $saveRetainRecentLayersButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-save-retain-recent-layers`);
       $autoUpdateEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox`); // 获取复选框
+      $standardizedTableFillEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox`);
       $toastMuteEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox`);
       $manualExtraHintCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox`);
       $manualUpdateCardButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-update-card`);
@@ -14166,6 +14305,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           saveSettings_ACU();
           logDebug_ACU('数据库自动更新启用状态已保存:', settings_ACU.autoUpdateEnabled);
           showToastr_ACU('info', `数据库自动更新已 ${settings_ACU.autoUpdateEnabled ? '启用' : '禁用'}`);
+        });
+      }
+      if ($standardizedTableFillEnabledCheckbox_ACU && $standardizedTableFillEnabledCheckbox_ACU.length) {
+        $standardizedTableFillEnabledCheckbox_ACU.on('change', function () {
+          settings_ACU.standardizedTableFillEnabled = jQuery_API_ACU(this).is(':checked');
+          saveSettings_ACU();
+          logDebug_ACU('规范填表功能启用状态已保存:', settings_ACU.standardizedTableFillEnabled);
+          showToastr_ACU('info', `规范填表功能已 ${settings_ACU.standardizedTableFillEnabled ? '开启' : '关闭'}`, {
+            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+          });
         });
       }
       if ($toastMuteEnabledCheckbox_ACU && $toastMuteEnabledCheckbox_ACU.length) {
@@ -16391,6 +16540,76 @@ async function callCustomOpenAI_ACU(dynamicContent) {
     const sheetKeysForIndexing = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
     const sheets = sheetKeysForIndexing.map(k => currentJsonTableData_ACU[k]).filter(Boolean);
 
+    // [新增] 统一解析指令（供预检查与正式应用复用）
+    const parseTableEditCommandLine_ACU = (rawLine) => {
+        try {
+            let commandLineWithoutComment = rawLine;
+            if (commandLineWithoutComment.match(/\)\s*;?\s*\/\/.*$/)) {
+                commandLineWithoutComment = commandLineWithoutComment.replace(/\/\/.*$/, '').trim();
+            }
+            if (!commandLineWithoutComment) return null;
+            const match = commandLineWithoutComment.match(/^(insertRow|deleteRow|updateRow)\s*\((.*)\);?$/);
+            if (!match) return null;
+            const command = match[1];
+            const argsString = match[2];
+            let args;
+            const firstBracket = argsString.indexOf('{');
+            if (firstBracket === -1) {
+                args = JSON.parse(`[${argsString}]`);
+            } else {
+                const paramsPart = argsString.substring(0, firstBracket).trim();
+                let jsonPart = argsString.substring(firstBracket);
+                const initialArgs = JSON.parse(`[${paramsPart.replace(/,$/, '')}]`);
+                try {
+                    const jsonData = JSON.parse(jsonPart);
+                    args = [...initialArgs, jsonData];
+                } catch (jsonError) {
+                    logError_ACU(`Primary JSON parse failed for: "${jsonPart}". Attempting sanitization...`, jsonError);
+                    let sanitizedJson = jsonPart;
+                    sanitizedJson = sanitizedJson.replace(/,\s*([}\]])/g, '$1');
+                    sanitizedJson = sanitizedJson.replace(/,\s*("[^"]*"\s*)}/g, '}');
+                    sanitizedJson = sanitizedJson.replace(/(:\s*)"((?:\\.|[^"\\])*)"/g, (match, prefix, content) => {
+                        return `${prefix}"${content.replace(/(?<!\\)"/g, '\\"')}"`;
+                    });
+                    sanitizedJson = sanitizedJson.replace(/([,{]\s*)"(\d+):"\s*"/g, '$1"$2":"');
+                    const jsonData = JSON.parse(sanitizedJson);
+                    args = [...initialArgs, jsonData];
+                }
+            }
+            return { command, args, line: commandLineWithoutComment };
+        } catch (e) {
+            logError_ACU(`Failed to parse command line: "${rawLine}"`, e);
+            return null;
+        }
+    };
+
+    // [新增] 总结表/总体大纲必须“同时新增一行”才允许写入
+    let summaryInsertCount = 0;
+    let outlineInsertCount = 0;
+    const standardizedFillEnabled = settings_ACU?.standardizedTableFillEnabled !== false;
+    if (standardizedFillEnabled) {
+        finalCommandLines.forEach(line => {
+            try {
+                const parsed = parseTableEditCommandLine_ACU(line);
+                if (!parsed || parsed.command !== 'insertRow') return;
+                const tableIndex = parsed.args?.[0];
+                const table = sheets[tableIndex];
+                if (!table || !table.name) return;
+                if (!isSummaryOrOutlineTable_ACU(table.name)) return;
+                if (table.name === '总结表') summaryInsertCount++;
+                if (table.name === '总体大纲') outlineInsertCount++;
+            } catch (e) {
+                // 解析失败的不计入，避免“半条成功半条失败”导致误放行
+            }
+        });
+    }
+    const allowSummaryOutlineInsert = !standardizedFillEnabled ||
+        (summaryInsertCount === 1 && outlineInsertCount === 1) ||
+        (summaryInsertCount === 0 && outlineInsertCount === 0);
+    if (standardizedFillEnabled && !allowSummaryOutlineInsert && (summaryInsertCount > 0 || outlineInsertCount > 0)) {
+        logWarn_ACU(`[屏蔽] 总结表/总体大纲新增不同步：总结=${summaryInsertCount}, 大纲=${outlineInsertCount}，本轮两表均不写入。`);
+    }
+
     // 如果某表 content 为空，但指导表/模板提供了 seedRows，则在真正应用编辑前先物化到 content，
     // 避免 AI 基于 $0 中的 seed rows 进行 updateRow/deleteRow 时“找不到行”。
     const materializeSeedRowsIfNeeded_ACU = (table) => {
@@ -16418,82 +16637,14 @@ async function callCustomOpenAI_ACU(dynamicContent) {
     // 不，这里是应用编辑。我们只记录本次编辑的数量。
     
     finalCommandLines.forEach(line => {
-        // [稳健性强化] 移除行尾的注释
-        // 注意：在重组阶段已经处理了一部分，这里再做一次清理以防万一，但要小心不破坏JSON
-        let commandLineWithoutComment = line;
-        // 只有当 // 后面没有 " 或 ' 时才安全移除，或者简单地假设重组阶段已处理好
-        // 为安全起见，只移除行尾的注释，且不在引号内
-        // 简单的正则很难完美匹配，这里沿用之前的简单逻辑，但仅当行尾确实像是注释时
-        if (commandLineWithoutComment.match(/\)\s*;?\s*\/\/.*$/)) {
-             commandLineWithoutComment = commandLineWithoutComment.replace(/\/\/.*$/, '').trim();
+        const parsed = parseTableEditCommandLine_ACU(line);
+        if (!parsed) {
+            logWarn_ACU(`Skipping malformed or truncated command line: "${line}"`);
+            return;
         }
+        const { command, args } = parsed;
 
-        if (!commandLineWithoutComment) {
-            return; // 跳过空行
-        }
-
-        // 恢复使用正则表达式来解析指令，这对于复杂参数更稳健
-        const match = commandLineWithoutComment.match(/^(insertRow|deleteRow|updateRow)\s*\((.*)\);?$/);
-        if (!match) {
-            logWarn_ACU(`Skipping malformed or truncated command line: "${commandLineWithoutComment}"`);
-            return; // continue to next line
-        }
-
-        const command = match[1];
-        const argsString = match[2];
-        
         try {
-            // [核心修复] 更稳健的参数分割和JSON解析
-            const firstBracket = argsString.indexOf('{');
-            let args;
-
-            if (firstBracket === -1) {
-                // 没有JSON对象，是简单的deleteRow指令
-                args = JSON.parse(`[${argsString}]`);
-            } else {
-                // 包含JSON对象的指令 (insertRow, updateRow)
-                const paramsPart = argsString.substring(0, firstBracket).trim();
-                let jsonPart = argsString.substring(firstBracket);
-
-                // 解析前面的参数（tableIndex, rowIndex等），移除尾部逗号
-                const initialArgs = JSON.parse(`[${paramsPart.replace(/,$/, '')}]`);
-                
-                // 对JSON部分进行单独、安全的解析
-                try {
-                    const jsonData = JSON.parse(jsonPart);
-                    args = [...initialArgs, jsonData];
-                } catch (jsonError) {
-                    logError_ACU(`Primary JSON parse failed for: "${jsonPart}". Attempting sanitization...`, jsonError);
-                    let sanitizedJson = jsonPart;
-
-                    // Sanitize for multiple common JSON errors from LLMs
-                    // 1. Remove trailing commas (e.g., [1, 2,])
-                    sanitizedJson = sanitizedJson.replace(/,\s*([}\]])/g, '$1');
-
-                    // 2. Fix dangling keys without values (e.g., {"key": "value", "danglingKey"}) by removing them
-                    sanitizedJson = sanitizedJson.replace(/,\s*("[^"]*"\s*)}/g, '}');
-
-                    // 3. Fix unescaped double quotes inside string values
-                    sanitizedJson = sanitizedJson.replace(/(:\s*)"((?:\\.|[^"\\])*)"/g, (match, prefix, content) => {
-                        return `${prefix}"${content.replace(/(?<!\\)"/g, '\\"')}"`;
-                    });
-
-                    // 4. Fix malformed keys like "7:"value" -> "7":"value"
-                    // Pattern: "Key:" followed by " (start of value) or value
-                    sanitizedJson = sanitizedJson.replace(/([,{]\s*)"(\d+):"\s*"/g, '$1"$2":"');
-
-                    try {
-                        const jsonData = JSON.parse(sanitizedJson);
-                        args = [...initialArgs, jsonData];
-                        logDebug_ACU(`Successfully parsed JSON after sanitization: "${sanitizedJson}"`);
-                    } catch (finalError) {
-                        logError_ACU(`Sanitization failed. Could not parse: "${sanitizedJson}"`, finalError);
-                        throw jsonError; // Re-throw original error if sanitization fails
-                    }
-                }
-            }
-
-
             switch (command) {
                 case 'insertRow': {
                     const [tableIndex, data] = args;
@@ -16503,6 +16654,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         break;
                     }
                     materializeSeedRowsIfNeeded_ACU(table);
+                    const sheetKey = sheetKeysForIndexing[tableIndex];
                     // [新增] 根据更新模式和表格名称屏蔽不相关的表格操作
                     // [修复] 统一更新模式（'full'）允许所有操作，不阻止任何表
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
@@ -16528,13 +16680,28 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         }
                         // 自动模式下不再屏蔽
                     }
+                    // [新增] 总结表/总体大纲必须“同时新增一行”
+                    if (isSummaryTable && !allowSummaryOutlineInsert) {
+                        logDebug_ACU(`[屏蔽] 总结表/总体大纲新增不同步：忽略 insertRow (tableIndex: ${tableIndex}, tableName: ${table.name})`);
+                        break;
+                    }
                     if (table && table.content && typeof data === 'object') {
                         const newRow = [null];
                         const headers = table.content[0].slice(1);
+                        const specialIndexCol = (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey))
+                            ? getSummaryIndexColumnIndex_ACU(table)
+                            : -1;
                         headers.forEach((_, colIndex) => {
-                            newRow.push(data[colIndex] || (data[String(colIndex)] || ""));
+                            let nextVal = data[colIndex] || (data[String(colIndex)] || "");
+                            if (colIndex === specialIndexCol) {
+                                nextVal = formatSummaryIndexCode_ACU(table.content.length);
+                            }
+                            newRow.push(nextVal);
                         });
                         table.content.push(newRow);
+                        if (isSummaryTable && specialIndexCol >= 0) {
+                            applySummaryIndexSequenceToTable_ACU(table, specialIndexCol);
+                        }
                         logDebug_ACU(`Applied insertRow to table ${tableIndex} (${table.name}) with data:`, data);
                         appliedEdits++;
                         editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
@@ -16598,6 +16765,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         break;
                     }
                     materializeSeedRowsIfNeeded_ACU(table);
+                    const sheetKey = sheetKeysForIndexing[tableIndex];
                     // [新增] 根据更新模式和表格名称屏蔽不相关的表格操作
                     // [修复] 统一更新模式（'full'）允许所有操作，不阻止任何表
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
@@ -16631,12 +16799,24 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                         // 自动模式下不再屏蔽
                     }
                     if (table && table.content && table.content.length > rowIndex + 1 && typeof data === 'object') {
+                        const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
+                        if (lockState.rows.has(rowIndex)) {
+                            logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${rowIndex})`);
+                            break;
+                        }
                         Object.keys(data).forEach(colIndexStr => {
                             const colIndex = parseInt(colIndexStr, 10);
-                            if (!isNaN(colIndex) && table.content[rowIndex + 1].length > colIndex + 1) {
+                            if (isNaN(colIndex)) return;
+                            if (lockState.cols.has(colIndex)) return;
+                            if (lockState.cells.has(`${rowIndex}:${colIndex}`)) return;
+                            if (table.content[rowIndex + 1].length > colIndex + 1) {
                                 table.content[rowIndex + 1][colIndex + 1] = data[colIndexStr];
                             }
                         });
+                        if (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey)) {
+                            const specialIndexCol = getSummaryIndexColumnIndex_ACU(table);
+                            if (specialIndexCol >= 0) applySummaryIndexSequenceToTable_ACU(table, specialIndexCol);
+                        }
                         logDebug_ACU(`Applied updateRow to table ${tableIndex} (${table.name}) at index ${rowIndex} with data:`, data);
                         appliedEdits++;
                         editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
@@ -17544,7 +17724,10 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                     // [合并更新逻辑] 传递 targetSheetKeys 作为合并更新组
                     // 只要组内有任意一个表被修改，整组表都视为已更新
                     // 首次初始化时，updateGroupKeys 使用实际被修改的表
-                    const updateGroupKeysToUse = isFirstTimeInit ? keysToPersist : targetSheetKeys;
+                    const updateGroupKeysRaw = isFirstTimeInit ? keysToPersist : targetSheetKeys;
+                    const updateGroupKeysToUse = Array.isArray(updateGroupKeysRaw)
+                        ? updateGroupKeysRaw.filter(k => keysToActuallySave.includes(k))
+                        : updateGroupKeysRaw;
                     const saveSuccess = await saveIndependentTableToChatHistory_ACU(saveTargetIndex, keysToActuallySave, updateGroupKeysToUse);
                     if (!saveSuccess) throw new Error('无法将更新后的数据库保存到聊天记录。');
                 } else {
@@ -19255,6 +19438,37 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
     /* ═══ 列编辑器 ═══ */
     .acu-col-list { display: flex; flex-direction: column; gap: 6px; }
+
+    /* ═══ 表格锁定（仅 updateRow 生效） ═══ */
+    .acu-lock-btn {
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--vis-paper-white);
+        border-radius: 8px;
+        padding: 2px 6px;
+        font-size: 11px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+    }
+    .acu-lock-btn.active {
+        border-color: rgba(255, 180, 0, 0.55);
+        background: rgba(255, 180, 0, 0.16);
+        color: #ffd36a;
+    }
+    .acu-lock-btn.special {
+        border-color: rgba(123, 183, 255, 0.6);
+        background: rgba(123, 183, 255, 0.15);
+        color: #a6ccff;
+    }
+    .acu-field-value-wrap { display: flex; align-items: center; gap: 6px; }
+    .acu-field-value { flex: 1; min-width: 0; }
+    .acu-field-row.acu-locked-field .acu-field-value {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: rgba(255, 180, 0, 0.35);
+        opacity: 0.85;
+    }
     
     .acu-col-item { 
         display: flex; 
@@ -20308,7 +20522,13 @@ async function callCustomOpenAI_ACU(dynamicContent) {
   function renderVisualizerDataMode_ACU($container, sheet) {
       // Headers
       const headers = sheet.content[0] || [];
+      const dataHeaders = headers.slice(1);
       const rows = sheet.content.slice(1);
+      const sheetKey = _acuVisState.currentSheetKey;
+      const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
+      const isSummaryTable = isSummaryOrOutlineTable_ACU(sheet.name);
+      const specialIndexCol = (isSummaryTable ? getSummaryIndexColumnIndex_ACU(sheet) : -1);
+      const specialIndexLocked = (isSummaryTable && sheetKey) ? isSpecialIndexLockEnabled_ACU(sheetKey) : false;
       
       let html = `<div class="acu-card-grid">`;
       
@@ -20321,21 +20541,49 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       `;
 
       rows.forEach((row, rIdx) => {
+          const rowLocked = lockState.rows.has(rIdx);
           html += `<div class="acu-data-card">
                       <div class="acu-card-header">
                           <span>#${rIdx + 1}</span>
-                          <button class="acu-vis-del-row" data-idx="${rIdx}" style="background:none; border:none; color:#e95e5e; cursor:pointer;"><i class="fa-solid fa-trash"></i></button>
+                          <div style="display:flex; align-items:center; gap:8px;">
+                              <button class="acu-lock-btn acu-vis-lock-row ${rowLocked ? 'active' : ''}" data-idx="${rIdx}" title="锁定行（仅update）">
+                                  <i class="fa-solid ${rowLocked ? 'fa-lock' : 'fa-unlock'}"></i>
+                              </button>
+                              <button class="acu-vis-del-row" data-idx="${rIdx}" style="background:none; border:none; color:#e95e5e; cursor:pointer;"><i class="fa-solid fa-trash"></i></button>
+                          </div>
                       </div>
                       <div class="acu-card-body">`;
           
           // Render fields (Skip index 0 usually internal ID or null)
-          headers.forEach((header, cIdx) => {
-              if (cIdx === 0) return; // Skip hidden ID column if desired, or show it. Usually null.
-              const val = row[cIdx] || '';
+          dataHeaders.forEach((header, colIdx) => {
+              const val = row[colIdx + 1] || '';
+              const colLocked = lockState.cols.has(colIdx);
+              const cellLocked = lockState.cells.has(`${rIdx}:${colIdx}`);
+              const isSpecialIndex = (isSummaryTable && colIdx === specialIndexCol);
+              const lockedClass = (rowLocked || colLocked || cellLocked || (isSpecialIndex && specialIndexLocked)) ? 'acu-locked-field' : '';
+              const colLockButton = isSpecialIndex
+                  ? `<button class="acu-lock-btn special acu-vis-lock-special ${specialIndexLocked ? 'active' : ''}" data-col="${colIdx}" title="编码索引列特殊锁定">
+                         <i class="fa-solid ${specialIndexLocked ? 'fa-lock' : 'fa-unlock'}"></i>
+                         <span>特锁</span>
+                     </button>`
+                  : `<button class="acu-lock-btn acu-vis-lock-col ${colLocked ? 'active' : ''}" data-col="${colIdx}" title="锁定列（仅update）">
+                         <i class="fa-solid ${colLocked ? 'fa-lock' : 'fa-unlock'}"></i>
+                     </button>`;
+              const cellLockButton = isSpecialIndex
+                  ? ''
+                  : `<button class="acu-lock-btn acu-vis-lock-cell ${cellLocked ? 'active' : ''}" data-row="${rIdx}" data-col="${colIdx}" title="锁定单元格（仅update）">
+                         <i class="fa-solid ${cellLocked ? 'fa-lock' : 'fa-unlock'}"></i>
+                     </button>`;
               html += `
-                  <div class="acu-field-row">
-                      <div class="acu-field-label">${escapeHtml_ACU(header)}</div>
-                      <div class="acu-field-value" contenteditable="true" data-row="${rIdx}" data-col="${cIdx}">${escapeHtml_ACU(String(val))}</div>
+                  <div class="acu-field-row ${lockedClass}">
+                      <div class="acu-field-label" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                          <span>${escapeHtml_ACU(header)}</span>
+                          ${colLockButton}
+                      </div>
+                      <div class="acu-field-value-wrap">
+                          <div class="acu-field-value" contenteditable="true" data-row="${rIdx}" data-col="${colIdx}">${escapeHtml_ACU(String(val))}</div>
+                          ${cellLockButton}
+                      </div>
                   </div>
               `;
           });
@@ -20354,7 +20602,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           
           // Update temp data (rIdx + 1 because row 0 is header)
           if (sheet.content[rIdx + 1]) {
-              sheet.content[rIdx + 1][cIdx] = val;
+              sheet.content[rIdx + 1][cIdx + 1] = val;
           }
       });
       
@@ -20362,6 +20610,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           const newRow = new Array(headers.length).fill('');
           newRow[0] = null; // convention
           sheet.content.push(newRow);
+          if (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey)) {
+              applySpecialIndexSequenceToSummaryTables_ACU(_acuVisState.tempData);
+          }
           renderVisualizerDataMode_ACU($container, sheet);
       });
       
@@ -20369,8 +20620,55 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           const rIdx = parseInt(jQuery_API_ACU(this).data('idx'));
           if (confirm('确定删除此行吗？')) {
               sheet.content.splice(rIdx + 1, 1);
+              if (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey)) {
+                  applySpecialIndexSequenceToSummaryTables_ACU(_acuVisState.tempData);
+              }
               renderVisualizerDataMode_ACU($container, sheet);
           }
+      });
+
+      // 行锁定
+      $container.find('.acu-vis-lock-row').on('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          const rIdx = parseInt(jQuery_API_ACU(this).data('idx'));
+          if (!sheetKey || Number.isNaN(rIdx)) return;
+          toggleRowLock_ACU(sheetKey, rIdx);
+          renderVisualizerDataMode_ACU($container, sheet);
+      });
+
+      // 列锁定
+      $container.find('.acu-vis-lock-col').on('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          const cIdx = parseInt(jQuery_API_ACU(this).data('col'));
+          if (!sheetKey || Number.isNaN(cIdx)) return;
+          toggleColLock_ACU(sheetKey, cIdx);
+          renderVisualizerDataMode_ACU($container, sheet);
+      });
+
+      // 单元格锁定
+      $container.find('.acu-vis-lock-cell').on('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          const rIdx = parseInt(jQuery_API_ACU(this).data('row'));
+          const cIdx = parseInt(jQuery_API_ACU(this).data('col'));
+          if (!sheetKey || Number.isNaN(rIdx) || Number.isNaN(cIdx)) return;
+          toggleCellLock_ACU(sheetKey, rIdx, cIdx);
+          renderVisualizerDataMode_ACU($container, sheet);
+      });
+
+      // 编码索引列特殊锁定
+      $container.find('.acu-vis-lock-special').on('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!sheetKey) return;
+          const next = !isSpecialIndexLockEnabled_ACU(sheetKey);
+          setSpecialIndexLockEnabled_ACU(sheetKey, next);
+          if (next) {
+              applySpecialIndexSequenceToSummaryTables_ACU(_acuVisState.tempData);
+          }
+          renderVisualizerDataMode_ACU($container, sheet);
       });
   }
 
@@ -20379,6 +20677,28 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       const updateConfig = sheet.updateConfig || {};
       const sourceData = sheet.sourceData || {};
       const ucVal = (v) => (Number.isFinite(v) ? v : -1);
+      const isSummaryTable = isSummaryOrOutlineTable_ACU(sheet.name);
+      const sheetKey = _acuVisState.currentSheetKey;
+      const specialIndexCol = isSummaryTable ? getSummaryIndexColumnIndex_ACU(sheet) : -1;
+      const specialIndexHeader = (specialIndexCol >= 0 && Array.isArray(sheet.content?.[0]))
+          ? sheet.content[0][specialIndexCol + 1]
+          : '';
+      const specialIndexLocked = (isSummaryTable && sheetKey) ? isSpecialIndexLockEnabled_ACU(sheetKey) : false;
+      const specialLockHtml = isSummaryTable ? `
+              <div class="acu-config-section">
+                  <h4>编码索引列锁定</h4>
+                  <div class="acu-form-group">
+                      <label>
+                          <input type="checkbox" id="cfg-special-index-lock" ${specialIndexLocked ? 'checked' : ''}>
+                          启用编码索引列特殊锁定
+                      </label>
+                      <div class="acu-hint">锁定时该列由系统按 AM01、AM02... 自动生成，仅对AI更新生效。</div>
+                      ${specialIndexCol >= 0
+                          ? `<div class="acu-hint">当前识别列: [${specialIndexCol}] ${escapeHtml_ACU(String(specialIndexHeader || ''))}</div>`
+                          : `<div class="acu-hint" style="color:#f6c177;">未识别到编码索引列，将默认使用最后一列。</div>`}
+                  </div>
+              </div>
+      ` : '';
       
       const html = `
           <div class="acu-config-panel">
@@ -20395,6 +20715,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                   <div class="acu-col-list" id="cfg-col-list"></div>
                   <button id="cfg-add-col" class="acu-btn-secondary" style="margin-top:10px; width:100%;"><i class="fa-solid fa-plus"></i> 添加列</button>
               </div>
+              ${specialLockHtml}
 
               <div class="acu-config-section">
                   <h4>自动化更新参数</h4>
@@ -20561,6 +20882,16 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       
       // Inputs bindings
       jQuery_API_ACU('#cfg-name').on('input', function() { sheet.name = jQuery_API_ACU(this).val(); });
+      if (isSummaryTable && sheetKey) {
+          jQuery_API_ACU('#cfg-special-index-lock').on('change', function() {
+              const enabled = jQuery_API_ACU(this).is(':checked');
+              setSpecialIndexLockEnabled_ACU(sheetKey, enabled);
+              if (enabled) {
+                  applySpecialIndexSequenceToSummaryTables_ACU(_acuVisState.tempData);
+              }
+              renderVisualizerMain_ACU();
+          });
+      }
       const parseIntOrDefault_ACU = (val, defVal) => {
           const n = parseInt(val, 10);
           return Number.isFinite(n) ? n : defVal;
@@ -20649,6 +20980,9 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
       // [新机制] 保存前统一重编号：编号随当前顺序变化，并写入当前数据（可随导出/导入迁移）
       applySheetOrderNumbers_ACU(orderedData, orderedKeys);
+      
+      // [新增] 若开启“编码索引列特殊锁定”，保存时强制按 AM 序列重排
+      applySpecialIndexSequenceToSummaryTables_ACU(orderedData);
       
       // First, apply changes to local variable (使用排序后的数据)
       currentJsonTableData_ACU = JSON.parse(JSON.stringify(orderedData));
