@@ -1783,7 +1783,7 @@
       "id": "mainPrompt",
       "name": "主系统提示词",
       "role": "system",
-      "content": "以下是你可能会用到的背景设定，你只需要参考其中的剧情设定内容即可，其他无关内容请直接忽视：\n<背景设定>\n<User基础设定>\n$U\n</User基础设定>\n$C\n$1\n</背景设定>\n\n============================此处为分割线====================\n你是一个负责进行大纲索引检索的AI，你需要对接下来的剧情进行思考，接下来的剧情需要用<总结大纲>部分的哪些记忆用来补充细节，找到它们对应的编码索引并进行输出。\n\n以下是供你参考的前文故事情节（AI上下文 + 前几轮用户输入，不含本轮）：\n<前文上下文>\n$7\n</前文上下文>\n\n以下是<总结大纲>的具体内容（如果为空说明暂未有剧情大纲编码索引）：\n<总结大纲>\n$5\n</总结大纲>",
+      "content": "以下是你可能会用到的背景设定，你只需要参考其中的剧情设定内容即可，其他无关内容请直接忽视：\n<背景设定>\n<User基础设定>\n$U\n</User基础设定>\n$C\n$1\n</背景设定>\n\n============================此处为分割线====================\n你是一个负责进行大纲索引检索的AI，你需要对接下来的剧情进行思考，接下来的剧情需要用<总结大纲>部分的哪些记忆用来补充细节，找到它们对应的编码索引并进行输出。\n\n以下是供你参考的前文故事情节（仅包含历史AI输出，不含任何用户输入）：\n<前文上下文>\n$7\n</前文上下文>\n\n以下是<总结大纲>的具体内容（如果为空说明暂未有剧情大纲编码索引）：\n<总结大纲>\n$5\n</总结大纲>",
       "deletable": false
     },
     {
@@ -1818,7 +1818,8 @@
     // [新字段] 剧情推进世界书选择（与填表世界书选择完全隔离）
     plotWorldbookConfig: buildDefaultPlotWorldbookConfig_ACU(),
     loopSettings: {
-      quickReplyContent: '',
+      quickReplyContent: [], // 改为数组，支持多个提示词循环使用
+      currentPromptIndex: 0, // 当前使用的提示词索引
       loopTags: '',
       loopDelay: 5, // 秒
       retryDelay: 3, // 秒
@@ -1850,7 +1851,7 @@
   },
   {
     "role": "USER",
-    "content": "以下是你可能会用到的背景设定，你只需要参考其中的剧情设定内容即可，其他无关内容请直接忽视：\n<背景设定>\n<User基础设定>\n$U\n</User基础设定>\n$C\n$1\n</背景设定>\n\n============================此处为分割线====================\n你是一个负责进行大纲索引检索的AI，你需要对接下来的剧情进行思考，接下来的剧情需要用<总结大纲>部分的哪些记忆用来补充细节，找到它们对应的编码索引并进行输出。\n\n以下是供你参考的前文故事情节（AI上下文 + 前几轮用户输入，不含本轮）：\n<前文上下文>\n$7\n</前文上下文>\n\n以下是<总结大纲>的具体内容（如果为空说明暂未有剧情大纲编码索引）：\n<总结大纲>\n$5\n</总结大纲>",
+    "content": "以下是你可能会用到的背景设定，你只需要参考其中的剧情设定内容即可，其他无关内容请直接忽视：\n<背景设定>\n<User基础设定>\n$U\n</User基础设定>\n$C\n$1\n</背景设定>\n\n============================此处为分割线====================\n你是一个负责进行大纲索引检索的AI，你需要对接下来的剧情进行思考，接下来的剧情需要用<总结大纲>部分的哪些记忆用来补充细节，找到它们对应的编码索引并进行输出。\n\n以下是供你参考的前文故事情节（仅包含历史AI输出，不含任何用户输入）：\n<前文上下文>\n$7\n</前文上下文>\n\n以下是<总结大纲>的具体内容（如果为空说明暂未有剧情大纲编码索引）：\n<总结大纲>\n$5\n</总结大纲>",
     "deletable": false,
     "mainSlot": "A",
     "isMain": true
@@ -1888,6 +1889,35 @@
     "deletable": true
   }
 ];
+
+  // --- [剧情推进] 循环提示词兼容性处理：将旧字符串格式转换为数组格式 ---
+  function ensureLoopPromptsArray_ACU(plotSettings) {
+    if (!plotSettings || !plotSettings.loopSettings) return;
+    const ls = plotSettings.loopSettings;
+    
+    // 如果 quickReplyContent 是字符串，转换为数组
+    if (typeof ls.quickReplyContent === 'string') {
+      const oldContent = ls.quickReplyContent.trim();
+      ls.quickReplyContent = oldContent ? [oldContent] : [];
+      ls.currentPromptIndex = 0;
+      logDebug_ACU('[剧情推进] 已迁移旧版循环提示词格式（字符串 -> 数组）');
+    }
+    
+    // 确保是数组
+    if (!Array.isArray(ls.quickReplyContent)) {
+      ls.quickReplyContent = [];
+    }
+    
+    // 确保 currentPromptIndex 存在且有效
+    if (typeof ls.currentPromptIndex !== 'number' || ls.currentPromptIndex < 0) {
+      ls.currentPromptIndex = 0;
+    }
+    
+    // 确保索引不超出范围
+    if (ls.quickReplyContent.length > 0 && ls.currentPromptIndex >= ls.quickReplyContent.length) {
+      ls.currentPromptIndex = 0;
+    }
+  }
 
   // --- [剧情推进] Prompt 辅助：兼容 prompts(数组/旧对象) 并以 id 读写 ---
   function ensurePlotPromptsArray_ACU(plotSettings) {
@@ -1934,6 +1964,84 @@
     const arr = plotSettings.prompts || [];
     const item = arr.find(p => p && p.id === promptId);
     if (item) item.content = content ?? '';
+  }
+
+  // --- [剧情推进] 循环提示词列表渲染和管理 ---
+  function renderLoopPromptsList_ACU() {
+    const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container`);
+    if (!$container.length) return;
+
+    const plotSettings = settings_ACU?.plotSettings;
+    if (!plotSettings) return;
+
+    ensureLoopPromptsArray_ACU(plotSettings);
+    const prompts = plotSettings.loopSettings.quickReplyContent || [];
+
+    $container.empty();
+
+    if (prompts.length === 0) {
+      $container.html('<div style="padding: 20px; text-align: center; color: var(--text_secondary); border: 1px dashed var(--border_color_light); border-radius: 6px;">暂无提示词，点击上方"添加提示词"按钮添加</div>');
+      return;
+    }
+
+    prompts.forEach((prompt, index) => {
+      const $item = $('<div>', {
+        class: 'loop-prompt-item',
+        style: 'display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--background_light); border: 1px solid var(--border_color_light); border-radius: 6px;'
+      });
+      
+      const $content = $('<div>', {
+        style: 'flex: 1; display: flex; flex-direction: column; gap: 6px;'
+      });
+      
+      $content.append($('<div>', {
+        style: 'display: flex; align-items: center; gap: 8px;'
+      }).append($('<span>', {
+        style: 'font-size: 0.85em; color: var(--text_secondary); font-weight: 500;',
+        text: `提示词 #${index + 1}`
+      })));
+      
+      const $textarea = $('<textarea>', {
+        class: 'loop-prompt-textarea text_pole',
+        'data-index': index,
+        rows: 2,
+        placeholder: '输入循环提示词内容...',
+        style: 'resize: vertical; width: 100%;',
+        text: prompt || ''
+      });
+      $content.append($textarea);
+      
+      const $deleteBtn = $('<button>', {
+        type: 'button',
+        class: 'loop-prompt-delete-btn button',
+        'data-index': index,
+        style: 'padding: 6px 10px; color: var(--danger); background: transparent; border: 1px solid var(--danger); border-radius: 4px; cursor: pointer; flex-shrink: 0;',
+        title: '删除此提示词',
+        html: '<i class="fa-solid fa-trash"></i>'
+      });
+      
+      $item.append($content).append($deleteBtn);
+      $container.append($item);
+    });
+  }
+
+  function saveLoopPromptsFromUI_ACU() {
+    const plotSettings = settings_ACU?.plotSettings;
+    if (!plotSettings) return;
+
+    ensureLoopPromptsArray_ACU(plotSettings);
+    const prompts = [];
+
+    $popupInstance_ACU.find('.loop-prompt-textarea').each(function() {
+      const content = $(this).val()?.trim() || '';
+      if (content) {
+        prompts.push(content);
+      }
+    });
+
+    plotSettings.loopSettings.quickReplyContent = prompts;
+    plotSettings.loopSettings.currentPromptIndex = 0; // 重置索引
+    saveSettings_ACU();
   }
 
   // --- [剧情推进] 临时替换“AI指令预设”(settings_ACU.charCardPrompt)，并在生成结束后恢复 ---
@@ -3253,7 +3361,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(targetPreset.minLength ?? 0);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(targetPreset.contextTurnCount ?? 3);
                 if (targetPreset.loopSettings) {
-                    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content`).val(targetPreset.loopSettings.quickReplyContent || '');
+                    // 兼容旧格式：如果是字符串，转换为数组
+                    let prompts = targetPreset.loopSettings.quickReplyContent;
+                    if (typeof prompts === 'string') {
+                        prompts = prompts.trim() ? [prompts.trim()] : [];
+                    } else if (!Array.isArray(prompts)) {
+                        prompts = [];
+                    }
+                    settings_ACU.plotSettings.loopSettings.quickReplyContent = prompts;
+                    settings_ACU.plotSettings.loopSettings.currentPromptIndex = 0;
+                    renderLoopPromptsList_ACU();
                     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(targetPreset.loopSettings.loopTags || '');
                     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(targetPreset.loopSettings.loopDelay ?? 5);
                     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(targetPreset.loopSettings.loopTotalDuration ?? 0);
@@ -4888,10 +5005,20 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                       for (let r = 1; r < next.content.length; r++) {
                           const row = next.content[r];
                           if (!Array.isArray(row)) continue;
+                          // [修复] 在对齐行长度之前，保留 auto_merged 标签
+                          const hasAutoMergedTag = row.length > 0 && row[row.length - 1] === 'auto_merged';
                           if (row.length < targetLen) {
                               while (row.length < targetLen) row.push('');
+                              // 如果原本有 auto_merged 标签，在填充后重新添加
+                              if (hasAutoMergedTag && row[row.length - 1] !== 'auto_merged') {
+                                  row.push('auto_merged');
+                              }
                           } else if (row.length > targetLen) {
+                              // [修复] 截断时保留 auto_merged 标签
                               row.splice(targetLen);
+                              if (hasAutoMergedTag) {
+                                  row.push('auto_merged');
+                              }
                           }
                       }
                   }
@@ -5596,13 +5723,22 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
    */
   async function startAutoLoop_ACU() {
     const plotSettings = settings_ACU.plotSettings;
-    const loopDuration = (plotSettings.loopSettings.loopTotalDuration || 0) * 60 * 1000;
+    
+    // 确保循环提示词格式正确（兼容旧版本）
+    ensureLoopPromptsArray_ACU(plotSettings);
+    
+    const loopSettings = plotSettings.loopSettings;
+    const loopDuration = (loopSettings.loopTotalDuration || 0) * 60 * 1000;
 
-    if (!plotSettings || !plotSettings.loopSettings || !plotSettings.loopSettings.quickReplyContent) {
-      showToastr_ACU('error', '请先设置快速回复内容 (Quick Reply Content)', '无法启动循环');
+    // 检查是否有有效的提示词
+    if (!loopSettings.quickReplyContent || !Array.isArray(loopSettings.quickReplyContent) || loopSettings.quickReplyContent.length === 0) {
+      showToastr_ACU('error', '请先添加至少一个循环提示词', '无法启动循环');
       stopAutoLoop_ACU();
       return;
     }
+    
+    // 重置索引到第一个
+    loopSettings.currentPromptIndex = 0;
 
     if (loopDuration <= 0) {
         showToastr_ACU('error', '请设置有效的总倒计时 (大于0分钟)', '无法启动循环');
@@ -5701,13 +5837,32 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
   async function triggerLoopGeneration_ACU() {
     if (!loopState_ACU.isLooping) return;
 
-    const quickReplyContent = settings_ACU.plotSettings.loopSettings.quickReplyContent;
+    const plotSettings = settings_ACU.plotSettings;
+    ensureLoopPromptsArray_ACU(plotSettings);
+    
+    const loopSettings = plotSettings.loopSettings;
+    const prompts = loopSettings.quickReplyContent || [];
 
-    if (!quickReplyContent) {
-      logWarn_ACU('[剧情推进] Loop content is empty, stopping loop.');
+    if (!prompts || prompts.length === 0) {
+      logWarn_ACU('[剧情推进] Loop prompts array is empty, stopping loop.');
       stopAutoLoop_ACU();
       return;
     }
+
+    // 获取当前提示词（循环使用）
+    const currentIndex = loopSettings.currentPromptIndex || 0;
+    const quickReplyContent = prompts[currentIndex] || prompts[0];
+    
+    if (!quickReplyContent || !quickReplyContent.trim()) {
+      logWarn_ACU('[剧情推进] Current prompt is empty, stopping loop.');
+      stopAutoLoop_ACU();
+      return;
+    }
+
+    // 更新索引，为下次循环做准备（循环到下一个提示词）
+    loopSettings.currentPromptIndex = (currentIndex + 1) % prompts.length;
+    
+    logDebug_ACU(`[剧情推进] 使用提示词 ${currentIndex + 1}/${prompts.length}: ${quickReplyContent.substring(0, 50)}...`);
 
     // 模拟用户输入并发送
     loopState_ACU.awaitingReply = true;
@@ -6170,7 +6325,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
         for (; i >= 0 && aiCount < contextTurnCount; i--) {
           const msg = chat[i];
           if (!msg) continue;
-          if (msg.is_user && msg._qrf_from_planning) continue;
+          
+          // 只提取 AI 消息，跳过所有用户消息
+          if (msg.is_user) continue;
+          if (msg._qrf_from_planning) continue;
 
           let content = msg.mes;
           // 上下文筛选：正文标签提取 + 标签排除（可单独或叠加）
@@ -6180,8 +6338,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
             content = applyContextTagFilters_ACU(content, { extractTags, excludeTags });
           }
 
-          extracted.unshift({ role: msg.is_user ? 'user' : 'assistant', content });
-          if (!msg.is_user) aiCount++;
+          extracted.unshift({ role: 'assistant', content });
+          aiCount++;
         }
 
         slicedContext = extracted;
@@ -6253,17 +6411,18 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
         return tempDiv.textContent || tempDiv.innerText || '';
       };
 
+      // 格式化历史记录：由于现在只包含 AI 输出，所有消息的 role 都是 'assistant'
       const formattedHistory = (slicedContext && Array.isArray(slicedContext) ? slicedContext : [])
-        .map(msg => `${msg.role}："${sanitizeHtml(msg.content)}"`)
+        .map(msg => `assistant："${sanitizeHtml(msg.content)}"`)
         .join(' \n ');
 
       // [改动] 不再把“前文上下文”硬插到“拦截任务详细指令”之前；
       // 改为固定占位符注入，用户可在任意提示词段自行放置/调整：
       // - $5：总体大纲表内容（含表头）
-      // - $7：前文上下文（本次实际读取的AI上下文 + 前几轮用户输入，不含本轮）
+      // - $7：前文上下文（仅包含历史AI输出，不含任何用户输入）
       // - $8：本轮用户输入（原始用户输入）
       const contextInjectionText = formattedHistory && formattedHistory.trim()
-        ? `以下是前文的用户记录和故事发展，给你用作参考：\n ${formattedHistory}`
+        ? `以下是前文的故事发展（AI输出），给你用作参考：\n ${formattedHistory}`
         : '';
 
       // [新增] 构建 $U (用户设定描述) 和 $C (角色描述) 占位符内容
@@ -13498,7 +13657,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                                     <code>$1</code> - 自动替换为世界书内容（默认开启）<br>
                                     <code>$6</code> - 自动替换为上一轮保存的剧情规划数据<br>
                                     <code>$5</code> - 自动替换为“总体大纲”表内容（含表头）<br>
-                                    <code>$7</code> - 自动替换为本次实际读取的前文上下文（AI上下文+前几轮用户输入，不含本轮）<br>
+                                    <code>$7</code> - 自动替换为本次实际读取的前文上下文（仅包含历史AI输出，不含任何用户输入）<br>
                                     <code>$8</code> - 自动替换为本轮用户输入（可自由放置）<br>
                                     <code>sulv1-4</code> - 剧情推进速率设置
                                 </small>
@@ -13566,9 +13725,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
 
                             <div style="display: grid; gap: 15px; margin-bottom: 20px;">
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content" style="font-weight: 500;">循环提示词</label>
-                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content" class="text_pole" rows="2" placeholder="输入用于循环发送的快速回复内容..." style="resize: vertical;"></textarea>
-                                    <small class="notes">此内容将在每次循环开始时，作为用户的输入经过剧情规划后发送</small>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                        <label style="font-weight: 500; margin: 0;">循环提示词列表</label>
+                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt" class="button" style="padding: 4px 12px; font-size: 0.85em; display: flex; align-items: center; gap: 4px;">
+                                            <i class="fa-solid fa-plus"></i> 添加提示词
+                                        </button>
+                                    </div>
+                                    <div id="${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container" style="display: grid; gap: 10px;">
+                                        <!-- 提示词项将动态添加到这里 -->
+                                    </div>
+                                    <small class="notes">可以添加多个提示词，循环时会自动依次使用，增加剧情变化</small>
                                 </div>
 
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
@@ -13597,7 +13763,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count" style="font-weight: 500;">AI上下文</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count" type="number" class="text_pole" min="0" max="20" step="1" value="3" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">轮数</small>
+                                    <small class="notes" style="color: var(--text_secondary);">AI输出楼层数（仅计算AI回复，不含用户输入）</small>
                                 </div>
                             </div>
 
@@ -14829,7 +14995,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         { id: 'plot-context-extract-tags', key: 'contextExtractTags', type: 'string' },
         { id: 'plot-context-exclude-tags', key: 'contextExcludeTags', type: 'string' },
         { id: 'plot-min-length', key: 'minLength', type: 'number' },
-        { id: 'plot-quick-reply-content', key: 'loopSettings.quickReplyContent', type: 'string' },
+        // 注意：plot-quick-reply-content 已改为数组，不再使用单个输入框，改用循环提示词列表管理
         { id: 'plot-loop-tags', key: 'loopSettings.loopTags', type: 'string' },
         { id: 'plot-loop-delay', key: 'loopSettings.loopDelay', type: 'number' },
         { id: 'plot-loop-total-duration', key: 'loopSettings.loopTotalDuration', type: 'number' },
@@ -14859,6 +15025,56 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
             saveSettings_ACU();
           });
         }
+      });
+
+      // 循环提示词列表管理
+      // 确保兼容性
+      ensureLoopPromptsArray_ACU(settings_ACU.plotSettings);
+      // 初始渲染
+      renderLoopPromptsList_ACU();
+
+      // 添加提示词按钮
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt`, function() {
+        const plotSettings = settings_ACU.plotSettings;
+        ensureLoopPromptsArray_ACU(plotSettings);
+        plotSettings.loopSettings.quickReplyContent.push('');
+        renderLoopPromptsList_ACU();
+        // 聚焦到新添加的输入框
+        setTimeout(() => {
+          const $newTextarea = $popupInstance_ACU.find('.loop-prompt-textarea').last();
+          if ($newTextarea.length) {
+            $newTextarea.focus();
+          }
+        }, 100);
+      });
+
+      // 删除提示词按钮
+      $popupInstance_ACU.on('click', '.loop-prompt-delete-btn', function() {
+        const index = parseInt($(this).data('index'), 10);
+        if (isNaN(index)) return;
+
+        const plotSettings = settings_ACU.plotSettings;
+        ensureLoopPromptsArray_ACU(plotSettings);
+        const prompts = plotSettings.loopSettings.quickReplyContent;
+        
+        if (prompts.length > 0 && index >= 0 && index < prompts.length) {
+          prompts.splice(index, 1);
+          // 调整索引
+          if (plotSettings.loopSettings.currentPromptIndex >= prompts.length) {
+            plotSettings.loopSettings.currentPromptIndex = 0;
+          }
+          renderLoopPromptsList_ACU();
+          saveLoopPromptsFromUI_ACU();
+        }
+      });
+
+      // 提示词内容变化时自动保存（防抖）
+      let saveLoopPromptsTimeout = null;
+      $popupInstance_ACU.on('input', '.loop-prompt-textarea', function() {
+        clearTimeout(saveLoopPromptsTimeout);
+        saveLoopPromptsTimeout = setTimeout(() => {
+          saveLoopPromptsFromUI_ACU();
+        }, 500);
       });
 
       // 预设管理
@@ -15359,8 +15575,10 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(plotSettings.rateCuckold);
 
       // 循环设置
+      ensureLoopPromptsArray_ACU(plotSettings);
       const loopSettings = plotSettings.loopSettings;
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content`).val(loopSettings.quickReplyContent || '');
+      // 循环提示词现在使用数组，通过 renderLoopPromptsList_ACU 渲染
+      renderLoopPromptsList_ACU();
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(loopSettings.loopTags || '');
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(loopSettings.loopDelay);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(loopSettings.loopTotalDuration);
@@ -15483,7 +15701,16 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
 
       // 加载循环设置
       if (preset.loopSettings) {
-        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content`).val(preset.loopSettings.quickReplyContent || '');
+        // 兼容旧格式：如果是字符串，转换为数组
+        let prompts = preset.loopSettings.quickReplyContent;
+        if (typeof prompts === 'string') {
+          prompts = prompts.trim() ? [prompts.trim()] : [];
+        } else if (!Array.isArray(prompts)) {
+          prompts = [];
+        }
+        settings_ACU.plotSettings.loopSettings.quickReplyContent = prompts;
+        settings_ACU.plotSettings.loopSettings.currentPromptIndex = 0;
+        renderLoopPromptsList_ACU();
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(preset.loopSettings.loopTags || '');
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(preset.loopSettings.loopDelay ?? 5);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(preset.loopSettings.loopTotalDuration ?? 0);
@@ -15543,7 +15770,16 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         minLength: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(), 10) || 0,
         contextTurnCount: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(), 10) || 3,
         loopSettings: {
-          quickReplyContent: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-quick-reply-content`).val() || '',
+          quickReplyContent: (() => {
+            // 从UI收集所有提示词
+            const prompts = [];
+            $popupInstance_ACU.find('.loop-prompt-textarea').each(function() {
+              const content = $(this).val()?.trim() || '';
+              if (content) prompts.push(content);
+            });
+            return prompts;
+          })(),
+          currentPromptIndex: 0,
           loopTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val() || '',
           loopDelay: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(), 10) || 5,
           loopTotalDuration: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(), 10) || 0,
