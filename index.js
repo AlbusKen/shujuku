@@ -117,7 +117,7 @@
     
     const css = `
       /* ═══════════════════════════════════════════════════════════════
-         神·数据库 独立窗口系统
+         魔·数据库 独立窗口系统
          ═══════════════════════════════════════════════════════════════ */
       
       .acu-window-overlay {
@@ -2722,7 +2722,27 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
   let wasStoppedByUser_ACU = false; // [新增] 标记更新是否被用户手动终止
   let newMessageDebounceTimer_ACU = null;
   let currentAbortController_ACU = null; // [新增] 用于中止正在进行的AI请求
+  let activeAbortControllers_ACU = new Set(); // [新增] 并发请求的 AbortController 集合
   let manualExtraHint_ACU = ''; // [新增] 手动更新时的额外提示词（一次性）
+
+  function trackAbortController_ACU(controller) {
+      if (controller) activeAbortControllers_ACU.add(controller);
+  }
+
+  function untrackAbortController_ACU(controller) {
+      if (controller) activeAbortControllers_ACU.delete(controller);
+  }
+
+  function abortAllActiveRequests_ACU() {
+      activeAbortControllers_ACU.forEach(controller => {
+          try {
+              controller.abort();
+          } catch (e) {
+              // ignore
+          }
+      });
+      activeAbortControllers_ACU.clear();
+  }
 
   // --- [核心改造] 回调函数管理器 ---
   const tableUpdateCallbacks_ACU = [];
@@ -2927,7 +2947,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     // 说明：这些方法尽量保持“可编程调用”(无需点UI)；个别方法仍可能弹出确认框/文件选择框，行为与按钮一致。
     // =========================
 
-    // 打开设置面板（等价于点“打开神·数据库”）
+    // 打开设置面板（等价于点“打开魔·数据库”）
     openSettings: async function() {
         try {
             return await openAutoCardPopup_ACU();
@@ -3665,7 +3685,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
   }
 
   // --- Toast / 通知（仅影响本插件的提示外观，不改变业务逻辑） ---
-  const ACU_TOAST_TITLE_ACU = '神·数据库';
+  const ACU_TOAST_TITLE_ACU = '魔·数据库';
   const _acuToastDedup_ACU = new Map(); // key -> ts
   let _acuToastStyleInjected_ACU = false;
 
@@ -8446,38 +8466,44 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     // 执行更新
     const groupKeys = Object.keys(updateGroups);
     if (groupKeys.length > 0) {
-        showToastr_ACU('info', `检测到 ${tablesToUpdate.length} 个表格需要更新，将分为 ${groupKeys.length} 组执行。`);
+        const totalGroups = groupKeys.length;
+        showToastr_ACU('info', `检测到 ${tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
         
         isAutoUpdatingCard_ACU = true;
         
-        for (const key of groupKeys) {
+        const groupPromises = groupKeys.map(key => (async () => {
             const group = updateGroups[key];
             // 构造一个临时的 updateMode 对象或字符串，传递给 processUpdates_ACU
             // 这里我们需要一种方式告诉 processUpdates_ACU 只更新特定的 sheetKeys
             // 我们将通过一个新的参数 'specific_sheets' 传递
             
-            logDebug_ACU(`Processing group update for sheets: ${group.sheetNames.join(', ')}`);
+            logDebug_ACU(`[Parallel] Processing group update for sheets: ${group.sheetNames.join(', ')}`);
             
-            await processUpdates_ACU(group.indices, 'auto_independent', {
+            const success = await processUpdates_ACU(group.indices, 'auto_independent', {
                 targetSheetKeys: group.sheetKeys,
-                batchSize: group.batchSize
+                batchSize: group.batchSize,
+                requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
             });
-
-            // [核心修复] 分组更新逻辑优化
-            // 当有多组需要更新时，必须在每组更新完成后立即强制刷新整个数据链条（读取、合并、更新世界书、刷新内存）。
-            // 否则，后续的组可能会基于过时的 currentJsonTableData_ACU 进行生成，导致“读不到上一组更新的内容”。
             
-            logDebug_ACU(`Group update for ${group.sheetNames.join(', ')} completed. Forcing data refresh for next group...`);
-            
-            // 1. 重新加载聊天记录 (确保获取到刚刚写入的消息)
-            await loadAllChatMessages_ACU();
-            
-            // 2. 刷新合并数据并通知 (更新 currentJsonTableData_ACU 和世界书)
-            await refreshMergedDataAndNotify_ACU();
-            
-            // 3. 增加额外的延时，确保异步操作完全落定
-            await new Promise(resolve => setTimeout(resolve, 500));
+            return { key, success, sheetNames: group.sheetNames };
+        })());
+        
+        const results = await Promise.allSettled(groupPromises);
+        const failedGroups = results.filter(result => {
+            if (result.status === 'rejected') return true;
+            return !result.value?.success;
+        });
+        
+        if (failedGroups.length > 0) {
+            logWarn_ACU(`并发分组更新失败 ${failedGroups.length}/${totalGroups} 组。`);
+            showToastr_ACU('warning', `并发分组更新有 ${failedGroups.length} 组失败，请查看日志。`);
         }
+        
+        // [核心修复] 并发更新完成后统一刷新数据链条
+        logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+        await loadAllChatMessages_ACU();
+        await refreshMergedDataAndNotify_ACU();
+        await new Promise(resolve => setTimeout(resolve, 500));
         
         isAutoUpdatingCard_ACU = false;
         // 最后再刷新一次，确保 UI 状态最新
@@ -11197,7 +11223,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     $menuItemContainer = jQuery_API_ACU(
       `<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`,
     );
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>神·数据库VXII</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>魔·数据库I</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
       e.stopPropagation();
@@ -12120,7 +12146,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
             <div id="${POPUP_ID_ACU}" class="auto-card-updater-popup">
                 <style>
                     /* ═══════════════════════════════════════════════════════════════
-                       神·数据库 UI 设计系统（仅影响插件自身）
+                       魔·数据库 UI 设计系统（仅影响插件自身）
                        目标：大气、简约、高级；超窄屏也能舒服用
                        ═══════════════════════════════════════════════════════════════ */
                     
@@ -13863,7 +13889,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     
     createACUWindow({
       id: windowId,
-      title: '神·数据库 VXII',
+      title: '魔·数据库 I',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度
@@ -16474,10 +16500,14 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
     return { tableDataText, messagesText, worldbookContent, manualExtraHint: manualExtraHintText };
 }
 
-async function callCustomOpenAI_ACU(dynamicContent) {
+async function callCustomOpenAI_ACU(dynamicContent, abortController = null, options = null) {
     // [新增] 创建一个新的 AbortController 用于本次请求
-    currentAbortController_ACU = new AbortController();
-    const abortSignal = currentAbortController_ACU.signal;
+    const localAbortController = abortController || new AbortController();
+    currentAbortController_ACU = localAbortController;
+    trackAbortController_ACU(localAbortController);
+    const abortSignal = localAbortController.signal;
+    const skipProfileSwitch = !!options?.skipProfileSwitch;
+    const forceDirectApi = !!options?.forceDirectApi;
 
     // [新增] 获取填表使用的API配置（支持API预设）
     const apiPresetConfig = getApiConfigByPreset_ACU(settings_ACU.tableApiPreset);
@@ -16582,18 +16612,24 @@ async function callCustomOpenAI_ACU(dynamicContent) {
     logDebug_ACU('Final messages array being sent to API:', messages);
     logDebug_ACU(`使用API预设: ${settings_ACU.tableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
 
-    if (effectiveApiMode === 'tavern') {
+    try {
+        if (effectiveApiMode === 'tavern') {
         const profileId = effectiveTavernProfile;
         if (!profileId) {
             throw new Error('未选择酒馆连接预设。');
         }
+            if (skipProfileSwitch) {
+                logDebug_ACU('ACU: 并发模式启用，跳过酒馆预设切换。');
+            }
 
         let originalProfile = '';
         let responsePromise;
         let rawResult;
 
         try {
-            originalProfile = await TavernHelper_API_ACU.triggerSlash('/profile');
+            if (!skipProfileSwitch) {
+                originalProfile = await TavernHelper_API_ACU.triggerSlash('/profile');
+            }
             const targetProfile = SillyTavern_API_ACU.extensionSettings?.connectionManager?.profiles.find(p => p.id === profileId);
 
             if (!targetProfile) {
@@ -16606,12 +16642,14 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                 throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有选择预设。`);
             }
 
-            const targetProfileName = targetProfile.name;
-            const currentProfile = await TavernHelper_API_ACU.triggerSlash('/profile');
+            const targetProfileName = targetProfile.name || targetProfile.id;
+            if (!skipProfileSwitch) {
+                const currentProfile = await TavernHelper_API_ACU.triggerSlash('/profile');
 
-            if (currentProfile !== targetProfileName) {
-                const escapedProfileName = targetProfileName.replace(/"/g, '\\"');
-                await TavernHelper_API_ACU.triggerSlash(`/profile await=true "${escapedProfileName}"`);
+                if (currentProfile !== targetProfileName) {
+                    const escapedProfileName = targetProfileName.replace(/"/g, '\\"');
+                    await TavernHelper_API_ACU.triggerSlash(`/profile await=true "${escapedProfileName}"`);
+                }
             }
             
             logDebug_ACU(`ACU: 通过酒馆连接预设 (ID: ${profileId}, Name: ${targetProfileName}) 发送请求...`);
@@ -16629,7 +16667,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
             logError_ACU(`ACU: 调用酒馆连接预设时出错:`, error);
             // [修正] 确保恢复预设后再抛出错误
             try {
-                if (originalProfile) {
+                if (originalProfile && !skipProfileSwitch) {
                     const currentProfileAfterCall = await TavernHelper_API_ACU.triggerSlash('/profile');
                     if (originalProfile !== currentProfileAfterCall) {
                         const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
@@ -16645,11 +16683,13 @@ async function callCustomOpenAI_ACU(dynamicContent) {
             // [修正] 只在成功的情况下恢复预设（错误情况下已在catch中处理）
             if (rawResult !== undefined) {
                 try {
-            const currentProfileAfterCall = await TavernHelper_API_ACU.triggerSlash('/profile');
-            if (originalProfile && originalProfile !== currentProfileAfterCall) {
-                const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                await TavernHelper_API_ACU.triggerSlash(`/profile await=true "${escapedOriginalProfile}"`);
-                logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
+                    if (!skipProfileSwitch) {
+                        const currentProfileAfterCall = await TavernHelper_API_ACU.triggerSlash('/profile');
+                        if (originalProfile && originalProfile !== currentProfileAfterCall) {
+                            const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
+                            await TavernHelper_API_ACU.triggerSlash(`/profile await=true "${escapedOriginalProfile}"`);
+                            logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
+                        }
                     }
                 } catch (restoreError) {
                     logError_ACU(`ACU: 恢复原预设时出错:`, restoreError);
@@ -16668,7 +16708,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
     } else { // 'custom' mode
         // --- 使用自定义API ---
-        if (effectiveApiConfig.useMainApi) {
+        if (effectiveApiConfig.useMainApi && !forceDirectApi) {
             // 模式A: 使用主API
             logDebug_ACU('ACU: 通过酒馆主API发送请求...');
             if (typeof TavernHelper_API_ACU.generateRaw !== 'function') {
@@ -16685,6 +16725,24 @@ async function callCustomOpenAI_ACU(dynamicContent) {
 
         } else {
             // 模式B: 使用独立配置的API
+            if (forceDirectApi && effectiveApiConfig.useMainApi) {
+                if (effectiveApiConfig.url && effectiveApiConfig.model) {
+                    logDebug_ACU('ACU: 并发模式启用，强制使用独立API路径。');
+                } else {
+                    logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
+                    if (typeof TavernHelper_API_ACU.generateRaw !== 'function') {
+                        throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
+                    }
+                    const response = await TavernHelper_API_ACU.generateRaw({
+                        ordered_prompts: messages,
+                        should_stream: false,
+                    });
+                    if (typeof response !== 'string') {
+                        throw new Error('主API调用未返回预期的文本响应。');
+                    }
+                    return response.trim();
+                }
+            }
             if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
                 throw new Error('自定义API的URL或模型未配置。');
             }
@@ -16726,6 +16784,12 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                 return data.choices[0].message.content.trim();
             }
             throw new Error('API响应格式不正确或内容为空。');
+        }
+        }
+    } finally {
+        untrackAbortController_ACU(localAbortController);
+        if (currentAbortController_ACU === localAbortController) {
+            currentAbortController_ACU = null;
         }
     }
   }
@@ -17235,7 +17299,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           return true;
       }
 
-      const { targetSheetKeys, batchSize: specificBatchSize } = options;
+      const { targetSheetKeys, batchSize: specificBatchSize, requestOptions } = options;
 
       isAutoUpdatingCard_ACU = true;
 
@@ -17453,7 +17517,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
           // [新增] 总结表静默更新时不显示toast提示
           const toastMessage = isSilentMode ? '' : `正在处理 ${isManualMode ? '手动' : '自动'} 更新 (${batchNumber}/${totalBatches})...`;
           // [修复] 传递 targetSheetKeys 到 proceedWithCardUpdate_ACU
-          const success = await proceedWithCardUpdate_ACU(messagesForContext, toastMessage, finalSaveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys);
+          const success = await proceedWithCardUpdate_ACU(messagesForContext, toastMessage, finalSaveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions);
 
           if (!success) {
               // [新增] 静默模式下不显示错误提示
@@ -17890,7 +17954,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
       }
   }
 
-  async function proceedWithCardUpdate_ACU(messagesToUse, batchToastMessage = '正在填表，请稍候...', saveTargetIndex = -1, isImportMode = false, updateMode = 'standard', isSilentMode = false, targetSheetKeys = null) {
+  async function proceedWithCardUpdate_ACU(messagesToUse, batchToastMessage = '正在填表，请稍候...', saveTargetIndex = -1, isImportMode = false, updateMode = 'standard', isSilentMode = false, targetSheetKeys = null, requestOptions = null) {
     if (!$statusMessageSpan_ACU && $popupInstance_ACU)
         $statusMessageSpan_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-status-message`);
 
@@ -17899,6 +17963,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         if (!isSilentMode && $statusMessageSpan_ACU) $statusMessageSpan_ACU.text(text);
     };
 
+    const localAbortController = new AbortController();
     let loadingToast = null;
     let success = false;
     let modifiedKeys = []; // [修复] 提升作用域
@@ -17938,9 +18003,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                             wasStoppedByUser_ACU = true;
 
                             // 1. Abort network requests
-                            if (currentAbortController_ACU) {
-                                currentAbortController_ACU.abort();
-                            }
+                            abortAllActiveRequests_ACU();
                             // [修复] 不再调用 SillyTavern_API_ACU.stopGeneration()，
                             // 因为这会停止酒馆的生成，但填表是独立的API调用，不应影响酒馆
                             // if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') {
@@ -17998,12 +18061,12 @@ async function callCustomOpenAI_ACU(dynamicContent) {
             
             // [新增] 将 API 调用放在 try-catch 中，以便在失败时重试
             try {
-                aiResponse = await callCustomOpenAI_ACU(dynamicContent);
+                aiResponse = await callCustomOpenAI_ACU(dynamicContent, localAbortController, requestOptions);
             } catch (error) {
                 apiError = error;
                 logWarn_ACU(`第 ${attempt} 次尝试失败：API调用失败 - ${error.message}`);
                 
-                if (currentAbortController_ACU && currentAbortController_ACU.signal.aborted) {
+                if (localAbortController.signal.aborted) {
                     throw new DOMException('Aborted by user', 'AbortError');
                 }
                 
@@ -18019,7 +18082,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                 }
             }
 
-            if (currentAbortController_ACU && currentAbortController_ACU.signal.aborted) {
+            if (localAbortController.signal.aborted) {
                  throw new DOMException('Aborted by user', 'AbortError');
             }
 
@@ -18164,7 +18227,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
         if (loadingToast && toastr_API_ACU) {
             toastr_API_ACU.clear(loadingToast);
         }
-        currentAbortController_ACU = null;
+        // currentAbortController_ACU 由 callCustomOpenAI_ACU 内部管理
         // [修改] 不在此处重置 isAutoUpdatingCard_ACU 和按钮状态，交由上层调用函数管理
         // isAutoUpdatingCard_ACU = false; 
         // if ($manualUpdateCardButton_ACU) {
@@ -18284,7 +18347,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                   e.stopPropagation();
                   e.preventDefault();
                   wasStoppedByUser_ACU = true;
-                  if (currentAbortController_ACU) currentAbortController_ACU.abort();
+                  abortAllActiveRequests_ACU();
                   if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
                   jQuery_API_ACU(this).closest('.toast').remove();
                   showToastr_ACU('warning', '合并操作已由用户终止。');
@@ -18378,7 +18441,7 @@ async function callCustomOpenAI_ACU(dynamicContent) {
                           e.stopPropagation();
                           e.preventDefault();
                           wasStoppedByUser_ACU = true;
-                          if (currentAbortController_ACU) currentAbortController_ACU.abort();
+                          abortAllActiveRequests_ACU();
                           if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
                           jQuery_API_ACU(this).closest('.toast').remove();
                           showToastr_ACU('warning', '合并操作已由用户终止。');
