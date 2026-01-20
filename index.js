@@ -2244,6 +2244,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     $saveAutoUpdateFrequencyButton_ACU, // Auto update frequency save button
     $updateBatchSizeInput_ACU, // [新增] 批处理大小输入
     $saveUpdateBatchSizeButton_ACU, // [新增] 批处理大小保存按钮
+    $maxConcurrentGroupsInput_ACU, // [新增] 最大并发数输入
     $autoUpdateEnabledCheckbox_ACU, // 新增UI元素
     $standardizedTableFillEnabledCheckbox_ACU, // [新增] 规范填表功能
     $toastMuteEnabledCheckbox_ACU, // [新增] 静默提示框
@@ -2291,6 +2292,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
       autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
       updateBatchSize: 3,
+      maxConcurrentGroups: 1,
       autoUpdateEnabled: true,
       standardizedTableFillEnabled: true, // [新增] 规范填表功能
       // [新增] UI提示框静默模式：勾选后，除白名单提示外，其余 toast 全部不显示
@@ -7075,6 +7077,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
           updateBatchSize: 3,
+          maxConcurrentGroups: 1,
           autoUpdateEnabled: true,
           standardizedTableFillEnabled: true, // [新增] 规范填表功能
           toastMuteEnabled: false,
@@ -7255,6 +7258,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           settings_ACU.dataIsolationEnabled = (activeCode !== '');
       }
 
+      if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
+          settings_ACU.maxConcurrentGroups = 1;
+      }
       logDebug_ACU('Settings loaded:', settings_ACU);
 
       // Update UI if it's open
@@ -7284,6 +7290,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           if ($autoUpdateFrequencyInput_ACU) $autoUpdateFrequencyInput_ACU.val(settings_ACU.autoUpdateFrequency);
           if ($autoUpdateTokenThresholdInput_ACU) $autoUpdateTokenThresholdInput_ACU.val(settings_ACU.autoUpdateTokenThreshold);
           if ($updateBatchSizeInput_ACU) $updateBatchSizeInput_ACU.val(settings_ACU.updateBatchSize); // [新增]
+          if ($maxConcurrentGroupsInput_ACU) $maxConcurrentGroupsInput_ACU.val(settings_ACU.maxConcurrentGroups || 1);
           if ($skipUpdateFloorsInput_ACU) $skipUpdateFloorsInput_ACU.val(settings_ACU.skipUpdateFloors || 0);
           if ($retainRecentLayersInput_ACU) $retainRecentLayersInput_ACU.val(settings_ACU.retainRecentLayers || '');
           const $tableContextExtractTagsInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-tags`);
@@ -7849,6 +7856,26 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       } else {
           if (!silent) showToastr_ACU('warning', `批处理大小 "${valStr}" 无效。请输入一个大于0的整数。恢复为: ${settings_ACU.updateBatchSize}`);
           $updateBatchSizeInput_ACU.val(settings_ACU.updateBatchSize);
+      }
+  }
+
+  // [新增] 保存最大并发组数
+  function saveMaxConcurrentGroups_ACU({ silent = false, skipReload = false } = {}) {
+      if (!$popupInstance_ACU || !$maxConcurrentGroupsInput_ACU) {
+          logError_ACU('保存最大并发数失败：UI元素未初始化。');
+          return;
+      }
+      const valStr = $maxConcurrentGroupsInput_ACU.val();
+      const newLimit = parseInt(valStr, 10);
+
+      if (!isNaN(newLimit) && newLimit >= 1) {
+          settings_ACU.maxConcurrentGroups = newLimit;
+          saveSettings_ACU();
+          if (!silent) showToastr_ACU('success', '最大并发数已保存！');
+          if (!skipReload) loadSettings_ACU();
+      } else {
+          if (!silent) showToastr_ACU('warning', `最大并发数 "${valStr}" 无效。请输入一个大于0的整数。恢复为: ${settings_ACU.maxConcurrentGroups || 1}`);
+          $maxConcurrentGroupsInput_ACU.val(settings_ACU.maxConcurrentGroups || 1);
       }
   }
 
@@ -8467,36 +8494,47 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     const groupKeys = Object.keys(updateGroups);
     if (groupKeys.length > 0) {
         const totalGroups = groupKeys.length;
-        showToastr_ACU('info', `检测到 ${tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
+        const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
+        const needsChunking = totalGroups > maxConcurrentGroups;
+        if (needsChunking) {
+            showToastr_ACU('info', `检测到 ${tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
+        } else {
+            showToastr_ACU('info', `检测到 ${tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
+        }
         
         isAutoUpdatingCard_ACU = true;
         
-        const groupPromises = groupKeys.map(key => (async () => {
-            const group = updateGroups[key];
-            // 构造一个临时的 updateMode 对象或字符串，传递给 processUpdates_ACU
-            // 这里我们需要一种方式告诉 processUpdates_ACU 只更新特定的 sheetKeys
-            // 我们将通过一个新的参数 'specific_sheets' 传递
+        const failedGroupKeys = [];
+        for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
+            const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
+            const groupPromises = chunkKeys.map(key => (async () => {
+                const group = updateGroups[key];
+                // 构造一个临时的 updateMode 对象或字符串，传递给 processUpdates_ACU
+                // 这里我们需要一种方式告诉 processUpdates_ACU 只更新特定的 sheetKeys
+                // 我们将通过一个新的参数 'specific_sheets' 传递
+                
+                logDebug_ACU(`[Parallel] Processing group update for sheets: ${group.sheetNames.join(', ')}`);
+                
+                const success = await processUpdates_ACU(group.indices, 'auto_independent', {
+                    targetSheetKeys: group.sheetKeys,
+                    batchSize: group.batchSize,
+                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
+                });
+                
+                return { key, success, sheetNames: group.sheetNames };
+            })());
             
-            logDebug_ACU(`[Parallel] Processing group update for sheets: ${group.sheetNames.join(', ')}`);
-            
-            const success = await processUpdates_ACU(group.indices, 'auto_independent', {
-                targetSheetKeys: group.sheetKeys,
-                batchSize: group.batchSize,
-                requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
+            const results = await Promise.allSettled(groupPromises);
+            results.forEach((result, idx) => {
+                if (result.status === 'rejected' || !result.value?.success) {
+                    failedGroupKeys.push(chunkKeys[idx]);
+                }
             });
-            
-            return { key, success, sheetNames: group.sheetNames };
-        })());
+        }
         
-        const results = await Promise.allSettled(groupPromises);
-        const failedGroups = results.filter(result => {
-            if (result.status === 'rejected') return true;
-            return !result.value?.success;
-        });
-        
-        if (failedGroups.length > 0) {
-            logWarn_ACU(`并发分组更新失败 ${failedGroups.length}/${totalGroups} 组。`);
-            showToastr_ACU('warning', `并发分组更新有 ${failedGroups.length} 组失败，请查看日志。`);
+        if (failedGroupKeys.length > 0) {
+            logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
+            showToastr_ACU('warning', `并发分组更新有 ${failedGroupKeys.length} 组失败，请查看日志。`);
         }
         
         // [核心修复] 并发更新完成后统一刷新数据链条
@@ -13233,6 +13271,12 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                                 </div>
                             </div>
                             <div>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-max-concurrent-groups">最大并发数:</label>
+                                <div class="input-group">
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-max-concurrent-groups" min="1" step="1" placeholder="1">
+                                </div>
+                            </div>
+                            <div>
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-skip-update-floors">保留X层楼不更新:</label>
                                 <div class="input-group">
                                     <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-skip-update-floors" min="0" step="1" placeholder="0">
@@ -13944,6 +13988,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       $saveAutoUpdateFrequencyButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-save-auto-update-frequency`);
       $updateBatchSizeInput_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-update-batch-size`); // [新增]
       $saveUpdateBatchSizeButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-save-update-batch-size`); // [新增]
+      $maxConcurrentGroupsInput_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-max-concurrent-groups`); // [新增]
       $skipUpdateFloorsInput_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-skip-update-floors`);
       $saveSkipUpdateFloorsButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-save-skip-update-floors`);
       $retainRecentLayersInput_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-retain-recent-layers`);
@@ -14630,6 +14675,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       bindAutoSaveNumberInput_ACU($autoUpdateThresholdInput_ACU, saveAutoUpdateThreshold_ACU);
       bindAutoSaveNumberInput_ACU($autoUpdateFrequencyInput_ACU, saveAutoUpdateFrequency_ACU);
       bindAutoSaveNumberInput_ACU($updateBatchSizeInput_ACU, saveUpdateBatchSize_ACU);
+      bindAutoSaveNumberInput_ACU($maxConcurrentGroupsInput_ACU, saveMaxConcurrentGroups_ACU);
       bindAutoSaveNumberInput_ACU($skipUpdateFloorsInput_ACU, saveSkipUpdateFloors_ACU);
       bindAutoSaveNumberInput_ACU($retainRecentLayersInput_ACU, saveRetainRecentLayers_ACU);
       if ($autoUpdateEnabledCheckbox_ACU.length) {
