@@ -1578,6 +1578,7 @@
   let isProcessing_Plot_ACU = false;
 
   // [剧情推进] 临时存储plot
+  // 结构: { content: string, userInputHash: string, userInputText: string }
   let tempPlotToSave_ACU = null;
 
   // --- [触发门控] 防止其它插件/后台请求误触发“剧情推进/自动填表” ---
@@ -6150,17 +6151,40 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
   }
 
   /**
-   * 将plot附加到最新的用户消息上。
-   * [优化] 现在由 GENERATION_STARTED 事件触发，此时用户消息一定已写入 chat 数组，无需延迟。
+   * 生成用户输入文本的哈希值，用于精确匹配目标消息
+   * 归一化处理：去除首尾空白，统一换行符
    */
-  function savePlotToLatestMessage_ACU(force = false) {
+  function hashUserInput_ACU(text) {
+    if (!text) return '';
+    // 归一化：去除首尾空白，统一换行符为 \n
+    const normalized = String(text).trim().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    // 使用简单的哈希算法（FNV-1a变体）
+    let hash = 2166136261;
+    for (let i = 0; i < normalized.length; i++) {
+      hash ^= normalized.charCodeAt(i);
+      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return hash.toString(36);
+  }
+
+  /**
+   * 将plot附加到对应的用户消息上。
+   * 使用用户输入文本哈希精确匹配，避免保存到错误的楼层。
+   */
+  async function savePlotToLatestMessage_ACU(force = false) {
     logDebug_ACU('[剧情推进] [Plot] savePlotToLatestMessage_ACU 被调用');
     logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.inProgress:', planningGuard_ACU.inProgress);
-    logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU:', tempPlotToSave_ACU ? `长度=${tempPlotToSave_ACU.length}` : '(空)');
+    logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.ignoreNextGenerationEndedCount:', planningGuard_ACU.ignoreNextGenerationEndedCount);
+    logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU:', tempPlotToSave_ACU ? (typeof tempPlotToSave_ACU === 'string' ? `长度=${tempPlotToSave_ACU.length}` : `content长度=${tempPlotToSave_ACU.content?.length}, hash=${tempPlotToSave_ACU.userInputHash}`) : '(空)');
 
-    // 忽略规划阶段触发的事件，避免把 plot 附加到错误楼层
+    // 忽略规划阶段触发的生成结束事件，避免把 plot 附加到错误楼层
     if (!force && planningGuard_ACU.inProgress) {
-      logDebug_ACU('[剧情推进] [Plot] Planning in progress, skipping save.');
+      logDebug_ACU('[剧情推进] [Plot] Planning in progress, ignoring GENERATION_ENDED.');
+      return;
+    }
+    if (planningGuard_ACU.ignoreNextGenerationEndedCount > 0) {
+      planningGuard_ACU.ignoreNextGenerationEndedCount--;
+      logDebug_ACU(`[剧情推进] [Plot] Ignoring planning-triggered GENERATION_ENDED (${planningGuard_ACU.ignoreNextGenerationEndedCount} left).`);
       return;
     }
 
@@ -6169,52 +6193,137 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       return;
     }
 
-    const chat = SillyTavern_API_ACU.chat;
-    if (!chat || chat.length === 0) {
-      logWarn_ACU('[剧情推进] [Plot] 聊天记录为空，无法附加plot');
-      return; // 保留 tempPlotToSave_ACU，等待下一次触发
-    }
-
-    const lastMessage = chat[chat.length - 1];
-    logDebug_ACU('[剧情推进] [Plot] 最后一条消息:', lastMessage ? `is_user=${lastMessage.is_user}, name=${lastMessage.name}` : '(空)');
-
-    // 寻找最新的、且【尚未附加plot数据】的用户消息
-    let target = null;
-    for (let i = chat.length - 1; i >= 0; i--) {
-      const msg = chat[i];
-      if (msg && msg.is_user) {
-        if (!msg.qrf_plot) {
-          // 找到了！这个就是本次规划所对应的用户输入
-          target = msg;
-          logDebug_ACU(`[剧情推进] [Plot] 找到目标用户消息于索引 ${i}`);
-          break;
-        }
-        // 如果已经有 plot，说明这是更早一轮的，继续往前找
-        logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的用户消息已有plot，跳过`);
-      }
-    }
-
-    if (target) {
-      target.qrf_plot = tempPlotToSave_ACU;
-      // 同时保存当前使用的预设名称，用于后续读取时的预设匹配
-      const currentPresetName = settings_ACU.plotSettings?.lastUsedPresetName || '';
-      target.qrf_plot_preset = currentPresetName;
-      logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已附加到目标用户消息，长度:', tempPlotToSave_ACU.length, '，预设:', currentPresetName || '(无)');
-      // 清空临时变量，避免污染下一次生成
-      tempPlotToSave_ACU = null;
+    // [兼容性] 处理旧格式（字符串）和新格式（对象）
+    let plotContent, userInputHash, userInputText;
+    if (typeof tempPlotToSave_ACU === 'string') {
+      // 旧格式：只有内容，没有哈希（向后兼容）
+      plotContent = tempPlotToSave_ACU;
+      userInputHash = null;
+      userInputText = null;
+      logDebug_ACU('[剧情推进] [Plot] 检测到旧格式数据，使用回退匹配逻辑');
     } else {
-      // 非致命：可能所有用户消息都已有plot
-      logWarn_ACU('[剧情推进] [Plot] 未找到可附加 plot 的【无数据】用户消息，可能所有用户消息都已有plot。');
-      // 保留 tempPlotToSave_ACU，等待下一次触发
+      // 新格式：包含内容和用户输入哈希
+      plotContent = tempPlotToSave_ACU.content;
+      userInputHash = tempPlotToSave_ACU.userInputHash;
+      userInputText = tempPlotToSave_ACU.userInputText;
+      logDebug_ACU('[剧情推进] [Plot] 使用新格式，用户输入哈希:', userInputHash, '，原始文本长度:', userInputText?.length || 0);
     }
+
+    if (!plotContent) {
+      logWarn_ACU('[剧情推进] [Plot] plotContent 为空，无法保存');
+      tempPlotToSave_ACU = null;
+      return;
+    }
+
+    // [优化] 使用轮询等待机制，确保用户楼层已写入chat数组
+    const MAX_POLL_ATTEMPTS = 20; // 最多轮询20次（2秒）
+    const POLL_INTERVAL_MS = 100; // 每100ms轮询一次
+    let pollAttempts = 0;
+    let target = null;
+
+    const tryFindTarget = () => {
+      const chat = SillyTavern_API_ACU.chat;
+      if (!chat || chat.length === 0) {
+        return null;
+      }
+
+      // [精确匹配] 优先使用用户输入文本哈希匹配
+      if (userInputHash) {
+        for (let i = chat.length - 1; i >= 0; i--) {
+          const msg = chat[i];
+          if (msg && msg.is_user) {
+            // [优化] 优先检查消息对象上保存的原始输入哈希（策略1场景）
+            if (msg._qrf_plot_pending_hash === userInputHash) {
+              // 找到匹配的消息，清理临时标记
+              delete msg._qrf_plot_pending_hash;
+              if (!msg.qrf_plot) {
+                logDebug_ACU(`[剧情推进] [Plot] ✓ 通过消息对象上的哈希标记找到目标用户消息（索引 ${i}，哈希: ${userInputHash}）`);
+                return { msg, index: i };
+              } else {
+                logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的消息哈希标记匹配但已有plot，继续查找`);
+              }
+            }
+            
+            // [回退] 如果消息对象上没有哈希标记，尝试计算当前消息文本的哈希（策略2场景）
+            const msgText = msg.mes || '';
+            const msgHash = hashUserInput_ACU(msgText);
+            
+            // 精确匹配哈希
+            if (msgHash === userInputHash) {
+              // 额外检查：如果该消息已有plot，且不是本次规划的目标，跳过（可能是重复文本）
+              // 但如果该消息没有plot，则一定是目标
+              if (!msg.qrf_plot) {
+                logDebug_ACU(`[剧情推进] [Plot] ✓ 通过消息文本哈希精确匹配找到目标用户消息（索引 ${i}，哈希: ${userInputHash}）`);
+                return { msg, index: i };
+              } else {
+                // 已有plot，可能是更早的重复文本，继续查找
+                logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的消息哈希匹配但已有plot，继续查找`);
+              }
+            }
+          }
+        }
+      }
+
+      // [回退逻辑] 如果没有哈希或哈希匹配失败，使用原逻辑（向后兼容）
+      // 寻找最新的、且【尚未附加plot数据】的用户消息
+      for (let i = chat.length - 1; i >= 0; i--) {
+        const msg = chat[i];
+        if (msg && msg.is_user && !msg.qrf_plot) {
+          logDebug_ACU(`[剧情推进] [Plot] 使用回退逻辑找到目标用户消息于索引 ${i}`);
+          return { msg, index: i };
+        }
+      }
+
+      return null;
+    };
+
+    const pollForTarget = () => {
+      pollAttempts++;
+      const result = tryFindTarget();
+      
+      if (result) {
+        target = result.msg;
+        logDebug_ACU(`[剧情推进] [Plot] 在第 ${pollAttempts} 次轮询中找到目标消息`);
+        
+        // 保存plot数据
+        target.qrf_plot = plotContent;
+        const currentPresetName = settings_ACU.plotSettings?.lastUsedPresetName || '';
+        target.qrf_plot_preset = currentPresetName;
+        logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已精确附加到目标用户消息，长度:', plotContent.length, '，预设:', currentPresetName || '(无)');
+        
+        // 清空临时变量
+        tempPlotToSave_ACU = null;
+        return true; // 成功
+      }
+
+      if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+        // 超时，记录警告但不清空tempPlotToSave_ACU，允许后续重试
+        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。将在下一次事件中重试。`);
+        return false; // 失败，但保留数据等待重试
+      }
+
+      // 继续轮询
+      setTimeout(pollForTarget, POLL_INTERVAL_MS);
+      return null; // 继续中
+    };
+
+    // 开始轮询（首次延迟100ms，给SillyTavern一些时间写入消息）
+    setTimeout(() => {
+      pollForTarget();
+    }, 100);
   }
 
   /**
    * 核心优化逻辑，可被多处调用。
    * @param {string} userMessage - 需要被优化的用户输入文本。
+   * @param {Object} options - 可选参数
+   * @param {string} options.originalUserInput - 原始用户输入文本（用于哈希匹配，如果与userMessage不同）
    * @returns {Promise<string|null>} - 返回优化后的完整消息体，如果失败或跳过则返回null。
    */
-  async function runOptimizationLogic_ACU(userMessage) {
+  async function runOptimizationLogic_ACU(userMessage, options = {}) {
+    const { originalUserInput } = options;
+    // 用于哈希匹配的原始用户输入（如果未提供，使用userMessage）
+    const inputForHash = originalUserInput || userMessage;
     // 如果当前处于重试流程，绝对禁止触发剧情规划
     if (loopState_ACU.isRetrying) {
         logDebug_ACU('[剧情推进] 当前处于重试流程，跳过剧情规划逻辑。');
@@ -6626,7 +6735,14 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
 
       if (processedMessage) {
         // 将本次优化结果暂存（保存完整回复）
-        tempPlotToSave_ACU = processedMessage;
+        // [优化] 同时保存用户输入文本哈希，用于精确匹配目标消息
+        const userInputHash = hashUserInput_ACU(inputForHash);
+        tempPlotToSave_ACU = {
+          content: processedMessage,
+          userInputHash: userInputHash,
+          userInputText: inputForHash
+        };
+        logDebug_ACU('[剧情推进] [Plot] 已暂存plot数据，用户输入哈希:', userInputHash, '，原始文本长度:', inputForHash?.length || 0);
 
         // 标签摘取逻辑
         let messageForTavern = processedMessage; // 默认使用完整回复
@@ -6678,8 +6794,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           }
         }
 
-        // [优化] 不再立即保存 Plot，改为在 GENERATION_STARTED 事件中保存
-        // 此时用户楼层一定已经写入 chat 数组，避免时序问题导致保存到错误楼层
+        // [新增] 在标签提取完成后立即保存 Plot
+        await savePlotToLatestMessage_ACU(true);
 
         // 使用可能被处理过的 messageForTavern 构建最终消息
         // [改动] 不再代码层面强制拼接本轮用户输入；是否/放置位置由最终注入指令中的 $8 决定。
@@ -10874,7 +10990,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                   if (userMessage) {
                     isProcessing_Plot_ACU = true;
                     try {
-                      const finalMessage = await runOptimizationLogic_ACU(userMessage);
+                      // [优化] 传递原始用户输入用于哈希匹配
+                      // 注意：在 TavernHelper.generate 钩子中，userMessage 就是原始用户输入
+                      const finalMessage = await runOptimizationLogic_ACU(userMessage, {
+                        originalUserInput: userMessage
+                      });
 
                       // 去重互斥：若本次被判定为重复触发，则不改写 prompt，继续走原始生成
                       if (finalMessage && finalMessage.skipped) {
@@ -10979,14 +11099,6 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
             try {
               recordGenerationContext_ACU(type, params, dryRun);
             } catch (e) {}
-
-            // [优化] 在 GENERATION_STARTED 时保存待保存的 plot 数据
-            // 条件：有待保存数据 且 不在规划阶段 且 不是 quiet 生成
-            // 此时用户消息一定已经写入 chat 数组，避免时序问题
-            if (tempPlotToSave_ACU && !planningGuard_ACU.inProgress && !isQuietLikeGeneration_ACU(type, params)) {
-              logDebug_ACU('[剧情推进] [Plot] GENERATION_STARTED 触发，执行延迟保存...');
-              savePlotToLatestMessage_ACU(true);
-            }
           });
         }
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
@@ -11056,7 +11168,17 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                     logDebug_ACU('[剧情推进] [Loop] 标记规划层消息: _qrf_from_planning=true');
                   }
 
-                  const finalMessage = await runOptimizationLogic_ACU(messageToProcess);
+                  // [优化] 在修改消息之前，先保存原始用户输入的哈希到消息对象上
+                  // 这样即使消息内容被规划结果替换，保存函数也能通过这个哈希找到正确的消息
+                  const originalInputHash = hashUserInput_ACU(messageToProcess);
+                  lastMessage._qrf_plot_pending_hash = originalInputHash;
+                  logDebug_ACU('[剧情推进] [Plot] 在消息对象上保存原始输入哈希:', originalInputHash);
+
+                  // [优化] 传递原始用户输入用于哈希匹配
+                  // 注意：在策略1中，lastMessage.mes 就是原始用户输入（还未被规划结果替换）
+                  const finalMessage = await runOptimizationLogic_ACU(messageToProcess, {
+                    originalUserInput: messageToProcess
+                  });
 
                   if (finalMessage && finalMessage.skipped) {
                     logDebug_ACU('[剧情推进] Planning skipped in Strategy 1 (duplicate).');
@@ -11125,7 +11247,12 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
 
             isProcessing_Plot_ACU = true;
             try {
-              const finalMessage = await runOptimizationLogic_ACU(String(textInBox));
+              // [优化] 传递原始用户输入用于哈希匹配
+              // 注意：在策略2中，textInBox 就是原始用户输入（还未被规划结果替换）
+              const originalInputText = String(textInBox);
+              const finalMessage = await runOptimizationLogic_ACU(originalInputText, {
+                originalUserInput: originalInputText
+              });
 
               if (finalMessage && finalMessage.skipped) {
                 logDebug_ACU('[剧情推进] Planning skipped in Strategy 2 (duplicate).');
