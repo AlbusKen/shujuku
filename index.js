@@ -6150,74 +6150,62 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
   }
 
   /**
-   * 将plot附加到最新的AI消息上。
+   * 将plot附加到最新的用户消息上。
+   * [优化] 现在由 GENERATION_STARTED 事件触发，此时用户消息一定已写入 chat 数组，无需延迟。
    */
-  async function savePlotToLatestMessage_ACU(force = false) {
+  function savePlotToLatestMessage_ACU(force = false) {
     logDebug_ACU('[剧情推进] [Plot] savePlotToLatestMessage_ACU 被调用');
     logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.inProgress:', planningGuard_ACU.inProgress);
-    logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.ignoreNextGenerationEndedCount:', planningGuard_ACU.ignoreNextGenerationEndedCount);
     logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU:', tempPlotToSave_ACU ? `长度=${tempPlotToSave_ACU.length}` : '(空)');
 
-    // 忽略规划阶段触发的生成结束事件，避免把 plot 附加到错误楼层
+    // 忽略规划阶段触发的事件，避免把 plot 附加到错误楼层
     if (!force && planningGuard_ACU.inProgress) {
-      logDebug_ACU('[剧情推进] [Plot] Planning in progress, ignoring GENERATION_ENDED.');
-      return;
-    }
-    if (planningGuard_ACU.ignoreNextGenerationEndedCount > 0) {
-      planningGuard_ACU.ignoreNextGenerationEndedCount--;
-      logDebug_ACU(`[剧情推进] [Plot] Ignoring planning-triggered GENERATION_ENDED (${planningGuard_ACU.ignoreNextGenerationEndedCount} left).`);
+      logDebug_ACU('[剧情推进] [Plot] Planning in progress, skipping save.');
       return;
     }
 
-    if (tempPlotToSave_ACU) {
-      // [时序修复] 增加一个短暂延迟，等待SillyTavern将用户输入写入聊天记录
-      setTimeout(() => {
-        const chat = SillyTavern_API_ACU.chat;
-        // 在SillyTavern的事件触发时，chat数组应该已经更新
-        if (chat && chat.length > 0) {
-          const lastMessage = chat[chat.length - 1];
-          logDebug_ACU('[剧情推进] [Plot] (延迟后) 最后一条消息:', lastMessage ? `is_user=${lastMessage.is_user}, name=${lastMessage.name}` : '(空)');
-
-          // [再修改] 寻找最新的、且【尚未附加plot数据】的用户消息
-          // 这样可以精确地将本次生成的plot附加到触发它的那个用户输入上，避免时序问题
-          let target = null;
-          for (let i = chat.length - 1; i >= 0; i--) {
-            const msg = chat[i];
-            // 寻找一个用户消息
-            if (msg && msg.is_user) {
-              // 检查它是否已经有 plot 数据
-              if (!msg.qrf_plot) {
-                // 找到了！这个就是本次规划所对应的用户输入
-                target = msg;
-                logDebug_ACU(`[剧情推进] [Plot] 找到目标用户消息于索引 ${i}`);
-                break;
-              }
-              // 如果已经有 plot，说明这是更早一轮的，继续往前找
-              logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的用户消息已有plot，跳过`);
-            }
-          }
-
-          if (target) {
-            target.qrf_plot = tempPlotToSave_ACU;
-            // [新增] 同时保存当前使用的预设名称，用于后续读取时的预设匹配
-            const currentPresetName = settings_ACU.plotSettings?.lastUsedPresetName || '';
-            target.qrf_plot_preset = currentPresetName;
-            logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已附加到目标用户消息，长度:', tempPlotToSave_ACU.length, '，预设:', currentPresetName || '(无)');
-            // SillyTavern should handle saving automatically after generation ends.
-          } else {
-            // 非致命：可能是生成刚结束、消息尚未同步。避免弹错与刷屏。
-            logWarn_ACU('[剧情推进] [Plot] 未找到可附加 plot 的【无数据】用户消息，可能所有用户消息都已有plot，或时序问题。将在下一次事件中重试。');
-            return; // 保留 tempPlotToSave_ACU，等待下一次触发
-          }
-        } else {
-          logWarn_ACU('[剧情推进] [Plot] 聊天记录为空，无法附加plot');
-          return; // 保留 tempPlotToSave_ACU，等待下一次触发
-        }
-        // 无论成功或失败，都清空临时变量，避免污染下一次生成
-        tempPlotToSave_ACU = null;
-      }, 100); // 延迟100毫秒
-    } else {
+    if (!tempPlotToSave_ACU) {
       logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU 为空，无需保存');
+      return;
+    }
+
+    const chat = SillyTavern_API_ACU.chat;
+    if (!chat || chat.length === 0) {
+      logWarn_ACU('[剧情推进] [Plot] 聊天记录为空，无法附加plot');
+      return; // 保留 tempPlotToSave_ACU，等待下一次触发
+    }
+
+    const lastMessage = chat[chat.length - 1];
+    logDebug_ACU('[剧情推进] [Plot] 最后一条消息:', lastMessage ? `is_user=${lastMessage.is_user}, name=${lastMessage.name}` : '(空)');
+
+    // 寻找最新的、且【尚未附加plot数据】的用户消息
+    let target = null;
+    for (let i = chat.length - 1; i >= 0; i--) {
+      const msg = chat[i];
+      if (msg && msg.is_user) {
+        if (!msg.qrf_plot) {
+          // 找到了！这个就是本次规划所对应的用户输入
+          target = msg;
+          logDebug_ACU(`[剧情推进] [Plot] 找到目标用户消息于索引 ${i}`);
+          break;
+        }
+        // 如果已经有 plot，说明这是更早一轮的，继续往前找
+        logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的用户消息已有plot，跳过`);
+      }
+    }
+
+    if (target) {
+      target.qrf_plot = tempPlotToSave_ACU;
+      // 同时保存当前使用的预设名称，用于后续读取时的预设匹配
+      const currentPresetName = settings_ACU.plotSettings?.lastUsedPresetName || '';
+      target.qrf_plot_preset = currentPresetName;
+      logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已附加到目标用户消息，长度:', tempPlotToSave_ACU.length, '，预设:', currentPresetName || '(无)');
+      // 清空临时变量，避免污染下一次生成
+      tempPlotToSave_ACU = null;
+    } else {
+      // 非致命：可能所有用户消息都已有plot
+      logWarn_ACU('[剧情推进] [Plot] 未找到可附加 plot 的【无数据】用户消息，可能所有用户消息都已有plot。');
+      // 保留 tempPlotToSave_ACU，等待下一次触发
     }
   }
 
@@ -6690,8 +6678,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           }
         }
 
-        // [新增] 在标签提取完成后立即保存 Plot
-        await savePlotToLatestMessage_ACU(true);
+        // [优化] 不再立即保存 Plot，改为在 GENERATION_STARTED 事件中保存
+        // 此时用户楼层一定已经写入 chat 数组，避免时序问题导致保存到错误楼层
 
         // 使用可能被处理过的 messageForTavern 构建最终消息
         // [改动] 不再代码层面强制拼接本轮用户输入；是否/放置位置由最终注入指令中的 $8 决定。
@@ -10991,6 +10979,14 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
             try {
               recordGenerationContext_ACU(type, params, dryRun);
             } catch (e) {}
+
+            // [优化] 在 GENERATION_STARTED 时保存待保存的 plot 数据
+            // 条件：有待保存数据 且 不在规划阶段 且 不是 quiet 生成
+            // 此时用户消息一定已经写入 chat 数组，避免时序问题
+            if (tempPlotToSave_ACU && !planningGuard_ACU.inProgress && !isQuietLikeGeneration_ACU(type, params)) {
+              logDebug_ACU('[剧情推进] [Plot] GENERATION_STARTED 触发，执行延迟保存...');
+              savePlotToLatestMessage_ACU(true);
+            }
           });
         }
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
