@@ -2249,6 +2249,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     $autoUpdateEnabledCheckbox_ACU, // 新增UI元素
     $standardizedTableFillEnabledCheckbox_ACU, // [新增] 规范填表功能
     $toastMuteEnabledCheckbox_ACU, // [新增] 静默提示框
+    $tableEditLastPairOnlyCheckbox_ACU, // [新增] 仅识别最后一对 tableEdit
     $manualUpdateCardButton_ACU, // New manual update button
     $statusMessageSpan_ACU,
     $cardUpdateStatusDisplay_ACU,
@@ -2304,6 +2305,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       tableContextExtractTags: '',
       // [填表功能] 正文标签排除：将指定标签内容从上下文中移除
       tableContextExcludeTags: '',
+      // [填表功能] 仅识别最后一对 <tableEdit> 标签
+      tableEditLastPairOnly: true,
       importSplitSize: 10000,
       skipUpdateFloors: 0, // 全局有效楼层 (UI参数) - 影响所有表
       retainRecentLayers: 100, // [新增] 保留最近N层本地数据 (0或空=全部保留，按AI楼层计数)
@@ -7191,6 +7194,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           tableContextExtractTags: '',
           // [填表功能] 正文标签排除：将指定标签内容从上下文中移除
           tableContextExcludeTags: '',
+          // [填表功能] 仅识别最后一对 <tableEdit> 标签
+          tableEditLastPairOnly: true,
           removeTags: '',
           importSplitSize: 10000,
           skipUpdateFloors: 0, // 跳过更新楼层（全局）
@@ -7406,6 +7411,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           if ($autoUpdateEnabledCheckbox_ACU) $autoUpdateEnabledCheckbox_ACU.prop('checked', settings_ACU.autoUpdateEnabled);
           if ($standardizedTableFillEnabledCheckbox_ACU) $standardizedTableFillEnabledCheckbox_ACU.prop('checked', settings_ACU.standardizedTableFillEnabled !== false);
           if ($toastMuteEnabledCheckbox_ACU) $toastMuteEnabledCheckbox_ACU.prop('checked', !!settings_ACU.toastMuteEnabled);
+          if ($tableEditLastPairOnlyCheckbox_ACU) $tableEditLastPairOnlyCheckbox_ACU.prop('checked', settings_ACU.tableEditLastPairOnly !== false);
 
           // [新增] 更新所有合并相关设置
           const $mergePromptInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-merge-prompt-template`);
@@ -9582,6 +9588,12 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
     }
   }
 
+  function splitKeywordsByComma_ACU(text) {
+      const raw = String(text || '').trim();
+      if (!raw) return [];
+      return raw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
+  }
+
   async function updateSummaryTableEntries_ACU(summaryTable, isImport = false) { // [外部导入] 添加 isImport 标志
     if (!TavernHelper_API_ACU) return;
     const primaryLorebookName = await getInjectionTargetLorebook_ACU();
@@ -9641,7 +9653,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
             const keywordsRaw = rowData[keywordColumnIndex];
             if (!keywordsRaw) return; // Skip if no keywords
 
-            const keywords = keywordsRaw.split(',').map(k => k.trim()).filter(Boolean);
+            const keywords = splitKeywordsByComma_ACU(keywordsRaw);
             if (keywords.length === 0) return;
 
             // 行条目只包含行数据，不包含表头
@@ -10229,14 +10241,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                       // Determine Keywords
                       let keys = [];
                       if (config.keywords) {
-                          const keywordList = config.keywords.split(/[,，]/).map(k => k.trim()).filter(Boolean);
+                          const keywordList = splitKeywordsByComma_ACU(config.keywords);
                           keywordList.forEach(k => {
                               // Check if keyword matches a column header
                               const colIndex = headers.indexOf(k);
                               if (colIndex !== -1) {
                                   // Use content from that column
                                   const cellContent = rowData[colIndex];
-                                  if (cellContent) keys.push(cellContent);
+                                  if (cellContent) {
+                                      keys.push(...splitKeywordsByComma_ACU(cellContent));
+                                  }
                               } else {
                                   // Use the keyword as is
                                   keys.push(k);
@@ -10298,7 +10312,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
               } else {
                   // Whole table export
                   const entryName = config.entryName || tableName;
-                  let keys = config.keywords ? config.keywords.split(/[,，]/).map(k => k.trim()).filter(Boolean) : [];
+                  let keys = config.keywords ? splitKeywordsByComma_ACU(config.keywords) : [];
                   
                   if (config.entryType === 'keyword' && keys.length === 0) return;
 
@@ -10537,21 +10551,34 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
         const personNames = [];
 
         // 2.1 准备要创建的人物条目
+        const buildPersonNameKeywords_ACU = (rawName) => {
+            const raw = String(rawName || '').trim();
+            if (!raw) return [];
+            const baseParts = splitKeywordsByComma_ACU(raw);
+            const parts = baseParts.length > 0 ? baseParts : [raw];
+            const keys = [];
+            parts.forEach(part => {
+                if (!part) return;
+                keys.push(part);
+                const bracketMatch = part.match(/^([^（(]+)[（(]/);
+                if (bracketMatch) {
+                    const nameBeforeBracket = bracketMatch[1].trim();
+                    if (nameBeforeBracket && nameBeforeBracket !== part) {
+                        keys.push(nameBeforeBracket);
+                    }
+                }
+            });
+            return [...new Set(keys)];
+        };
+
         personRows.forEach((row, i) => {
             const rowData = row.slice(1);
             const personName = rowData[nameColumnIndex];
             if (!personName) return;
             personNames.push(personName);
 
-            // [新增] 生成关键词：如果名称包含括号，除了完整名称外，还要添加括号前的部分
-            const keys = [personName];
-            const bracketMatch = personName.match(/^([^（(]+)[（(]/);
-            if (bracketMatch) {
-                const nameBeforeBracket = bracketMatch[1].trim();
-                if (nameBeforeBracket && nameBeforeBracket !== personName) {
-                    keys.push(nameBeforeBracket);
-                }
-            }
+            // [优化] 生成关键词：英文逗号分割为多关键词；每个关键词保留括号前的部分
+            const keys = buildPersonNameKeywords_ACU(personName);
 
             const content = `| ${rowData.join(' | ')} |`
             const newEntryData = applySystemDepthInjection_ACU({
@@ -13325,6 +13352,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
                                     <label style="white-space: nowrap; font-size: 0.9em;">标签排除:</label>
                                     <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-tags" placeholder="例如: thinking,reason" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
                                 </div>
+                                <div class="checkbox-group">
+                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">仅识别最后一对 &lt;tableEdit&gt; 标签（忽略前面的思维链/草稿）</label>
+                                </div>
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-manual-update-card" class="primary" style="width:100%;">立即手动更新</button>
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">
@@ -14119,6 +14150,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
       $autoUpdateEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox`); // 获取复选框
       $standardizedTableFillEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox`);
       $toastMuteEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox`);
+      $tableEditLastPairOnlyCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox`);
       $manualExtraHintCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox`);
       $manualUpdateCardButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-update-card`);
       $manualTableSelectAll_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-table-select-all`);
@@ -14827,6 +14859,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM0001"})
           // 该提示属于“导入/手动操作类”允许项，避免用户开启后无反馈
           showToastr_ACU('info', `静默提示框已 ${settings_ACU.toastMuteEnabled ? '开启' : '关闭'}`, {
             acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
+          });
+        });
+      }
+      if ($tableEditLastPairOnlyCheckbox_ACU && $tableEditLastPairOnlyCheckbox_ACU.length) {
+        $tableEditLastPairOnlyCheckbox_ACU.on('change', function () {
+          settings_ACU.tableEditLastPairOnly = jQuery_API_ACU(this).is(':checked');
+          saveSettings_ACU();
+          logDebug_ACU('仅识别最后一对 tableEdit 启用状态已保存:', settings_ACU.tableEditLastPairOnly);
+          showToastr_ACU('info', `tableEdit 解析将${settings_ACU.tableEditLastPairOnly ? '仅使用最后一对标签' : '按全部标签优先匹配'}`, {
+            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
           });
         });
       }
@@ -16985,19 +17027,34 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
   }
 
   function extractTableEditInner_ACU(text, options = {}) {
-    const { allowNoTableEditTags = true } = options;
+    const { allowNoTableEditTags = true, useLastPairOnly = (settings_ACU?.tableEditLastPairOnly !== false) } = options;
     const cleaned = normalizeAiResponseForTableEditParsing_ACU(text);
     if (!cleaned) return null;
 
     // 1) 标准格式：<tableEdit>...</tableEdit>
-    const fullMatch = cleaned.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i);
-    if (fullMatch && typeof fullMatch[1] === 'string') {
-      return { inner: fullMatch[1], cleaned, mode: 'full' };
+    if (useLastPairOnly) {
+      const fullRe = /<tableEdit>([\s\S]*?)<\/tableEdit>/ig;
+      let lastMatch = null;
+      let m;
+      while ((m = fullRe.exec(cleaned)) !== null) {
+        lastMatch = m;
+      }
+      if (lastMatch && typeof lastMatch[1] === 'string') {
+        return { inner: lastMatch[1], cleaned, mode: 'full_last' };
+      }
+    } else {
+      const fullMatch = cleaned.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i);
+      if (fullMatch && typeof fullMatch[1] === 'string') {
+        return { inner: fullMatch[1], cleaned, mode: 'full' };
+      }
     }
 
     // 2) 宽松格式：缺失开/闭标签，但 <!-- --> 包裹完整
-    const hasOpen = /<tableEdit>/i.test(cleaned);
-    const hasClose = /<\/tableEdit>/i.test(cleaned);
+    const lowerCleaned = cleaned.toLowerCase();
+    const openTag = '<tableedit>';
+    const closeTag = '</tableedit>';
+    const hasOpen = lowerCleaned.includes(openTag);
+    const hasClose = lowerCleaned.includes(closeTag);
     const hasAnyTag = hasOpen || hasClose;
 
     const commentRe = /<!--([\s\S]*?)-->/g;
@@ -17018,23 +17075,27 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
 
     let chosen = null;
     if (hasOpen && !hasClose) {
-      const openIdx = cleaned.search(/<tableEdit>/i);
-      chosen = candidates.find(b => b.start > openIdx) || candidates[0];
+      const openIdx = useLastPairOnly ? lowerCleaned.lastIndexOf(openTag) : cleaned.search(/<tableEdit>/i);
+      chosen = candidates.find(b => b.start > openIdx) || (useLastPairOnly ? candidates[candidates.length - 1] : candidates[0]);
     } else if (!hasOpen && hasClose) {
-      const closeIdx = cleaned.search(/<\/tableEdit>/i);
+      const closeIdx = useLastPairOnly ? lowerCleaned.lastIndexOf(closeTag) : cleaned.search(/<\/tableEdit>/i);
       for (let i = candidates.length - 1; i >= 0; i--) {
         if (candidates[i].end < closeIdx) { chosen = candidates[i]; break; }
       }
       chosen = chosen || candidates[candidates.length - 1];
     } else if (hasAnyTag) {
-      const tagIdx = hasOpen ? cleaned.search(/<tableEdit>/i) : cleaned.search(/<\/tableEdit>/i);
+      const lastOpenIdx = lowerCleaned.lastIndexOf(openTag);
+      const lastCloseIdx = lowerCleaned.lastIndexOf(closeTag);
+      const tagIdx = useLastPairOnly
+        ? (lastCloseIdx !== -1 ? lastCloseIdx : lastOpenIdx)
+        : (hasOpen ? cleaned.search(/<tableEdit>/i) : cleaned.search(/<\/tableEdit>/i));
       let bestDist = Infinity;
       candidates.forEach(b => {
         const dist = Math.min(Math.abs(b.start - tagIdx), Math.abs(b.end - tagIdx));
         if (dist < bestDist) { bestDist = dist; chosen = b; }
       });
     } else if (allowNoTableEditTags) {
-      chosen = candidates[0];
+      chosen = useLastPairOnly ? candidates[candidates.length - 1] : candidates[0];
     }
 
     if (!chosen) return null;
