@@ -1355,6 +1355,7 @@
       activeIsolationCode: '',
       isolationCodeList: [],
       migratedLegacySingleStore: false, // 是否已完成从 legacy(allSettings/customTemplate) 迁移到 profile
+      zeroTkOccupyModeGlobal: false, // 0TK全局偏好（跨角色卡/跨隔离标识）
   };
 
   function buildDefaultGlobalMeta_ACU() {
@@ -1363,6 +1364,7 @@
           activeIsolationCode: '',
           isolationCodeList: [],
           migratedLegacySingleStore: false,
+          zeroTkOccupyModeGlobal: false,
       };
   }
 
@@ -2429,7 +2431,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       if (!settings_ACU.characterSettings) {
           settings_ACU.characterSettings = {};
       }
-      const globalZeroTkDefault = settings_ACU?.zeroTkOccupyModeDefault === true;
+      const globalZeroTkDefault =
+          (typeof globalMeta_ACU?.zeroTkOccupyModeGlobal === 'boolean')
+              ? (globalMeta_ACU.zeroTkOccupyModeGlobal === true)
+              : (settings_ACU?.zeroTkOccupyModeDefault === true);
       if (!settings_ACU.characterSettings[charId]) {
           // 如果该角色没有设置，则创建一个深拷贝的默认设置
           const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
@@ -2448,15 +2453,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU)),
               existingCfg,
           );
-          // 兼容旧字段并统一语义：zeroTk=true <=> outline=false
-          if (typeof existingCfg.zeroTkOccupyMode === 'undefined') {
-              if (typeof existingCfg.outlineEntryEnabled !== 'undefined') {
-                  mergedCfg.zeroTkOccupyMode = (existingCfg.outlineEntryEnabled === false);
-              } else {
-                  mergedCfg.zeroTkOccupyMode = globalZeroTkDefault;
-              }
-          }
-          mergedCfg.outlineEntryEnabled = !mergedCfg.zeroTkOccupyMode;
+          // 0TK模式按全局偏好统一生效，切换角色卡/聊天不应被旧角色配置覆盖
+          mergedCfg.zeroTkOccupyMode = globalZeroTkDefault;
+          mergedCfg.outlineEntryEnabled = !globalZeroTkDefault;
           settings_ACU.characterSettings[charId].worldbookConfig = mergedCfg;
       } catch (e) {
           // ignore
@@ -3021,6 +3020,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             // 同步到新字段（新语义：mode=true => enabled=false）
             cfg.zeroTkOccupyMode = (cfg.outlineEntryEnabled === false);
             settings_ACU.zeroTkOccupyModeDefault = cfg.zeroTkOccupyMode;
+            globalMeta_ACU.zeroTkOccupyModeGlobal = cfg.zeroTkOccupyMode;
+            saveGlobalMeta_ACU();
             saveSettings_ACU();
             if (currentJsonTableData_ACU) {
                 const { outlineTable } = formatJsonToReadable_ACU(currentJsonTableData_ACU);
@@ -3041,6 +3042,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             // 兼容旧字段
             cfg.outlineEntryEnabled = !cfg.zeroTkOccupyMode;
             settings_ACU.zeroTkOccupyModeDefault = cfg.zeroTkOccupyMode;
+            globalMeta_ACU.zeroTkOccupyModeGlobal = cfg.zeroTkOccupyMode;
+            saveGlobalMeta_ACU();
             saveSettings_ACU();
             if (currentJsonTableData_ACU) {
                 const { outlineTable } = formatJsonToReadable_ACU(currentJsonTableData_ACU);
@@ -7367,6 +7370,14 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               settings_ACU.dataIsolationCode = activeCode;
               settings_ACU.dataIsolationEnabled = (activeCode !== '');
 
+              // 0TK 全局偏好：优先 globalMeta；若缺失则从旧 profile 字段迁移
+              if (typeof globalMeta_ACU.zeroTkOccupyModeGlobal === 'boolean') {
+                  settings_ACU.zeroTkOccupyModeDefault = (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
+              } else {
+                  globalMeta_ACU.zeroTkOccupyModeGlobal = (settings_ACU.zeroTkOccupyModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
+
               // 确保当前角色有配置
               getCurrentCharSettings_ACU();
               
@@ -7380,6 +7391,12 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               // [Profile] 强制以 globalMeta.activeIsolationCode 作为当前标识
               settings_ACU.dataIsolationCode = activeCode;
               settings_ACU.dataIsolationEnabled = (activeCode !== '');
+              if (typeof globalMeta_ACU.zeroTkOccupyModeGlobal === 'boolean') {
+                  settings_ACU.zeroTkOccupyModeDefault = (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
+              } else {
+                  globalMeta_ACU.zeroTkOccupyModeGlobal = (settings_ACU.zeroTkOccupyModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
           }
       } catch (error) {
           logError_ACU('Failed to load or parse settings, using defaults:', error);
@@ -14563,6 +14580,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               // 兼容：同步旧字段（旧语义：true=条目启用）
               worldbookConfig.outlineEntryEnabled = !modeEnabled;
               settings_ACU.zeroTkOccupyModeDefault = !!modeEnabled;
+              globalMeta_ACU.zeroTkOccupyModeGlobal = !!modeEnabled;
+              saveGlobalMeta_ACU();
               saveSettings_ACU();
               showToastr_ACU(
                   'info',
