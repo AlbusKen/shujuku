@@ -2274,6 +2274,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     // - 对应条目 comment: `${isoPrefix}TavernDB-ACU-OutlineTable`（或外部导入前缀版本）
     // - 关闭时仍会更新内容，但条目在世界书里为禁用（enabled=false）
     outlineEntryEnabled: true,
+    // [新增] 0TK占用模式：true=世界书条目禁用；false=世界书条目启用
+    zeroTkOccupyMode: false,
   };
 
   // [剧情推进] 世界书选择默认值：已改为 buildDefaultPlotWorldbookConfig_ACU()（见上方），避免初始化顺序问题
@@ -2324,6 +2326,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       
       // [新增] 外部导入专用的世界书配置
       importWorldbookTarget: '', // 导入数据注入目标世界书名称
+      // [新增] 0TK占用模式全局默认值：新对话会继承这个值
+      zeroTkOccupyModeDefault: false,
 
     // [新增] 数据隔离/多副本机制
     dataIsolationEnabled: false, // 是否开启数据隔离
@@ -2425,20 +2429,35 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       if (!settings_ACU.characterSettings) {
           settings_ACU.characterSettings = {};
       }
+      const globalZeroTkDefault = settings_ACU?.zeroTkOccupyModeDefault === true;
       if (!settings_ACU.characterSettings[charId]) {
           // 如果该角色没有设置，则创建一个深拷贝的默认设置
+          const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
+          // 新建聊天默认继承“全局0TK偏好”，避免切换/新开后被重置
+          worldbookConfigForNewChat.zeroTkOccupyMode = globalZeroTkDefault;
+          worldbookConfigForNewChat.outlineEntryEnabled = !globalZeroTkDefault;
           settings_ACU.characterSettings[charId] = {
-              worldbookConfig: JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU))
+              worldbookConfig: worldbookConfigForNewChat,
           };
           logDebug_ACU(`Created new character settings for: ${charId}`);
       }
       // [新增] 兜底补齐：老存档的 worldbookConfig 可能缺少新增字段（如 outlineEntryEnabled）
       try {
           const existingCfg = settings_ACU.characterSettings[charId].worldbookConfig || {};
-          settings_ACU.characterSettings[charId].worldbookConfig = deepMerge_ACU(
+          const mergedCfg = deepMerge_ACU(
               JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU)),
               existingCfg,
           );
+          // 兼容旧字段并统一语义：zeroTk=true <=> outline=false
+          if (typeof existingCfg.zeroTkOccupyMode === 'undefined') {
+              if (typeof existingCfg.outlineEntryEnabled !== 'undefined') {
+                  mergedCfg.zeroTkOccupyMode = (existingCfg.outlineEntryEnabled === false);
+              } else {
+                  mergedCfg.zeroTkOccupyMode = globalZeroTkDefault;
+              }
+          }
+          mergedCfg.outlineEntryEnabled = !mergedCfg.zeroTkOccupyMode;
+          settings_ACU.characterSettings[charId].worldbookConfig = mergedCfg;
       } catch (e) {
           // ignore
       }
@@ -3001,6 +3020,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             cfg.outlineEntryEnabled = !!enabled;
             // 同步到新字段（新语义：mode=true => enabled=false）
             cfg.zeroTkOccupyMode = (cfg.outlineEntryEnabled === false);
+            settings_ACU.zeroTkOccupyModeDefault = cfg.zeroTkOccupyMode;
             saveSettings_ACU();
             if (currentJsonTableData_ACU) {
                 const { outlineTable } = formatJsonToReadable_ACU(currentJsonTableData_ACU);
@@ -3020,6 +3040,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             cfg.zeroTkOccupyMode = !!modeEnabled;
             // 兼容旧字段
             cfg.outlineEntryEnabled = !cfg.zeroTkOccupyMode;
+            settings_ACU.zeroTkOccupyModeDefault = cfg.zeroTkOccupyMode;
             saveSettings_ACU();
             if (currentJsonTableData_ACU) {
                 const { outlineTable } = formatJsonToReadable_ACU(currentJsonTableData_ACU);
@@ -7203,6 +7224,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           tableUpdateLocks: {},
           // [新增] 总结表/总体大纲“编码索引列”特殊锁定（默认锁定）
           specialIndexLocks: {},
+          // [新增] 0TK占用模式全局默认值：新对话会继承这个值
+          zeroTkOccupyModeDefault: false,
           // [Profile] dataIsolationEnabled/code 由当前 profile 决定；history 走 globalMeta
           dataIsolationCode: '',
           dataIsolationHistory: [], // legacy 字段保留但不再持久化
@@ -14539,6 +14562,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               worldbookConfig.zeroTkOccupyMode = !!modeEnabled;
               // 兼容：同步旧字段（旧语义：true=条目启用）
               worldbookConfig.outlineEntryEnabled = !modeEnabled;
+              settings_ACU.zeroTkOccupyModeDefault = !!modeEnabled;
               saveSettings_ACU();
               showToastr_ACU(
                   'info',
