@@ -1808,6 +1808,7 @@
     ratePersonal: 1.0,
     rateErotic: 0,
     rateCuckold: 1.0,
+    recallCount: 20,
     extractTags: 'recall', // 默认为空
     contextExtractTags: '', // 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
     contextExcludeTags: '', // 正文标签排除：将指定标签内容从上下文中移除
@@ -3387,6 +3388,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             settings_ACU.plotSettings.ratePersonal = targetPreset.ratePersonal ?? 1.0;
             settings_ACU.plotSettings.rateErotic = targetPreset.rateErotic ?? 0;
             settings_ACU.plotSettings.rateCuckold = targetPreset.rateCuckold ?? 1.0;
+            settings_ACU.plotSettings.recallCount = targetPreset.recallCount ?? 20;
             settings_ACU.plotSettings.extractTags = targetPreset.extractTags || '';
             settings_ACU.plotSettings.minLength = targetPreset.minLength ?? 0;
             settings_ACU.plotSettings.contextTurnCount = targetPreset.contextTurnCount ?? 3;
@@ -3405,6 +3407,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val(targetPreset.ratePersonal ?? 1.0);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(targetPreset.rateErotic ?? 0);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(targetPreset.rateCuckold ?? 1.0);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(targetPreset.recallCount ?? 20);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(targetPreset.extractTags || '');
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(targetPreset.minLength ?? 0);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(targetPreset.contextTurnCount ?? 3);
@@ -4159,7 +4162,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               sourceData: s.sourceData || { note: '', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
               content: [headerRow],
               updateConfig: s.updateConfig || { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
-              exportConfig: s.exportConfig || { enabled: false, splitByRow: false, entryName: s.name || k, entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '' },
+              exportConfig: ensureExportConfigDefaults_ACU(s.exportConfig, s.name || k),
           };
           // v2: 基础数据（仅模板预置/seedRows）；注意：这里绝不从 content 派生，避免把真实数据误当作“基础数据”写入指导表
           if (Array.isArray(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])) {
@@ -4384,6 +4387,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       if (!dataObj || typeof dataObj !== 'object') return null;
       const keys = getSortedSheetKeys_ACU(dataObj, { ignoreChatGuide: true });
       const out = { mate: { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU } };
+      if (dataObj.mate && typeof dataObj.mate === 'object') {
+          out.mate = JSON.parse(JSON.stringify(dataObj.mate));
+      }
+      out.mate.globalInjectionConfig = ensureGlobalInjectionConfigDefaults_ACU(out.mate.globalInjectionConfig);
       keys.forEach(k => {
           const s = dataObj[k];
           if (!s) return;
@@ -4394,7 +4401,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               sourceData: s.sourceData ? JSON.parse(JSON.stringify(s.sourceData)) : { note: '', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
               content: [headerRow],
               updateConfig: s.updateConfig ? JSON.parse(JSON.stringify(s.updateConfig)) : { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
-              exportConfig: s.exportConfig ? JSON.parse(JSON.stringify(s.exportConfig)) : { enabled: false, splitByRow: false, entryName: s.name || k, entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '' },
+              exportConfig: ensureExportConfigDefaults_ACU(
+                  s.exportConfig ? JSON.parse(JSON.stringify(s.exportConfig)) : null,
+                  s.name || k
+              ),
           };
           // 需求4：结构/表名/参数变更时，仅更新指导表元信息，不修改“基础数据(seedRows)”
           const preserved = preserveSeedRowsFromGuideData?.[k]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
@@ -4427,6 +4437,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           return String(a).localeCompare(String(b));
       });
       const out = { mate: { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU } };
+      if (templateObj.mate && typeof templateObj.mate === 'object') {
+          out.mate = JSON.parse(JSON.stringify(templateObj.mate));
+      }
+      out.mate.globalInjectionConfig = ensureGlobalInjectionConfigDefaults_ACU(out.mate.globalInjectionConfig);
       sorted.forEach((k, idx) => {
           const base = JSON.parse(JSON.stringify(templateObj[k] || {}));
           base.uid = base.uid || k;
@@ -4569,6 +4583,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       if (!out.name && sheet.name) out.name = sheet.name;
       if (!out.content && Array.isArray(sheet.content)) out.content = sheet.content;
       if (!out.sourceData && sheet.sourceData) out.sourceData = sheet.sourceData;
+      out.exportConfig = ensureExportConfigDefaults_ACU(out.exportConfig, out.name || sheet.name || sheet.uid || '');
       return out;
   }
 
@@ -5715,6 +5730,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         if (presetToLoad.ratePersonal !== undefined) newApiSettings.ratePersonal = presetToLoad.ratePersonal;
         if (presetToLoad.rateErotic !== undefined) newApiSettings.rateErotic = presetToLoad.rateErotic;
         if (presetToLoad.rateCuckold !== undefined) newApiSettings.rateCuckold = presetToLoad.rateCuckold;
+        if (presetToLoad.recallCount !== undefined) newApiSettings.recallCount = presetToLoad.recallCount;
 
         // 迁移提示词：优先采用“独立提示词组(promptGroup)”
         const looksLikePromptGroupSegments = (arr) => {
@@ -6624,6 +6640,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         sulv2: plotSettings.ratePersonal,
         sulv3: plotSettings.rateErotic,
         sulv4: plotSettings.rateCuckold,
+        zhaohui: plotSettings.recallCount,
         $5: outlineTableContent,
         $6: lastPlotContent,
         $7: contextInjectionText,
@@ -9126,6 +9143,173 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
       return '';
   }
 
+  const DEFAULT_ENTRY_PLACEMENT_ACU = Object.freeze({ position: 'at_depth_as_system', depth: 2, order: 10000 });
+  const DEFAULT_EXTRA_INDEX_PLACEMENT_ACU = Object.freeze({ position: 'at_depth_as_system', depth: 2, order: 10010 });
+  const DEFAULT_FIXED_PLACEMENT_ACU = Object.freeze({ position: 'at_depth_as_system', depth: 2, order: 99990 });
+  const DEFAULT_FIXED_INDEX_PLACEMENT_ACU = Object.freeze({ position: 'at_depth_as_system', depth: 2, order: 99991 });
+
+  function normalizeLorebookPosition_ACU(position, fallback = 'at_depth_as_system') {
+      const raw = String(position ?? '').trim().toLowerCase();
+      if (raw === 'at_depth_as_system' || raw === 'system') return 'at_depth_as_system';
+      if (raw === 'before_char' || raw === 'before_character' || raw === '0') return 'before_char';
+      if (raw === 'after_char' || raw === 'after_character' || raw === '1') return 'after_char';
+      return fallback;
+  }
+
+  function normalizePlacementConfig_ACU(rawPlacement, fallbackPlacement) {
+      const fallback = fallbackPlacement || DEFAULT_ENTRY_PLACEMENT_ACU;
+      const source = (rawPlacement && typeof rawPlacement === 'object') ? rawPlacement : {};
+      const depthRaw = parseInt(source.depth, 10);
+      const orderRaw = parseInt(source.order, 10);
+      return {
+          position: normalizeLorebookPosition_ACU(source.position, fallback.position),
+          depth: Number.isFinite(depthRaw) ? depthRaw : fallback.depth,
+          order: Number.isFinite(orderRaw) ? orderRaw : fallback.order,
+      };
+  }
+
+  function isSummaryTableName_ACU(name) {
+      return String(name || '').trim() === '总结表';
+  }
+
+  function isOutlineTableName_ACU(name) {
+      return String(name || '').trim() === '总体大纲';
+  }
+
+  function isImportantPersonsTableName_ACU(name) {
+      return String(name || '').trim() === '重要人物表';
+  }
+
+  function isGlobalDataTableName_ACU(name) {
+      const n = String(name || '').trim();
+      return n === '全局数据表' || n === '全局表';
+  }
+
+  function getFixedPlacementDefaultsForTable_ACU(tableName) {
+      const name = String(tableName || '').trim();
+      if (isSummaryTableName_ACU(name)) {
+          return {
+              entry: { position: 'at_depth_as_system', depth: 9999, order: 99987 },
+              index: { position: 'at_depth_as_system', depth: 9999, order: 99988 },
+          };
+      }
+      if (isOutlineTableName_ACU(name)) {
+          return {
+              entry: { position: 'at_depth_as_system', depth: 9998, order: 99985 },
+              index: { position: 'at_depth_as_system', depth: 9998, order: 99986 },
+          };
+      }
+      if (isImportantPersonsTableName_ACU(name)) {
+          return {
+              entry: { position: 'at_depth_as_system', depth: 10000, order: 99983 },
+              index: { position: 'at_depth_as_system', depth: 10000, order: 99984 },
+          };
+      }
+      if (isGlobalDataTableName_ACU(name)) {
+          return {
+              entry: { position: 'before_char', depth: 2, order: 99981 },
+              index: { position: 'before_char', depth: 2, order: 99982 },
+          };
+      }
+      return {
+          entry: { ...DEFAULT_FIXED_PLACEMENT_ACU },
+          index: { ...DEFAULT_FIXED_INDEX_PLACEMENT_ACU },
+      };
+  }
+
+  function buildDefaultExportConfig_ACU(tableName = '') {
+      const fixedDefaults = getFixedPlacementDefaultsForTable_ACU(tableName);
+      return {
+          enabled: false,
+          splitByRow: false,
+          entryName: tableName || '',
+          entryType: 'constant',
+          keywords: '',
+          preventRecursion: true,
+          injectionTemplate: '',
+          extraIndexEnabled: false,
+          extraIndexEntryName: `${tableName || '表格'}-索引`,
+          extraIndexColumns: [],
+          extraIndexColumnModes: {},
+          extraIndexInjectionTemplate: '',
+          entryPlacement: { ...DEFAULT_ENTRY_PLACEMENT_ACU },
+          extraIndexPlacement: { ...DEFAULT_EXTRA_INDEX_PLACEMENT_ACU },
+          fixedEntryPlacement: { ...fixedDefaults.entry },
+          fixedIndexPlacement: { ...fixedDefaults.index },
+      };
+  }
+
+  function buildDefaultGlobalInjectionConfig_ACU() {
+      return {
+          readableEntryPlacement: { position: 'before_char', depth: 2, order: 99981 },
+          wrapperPlacement: { position: 'before_char', depth: 2, order: 99982 },
+      };
+  }
+
+  function ensureGlobalInjectionConfigDefaults_ACU(rawConfig) {
+      const base = buildDefaultGlobalInjectionConfig_ACU();
+      const raw = (rawConfig && typeof rawConfig === 'object') ? rawConfig : {};
+      return {
+          readableEntryPlacement: normalizePlacementConfig_ACU(raw.readableEntryPlacement, base.readableEntryPlacement),
+          wrapperPlacement: normalizePlacementConfig_ACU(raw.wrapperPlacement, base.wrapperPlacement),
+      };
+  }
+
+  function getGlobalInjectionConfigFromData_ACU(dataObj, { ensureWriteBack = false } = {}) {
+      const defaults = buildDefaultGlobalInjectionConfig_ACU();
+      const cfg = ensureGlobalInjectionConfigDefaults_ACU(dataObj?.mate?.globalInjectionConfig);
+      if (ensureWriteBack && dataObj && typeof dataObj === 'object') {
+          if (!dataObj.mate || typeof dataObj.mate !== 'object') dataObj.mate = { type: 'chatSheets', version: 1 };
+          dataObj.mate.globalInjectionConfig = cfg;
+          if (!dataObj.mate.type) dataObj.mate.type = 'chatSheets';
+          if (!Number.isFinite(dataObj.mate.version)) dataObj.mate.version = 1;
+      }
+      return {
+          readableEntryPlacement: normalizePlacementConfig_ACU(cfg.readableEntryPlacement, defaults.readableEntryPlacement),
+          wrapperPlacement: normalizePlacementConfig_ACU(cfg.wrapperPlacement, defaults.wrapperPlacement),
+      };
+  }
+
+  function ensureExportConfigDefaults_ACU(exportConfig, tableName = '') {
+      const base = buildDefaultExportConfig_ACU(tableName);
+      const raw = (exportConfig && typeof exportConfig === 'object') ? exportConfig : {};
+      const merged = { ...base, ...raw };
+      merged.entryPlacement = normalizePlacementConfig_ACU(raw.entryPlacement, base.entryPlacement);
+      merged.extraIndexPlacement = normalizePlacementConfig_ACU(raw.extraIndexPlacement, base.extraIndexPlacement);
+      merged.fixedEntryPlacement = normalizePlacementConfig_ACU(raw.fixedEntryPlacement, base.fixedEntryPlacement);
+      merged.fixedIndexPlacement = normalizePlacementConfig_ACU(raw.fixedIndexPlacement, base.fixedIndexPlacement);
+      return merged;
+  }
+
+  function ensureSheetExportConfigDefaults_ACU(sheet) {
+      if (!sheet || typeof sheet !== 'object') return buildDefaultExportConfig_ACU('');
+      sheet.exportConfig = ensureExportConfigDefaults_ACU(sheet.exportConfig, sheet.name || sheet.uid || '');
+      return sheet.exportConfig;
+  }
+
+  function applyPlacementToEntry_ACU(entry, placement) {
+      if (!entry || typeof entry !== 'object') return entry;
+      const p = normalizePlacementConfig_ACU(placement, DEFAULT_ENTRY_PLACEMENT_ACU);
+      const out = { ...entry, position: p.position };
+      if (p.position === 'at_depth_as_system') {
+          out.depth = p.depth;
+      } else {
+          delete out.depth;
+      }
+      return out;
+  }
+
+  function isEntryPlacementMatched_ACU(entry, placement) {
+      const p = normalizePlacementConfig_ACU(placement, DEFAULT_ENTRY_PLACEMENT_ACU);
+      const ep = normalizeLorebookPosition_ACU(entry?.position, p.position);
+      if (ep !== p.position) return false;
+      if (p.position === 'at_depth_as_system') {
+          const d = typeof entry?.depth === 'number' ? entry.depth : parseInt(String(entry?.depth ?? ''), 10);
+          return Number.isFinite(d) && d === p.depth;
+      }
+      return true;
+  }
+
   // =========================
   // [世界书] 注入位置：强制改为 @D 系统深度（避免默认“角色定义之前”）
   // 说明：
@@ -9583,8 +9767,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         });
 
         const finalContent = `<剧情大纲编码索引>\n\n${content.trim()}\n\n</剧情大纲编码索引>`;
-
-        const OUTLINE_FIXED_SYSTEM_DEPTH = 9998; // 用户指定：总结大纲固定深度
+        const outlineCfg = ensureExportConfigDefaults_ACU(outlineTable?.exportConfig, outlineTable?.name || '总体大纲');
+        const outlineFixedPlacement = normalizePlacementConfig_ACU(
+            outlineCfg.fixedEntryPlacement,
+            getFixedPlacementDefaultsForTable_ACU(outlineTable?.name || '总体大纲').entry
+        );
 
         if (existingEntry) {
             const needsUpdate =
@@ -9592,32 +9779,32 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 existingEntry.enabled !== outlineEntryEnabled ||
                 existingEntry.type !== 'constant' ||
                 existingEntry.prevent_recursion !== true ||
-                !isSystemDepthInjected_ACU(existingEntry, OUTLINE_FIXED_SYSTEM_DEPTH);
+                !isEntryPlacementMatched_ACU(existingEntry, outlineFixedPlacement);
 
             if (needsUpdate) {
-                const updatedEntry = applySystemDepthInjection_ACU({
+                const updatedEntry = applyPlacementToEntry_ACU({
                     uid: existingEntry.uid,
                     content: finalContent,
                     enabled: outlineEntryEnabled,
                     type: 'constant',
                     prevent_recursion: true,
-                }, OUTLINE_FIXED_SYSTEM_DEPTH);
+                }, outlineFixedPlacement);
                 await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [updatedEntry]);
                 logDebug_ACU(`Successfully updated the outline table lorebook entry. enabled=${outlineEntryEnabled} (0TK占用模式=${zeroTkOccupyMode})`);
             } else {
                 logDebug_ACU('Outline table lorebook entry is already up-to-date.');
             }
         } else {
-            const newEntry = applySystemDepthInjection_ACU({
+            const newEntry = applyPlacementToEntry_ACU({
                 comment: OUTLINE_COMMENT,
                 content: finalContent,
                 keys: [OUTLINE_COMMENT + '-Key'],
                 enabled: outlineEntryEnabled,
                 type: 'constant',
                 // [优化] order(插入深度) 避免与任何现有条目重复
-                order: allocOrder_ACU(usedOrders, 99985, 1, 99999),
+                order: allocOrder_ACU(usedOrders, outlineFixedPlacement.order, 1, 99999),
                 prevent_recursion: true,
-            }, OUTLINE_FIXED_SYSTEM_DEPTH);
+            }, outlineFixedPlacement);
             await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [newEntry]);
             logDebug_ACU(`Outline table lorebook entry not found. Created a new one. enabled=${outlineEntryEnabled} (0TK占用模式=${zeroTkOccupyMode})`);
         }
@@ -9673,6 +9860,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             return;
         }
 
+        const summaryCfg = ensureExportConfigDefaults_ACU(summaryTable?.exportConfig, summaryTable?.name || '总结表');
+        const summaryFixedPlacement = normalizePlacementConfig_ACU(
+            summaryCfg.fixedEntryPlacement,
+            getFixedPlacementDefaultsForTable_ACU(summaryTable?.name || '总结表').entry
+        );
         const headers = summaryTable.content[0].slice(1);
         const keywordColumnIndex = headers.indexOf('编码索引');
         if (keywordColumnIndex === -1) {
@@ -9681,10 +9873,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         }
 
         const entriesToCreate = [];
-        const SUMMARY_FIXED_SYSTEM_DEPTH = 9999; // 用户指定：总结表+记忆包裹固定深度
         // [优化] 总结表“按表占深度”：所有总结行共用同一个 order(深度)，避免 N 行占 N 个深度
         // 注意：MemoryStart / MemoryEnd 的“3深度成组”会在 updateReadableLorebookEntry_ACU 中统一对齐并保证连续
-        const sharedSummaryDataOrder = allocOrder_ACU(usedOrders, 99987, 1, 99999);
+        const sharedSummaryDataOrder = allocOrder_ACU(usedOrders, summaryFixedPlacement.order, 1, 99999);
         
         summaryRows.forEach((row, i) => {
             const rowData = row.slice(1);
@@ -9696,7 +9887,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
             // 行条目只包含行数据，不包含表头
             const content = `| ${rowData.join(' | ')} |\n`;
-            const newEntryData = applySystemDepthInjection_ACU({
+            const newEntryData = applyPlacementToEntry_ACU({
                 comment: `${SUMMARY_ENTRY_PREFIX}${i + 1}`,
                 content: content,
                 keys: keywords,
@@ -9705,7 +9896,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 // [优化] 同表所有行条目共用同一深度
                 order: sharedSummaryDataOrder,
                 prevent_recursion: true
-            }, SUMMARY_FIXED_SYSTEM_DEPTH);
+            }, summaryFixedPlacement);
             entriesToCreate.push(newEntryData);
         });
         
@@ -9723,7 +9914,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 if (toFix.length > 0) {
                     await TavernHelper_API_ACU.setLorebookEntries(
                         primaryLorebookName,
-                        toFix.map(e => applySystemDepthInjection_ACU({ uid: e.uid, order: sharedSummaryDataOrder }, SUMMARY_FIXED_SYSTEM_DEPTH))
+                        toFix.map(e => applyPlacementToEntry_ACU({ uid: e.uid, order: sharedSummaryDataOrder }, summaryFixedPlacement))
                     );
                 }
             } catch (e) {
@@ -9804,6 +9995,24 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             const entries = await TavernHelper_API_ACU.getLorebookEntries(primaryLorebookName);
             const usedOrders = buildUsedOrderSet_ACU(entries);
             const db2Entry = entries.find(e => e.comment === READABLE_LOREBOOK_COMMENT);
+            const templateObjForGlobalCfg = parseTableTemplateJson_ACU({ stripSeedRows: false });
+            const globalCfgRaw =
+                mergedData?.mate?.globalInjectionConfig
+                ?? currentJsonTableData_ACU?.mate?.globalInjectionConfig
+                ?? templateObjForGlobalCfg?.mate?.globalInjectionConfig;
+            const globalCfgFromData = ensureGlobalInjectionConfigDefaults_ACU(globalCfgRaw);
+            const globalDefaults = buildDefaultGlobalInjectionConfig_ACU();
+            const globalFixedEntryPlacement = normalizePlacementConfig_ACU(globalCfgFromData?.readableEntryPlacement, globalDefaults.readableEntryPlacement);
+            const globalFixedIndexPlacement = normalizePlacementConfig_ACU(globalCfgFromData?.wrapperPlacement, globalDefaults.wrapperPlacement);
+            const summaryCfg = ensureExportConfigDefaults_ACU(summaryTable?.exportConfig, summaryTable?.name || '总结表');
+            const summaryFixedEntryPlacement = normalizePlacementConfig_ACU(
+                summaryCfg.fixedEntryPlacement,
+                getFixedPlacementDefaultsForTable_ACU(summaryTable?.name || '总结表').entry
+            );
+            const summaryFixedIndexPlacement = normalizePlacementConfig_ACU(
+                summaryCfg.fixedIndexPlacement,
+                getFixedPlacementDefaultsForTable_ACU(summaryTable?.name || '总结表').index
+            );
 
             // [修复] 检查生成的可读文本是否为空（即数据库为空）
             // 注意：readableText 可能会包含 "数据库为空。" 这样的提示文本，需要根据 formatJsonToReadable_ACU 的返回值判断
@@ -9882,57 +10091,72 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                     (db2Entry.type !== 'constant') ||
                     (db2Entry.enabled !== true) ||
                     (db2Entry.prevent_recursion !== true) ||
-                    (db2Entry.position !== 0); // 检查是否为"角色定义之前"
+                    !isEntryPlacementMatched_ACU(db2Entry, globalFixedEntryPlacement);
                 if (needsUpdate) {
-                    const updatedDb2Entry = {
+                    const updatedDb2Entry = applyPlacementToEntry_ACU({
                         uid: db2Entry.uid,
                         content: newContent,
                         enabled: true,
                         type: 'constant',
                         prevent_recursion: true,
-                        position: 0, // "角色定义之前"
-                    };
+                    }, globalFixedEntryPlacement);
                     await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [updatedDb2Entry]);
-                    logDebug_ACU('Successfully updated the global readable lorebook entry (position: before_char).');
+                    logDebug_ACU('Successfully updated the global readable lorebook entry.');
                 } else {
                     logDebug_ACU('Global readable lorebook entry is already up-to-date.');
                 }
             } else if (createIfNeeded) {
-                const newDb2Entry = {
+                const newDb2Entry = applyPlacementToEntry_ACU({
                     comment: READABLE_LOREBOOK_COMMENT,
                     content: readableText,
                     keys: ['TavernDB-ACU-ReadableDataTable-Key'],
                     enabled: true,
                     type: 'constant',
-                    order: allocOrder_ACU(usedOrders, 99981, 1, 99999),
+                    order: allocOrder_ACU(usedOrders, globalFixedEntryPlacement.order, 1, 99999),
                     prevent_recursion: true,
-                    position: 0, // "角色定义之前"
-                };
+                }, globalFixedEntryPlacement);
                 await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [newDb2Entry]);
-                logDebug_ACU('Global readable lorebook entry not found. Created a new one. (position: before_char)');
+                logDebug_ACU('Global readable lorebook entry not found. Created a new one.');
                 showToastr_ACU('success', `已创建全局可读数据库条目。`);
             }
 
             // [新增] 创建 WrapperStart 条目
             const wrapperStartEntry = entries.find(e => e.comment === WRAPPER_START_COMMENT);
+            const wrapperStartContent = '<最新数据与记录>\n以下是在这个时间点，当前场景下剧情相关的最新数据与记录，你在进行剧情分析时必须以此最新的数据为准，以下数据与记录的优先级高于其他任何背景设定：\n\n';
             if (!wrapperStartEntry) {
-                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [{
+                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [applyPlacementToEntry_ACU({
                     comment: WRAPPER_START_COMMENT,
-                    content: '<最新数据与记录>\n以下是在这个时间点，当前场景下剧情相关的最新数据与记录，你在进行剧情分析时必须以此最新的数据为准，以下数据与记录的优先级高于其他任何背景设定：\n\n',
+                    content: wrapperStartContent,
                     keys: ['TavernDB-ACU-WrapperStart-Key'],
                     enabled: true,
                     type: 'constant',
-                    order: allocOrder_ACU(usedOrders, 99980, 1, 99999),
+                    order: allocOrder_ACU(usedOrders, globalFixedIndexPlacement.order, 1, 99999),
                     prevent_recursion: true,
-                }]);
+                }, globalFixedIndexPlacement)]);
                 logDebug_ACU('Created wrapper start entry.');
+            } else {
+                const wrapperStartNeedsUpdate =
+                    wrapperStartEntry.content !== wrapperStartContent ||
+                    wrapperStartEntry.enabled !== true ||
+                    wrapperStartEntry.type !== 'constant' ||
+                    wrapperStartEntry.prevent_recursion !== true ||
+                    !isEntryPlacementMatched_ACU(wrapperStartEntry, globalFixedIndexPlacement);
+                if (wrapperStartNeedsUpdate) {
+                    await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [
+                        applyPlacementToEntry_ACU({
+                            uid: wrapperStartEntry.uid,
+                            content: wrapperStartContent,
+                            enabled: true,
+                            type: 'constant',
+                            prevent_recursion: true,
+                        }, globalFixedIndexPlacement)
+                    ]);
+                }
             }
 
             // [新增] 创建或更新 MemoryStart 条目（整合总结表表头）
             const MEMORY_START_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-MemoryStart` : 'TavernDB-ACU-MemoryStart');
             const memoryStartEntry = entries.find(e => e.comment === MEMORY_START_COMMENT);
-            const SUMMARY_FIXED_SYSTEM_DEPTH = 9999; // 用户指定：总结表+记忆包裹固定深度
-            
             // 准备总结表表头内容
             let summaryHeaderContent = '';
             if (summaryTable && summaryTable.content && summaryTable.content.length > 0) {
@@ -9957,7 +10181,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             const baseSmallSummaryPrefix2 = isImport ? `${IMPORT_PREFIX}小总结条目` : '小总结条目';
             const SUMMARY_ENTRY_PREFIX2 = isoPrefix + baseSummaryPrefix2;
             const SMALL_SUMMARY_PREFIX2 = isoPrefix + baseSmallSummaryPrefix2;
-            const summaryOrderBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, 99986, 1, 99999);
+            const summaryOrderBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, Math.max(1, summaryFixedEntryPlacement.order - 1), 1, 99999);
             const memoryStartOrder = summaryOrderBlockBase;
             const summaryDataOrder = summaryOrderBlockBase + 1;
             const memoryEndOrder = summaryOrderBlockBase + 2;
@@ -9970,14 +10194,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             if (summaryEntriesToReorder.length > 0) {
                 await TavernHelper_API_ACU.setLorebookEntries(
                     primaryLorebookName,
-                    summaryEntriesToReorder.map(e => applySystemDepthInjection_ACU({ uid: e.uid, order: summaryDataOrder }, SUMMARY_FIXED_SYSTEM_DEPTH))
+                    summaryEntriesToReorder.map(e => applyPlacementToEntry_ACU({ uid: e.uid, order: summaryDataOrder }, summaryFixedEntryPlacement))
                 );
             }
             
             if (!memoryStartEntry) {
                 // 创建新条目
-                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [{
-                    ...applySystemDepthInjection_ACU({
+                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [applyPlacementToEntry_ACU({
                         comment: MEMORY_START_COMMENT,
                         content: memoryStartContent,
                         keys: ['AM'],
@@ -9985,17 +10208,16 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                         type: 'keyword',
                         order: memoryStartOrder,
                         prevent_recursion: true,
-                    }, SUMMARY_FIXED_SYSTEM_DEPTH)
-                }]);
+                    }, summaryFixedIndexPlacement)]);
             } else {
                 // 更新现有条目（内容/深度）
                 const needsUpdate =
                     (memoryStartEntry.content !== memoryStartContent) ||
                     (getEntryOrderNumber_ACU(memoryStartEntry) !== memoryStartOrder) ||
-                    !isSystemDepthInjected_ACU(memoryStartEntry, SUMMARY_FIXED_SYSTEM_DEPTH);
+                    !isEntryPlacementMatched_ACU(memoryStartEntry, summaryFixedIndexPlacement);
                 if (needsUpdate) {
                     await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [{
-                        ...applySystemDepthInjection_ACU({
+                        ...applyPlacementToEntry_ACU({
                             uid: memoryStartEntry.uid,
                             content: memoryStartContent,
                             order: memoryStartOrder,
@@ -10003,7 +10225,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                             type: 'keyword',
                             prevent_recursion: true,
                             keys: memoryStartEntry.keys || memoryStartEntry.key || ['AM'],
-                        }, SUMMARY_FIXED_SYSTEM_DEPTH)
+                        }, summaryFixedIndexPlacement)
                     }]);
                 }
             }
@@ -10012,8 +10234,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             const MEMORY_END_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-MemoryEnd` : 'TavernDB-ACU-MemoryEnd');
             const memoryEndEntry = entries.find(e => e.comment === MEMORY_END_COMMENT);
             if (!memoryEndEntry) {
-                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [{
-                    ...applySystemDepthInjection_ACU({
+                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [applyPlacementToEntry_ACU({
                         comment: MEMORY_END_COMMENT,
                         content: '</过往记忆>',
                         keys: ['AM'],
@@ -10021,39 +10242,57 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                         type: 'keyword',
                         order: memoryEndOrder,
                         prevent_recursion: true,
-                    }, SUMMARY_FIXED_SYSTEM_DEPTH)
-                }]);
+                    }, summaryFixedIndexPlacement)]);
             } else {
                 const needsUpdate =
                     (getEntryOrderNumber_ACU(memoryEndEntry) !== memoryEndOrder) ||
-                    !isSystemDepthInjected_ACU(memoryEndEntry, SUMMARY_FIXED_SYSTEM_DEPTH);
+                    !isEntryPlacementMatched_ACU(memoryEndEntry, summaryFixedIndexPlacement);
                 if (needsUpdate) {
                     await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [{
-                        ...applySystemDepthInjection_ACU({
+                        ...applyPlacementToEntry_ACU({
                             uid: memoryEndEntry.uid,
                             order: memoryEndOrder,
                             enabled: true,
                             type: 'keyword',
                             prevent_recursion: true,
                             keys: memoryEndEntry.keys || memoryEndEntry.key || ['AM'],
-                        }, SUMMARY_FIXED_SYSTEM_DEPTH)
+                        }, summaryFixedIndexPlacement)
                     }]);
                 }
             }
 
             // [新增] 创建 WrapperEnd 条目
             const wrapperEndEntry = entries.find(e => e.comment === WRAPPER_END_COMMENT);
+            const wrapperEndContent = '</最新数据与记录>';
             if (!wrapperEndEntry) {
-                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [{
+                await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, [applyPlacementToEntry_ACU({
                     comment: WRAPPER_END_COMMENT,
-                    content: '</最新数据与记录>',
+                    content: wrapperEndContent,
                     keys: ['TavernDB-ACU-WrapperEnd-Key'],
                     enabled: true,
                     type: 'constant',
-                    order: allocOrder_ACU(usedOrders, 99999, 1, 99999),
+                    order: allocOrder_ACU(usedOrders, globalFixedIndexPlacement.order + 1, 1, 99999),
                     prevent_recursion: true,
-                }]);
+                }, globalFixedIndexPlacement)]);
                 logDebug_ACU('Created wrapper end entry.');
+            } else {
+                const wrapperEndNeedsUpdate =
+                    wrapperEndEntry.content !== wrapperEndContent ||
+                    wrapperEndEntry.enabled !== true ||
+                    wrapperEndEntry.type !== 'constant' ||
+                    wrapperEndEntry.prevent_recursion !== true ||
+                    !isEntryPlacementMatched_ACU(wrapperEndEntry, globalFixedIndexPlacement);
+                if (wrapperEndNeedsUpdate) {
+                    await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, [
+                        applyPlacementToEntry_ACU({
+                            uid: wrapperEndEntry.uid,
+                            content: wrapperEndContent,
+                            enabled: true,
+                            type: 'constant',
+                            prevent_recursion: true,
+                        }, globalFixedIndexPlacement)
+                    ]);
+                }
             }
         } catch(error) {
             logError_ACU('Failed to get or update readable lorebook entry:', error);
@@ -10156,6 +10395,14 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
           let nextCustomExportOrder = 10000; // 维持原本“自定义导出”大致优先级区间
           // [优化] 不允许重复 order：为每个条目分配唯一 order，并整体避开世界书现有 order
           const CUSTOM_EXPORT_ORDER_GAP = 1;
+          const toIntOrFallback_ACU = (v, fb) => {
+              const n = parseInt(v, 10);
+              return Number.isFinite(n) ? n : fb;
+          };
+          const calcPreferredBlockStart_ACU = (baseOrder, leadingSlots = 0, fallback = 1) => {
+              const o = toIntOrFallback_ACU(baseOrder, fallback);
+              return Math.max(1, o - Math.max(0, toIntOrFallback_ACU(leadingSlots, 0)));
+          };
           
           // [新增] 解析注入模板，提取用于前后包裹的常量条目内容
           const parseWrapperTemplate = templateStr => {
@@ -10186,6 +10433,100 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               return finalTemplate.replace('$1', tableData);
           };
 
+          const buildMarkdownTableFromRows_ACU = (headerList, rowList) => {
+              if (!Array.isArray(headerList) || headerList.length === 0) return '';
+              const lines = [];
+              lines.push(`| ${headerList.join(' | ')} |`);
+              lines.push(`|${headerList.map(() => '---').join('|')}|`);
+              (Array.isArray(rowList) ? rowList : []).forEach(row => {
+                  const cells = headerList.map((_, idx) => {
+                      const v = Array.isArray(row) ? row[idx] : '';
+                      return v === null || v === undefined ? '' : String(v);
+                  });
+                  lines.push(`| ${cells.join(' | ')} |`);
+              });
+              return lines.join('\n');
+          };
+
+          const resolveExtraIndexSpec_ACU = (cfg, originalHeaders, rawRows, defaultName) => {
+              if (!cfg || cfg.extraIndexEnabled !== true) return null;
+              if (!Array.isArray(originalHeaders) || originalHeaders.length === 0) return null;
+              const selectedRaw = Array.isArray(cfg.extraIndexColumns) ? cfg.extraIndexColumns : [];
+              const selectedCols = [...new Set(selectedRaw.filter(col => typeof col === 'string' && originalHeaders.includes(col)))];
+              if (selectedCols.length === 0) return null;
+
+              const modeMap = (cfg.extraIndexColumnModes && typeof cfg.extraIndexColumnModes === 'object')
+                  ? cfg.extraIndexColumnModes
+                  : {};
+              const selectedMeta = selectedCols.map(col => {
+                  const idx = originalHeaders.indexOf(col);
+                  const mode = modeMap[col] === 'index_only' ? 'index_only' : 'both';
+                  return { name: col, idx, mode };
+              }).filter(m => m.idx >= 0);
+              if (selectedMeta.length === 0) return null;
+
+              const indexCols = selectedMeta.map(m => m.name);
+              const indexColIndexes = selectedMeta.map(m => m.idx);
+              const indexOnlySet = new Set(selectedMeta.filter(m => m.mode === 'index_only').map(m => m.idx));
+              const mainColIndexes = originalHeaders
+                  .map((_, idx) => idx)
+                  .filter(idx => !indexOnlySet.has(idx));
+              const mainCols = mainColIndexes.map(idx => originalHeaders[idx]);
+              const mapRowsByIndexes = (rows, indexes) => {
+                  const safeRows = Array.isArray(rows) ? rows : [];
+                  return safeRows.map(row => indexes.map(i => {
+                      const v = Array.isArray(row) ? row[i] : '';
+                      return v === null || v === undefined ? '' : String(v);
+                  }));
+              };
+
+              return {
+                  entryName: String(cfg.extraIndexEntryName || `${defaultName}-索引`).trim() || `${defaultName}-索引`,
+                  indexCols,
+                  indexRows: mapRowsByIndexes(rawRows, indexColIndexes),
+                  mainCols,
+                  mainRows: mapRowsByIndexes(rawRows, mainColIndexes),
+              };
+          };
+
+          const buildExtraIndexEntryBlock_ACU = ({ exportPrefix, extraIndexSpec, templateStr, startOrder, placement, usedOrderSet }) => {
+              if (!extraIndexSpec) return { entries: [], names: [], plans: [], nextOrder: startOrder, span: 0 };
+              const cursor = allocOrder_ACU(usedOrderSet || usedOrders, startOrder, 1, 99999);
+              const names = [];
+              const plans = [];
+              const entries = [];
+              const fullTable = buildMarkdownTableFromRows_ACU(extraIndexSpec.indexCols, extraIndexSpec.indexRows);
+              const fallbackTemplate = `# ${extraIndexSpec.entryName}\n\n$1`;
+              const mainComment = `${exportPrefix}${extraIndexSpec.entryName}`;
+              const mainContent = buildEntryContent(
+                  extraIndexSpec.entryName,
+                  fullTable,
+                  templateStr,
+                  false,
+                  fallbackTemplate
+              );
+              names.push(mainComment);
+              const normalizedPlacement = normalizePlacementConfig_ACU(placement, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU);
+              plans.push({ comment: mainComment, order: cursor, placement: normalizedPlacement });
+              entries.push(applyPlacementToEntry_ACU({
+                  comment: mainComment,
+                  content: mainContent,
+                  keys: [],
+                  enabled: true,
+                  type: 'constant',
+                  prevent_recursion: true,
+                  order: cursor
+              }, normalizedPlacement));
+
+              return {
+                  entries,
+                  names,
+                  plans,
+                  nextOrder: cursor + 1,
+                  span: entries.length,
+              };
+          };
+
           sortedTableKeys.forEach(sheetKey => {
               const table = mergedData[sheetKey];
               // Check for exportConfig
@@ -10193,10 +10534,20 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               if (!table || !table.exportConfig || !table.exportConfig.enabled) return;
               if (table.exportConfig.injectIntoWorldbook === false) return;
 
-              const config = table.exportConfig;
+              const config = ensureExportConfigDefaults_ACU(table.exportConfig, table.name || sheetKey);
               const tableName = table.name;
+              const entryPlacement = normalizePlacementConfig_ACU(config.entryPlacement, DEFAULT_ENTRY_PLACEMENT_ACU);
+              const extraIndexPlacement = normalizePlacementConfig_ACU(config.extraIndexPlacement, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU);
               const headers = table.content[0] ? table.content[0].slice(1) : [];
-              const rows = table.content.slice(1);
+              const rows = table.content.slice(1).map(row => row.slice(1));
+              const extraIndexSpec = resolveExtraIndexSpec_ACU(
+                  config,
+                  headers,
+                  rows,
+                  config.entryName || tableName || '表格'
+              );
+              const mainHeaders = extraIndexSpec ? extraIndexSpec.mainCols : headers;
+              const mainRows = extraIndexSpec ? extraIndexSpec.mainRows : rows;
 
               const wrapperParts = parseWrapperTemplate(config.injectionTemplate);
               const useWrapperEntries = !!wrapperParts;
@@ -10209,69 +10560,63 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                   // Will be handled inside loop
               } else {
                   // Whole table content
-                  tableContentMarkdown += `| ${headers.join(' | ')} |\n|${headers.map(() => '---').join('|')}|\n`;
-                  rows.forEach(row => {
-                      tableContentMarkdown += `| ${row.slice(1).join(' | ')} |\n`;
-                  });
+                  tableContentMarkdown = buildMarkdownTableFromRows_ACU(mainHeaders, mainRows);
               }
 
               if (config.splitByRow) {
                   // Split export: One entry per row
                   const rowEntries = [];
-                  // [优化] 深度(order) 分配：按“表”为单位占用深度，而不是按“行”为单位占用深度
-                  // 需求：
-                  // - 同一张表拆成 N 个行条目时，这 N 个条目共用一个 dataOrder
-                  // - 上包裹/数据/下包裹 总共占用连续 3 个深度 (wrapperStart/data/wrapperEnd)
-                  // - 这 3 个深度不能与世界书任何已有条目重合，并且必须紧挨在一起
                   const hasWrapperBefore = !!(wrapperParts && wrapperParts.before);
                   const hasWrapperAfter = !!(wrapperParts && wrapperParts.after);
                   const use3DepthWrapperGroup = !!(useWrapperEntries && (hasWrapperBefore || hasWrapperAfter));
-                  const needsHeader = (!use3DepthWrapperGroup && headers.length > 0);
-                  const blockSpan = use3DepthWrapperGroup ? 3 : (needsHeader ? 2 : 1);
-                  const baseOrder = allocConsecutiveOrderBlock_ACU(usedOrders, Math.max(1, blockSpan), nextCustomExportOrder, 1, 99999);
-                  const wrapperStartOrder = baseOrder;
-                  const dataOrder = use3DepthWrapperGroup ? (baseOrder + 1) : (needsHeader ? (baseOrder + 1) : baseOrder);
-                  const wrapperEndOrder = use3DepthWrapperGroup ? (baseOrder + 2) : null;
+                  const needsHeader = (!use3DepthWrapperGroup && mainHeaders.length > 0);
+                  const hasExtraIndexEntry = !!(extraIndexSpec && extraIndexSpec.indexCols.length > 0);
+                  const blockSpan = (use3DepthWrapperGroup ? 3 : (needsHeader ? 2 : 1));
+                  const leadingSlots = (use3DepthWrapperGroup && hasWrapperBefore) ? 1 : ((!useWrapperEntries && mainHeaders.length > 0) ? 1 : 0);
+                  const preferredMainOrder = toIntOrFallback_ACU(entryPlacement.order, nextCustomExportOrder);
+                  const preferredBlockStart = calcPreferredBlockStart_ACU(preferredMainOrder, leadingSlots, nextCustomExportOrder);
+                  const baseOrder = allocConsecutiveOrderBlock_ACU(usedOrders, Math.max(1, blockSpan), preferredBlockStart, 1, 99999);
+                  let orderCursor = baseOrder;
                   
                   // 准备表头markdown
-                  const headerMarkdown = headers.length
-                      ? `# ${tableName}\n\n| ${headers.join(' | ')} |\n|${headers.map(() => '---').join('|')}|`
+                  const headerMarkdown = mainHeaders.length
+                      ? `# ${tableName}\n\n${buildMarkdownTableFromRows_ACU(mainHeaders, [])}`
                       : `# ${tableName}`;
 
                   // 在拆分模式下，如果存在包裹模板，先追加前置常量条目（包含表头）
                   if (use3DepthWrapperGroup && hasWrapperBefore) {
                       const wrapperName = `${exportPrefix}${(config.entryName || tableName)}-包裹-上`;
                       newGeneratedNames.push(wrapperName);
-                      postCreateOrderFixPlan.push({ comment: wrapperName, order: wrapperStartOrder });
+                      postCreateOrderFixPlan.push({ comment: wrapperName, order: orderCursor, placement: entryPlacement });
                       // 将表头添加到上包裹条目的内容中
                       const wrapperContent = [wrapperParts.before, headerMarkdown].filter(Boolean).join('\n\n').trim();
-                      rowEntries.push({
+                      rowEntries.push(applyPlacementToEntry_ACU({
                           comment: wrapperName,
                           content: wrapperContent,
                           keys: [],
                           enabled: true,
                           type: 'constant',
                           prevent_recursion: true,
-                          order: wrapperStartOrder
-                      });
-                  } else if (!useWrapperEntries && headers.length > 0) {
+                          order: orderCursor++
+                      }, entryPlacement));
+                  } else if (!useWrapperEntries && mainHeaders.length > 0) {
                       // 如果没有包裹模板，但需要表头，单独创建一个表头条目
                       const headerName = `${exportPrefix}${(config.entryName || tableName)}-表头`;
                       newGeneratedNames.push(headerName);
-                      postCreateOrderFixPlan.push({ comment: headerName, order: baseOrder });
-                      rowEntries.push({
+                      postCreateOrderFixPlan.push({ comment: headerName, order: orderCursor, placement: entryPlacement });
+                      rowEntries.push(applyPlacementToEntry_ACU({
                           comment: headerName,
                           content: headerMarkdown,
                           keys: [],
                           enabled: true,
                           type: 'constant',
                           prevent_recursion: true,
-                          order: baseOrder
-                      });
+                          order: orderCursor++
+                      }, entryPlacement));
                   }
 
-                  rows.forEach((row, i) => {
-                      const rowData = row.slice(1);
+                  const dataOrder = orderCursor++;
+                  mainRows.forEach((rowData, i) => {
                       
                       // Determine Entry Name
                       const entryName = config.entryName ? `${config.entryName}-${i + 1}` : `${tableName}-${i + 1}`;
@@ -10285,7 +10630,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                               const colIndex = headers.indexOf(k);
                               if (colIndex !== -1) {
                                   // Use content from that column
-                                  const cellContent = rowData[colIndex];
+                                  const rawRowData = rows[i] || [];
+                                  const cellContent = rawRowData[colIndex];
                                   if (cellContent) {
                                       keys.push(...splitKeywordsByComma_ACU(cellContent));
                                   }
@@ -10301,7 +10647,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                       }
 
                       // Content Construction - 行条目只包含行数据，不包含表头
-                      const rowTableMarkdown = `| ${rowData.join(' | ')} |\n`;
+                      const rowTableMarkdown = mainHeaders.length > 0
+                          ? `| ${rowData.join(' | ')} |\n`
+                          : '';
                       const finalContent = buildEntryContent(
                           entryName,
                           rowTableMarkdown,
@@ -10313,9 +10661,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
                       const fullComment = `${exportPrefix}${entryName}`;
                       newGeneratedNames.push(fullComment); // 记录名称
-                      postCreateOrderFixPlan.push({ comment: fullComment, order: dataOrder });
+                      postCreateOrderFixPlan.push({ comment: fullComment, order: dataOrder, placement: entryPlacement });
 
-                      rowEntries.push({
+                      rowEntries.push(applyPlacementToEntry_ACU({
                           comment: fullComment, // [修改] 使用模板设置的名称作为条目名
                           content: finalContent,
                           keys: keys,
@@ -10324,30 +10672,147 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                           prevent_recursion: config.preventRecursion !== false, // Default true
                           // [优化] 所有行条目共用同一个 dataOrder（不再每行占一个深度）
                           order: dataOrder
-                      });
+                      }, entryPlacement));
                   });
 
                   // 添加后置包裹常量条目
                   if (use3DepthWrapperGroup && hasWrapperAfter) {
                       const wrapperName = `${exportPrefix}${(config.entryName || tableName)}-包裹-下`;
                       newGeneratedNames.push(wrapperName);
-                      postCreateOrderFixPlan.push({ comment: wrapperName, order: wrapperEndOrder });
-                      rowEntries.push({
+                      postCreateOrderFixPlan.push({ comment: wrapperName, order: orderCursor, placement: entryPlacement });
+                      rowEntries.push(applyPlacementToEntry_ACU({
                           comment: wrapperName,
                           content: wrapperParts.after,
                           keys: [],
                           enabled: true,
                           type: 'constant',
                           prevent_recursion: true,
-                          order: wrapperEndOrder
+                          order: orderCursor++
+                      }, entryPlacement));
+                  }
+
+                  if (hasExtraIndexEntry) {
+                      const extraBlock = buildExtraIndexEntryBlock_ACU({
+                          exportPrefix,
+                          extraIndexSpec,
+                          templateStr: config.extraIndexInjectionTemplate,
+                          startOrder: toIntOrFallback_ACU(extraIndexPlacement.order, orderCursor),
+                          placement: extraIndexPlacement,
+                          usedOrderSet: usedOrders,
                       });
+                      newGeneratedNames.push(...extraBlock.names);
+                      postCreateOrderFixPlan.push(...extraBlock.plans);
+                      rowEntries.push(...extraBlock.entries);
+                      orderCursor = extraBlock.nextOrder;
                   }
 
                   entriesToCreate.push(...rowEntries);
-                  // 下一张表从本块之后开始（按 blockSpan 推进，而不是按行数推进）
-                  nextCustomExportOrder = (baseOrder + blockSpan) + CUSTOM_EXPORT_ORDER_GAP;
+                  nextCustomExportOrder = orderCursor + CUSTOM_EXPORT_ORDER_GAP;
 
               } else {
+                  if (extraIndexSpec) {
+                      const entryName = config.entryName || tableName;
+                      let keys = config.keywords ? splitKeywordsByComma_ACU(config.keywords) : [];
+                      if (config.entryType === 'keyword' && keys.length === 0) return;
+
+                      const hasWrapperBefore = !!(wrapperParts && wrapperParts.before);
+                      const hasWrapperAfter = !!(wrapperParts && wrapperParts.after);
+                      const useWrapperBlock = !!(useWrapperEntries && (hasWrapperBefore || hasWrapperAfter));
+                      const needsHeader = (!useWrapperBlock && mainHeaders.length > 0);
+                      const blockSize = (useWrapperBlock ? 2 : 0) + (needsHeader ? 1 : 0) + 1;
+                      const leadingSlots = (useWrapperBlock && hasWrapperBefore) ? 1 : ((!useWrapperEntries && mainHeaders.length > 0) ? 1 : 0);
+                      const preferredMainOrder = toIntOrFallback_ACU(entryPlacement.order, nextCustomExportOrder);
+                      const preferredBlockStart = calcPreferredBlockStart_ACU(preferredMainOrder, leadingSlots, nextCustomExportOrder);
+                      const baseOrder = allocConsecutiveOrderBlock_ACU(usedOrders, Math.max(1, blockSize), preferredBlockStart, 1, 99999);
+                      let cursor = baseOrder;
+                      const blockEntries = [];
+                      const tableHeader = mainHeaders.length > 0
+                          ? `# ${tableName}\n\n${buildMarkdownTableFromRows_ACU(mainHeaders, [])}`
+                          : `# ${tableName}`;
+
+                      if (useWrapperBlock && hasWrapperBefore) {
+                          const wrapperName = `${exportPrefix}${entryName}-包裹-上`;
+                          const wrapperContent = [wrapperParts.before, tableHeader].filter(Boolean).join('\n\n').trim();
+                          newGeneratedNames.push(wrapperName);
+                          postCreateOrderFixPlan.push({ comment: wrapperName, order: cursor, placement: entryPlacement });
+                          blockEntries.push(applyPlacementToEntry_ACU({
+                              comment: wrapperName,
+                              content: wrapperContent,
+                              keys: [],
+                              enabled: true,
+                              type: 'constant',
+                              prevent_recursion: true,
+                              order: cursor++
+                          }, entryPlacement));
+                      } else if (!useWrapperEntries && mainHeaders.length > 0) {
+                          const headerName = `${exportPrefix}${entryName}-表头`;
+                          newGeneratedNames.push(headerName);
+                          postCreateOrderFixPlan.push({ comment: headerName, order: cursor, placement: entryPlacement });
+                          blockEntries.push(applyPlacementToEntry_ACU({
+                              comment: headerName,
+                              content: tableHeader,
+                              keys: [],
+                              enabled: true,
+                              type: 'constant',
+                              prevent_recursion: true,
+                              order: cursor++
+                          }, entryPlacement));
+                      }
+
+                      const mainBody = buildMarkdownTableFromRows_ACU(mainHeaders, mainRows);
+                      const mainContent = buildEntryContent(
+                          entryName,
+                          mainBody,
+                          config.injectionTemplate,
+                          useWrapperBlock,
+                          '$1'
+                      );
+                      const fullComment = `${exportPrefix}${entryName}`;
+                      newGeneratedNames.push(fullComment);
+                      postCreateOrderFixPlan.push({ comment: fullComment, order: cursor, placement: entryPlacement });
+                      blockEntries.push(applyPlacementToEntry_ACU({
+                          comment: fullComment,
+                          content: mainContent,
+                          keys: keys,
+                          enabled: true,
+                          type: config.entryType || 'constant',
+                          prevent_recursion: config.preventRecursion !== false,
+                          order: cursor++
+                      }, entryPlacement));
+
+                      if (useWrapperBlock && hasWrapperAfter) {
+                          const wrapperName = `${exportPrefix}${entryName}-包裹-下`;
+                          newGeneratedNames.push(wrapperName);
+                          postCreateOrderFixPlan.push({ comment: wrapperName, order: cursor, placement: entryPlacement });
+                          blockEntries.push(applyPlacementToEntry_ACU({
+                              comment: wrapperName,
+                              content: wrapperParts.after,
+                              keys: [],
+                              enabled: true,
+                              type: 'constant',
+                              prevent_recursion: true,
+                              order: cursor++
+                          }, entryPlacement));
+                      }
+
+                      const extraBlock = buildExtraIndexEntryBlock_ACU({
+                          exportPrefix,
+                          extraIndexSpec,
+                          templateStr: config.extraIndexInjectionTemplate,
+                          startOrder: toIntOrFallback_ACU(extraIndexPlacement.order, cursor),
+                          placement: extraIndexPlacement,
+                          usedOrderSet: usedOrders,
+                      });
+                      newGeneratedNames.push(...extraBlock.names);
+                      postCreateOrderFixPlan.push(...extraBlock.plans);
+                      blockEntries.push(...extraBlock.entries);
+                      cursor = extraBlock.nextOrder;
+
+                      entriesToCreate.push(...blockEntries);
+                      nextCustomExportOrder = cursor + CUSTOM_EXPORT_ORDER_GAP;
+                      return;
+                  }
+
                   // Whole table export
                   const entryName = config.entryName || tableName;
                   let keys = config.keywords ? splitKeywordsByComma_ACU(config.keywords) : [];
@@ -10368,7 +10833,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                           tableContents: [], // Store table contents separately
                           injectionTemplate: config.injectionTemplate, // Use the first one found
                           wrapperParts: wrapperParts,
-                          useWrapperEntries: useWrapperEntries
+                          useWrapperEntries: useWrapperEntries,
+                          entryPlacement: entryPlacement
                       };
                   }
                   // 如果后续表格提供了包裹模板，则优先使用最新的非空包裹设置
@@ -10378,6 +10844,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                   }
                   if (!mergedEntriesMap[mergeKey].injectionTemplate && config.injectionTemplate) {
                       mergedEntriesMap[mergeKey].injectionTemplate = config.injectionTemplate;
+                  }
+                  if (!mergedEntriesMap[mergeKey].entryPlacement) {
+                      mergedEntriesMap[mergeKey].entryPlacement = entryPlacement;
                   }
                   
                   // Add current table content to merge group
@@ -10392,7 +10861,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                   });
                   // Store table content without header (header will be in wrapper entry)
                   // tableContentMarkdown already contains header, so we need to extract only the rows
-                  const rowsOnly = rows.map(row => `| ${row.slice(1).join(' | ')} |`).join('\n');
+                  const rowsOnly = rows.map(row => `| ${row.join(' | ')} |`).join('\n');
                   mergedEntriesMap[mergeKey].tableContents.push(rowsOnly);
                   
                   // If any merged table enforces recursion prevention, the whole entry should
@@ -10411,6 +10880,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
               const wrapperParts = group.useWrapperEntries ? group.wrapperParts : null;
               const useWrapperEntries = !!(group.useWrapperEntries && (wrapperParts?.before || wrapperParts?.after));
+              const groupPlacement = normalizePlacementConfig_ACU(group.entryPlacement, DEFAULT_ENTRY_PLACEMENT_ACU);
 
               // 按需构造包裹与主体条目，保持合并表默认无标题的旧行为
               const blockEntries = [];
@@ -10423,7 +10893,10 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               const needsHeader = (!useWrapperEntries && !!allHeadersContent);
               // 合并组：最多 上包裹/表头 + 主体 + 下包裹
               const blockSize = (useWrapperEntries ? 2 : 0) + (needsHeader ? 1 : 0) + 1;
-              const baseOrder = allocConsecutiveOrderBlock_ACU(usedOrders, Math.max(1, blockSize), nextCustomExportOrder, 1, 99999);
+              const leadingSlots = (useWrapperEntries && wrapperParts?.before) ? 1 : ((!useWrapperEntries && !!allHeadersContent) ? 1 : 0);
+              const preferredMainOrder = toIntOrFallback_ACU(groupPlacement.order, nextCustomExportOrder);
+              const preferredBlockStart = calcPreferredBlockStart_ACU(preferredMainOrder, leadingSlots, nextCustomExportOrder);
+              const baseOrder = allocConsecutiveOrderBlock_ACU(usedOrders, Math.max(1, blockSize), preferredBlockStart, 1, 99999);
               let cursor = baseOrder;
 
               if (useWrapperEntries && wrapperParts?.before) {
@@ -10431,7 +10904,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                   newGeneratedNames.push(wrapperName);
                   // 将表头添加到上包裹条目的内容中
                   const wrapperContent = [wrapperParts.before, allHeadersContent].filter(Boolean).join('\n\n').trim();
-                  blockEntries.push({
+                  postCreateOrderFixPlan.push({ comment: wrapperName, order: cursor, placement: groupPlacement });
+                  blockEntries.push(applyPlacementToEntry_ACU({
                       comment: wrapperName,
                       content: wrapperContent,
                       keys: [],
@@ -10439,12 +10913,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                       type: 'constant',
                       prevent_recursion: true,
                       order: cursor++
-                  });
+                  }, groupPlacement));
               } else if (!useWrapperEntries && allHeadersContent) {
                   // 如果没有包裹模板，但需要表头，单独创建一个表头条目
                   const headerName = `${exportPrefix}${group.entryName}-表头`;
                   newGeneratedNames.push(headerName);
-                  blockEntries.push({
+                  postCreateOrderFixPlan.push({ comment: headerName, order: cursor, placement: groupPlacement });
+                  blockEntries.push(applyPlacementToEntry_ACU({
                       comment: headerName,
                       content: allHeadersContent,
                       keys: [],
@@ -10452,7 +10927,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                       type: 'constant',
                       prevent_recursion: true,
                       order: cursor++
-                  });
+                  }, groupPlacement));
               }
 
               const finalContent = buildEntryContent(
@@ -10466,7 +10941,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
               const fullComment = `${exportPrefix}${group.entryName}`;
               newGeneratedNames.push(fullComment); // 记录名称
 
-              blockEntries.push({
+              postCreateOrderFixPlan.push({ comment: fullComment, order: cursor, placement: groupPlacement });
+              blockEntries.push(applyPlacementToEntry_ACU({
                   comment: fullComment, // [修改] 使用模板设置的名称作为条目名
                   content: finalContent,
                   keys: group.keywords,
@@ -10474,12 +10950,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                   type: group.entryType,
                   prevent_recursion: group.preventRecursion,
                   order: cursor++
-              });
+              }, groupPlacement));
 
               if (useWrapperEntries && wrapperParts?.after) {
                   const wrapperName = `${exportPrefix}${group.entryName}-包裹-下`;
                   newGeneratedNames.push(wrapperName);
-                  blockEntries.push({
+                  postCreateOrderFixPlan.push({ comment: wrapperName, order: cursor, placement: groupPlacement });
+                  blockEntries.push(applyPlacementToEntry_ACU({
                       comment: wrapperName,
                       content: wrapperParts.after,
                       keys: [],
@@ -10487,7 +10964,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                       type: 'constant',
                       prevent_recursion: true,
                       order: cursor++
-                  });
+                  }, groupPlacement));
               }
 
               entriesToCreate.push(...blockEntries);
@@ -10509,7 +10986,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                       postCreateOrderFixPlan.forEach(p => {
                           const e = byComment.get(p.comment);
                           if (e?.uid != null && Number.isFinite(p.order)) {
-                              updates.push({ uid: e.uid, order: p.order });
+                              const fixed = applyPlacementToEntry_ACU({ uid: e.uid, order: p.order }, p.placement || DEFAULT_ENTRY_PLACEMENT_ACU);
+                              updates.push(fixed);
                           }
                       });
                       if (updates.length > 0) {
@@ -10551,7 +11029,15 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
     const PERSON_ENTRY_PREFIX = isoPrefix + basePersonEntryPrefix;
     const basePersonIndexComment = isImport ? `${IMPORT_PREFIX}TavernDB-ACU-ImportantPersonsIndex` : 'TavernDB-ACU-ImportantPersonsIndex';
     const PERSON_INDEX_COMMENT = isoPrefix + basePersonIndexComment;
-    const PERSONS_FIXED_SYSTEM_DEPTH = 10000; // 用户指定：PersonsHeader + 重要人物条目固定深度（@D⚙）
+    const personsCfg = ensureExportConfigDefaults_ACU(importantPersonsTable?.exportConfig, importantPersonsTable?.name || '重要人物表');
+    const personsEntryPlacement = normalizePlacementConfig_ACU(
+        personsCfg.fixedEntryPlacement,
+        getFixedPlacementDefaultsForTable_ACU(importantPersonsTable?.name || '重要人物表').entry
+    );
+    const personsIndexPlacement = normalizePlacementConfig_ACU(
+        personsCfg.fixedIndexPlacement,
+        getFixedPlacementDefaultsForTable_ACU(importantPersonsTable?.name || '重要人物表').index
+    );
 
     try {
         const allEntries = await TavernHelper_API_ACU.getLorebookEntries(primaryLorebookName);
@@ -10619,7 +11105,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             const keys = buildPersonNameKeywords_ACU(personName);
 
             const content = `| ${rowData.join(' | ')} |`
-            const newEntryData = applySystemDepthInjection_ACU({
+            const newEntryData = applyPlacementToEntry_ACU({
                 comment: `${PERSON_ENTRY_PREFIX}${i + 1}`,
                 content: content,
                 keys: keys,
@@ -10628,7 +11114,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 // [优化] order(插入深度) 避免与任何现有条目重复（人物条目按序分配）
                 order: null,
                 prevent_recursion: true
-            }, PERSONS_FIXED_SYSTEM_DEPTH);
+            }, personsEntryPlacement);
             personEntriesToCreate.push(newEntryData);
         });
 
@@ -10636,7 +11122,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
 
         // 2.1.5 创建重要人物表表头条目
         const personsHeaderContent = `# ${importantPersonsTable.name}\n\n| ${headers.join(' | ')} |\n|${headers.map(() => '---').join('|')}|`;
-        const personsHeaderEntryData = applySystemDepthInjection_ACU({
+        const personsHeaderEntryData = applyPlacementToEntry_ACU({
             // [修复] 外部导入时 PersonsHeader 也必须带外部导入前缀，避免被清理逻辑误删
             comment: isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-PersonsHeader` : 'TavernDB-ACU-PersonsHeader'),
             content: personsHeaderContent,
@@ -10645,7 +11131,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
             type: 'constant',
             order: null,
             prevent_recursion: true
-        }, PERSONS_FIXED_SYSTEM_DEPTH);
+        }, personsEntryPlacement);
         personEntriesToCreate.unshift(personsHeaderEntryData);
 
         // 2.2 准备要创建的索引条目
@@ -10667,13 +11153,13 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
         // [优化] 重要人物表 3-depth 成组对齐：
         // - PersonsHeader / 人物行条目 / PersonsIndex 只占用连续 3 个 order(深度)
         // - 人物行条目共用同一个深度（不再每人占一个深度）
-        const personsOrderBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, 99982, 1, 99999);
+        const personsOrderBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, Math.max(1, personsEntryPlacement.order - 1), 1, 99999);
         personEntriesToCreate[0].order = personsOrderBlockBase; // header
-            for (let i = 1; i < personEntriesToCreate.length; i++) {
+        for (let i = 1; i < personEntriesToCreate.length; i++) {
             personEntriesToCreate[i].order = personsOrderBlockBase + 1; // all persons share
-            }
+        }
         indexEntryData.order = personsOrderBlockBase + 2; // index/footer
-        const allCreates = [...personEntriesToCreate, indexEntryData];
+        const allCreates = [...personEntriesToCreate, applyPlacementToEntry_ACU(indexEntryData, personsIndexPlacement)];
         if (allCreates.length > 0) {
             await TavernHelper_API_ACU.createLorebookEntries(primaryLorebookName, allCreates);
             logDebug_ACU(`Successfully created ${allCreates.length} new person-related entries.`);
@@ -10684,9 +11170,9 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                 const index = latest.find(e => e.comment === PERSON_INDEX_COMMENT);
                 const rows = latest.filter(e => (e?.comment || '').startsWith(PERSON_ENTRY_PREFIX));
                 const updates = [];
-                if (header?.uid) updates.push(applySystemDepthInjection_ACU({ uid: header.uid, order: personsOrderBlockBase }, PERSONS_FIXED_SYSTEM_DEPTH));
-                rows.forEach(e => { if (e?.uid) updates.push(applySystemDepthInjection_ACU({ uid: e.uid, order: personsOrderBlockBase + 1 }, PERSONS_FIXED_SYSTEM_DEPTH)); });
-                if (index?.uid) updates.push({ uid: index.uid, order: personsOrderBlockBase + 2 });
+                if (header?.uid) updates.push(applyPlacementToEntry_ACU({ uid: header.uid, order: personsOrderBlockBase }, personsEntryPlacement));
+                rows.forEach(e => { if (e?.uid) updates.push(applyPlacementToEntry_ACU({ uid: e.uid, order: personsOrderBlockBase + 1 }, personsEntryPlacement)); });
+                if (index?.uid) updates.push(applyPlacementToEntry_ACU({ uid: index.uid, order: personsOrderBlockBase + 2 }, personsIndexPlacement));
                 if (updates.length > 0) {
                     await TavernHelper_API_ACU.setLorebookEntries(primaryLorebookName, updates);
                 }
@@ -13921,7 +14407,8 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                                     <code>$5</code> - 自动替换为“总体大纲”表内容（含表头）<br>
                                     <code>$7</code> - 自动替换为本次实际读取的前文上下文（仅包含历史AI输出，不含任何用户输入）<br>
                                     <code>$8</code> - 自动替换为本轮用户输入（可自由放置）<br>
-                                    <code>sulv1-4</code> - 剧情推进速率设置
+                                    <code>sulv1-4</code> - 剧情推进速率设置<br>
+                                    <code>zhaohui</code> - 记忆召回数量
                                 </small>
                             </div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-plot-prompt-constructor-area">
@@ -13953,7 +14440,7 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                                 <i class="fa-solid fa-right-left"></i> 匹配替换
                             </h4>
                             <small class="notes" style="display: block; margin-bottom: 15px; color: var(--text_secondary);">
-                                在发送前，将下方设置的数值替换掉提示词中的占位符（sulv1-4）
+                                在发送前，将下方设置的数值替换掉提示词中的占位符（sulv1-4、zhaohui）
                             </small>
                             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
@@ -13975,6 +14462,11 @@ insertRow(1, {"0":"时间跨度1", "1":"总结大纲", "2":"AM01"})
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold" style="font-weight: 500;">绿帽线推进速率</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold" type="number" class="text_pole" step="0.05" value="1.0" style="width: 100%;">
                                     <small class="notes" style="color: var(--text_secondary);">占位符: sulv4</small>
+                                </div>
+                                <div class="qrf_settings_block" style="margin-bottom: 0;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-plot-recall-count" style="font-weight: 500;">记忆召回数量</label>
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-plot-recall-count" type="number" class="text_pole" step="1" min="1" value="20" style="width: 100%;">
+                                    <small class="notes" style="color: var(--text_secondary);">占位符: zhaohui</small>
                                 </div>
                             </div>
                         </div>
@@ -15250,17 +15742,18 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
 
       // 匹配替换速率保存
       const plotRateInputs = [
-        { id: 'plot-rate-main', key: 'rateMain' },
-        { id: 'plot-rate-personal', key: 'ratePersonal' },
-        { id: 'plot-rate-erotic', key: 'rateErotic' },
-        { id: 'plot-rate-cuckold', key: 'rateCuckold' }
+        { id: 'plot-rate-main', key: 'rateMain', defaultValue: 1.0 },
+        { id: 'plot-rate-personal', key: 'ratePersonal', defaultValue: 1.0 },
+        { id: 'plot-rate-erotic', key: 'rateErotic', defaultValue: 0 },
+        { id: 'plot-rate-cuckold', key: 'rateCuckold', defaultValue: 1.0 },
+        { id: 'plot-recall-count', key: 'recallCount', defaultValue: 20 }
       ];
 
-      plotRateInputs.forEach(({ id, key }) => {
+      plotRateInputs.forEach(({ id, key, defaultValue }) => {
         const $input = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
         if ($input.length) {
           $input.on('input change', function() {
-            settings_ACU.plotSettings[key] = parseFloat($(this).val()) || 1.0;
+            settings_ACU.plotSettings[key] = parseFloat($(this).val()) || defaultValue;
             saveSettings_ACU();
           });
         }
@@ -15590,6 +16083,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
                     ratePersonal: preset.ratePersonal ?? 1.0,
                     rateErotic: preset.rateErotic ?? 0,
                     rateCuckold: preset.rateCuckold ?? 1.0,
+                    recallCount: preset.recallCount ?? 20,
                   extractTags: preset.extractTags || '',
                   contextExtractTags: preset.contextExtractTags || '',
                   contextExcludeTags: preset.contextExcludeTags || '',
@@ -15851,6 +16345,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val(plotSettings.ratePersonal);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(plotSettings.rateErotic);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(plotSettings.rateCuckold);
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(plotSettings.recallCount ?? 20);
 
       // 循环设置
       ensureLoopPromptsArray_ACU(plotSettings);
@@ -15971,6 +16466,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val(preset.ratePersonal ?? 1.0);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(preset.rateErotic ?? 0);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(preset.rateCuckold ?? 1.0);
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(preset.recallCount ?? 20);
 
       // 加载其他设置
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(preset.extractTags || '');
@@ -16003,6 +16499,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       settings_ACU.plotSettings.ratePersonal = preset.ratePersonal ?? 1.0;
       settings_ACU.plotSettings.rateErotic = preset.rateErotic ?? 0;
       settings_ACU.plotSettings.rateCuckold = preset.rateCuckold ?? 1.0;
+      settings_ACU.plotSettings.recallCount = preset.recallCount ?? 20;
       settings_ACU.plotSettings.extractTags = preset.extractTags || '';
       settings_ACU.plotSettings.minLength = preset.minLength ?? 0;
       settings_ACU.plotSettings.contextTurnCount = preset.contextTurnCount ?? 3;
@@ -16042,6 +16539,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         ratePersonal: parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val()) || 1.0,
         rateErotic: parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val()) || 0,
         rateCuckold: parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val()) || 1.0,
+        recallCount: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(), 10) || 20,
         extractTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val() || '',
         contextExtractTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-tags`).val() || '',
         contextExcludeTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-tags`).val() || '',
@@ -19373,15 +19871,9 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
             if (!sheet.exportConfig) {
                 // [修改] 所有表格（包括重要人物表、总结表、总体大纲）默认不开启自定义导出
                 // 因为特殊表格有专门的函数处理拆分逻辑，无需在此处通过通用配置再次启用，避免冲突
-                sheet.exportConfig = {
-                    enabled: false,
-                    splitByRow: false,
-                    entryName: sheet.name,
-                    entryType: 'constant',
-                    keywords: '',
-                    preventRecursion: true,
-                    injectionTemplate: ''
-                };
+                sheet.exportConfig = buildDefaultExportConfig_ACU(sheet.name);
+            } else {
+                sheet.exportConfig = ensureExportConfigDefaults_ACU(sheet.exportConfig, sheet.name);
             }
         });
 
@@ -20972,6 +21464,7 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
                   <div class="acu-mode-switch">
                       <button class="acu-mode-btn active" data-mode="data">数据编辑</button>
                       <button class="acu-mode-btn" data-mode="config">结构/参数配置</button>
+                      <button class="acu-mode-btn" data-mode="globalConfig">全局注入配置</button>
                   </div>
                   <div class="acu-vis-actions" style="display: flex; gap: 10px;">
                       <button id="acu-vis-save-btn" class="acu-btn-primary"><i class="fa-solid fa-save"></i> 普通保存</button>
@@ -21202,7 +21695,7 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
                   sourceData: { note: "新表格说明", initNode: "", insertNode: "", updateNode: "", deleteNode: "" },
                   // -1 = 沿用UI全局（新版默认）；updateFrequency=0 可用于“禁用该表自动更新”
                   updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
-                  exportConfig: { enabled: false, splitByRow: false, entryName: newName, entryType: 'constant', preventRecursion: true },
+                  exportConfig: buildDefaultExportConfig_ACU(newName),
                   [TABLE_ORDER_FIELD_ACU]: 999999 // 临时占位，稍后会被 getOrderedSheetKeys_ACU / applySheetOrderNumbers_ACU 重编号
               };
               // 添加到顺序列表末尾 (getOrderedSheetKeys_ACU 会自动同步新增的 key，无需手动 push)
@@ -21219,6 +21712,11 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
   function renderVisualizerMain_ACU() {
       const $main = jQuery_API_ACU('#acu-vis-main-area');
       $main.empty();
+
+      if (_acuVisState.mode === 'globalConfig') {
+          renderVisualizerGlobalConfigMode_ACU($main);
+          return;
+      }
       
       if (!_acuVisState.currentSheetKey) {
           $main.html('<div style="text-align:center; padding:50px; color:#888;">请选择一个表格</div>');
@@ -21233,6 +21731,80 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
       } else {
           renderVisualizerConfigMode_ACU($main, sheet);
       }
+  }
+
+  function renderVisualizerGlobalConfigMode_ACU($container) {
+      const cfg = getGlobalInjectionConfigFromData_ACU(_acuVisState.tempData, { ensureWriteBack: true });
+      const readablePlacement = normalizePlacementConfig_ACU(cfg.readableEntryPlacement, buildDefaultGlobalInjectionConfig_ACU().readableEntryPlacement);
+      const wrapperPlacement = normalizePlacementConfig_ACU(cfg.wrapperPlacement, buildDefaultGlobalInjectionConfig_ACU().wrapperPlacement);
+
+      const html = `
+          <div class="acu-config-panel">
+              <div class="acu-config-section">
+                  <h4>全局条目注入配置（跨表）</h4>
+                  <div class="acu-hint" style="margin-bottom:10px;">该配置独立于单表，跟随当前模板预设保存。</div>
+                  <div class="acu-form-group">
+                      <label>全局可读条目位置:</label>
+                      <select class="acu-form-input" id="cfg-global-readable-position">
+                          <option value="at_depth_as_system" ${readablePlacement.position === 'at_depth_as_system' ? 'selected' : ''}>系统</option>
+                          <option value="before_char" ${readablePlacement.position === 'before_char' ? 'selected' : ''}>角色定义前</option>
+                          <option value="after_char" ${readablePlacement.position === 'after_char' ? 'selected' : ''}>角色定义后</option>
+                      </select>
+                  </div>
+                  <div class="acu-form-group">
+                      <label>全局可读条目插入深度 (Depth):</label>
+                      <input type="number" class="acu-form-input" id="cfg-global-readable-depth" step="1" value="${readablePlacement.depth}">
+                  </div>
+                  <div class="acu-form-group">
+                      <label>全局可读条目插入顺序 (Order):</label>
+                      <input type="number" class="acu-form-input" id="cfg-global-readable-order" min="1" step="1" value="${readablePlacement.order}">
+                  </div>
+
+                  <div class="acu-form-group" style="margin-top:12px; padding-top:10px; border-top:1px dashed #ddd;">
+                      <label>全局包裹条目位置:</label>
+                      <select class="acu-form-input" id="cfg-global-wrapper-position">
+                          <option value="at_depth_as_system" ${wrapperPlacement.position === 'at_depth_as_system' ? 'selected' : ''}>系统</option>
+                          <option value="before_char" ${wrapperPlacement.position === 'before_char' ? 'selected' : ''}>角色定义前</option>
+                          <option value="after_char" ${wrapperPlacement.position === 'after_char' ? 'selected' : ''}>角色定义后</option>
+                      </select>
+                  </div>
+                  <div class="acu-form-group">
+                      <label>全局包裹条目插入深度 (Depth):</label>
+                      <input type="number" class="acu-form-input" id="cfg-global-wrapper-depth" step="1" value="${wrapperPlacement.depth}">
+                  </div>
+                  <div class="acu-form-group">
+                      <label>全局包裹条目插入顺序 (Order):</label>
+                      <input type="number" class="acu-form-input" id="cfg-global-wrapper-order" min="1" step="1" value="${wrapperPlacement.order}">
+                  </div>
+              </div>
+          </div>
+      `;
+      $container.html(html);
+
+      const parseIntOrDefault_ACU = (val, defVal) => {
+          const n = parseInt(val, 10);
+          return Number.isFinite(n) ? n : defVal;
+      };
+      const readPlacementFromInputs_ACU = (prefix, fallbackPlacement) => {
+          const position = normalizeLorebookPosition_ACU(jQuery_API_ACU(`#${prefix}-position`).val(), fallbackPlacement.position);
+          const depth = parseIntOrDefault_ACU(jQuery_API_ACU(`#${prefix}-depth`).val(), fallbackPlacement.depth);
+          const order = parseIntOrDefault_ACU(jQuery_API_ACU(`#${prefix}-order`).val(), fallbackPlacement.order);
+          return normalizePlacementConfig_ACU({ position, depth, order }, fallbackPlacement);
+      };
+
+      const syncGlobalInjectionConfigFromUi_ACU = () => {
+          const nextCfg = getGlobalInjectionConfigFromData_ACU(_acuVisState.tempData, { ensureWriteBack: true });
+          nextCfg.readableEntryPlacement = readPlacementFromInputs_ACU('cfg-global-readable', buildDefaultGlobalInjectionConfig_ACU().readableEntryPlacement);
+          nextCfg.wrapperPlacement = readPlacementFromInputs_ACU('cfg-global-wrapper', buildDefaultGlobalInjectionConfig_ACU().wrapperPlacement);
+          _acuVisState.tempData.mate.globalInjectionConfig = nextCfg;
+      };
+
+      jQuery_API_ACU('#cfg-global-readable-position, #cfg-global-readable-depth, #cfg-global-readable-order').on('input change', function() {
+          syncGlobalInjectionConfigFromUi_ACU();
+      });
+      jQuery_API_ACU('#cfg-global-wrapper-position, #cfg-global-wrapper-depth, #cfg-global-wrapper-order').on('input change', function() {
+          syncGlobalInjectionConfigFromUi_ACU();
+      });
   }
 
   function renderVisualizerDataMode_ACU($container, sheet) {
@@ -21389,10 +21961,40 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
   }
 
   function renderVisualizerConfigMode_ACU($container, sheet) {
-      const config = sheet.exportConfig || {};
+      const config = ensureSheetExportConfigDefaults_ACU(sheet);
       const updateConfig = sheet.updateConfig || {};
       const sourceData = sheet.sourceData || {};
       const ucVal = (v) => (Number.isFinite(v) ? v : -1);
+      const entryPlacement = normalizePlacementConfig_ACU(config.entryPlacement, DEFAULT_ENTRY_PLACEMENT_ACU);
+      const extraIndexPlacement = normalizePlacementConfig_ACU(config.extraIndexPlacement, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU);
+      const fixedDefaults = getFixedPlacementDefaultsForTable_ACU(sheet.name);
+      const fixedEntryPlacement = normalizePlacementConfig_ACU(config.fixedEntryPlacement, fixedDefaults.entry);
+      const fixedIndexPlacement = normalizePlacementConfig_ACU(config.fixedIndexPlacement, fixedDefaults.index);
+      const dataHeaders = Array.isArray(sheet?.content?.[0]) ? sheet.content[0].slice(1) : [];
+      const selectedExtraIndexColumns = Array.isArray(config.extraIndexColumns)
+          ? [...new Set(config.extraIndexColumns.filter(col => dataHeaders.includes(col)))]
+          : [];
+      const extraIndexColumnModes = (config.extraIndexColumnModes && typeof config.extraIndexColumnModes === 'object')
+          ? config.extraIndexColumnModes
+          : {};
+      const extraIndexColumnsHtml = dataHeaders.length > 0
+          ? dataHeaders.map((header, colIdx) => {
+                const checked = selectedExtraIndexColumns.includes(header);
+                const modeVal = extraIndexColumnModes[header] === 'index_only' ? 'index_only' : 'both';
+                return `
+                    <div class="acu-extra-index-col-row" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                        <label style="display:flex; align-items:center; gap:6px; margin:0; min-width: 220px;">
+                            <input type="checkbox" class="cfg-extra-index-col-check" data-col-idx="${colIdx}" ${checked ? 'checked' : ''}>
+                            <span>${escapeHtml_ACU(header)}</span>
+                        </label>
+                        <select class="acu-form-input cfg-extra-index-col-mode" data-col-idx="${colIdx}" style="max-width: 260px;" ${checked ? '' : 'disabled'}>
+                            <option value="both" ${modeVal === 'both' ? 'selected' : ''}>该列在原条目和索引条目都保留</option>
+                            <option value="index_only" ${modeVal === 'index_only' ? 'selected' : ''}>该列仅放到索引条目</option>
+                        </select>
+                    </div>
+                `;
+            }).join('')
+          : '<div class="acu-hint">当前表格没有可选列。</div>';
       const isSummaryTable = isSummaryOrOutlineTable_ACU(sheet.name);
       const sheetKey = _acuVisState.currentSheetKey;
       const specialIndexCol = isSummaryTable ? getSummaryIndexColumnIndex_ACU(sheet) : -1;
@@ -21400,6 +22002,10 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
           ? sheet.content[0][specialIndexCol + 1]
           : '';
       const specialIndexLocked = (isSummaryTable && sheetKey) ? isSpecialIndexLockEnabled_ACU(sheetKey) : false;
+      const isFixedConfigTable =
+          isSummaryTableName_ACU(sheet.name) ||
+          isOutlineTableName_ACU(sheet.name) ||
+          isImportantPersonsTableName_ACU(sheet.name);
       const specialLockHtml = isSummaryTable ? `
               <div class="acu-config-section">
                   <h4>编码索引列锁定</h4>
@@ -21413,6 +22019,44 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
                           ? `<div class="acu-hint">当前识别列: [${specialIndexCol}] ${escapeHtml_ACU(String(specialIndexHeader || ''))}</div>`
                           : `<div class="acu-hint" style="color:#f6c177;">未识别到编码索引列，将默认使用最后一列。</div>`}
                   </div>
+              </div>
+      ` : '';
+      const fixedPlacementHtml = isFixedConfigTable ? `
+              <div class="acu-config-section">
+                  <h4>固定条目注入配置（本表专用）</h4>
+                  <div class="acu-form-group">
+                      <label>主条目位置:</label>
+                      <select class="acu-form-input" id="cfg-fixed-entry-position">
+                          <option value="at_depth_as_system" ${fixedEntryPlacement.position === 'at_depth_as_system' ? 'selected' : ''}>系统</option>
+                          <option value="before_char" ${fixedEntryPlacement.position === 'before_char' ? 'selected' : ''}>角色定义前</option>
+                          <option value="after_char" ${fixedEntryPlacement.position === 'after_char' ? 'selected' : ''}>角色定义后</option>
+                      </select>
+                  </div>
+                  <div class="acu-form-group">
+                      <label>主条目插入深度 (Depth):</label>
+                      <input type="number" class="acu-form-input" id="cfg-fixed-entry-depth" step="1" value="${fixedEntryPlacement.depth}">
+                  </div>
+                  <div class="acu-form-group">
+                      <label>主条目插入顺序 (Order):</label>
+                      <input type="number" class="acu-form-input" id="cfg-fixed-entry-order" min="1" step="1" value="${fixedEntryPlacement.order}">
+                  </div>
+                  ${isImportantPersonsTableName_ACU(sheet.name) ? `
+                  <div class="acu-form-group" style="margin-top:10px; padding-top:10px; border-top: 1px dashed #ddd;">
+                      <label>索引条目位置:</label>
+                      <select class="acu-form-input" id="cfg-fixed-index-position">
+                          <option value="at_depth_as_system" ${fixedIndexPlacement.position === 'at_depth_as_system' ? 'selected' : ''}>系统</option>
+                          <option value="before_char" ${fixedIndexPlacement.position === 'before_char' ? 'selected' : ''}>角色定义前</option>
+                          <option value="after_char" ${fixedIndexPlacement.position === 'after_char' ? 'selected' : ''}>角色定义后</option>
+                      </select>
+                  </div>
+                  <div class="acu-form-group">
+                      <label>索引条目插入深度 (Depth):</label>
+                      <input type="number" class="acu-form-input" id="cfg-fixed-index-depth" step="1" value="${fixedIndexPlacement.depth}">
+                  </div>
+                  <div class="acu-form-group">
+                      <label>索引条目插入顺序 (Order):</label>
+                      <input type="number" class="acu-form-input" id="cfg-fixed-index-order" min="1" step="1" value="${fixedIndexPlacement.order}">
+                  </div>` : ''}
               </div>
       ` : '';
       
@@ -21540,9 +22184,70 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
                               <textarea class="acu-form-textarea" id="cfg-template" placeholder="使用 $1 代表本表导出的蓝灯/绿灯条目列表，$1 上下的内容会分别生成独立的常量条目，插入到该表注入区块的最前与最后。">${escapeHtml_ACU(config.injectionTemplate || '')}</textarea>
                               <div class="acu-hint">注入词现在以独立的常量条目进行包裹。填写模板后，$1 保留为条目本身，$1 之前和之后的内容会各自成为前/后包裹条目。</div>
                           </div>
+                          <div class="acu-form-group" style="margin-top:10px; padding-top:10px; border-top: 1px dashed #ddd;">
+                              <label>主条目位置:</label>
+                              <select class="acu-form-input" id="cfg-entry-position">
+                                  <option value="at_depth_as_system" ${entryPlacement.position === 'at_depth_as_system' ? 'selected' : ''}>系统</option>
+                                  <option value="before_char" ${entryPlacement.position === 'before_char' ? 'selected' : ''}>角色定义前</option>
+                                  <option value="after_char" ${entryPlacement.position === 'after_char' ? 'selected' : ''}>角色定义后</option>
+                              </select>
+                          </div>
+                          <div class="acu-form-group">
+                              <label>主条目插入深度 (Depth):</label>
+                              <input type="number" class="acu-form-input" id="cfg-entry-depth" step="1" value="${entryPlacement.depth}">
+                          </div>
+                          <div class="acu-form-group">
+                              <label>主条目插入顺序 (Order):</label>
+                              <input type="number" class="acu-form-input" id="cfg-entry-order" min="1" step="1" value="${entryPlacement.order}">
+                              <div class="acu-hint">只需设置主条目的顺序；若存在上/下包裹条目，会自动占用前后顺序位。</div>
+                          </div>
+
+                          <div class="acu-form-group" style="margin-top: 12px; padding-top: 10px; border-top: 1px dashed #ddd;">
+                              <label>
+                                  <input type="checkbox" id="cfg-extra-index-enabled" ${config.extraIndexEnabled ? 'checked' : ''}>
+                                  额外增加索引条目
+                              </label>
+                              <div class="acu-hint">启用后会在该表导出区块额外注入 1 条“索引条目”（常量条目）。</div>
+                          </div>
+                          <div id="cfg-extra-index-options" style="display: ${config.extraIndexEnabled ? 'block' : 'none'}; padding-left: 12px; border-left: 2px solid #eee;">
+                              <div class="acu-form-group">
+                                  <label>索引条目名称:</label>
+                                  <input type="text" class="acu-form-input" id="cfg-extra-index-entry-name" value="${escapeHtml_ACU(config.extraIndexEntryName || `${config.entryName || sheet.name || ''}-索引`)}" placeholder="例如: ${escapeHtml_ACU((config.entryName || sheet.name || '表格') + '-索引')}">
+                                  <div class="acu-hint">将作为额外注入世界书条目的名称。</div>
+                              </div>
+                              <div class="acu-form-group">
+                                  <label>索引条目列选择（可多选）:</label>
+                                  <div id="cfg-extra-index-columns-list">
+                                      ${extraIndexColumnsHtml}
+                                  </div>
+                                  <div class="acu-hint">每列可独立设置：仅放索引条目，或原条目与索引条目都保留。</div>
+                              </div>
+                              <div class="acu-form-group">
+                                  <label>索引条目自定义注入模板 (可选):</label>
+                                  <textarea class="acu-form-textarea" id="cfg-extra-index-template" placeholder="使用 $1 代表索引条目内容；$1 上下内容会分别生成独立常量条目并放在索引条目之前/之后。">${escapeHtml_ACU(config.extraIndexInjectionTemplate || '')}</textarea>
+                                  <div class="acu-hint">逻辑与独立导出条目的自定义注入模板一致。</div>
+                              </div>
+                              <div class="acu-form-group" style="margin-top:10px; padding-top:10px; border-top: 1px dashed #ddd;">
+                                  <label>索引条目位置:</label>
+                                  <select class="acu-form-input" id="cfg-extra-index-position">
+                                      <option value="at_depth_as_system" ${extraIndexPlacement.position === 'at_depth_as_system' ? 'selected' : ''}>系统</option>
+                                      <option value="before_char" ${extraIndexPlacement.position === 'before_char' ? 'selected' : ''}>角色定义前</option>
+                                      <option value="after_char" ${extraIndexPlacement.position === 'after_char' ? 'selected' : ''}>角色定义后</option>
+                                  </select>
+                              </div>
+                              <div class="acu-form-group">
+                                  <label>索引条目插入深度 (Depth):</label>
+                                  <input type="number" class="acu-form-input" id="cfg-extra-index-depth" step="1" value="${extraIndexPlacement.depth}">
+                              </div>
+                              <div class="acu-form-group">
+                                  <label>索引条目插入顺序 (Order):</label>
+                                  <input type="number" class="acu-form-input" id="cfg-extra-index-order" min="1" step="1" value="${extraIndexPlacement.order}">
+                              </div>
+                          </div>
                       </div>
                   </div>
               </div>
+              ${fixedPlacementHtml}
           </div>
       `;
       
@@ -21667,6 +22372,96 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
           ensureExportConfig();
           sheet.exportConfig.injectionTemplate = jQuery_API_ACU(this).val();
       });
+
+      const readPlacementFromInputs_ACU = (prefix, fallbackPlacement) => {
+          const position = normalizeLorebookPosition_ACU(jQuery_API_ACU(`#${prefix}-position`).val(), fallbackPlacement.position);
+          const depth = parseIntOrDefault_ACU(jQuery_API_ACU(`#${prefix}-depth`).val(), fallbackPlacement.depth);
+          const order = parseIntOrDefault_ACU(jQuery_API_ACU(`#${prefix}-order`).val(), fallbackPlacement.order);
+          return normalizePlacementConfig_ACU({ position, depth, order }, fallbackPlacement);
+      };
+
+      const syncEntryPlacementFromUi_ACU = () => {
+          ensureExportConfig();
+          sheet.exportConfig.entryPlacement = readPlacementFromInputs_ACU('cfg-entry', DEFAULT_ENTRY_PLACEMENT_ACU);
+      };
+      jQuery_API_ACU('#cfg-entry-position, #cfg-entry-depth, #cfg-entry-order').on('input change', function() {
+          syncEntryPlacementFromUi_ACU();
+      });
+
+      const syncExtraIndexConfigFromUi = () => {
+          ensureExportConfig();
+          const enabled = jQuery_API_ACU('#cfg-extra-index-enabled').is(':checked');
+          sheet.exportConfig.extraIndexEnabled = enabled;
+          const selectedColumns = [];
+          const modeMap = {};
+          jQuery_API_ACU('.cfg-extra-index-col-check').each(function() {
+              const colIdx = parseInt(jQuery_API_ACU(this).attr('data-col-idx'), 10);
+              const colName = dataHeaders[colIdx];
+              if (!colName) return;
+              const isChecked = jQuery_API_ACU(this).is(':checked');
+              const $mode = jQuery_API_ACU(`.cfg-extra-index-col-mode[data-col-idx="${colIdx}"]`);
+              $mode.prop('disabled', !isChecked);
+              if (!isChecked) return;
+              selectedColumns.push(colName);
+              const modeVal = $mode.val() === 'index_only' ? 'index_only' : 'both';
+              modeMap[colName] = modeVal;
+          });
+          sheet.exportConfig.extraIndexColumns = selectedColumns;
+          sheet.exportConfig.extraIndexColumnModes = modeMap;
+          sheet.exportConfig.extraIndexPlacement = readPlacementFromInputs_ACU('cfg-extra-index', DEFAULT_EXTRA_INDEX_PLACEMENT_ACU);
+      };
+
+      jQuery_API_ACU('#cfg-extra-index-enabled').on('change', function() {
+          ensureExportConfig();
+          const enabled = jQuery_API_ACU(this).is(':checked');
+          sheet.exportConfig.extraIndexEnabled = enabled;
+          jQuery_API_ACU('#cfg-extra-index-options').slideToggle(enabled);
+          syncExtraIndexConfigFromUi();
+      });
+
+      jQuery_API_ACU('#cfg-extra-index-entry-name').on('input', function() {
+          ensureExportConfig();
+          sheet.exportConfig.extraIndexEntryName = jQuery_API_ACU(this).val();
+      });
+
+      jQuery_API_ACU('#cfg-extra-index-template').on('input', function() {
+          ensureExportConfig();
+          sheet.exportConfig.extraIndexInjectionTemplate = jQuery_API_ACU(this).val();
+      });
+      jQuery_API_ACU('#cfg-extra-index-position, #cfg-extra-index-depth, #cfg-extra-index-order').on('input change', function() {
+          syncExtraIndexConfigFromUi();
+      });
+
+      jQuery_API_ACU('.cfg-extra-index-col-check').on('change', function() {
+          syncExtraIndexConfigFromUi();
+      });
+
+      jQuery_API_ACU('.cfg-extra-index-col-mode').on('change', function() {
+          syncExtraIndexConfigFromUi();
+      });
+
+      if (isFixedConfigTable) {
+          const syncFixedEntryPlacementFromUi_ACU = () => {
+              ensureExportConfig();
+              const fallback = getFixedPlacementDefaultsForTable_ACU(sheet.name).entry;
+              sheet.exportConfig.fixedEntryPlacement = readPlacementFromInputs_ACU('cfg-fixed-entry', fallback);
+          };
+          jQuery_API_ACU('#cfg-fixed-entry-position, #cfg-fixed-entry-depth, #cfg-fixed-entry-order').on('input change', function() {
+              syncFixedEntryPlacementFromUi_ACU();
+          });
+
+          if (isImportantPersonsTableName_ACU(sheet.name)) {
+              const syncFixedIndexPlacementFromUi_ACU = () => {
+                  ensureExportConfig();
+                  const fallback = getFixedPlacementDefaultsForTable_ACU(sheet.name).index;
+                  sheet.exportConfig.fixedIndexPlacement = readPlacementFromInputs_ACU('cfg-fixed-index', fallback);
+              };
+              jQuery_API_ACU('#cfg-fixed-index-position, #cfg-fixed-index-depth, #cfg-fixed-index-order').on('input change', function() {
+                  syncFixedIndexPlacementFromUi_ACU();
+              });
+          }
+      }
+
   }
 
   async function saveVisualizerChanges_ACU(saveToTemplate = false) {
@@ -21734,7 +22529,17 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
           let templateObj = null;
           try {
               templateObj = JSON.parse(TABLE_TEMPLATE_ACU);
+              if (!templateObj || typeof templateObj !== 'object') templateObj = {};
+              // 同步全局注入配置（存入模板 mate，不走 settings）
+              const tempGlobalCfg = getGlobalInjectionConfigFromData_ACU(currentJsonTableData_ACU, { ensureWriteBack: true });
+              const prevGlobalCfgStr = safeJsonStringify_ACU(templateObj?.mate?.globalInjectionConfig || {}, '{}');
+              const nextGlobalCfgStr = safeJsonStringify_ACU(tempGlobalCfg || {}, '{}');
+              if (!templateObj.mate || typeof templateObj.mate !== 'object') templateObj.mate = { type: 'chatSheets', version: 1 };
+              if (!templateObj.mate.type) templateObj.mate.type = 'chatSheets';
+              if (!Number.isFinite(templateObj.mate.version)) templateObj.mate.version = 1;
+              templateObj.mate.globalInjectionConfig = tempGlobalCfg;
               let templateChanged = false;
+              if (prevGlobalCfgStr !== nextGlobalCfgStr) templateChanged = true;
 
               // [优化] 全量同步：不仅更新现有表，也处理新增和删除的表
               // 1. 同步 currentJsonTableData_ACU 中的所有表到 templateObj
