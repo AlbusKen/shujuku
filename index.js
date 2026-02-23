@@ -2587,8 +2587,7 @@
     }
     $container.empty();
 
-    const rows = normalized.length > 0 ? normalized : [{ start: '', end: '' }];
-    rows.forEach(rule => {
+    const appendRow = (rule = {}) => {
       const rowHtml = `
         <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
           <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU(startPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU(rule.start || '')}">
@@ -2597,7 +2596,24 @@
         </div>
       `;
       $container.append(rowHtml);
-    });
+    };
+
+    const rows = normalized.length > 0 ? normalized : [{ start: '', end: '' }];
+    rows.forEach(rule => appendRow(rule));
+  }
+
+  function appendExcludeRuleRow_ACU(containerSelector, { startPlaceholder = '开始词', endPlaceholder = '结束词' } = {}) {
+    if (!$popupInstance_ACU) return;
+    const $container = $popupInstance_ACU.find(containerSelector);
+    if (!$container.length) return;
+    const rowHtml = `
+      <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+        <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU(startPlaceholder)}" style="flex:1;" value="">
+        <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU(endPlaceholder)}" style="flex:1;" value="">
+        <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
+      </div>
+    `;
+    $container.append(rowHtml);
   }
 
   function readExcludeRulesFromRows_ACU(containerSelector) {
@@ -7297,6 +7313,12 @@
 
       const plotExcludeTags = (plotSettings.contextExcludeTags || '').trim();
       const plotExcludeRules = normalizeExcludeRules_ACU(plotSettings.contextExcludeRules, plotExcludeTags);
+      const filterPlotInjectedContent = (value, placeholderKey = '') => {
+        const text = value !== undefined && value !== null ? String(value) : '';
+        // 仅对注入内容做规则处理，避免影响基础提示词模板文本
+        if (!['$1', '$5', '$6', '$7', '$8', '$U', '$C'].includes(placeholderKey)) return text;
+        return applyExcludeRulesToText_ACU(text, { excludeRules: plotExcludeRules, excludeTags: plotExcludeTags });
+      };
 
       // 辅助函数：替换文本中的占位符
       const performReplacements = text => {
@@ -7305,7 +7327,7 @@
 
         // 替换 $1 (Worldbook)
         const worldbookReplacement = worldbookContent
-          ? `\n<worldbook_context>\n${worldbookContent}\n</worldbook_context>\n`
+          ? `\n<worldbook_context>\n${filterPlotInjectedContent(worldbookContent, '$1')}\n</worldbook_context>\n`
           : '';
         processed = processed.replace(/(?<!\\)\$1/g, worldbookReplacement);
 
@@ -7313,10 +7335,9 @@
         for (const key in replacements) {
           const value = replacements[key];
           const regex = new RegExp(escapeRegExp_ACU(key), 'g');
-          processed = processed.replace(regex, () => (value !== undefined && value !== null ? String(value) : ''));
+          const filteredValue = filterPlotInjectedContent(value, key);
+          processed = processed.replace(regex, () => filteredValue);
         }
-        // 占位符注入完成后，统一执行标签排除规则
-        processed = applyExcludeRulesToText_ACU(processed, { excludeRules: plotExcludeRules, excludeTags: plotExcludeTags });
         return processed;
       };
 
@@ -16038,11 +16059,8 @@
 
       // 填表正文标签提取规则编辑器
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-add-rule`).on('click', function() {
-        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
-        currentRules.push({ start: '', end: '' });
-        renderExcludeRuleRows_ACU(
+        appendExcludeRuleRow_ACU(
           `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`,
-          currentRules,
           { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' },
         );
       });
@@ -16059,11 +16077,8 @@
 
       // 填表正文标签排除规则编辑器
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-add-rule`).on('click', function() {
-        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
-        currentRules.push({ start: '', end: '' });
-        renderExcludeRuleRows_ACU(
+        appendExcludeRuleRow_ACU(
           `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`,
-          currentRules,
           { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' },
         );
       });
@@ -16606,11 +16621,8 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
 
       // 剧情推进正文标签提取规则编辑器
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-add-rule`).on('click', function() {
-        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
-        currentRules.push({ start: '', end: '' });
-        renderExcludeRuleRows_ACU(
+        appendExcludeRuleRow_ACU(
           `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
-          currentRules,
           { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' },
         );
       });
@@ -16627,11 +16639,8 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
 
       // 剧情推进标签排除规则编辑器
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-add-rule`).on('click', function() {
-        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
-        currentRules.push({ start: '', end: '' });
-        renderExcludeRuleRows_ACU(
+        appendExcludeRuleRow_ACU(
           `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`,
-          currentRules,
           { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' },
         );
       });
@@ -18231,20 +18240,24 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
 
     const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
     const tableExcludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, tableExcludeTags);
+    const filterTableInjectedContent = (value, placeholderKey = '') => {
+        const text = value !== undefined && value !== null ? String(value) : '';
+        // 仅对注入内容应用规则，避免改写基础提示词本体
+        if (!['$0', '$1', '$4', '$6', '$8', '$U', '$C'].includes(placeholderKey)) return text;
+        return applyExcludeRulesToText_ACU(text, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
+    };
 
     // Interpolate placeholders in each segment
     promptSegments.forEach(segment => {
         let finalContent = segment.content;
-        finalContent = finalContent.replace('$0', dynamicContent.tableDataText);
-        finalContent = finalContent.replace('$1', dynamicContent.messagesText);
-        finalContent = finalContent.replace('$4', dynamicContent.worldbookContent);
-        finalContent = finalContent.replace(/\$6/g, lastPlotContent || ''); // [新增] $6 占位符替换为上一轮剧情规划数据（全局替换）
-        finalContent = finalContent.replace('$8', dynamicContent.manualExtraHint || '');
+        finalContent = finalContent.replace('$0', filterTableInjectedContent(dynamicContent.tableDataText, '$0'));
+        finalContent = finalContent.replace('$1', filterTableInjectedContent(dynamicContent.messagesText, '$1'));
+        finalContent = finalContent.replace('$4', filterTableInjectedContent(dynamicContent.worldbookContent, '$4'));
+        finalContent = finalContent.replace(/\$6/g, filterTableInjectedContent(lastPlotContent || '', '$6')); // [新增] $6 占位符替换为上一轮剧情规划数据（全局替换）
+        finalContent = finalContent.replace('$8', filterTableInjectedContent(dynamicContent.manualExtraHint || '', '$8'));
         // [新增] $U 和 $C 占位符替换
-        finalContent = finalContent.replace(/\$U/g, userInfoContent_Table);
-        finalContent = finalContent.replace(/\$C/g, charInfoContent_Table);
-        // 占位符注入完成后，统一执行标签排除规则
-        finalContent = applyExcludeRulesToText_ACU(finalContent, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
+        finalContent = finalContent.replace(/\$U/g, filterTableInjectedContent(userInfoContent_Table, '$U'));
+        finalContent = finalContent.replace(/\$C/g, filterTableInjectedContent(charInfoContent_Table, '$C'));
         
         // Convert role to API-safe role
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
