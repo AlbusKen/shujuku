@@ -2403,7 +2403,9 @@
   "recallCount": 20,
   "extractTags": "recall",
   "contextExtractTags": "",
+  "contextExtractRules": [],
   "contextExcludeTags": "",
+  "contextExcludeRules": [],
   "minLength": 0,
   "contextTurnCount": 3,
   "worldbookEnabled": true,
@@ -2515,6 +2517,100 @@
     if (ls.quickReplyContent.length > 0 && ls.currentPromptIndex >= ls.quickReplyContent.length) {
       ls.currentPromptIndex = 0;
     }
+  }
+
+  // --- [剧情推进/填表] 标签规则兼容：旧字符串字段 -> 新规则数组 ---
+  function ensureTagRulesCompat_ACU(targetSettings) {
+    if (!targetSettings || typeof targetSettings !== 'object') return;
+
+    targetSettings.tableContextExtractRules = normalizeExtractRules_ACU(
+      targetSettings.tableContextExtractRules,
+      targetSettings.tableContextExtractTags || '',
+    );
+    targetSettings.tableContextExcludeRules = normalizeExcludeRules_ACU(
+      targetSettings.tableContextExcludeRules,
+      targetSettings.tableContextExcludeTags || '',
+    );
+
+    const plot = targetSettings.plotSettings;
+    if (!plot || typeof plot !== 'object') return;
+
+    plot.contextExtractRules = normalizeExtractRules_ACU(
+      plot.contextExtractRules,
+      plot.contextExtractTags || '',
+    );
+    plot.contextExcludeRules = normalizeExcludeRules_ACU(
+      plot.contextExcludeRules,
+      plot.contextExcludeTags || '',
+    );
+
+    // 若当前配置为空，回填默认配置中的规则，确保 UI 可见默认规则
+    if ((!Array.isArray(plot.contextExtractRules) || plot.contextExtractRules.length === 0)
+      && (plot.contextExtractTags || '').trim() === '') {
+      plot.contextExtractRules = normalizeExtractRules_ACU(
+        DEFAULT_PLOT_SETTINGS_ACU.contextExtractRules,
+        DEFAULT_PLOT_SETTINGS_ACU.contextExtractTags || '',
+      );
+    }
+    if ((!Array.isArray(plot.contextExcludeRules) || plot.contextExcludeRules.length === 0)
+      && (plot.contextExcludeTags || '').trim() === '') {
+      plot.contextExcludeRules = normalizeExcludeRules_ACU(
+        DEFAULT_PLOT_SETTINGS_ACU.contextExcludeRules,
+        DEFAULT_PLOT_SETTINGS_ACU.contextExcludeTags || '',
+      );
+    }
+
+    if (Array.isArray(plot.promptPresets)) {
+      plot.promptPresets = plot.promptPresets.map(preset => normalizePlotPresetExcludeRules_ACU(preset));
+    }
+  }
+
+  function normalizePlotPresetExcludeRules_ACU(preset) {
+    if (!preset || typeof preset !== 'object') return preset;
+    const cloned = JSON.parse(JSON.stringify(preset));
+    cloned.contextExtractRules = normalizeExtractRules_ACU(cloned.contextExtractRules, cloned.contextExtractTags || '');
+    cloned.contextExcludeRules = normalizeExcludeRules_ACU(cloned.contextExcludeRules, cloned.contextExcludeTags || '');
+    // 新格式保存：不再继续写入旧字段
+    delete cloned.contextExtractTags;
+    delete cloned.contextExcludeTags;
+    return cloned;
+  }
+
+  function renderExcludeRuleRows_ACU(containerSelector, rules, { startPlaceholder = '开始词', endPlaceholder = '结束词', fallbackRules = [] } = {}) {
+    if (!$popupInstance_ACU) return;
+    const $container = $popupInstance_ACU.find(containerSelector);
+    if (!$container.length) return;
+
+    let normalized = normalizeExcludeRules_ACU(rules, '');
+    if (normalized.length === 0 && Array.isArray(fallbackRules) && fallbackRules.length > 0) {
+      normalized = normalizeExcludeRules_ACU(fallbackRules, '');
+    }
+    $container.empty();
+
+    const rows = normalized.length > 0 ? normalized : [{ start: '', end: '' }];
+    rows.forEach(rule => {
+      const rowHtml = `
+        <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+          <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU(startPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU(rule.start || '')}">
+          <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU(endPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU(rule.end || '')}">
+          <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
+        </div>
+      `;
+      $container.append(rowHtml);
+    });
+  }
+
+  function readExcludeRulesFromRows_ACU(containerSelector) {
+    if (!$popupInstance_ACU) return [];
+    const $container = $popupInstance_ACU.find(containerSelector);
+    if (!$container.length) return [];
+    const collected = [];
+    $container.find('.acu-exclude-rule-row').each(function() {
+      const start = String($(this).find('.acu-exclude-rule-start').val() || '').trim();
+      const end = String($(this).find('.acu-exclude-rule-end').val() || '').trim();
+      if (start && end) collected.push({ start, end });
+    });
+    return normalizeExcludeRules_ACU(collected, '');
   }
 
   // --- [剧情推进] Prompt 辅助：兼容 prompts(数组/旧对象) 并以 id 读写 ---
@@ -2824,8 +2920,10 @@
       plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
       // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
       tableContextExtractTags: '',
+      tableContextExtractRules: [],
       // [填表功能] 正文标签排除：将指定标签内容从上下文中移除
       tableContextExcludeTags: '',
+      tableContextExcludeRules: [],
       // [填表功能] 仅识别最后一对 <tableEdit> 标签
       tableEditLastPairOnly: true,
       importSplitSize: 10000,
@@ -3825,7 +3923,7 @@
         try {
             const presets = settings_ACU.plotSettings?.promptPresets || [];
             // 返回预设列表的深拷贝，防止外部直接修改内部数据
-            return JSON.parse(JSON.stringify(presets));
+            return presets.map(p => normalizePlotPresetExcludeRules_ACU(p));
         } catch (e) {
             logError_ACU('getPlotPresets failed:', e);
             return [];
@@ -3858,7 +3956,8 @@
             }
 
             const presets = settings_ACU.plotSettings?.promptPresets || [];
-            const targetPreset = presets.find(p => p.name === presetName);
+            const targetPresetRaw = presets.find(p => p.name === presetName);
+            const targetPreset = normalizePlotPresetExcludeRules_ACU(targetPresetRaw);
 
             if (!targetPreset) {
                 logError_ACU(`switchPlotPreset: Preset "${presetName}" not found.`);
@@ -3908,6 +4007,8 @@
             settings_ACU.plotSettings.rateCuckold = targetPreset.rateCuckold ?? 1.0;
             settings_ACU.plotSettings.recallCount = targetPreset.recallCount ?? 20;
             settings_ACU.plotSettings.extractTags = targetPreset.extractTags || '';
+            settings_ACU.plotSettings.contextExtractRules = normalizeExtractRules_ACU(targetPreset.contextExtractRules, targetPreset.contextExtractTags || '');
+            settings_ACU.plotSettings.contextExcludeRules = normalizeExcludeRules_ACU(targetPreset.contextExcludeRules, targetPreset.contextExcludeTags || '');
             settings_ACU.plotSettings.minLength = targetPreset.minLength ?? 0;
             settings_ACU.plotSettings.contextTurnCount = targetPreset.contextTurnCount ?? 3;
             if (targetPreset.loopSettings) {
@@ -3927,6 +4028,24 @@
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(targetPreset.rateCuckold ?? 1.0);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(targetPreset.recallCount ?? 20);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(targetPreset.extractTags || '');
+                renderExcludeRuleRows_ACU(
+                    `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
+                    normalizeExtractRules_ACU(targetPreset.contextExtractRules, targetPreset.contextExtractTags || ''),
+                    {
+                        startPlaceholder: '开始词（例如：<think）',
+                        endPlaceholder: '结束词（例如：</think>）',
+                        fallbackRules: getDefaultPlotContextExtractRules_ACU(),
+                    },
+                );
+                renderExcludeRuleRows_ACU(
+                    `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`,
+                    normalizeExcludeRules_ACU(targetPreset.contextExcludeRules, targetPreset.contextExcludeTags || ''),
+                    {
+                        startPlaceholder: '开始词（例如：<thinking）',
+                        endPlaceholder: '结束词（例如：</thinking>）',
+                        fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
+                    },
+                );
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(targetPreset.minLength ?? 0);
                 $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(targetPreset.contextTurnCount ?? 3);
                 if (targetPreset.loopSettings) {
@@ -3969,7 +4088,7 @@
             }
             const presets = settings_ACU.plotSettings?.promptPresets || [];
             const preset = presets.find(p => p.name === presetName);
-            return preset ? JSON.parse(JSON.stringify(preset)) : null;
+            return preset ? normalizePlotPresetExcludeRules_ACU(preset) : null;
         } catch (e) {
             logError_ACU('getPlotPresetDetails failed:', e);
             return null;
@@ -4104,13 +4223,15 @@
             const presetName = preset.name.trim();
             const presets = settings_ACU.plotSettings?.promptPresets || [];
             const existingIndex = presets.findIndex(p => p.name === presetName);
+            const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
+            normalizedPreset.name = presetName;
 
             let finalName = presetName;
 
             if (existingIndex !== -1) {
                 if (overwrite) {
                     // 覆盖现有预设
-                    presets[existingIndex] = preset;
+                    presets[existingIndex] = normalizedPreset;
                     logDebug_ACU(`[API] importPlotPresetFromData: 覆盖已存在的预设 "${presetName}"`);
                 } else {
                     // 自动重命名
@@ -4119,13 +4240,13 @@
                         finalName = `${presetName} (${counter})`;
                         counter++;
                     }
-                    preset.name = finalName;
-                    presets.push(preset);
+                    normalizedPreset.name = finalName;
+                    presets.push(normalizedPreset);
                     logDebug_ACU(`[API] importPlotPresetFromData: 预设已存在，重命名为 "${finalName}"`);
                 }
             } else {
                 // 新增预设
-                presets.push(preset);
+                presets.push(normalizedPreset);
                 logDebug_ACU(`[API] importPlotPresetFromData: 新增预设 "${presetName}"`);
             }
 
@@ -4214,7 +4335,7 @@
     exportAllPlotPresets: function() {
         try {
             const presets = settings_ACU.plotSettings?.promptPresets || [];
-            return JSON.parse(JSON.stringify(presets));
+            return presets.map(p => normalizePlotPresetExcludeRules_ACU(p));
         } catch (e) {
             logError_ACU('exportAllPlotPresets failed:', e);
             return [];
@@ -5232,32 +5353,149 @@
           .map(t => t.replace(/[<>]/g, '')); // 防止用户输入 <tag>
   }
 
-  // [新增] 从文本中移除指定标签块：<tag>...</tag>（大小写不敏感，支持属性）
-  function removeTaggedBlocks_ACU(text, tagNames) {
-      if (!text || !Array.isArray(tagNames) || tagNames.length === 0) return text;
-      let result = String(text);
-      tagNames.forEach(tag => {
-          if (!tag) return;
-          const safe = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const re = new RegExp(`<\\s*${safe}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${safe}\\s*>`, 'gi');
-          result = result.replace(re, '');
+  // [新增] 兼容旧“标签提取/排除”字符串：tagA,tagB -> [{start:"<tagA", end:"</tagA>"}, ...]
+  function buildBoundaryRulesFromLegacyTags_ACU(tagsText = '') {
+      const tags = parseTagList_ACU(tagsText);
+      return tags.map(tag => ({ start: `<${tag}`, end: `</${tag}>` }));
+  }
+
+  // [新增] 标准化标签排除规则：支持数组对象/字符串行/旧标签字符串兜底
+  function normalizeExcludeRules_ACU(excludeRulesInput, legacyExcludeTags = '') {
+      const normalized = [];
+      const dedup = new Set();
+
+      const pushRule = (startRaw, endRaw) => {
+          const start = String(startRaw || '').trim();
+          const end = String(endRaw || '').trim();
+          if (!start || !end) return;
+          const key = `${start}\u0000${end}`;
+          if (dedup.has(key)) return;
+          dedup.add(key);
+          normalized.push({ start, end });
+      };
+
+      if (Array.isArray(excludeRulesInput)) {
+          excludeRulesInput.forEach(rule => {
+              if (!rule) return;
+              if (typeof rule === 'string') {
+                  const parts = rule.split('|');
+                  if (parts.length >= 2) {
+                      const start = parts.shift();
+                      const end = parts.join('|');
+                      pushRule(start, end);
+                  }
+                  return;
+              }
+              if (typeof rule === 'object') {
+                  pushRule(rule.start ?? rule.begin ?? rule.open, rule.end ?? rule.close ?? rule.finish);
+              }
+          });
+      }
+
+      // 兼容旧配置：若未提供新规则，则回退旧标签字符串
+      if (normalized.length === 0) {
+          buildBoundaryRulesFromLegacyTags_ACU(legacyExcludeTags).forEach(rule => pushRule(rule.start, rule.end));
+      }
+
+      return normalized;
+  }
+
+  // [新增] 标准化正文标签提取规则，结构与排除规则一致
+  function normalizeExtractRules_ACU(extractRulesInput, legacyExtractTags = '') {
+      return normalizeExcludeRules_ACU(extractRulesInput, legacyExtractTags);
+  }
+
+  function getDefaultPlotContextExtractRules_ACU() {
+      return normalizeExtractRules_ACU(
+          DEFAULT_PLOT_SETTINGS_ACU.contextExtractRules,
+          DEFAULT_PLOT_SETTINGS_ACU.contextExtractTags || '',
+      );
+  }
+
+  function getDefaultPlotContextExcludeRules_ACU() {
+      return normalizeExcludeRules_ACU(
+          DEFAULT_PLOT_SETTINGS_ACU.contextExcludeRules,
+          DEFAULT_PLOT_SETTINGS_ACU.contextExcludeTags || '',
+      );
+  }
+
+  // [新增] 按“开始词 + 结束词”删除最后一个命中区间
+  function removeLastMatchedBoundary_ACU(text, startBoundary, endBoundary) {
+      const source = String(text ?? '');
+      const start = String(startBoundary || '');
+      const end = String(endBoundary || '');
+      if (!source || !start || !end) return source;
+
+      const lowerSource = source.toLowerCase();
+      const lowerStart = start.toLowerCase();
+      const lowerEnd = end.toLowerCase();
+
+      const endIdx = lowerSource.lastIndexOf(lowerEnd);
+      if (endIdx === -1) return source;
+
+      const startIdx = lowerSource.lastIndexOf(lowerStart, Math.max(0, endIdx - 1));
+      if (startIdx === -1) return source;
+
+      const removeTo = endIdx + end.length;
+      if (removeTo <= startIdx) return source;
+
+      return source.slice(0, startIdx) + source.slice(removeTo);
+  }
+
+  // [新增] 对文本应用排除规则：每组规则仅移除“最后一个”命中区间
+  function applyExcludeRulesToText_ACU(text, { excludeRules = [], excludeTags = '' } = {}) {
+      let result = String(text ?? '');
+      const rules = normalizeExcludeRules_ACU(excludeRules, excludeTags);
+      if (!result || rules.length === 0) return result;
+
+      rules.forEach(rule => {
+          result = removeLastMatchedBoundary_ACU(result, rule.start, rule.end);
       });
-      // 清理多余空行
-      result = result.replace(/\n{3,}/g, '\n\n').trim();
-      return result;
+
+      return result.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // [新增] 提取“开始词 + 结束词”最后一组命中区间（保留区间文本）
+  function extractLastMatchedBoundary_ACU(text, startBoundary, endBoundary) {
+      const source = String(text ?? '');
+      const start = String(startBoundary || '');
+      const end = String(endBoundary || '');
+      if (!source || !start || !end) return null;
+
+      const lowerSource = source.toLowerCase();
+      const lowerStart = start.toLowerCase();
+      const lowerEnd = end.toLowerCase();
+
+      const endIdx = lowerSource.lastIndexOf(lowerEnd);
+      if (endIdx === -1) return null;
+      const startIdx = lowerSource.lastIndexOf(lowerStart, Math.max(0, endIdx - 1));
+      if (startIdx === -1) return null;
+
+      const rangeEnd = endIdx + end.length;
+      if (rangeEnd <= startIdx) return null;
+      return source.slice(startIdx, rangeEnd);
+  }
+
+  // [新增] 对文本应用提取规则：每组规则提取最后一组命中并拼接返回；若无命中则保留原文本
+  function applyExtractRulesToText_ACU(text, { extractRules = [], extractTags = '' } = {}) {
+      const source = String(text ?? '');
+      const rules = normalizeExtractRules_ACU(extractRules, extractTags);
+      if (!source || rules.length === 0) return source;
+
+      const parts = [];
+      rules.forEach(rule => {
+          const matched = extractLastMatchedBoundary_ACU(source, rule.start, rule.end);
+          if (matched !== null) parts.push(matched);
+      });
+      if (parts.length === 0) return source;
+      return parts.join('\n\n');
   }
 
   // [新增] 上下文筛选：标签提取 + 标签排除（可单独生效，也可叠加）
-  function applyContextTagFilters_ACU(text, { extractTags = '', excludeTags = '' } = {}) {
+  function applyContextTagFilters_ACU(text, { extractTags = '', extractRules = [], excludeTags = '', excludeRules = [] } = {}) {
       let result = String(text ?? '');
-      const includeList = parseTagList_ACU(extractTags);
-      const excludeList = parseTagList_ACU(excludeTags);
-      if (includeList.length > 0) {
-          result = extractContextTags_ACU(result, includeList, false);
-      }
-      if (excludeList.length > 0) {
-          result = removeTaggedBlocks_ACU(result, excludeList);
-      }
+      result = applyExtractRulesToText_ACU(result, { extractRules, extractTags });
+      result = applyExcludeRulesToText_ACU(result, { excludeRules, excludeTags });
       return result;
   }
 
@@ -7011,9 +7249,11 @@
           let content = msg.mes;
           // 上下文筛选：正文标签提取 + 标签排除（可单独或叠加）
           const extractTags = (plotSettings.contextExtractTags || '').trim();
+          const extractRules = normalizeExtractRules_ACU(plotSettings.contextExtractRules, extractTags);
           const excludeTags = (plotSettings.contextExcludeTags || '').trim();
-          if (extractTags || excludeTags) {
-            content = applyContextTagFilters_ACU(content, { extractTags, excludeTags });
+          const excludeRules = normalizeExcludeRules_ACU(plotSettings.contextExcludeRules, excludeTags);
+          if (extractTags || extractRules.length > 0 || excludeTags || excludeRules.length > 0) {
+            content = applyContextTagFilters_ACU(content, { extractTags, extractRules, excludeTags, excludeRules });
           }
 
           extracted.unshift({ role: 'assistant', content });
@@ -7055,6 +7295,9 @@
         outlineTableContent = '{"error": "加载表格数据时发生错误"}';
       }
 
+      const plotExcludeTags = (plotSettings.contextExcludeTags || '').trim();
+      const plotExcludeRules = normalizeExcludeRules_ACU(plotSettings.contextExcludeRules, plotExcludeTags);
+
       // 辅助函数：替换文本中的占位符
       const performReplacements = text => {
         if (!text) return '';
@@ -7072,6 +7315,8 @@
           const regex = new RegExp(escapeRegExp_ACU(key), 'g');
           processed = processed.replace(regex, () => (value !== undefined && value !== null ? String(value) : ''));
         }
+        // 占位符注入完成后，统一执行标签排除规则
+        processed = applyExcludeRulesToText_ACU(processed, { excludeRules: plotExcludeRules, excludeTags: plotExcludeTags });
         return processed;
       };
 
@@ -7749,8 +7994,10 @@
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
           // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
           tableContextExtractTags: '',
+          tableContextExtractRules: [],
           // [填表功能] 正文标签排除：将指定标签内容从上下文中移除
           tableContextExcludeTags: '',
+          tableContextExcludeRules: [],
           // [填表功能] 仅识别最后一对 <tableEdit> 标签
           tableEditLastPairOnly: true,
           removeTags: '',
@@ -7940,6 +8187,9 @@
           settings_ACU.dataIsolationEnabled = (activeCode !== '');
       }
 
+      // [兼容] 旧标签排除字段自动迁移为新规则组结构
+      ensureTagRulesCompat_ACU(settings_ACU);
+
       if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
           settings_ACU.maxConcurrentGroups = 1;
       }
@@ -7975,10 +8225,16 @@
           if ($maxConcurrentGroupsInput_ACU) $maxConcurrentGroupsInput_ACU.val(settings_ACU.maxConcurrentGroups || 1);
           if ($skipUpdateFloorsInput_ACU) $skipUpdateFloorsInput_ACU.val(settings_ACU.skipUpdateFloors || 0);
           if ($retainRecentLayersInput_ACU) $retainRecentLayersInput_ACU.val(settings_ACU.retainRecentLayers || '');
-          const $tableContextExtractTagsInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-tags`);
-          if ($tableContextExtractTagsInput.length) $tableContextExtractTagsInput.val(settings_ACU.tableContextExtractTags || '');
-          const $tableContextExcludeTagsInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-tags`);
-          if ($tableContextExcludeTagsInput.length) $tableContextExcludeTagsInput.val(settings_ACU.tableContextExcludeTags || '');
+          renderExcludeRuleRows_ACU(
+            `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`,
+            normalizeExtractRules_ACU(settings_ACU.tableContextExtractRules, settings_ACU.tableContextExtractTags || ''),
+            { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' },
+          );
+          renderExcludeRuleRows_ACU(
+            `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`,
+            normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, settings_ACU.tableContextExcludeTags || ''),
+            { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' },
+          );
           const $importSplitSizeInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-split-size`);
           if ($importSplitSizeInput.length) $importSplitSizeInput.val(settings_ACU.importSplitSize);
           if ($autoUpdateEnabledCheckbox_ACU) $autoUpdateEnabledCheckbox_ACU.prop('checked', settings_ACU.autoUpdateEnabled);
@@ -12453,7 +12709,7 @@
     $menuItemContainer = jQuery_API_ACU(
       `<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`,
     );
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>魔·数据库III</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>魔·数据库IV</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
       e.stopPropagation();
@@ -14386,13 +14642,17 @@
                                         <option value="">使用当前API配置</option>
                                     </select>
                                 </div>
-                                <div style="width: 100%; display: flex; gap: 10px; align-items: center;">
-                                    <label style="white-space: nowrap; font-size: 0.9em;">正文标签提取:</label>
-                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-tags" placeholder="例如: think,reason" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                                <div style="width: 100%; display: flex; flex-direction: column; gap: 6px;">
+                                    <label style="white-space: nowrap; font-size: 0.9em;">正文标签提取规则:</label>
+                                    <div id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules"></div>
+                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-add-rule" class="button" style="align-self: flex-start;">添加规则</button>
+                                    <small class="notes">每条规则填写开始词和结束词，仅提取最后一组匹配内容（不影响注入词规则）。</small>
                                 </div>
-                                <div style="width: 100%; display: flex; gap: 10px; align-items: center;">
-                                    <label style="white-space: nowrap; font-size: 0.9em;">标签排除:</label>
-                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-tags" placeholder="例如: thinking,reason" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                                <div style="width: 100%; display: flex; flex-direction: column; gap: 6px;">
+                                    <label style="white-space: nowrap; font-size: 0.9em;">标签排除规则:</label>
+                                    <div id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules"></div>
+                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-add-rule" class="button" style="align-self: flex-start;">添加规则</button>
+                                    <small class="notes">每条规则填写开始词与结束词，仅移除最后一组匹配内容。</small>
                                 </div>
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">
@@ -15046,14 +15306,16 @@
                                     <small class="notes">从AI回复中提取并注入酒馆的标签</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-tags" style="font-weight: 500;">正文标签提取</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-tags" type="text" class="text_pole" placeholder="例如: think,reason" style="width: 100%;">
-                                    <small class="notes">从上下文中提取标签内容发送给AI，User回复不受影响</small>
+                                    <label style="font-weight: 500;">正文标签提取规则</label>
+                                    <div id="${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules"></div>
+                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-add-rule" class="button" style="margin-top: 6px;">添加规则</button>
+                                    <small class="notes">每条规则填写开始词和结束词，仅提取最后一组匹配内容；User回复不受影响</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-tags" style="font-weight: 500;">标签排除</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-tags" type="text" class="text_pole" placeholder="例如: thinking,reason" style="width: 100%;">
-                                    <small class="notes">将指定标签内容从上下文中移除（可与“正文标签提取”叠加）</small>
+                                    <label style="font-weight: 500;">标签排除规则</label>
+                                    <div id="${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules"></div>
+                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-add-rule" class="button" style="margin-top: 6px;">添加规则</button>
+                                    <small class="notes">每条规则填写开始词和结束词，仅移除最后一组匹配内容（可与“正文标签提取”叠加）</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-min-length" style="font-weight: 500;">跳过更新最小回复长度</label>
@@ -15135,7 +15397,7 @@
     
     createACUWindow({
       id: windowId,
-      title: '魔·数据库 III',
+      title: '魔·数据库 IV',
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度
@@ -15774,18 +16036,46 @@
         logDebug_ACU(`填表API预设已切换为: ${settings_ACU.tableApiPreset || '当前配置'}`);
       });
 
-      // 填表正文标签提取输入框
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-tags`).on('input', function() {
-        settings_ACU.tableContextExtractTags = $(this).val().trim();
+      // 填表正文标签提取规则编辑器
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-add-rule`).on('click', function() {
+        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
+        currentRules.push({ start: '', end: '' });
+        renderExcludeRuleRows_ACU(
+          `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`,
+          currentRules,
+          { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' },
+        );
+      });
+      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules .acu-exclude-rule-end`, function() {
+        settings_ACU.tableContextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
         saveSettings_ACU();
-        logDebug_ACU(`填表正文标签提取已更新为: ${settings_ACU.tableContextExtractTags || '(空)'}`);
+      });
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules .acu-exclude-rule-delete`, function() {
+        const $row = $(this).closest('.acu-exclude-rule-row');
+        if ($row.length) $row.remove();
+        settings_ACU.tableContextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
+        saveSettings_ACU();
       });
 
-      // 填表正文标签排除输入框
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-tags`).on('input', function() {
-        settings_ACU.tableContextExcludeTags = $(this).val().trim();
+      // 填表正文标签排除规则编辑器
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-add-rule`).on('click', function() {
+        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
+        currentRules.push({ start: '', end: '' });
+        renderExcludeRuleRows_ACU(
+          `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`,
+          currentRules,
+          { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' },
+        );
+      });
+      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules .acu-exclude-rule-end`, function() {
+        settings_ACU.tableContextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
         saveSettings_ACU();
-        logDebug_ACU(`填表正文标签排除已更新为: ${settings_ACU.tableContextExcludeTags || '(空)'}`);
+      });
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules .acu-exclude-rule-delete`, function() {
+        const $row = $(this).closest('.acu-exclude-rule-row');
+        if ($row.length) $row.remove();
+        settings_ACU.tableContextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
+        saveSettings_ACU();
       });
 
       // 剧情推进API预设选择器
@@ -16281,8 +16571,6 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       const plotPersistentInputs = [
         { id: 'plot-context-turn-count', key: 'contextTurnCount', type: 'number' },
         { id: 'plot-extract-tags', key: 'extractTags', type: 'string' },
-        { id: 'plot-context-extract-tags', key: 'contextExtractTags', type: 'string' },
-        { id: 'plot-context-exclude-tags', key: 'contextExcludeTags', type: 'string' },
         { id: 'plot-min-length', key: 'minLength', type: 'number' },
         // 注意：plot-quick-reply-content 已改为数组，不再使用单个输入框，改用循环提示词列表管理
         { id: 'plot-loop-tags', key: 'loopSettings.loopTags', type: 'string' },
@@ -16314,6 +16602,48 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
             saveSettings_ACU();
           });
         }
+      });
+
+      // 剧情推进正文标签提取规则编辑器
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-add-rule`).on('click', function() {
+        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
+        currentRules.push({ start: '', end: '' });
+        renderExcludeRuleRows_ACU(
+          `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
+          currentRules,
+          { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' },
+        );
+      });
+      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-end`, function() {
+        settings_ACU.plotSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
+        saveSettings_ACU();
+      });
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-delete`, function() {
+        const $row = $(this).closest('.acu-exclude-rule-row');
+        if ($row.length) $row.remove();
+        settings_ACU.plotSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
+        saveSettings_ACU();
+      });
+
+      // 剧情推进标签排除规则编辑器
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-add-rule`).on('click', function() {
+        const currentRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
+        currentRules.push({ start: '', end: '' });
+        renderExcludeRuleRows_ACU(
+          `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`,
+          currentRules,
+          { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' },
+        );
+      });
+      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-end`, function() {
+        settings_ACU.plotSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
+        saveSettings_ACU();
+      });
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-delete`, function() {
+        const $row = $(this).closest('.acu-exclude-rule-row');
+        if ($row.length) $row.remove();
+        settings_ACU.plotSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
+        saveSettings_ACU();
       });
 
       // 循环提示词列表管理
@@ -16427,7 +16757,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
             return;
           }
 
-          const dataStr = JSON.stringify([selectedPreset], null, 2);
+          const dataStr = JSON.stringify([normalizePlotPresetExcludeRules_ACU(selectedPreset)], null, 2);
           const blob = new Blob([dataStr], { type: 'application/json' });
           const url = URL.createObjectURL(blob);
 
@@ -16466,7 +16796,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
           }
 
           const currentSettings = getCurrentPlotSettingsFromUI_ACU();
-          presets[existingIndex] = { name: selectedName, ...currentSettings };
+          presets[existingIndex] = normalizePlotPresetExcludeRules_ACU({ name: selectedName, ...currentSettings });
           settings_ACU.plotSettings.promptPresets = presets;
           saveSettings_ACU();
           showToastr_ACU('success', `预设 "${selectedName}" 已被成功覆盖。`);
@@ -16527,6 +16857,8 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
           // 同步重置"标签摘取"(extractTags)到默认值
           // 说明：此前只恢复 prompts，导致"标签摘取"仍保留旧值；用户期望恢复默认提示词时一并恢复默认标签。
           settings_ACU.plotSettings.extractTags = DEFAULT_PLOT_SETTINGS_ACU.extractTags;
+          settings_ACU.plotSettings.contextExtractRules = getDefaultPlotContextExtractRules_ACU();
+          settings_ACU.plotSettings.contextExcludeRules = getDefaultPlotContextExcludeRules_ACU();
 
           // 更新UI
           try { renderPlotPromptSegments_ACU(settings_ACU.plotSettings.promptGroup); } catch (e) {}
@@ -16602,10 +16934,10 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
                     rateErotic: preset.rateErotic ?? 0,
                     rateCuckold: preset.rateCuckold ?? 1.0,
                     recallCount: preset.recallCount ?? 20,
-                  extractTags: preset.extractTags || '',
-                  contextExtractTags: preset.contextExtractTags || '',
-                  contextExcludeTags: preset.contextExcludeTags || '',
-                  minLength: preset.minLength ?? 0,
+                    extractTags: preset.extractTags || '',
+                    contextExtractRules: normalizeExtractRules_ACU(preset.contextExtractRules, preset.contextExtractTags || ''),
+                    contextExcludeRules: normalizeExcludeRules_ACU(preset.contextExcludeRules, preset.contextExcludeTags || ''),
+                    minLength: preset.minLength ?? 0,
                     contextTurnCount: preset.contextTurnCount ?? 3,
                     loopSettings: preset.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings
                   };
@@ -16876,8 +17208,24 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(loopSettings.maxRetries);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(plotSettings.contextTurnCount);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(plotSettings.extractTags || '');
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-tags`).val(plotSettings.contextExtractTags || '');
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-tags`).val(plotSettings.contextExcludeTags || '');
+      renderExcludeRuleRows_ACU(
+        `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
+        normalizeExtractRules_ACU(plotSettings.contextExtractRules, plotSettings.contextExtractTags || ''),
+        {
+          startPlaceholder: '开始词（例如：<think）',
+          endPlaceholder: '结束词（例如：</think>）',
+          fallbackRules: getDefaultPlotContextExtractRules_ACU(),
+        },
+      );
+      renderExcludeRuleRows_ACU(
+        `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`,
+        normalizeExcludeRules_ACU(plotSettings.contextExcludeRules, plotSettings.contextExcludeTags || ''),
+        {
+          startPlaceholder: '开始词（例如：<thinking）',
+          endPlaceholder: '结束词（例如：</thinking>）',
+          fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
+        },
+      );
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(plotSettings.minLength);
 
       // 循环状态
@@ -16988,6 +17336,24 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
 
       // 加载其他设置
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(preset.extractTags || '');
+      renderExcludeRuleRows_ACU(
+        `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
+        normalizeExtractRules_ACU(preset.contextExtractRules, preset.contextExtractTags || ''),
+        {
+          startPlaceholder: '开始词（例如：<think）',
+          endPlaceholder: '结束词（例如：</think>）',
+          fallbackRules: getDefaultPlotContextExtractRules_ACU(),
+        },
+      );
+      renderExcludeRuleRows_ACU(
+        `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`,
+        normalizeExcludeRules_ACU(preset.contextExcludeRules, preset.contextExcludeTags || ''),
+        {
+          startPlaceholder: '开始词（例如：<thinking）',
+          endPlaceholder: '结束词（例如：</thinking>）',
+          fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
+        },
+      );
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(preset.minLength ?? 0);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(preset.contextTurnCount ?? 3);
 
@@ -17019,6 +17385,8 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
       settings_ACU.plotSettings.rateCuckold = preset.rateCuckold ?? 1.0;
       settings_ACU.plotSettings.recallCount = preset.recallCount ?? 20;
       settings_ACU.plotSettings.extractTags = preset.extractTags || '';
+      settings_ACU.plotSettings.contextExtractRules = normalizeExtractRules_ACU(preset.contextExtractRules, preset.contextExtractTags || '');
+      settings_ACU.plotSettings.contextExcludeRules = normalizeExcludeRules_ACU(preset.contextExcludeRules, preset.contextExcludeTags || '');
       settings_ACU.plotSettings.minLength = preset.minLength ?? 0;
       settings_ACU.plotSettings.contextTurnCount = preset.contextTurnCount ?? 3;
       if (preset.loopSettings) settings_ACU.plotSettings.loopSettings = { ...settings_ACU.plotSettings.loopSettings, ...preset.loopSettings };
@@ -17059,8 +17427,8 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         rateCuckold: parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val()) || 1.0,
         recallCount: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(), 10) || 20,
         extractTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val() || '',
-        contextExtractTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-tags`).val() || '',
-        contextExcludeTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-tags`).val() || '',
+        contextExtractRules: readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`),
+        contextExcludeRules: readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`),
         minLength: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(), 10) || 0,
         contextTurnCount: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(), 10) || 3,
         loopSettings: {
@@ -17098,9 +17466,9 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         if (!confirm(`名为 "${presetName}" 的预设已存在。是否要覆盖它？`)) {
           return;
         }
-        presets[existingIndex] = { name: presetName, ...currentSettings };
+        presets[existingIndex] = normalizePlotPresetExcludeRules_ACU({ name: presetName, ...currentSettings });
       } else {
-        presets.push({ name: presetName, ...currentSettings });
+        presets.push(normalizePlotPresetExcludeRules_ACU({ name: presetName, ...currentSettings }));
       }
 
       settings_ACU.plotSettings.promptPresets = presets;
@@ -17741,15 +18109,17 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
     if (messages && messages.length > 0) {
         // [上下文筛选] 正文标签提取 + 标签排除（可单独或叠加）
         const extractTags = (settings_ACU.tableContextExtractTags || '').trim();
+        const extractRules = normalizeExtractRules_ACU(settings_ACU.tableContextExtractRules, extractTags);
         const excludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
+        const excludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, excludeTags);
 
         messagesText += messages.map(msg => {
             const prefix = msg.is_user ? SillyTavern_API_ACU?.name1 || '用户' : msg.name || '角色';
             let content = msg.mes || msg.message || '';
 
             // 对非用户消息应用上下文筛选（User回复不受影响）
-            if (!msg.is_user && (extractTags || excludeTags)) {
-                content = applyContextTagFilters_ACU(content, { extractTags, excludeTags });
+            if (!msg.is_user && (extractTags || extractRules.length > 0 || excludeTags || excludeRules.length > 0)) {
+                content = applyContextTagFilters_ACU(content, { extractTags, extractRules, excludeTags, excludeRules });
             }
 
             return `${prefix}: ${content}`;
@@ -17859,6 +18229,9 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
     const lastPlotContent = getPlotFromHistory_ACU();
     logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
 
+    const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
+    const tableExcludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, tableExcludeTags);
+
     // Interpolate placeholders in each segment
     promptSegments.forEach(segment => {
         let finalContent = segment.content;
@@ -17870,6 +18243,8 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
         // [新增] $U 和 $C 占位符替换
         finalContent = finalContent.replace(/\$U/g, userInfoContent_Table);
         finalContent = finalContent.replace(/\$C/g, charInfoContent_Table);
+        // 占位符注入完成后，统一执行标签排除规则
+        finalContent = applyExcludeRulesToText_ACU(finalContent, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
         
         // Convert role to API-safe role
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
