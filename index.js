@@ -11292,7 +11292,8 @@
               const entries = [];
               const fullTable = buildMarkdownTableFromRows_ACU(extraIndexSpec.indexCols, extraIndexSpec.indexRows);
               const fallbackTemplate = `# ${extraIndexSpec.entryName}\n\n$1`;
-              const mainComment = `${exportPrefix}${extraIndexSpec.entryName}`;
+              // 自定义表格导出的附加索引条目：在注释名中加入统一标记，便于在世界书 UI 中识别为“数据库生成条目”并默认隐藏
+              const mainComment = `${exportPrefix}TavernDB-ACU-CustomExport-${extraIndexSpec.entryName}`;
               const mainContent = buildEntryContent(
                   extraIndexSpec.entryName,
                   fullTable,
@@ -11380,7 +11381,7 @@
 
                   // 在拆分模式下，如果存在包裹模板，先追加前置常量条目（包含表头）
                   if (use3DepthWrapperGroup && hasWrapperBefore) {
-                      const wrapperName = `${exportPrefix}${(config.entryName || tableName)}-包裹-上`;
+                      const wrapperName = `${exportPrefix}TavernDB-ACU-CustomExport-${(config.entryName || tableName)}-包裹-上`;
                       newGeneratedNames.push(wrapperName);
                       postCreateOrderFixPlan.push({ comment: wrapperName, order: orderCursor, placement: entryPlacement });
                       // 将表头添加到上包裹条目的内容中
@@ -11396,7 +11397,7 @@
                       }, entryPlacement));
                   } else if (!useWrapperEntries && mainHeaders.length > 0) {
                       // 如果没有包裹模板，但需要表头，单独创建一个表头条目
-                      const headerName = `${exportPrefix}${(config.entryName || tableName)}-表头`;
+                      const headerName = `${exportPrefix}TavernDB-ACU-CustomExport-${(config.entryName || tableName)}-表头`;
                       newGeneratedNames.push(headerName);
                       postCreateOrderFixPlan.push({ comment: headerName, order: orderCursor, placement: entryPlacement });
                       rowEntries.push(applyPlacementToEntry_ACU({
@@ -11454,7 +11455,7 @@
                           true // 拆分模式，不添加条目名称
                       );
 
-                      const fullComment = `${exportPrefix}${entryName}`;
+                      const fullComment = `${exportPrefix}TavernDB-ACU-CustomExport-${entryName}`;
                       newGeneratedNames.push(fullComment); // 记录名称
                       postCreateOrderFixPlan.push({ comment: fullComment, order: dataOrder, placement: entryPlacement });
 
@@ -11472,7 +11473,7 @@
 
                   // 添加后置包裹常量条目
                   if (use3DepthWrapperGroup && hasWrapperAfter) {
-                      const wrapperName = `${exportPrefix}${(config.entryName || tableName)}-包裹-下`;
+                      const wrapperName = `${exportPrefix}TavernDB-ACU-CustomExport-${(config.entryName || tableName)}-包裹-下`;
                       newGeneratedNames.push(wrapperName);
                       postCreateOrderFixPlan.push({ comment: wrapperName, order: orderCursor, placement: entryPlacement });
                       rowEntries.push(applyPlacementToEntry_ACU({
@@ -11526,7 +11527,7 @@
                           : `# ${tableName}`;
 
                       if (useWrapperBlock && hasWrapperBefore) {
-                          const wrapperName = `${exportPrefix}${entryName}-包裹-上`;
+                          const wrapperName = `${exportPrefix}TavernDB-ACU-CustomExport-${entryName}-包裹-上`;
                           const wrapperContent = [wrapperParts.before, tableHeader].filter(Boolean).join('\n\n').trim();
                           newGeneratedNames.push(wrapperName);
                           postCreateOrderFixPlan.push({ comment: wrapperName, order: cursor, placement: entryPlacement });
@@ -11540,7 +11541,7 @@
                               order: cursor++
                           }, entryPlacement));
                       } else if (!useWrapperEntries && mainHeaders.length > 0) {
-                          const headerName = `${exportPrefix}${entryName}-表头`;
+                          const headerName = `${exportPrefix}TavernDB-ACU-CustomExport-${entryName}-表头`;
                           newGeneratedNames.push(headerName);
                           postCreateOrderFixPlan.push({ comment: headerName, order: cursor, placement: entryPlacement });
                           blockEntries.push(applyPlacementToEntry_ACU({
@@ -11562,7 +11563,7 @@
                           useWrapperBlock,
                           '$1'
                       );
-                      const fullComment = `${exportPrefix}${entryName}`;
+                      const fullComment = `${exportPrefix}TavernDB-ACU-CustomExport-${entryName}`;
                       newGeneratedNames.push(fullComment);
                       postCreateOrderFixPlan.push({ comment: fullComment, order: cursor, placement: entryPlacement });
                       blockEntries.push(applyPlacementToEntry_ACU({
@@ -11576,7 +11577,7 @@
                       }, entryPlacement));
 
                       if (useWrapperBlock && hasWrapperAfter) {
-                          const wrapperName = `${exportPrefix}${entryName}-包裹-下`;
+                          const wrapperName = `${exportPrefix}TavernDB-ACU-CustomExport-${entryName}-包裹-下`;
                           newGeneratedNames.push(wrapperName);
                           postCreateOrderFixPlan.push({ comment: wrapperName, order: cursor, placement: entryPlacement });
                           blockEntries.push(applyPlacementToEntry_ACU({
