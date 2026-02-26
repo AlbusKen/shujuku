@@ -2881,6 +2881,7 @@
     $standardizedTableFillEnabledCheckbox_ACU, // [新增] 规范填表功能
     $toastMuteEnabledCheckbox_ACU, // [新增] 静默提示框
     $tableEditLastPairOnlyCheckbox_ACU, // [新增] 仅识别最后一对 tableEdit
+    $tableMaxRetriesInput_ACU, // [新增] 填表自动重试次数
     $manualUpdateCardButton_ACU, // New manual update button
     $statusMessageSpan_ACU,
     $cardUpdateStatusDisplay_ACU,
@@ -2942,6 +2943,8 @@
       tableContextExcludeRules: [],
       // [填表功能] 仅识别最后一对 <tableEdit> 标签
       tableEditLastPairOnly: true,
+      // [新增] 填表自动重试次数（错误或空回时重试，默认3次）
+      tableMaxRetries: 3,
       importSplitSize: 10000,
       skipUpdateFloors: 0, // 全局有效楼层 (UI参数) - 影响所有表
       retainRecentLayers: 100, // [新增] 保留最近N层本地数据 (0或空=全部保留，按AI楼层计数)
@@ -7513,7 +7516,8 @@
 
       const minLength = plotSettings.minLength || 0;
       let processedMessage = null;
-      const maxRetries = 3;
+      // [修改] 使用可配置的重试次数，优先从 plotSettings.loopSettings.maxRetries 获取，默认为3
+      const maxRetries = plotSettings.loopSettings?.maxRetries ?? 3;
 
       // 检查中止信号的帮助函数
       const checkAbort = () => {
@@ -7525,38 +7529,52 @@
       // 如果规划走"酒馆主API(generateRaw)"路径，会触发一次 GENERATION_ENDED，需要精确忽略
       const willUseMainApiGenerateRaw = settings_ACU.apiMode !== 'tavern' && !!settings_ACU.useMainApi;
 
-      if (minLength > 0) {
-        for (let i = 0; i < maxRetries; i++) {
-          checkAbort();
-          $toast.find('.toastr-message').text(`正在读取过往的记忆并分析，请稍后... (尝试 ${i + 1}/${maxRetries})`);
+      // [修改] 统一重试逻辑，无论 minLength 是否大于0都支持重试
+      for (let i = 0; i < maxRetries; i++) {
+        checkAbort();
+        $toast.find('.toastr-message').text(`正在读取过往的记忆并分析，请稍后... (尝试 ${i + 1}/${maxRetries})`);
 
-          if (willUseMainApiGenerateRaw) {
-            planningGuard_ACU.ignoreNextGenerationEndedCount++;
+        if (willUseMainApiGenerateRaw) {
+          planningGuard_ACU.ignoreNextGenerationEndedCount++;
+        }
+
+        // [修改] 调用数据库的API函数，添加 try-catch 捕获API错误
+        let tempMessage = null;
+        let apiError = null;
+        try {
+          tempMessage = await callApi_ACU(messages, settings_ACU, abortController_ACU.signal);
+        } catch (apiCallError) {
+          // 检查是否是用户中止
+          if (apiCallError?.name === 'AbortError' || String(apiCallError?.message || '').toLowerCase().includes('aborted')) {
+            throw apiCallError; // 用户中止，直接抛出
           }
+          apiError = apiCallError;
+          logWarn_ACU(`[剧情推进] 第 ${i + 1} 次API调用失败:`, apiCallError.message);
+        }
 
-          // 调用数据库的API函数
-          const tempMessage = await callApi_ACU(messages, settings_ACU, abortController_ACU.signal);
+        checkAbort();
 
-          checkAbort();
-
-          if (tempMessage && tempMessage.length >= minLength) {
+        // [修改] 检查是否有API错误或回复为空/过短
+        if (!apiError && tempMessage) {
+          if (minLength <= 0 || tempMessage.length >= minLength) {
+            // 成功：没有错误且回复满足条件
             processedMessage = tempMessage;
             try { if ($toast) toastr_API_ACU.clear($toast); } catch (e) {}
             showToastr_ACU('success', `剧情规划成功 (第 ${i + 1} 次尝试)。`, '成功', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK });
             break;
           }
-          if (i < maxRetries - 1) {
+        }
+
+        // 需要重试的情况
+        if (i < maxRetries - 1) {
+          if (apiError) {
+            showToastr_ACU('warning', `API调用失败，准备重试... (${apiError.message.substring(0, 50)})`, '剧情规划大师', { timeOut: 3000 });
+          } else if (minLength > 0 && (!tempMessage || tempMessage.length < minLength)) {
             showToastr_ACU('warning', `回复过短，准备重试...`, '剧情规划大师', { timeOut: 2000 });
-            await new Promise(resolve => setTimeout(resolve, 1000));
           }
+          // 递增等待时间：1秒、2秒、3秒
+          await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
         }
-      } else {
-        checkAbort();
-        if (willUseMainApiGenerateRaw) {
-          planningGuard_ACU.ignoreNextGenerationEndedCount++;
-        }
-        processedMessage = await callApi_ACU(messages, settings_ACU, abortController_ACU.signal);
-        checkAbort();
       }
 
       if (processedMessage) {
@@ -8262,6 +8280,7 @@
           if ($standardizedTableFillEnabledCheckbox_ACU) $standardizedTableFillEnabledCheckbox_ACU.prop('checked', settings_ACU.standardizedTableFillEnabled !== false);
           if ($toastMuteEnabledCheckbox_ACU) $toastMuteEnabledCheckbox_ACU.prop('checked', !!settings_ACU.toastMuteEnabled);
           if ($tableEditLastPairOnlyCheckbox_ACU) $tableEditLastPairOnlyCheckbox_ACU.prop('checked', settings_ACU.tableEditLastPairOnly !== false);
+          if ($tableMaxRetriesInput_ACU) $tableMaxRetriesInput_ACU.val(settings_ACU.tableMaxRetries || 3); // [新增] 填表重试次数
 
           // [新增] 更新所有合并相关设置
           const $mergePromptInput = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-merge-prompt-template`);
@@ -8776,6 +8795,26 @@
     } else {
       if (!silent) showToastr_ACU('warning', `Token阈值 "${valStr}" 无效。请输入一个大于等于0的整数。恢复为: ${settings_ACU.autoUpdateTokenThreshold}`);
       $autoUpdateTokenThresholdInput_ACU.val(settings_ACU.autoUpdateTokenThreshold);
+    }
+  }
+
+  // [新增] 保存填表自动重试次数的函数
+  function saveTableMaxRetries_ACU({ silent = false, skipReload = false } = {}) {
+    if (!$popupInstance_ACU || !$tableMaxRetriesInput_ACU) {
+      logError_ACU('保存填表重试次数失败：UI元素未初始化。');
+      return;
+    }
+    const valStr = $tableMaxRetriesInput_ACU.val();
+    const newR = parseInt(valStr, 10);
+
+    if (!isNaN(newR) && newR >= 1 && newR <= 10) {
+      settings_ACU.tableMaxRetries = newR;
+      saveSettings_ACU();
+      if (!silent) showToastr_ACU('success', '填表自动重试次数已保存！');
+      if (!skipReload) loadSettings_ACU();
+    } else {
+      if (!silent) showToastr_ACU('warning', `重试次数 "${valStr}" 无效。请输入1-10之间的整数。恢复为: ${settings_ACU.tableMaxRetries || 3}`);
+      $tableMaxRetriesInput_ACU.val(settings_ACU.tableMaxRetries || 3);
     }
   }
 
@@ -14722,6 +14761,11 @@
                                     <small class="notes" style="font-size: 0.85em; color: #888;">AI回复少于此长度时跳过自动填表</small>
                                 </div>
                                 <div>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-table-max-retries">填表自动重试次数:</label>
+                                    <div class="input-group">
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-table-max-retries" min="1" max="10" step="1" value="3">
+                                    </div>
+                                    <small class="notes" style="font-size: 0.85em; color: #888;">错误或空回时自动重试的次数（默认3次）</small>
                                 </div>
                                     </div>
                         <p class="notes">当自动更新时，若上下文Token（约等于字符数）低于此值，则跳过本次更新。</p>
@@ -15483,6 +15527,7 @@
       $standardizedTableFillEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox`);
       $toastMuteEnabledCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox`);
       $tableEditLastPairOnlyCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox`);
+      $tableMaxRetriesInput_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-max-retries`); // [新增] 填表重试次数
       $manualExtraHintCheckbox_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox`);
       $manualUpdateCardButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-update-card`);
       $manualTableSelectAll_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-manual-table-select-all`);
@@ -16190,6 +16235,7 @@
       bindAutoSaveNumberInput_ACU($maxConcurrentGroupsInput_ACU, saveMaxConcurrentGroups_ACU);
       bindAutoSaveNumberInput_ACU($skipUpdateFloorsInput_ACU, saveSkipUpdateFloors_ACU);
       bindAutoSaveNumberInput_ACU($retainRecentLayersInput_ACU, saveRetainRecentLayers_ACU);
+      bindAutoSaveNumberInput_ACU($tableMaxRetriesInput_ACU, saveTableMaxRetries_ACU); // [新增] 填表重试次数
       if ($autoUpdateEnabledCheckbox_ACU.length) {
         $autoUpdateEnabledCheckbox_ACU.on('change', function () {
           settings_ACU.autoUpdateEnabled = jQuery_API_ACU(this).is(':checked');
@@ -19643,7 +19689,7 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
     let loadingToast = null;
     let success = false;
     let modifiedKeys = []; // [修复] 提升作用域
-    const maxRetries = 3;
+    const maxRetries = settings_ACU.tableMaxRetries || 3; // [修改] 使用可配置的重试次数，默认3次
 
     try {
         // [新增] 静默模式下不通知填表开始
@@ -19733,16 +19779,61 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
             }
             
             let aiResponse = null;
-            let apiError = null;
+            let attemptError = null; // [修改] 统一的错误变量
             
-            // [新增] 将 API 调用放在 try-catch 中，以便在失败时重试
+            // [修改] 统一重试逻辑：API调用、空回检测、解析失败都进入重试
             try {
+                // 1. API调用
                 aiResponse = await callCustomOpenAI_ACU(dynamicContent, localAbortController, requestOptions);
-            } catch (error) {
-                apiError = error;
-                logWarn_ACU(`第 ${attempt} 次尝试失败：API调用失败 - ${error.message}`);
                 
-                if (localAbortController.signal.aborted) {
+                // 检查用户中止
+                if (localAbortController.signal.aborted || wasStoppedByUser_ACU) {
+                    throw new DOMException('Aborted by user', 'AbortError');
+                }
+                
+                // 2. [新增] 空回检测：检查AI回复长度是否低于阈值
+                const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
+                if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
+                    throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
+                }
+                
+                // 3. 检查tableEdit标签
+                if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                    throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
+                }
+
+                if (!isSilentMode) {
+                    statusUpdate('解析并应用AI返回的更新...');
+                }
+                
+                // 4. 解析并应用更新
+                const parseResult = parseAndApplyTableEdits_ACU(aiResponse, updateMode);
+                
+                let parseSuccess = false;
+                modifiedKeys = []; // Reset for this attempt
+                
+                if (typeof parseResult === 'object' && parseResult !== null) {
+                    parseSuccess = parseResult.success;
+                    modifiedKeys = parseResult.modifiedKeys || [];
+                } else {
+                    parseSuccess = !!parseResult;
+                    modifiedKeys = targetSheetKeys || [];
+                }
+
+                if (!parseSuccess) {
+                    throw new Error('解析或应用AI更新时出错');
+                }
+                
+                // 成功！退出重试循环
+                success = true;
+                break;
+                
+            } catch (error) {
+                attemptError = error;
+                logWarn_ACU(`第 ${attempt} 次尝试失败: ${error.message}`);
+                
+                // 用户中止：直接抛出，不重试
+                if (error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted') || wasStoppedByUser_ACU) {
                     throw new DOMException('Aborted by user', 'AbortError');
                 }
                 
@@ -19750,47 +19841,16 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
                 if (attempt < maxRetries) {
                     const waitTime = 1000 * attempt; // 递增等待时间：1秒、2秒、3秒
                     logDebug_ACU(`等待 ${waitTime}ms 后重试...`);
+                    if (!isSilentMode) {
+                        showToastr_ACU('warning', `第 ${attempt} 次尝试失败，准备重试... (${error.message.substring(0, 50)})`, { timeOut: 2000 });
+                    }
                     await new Promise(resolve => setTimeout(resolve, waitTime));
                     continue;
                 } else {
                     // 最后一次尝试也失败，抛出错误
-                    throw new Error(`API调用在 ${maxRetries} 次尝试后仍失败: ${error.message}`);
+                    throw new Error(`填表在 ${maxRetries} 次尝试后仍失败: ${error.message}`);
                 }
             }
-
-            if (localAbortController.signal.aborted) {
-                 throw new DOMException('Aborted by user', 'AbortError');
-            }
-
-            if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
-                logWarn_ACU(`第 ${attempt} 次尝试失败：AI响应中未找到完整有效的 <tableEdit> 标签。`);
-                if (attempt === maxRetries) {
-                    throw new Error(`AI在 ${maxRetries} 次尝试后仍未能返回有效指令。`);
-                }
-                await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒后重试
-                continue;
-            }
-
-            if (!isSilentMode) {
-                statusUpdate('解析并应用AI返回的更新...');
-            }
-            const parseResult = parseAndApplyTableEdits_ACU(aiResponse, updateMode);
-            
-            let parseSuccess = false;
-            modifiedKeys = []; // Reset for this attempt
-            
-            if (typeof parseResult === 'object' && parseResult !== null) {
-                parseSuccess = parseResult.success;
-                modifiedKeys = parseResult.modifiedKeys || [];
-            } else {
-                parseSuccess = !!parseResult;
-                modifiedKeys = targetSheetKeys || []; 
-            }
-
-            if (!parseSuccess) throw new Error('解析或应用AI更新时出错。');
-            
-            success = true;
-            break; 
         }
 
         if (success) {
