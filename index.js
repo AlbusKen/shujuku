@@ -19198,8 +19198,9 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
           // - 自动更新模式 (auto_*) + 用户开启静默开关：不显示进度框
           // - 手动更新模式 (manual_*)：无论静默开关如何，始终显示进度框
           const isAutoUpdateMode = mode && mode.startsWith('auto');
+          const isManualMode = mode && mode.startsWith('manual');
           const isSilentMode = isAutoUpdateMode && !!settings_ACU.toastMuteEnabled;
-                   
+                    
           // [修复] 检查最新AI回复长度阈值，仅适用于自动更新模式
                  // 手动更新模式 (manual_*) 强制执行，忽略阈值
                  // [修复 2026-02-28] 使用 isAutoUpdateMode 变量替代硬编码的模式列表，确保所有 auto_* 模式（包括 auto_independent）都被覆盖
