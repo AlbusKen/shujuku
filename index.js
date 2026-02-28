@@ -19202,8 +19202,8 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
                    
           // [修复] 检查最新AI回复长度阈值，仅适用于自动更新模式
                  // 手动更新模式 (manual_*) 强制执行，忽略阈值
-                 const isManualMode = mode && mode.startsWith('manual');
-          if (!isManualMode && (mode === 'auto' || mode === 'auto_unified' || mode === 'auto_standard' || mode === 'auto_summary_silent') && lastAiMessageLength < minReplyLength) {
+                 // [修复 2026-02-28] 使用 isAutoUpdateMode 变量替代硬编码的模式列表，确保所有 auto_* 模式（包括 auto_independent）都被覆盖
+          if (isAutoUpdateMode && lastAiMessageLength < minReplyLength) {
               logDebug_ACU(`[Auto] Batch ${batchNumber}/${totalBatches} skipped: Last AI reply length (${lastAiMessageLength}) is below threshold (${minReplyLength}).`);
               // [新增] 静默模式下不显示跳过提示
               if (!isSilentMode) {
