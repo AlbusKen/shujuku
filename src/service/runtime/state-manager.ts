@@ -58,7 +58,15 @@ export const generationGate_ACU = {
   lastUserMessageAt: 0,
   lastUserSendIntentAt: 0,
   lastGeneration: null as any,
+  lastForegroundGeneration: null as any,
+  lastProcessedForegroundGenerationAt: 0,
 };
+
+function isInternalExtensionGeneration_ACU(params: any) {
+  return params?.requestScope === 'extension_internal'
+      || params?.request_scope === 'extension_internal'
+      || params?._requestScope === 'extension_internal';
+}
 
 export function markUserSendIntent_ACU() {
   generationGate_ACU.lastUserSendIntentAt = Date.now();
@@ -83,7 +91,12 @@ export function recordLastUserSend_ACU(messageId: any) {
 }
 
 export function recordGenerationContext_ACU(type: any, params: any, dryRun: any) {
-  generationGate_ACU.lastGeneration = { type, params, dryRun, at: Date.now() };
+  const ctx = { type, params, dryRun, at: Date.now() };
+  generationGate_ACU.lastGeneration = ctx;
+
+  if (!dryRun && !isQuietLikeGeneration_ACU(type, params) && !isInternalExtensionGeneration_ACU(params)) {
+    generationGate_ACU.lastForegroundGeneration = ctx;
+  }
 }
 
 export function isQuietLikeGeneration_ACU(type: any, params: any) {
@@ -134,7 +147,21 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
 }
 
 export function shouldProcessAutoTableUpdateForGenerationEnded_ACU() {
-  const g = generationGate_ACU.lastGeneration;
+  const fg = generationGate_ACU.lastForegroundGeneration;
+  const latest = generationGate_ACU.lastGeneration;
+
+  const useForeground =
+    fg &&
+    fg.at !== generationGate_ACU.lastProcessedForegroundGenerationAt &&
+    latest &&
+    isQuietLikeGeneration_ACU(latest.type, latest.params);
+
+  const g = useForeground ? fg : latest;
+
+  if (useForeground) {
+    generationGate_ACU.lastProcessedForegroundGenerationAt = fg.at;
+  }
+
   if (!g) return true;
   if (g.dryRun) return false;
   if (isQuietLikeGeneration_ACU(g.type, g.params)) return false;
