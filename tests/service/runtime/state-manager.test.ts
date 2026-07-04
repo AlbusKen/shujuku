@@ -284,8 +284,13 @@ describe('shouldProcessPlotForGeneration_ACU', () => {
 
 // ═══ shouldProcessAutoTableUpdateForGenerationEnded_ACU ═══
 describe('shouldProcessAutoTableUpdateForGenerationEnded_ACU', () => {
-  it('无 lastGeneration 时返回 true', () => {
+  beforeEach(() => {
     generationGate_ACU.lastGeneration = null;
+    generationGate_ACU.lastForegroundGeneration = null;
+    generationGate_ACU.lastProcessedForegroundGenerationAt = 0;
+  });
+
+  it('无 lastGeneration 时返回 true', () => {
     expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
   });
 
@@ -307,6 +312,27 @@ describe('shouldProcessAutoTableUpdateForGenerationEnded_ACU', () => {
   it('正常生成时返回 true', () => {
     generationGate_ACU.lastGeneration = { type: 'normal', params: {}, dryRun: false, at: Date.now() };
     expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
+  });
+
+  it('前台生成后被 quiet/internal 生成覆盖时，前台生成只触发一次', () => {
+    const t = Date.now();
+
+    generationGate_ACU.lastForegroundGeneration = {
+      type: 'normal',
+      params: {},
+      dryRun: false,
+      at: t,
+    };
+
+    generationGate_ACU.lastGeneration = {
+      type: 'quiet',
+      params: { requestScope: 'extension_internal' },
+      dryRun: false,
+      at: t + 1,
+    };
+
+    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
+    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
   });
 });
 
