@@ -60,6 +60,7 @@ export const generationGate_ACU = {
   lastGeneration: null as any,
   lastForegroundGeneration: null as any,
   lastProcessedForegroundGenerationAt: 0,
+  lastProcessedAutoTableMessageSignature: '',
 };
 
 function isInternalExtensionGeneration_ACU(params: any) {
@@ -146,7 +147,48 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
   return fresh.result;
 }
 
-export function shouldProcessAutoTableUpdateForGenerationEnded_ACU() {
+function getAssistantMessageSignature_ACU(messageId?: any): string {
+  const chat = getChatArray_ACU();
+  if (!Array.isArray(chat) || chat.length === 0) return '';
+
+  const explicitIndex = Number(messageId);
+  let index = Number.isInteger(explicitIndex) ? explicitIndex : -1;
+
+  let msg = index >= 0 ? chat[index] : null;
+
+  // Fallback for swipe / Luker / extension-ended paths:
+  // GENERATION_ENDED may arrive after MVU quiet generation, with no useful message_id.
+  if (!msg || msg.is_user) {
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (chat[i] && !chat[i].is_user) {
+        index = i;
+        msg = chat[i];
+        break;
+      }
+    }
+  }
+
+  if (!msg || msg.is_user) return '';
+
+  const swipeId = msg.swipe_id ?? msg.swipeId ?? '';
+  const swipeCount = Array.isArray(msg.swipes) ? msg.swipes.length : '';
+  const mes = String(msg.mes || '');
+
+  return `${index}:${swipeId}:${swipeCount}:${mes}`;
+}
+
+export function shouldProcessAutoTableUpdateForGenerationEnded_ACU(messageId?: any) {
+  const messageSignature = getAssistantMessageSignature_ACU(messageId);
+
+  if (messageSignature) {
+    if (generationGate_ACU.lastProcessedAutoTableMessageSignature === messageSignature) {
+      return false;
+    }
+
+    generationGate_ACU.lastProcessedAutoTableMessageSignature = messageSignature;
+    return true;
+  }
+
   const fg = generationGate_ACU.lastForegroundGeneration;
   const latest = generationGate_ACU.lastGeneration;
 

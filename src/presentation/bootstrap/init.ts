@@ -323,7 +323,7 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
             SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, (message_id: any) => {
                 logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
-                if (shouldProcessAutoTableUpdateForGenerationEnded_ACU()) {
+                if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(message_id)) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED');
                 } else {
                   logDebug_ACU('ACU: Skip auto table update due to quiet/background generation.');
