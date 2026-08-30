@@ -78,7 +78,8 @@ function findPresetMatchingCurrentConfig(presets: AcuV2ApiPreset[]): AcuV2ApiPre
       preset.apiConfig.temperature === current.apiConfig.temperature &&
       preset.apiConfig.bodyParams === current.apiConfig.bodyParams &&
       preset.apiConfig.excludeBodyParams === current.apiConfig.excludeBodyParams &&
-      preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders
+      preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders &&
+      preset.apiConfig.promptPostProcessing === current.apiConfig.promptPostProcessing
     );
   }) ?? null;
 }

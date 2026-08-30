@@ -14,6 +14,44 @@ import { logWarn_ACU } from '../../shared/utils';
 
 export type ApiPresetApiMode_ACU = 'custom' | 'tavern';
 
+/**
+ * 提示词后处理（SillyTavern custom_prompt_post_processing）可选值。
+ * '' = 未选择：请求体不带该字段，酒馆后端原样透传消息（保留中部的 system 角色）。
+ * 缺失/非法值统一归一为 'strict'（默认严格，与历史写死 strict 的行为保持兼容）。
+ */
+export type ApiPromptPostProcessingValue_ACU =
+  | ''
+  | 'merge'
+  | 'semi'
+  | 'strict'
+  | 'single'
+  | 'merge_tools'
+  | 'semi_tools'
+  | 'strict_tools';
+
+export const API_PROMPT_POST_PROCESSING_VALUES_ACU: readonly ApiPromptPostProcessingValue_ACU[] = [
+  '',
+  'merge',
+  'semi',
+  'strict',
+  'single',
+  'merge_tools',
+  'semi_tools',
+  'strict_tools',
+];
+
+export const API_PROMPT_POST_PROCESSING_DEFAULT_ACU: ApiPromptPostProcessingValue_ACU = 'strict';
+
+export function normalizePromptPostProcessing_ACU(value: unknown): ApiPromptPostProcessingValue_ACU {
+  // 显式空串 = 用户选择「未选择」，保留；缺失/非字符串/非法值 → 默认严格。
+  if (typeof value !== 'string') return API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
+  const normalized = value.trim();
+  if (normalized === '') return '';
+  return (API_PROMPT_POST_PROCESSING_VALUES_ACU as readonly string[]).includes(normalized)
+    ? (normalized as ApiPromptPostProcessingValue_ACU)
+    : API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
+}
+
 export interface ApiPresetApiConfig_ACU {
   url: string;
   apiKey: string;
@@ -25,6 +63,7 @@ export interface ApiPresetApiConfig_ACU {
   bodyParams: string;
   excludeBodyParams: string;
   requestHeaders: string;
+  promptPostProcessing: ApiPromptPostProcessingValue_ACU;
 }
 
 export interface ApiPreset_ACU {
@@ -72,9 +111,10 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
     excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
+    promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing'].includes(key)
       )
     ),
   };

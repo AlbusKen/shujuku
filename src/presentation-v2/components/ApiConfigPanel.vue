@@ -149,6 +149,17 @@
             placeholder="top_p, reasoning_effort"
           />
         </AcuFormRow>
+        <AcuFormRow
+          label="提示词后处理"
+          hint="SillyTavern custom_prompt_post_processing，默认严格（与旧版本行为一致）。未选择=不带该字段原样透传消息，可保留提示词组中 system 段的角色；严格等模式会把提示词中部的 system 消息强制改为 user。"
+        >
+          <AcuSelect
+            :options="promptPostProcessingOptions"
+            :model-value="activeDraft.promptPostProcessing"
+            placeholder="未选择"
+            @update:model-value="setPromptPostProcessing"
+          />
+        </AcuFormRow>
         <AcuFormRow label="附加请求标头" hint="每行一个 Header: Value，追加到请求头中。">
           <AcuTextarea
             v-model="activeDraft.requestHeaders"
@@ -193,6 +204,7 @@ import {
   type ApiPresetDraft,
   type ConnectionMode,
 } from "../composables/useApiPresetManagement";
+import type { ApiPromptPostProcessingValue_ACU } from "../../service/settings/api-preset-service";
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
 import { apiCopy } from "../copy/api-copy";
 import {
@@ -239,6 +251,33 @@ const connectionModeOptions: AcuSegmentedOption[] = [
   { value: "main", label: "酒馆主 API" },
   { value: "custom", label: "自定义" },
   { value: "tavern", label: "酒馆预设" },
+];
+// 选项与 SillyTavern「提示词后处理」下拉一致；'' 为「未选择」，默认 'strict'。
+const promptPostProcessingOptions: AcuSelectOption[] = [
+  { value: "", label: "未选择" },
+  {
+    value: "merge_tools",
+    label: "合并相同角色连续的发言（含工具）",
+    group: "With Tools",
+  },
+  {
+    value: "semi_tools",
+    label: "半严格（强制对话角色交替）（含工具）",
+    group: "With Tools",
+  },
+  {
+    value: "strict_tools",
+    label: "严格（强制对话角色交替、用户最先）（含工具）",
+    group: "With Tools",
+  },
+  { value: "merge", label: "合并相同角色连续的发言", group: "No Tools" },
+  { value: "semi", label: "半严格（强制对话角色交替）", group: "No Tools" },
+  {
+    value: "strict",
+    label: "严格（强制对话角色交替、用户最先）",
+    group: "No Tools",
+  },
+  { value: "single", label: "单一用户消息（无工具）" },
 ];
 const modelSelectOptions = computed<AcuSelectOption[]>(() =>
   store.modelOptions.map((m) => ({ value: m, label: m })),
@@ -369,6 +408,12 @@ function saveActiveDraft(): void {
 
 function setActiveConnectionMode(value: string): void {
   applyConnectionMode(activeDraft, value as ConnectionMode);
+  activeDraftSavedAt.value = null;
+}
+
+function setPromptPostProcessing(value: string): void {
+  activeDraft.promptPostProcessing =
+    value as ApiPromptPostProcessingValue_ACU;
   activeDraftSavedAt.value = null;
 }
 
