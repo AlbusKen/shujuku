@@ -7,6 +7,7 @@ export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 
 type CustomIncludeBodyRootType_ACU = 'empty' | 'mapping' | 'sequence' | 'scalar' | 'invalid';
@@ -158,6 +159,25 @@ export function buildCustomApiRequestBody_ACU(
     logWarn_ACU('[buildCustomApiRequestBody] 用户 stream_options 不是对象，已由插件对象替换', composedIncludeBody.diagnostic);
   }
 
+  // 接口协议按宿主后端形态分流（同一预设字段 customApiFormat，两种落地方式）：
+  // - TauriTavern（Rust 后端）：透传 custom_api_format 契约，按其分流上游端点与请求/响应变形
+  //   （openai_compat→/chat/completions、openai_responses→/responses、claude_messages→/messages、
+  //   gemini_interactions→/interactions）；非流式响应归一化为 OpenAI 形态，流式 Claude 为原样 Anthropic SSE。
+  // - 原版 SillyTavern（Node 后端）：不识别 custom_api_format，改为映射到其内置的原生协议源
+  //   （claude_messages→chat_completion_source:'claude'，服务端做 Anthropic 变形并透传原生 SSE，
+  //   gemini_interactions→'makersuite'）；openai_compat 维持 custom；
+  //   openai_responses 在 ST 无对应后端，回退 custom（/chat/completions）。
+  // 白名单兜底：调用点可能传未归一化的 config，非法值回退 openai_compat。
+  const CUSTOM_API_FORMATS_ACU = ['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'] as const;
+  const customApiFormat = CUSTOM_API_FORMATS_ACU.includes(effectiveApiConfig.customApiFormat)
+    ? effectiveApiConfig.customApiFormat
+    : 'openai_compat';
+  const isTauriTavern_ACU = isTauriTavernHost_ACU();
+  const ST_NATIVE_SOURCE_BY_FORMAT: Record<string, string> = { claude_messages: 'claude', gemini_interactions: 'makersuite' };
+  const chatCompletionSource = isTauriTavern_ACU || !ST_NATIVE_SOURCE_BY_FORMAT[customApiFormat]
+    ? 'custom'
+    : ST_NATIVE_SOURCE_BY_FORMAT[customApiFormat];
+
   const body: Record<string, any> = {
     // 统一将 messages 的 role 归一为小写（system / user / assistant）。
     //
@@ -186,15 +206,9 @@ export function buildCustomApiRequestBody_ACU(
     temperature,
     top_p: topP,
     stream: streaming,
-    chat_completion_source: 'custom',
-    // 接口协议（预设级）：对齐 TauriTavern 主 API 四「自定义」选项（custom_api_format 契约）。
-    // 后端按该值分流上游端点与请求/响应变形：openai_compat→/chat/completions、
-    // openai_responses→/responses、claude_messages→/messages、gemini_interactions→/interactions；
-    // 非流式响应归一化为 OpenAI 形态，流式 Claude 为原样 Anthropic SSE（解析见 prompt-api-call）。
-    // 白名单兜底：调用点可能传未归一化的 config，非法值回退 openai_compat。
-    custom_api_format: (['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'] as const).includes(effectiveApiConfig.customApiFormat)
-      ? effectiveApiConfig.customApiFormat
-      : 'openai_compat',
+    chat_completion_source: chatCompletionSource,
+    // custom_api_format 为 TT 契约字段，仅在 TT 宿主下携带（ST 后端不识别，由上方映射到原生源）。
+    ...(isTauriTavern_ACU ? { custom_api_format: customApiFormat } : {}),
     group_names: [],
     include_reasoning: false,
     reasoning_effort: 'medium',
@@ -202,7 +216,11 @@ export function buildCustomApiRequestBody_ACU(
     request_images: false,
     custom_prompt_post_processing: 'strict',
     reverse_proxy: effectiveApiConfig.url,
-    proxy_password: '',
+    // 原版 ST 原生协议源（claude/makersuite）从 reverse_proxy+proxy_password 取预设地址与密钥；
+    // custom 源与 TT 不使用该字段，保持空串。
+    proxy_password: (!isTauriTavern_ACU && chatCompletionSource !== 'custom')
+      ? String(effectiveApiConfig.apiKey || '')
+      : '',
     custom_url: effectiveApiConfig.url,
     custom_include_headers: headers,
     custom_include_body: composedIncludeBody.value,

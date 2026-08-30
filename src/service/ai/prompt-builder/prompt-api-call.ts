@@ -497,6 +497,16 @@ export class RetryableAiResponseError_ACU extends Error {
                         if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json?.delta?.text === 'string') {
                             fullContent += json.delta.text;
                         }
+                        // Gemini SSE 分支（接口协议=gemini_interactions 时后端原样透传 generateContent 流）：
+                        // candidates[0].content.parts[].text 拼接（跳过 thought 段）；流结束由连接关闭界定。
+                        const geminiParts = json?.candidates?.[0]?.content?.parts;
+                        if (Array.isArray(geminiParts)) {
+                            for (const part of geminiParts) {
+                                if (part && typeof part.text === 'string' && part.thought !== true) {
+                                    fullContent += part.text;
+                                }
+                            }
+                        }
                         const usage = extractResponseUsageMetadata_ACU(json);
                         capturedUsage = mergeAiUsageMetadata_ACU(capturedUsage, usage);
                     } catch (e) {

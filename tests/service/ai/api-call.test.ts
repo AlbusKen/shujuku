@@ -276,24 +276,63 @@ describe('callCustomOpenAI_ACU_Direct', () => {
 // ═══ buildCustomApiRequestBody_ACU ═══
 describe('buildCustomApiRequestBody_ACU', () => {
   it('custom_api_format 缺省回退 openai_compat，预设值白名单透传', () => {
-    const defaultBody = buildCustomApiRequestBody_ACU(
-      [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4' },
-    );
-    expect(defaultBody.chat_completion_source).toBe('custom');
-    expect(defaultBody.custom_api_format).toBe('openai_compat');
+    (globalThis as any).__TAURITAVERN__ = { version: 'test' };
+    try {
+      const defaultBody = buildCustomApiRequestBody_ACU(
+        [{ role: 'user', content: 'test' }],
+        { url: 'https://api.example.com', model: 'gpt-4' },
+      );
+      expect(defaultBody.chat_completion_source).toBe('custom');
+      expect(defaultBody.custom_api_format).toBe('openai_compat');
 
+      const claudeBody = buildCustomApiRequestBody_ACU(
+        [{ role: 'user', content: 'test' }],
+        { url: 'https://api.example.com', model: 'gpt-4', customApiFormat: 'claude_messages' as any },
+      );
+      expect(claudeBody.custom_api_format).toBe('claude_messages');
+      expect(claudeBody.chat_completion_source).toBe('custom');
+
+      const invalidBody = buildCustomApiRequestBody_ACU(
+        [{ role: 'user', content: 'test' }],
+        { url: 'https://api.example.com', model: 'gpt-4', customApiFormat: 'unknown_format' as any },
+      );
+      expect(invalidBody.custom_api_format).toBe('openai_compat');
+    } finally {
+      delete (globalThis as any).__TAURITAVERN__;
+    }
+  });
+
+  it('原版 ST 宿主：协议映射到原生 chat_completion_source，不带 custom_api_format', () => {
     const claudeBody = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4', customApiFormat: 'claude_messages' as any },
+      { url: 'https://api.anthropic.com', model: 'claude-sonnet-4-5-20250929', apiKey: 'sk-ant-test', customApiFormat: 'claude_messages' as any },
     );
-    expect(claudeBody.custom_api_format).toBe('claude_messages');
+    expect(claudeBody.chat_completion_source).toBe('claude');
+    expect(claudeBody.custom_api_format).toBeUndefined();
+    expect(claudeBody.reverse_proxy).toBe('https://api.anthropic.com');
+    expect(claudeBody.proxy_password).toBe('sk-ant-test');
 
-    const invalidBody = buildCustomApiRequestBody_ACU(
+    const geminiBody = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4', customApiFormat: 'unknown_format' as any },
+      { url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-pro', apiKey: 'gk-test', customApiFormat: 'gemini_interactions' as any },
     );
-    expect(invalidBody.custom_api_format).toBe('openai_compat');
+    expect(geminiBody.chat_completion_source).toBe('makersuite');
+    expect(geminiBody.proxy_password).toBe('gk-test');
+
+    // Responses 在 ST 无原生后端：回退 custom；openai_compat 恒 custom 且 proxy_password 留空
+    const responsesBody = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.openai.com/v1', model: 'gpt-4', apiKey: 'sk-test', customApiFormat: 'openai_responses' as any },
+    );
+    expect(responsesBody.chat_completion_source).toBe('custom');
+    expect(responsesBody.proxy_password).toBe('');
+
+    const compatBody = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.openai.com/v1', model: 'gpt-4', apiKey: 'sk-test' },
+    );
+    expect(compatBody.chat_completion_source).toBe('custom');
+    expect(compatBody.proxy_password).toBe('');
   });
 
   it('max_tokens=0 不被回退为 20000', () => {

@@ -35,7 +35,7 @@ export interface ApiPresetApiConfig_ACU {
   bodyParams: string;
   excludeBodyParams: string;
   requestHeaders: string;
-  /** 接口协议（预设级）：openai_compat（默认）/ openai_responses / claude_messages / gemini_interactions；随请求体 custom_api_format 透传给后端分流 */
+  /** 接口协议（预设级）：openai_compat（默认）/ openai_responses / claude_messages / gemini_interactions；TT 下随请求体 custom_api_format 透传分流，原版 ST 下映射为原生 chat_completion_source（claude/makersuite） */
   customApiFormat: CustomApiFormat_ACU;
 }
 
