@@ -13,6 +13,8 @@ export interface ApiPresetDraft {
   bodyParams: string;
   excludeBodyParams: string;
   requestHeaders: string;
+  /** 接口协议（预设级）：openai_compat / openai_responses / claude_messages / gemini_interactions */
+  customApiFormat: string;
 }
 
 /** Effective connection mode — flattens apiMode + useMainApi into 3 user-visible states. */
@@ -50,6 +52,7 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     bodyParams: '',
     excludeBodyParams: '',
     requestHeaders: '',
+    customApiFormat: 'openai_compat',
   };
 }
 
@@ -67,6 +70,7 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     bodyParams: preset.apiConfig.bodyParams || '',
     excludeBodyParams: preset.apiConfig.excludeBodyParams || '',
     requestHeaders: preset.apiConfig.requestHeaders || '',
+    customApiFormat: preset.apiConfig.customApiFormat || 'openai_compat',
   };
 }
 
@@ -85,6 +89,9 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       bodyParams: draft.bodyParams || '',
       excludeBodyParams: draft.excludeBodyParams || '',
       requestHeaders: draft.requestHeaders || '',
+      customApiFormat: (['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'] as const).includes(draft.customApiFormat as any)
+        ? (draft.customApiFormat as 'openai_compat' | 'openai_responses' | 'claude_messages' | 'gemini_interactions')
+        : 'openai_compat',
     },
   };
 }

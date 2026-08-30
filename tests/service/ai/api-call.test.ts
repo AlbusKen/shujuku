@@ -275,6 +275,27 @@ describe('callCustomOpenAI_ACU_Direct', () => {
 
 // ═══ buildCustomApiRequestBody_ACU ═══
 describe('buildCustomApiRequestBody_ACU', () => {
+  it('custom_api_format 缺省回退 openai_compat，预设值白名单透传', () => {
+    const defaultBody = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4' },
+    );
+    expect(defaultBody.chat_completion_source).toBe('custom');
+    expect(defaultBody.custom_api_format).toBe('openai_compat');
+
+    const claudeBody = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', customApiFormat: 'claude_messages' as any },
+    );
+    expect(claudeBody.custom_api_format).toBe('claude_messages');
+
+    const invalidBody = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', customApiFormat: 'unknown_format' as any },
+    );
+    expect(invalidBody.custom_api_format).toBe('openai_compat');
+  });
+
   it('max_tokens=0 不被回退为 20000', () => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],

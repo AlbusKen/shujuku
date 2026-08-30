@@ -53,6 +53,16 @@
         </AcuFormRow>
 
         <template v-if="activeConnectionMode === 'custom'">
+          <AcuFormRow
+            label="接口协议"
+            hint="决定请求变形与上游端点：兼容 OpenAI→/chat/completions；兼容 OpenAI Responses→/responses；兼容 Claude Messages→/messages；兼容 Gemini Interactions→/interactions（自动补 /v1beta）。默认兼容 OpenAI。注意：纯原生端点下「加载模型」可能失败，可手填模型名。"
+          >
+            <AcuSelect
+              :options="customApiFormatOptions"
+              :model-value="activeDraft.customApiFormat"
+              @update:model-value="activeDraft.customApiFormat = $event"
+            />
+          </AcuFormRow>
           <AcuFormRow label="端点(基础URL)">
             <AcuInput
               v-model="activeDraft.url"
@@ -239,6 +249,13 @@ const connectionModeOptions: AcuSegmentedOption[] = [
   { value: "main", label: "酒馆主 API" },
   { value: "custom", label: "自定义" },
   { value: "tavern", label: "酒馆预设" },
+];
+// ─── 接口协议选项（对齐 TT 主 API 四个「自定义」选项，custom_api_format 契约） ───
+const customApiFormatOptions: AcuSelectOption[] = [
+  { value: "openai_compat", label: "兼容 OpenAI" },
+  { value: "openai_responses", label: "兼容 OpenAI Responses" },
+  { value: "claude_messages", label: "兼容 Claude Messages" },
+  { value: "gemini_interactions", label: "兼容 Gemini Interactions" },
 ];
 const modelSelectOptions = computed<AcuSelectOption[]>(() =>
   store.modelOptions.map((m) => ({ value: m, label: m })),

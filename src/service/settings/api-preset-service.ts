@@ -14,6 +14,16 @@ import { logWarn_ACU } from '../../shared/utils';
 
 export type ApiPresetApiMode_ACU = 'custom' | 'tavern';
 
+/** 接口协议（预设级）：对齐 TauriTavern 主 API 的四个「自定义」选项（custom_api_format 四值契约） */
+export type CustomApiFormat_ACU = 'openai_compat' | 'openai_responses' | 'claude_messages' | 'gemini_interactions';
+
+const CUSTOM_API_FORMATS_ACU: readonly CustomApiFormat_ACU[] = ['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'];
+
+export function normalizeCustomApiFormat_ACU(value: unknown): CustomApiFormat_ACU {
+  const raw = String(value ?? '').trim();
+  return (CUSTOM_API_FORMATS_ACU as readonly string[]).includes(raw) ? (raw as CustomApiFormat_ACU) : 'openai_compat';
+}
+
 export interface ApiPresetApiConfig_ACU {
   url: string;
   apiKey: string;
@@ -25,6 +35,8 @@ export interface ApiPresetApiConfig_ACU {
   bodyParams: string;
   excludeBodyParams: string;
   requestHeaders: string;
+  /** 接口协议（预设级）：openai_compat（默认）/ openai_responses / claude_messages / gemini_interactions；随请求体 custom_api_format 透传给后端分流 */
+  customApiFormat: CustomApiFormat_ACU;
 }
 
 export interface ApiPreset_ACU {
@@ -72,9 +84,10 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
     excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
+    customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'customApiFormat'].includes(key)
       )
     ),
   };

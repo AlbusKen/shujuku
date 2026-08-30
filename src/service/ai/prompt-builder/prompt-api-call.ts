@@ -492,6 +492,11 @@ export class RetryableAiResponseError_ACU extends Error {
                         if (content) {
                             fullContent += content;
                         }
+                        // Anthropic SSE 分支（接口协议=claude_messages 时后端原样透传 Anthropic 流，不归一化）：
+                        // content_block_delta(text_delta).delta.text 拼内容；message_stop 视为流结束（等价 [DONE]）。
+                        if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json?.delta?.text === 'string') {
+                            fullContent += json.delta.text;
+                        }
                         const usage = extractResponseUsageMetadata_ACU(json);
                         capturedUsage = mergeAiUsageMetadata_ACU(capturedUsage, usage);
                     } catch (e) {

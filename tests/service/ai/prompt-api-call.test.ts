@@ -231,6 +231,31 @@ describe('handleApiResponse_ACU', () => {
     expect(mockReader.releaseLock).toHaveBeenCalled();
   });
 
+  it('流式模式：Anthropic SSE（claude_messages）拼接 content_block_delta.text', async () => {
+    mockSettings.streamingEnabled = true;
+    const encoder = new TextEncoder();
+    const chunks = [
+      encoder.encode('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你"}}\n\n'),
+      encoder.encode('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}\n\n'),
+      encoder.encode('data: {"type":"message_stop"}\n\n'),
+    ];
+    let chunkIndex = 0;
+    const mockReader = {
+      read: vi.fn(async () => {
+        if (chunkIndex < chunks.length) {
+          return { done: false, value: chunks[chunkIndex++] };
+        }
+        return { done: true, value: undefined };
+      }),
+      releaseLock: vi.fn(),
+    };
+    const mockResponse = {
+      body: { getReader: () => mockReader },
+    };
+    const result = await handleApiResponse_ACU(mockResponse);
+    expect(result).toBe('你好');
+  });
+
   it('非流式模式：响应带 usage 时经回调回传（含 cached_tokens）', async () => {
     mockSettings.streamingEnabled = false;
     const onUsage = vi.fn();
