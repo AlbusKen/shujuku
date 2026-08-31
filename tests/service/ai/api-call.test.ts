@@ -57,6 +57,7 @@ import {
   callAIWithPreset_ACU,
   callCustomOpenAI_ACU_Direct,
   buildCustomApiRequestBody_ACU,
+  normalizeSTNativeProxyBase_ACU,
 } from '../../../src/service/ai/api-call';
 
 beforeEach(() => {
@@ -273,6 +274,37 @@ describe('callCustomOpenAI_ACU_Direct', () => {
   });
 });
 
+// ═══ normalizeSTNativeProxyBase_ACU（原版 ST 原生协议源基址归一化） ═══
+describe('normalizeSTNativeProxyBase_ACU', () => {
+  it('claude：空路径补 /v1，已有 /v1 不重复，剥误贴的 /messages 尾段', () => {
+    expect(normalizeSTNativeProxyBase_ACU('https://api.anthropic.com', 'claude')).toBe('https://api.anthropic.com/v1');
+    expect(normalizeSTNativeProxyBase_ACU('https://api.anthropic.com/', 'claude')).toBe('https://api.anthropic.com/v1');
+    expect(normalizeSTNativeProxyBase_ACU('https://api.anthropic.com/v1', 'claude')).toBe('https://api.anthropic.com/v1');
+    expect(normalizeSTNativeProxyBase_ACU('https://api.anthropic.com/v1/messages', 'claude')).toBe('https://api.anthropic.com/v1');
+    expect(normalizeSTNativeProxyBase_ACU('https://api.anthropic.com/chat/completions', 'claude')).toBe('https://api.anthropic.com/v1');
+    // 自建代理子路径保留原样（用户有意为之），仅按 ST 拼接语义补 /v1
+    expect(normalizeSTNativeProxyBase_ACU('https://gw.example.com/claude', 'claude')).toBe('https://gw.example.com/claude/v1');
+  });
+
+  it('claude：/v1beta 误配纠正为 /v1（ST claude 源 fetch(apiUrl+/messages)）', () => {
+    expect(normalizeSTNativeProxyBase_ACU('https://api.anthropic.com/v1beta', 'claude')).toBe('https://api.anthropic.com/v1');
+  });
+
+  it('makersuite：剥 /v1beta 与 /v1 版本段（ST 服务端自补 apiVersion）', () => {
+    expect(normalizeSTNativeProxyBase_ACU('https://generativelanguage.googleapis.com', 'makersuite')).toBe('https://generativelanguage.googleapis.com');
+    expect(normalizeSTNativeProxyBase_ACU('https://generativelanguage.googleapis.com/', 'makersuite')).toBe('https://generativelanguage.googleapis.com');
+    expect(normalizeSTNativeProxyBase_ACU('https://generativelanguage.googleapis.com/v1beta', 'makersuite')).toBe('https://generativelanguage.googleapis.com');
+    expect(normalizeSTNativeProxyBase_ACU('https://generativelanguage.googleapis.com/v1', 'makersuite')).toBe('https://generativelanguage.googleapis.com');
+    expect(normalizeSTNativeProxyBase_ACU('https://gw.example.com/gemini/v1beta', 'makersuite')).toBe('https://gw.example.com/gemini');
+  });
+
+  it('空值与非法 URL 安全透传', () => {
+    expect(normalizeSTNativeProxyBase_ACU('', 'claude')).toBe('');
+    expect(normalizeSTNativeProxyBase_ACU(undefined, 'makersuite')).toBe('');
+    expect(normalizeSTNativeProxyBase_ACU('not-a-url/v1beta', 'makersuite')).toBe('not-a-url');
+  });
+});
+
 // ═══ buildCustomApiRequestBody_ACU ═══
 describe('buildCustomApiRequestBody_ACU', () => {
   it('custom_api_format 缺省回退 openai_compat，预设值白名单透传', () => {
@@ -309,23 +341,27 @@ describe('buildCustomApiRequestBody_ACU', () => {
     );
     expect(claudeBody.chat_completion_source).toBe('claude');
     expect(claudeBody.custom_api_format).toBeUndefined();
-    expect(claudeBody.reverse_proxy).toBe('https://api.anthropic.com');
+    // ST claude 源 fetch(apiUrl + '/messages')：基址自动补 /v1
+    expect(claudeBody.reverse_proxy).toBe('https://api.anthropic.com/v1');
     expect(claudeBody.proxy_password).toBe('sk-ant-test');
 
     const geminiBody = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-pro', apiKey: 'gk-test', customApiFormat: 'gemini_interactions' as any },
+      { url: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-pro', apiKey: 'gk-test', customApiFormat: 'gemini_interactions' as any },
     );
     expect(geminiBody.chat_completion_source).toBe('makersuite');
+    // ST makersuite 源自补 /v1beta：基址自动剥版本段
+    expect(geminiBody.reverse_proxy).toBe('https://generativelanguage.googleapis.com');
     expect(geminiBody.proxy_password).toBe('gk-test');
 
-    // Responses 在 ST 无原生后端：回退 custom；openai_compat 恒 custom 且 proxy_password 留空
+    // Responses 在 ST 无原生后端：回退 custom；openai_compat 恒 custom 且 proxy_password 留空、url 原样
     const responsesBody = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
       { url: 'https://api.openai.com/v1', model: 'gpt-4', apiKey: 'sk-test', customApiFormat: 'openai_responses' as any },
     );
     expect(responsesBody.chat_completion_source).toBe('custom');
     expect(responsesBody.proxy_password).toBe('');
+    expect(responsesBody.reverse_proxy).toBe('https://api.openai.com/v1');
 
     const compatBody = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
@@ -333,6 +369,7 @@ describe('buildCustomApiRequestBody_ACU', () => {
     );
     expect(compatBody.chat_completion_source).toBe('custom');
     expect(compatBody.proxy_password).toBe('');
+    expect(compatBody.reverse_proxy).toBe('https://api.openai.com/v1');
   });
 
   it('max_tokens=0 不被回退为 20000', () => {

@@ -55,7 +55,7 @@
         <template v-if="activeConnectionMode === 'custom'">
           <AcuFormRow
             label="接口协议"
-            hint="决定请求变形与上游端点。TauriTavern：custom_api_format 契约分流——兼容 OpenAI→/chat/completions；兼容 OpenAI Responses→/responses；兼容 Claude Messages→/messages；兼容 Gemini Interactions→/interactions（自动补 /v1beta）。原版 SillyTavern：Claude/Gemini 映射到服务端原生协议源（需端点填协议根地址，如 https://api.anthropic.com；Responses 无对应后端，回退兼容 OpenAI）。默认兼容 OpenAI。注意：纯原生端点下「加载模型」可能失败，可手填模型名。"
+            hint="决定请求变形与上游端点。TauriTavern：custom_api_format 契约分流——兼容 OpenAI→/chat/completions；兼容 OpenAI Responses→/responses；兼容 Claude Messages→/messages；兼容 Gemini Interactions→/interactions（自动补 /v1beta）。原版 SillyTavern：Claude/Gemini 映射到服务端原生协议源，端点填协议根即可（插件自动按 ST 拼接语义归一：Claude 补 /v1、Gemini 剥版本段；Responses 无对应后端，回退兼容 OpenAI）。默认兼容 OpenAI。注意：纯原生端点下「加载模型」可能失败，可手填模型名。"
           >
             <AcuSelect
               :options="customApiFormatOptions"

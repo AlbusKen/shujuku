@@ -98,6 +98,33 @@ function normalizeExcludeBodyParamsForSillyTavern_ACU(raw: any): string {
 }
 
 /**
+ * 原版 ST 原生协议源的 reverse_proxy 基址归一化（对齐 ST 自身的 URL 拼接语义）：
+ * - claude 源 fetch(apiUrl + '/messages')：基址须含 /v1（ST 官方常量即 https://api.anthropic.com/v1）；
+ * - makersuite 源 fetch(`${apiUrl}/${apiVersion}/models/...`)：基址不得带版本段（服务端自补 /v1beta）。
+ * 仅剥显式协议路径段（/messages、/v1beta 等防重复），并按 ST 惯例补 /v1，
+ * 不改写用户自建代理的其他子路径段（如 https://gw.example.com/claude 视为用户有意为之）。
+ */
+export function normalizeSTNativeProxyBase_ACU(rawUrl: unknown, nativeSource: 'claude' | 'makersuite'): string {
+  let base = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return '';
+  for (const suffix of ['/chat/completions', '/messages', '/responses', '/interactions']) {
+    if (base.endsWith(suffix)) { base = base.slice(0, -suffix.length).replace(/\/+$/, ''); break; }
+  }
+  if (nativeSource === 'claude') {
+    if (base.endsWith('/v1beta')) base = base.slice(0, -'/v1beta'.length).replace(/\/+$/, '');
+    let path = '';
+    try { path = new URL(base).pathname.replace(/\/+$/, ''); } catch { /* 非法 URL 原样透传，交由后端报错 */ }
+    if (path === '' || path === '/') return `${base}/v1`;
+    if (!base.endsWith('/v1')) return `${base}/v1`;
+    return base;
+  }
+  for (const suffix of ['/v1beta', '/v1']) {
+    if (base.endsWith(suffix)) { base = base.slice(0, -suffix.length).replace(/\/+$/, ''); break; }
+  }
+  return base;
+}
+
+/**
  * 构建 Chat Completions 自定义 API 请求体（支持 bodyParams / excludeBodyParams / requestHeaders）
  */
 export function buildCustomApiRequestBody_ACU(
@@ -177,6 +204,12 @@ export function buildCustomApiRequestBody_ACU(
   const chatCompletionSource = isTauriTavern_ACU || !ST_NATIVE_SOURCE_BY_FORMAT[customApiFormat]
     ? 'custom'
     : ST_NATIVE_SOURCE_BY_FORMAT[customApiFormat];
+  const stNativeSource = (!isTauriTavern_ACU && chatCompletionSource !== 'custom')
+    ? (chatCompletionSource as 'claude' | 'makersuite')
+    : null;
+  const reverseProxy = stNativeSource
+    ? normalizeSTNativeProxyBase_ACU(effectiveApiConfig.url, stNativeSource)
+    : effectiveApiConfig.url;
 
   const body: Record<string, any> = {
     // 统一将 messages 的 role 归一为小写（system / user / assistant）。
@@ -215,10 +248,11 @@ export function buildCustomApiRequestBody_ACU(
     enable_web_search: false,
     request_images: false,
     custom_prompt_post_processing: 'strict',
-    reverse_proxy: effectiveApiConfig.url,
+    reverse_proxy: reverseProxy,
     // 原版 ST 原生协议源（claude/makersuite）从 reverse_proxy+proxy_password 取预设地址与密钥；
-    // custom 源与 TT 不使用该字段，保持空串。
-    proxy_password: (!isTauriTavern_ACU && chatCompletionSource !== 'custom')
+    // reverse_proxy 已按 ST 拼接语义归一化（claude 补 /v1、makersuite 剥版本段）。
+    // custom 源与 TT 不使用该字段，proxy_password 保持空串。
+    proxy_password: stNativeSource
       ? String(effectiveApiConfig.apiKey || '')
       : '',
     custom_url: effectiveApiConfig.url,
