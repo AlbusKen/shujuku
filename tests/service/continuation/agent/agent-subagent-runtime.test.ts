@@ -68,6 +68,94 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(renderStoryArcVolumePlanInstruction_ACU(settings)).toContain('自定义：新建或全量重构总纲时规划 16 卷');
   });
 
+  it('renders fixed user intent and the complete current-stage outline from one resolve context', async () => {
+    const input = input_ACU();
+    input.delegation = { agentName: 'arc-architect', prompt: '根据本轮任务校准总纲', reads: [] };
+    input.settings.agentPrompts.arcArchitect = [{
+      role: 'user',
+      content: '【初始要求】\n$USER_INTENT\n【完整大纲】\n$OUTLINE_WINDOW\n【任务】\n$AGENT_TASK',
+      enabled: true,
+      deletable: true,
+    }];
+    input.resolveContext.execution = {
+      envelope: {},
+      task: { taskId: 't', stages: [] },
+      stage: { stageNumber: 2, status: 'running' },
+      revision: { outline: { title: '禁区试探', goal: '确认入口代价', tempo: 'mixed', totalTurns: 2 } },
+      node: {
+        id: 'node-1',
+        title: '入口试探',
+        goal: '确认守门人意图',
+        turns: [
+          { id: 'turn-1', pacing: 'setup', goal: '观察守门人' },
+          { id: 'turn-2', pacing: 'pressure', goal: '支付试探代价' },
+        ],
+      },
+      turn: { id: 'turn-1', pacing: 'setup', goal: '观察守门人' },
+      turnNumber: 1,
+      nodeTurnNumber: 1,
+    } as any;
+    const calls: Array<Array<{ role: string; content: string }>> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => {
+        calls.push(messages);
+        return finalReply_ACU;
+      },
+    });
+
+    await runtime.run(input);
+    const rendered = calls[0].map(message => message.content).join('\n');
+    expect(rendered).toContain('推进剧情');
+    expect(rendered).toContain('阶段 2：禁区试探');
+    expect(rendered).toContain('观察守门人');
+    expect(rendered).toContain('支付试探代价');
+    expect(rendered).toContain('根据本轮任务校准总纲');
+  });
+
+  it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {
+    const base = input_ACU();
+    base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxExtraReads: 1 };
+    base.settings.agentReadTokenBudget = 1;
+    base.resolveContext.worldbook = {
+      available: true,
+      entries: [{ bookName: '设定集', uid: '7', title: '晶屑设定', keys: ['晶屑'], constant: false, content: '晶屑不能带离铁门。', tokens: 8 }],
+    };
+    const roles: string[] = [];
+    const calls: Array<Array<{ role: string; content: string }>> = [];
+    const replies = [
+      '{"action":"read","reads":["$TABLE:角色表"]}',
+      JSON.stringify({ verdict: 'revise', summary: '晶屑去向需要遵守设定', emotionFindings: [], worldFindings: ['晶屑不能带离铁门'], logicFindings: [], requiredFixes: ['保留铁门限制'], preserve: ['守门人边界'] }),
+    ];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      resolveAgentApiPreset: ((_settings: unknown, role: string) => { roles.push(role); return preset_ACU; }) as any,
+      callInternalAi: async messages => {
+        calls.push(messages);
+        return replies.shift() ?? null;
+      },
+    });
+
+    const result = await runtime.runFinalReview({
+      settings: base.settings,
+      resolveContext: base.resolveContext,
+      candidateInstruction: '主角拿起晶屑走出铁门。',
+      currentUserInput: '让主角观察晶屑。',
+      planningSummary: '主线建议主角试探守门人。',
+      createIdentity: (_name, attempt) => ({ taskId: 't', stageId: 's', turnId: 'u', attemptId: `final-${attempt}`, source: 'agent_subagent' }) as any,
+      isCurrent: () => true,
+    });
+
+    expect(roles).toEqual(['finalReviewer']);
+    expect(result.output).toMatchObject({ verdict: 'revise', worldFindings: ['晶屑不能带离铁门'] });
+    expect(result.expandedReads).toEqual(['$TABLE:角色表']);
+    expect(result.toolRounds).toBe(1);
+    expect(result.readTokens).toBeGreaterThan(0);
+    expect(result.iterations).toBe(2);
+    expect(calls[0].map(message => message.content).join('\n')).toContain('晶屑不能带离铁门。');
+    expect(calls[1].map(message => message.content).join('\n')).toContain('角色表');
+  });
+
   it('所有调用均报告字段时逐字段求和，并保留明确 0', async () => {
     const result = await runWithUsageSequence_ACU([
       { promptTokens: 10, completionTokens: 2, cachedTokens: 0, cacheWriteTokens: 3 },

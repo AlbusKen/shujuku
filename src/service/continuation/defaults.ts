@@ -51,7 +51,7 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量算清楚这个阶段装得下多少内容，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 先按总纲台阶与当前节奏状态定 <stage_tempo>，再按该形态的下限安排低压轮——低压轮按叙事需要成段安放，不平均分散成节拍器；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标落在故事总纲当前推进中的那一级台阶内，不触碰总纲里标注为禁止提前释放的底牌，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
+    content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量与【活动卷规划上下文】算清楚本阶段只承载当前 active 卷尚未完成的一段，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 先按总纲台阶与当前节奏状态定 <stage_tempo>，再按该形态的下限安排低压轮——低压轮按叙事需要成段安放，不平均分散成节拍器；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标只承载故事总纲当前 active 卷尚未完成的一段，不触碰总纲里标注为禁止提前释放的底牌；单个阶段结束只留下跨阶段悬念，不擅自收束整卷。只有活动卷规划上下文显示卷级收束条件已被真实完成阶段满足时，才交由 arc-architect 切卷；所有既有卷完成时先扩充后续 active 卷。\n我会将这些原则落实到各个标签的内容中。',
     enabled: true,
     deletable: true,
   },
@@ -143,6 +143,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU = 'spv2.8-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU = 'spv2.9-continuation-longform-story-arc-v21';
 /** Story-arc volume plan version: migrated default prompts follow the persisted volume-count setting. */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU = 'spv3.0-continuation-story-arc-volume-plan-v22';
+/** Volume lifecycle version: default prompts now distinguish stage progress, volume completion evidence, and post-arc expansion. */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU = 'spv3.1-continuation-volume-lifecycle-v23';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -152,6 +154,11 @@ export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU = 8;
 
 /** 连续高压轮上限的可配置上限。再大就等于关闭这条兜底。 */
 export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU = 20;
+
+/** 终审独立读取预算；与主 Agent 预算隔离，按会话总结阈值折算。 */
+export const CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU = '50%';
+/** 终审允许的额外 worldbook read/search 工具轮上限。 */
+export const CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU = 6;
 
 function clonePromptSegments_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
   return segments.map(segment => ({ ...segment }));
@@ -193,6 +200,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     storyTailFloors: AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
     agentReadTokenBudget: AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
     agentReadFallbackTokens: AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
+    finalReview: { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxExtraReads: CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU },
     contextExtractRules: [],
     contextExcludeRules: [],
     agentRunBudget: { ...DEFAULT_AGENT_RUN_BUDGET_ACU },
@@ -203,7 +211,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU,
   };
 }
 

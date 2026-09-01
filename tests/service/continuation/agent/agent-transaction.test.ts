@@ -38,6 +38,9 @@ function storyArcItem_ACU(patch: Record<string, unknown> = {}) {
     withheld: '第三方就是主角生父的旧部',
     status: 'active' as const,
     stageNumbers: [] as number[],
+    completionStageNumber: null,
+    completionState: '',
+    continuationRationale: '',
     reason: '',
     ...patch,
   };
@@ -89,14 +92,73 @@ describe('Agent 总纲写集事务', () => {
   });
 
   it('patch 回写阶段进度只改给定字段，且只给 storyArc 升版本、不动结算水位', () => {
-    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1] })] }), ['storyArc'], 6);
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1] })] }), ['storyArc'], 6, [1]);
     expect(seeded.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 5 });
 
-    const patched = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', stageNumbers: [3, 2, 2] }] }), ['storyArc'], 9);
+    const patched = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', stageNumbers: [3, 2, 2] }] }), ['storyArc'], 9, [2, 3]);
     expect(patched.storyArc[0].stageNumbers).toEqual([2, 3]);
     expect(patched.storyArc[0].direction).toBe(seeded.storyArc[0].direction);
     expect(patched.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 6 });
     expect(patched.settledThroughIndex).toBe(seeded.settledThroughIndex);
+  });
+
+  it('同一 active 卷可渐进登记多个已完成阶段，不会因单个阶段完成而切卷', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [
+        storyArcItem_ACU({ id: 'VOL-01', status: 'active', stageNumbers: [] }),
+        storyArcItem_ACU({ id: 'VOL-02', status: 'planned', title: '第二卷', direction: '追查第三方签名', escalation: '收在第三方主动灭口', withheld: '第三方身份' }),
+      ],
+    }), ['storyArc'], 6);
+
+    const afterFirstStage = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', stageNumbers: [1] }] }), ['storyArc'], 7, [1]);
+    const afterSecondStage = applyAgentModuleDelta_ACU(afterFirstStage, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', stageNumbers: [1, 2] }] }), ['storyArc'], 8, [1, 2]);
+
+    expect(afterSecondStage.storyArc.find(item => item.id === 'VOL-01')).toMatchObject({ status: 'active', stageNumbers: [1, 2], completionStageNumber: null });
+    expect(afterSecondStage.storyArc.find(item => item.id === 'VOL-02')).toMatchObject({ status: 'planned', stageNumbers: [] });
+  });
+
+  it('卷完成必须引用已登记且真实完成的阶段，并原子激活下一卷', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [
+        storyArcItem_ACU({ id: 'VOL-01', status: 'active', stageNumbers: [1, 2] }),
+        storyArcItem_ACU({ id: 'VOL-02', status: 'planned', title: '第二卷', direction: '追查第三方签名', escalation: '收在第三方主动灭口', withheld: '第三方身份' }),
+      ],
+    }), ['storyArc'], 6, [1, 2]);
+
+    expect(() => applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', status: 'done', completionStageNumber: 2 }] }), ['storyArc'], 8, [1, 2]))
+      .toThrowError(/必须说明已达到的卷末状态/);
+    expect(() => applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '商行控制权已夺回' }] }), ['storyArc'], 8, [1, 2]))
+      .toThrowError(/必须已登记进 stageNumbers/);
+
+    const advanced = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [
+      { id: 'VOL-01', status: 'done', completionStageNumber: 2, completionState: '主角夺回印信，第三方签名浮出水面' },
+      { id: 'VOL-02', status: 'active' },
+    ] }), ['storyArc'], 8, [1, 2]);
+
+    expect(advanced.storyArc.find(item => item.id === 'VOL-01')).toMatchObject({ status: 'done', completionStageNumber: 2 });
+    expect(advanced.storyArc.find(item => item.id === 'VOL-02')).toMatchObject({ status: 'active' });
+  });
+
+  it('已完成卷不能重激活，全部既有卷完成后扩卷必须给出续卷依据', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [storyArcItem_ACU({ id: 'VOL-01', status: 'active', stageNumbers: [1] })],
+    }), ['storyArc'], 6, [1]);
+    const completed = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{
+      id: 'VOL-01', status: 'done', completionStageNumber: 1, completionState: '商行印信回到主角手中，第三方签名留下新线索',
+    }] }), ['storyArc'], 7, [1]);
+
+    expect(() => applyAgentModuleDelta_ACU(completed, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', status: 'active' }] }), ['storyArc'], 8, [1]))
+      .toThrowError(/不可重新激活/);
+    expect(() => applyAgentModuleDelta_ACU(completed, delta_ACU({ storyArc: [storyArcItem_ACU({
+      id: 'VOL-02', title: '第二卷', direction: '追查第三方签名', escalation: '收在第三方主动灭口', withheld: '第三方身份', status: 'active',
+    })] }), ['storyArc'], 8, [1]))
+      .toThrowError(/必须说明续卷依据/);
+
+    const expanded = applyAgentModuleDelta_ACU(completed, delta_ACU({ storyArc: [storyArcItem_ACU({
+      id: 'VOL-02', title: '第二卷', direction: '追查第三方签名', escalation: '收在第三方主动灭口', withheld: '第三方身份', status: 'active',
+      continuationRationale: '第一卷留下的第三方签名把商行争夺升级为追查幕后势力。',
+    })] }), ['storyArc'], 8, [1]);
+    expect(expanded.storyArc.find(item => item.id === 'VOL-02')).toMatchObject({ status: 'active', continuationRationale: '第一卷留下的第三方签名把商行争夺升级为追查幕后势力。' });
   });
 
   it('已废止的条目不可 patch', () => {
@@ -106,7 +168,7 @@ describe('Agent 总纲写集事务', () => {
   });
 
   it('upsert 不带 stageNumbers 时保留既有进度锚', () => {
-    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1, 2] })] }), ['storyArc'], 6);
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1, 2] })] }), ['storyArc'], 6, [1, 2]);
     const rewritten = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArc: [storyArcItem_ACU({ direction: '方向改写为主角主动出击' })] }), ['storyArc'], 6);
     expect(rewritten.storyArc[0].stageNumbers).toEqual([1, 2]);
   });

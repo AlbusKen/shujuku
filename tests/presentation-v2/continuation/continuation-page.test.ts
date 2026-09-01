@@ -15,6 +15,7 @@ const activeStage = ref<any>(null);
 const activeRevision = ref<any>(null);
 const activeNode = ref<any>(null);
 const activeTurn = ref<any>(null);
+const materialsSnapshot = ref<any>(null);
 const settings = ref<any>(null);
 const busy = ref(false);
 const canContinue = ref(false);
@@ -43,6 +44,17 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () =>
   // 连续高压轮上限输入框的上界常量：组件从 composable 取，mock 缺了它会整页渲染失败。
   CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU: 20,
 }));
+vi.mock('../../../src/presentation-v2/composables/useContinuationMaterials', () => ({
+  useContinuationMaterials: () => ({
+    snapshot: materialsSnapshot,
+    loadError: ref(''),
+    modules: {},
+    reload: vi.fn(),
+    save: vi.fn(),
+    discard: vi.fn(),
+    updateDraft: vi.fn(),
+  }),
+}));
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
   useChatChangedTick: () => chatTick,
 }));
@@ -50,15 +62,31 @@ vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () =>
 function setTask(status = 'paused', pending = false): void {
   task.value = {
     taskId: 'task-1', originInstruction: '让主角找到出口', status, stopReason: null,
-    activeStageId: 'stage-1', stages: [{
-      stageId: 'stage-1', stageNumber: 1, status: 'running', activeRevision: 2,
-      completedTurns: 3, revisions: [{
-        revision: 2, reason: 'initial', frozen: true,
-        outline: { title: '逃离计划', goal: '让主角找到出口', totalTurns: 6, nodes: [] },
-      }],
-    }], timeline: [],
+    activeStageId: 'stage-1', stages: [
+      {
+        stageId: 'stage-1', stageNumber: 1, status: 'running', activeRevision: 2, activeNodeIndex: 1, activeTurnIndex: 0,
+        completedTurns: 2, revisions: [{
+          revision: 2, reason: 'initial', frozen: true,
+          outline: {
+            title: '逃离计划', goal: '让主角找到出口', tempo: 'development', totalTurns: 4,
+            nodes: [
+              { id: 'node-1', title: '摸清出口守卫', goal: '确认守卫换班规律', suggestedTurns: 2, turns: [{ id: 'turn-1', goal: '观察守卫换班', pacing: 'setup' }, { id: 'turn-2', goal: '用假线索试探守卫', pacing: 'pressure' }] },
+              { id: 'node-2', title: '夺取钥匙', goal: '利用换班空隙夺取钥匙', suggestedTurns: 2, turns: [{ id: 'turn-3', goal: '趁换班夺取钥匙', pacing: 'turn' }, { id: 'turn-4', goal: '带着钥匙撤离并留下追踪钩子', pacing: 'cooldown' }] },
+            ],
+          },
+        }],
+      },
+      {
+        stageId: 'stage-0', stageNumber: 0, status: 'completed', activeRevision: 2, activeNodeIndex: 0, activeTurnIndex: 0,
+        completedTurns: 2, revisions: [
+          { revision: 1, reason: 'initial', frozen: true, outline: { title: '旧版试探', goal: '找到守卫弱点', tempo: 'opening', totalTurns: 2, nodes: [] } },
+          { revision: 2, reason: 'replan', frozen: true, outline: { title: '最终试探', goal: '确认换班规律', tempo: 'opening', totalTurns: 2, nodes: [] } },
+        ],
+      },
+    ], timeline: [],
     pendingHostTurn: pending ? { status: 'awaiting_generation' } : null,
   };
+  materialsSnapshot.value = { storyArc: [{ id: 'VOL-01', scope: 'volume', title: '禁区试探', status: 'active', retired: false }], revisions: { storyArc: 1 } };
   activeStage.value = task.value.stages[0];
   activeRevision.value = task.value.stages[0].revisions[0];
   canContinue.value = status === 'paused';
@@ -124,6 +152,7 @@ beforeEach(() => {
   activeRevision.value = null;
   activeNode.value = null;
   activeTurn.value = null;
+  materialsSnapshot.value = null;
   settings.value = null;
   busy.value = false;
   canContinue.value = false;
@@ -143,6 +172,7 @@ function setSettings(): void {
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3, minGenerationTokens: 1000,
     storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
+    finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
     agentRunBudget: { maxIterations: 8, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxReads: 8, maxExtraReads: 3 },
     contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '', promptCacheEnabled: false,
@@ -154,6 +184,7 @@ function setSettings(): void {
       mainlinePlanner: { mode: 'inherit', presetName: '' },
       beatPlanner: { mode: 'inherit', presetName: '' },
       reviewer: { mode: 'inherit', presetName: '' },
+      finalReviewer: { mode: 'inherit', presetName: '' },
     },
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
     agentPrompts: {
@@ -163,6 +194,7 @@ function setSettings(): void {
       mainlinePlanner: [{ role: 'system', content: '主线', enabled: true, deletable: true }],
       beatPlanner: [{ role: 'system', content: '节拍', enabled: true, deletable: true }],
       reviewer: [{ role: 'system', content: '审查', enabled: true, deletable: true }],
+      finalReviewer: [{ role: 'system', content: '终审', enabled: true, deletable: true }],
     },
   };
 }
@@ -345,7 +377,7 @@ describe('ContinuationPage', () => {
     expect(el.querySelector('.acu-v2-session-feed')).not.toBeNull();
     expect(el.textContent).toContain('还没有运行记录');
     expect(el.textContent).toContain('第 1 阶段');
-    expect(el.textContent).toContain('已完成 3 / 6 轮');
+    expect(el.textContent).toContain('已完成 2 / 4 轮');
     expect(el.textContent).toContain('大纲 revision 2');
 
     expect(buttonByText(el, '发送')).not.toBeUndefined();
@@ -399,19 +431,38 @@ describe('ContinuationPage', () => {
     app.unmount();
   });
 
-  it('资料面板可编辑保存当前大纲，一键清空需二次确认', async () => {
+  it('资料面板结构化展示当前大纲，保留 JSON 草稿保护、保存与清空确认', async () => {
     setTask();
     const { app, el } = await mountPage();
     expect(el.textContent).toContain('已有资料');
-    expect(el.textContent).toContain('逃离计划');
+    expect(el.textContent).toContain('第 1 阶段：逃离计划');
+    expect(el.textContent).toContain('阶段目标：让主角找到出口');
+    expect(el.textContent).toContain('推进');
+    expect(el.textContent).toContain('完成 2 / 4 轮 · 剩余 2 轮');
+    expect(el.textContent).toContain('所属 active 卷：[VOL-01]「禁区试探」');
+    expect(el.textContent).toContain('摸清出口守卫');
+    expect(el.textContent).toContain('观察守卫换班');
+    expect(el.textContent).toContain('当前执行');
+    expect(el.querySelectorAll('.acu-v2-continuation-materials__turn--done')).toHaveLength(2);
+    expect(el.querySelectorAll('.acu-v2-continuation-materials__turn--current')).toHaveLength(1);
+    expect(el.querySelectorAll('.acu-v2-continuation-materials__turn--planned')).toHaveLength(1);
+    expect(el.textContent).toContain('第 0 阶段');
+    expect(el.textContent).toContain('最终试探');
+    expect(el.textContent).toContain('旧 revision（1）');
 
-    const outlineTextarea = el.querySelector<HTMLTextAreaElement>('.acu-v2-continuation-materials__editor textarea')!;
+    const outlineJson = el.querySelector<HTMLDetailsElement>('.acu-v2-continuation-materials__outline > .acu-v2-continuation-materials__json')!;
+    expect(outlineJson.open).toBe(false);
+    outlineJson.open = true;
+    const outlineTextarea = outlineJson.querySelector<HTMLTextAreaElement>('textarea')!;
     expect(JSON.parse(outlineTextarea.value).title).toBe('逃离计划');
     // 未改动时保存按钮禁用，避免无意义写盘推进 revision。
     expect(buttonByText(el, '保存大纲')!.disabled).toBe(true);
 
     typeInto(outlineTextarea, JSON.stringify({ ...JSON.parse(outlineTextarea.value), title: '逃离计划 v2' }));
     await nextTick();
+    activeRevision.value = { ...activeRevision.value, revision: 3, outline: { ...activeRevision.value.outline, title: '外部 revision' } };
+    await nextTick();
+    expect(JSON.parse(outlineTextarea.value).title).toBe('逃离计划 v2');
     buttonByText(el, '保存大纲')!.click();
     await nextTick();
     expect(saveActiveOutline).toHaveBeenCalledOnce();
@@ -449,6 +500,12 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('读取预算');
       expect(el.textContent).toContain('精读兜底额度');
       expect(el.textContent).toContain('连续高压轮上限');
+      expect(el.textContent).toContain('终审读取预算');
+      expect(el.textContent).toContain('关闭时不装配终审证据');
+      expect(el.textContent).toContain('不会发起终审调用');
+      expect(el.textContent).toContain('发送前终审子代理提示词');
+      expect(el.textContent).toContain('固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW');
+      expect(el.textContent).toContain('伏笔与认知维护代理不接收用户目标或阶段大纲');
       expect(el.textContent).toContain('故事总纲子代理（arc-architect）提示词');
       expect(el.textContent).not.toContain('缓存优化');
       expect(el.textContent).not.toContain('prompt_cache_key');
@@ -462,7 +519,12 @@ describe('ContinuationPage', () => {
       expect(saveSettings).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(900);
       expect(saveSettings).toHaveBeenCalledOnce();
-      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8 });
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({
+        stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
+        finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
+        agentApiPresets: { finalReviewer: { mode: 'inherit', presetName: '' } },
+        agentPrompts: { finalReviewer: [{ content: '终审' }] },
+      });
       app.unmount();
     } finally {
       vi.useRealTimers();

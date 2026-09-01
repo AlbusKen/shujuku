@@ -101,23 +101,11 @@ describe('主 Agent 动作解析', () => {
     expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '指导', constraints: {} }, true)).toMatchObject({ constraints: null });
   });
 
-  it('edit_outline 按操作种类校验必填字段', () => {
-    const action = parseAgentMainAction_ACU({
+  it('edit_outline 已从主 Agent 协议退役，要求委派 outline-architect', () => {
+    expect(() => parseAgentMainAction_ACU({
       action: 'edit_outline',
-      thought: '微调',
-      edits: [
-        { op: 'set_turn_goal', turnId: 'turn-3', goal: '让守门人先露破绽' },
-        { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-3', goal: '巡查队提前到场' },
-        { op: 'remove_turn', turnId: 'turn-5' },
-        { op: 'set_node_goal', nodeId: 'node-1', goal: '试探但不揭穿' },
-      ],
-    }, true);
-    expect(action).toMatchObject({ kind: 'edit_outline' });
-    expect((action as any).edits).toHaveLength(4);
-
-    expect(() => parseAgentMainAction_ACU({ action: 'edit_outline', edits: [] }, true)).toThrowError(/非空的 edits/);
-    expect(() => parseAgentMainAction_ACU({ action: 'edit_outline', edits: [{ op: 'set_turn_goal', turnId: 'turn-1' }] }, true)).toThrowError(/需要 turnId 与非空 goal/);
-    expect(() => parseAgentMainAction_ACU({ action: 'edit_outline', edits: [{ op: 'rewrite_all' }] }, true)).toThrowError(/op 必须是/);
+      edits: [{ op: 'set_turn_goal', turnId: 'turn-3', goal: '让守门人先露破绽' }],
+    }, true)).toThrowError(/大纲调整请派工 outline-architect/);
   });
 
   it('维护类的 patch 只收显式字段，至少要带一个可改字段', () => {
@@ -137,14 +125,30 @@ describe('主 Agent 动作解析', () => {
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: [{ action: 'patch', id: 'E1', revealStatus: '瞎写' }] } })).toThrowError(/revealStatus 非法/);
   });
 
+  it('总纲写集保留卷完成依据与续卷依据，并拒绝非法完成阶段编号', () => {
+    const output = parseAgentMaintainerOutput_ACU({
+      summary: '第一卷已收束并扩充第二卷',
+      delta: {
+        storyArc: [
+          { action: 'patch', id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '印信回归，第三方签名浮出水面' },
+          { action: 'upsert', id: 'VOL-02', scope: 'volume', title: '追查签名', direction: '追查第三方势力', escalation: '收在幕后势力主动灭口', withheld: '幕后首脑身份', status: 'active', stageNumbers: [], continuationRationale: '第一卷留下的第三方签名将商行争夺推向幕后势力' },
+        ],
+      },
+    });
+
+    expect(output.delta.storyArcPatches).toEqual([{ id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '印信回归，第三方签名浮出水面' }]);
+    expect(output.delta.storyArc[0]).toMatchObject({ id: 'VOL-02', continuationRationale: '第一卷留下的第三方签名将商行争夺推向幕后势力', completionStageNumber: null, completionState: '' });
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { storyArc: [{ action: 'patch', id: 'VOL-01', completionStageNumber: 0 }] } })).toThrowError(/completionStageNumber 必须是从 1 起的整数或 null/);
+  });
+
   it('block 必须带明确理由', () => {
     expect(parseAgentMainAction_ACU({ action: 'block', reason: '关键资料缺失', unresolved: ['缺角色表'] }, true)).toMatchObject({ kind: 'block', unresolved: ['缺角色表'] });
     expect(() => parseAgentMainAction_ACU({ action: 'block' }, true)).toThrowError(/必须提供 reason/);
   });
 
-  it('未知动作直接拒绝，revise_outline 已退役不再是合法动作', () => {
+  it('未知动作和已退役的大纲动作直接拒绝', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ edit_outline \/ finalize \/ block/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ finalize \/ block/);
   });
 });
 

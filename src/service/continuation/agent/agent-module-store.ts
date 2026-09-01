@@ -121,6 +121,9 @@ function validateStoryArcEntry_ACU(raw: unknown): AgentStoryArcEntry_ACU | null 
     withheld: readText_ACU(raw.withheld),
     status: readEnum_ACU(raw.status, AGENT_STORY_ARC_STATUSES_ACU, 'planned') as AgentStoryArcEntry_ACU['status'],
     stageNumbers: normalizeStageNumbers_ACU(raw.stageNumbers),
+    completionStageNumber: typeof raw.completionStageNumber === 'number' && Number.isInteger(raw.completionStageNumber) && raw.completionStageNumber >= 1 ? raw.completionStageNumber : null,
+    completionState: readText_ACU(raw.completionState),
+    continuationRationale: readText_ACU(raw.continuationRationale),
     retired: raw.retired === true,
     retiredReason: readText_ACU(raw.retiredReason),
   };
@@ -362,6 +365,8 @@ function renderStoryArcEntry_ACU(entry: AgentStoryArcEntry_ACU): string {
     entry.direction ? `  方向：${entry.direction}` : '',
     entry.escalation ? `  升级目标：${entry.escalation}` : '',
     entry.withheld ? `  禁止提前翻的底牌：${entry.withheld}` : '',
+    entry.completionStageNumber === null ? '' : `  完成依据：第 ${entry.completionStageNumber} 阶段；卷末状态=${entry.completionState || '（未登记）'}`,
+    entry.continuationRationale ? `  续卷依据：${entry.continuationRationale}` : '',
     entry.retired && entry.retiredReason ? `  废止原因：${entry.retiredReason}` : '',
   ].filter(Boolean).join('\n');
 }
@@ -374,6 +379,15 @@ function renderStoryArcEntry_ACU(entry: AgentStoryArcEntry_ACU): string {
  */
 export function hasActiveStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU): boolean {
   return snapshot.storyArc.some(entry => !entry.retired);
+}
+
+/** 判断是否存在可承载下一份阶段大纲的活动卷。全书方向本身不是阶段规划目标。 */
+export function hasActiveStoryArcVolume_ACU(snapshot: AgentModuleSnapshot_ACU): boolean {
+  return snapshot.storyArc.some(entry => (
+    entry.scope === 'volume'
+    && !entry.retired
+    && entry.status === 'active'
+  ));
 }
 
 /**
@@ -393,16 +407,44 @@ export function findUnregisteredStageNumbers_ACU(snapshot: AgentModuleSnapshot_A
 }
 
 /**
+ * 渲染活动卷给阶段规划与审查使用的集中上下文。
+ * 阶段承载与卷收束是两层事实：stageNumbers 是卷已承载的阶段，completedStageNumbers 才是正文已完成的阶段。
+ */
+export function renderAgentActiveVolumePlanningContext_ACU(snapshot: AgentModuleSnapshot_ACU, completedStageNumbers: readonly number[]): string {
+  const volumes = snapshot.storyArc.filter(entry => entry.scope === 'volume' && !entry.retired);
+  const active = volumes.filter(entry => entry.status === 'active');
+  const completed = new Set(completedStageNumbers);
+  if (!volumes.length) return '【活动卷规划上下文】\n当前没有卷台阶；必须由 arc-architect 建立总纲后才能创建阶段大纲。';
+  if (!active.length) {
+    return '【活动卷规划上下文】\n所有既有卷均已完成。用户继续写作时，arc-architect 必须先根据最后一卷的结果、代价、关系变化或未解决问题在末尾追加一个 active 卷，再由 outline-architect 创建下一阶段大纲。';
+  }
+  if (active.length > 1) return `【活动卷规划上下文】\n总纲状态无效：当前存在 ${active.length} 个 active 卷（${active.map(entry => entry.id).join('、')}），必须先由 arc-architect 修复。`;
+  const volume = active[0];
+  const completedCarriers = volume.stageNumbers.filter(stageNumber => completed.has(stageNumber));
+  const pendingCarriers = volume.stageNumbers.filter(stageNumber => !completed.has(stageNumber));
+  return [
+    '【活动卷规划上下文】',
+    `当前 active 卷：[${volume.id}]「${volume.title}」`,
+    `已承载阶段：${volume.stageNumbers.length ? volume.stageNumbers.join('、') : '（尚无）'}`,
+    `真实完成进度：${completedCarriers.length ? `已完成阶段 ${completedCarriers.join('、')}` : '尚未有已完成阶段'}${pendingCarriers.length ? `；已登记但尚未完成阶段 ${pendingCarriers.join('、')}` : ''}`,
+    `本阶段只承担本卷尚未完成的一段：${volume.direction}`,
+    `卷级收束条件：${volume.escalation}`,
+    `禁止提前释放：${volume.withheld || '（无额外底牌）'}`,
+  ].join('\n');
+}
+
+/**
  * 渲染故事总纲的热上下文。
  * @param snapshot 当前快照
+ * @param completedStageNumbers 已真实完成的阶段编号
  * @returns 自然语言文本；总纲为空时明确指出必须先派工 arc-architect
  */
-export function renderAgentStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU): string {
+export function renderAgentStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU, completedStageNumbers: readonly number[] = []): string {
   const head = `当前修订号=${snapshot.revisions.storyArc}`;
   const active = snapshot.storyArc.filter(entry => !entry.retired);
   if (!active.length) return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步，必须先派工 arc-architect 立总纲。`;
   const sorted = [...active].sort(compareStoryArc_ACU);
-  return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}`);
+  return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`);
 }
 
 function renderHookFull_ACU(hook: AgentHookEntry_ACU): string {
@@ -484,6 +526,7 @@ export function renderAgentConstraintsByIds_ACU(snapshot: AgentModuleSnapshot_AC
 /**
  * 按 ID 精读故事总纲（含已废止条目）；不传 ID 则输出全部活跃条目，支撑 `$STORY_ARC` / `$STORY_ARC:ID1,ID2`。
  */
-export function renderAgentStoryArcByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
-  return renderModuleEntries_ACU({ label: '故事总纲', revision: snapshot.revisions.storyArc, entries: snapshot.storyArc, render: renderStoryArcEntry_ACU }, ids);
+export function renderAgentStoryArcByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[], completedStageNumbers: readonly number[] = []): string {
+  const entries = renderModuleEntries_ACU({ label: '故事总纲', revision: snapshot.revisions.storyArc, entries: snapshot.storyArc, render: renderStoryArcEntry_ACU }, ids);
+  return ids?.length ? entries : `${entries}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`;
 }

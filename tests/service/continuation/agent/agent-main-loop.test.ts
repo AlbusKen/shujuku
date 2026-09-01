@@ -55,8 +55,8 @@ const nextTurnContext_ACU = () => {
 const snapshotWithArc_ACU = (): AgentModuleSnapshot_ACU => {
   const snapshot = buildEmptyAgentModuleSnapshot_ACU();
   snapshot.storyArc = [
-    { id: 'A1', scope: 'story', title: '禁区真相', direction: '主角查明禁区吞人的真相', escalation: '从个人求生抬到与守门人体系对抗', withheld: '守门人是主角失踪的兄长', status: 'active', stageNumbers: [1], retired: false, retiredReason: '' },
-    { id: 'A2', scope: 'volume', title: '第一卷·试探', direction: '摸清禁区门禁规则', escalation: '收在主角第一次被守门人识破', withheld: '晶屑的真实来源', status: 'active', stageNumbers: [1, 2], retired: false, retiredReason: '' },
+    { id: 'A1', scope: 'story', title: '禁区真相', direction: '主角查明禁区吞人的真相', escalation: '从个人求生抬到与守门人体系对抗', withheld: '守门人是主角失踪的兄长', status: 'active', stageNumbers: [1], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' },
+    { id: 'A2', scope: 'volume', title: '第一卷·试探', direction: '摸清禁区门禁规则', escalation: '收在主角第一次被守门人识破', withheld: '晶屑的真实来源', status: 'active', stageNumbers: [1, 2], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' },
   ];
   snapshot.revisions.storyArc = 1;
   return snapshot;
@@ -100,14 +100,15 @@ function harness_ACU(options: {
   snapshot?: AgentModuleSnapshot_ACU;
   isCurrent?: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   context?: () => any;
+  worldbook?: any;
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU> | AgentOutlineOpResult_ACU;
-  applyOutlineEdits?: (edits: any[]) => Promise<{ summary: string }> | { summary: string };
   withoutApplyOutline?: boolean;
   conversation?: AgentConversationSnapshot_ACU;
   historyTokenBudget?: number;
   countTokens?: (text: string) => Promise<number>;
   apiPresetMode?: 'current' | 'fixed';
-  agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
+  agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
+  taskId?: string;
 }): Harness_ACU {
   const mainReplies = [...options.mainReplies];
   const subReplies = [...(options.subReplies ?? [])];
@@ -124,6 +125,7 @@ function harness_ACU(options: {
 
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
+    resolveAgentApiPreset: (() => preset_ACU) as any,
     callInternalAi: async messages => { subCalls.push(messages); return subReplies.shift() ?? '{"summary":"空","recommendation":"随便推进"}'; },
   });
 
@@ -152,7 +154,7 @@ function harness_ACU(options: {
       conversationWrites.push(conversation);
       return true;
     },
-    loadWorldbook: async () => buildEmptyAgentWorldbookSnapshot_ACU(true),
+    loadWorldbook: async () => options.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(true),
     budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1, ...options.budget },
     countTokens: options.countTokens,
   });
@@ -169,7 +171,7 @@ function harness_ACU(options: {
   const request: ContinuationAgentTurnPlanRequest_ACU = {
     settings,
     readContext: () => contextFactory(),
-    createInternalRequestIdentity: attempt => ({ taskId: 'task-1', stageId: 'stage-1', turnId: 'turn-2', attemptId: `a-${attempt}`, source: 'turn_instruction' }) as any,
+    createInternalRequestIdentity: attempt => ({ taskId: options.taskId ?? 'task-1', stageId: 'stage-1', turnId: 'turn-2', attemptId: `a-${attempt}`, source: 'turn_instruction' }) as any,
     isInternalRequestCurrent: options.isCurrent ?? (() => true),
     applyOutline: options.withoutApplyOutline
       ? undefined
@@ -177,12 +179,6 @@ function harness_ACU(options: {
           outlineCalls.push(instruction);
           const handler = options.applyOutline ?? (() => ({ op: 'revise' as const, requiresReview: false, stopped: null, summary: '已改写大纲' }));
           return handler(instruction);
-        },
-    applyOutlineEdits: options.withoutApplyOutline
-      ? undefined
-      : async edits => {
-          const handler = options.applyOutlineEdits ?? (() => ({ summary: `已按工具编辑改写大纲（${edits.length} 处）` }));
-          return handler(edits);
         },
   };
 
@@ -399,11 +395,11 @@ describe('主 Agent read/search 工具批次', () => {
     const h = harness_ACU({
       mainReplies: [
         '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
-        '{"action":"edit_outline","thought":"更新轮次目标","edits":[{"op":"set_turn_goal","turnId":"turn-2","goal":"守门人先露破绽"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"将当前轮目标调整为守门人先露破绽"}]}',
         '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
         '{"action":"finalize","instruction":"按最新快照写"}',
       ],
-      applyOutlineEdits: () => ({ summary: '已按工具编辑改写大纲（1 处）' }),
+      applyOutline: () => ({ op: 'revise', requiresReview: false, stopped: null, summary: '大纲已由架构师维护' }),
     });
 
     const result = await h.planner.plan(h.request);
@@ -477,6 +473,9 @@ describe('主 Agent 提示词装配', () => {
     expect(historyIndex).toBeGreaterThan(storyIndex);
     // 运行时快照是会话消息：排在历史通告之后、预填充之前，骨架本身不再重算这段。
     expect(runtimeIndex).toBeGreaterThan(historyIndex);
+    expect(messages[runtimeIndex].content).toContain('【完整当前阶段大纲】');
+    expect(messages[runtimeIndex].content).toContain('阶段 2：禁区试探');
+    expect(messages[runtimeIndex].content).toContain('大纲是计划，不是已经发生的事实');
     expect(messages[runtimeIndex].content.startsWith('【运行时快照】')).toBe(true);
     expect(lastMessage_ACU(messages).role).toBe('assistant');
     expect(lastMessage_ACU(messages).content.endsWith('"thought": "')).toBe(true);
@@ -613,6 +612,156 @@ describe('主 Agent 循环收敛', () => {
     expect(readAgentRunState_ACU('chat-resume', 'task-1', 'stage-1#0#turn-2')).toBeNull();
   });
 
+  it('终审关闭时 finalize 沿用原交付路径，不调用 final-reviewer', async () => {
+    const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"不审查直接交付"}'] });
+    h.request.settings.finalReview.enabled = false;
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('不审查直接交付');
+    expect(h.subCalls).toHaveLength(0);
+    expect(h.conversation().messages.some(message => message.digest === '发送前终审反馈')).toBe(false);
+  });
+
+  it('首次 finalize 回灌终审结论，终审后裁决的 finalize 直接交付且不递归审查', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"finalize","instruction":"主角带着晶屑离开铁门"}',
+        '{"action":"finalize","instruction":"主角只在铁门前观察晶屑"}',
+      ],
+      subReplies: [JSON.stringify({
+        verdict: 'revise',
+        summary: '晶屑不能带离铁门。',
+        emotionFindings: [],
+        worldFindings: ['晶屑不能带离铁门。'],
+        logicFindings: [],
+        requiredFixes: ['保留铁门限制。'],
+        preserve: ['守门人的认知边界。'],
+      })],
+      worldbook: {
+        available: true,
+        entries: [{ bookName: '设定集', uid: '7', title: '晶屑设定', keys: ['晶屑'], constant: false, content: '晶屑不能带离铁门。', tokens: 8 }],
+      },
+    });
+    h.request.settings.finalReview.enabled = true;
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('主角只在铁门前观察晶屑');
+    expect(h.subCalls).toHaveLength(1);
+    expect(h.mainCalls).toHaveLength(2);
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('发送前终审反馈');
+    expect(h.conversation().messages.some(message => message.digest === '发送前终审反馈' && message.text.includes('晶屑不能带离铁门。'))).toBe(true);
+    const telemetry = readAgentSessionLog_ACU().find(entry => entry.title.includes('发送前终审遥测'));
+    expect(telemetry?.detail).toContain('初始世界书命中：1 条（设定集:7）');
+    expect(telemetry?.detail).toContain('独立读取：');
+    expect(telemetry?.detail).toContain('工具轮：0');
+    expect(telemetry?.detail).not.toContain('晶屑不能带离铁门。');
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('终审反馈后的主 Agent 动作') && entry.detail.includes('协议动作：finalize'))).toBe(true);
+  });
+
+  it('终审调用失败时回灌诊断并保留裁决机会，不静默放行首次候选', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"finalize","instruction":"未经验证的候选"}',
+        '{"action":"finalize","instruction":"终审失败后仍需显式裁决的指导"}',
+      ],
+      subReplies: ['{}', '{}'],
+    });
+    h.request.settings.finalReview.enabled = true;
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('终审失败后仍需显式裁决的指导');
+    expect(h.subCalls.length).toBeGreaterThan(0);
+    expect(h.conversation().messages.some(message => message.digest === '发送前终审反馈' && message.text.includes('终审调用失败'))).toBe(true);
+    expect(h.mainCalls).toHaveLength(2);
+  });
+
+  it('终审反馈已就绪时中断恢复不重复调用，恢复后的裁决 finalize 直接交付', async () => {
+    const identity = (attempt: number) => ({ chatIdentity: 'chat-final-review-resume', taskId: 'task-1', stageId: 'stage-1', turnId: 'turn-2', attemptId: `final-${attempt}`, source: 'turn_instruction' }) as any;
+    const first = harness_ACU({
+      mainReplies: [
+        '{"action":"finalize","instruction":"第一次候选"}',
+        '协议非法输出一',
+        '协议非法输出二',
+      ],
+      subReplies: [JSON.stringify({ verdict: 'revise', summary: '需要修订', emotionFindings: [], worldFindings: [], logicFindings: [], requiredFixes: ['修订候选'], preserve: [] })],
+    });
+    first.request.settings.finalReview.enabled = true;
+    first.request.createInternalRequestIdentity = identity;
+    await expect(first.planner.plan(first.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID' } });
+    expect(first.subCalls).toHaveLength(1);
+
+    // 模拟页面重载：进程内运行缓存清空，只能依赖聊天会话里的终审状态与反馈恢复。
+    resetAgentRunCacheForTests_ACU();
+    const second = harness_ACU({ conversation: first.conversation(), mainReplies: ['{"action":"finalize","instruction":"恢复后裁决指导"}'] });
+    second.request.settings.finalReview.enabled = true;
+    second.request.createInternalRequestIdentity = identity;
+    const result = await second.planner.plan(second.request);
+
+    expect(result.instruction).toBe('恢复后裁决指导');
+    expect(second.subCalls).toHaveLength(0);
+    expect(second.mainCalls[0].map(message => message.content).join('\n')).toContain('发送前终审反馈');
+  });
+
+  it('相同游标的新任务不继承旧任务的终审状态', async () => {
+    const oldIdentity = (attempt: number) => ({ chatIdentity: 'chat-final-review-task-boundary', taskId: 'task-old', stageId: 'stage-1', turnId: 'turn-2', attemptId: `old-${attempt}`, source: 'turn_instruction' }) as any;
+    const first = harness_ACU({
+      mainReplies: [
+        '{"action":"finalize","instruction":"旧任务候选"}',
+        '协议非法输出一',
+        '协议非法输出二',
+      ],
+      subReplies: [JSON.stringify({ verdict: 'revise', summary: '旧任务需要修订', emotionFindings: [], worldFindings: [], logicFindings: [], requiredFixes: ['修订旧候选'], preserve: [] })],
+    });
+    first.request.settings.finalReview.enabled = true;
+    first.request.createInternalRequestIdentity = oldIdentity;
+    await expect(first.planner.plan(first.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID' } });
+    expect(first.subCalls).toHaveLength(1);
+
+    resetAgentRunCacheForTests_ACU();
+    const newIdentity = (attempt: number) => ({ chatIdentity: 'chat-final-review-task-boundary', taskId: 'task-new', stageId: 'stage-1', turnId: 'turn-2', attemptId: `new-${attempt}`, source: 'turn_instruction' }) as any;
+    const second = harness_ACU({
+      conversation: first.conversation(),
+      mainReplies: [
+        '{"action":"finalize","instruction":"新任务候选"}',
+        '{"action":"finalize","instruction":"新任务裁决后的指导"}',
+      ],
+      subReplies: [JSON.stringify({ verdict: 'pass', summary: '新任务已审查', emotionFindings: [], worldFindings: [], logicFindings: [], requiredFixes: [], preserve: [] })],
+    });
+    second.request.settings.finalReview.enabled = true;
+    second.request.createInternalRequestIdentity = newIdentity;
+    const result = await second.planner.plan(second.request);
+
+    expect(result.instruction).toBe('新任务裁决后的指导');
+    expect(second.subCalls).toHaveLength(1);
+    expect(second.conversation().messages.some(message => message.digest === '发送前终审反馈' && message.text.includes('新任务已审查'))).toBe(true);
+  });
+
+  it('终审租约失效时不把过期结果回灌为普通失败，恢复后不重付费并回灌中断诊断', async () => {
+    const identity = (attempt: number) => ({ chatIdentity: 'chat-final-review-stale', taskId: 'task-1', stageId: 'stage-1', turnId: 'turn-2', attemptId: `stale-${attempt}`, source: 'turn_instruction' }) as any;
+    const first = harness_ACU({
+      mainReplies: ['{\"action\":\"finalize\",\"instruction\":\"会过期的候选\"}'],
+      subReplies: [JSON.stringify({ verdict: 'revise', summary: '不应采纳', emotionFindings: [], worldFindings: [], logicFindings: [], requiredFixes: [], preserve: [] })],
+      isCurrent: identityValue => identityValue.source !== 'agent_subagent',
+    });
+    first.request.settings.finalReview.enabled = true;
+    first.request.createInternalRequestIdentity = identity;
+
+    await expect(first.planner.plan(first.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_INTERNAL_REQUEST_STALE' } });
+    expect(first.conversation().messages.some(message => message.digest === '发送前终审反馈')).toBe(false);
+
+    const second = harness_ACU({ conversation: first.conversation(), mainReplies: ['{\"action\":\"finalize\",\"instruction\":\"恢复后的显式裁决\"}'] });
+    second.request.settings.finalReview.enabled = true;
+    second.request.createInternalRequestIdentity = identity;
+    const result = await second.planner.plan(second.request);
+
+    expect(result.instruction).toBe('恢复后的显式裁决');
+    expect(second.subCalls).toHaveLength(0);
+    expect(second.conversation().messages.some(message => message.digest === '发送前终审中断' && message.text.includes('未将其视为通过'))).toBe(true);
+  });
+
   it('协议非法时按重试上限重试，重试仍失败则以不可重试错误终止', async () => {
     const h = harness_ACU({ mainReplies: ['我不想输出 JSON', '{"action":"write_story"}'] });
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID', retryable: false } });
@@ -647,6 +796,87 @@ describe('主 Agent 循环收敛', () => {
     expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '没有被采纳')].content).toContain('预算最后一轮');
   });
 
+  it('末轮无可执行大纲且常规配额锁死时，outline-architect 可使用一次保留容量后收敛交付', async () => {
+    const h = harness_ACU({
+      context: preOutlineContext_ACU,
+      snapshot: snapshotWithArc_ACU(),
+      budget: { maxIterations: 1, maxDelegations: 0, maxSameAgent: 0 },
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"根据当前卷台阶创建首个阶段大纲"}]}',
+        '{"action":"finalize","instruction":"按新阶段大纲推进"}',
+      ],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建首个阶段大纲' }),
+    });
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('按新阶段大纲推进');
+    expect(h.outlineCalls).toEqual(['根据当前卷台阶创建首个阶段大纲']);
+    expect(h.mainCalls).toHaveLength(2);
+    expect(h.mainCalls[0][findIndex_ACU(h.mainCalls[0], '本轮预算状态')].content).toContain('FINAL_MAINTENANCE_RESERVE');
+    const latestBudget = h.mainCalls[1].filter(message => message.content.includes('本轮预算状态')).at(-1)?.content ?? '';
+    expect(latestBudget).toContain('CONVERGENCE_ONLY');
+  });
+
+  it('同一权威游标的末轮保留容量不能执行第二个 outline-architect 或普通代理', async () => {
+    const h = harness_ACU({
+      context: preOutlineContext_ACU,
+      snapshot: snapshotWithArc_ACU(),
+      budget: { maxIterations: 1, maxDelegations: 0, maxSameAgent: 0 },
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"创建阶段大纲"},{"agentName":"outline-architect","prompt":"再次改写阶段大纲"},{"agentName":"mainline-planner","prompt":"不应执行的策划"}]}',
+        '{"action":"finalize","instruction":"仅按首份大纲推进"}',
+      ],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建首个阶段大纲' }),
+    });
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('仅按首份大纲推进');
+    expect(h.outlineCalls).toEqual(['创建阶段大纲']);
+    expect(h.subCalls).toHaveLength(0);
+    const feedback = h.mainCalls[1].map(message => message.content).join('\n');
+    expect(feedback).toContain('派工总数已达上限 0 次');
+    expect(feedback).toContain('末轮保留容量只允许 outline-architect');
+  });
+
+  it('总纲版本或结算水位变化后切换权威游标，不受旧派工账本锁定', async () => {
+    const arcChanged = harness_ACU({
+      snapshot: snapshotWithArc_ACU(),
+      budget: { maxDelegations: 1 },
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"依据新证据修订卷台阶"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按新卷台阶维护阶段大纲"}]}',
+        '{"action":"finalize","instruction":"按更新后的阶段大纲推进"}',
+      ],
+      subReplies: [JSON.stringify({ summary: '已更新卷台阶', delta: { storyArc: [{ action: 'patch', id: 'A2', escalation: '把试探升级为公开对抗' }] } })],
+      applyOutline: () => ({ op: 'revise', requiresReview: false, stopped: null, summary: '已按新卷台阶维护阶段大纲' }),
+    });
+    const arcResult = await arcChanged.planner.plan(arcChanged.request);
+    expect(arcResult.instruction).toBe('按更新后的阶段大纲推进');
+    expect(arcChanged.outlineCalls).toEqual(['按新卷台阶维护阶段大纲']);
+
+    const settledChanged = harness_ACU({
+      budget: { maxDelegations: 1 },
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算未结算历史","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]}]}',
+        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"基于已结算事实策划"}]}',
+        '{"action":"finalize","instruction":"按结算后的证据推进"}',
+      ],
+      subReplies: [
+        JSON.stringify({ summary: '已结算历史', delta: { hooks: [{ action: 'upsert', id: 'H1', summary: '黑色晶屑', status: 'planted', importance: 'high', plantedIndex: 3 }] } }),
+        JSON.stringify({ summary: '主线建议', recommendation: '先验证晶屑来源', mustPreserve: [], risks: [] }),
+      ],
+    });
+    const settledResult = await settledChanged.planner.plan(settledChanged.request);
+    expect(settledResult.instruction).toBe('按结算后的证据推进');
+    expect(settledChanged.subCalls).toHaveLength(2);
+  });
+
   it('block 以专用错误码终止，并带上未解决项', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"block","reason":"角色表缺失","unresolved":["林瑶当前状态未知"]}'] });
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({
@@ -672,7 +902,7 @@ describe('故事总纲门禁', () => {
         '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"围绕第一卷台阶排阶段"}]}',
         '{"action":"finalize","instruction":"按新大纲写"}',
       ],
-      subReplies: ['{"summary":"已立全书方向与第一卷台阶","delta":{"storyArc":[{"action":"upsert","id":"A1","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active"}]}}'],
+      subReplies: ['{"summary":"已立全书方向与第一卷台阶","delta":{"storyArc":[{"action":"upsert","id":"A1","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active"},{"action":"upsert","id":"VOL-01","scope":"volume","title":"第一卷·试探","direction":"摸清禁区门禁规则","escalation":"收在主角第一次被守门人识破","withheld":"晶屑的真实来源","status":"active"}]}}'],
       applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建第 1 阶段大纲「禁区试探」（共 6 轮）' }),
     });
     const original = h.request.applyOutline!;
@@ -687,6 +917,29 @@ describe('故事总纲门禁', () => {
     expect(rejection).toContain('本次未消耗派工额度');
     // 门禁不吃额度：三次派工里只有两次记账，maxDelegations=4 时仍够用。
     expect(h.mainCalls[3].map(message => message.content).join('\n')).toContain('已创建第 1 阶段大纲');
+  });
+
+  it('既有卷全部完成时拒绝 outline-architect，必须先由 arc-architect 扩充 active 卷', async () => {
+    const snapshot = snapshotWithArc_ACU();
+    snapshot.storyArc[1] = {
+      ...snapshot.storyArc[1],
+      status: 'done',
+      completionStageNumber: 1,
+      completionState: '第一卷冲突已收束，守门人身份留下后续线索',
+    };
+    const h = harness_ACU({
+      snapshot,
+      context: preOutlineContext_ACU,
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"直接创建下一阶段"}]}',
+        '{"action":"block","reason":"需要先扩充总纲卷","unresolved":["没有 active 卷"]}',
+      ],
+    });
+
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_BLOCKED' } });
+    expect(h.outlineCalls).toEqual([]);
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('既有卷已全部完成');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('本次未消耗派工额度');
   });
 
   it('arc-architect 的写入只换总纲快照，不推进结算水位', async () => {
@@ -789,44 +1042,19 @@ describe('大纲子代理派工', () => {
     expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('正文重试轮次不允许改写大纲');
   });
 
-  it('edit_outline 工具编辑成功后结果回灌，同循环继续交付', async () => {
-    const received: any[] = [];
+  it('edit_outline 被拒后回灌原因，并通过 outline-architect 维护大纲', async () => {
     const h = harness_ACU({
       mainReplies: [
         '{"action":"edit_outline","thought":"只需微调","edits":[{"op":"set_turn_goal","turnId":"turn-2","goal":"守门人先露破绽"}]}',
-        '{"action":"finalize","instruction":"按微调后的目标写"}',
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"将当前轮目标调整为守门人先露破绽"}]}',
+        '{"action":"finalize","instruction":"按维护后的大纲写"}',
       ],
-      applyOutlineEdits: edits => { received.push(...edits); return { summary: '已按工具编辑改写大纲（1 处）' }; },
+      applyOutline: () => ({ op: 'revise', requiresReview: false, stopped: null, summary: '大纲已由架构师维护' }),
     });
     const result = await h.planner.plan(h.request);
-    expect(result.instruction).toBe('按微调后的目标写');
-    expect(received).toEqual([{ op: 'set_turn_goal', turnId: 'turn-2', goal: '守门人先露破绽' }]);
-    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('已按工具编辑改写大纲');
-  });
-
-  it('edit_outline 校验被拒时拒绝回灌而不中止，重试轮则直接拒绝', async () => {
-    const h = harness_ACU({
-      mainReplies: [
-        '{"action":"edit_outline","edits":[{"op":"remove_turn","turnId":"turn-1"}]}',
-        '{"action":"finalize","instruction":"保持原大纲交付"}',
-      ],
-      applyOutlineEdits: () => {
-        throw new ContinuationValidationError_ACU({ code: 'CONTINUATION_AGENT_WRITE_REJECTED', phase: 'agent_loop', message: '编辑不能移除当前轮次', retryable: false } as any);
-      },
-    });
-    const result = await h.planner.plan(h.request);
-    expect(result.instruction).toBe('保持原大纲交付');
-    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('编辑不能移除当前轮次');
-
-    const retryRun = harness_ACU({
-      withoutApplyOutline: true,
-      mainReplies: [
-        '{"action":"edit_outline","edits":[{"op":"set_turn_goal","turnId":"turn-2","goal":"改"}]}',
-        '{"action":"finalize","instruction":"交付"}',
-      ],
-    });
-    await retryRun.planner.plan(retryRun.request);
-    expect(retryRun.mainCalls[1].map(message => message.content).join('\n')).toContain('正文重试轮次不允许修改大纲');
+    expect(result.instruction).toBe('按维护后的大纲写');
+    expect(h.outlineCalls).toEqual(['将当前轮目标调整为守门人先露破绽']);
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('大纲调整请派工 outline-architect');
   });
 
   it('大纲操作先于同波次其他派工执行，普通派工照常并发', async () => {

@@ -194,6 +194,12 @@ export interface AgentStoryArcEntry_ACU {
   status: AgentStoryArcStatus_ACU;
   /** 已由哪些阶段承载，作为进度锚。 */
   stageNumbers: number[];
+  /** 卷完成时引用的真实完成阶段；未完成卷为 null。 */
+  completionStageNumber: number | null;
+  /** 卷末实际达到的状态；未完成卷为空字符串。 */
+  completionState: string;
+  /** 在所有既有卷完成后追加本卷时，由既有结果推出的依据。 */
+  continuationRationale: string;
   retired: boolean;
   retiredReason: string;
 }
@@ -224,6 +230,9 @@ export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-mainta
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
 export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review';
+
+/** 最终审查是 finalize 前由运行时受控触发的内部代理，不进入主 Agent 可委派名称集合。 */
+export const AGENT_FINAL_REVIEWER_NAME_ACU = 'final-reviewer';
 
 /**
  * 大纲子代理的目录名。它不走通用子代理运行时：主循环拦截对它的派工，
@@ -309,13 +318,7 @@ export type AgentOutlineEditOp_ACU =
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
-export interface AgentOutlineEditAction_ACU {
-  kind: 'edit_outline';
-  thought: string;
-  edits: AgentOutlineEditOp_ACU[];
-}
-
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentOutlineEditAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU;
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU;
 
 /** 运行时硬边界。预留最后一轮让主 Agent 有机会正常交付而不是被突然掐断。 */
 export interface AgentRunBudget_ACU {
@@ -368,6 +371,9 @@ export interface AgentStoryArcPatch_ACU {
   withheld?: string;
   status?: AgentStoryArcStatus_ACU;
   stageNumbers?: number[];
+  completionStageNumber?: number | null;
+  completionState?: string;
+  continuationRationale?: string;
 }
 
 export interface AgentStoryArcDeltaItem_ACU {
@@ -380,6 +386,9 @@ export interface AgentStoryArcDeltaItem_ACU {
   withheld: string;
   status: AgentStoryArcStatus_ACU;
   stageNumbers: number[];
+  completionStageNumber: number | null;
+  completionState: string;
+  continuationRationale: string;
   reason: string;
 }
 
@@ -450,6 +459,17 @@ export interface AgentReviewerOutput_ACU {
   fixes: string[];
 }
 
+/** 发送前最终审查的完整输出；只读反馈由 #p5 状态机回灌主 Agent。 */
+export interface AgentFinalReviewerOutput_ACU {
+  verdict: AgentReviewVerdict_ACU;
+  summary: string;
+  emotionFindings: string[];
+  worldFindings: string[];
+  logicFindings: string[];
+  requiredFixes: string[];
+  preserve: string[];
+}
+
 /** 主 Agent 循环最终交付给宿主装配器的结果，字段形状与旧生成器保持一致。 */
 export interface ContinuationAgentTurnPlanResult_ACU {
   instruction: string;
@@ -466,8 +486,6 @@ export interface ContinuationAgentTurnPlanRequest_ACU {
   isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   /** 大纲操作回调，由编排器在租约内执行。正文重试轮不注入，此时大纲派工被拒绝回灌。 */
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>;
-  /** 大纲句级编辑回调，由编排器在租约内执行。正文重试轮不注入。 */
-  applyOutlineEdits?: (edits: AgentOutlineEditOp_ACU[]) => Promise<{ summary: string }>;
   signal?: AbortSignal | null;
 }
 

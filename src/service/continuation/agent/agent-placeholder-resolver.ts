@@ -411,7 +411,7 @@ export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): 
   if (!execution.revision || !execution.node || !execution.turn) {
     return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
   }
-  // 轮次/节点都带 [ID] 前缀：edit_outline 协议按 nodeId/turnId 定位，模型必须能从渲染里拿到编辑目标。
+  // 轮次与节点都带 [ID] 前缀：便于主 Agent 在委派 outline-architect 时精确引用待维护目标。
   const turns = execution.node.turns
     .map((turn, index) => `${index + 1}. [${turn.id}]（${turn.pacing}）${turn.goal}${turn.id === execution.turn!.id ? '  ← 本轮' : ''}`)
     .join('\n');
@@ -514,7 +514,10 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
 
   const storyArcIds = splitIdSuffix_ACU(normalized, '$STORY_ARC');
   if (storyArcIds !== null) {
-    return { title: storyArcIds.length ? `故事总纲条目 ${storyArcIds.join('、')}` : '故事总纲（全部活跃条目）', text: renderAgentStoryArcByIds_ACU(context.moduleSnapshot, storyArcIds.length ? storyArcIds : undefined) };
+    const completedStageNumbers = context.execution.task.stages
+      .filter(stage => stage.status === 'completed')
+      .map(stage => stage.stageNumber);
+    return { title: storyArcIds.length ? `故事总纲条目 ${storyArcIds.join('、')}` : '故事总纲（全部活跃条目）', text: renderAgentStoryArcByIds_ACU(context.moduleSnapshot, storyArcIds.length ? storyArcIds : undefined, completedStageNumbers) };
   }
   const hookIds = splitIdSuffix_ACU(normalized, '$HOOKS_LEDGER');
   if (hookIds !== null) {

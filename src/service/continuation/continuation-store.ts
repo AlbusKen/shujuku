@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
 import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU } from './agent/agent-defaults';
 import {
@@ -111,6 +111,7 @@ function validateAgentPrompts_ACU(raw: unknown): ContinuationSettings_ACU['agent
     mainlinePlanner: validateContinuationPromptSegments_ACU(raw.mainlinePlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     beatPlanner: validateContinuationPromptSegments_ACU(raw.beatPlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
+    finalReviewer: validateContinuationPromptSegments_ACU(raw.finalReviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
   };
 }
 
@@ -230,6 +231,47 @@ function migrateV21AgentPromptsToV22_ACU(raw: unknown): unknown {
   return changed ? { ...raw, arcArchitect } : raw;
 }
 
+/** V22 → V23 对齐卷生命周期契约，只替换未改写的默认规则片段。 */
+function migrateV22AgentPromptsToV23_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const replaceDefaults = (segments: unknown, replacements: ReadonlyMap<string, string>): unknown => {
+    if (!Array.isArray(segments)) return segments;
+    let changed = false;
+    const next = segments.map(segment => {
+      if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
+      let content = segment.content;
+      for (const [from, to] of replacements) content = content.replace(from, to);
+      if (content === segment.content) return segment;
+      changed = true;
+      return { ...segment, content };
+    });
+    return changed ? next : segments;
+  };
+  const arcArchitect = replaceDefaults(raw.arcArchitect, new Map<string, string>([
+    ['"stageNumbers":[已承载的阶段编号],"reason":"retire 时必填"', '"stageNumbers":[已承载的阶段编号],"completionStageNumber":"done 时为已完成阶段编号，否则 null","completionState":"done 时达到的卷末状态，否则空字符串","continuationRationale":"续卷时由前卷后果推出的依据，否则空字符串","reason":"retire 时必填"'],
+    ['7. 阶段完成后回写进度用 patch：{"action":"patch","id":"VOL-01","stageNumbers":[1,2,3]}。当前卷台阶走完时，把它 patch 成 done，同时把下一卷 patch 成 active。\n8. patch 只带要改的字段，其余字段保持原样；新增或整条重写才用 upsert。', '7. stage 是阶段大纲，volume 是长程卷台阶；一个 active 卷可由多份阶段大纲渐进承载。每完成一份阶段只 patch 当前 active 卷的 stageNumbers，不能因单个阶段完成就把卷设为 done。\n8. 仅当真实正文已达到本卷 escalation 的可判定收束状态时，才可把 active 卷 patch 为 done；同一 patch 必须给 completionStageNumber、completionState，且该阶段已真实完成并已登记在 stageNumbers。状态只能 planned→active→done；done 卷不可重激活。\n9. 所有既有卷 done 而用户继续写作时，先在末尾 upsert 一个 active 新卷，并以 continuationRationale 说明它如何由最后一卷的结果、代价、关系变化或未解决问题推出；之后才由 outline-architect 创建阶段大纲。\n10. patch 只带要改的字段，其余字段保持原样；新增或整条重写才用 upsert。'],
+  ]));
+  const main = replaceDefaults(raw.main, new Map<string, string>([
+    ['此外，剧情实际走向已越出总纲台阶、底牌被正文提前翻开、或当前卷目标事实上已收束/明显提前推迟时，同样必须派它维护总纲，不要拖到下一阶段。', '此外，剧情实际走向已越出总纲台阶、底牌被正文提前翻开、或当前卷已经由真实完成阶段达到可判定收束状态时，同样必须派它维护总纲。单个阶段完成只回写当前 active 卷的 stageNumbers；所有既有卷完成而用户继续写时，先派 arc-architect 依据最后一卷的后果扩充一个 active 新卷，再派 outline-architect，不要拖到下一阶段。'],
+  ]));
+  return arcArchitect === raw.arcArchitect && main === raw.main ? raw : { ...raw, arcArchitect, main };
+}
+
+function migrateV22OutlinePromptToV23_ACU(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  const oldRule = '8. 让阶段目标落在故事总纲当前推进中的那一级台阶内，不触碰总纲里标注为禁止提前释放的底牌，并在阶段末留下跨阶段悬念。';
+  const nextRule = '8. 让阶段目标只承载故事总纲当前 active 卷尚未完成的一段，不触碰总纲里标注为禁止提前释放的底牌；单个阶段结束只留下跨阶段悬念，不擅自收束整卷。只有活动卷规划上下文显示卷级收束条件已被真实完成阶段满足时，才交由 arc-architect 切卷；所有既有卷完成时先扩充后续 active 卷。';
+  let changed = false;
+  const outlinePrompt = raw.map(segment => {
+    if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
+    const content = segment.content.replace(oldRule, nextRule);
+    if (content === segment.content) return segment;
+    changed = true;
+    return { ...segment, content };
+  });
+  return changed ? outlinePrompt : raw;
+}
+
 /**
  * 校验七个角色的 AI 渠道配置。
  * @param raw 持久化里的 agentApiPresets 字段
@@ -272,6 +314,16 @@ function validateReadTokenBudget_ACU(raw: unknown): number | string {
   fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
 }
 
+function validateFinalReviewSettings_ACU(raw: unknown): ContinuationSettings_ACU['finalReview'] {
+  if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.finalReview 必须是对象');
+  requireKeys_ACU(raw, ['enabled', 'readTokenBudget', 'maxExtraReads'], 'settings.finalReview');
+  return {
+    enabled: requireBoolean_ACU(raw.enabled, 'settings.finalReview.enabled'),
+    readTokenBudget: validateReadTokenBudget_ACU(raw.readTokenBudget),
+    maxExtraReads: requireBoundedInteger_ACU(raw.maxExtraReads, 'settings.finalReview.maxExtraReads', 10),
+  };
+}
+
 /**
  * 校验 Agent 运行预算。六项各有边界：上界防止「设个大数等于关闭护栏」，
  * 下界区分「必须至少一次」（迭代/同代理/并发）与「0 即显式关闭」（派工/读取/工具轮）。
@@ -311,6 +363,9 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   // 所以先就地迁移：丢掉退役字段、补上 Agent 提示词，再进入正常校验。
   if (Object.prototype.hasOwnProperty.call(raw, 'turnInstructionPrompt')) delete raw.turnInstructionPrompt;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentPrompts')) raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
+  if (isRecord_ACU(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
+    raw.agentPrompts.finalReviewer = buildDefaultContinuationAgentPrompts_ACU().finalReviewer;
+  }
   // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets')) raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
   // 主 Agent 会话改造之前的信封没有这两项；补默认即无感迁移，不必让用户重建配置。
@@ -323,6 +378,9 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyTailFloors')) raw.storyTailFloors = AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadTokenBudget')) raw.agentReadTokenBudget = AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadFallbackTokens')) raw.agentReadFallbackTokens = AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU;
+  if (!Object.prototype.hasOwnProperty.call(raw, 'finalReview')) {
+    raw.finalReview = { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxExtraReads: CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU };
+  }
   // 节奏规则从「每阶段固定低压占比」改为「阶段形态 + 跨阶段连续高压上限」，旧键已无对应语义：
   // 直接丢掉并补新键的默认值，保留旧值反而会把用户配过的比例误当成新语义使用。
   if (Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio')) delete raw.downtimeTurnRatio;
@@ -338,7 +396,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   // 总纲卷数与阶段轮次是两条独立的尺度。旧信封没有卷数计划时默认采用中线档。
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyArcVolumePlan')) raw.storyArcVolumePlan = 'medium';
   if (!Object.prototype.hasOwnProperty.call(raw, 'customStoryArcVolumeCount')) raw.customStoryArcVolumeCount = null;
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -359,29 +417,43 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
     agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
     agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU;
+    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
+    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
   } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
     agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
     agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
     agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
     agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU;
+    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
+    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
   } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
     agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
     agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
     agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU;
+    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
+    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
   } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU) {
     agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
     agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU;
+    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
+    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
   } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU) {
     agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU;
-  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU) {
+    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
+    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
+  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU) {
+    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
+    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
+  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
   }
 
   return {
@@ -393,6 +465,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), minGenerationTokens: requireInteger_ACU(raw.minGenerationTokens, 'settings.minGenerationTokens', 0), maxConsecutivePressureTurns: requireBoundedInteger_ACU(raw.maxConsecutivePressureTurns, 'settings.maxConsecutivePressureTurns', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU),
     storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
     storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
+    finalReview: validateFinalReviewSettings_ACU(raw.finalReview),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
     agentRunBudget: validateAgentRunBudget_ACU(raw.agentRunBudget),
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),

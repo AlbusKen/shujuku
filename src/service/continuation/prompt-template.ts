@@ -13,6 +13,7 @@ import {
   buildDefaultAgentMainlinePlannerPrompt_ACU,
   buildDefaultAgentMaintainerPrompt_ACU,
   buildDefaultAgentReviewerPrompt_ACU,
+  buildDefaultAgentFinalReviewerPrompt_ACU,
 } from './agent/agent-defaults';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
@@ -44,7 +45,7 @@ const PLACEHOLDER_ALTERNATION_ACU = [...CONTINUATION_PROMPT_PLACEHOLDERS_ACU]
   .sort((left, right) => right.length - left.length)
   .map(token => token.replace(/[$]/g, '\\$'))
   .join('|');
-export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer';
+export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer' | 'agent_final_reviewer';
 type PlaceholderResolver_ACU = () => string | Promise<string | null | undefined> | null | undefined;
 
 function failPrompt_ACU(code: 'CONTINUATION_ENVELOPE_INVALID' | 'CONTINUATION_PROMPT_INVALID' | 'CONTINUATION_PROMPT_EMPTY', phase: ContinuationErrorPhase_ACU, message: string, details?: Record<string, unknown>): never {
@@ -100,5 +101,6 @@ export function restoreContinuationPromptDefault_ACU(settings: ContinuationSetti
   if (kind === 'agent_mainline') agentPrompts.mainlinePlanner = buildDefaultAgentMainlinePlannerPrompt_ACU();
   if (kind === 'agent_beat') agentPrompts.beatPlanner = buildDefaultAgentBeatPlannerPrompt_ACU();
   if (kind === 'agent_reviewer') agentPrompts.reviewer = buildDefaultAgentReviewerPrompt_ACU();
+  if (kind === 'agent_final_reviewer') agentPrompts.finalReviewer = buildDefaultAgentFinalReviewerPrompt_ACU();
   return { ...settings, agentPrompts };
 }

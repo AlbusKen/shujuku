@@ -7,7 +7,7 @@
  * 直接输出完整 JSON，或只续写预填充之后的部分。
  */
 
-import { ContinuationValidationError_ACU, createContinuationError_ACU, STAGE_TURN_PACINGS_ACU, type StageTurnPacing_ACU } from '../model';
+import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import {
   AGENT_HOOK_IMPORTANCES_ACU,
   AGENT_HOOK_STATUSES_ACU,
@@ -17,12 +17,12 @@ import {
   AGENT_STORY_ARC_SCOPES_ACU,
   AGENT_STORY_ARC_STATUSES_ACU,
   type AgentDelegation_ACU,
+  type AgentFinalReviewerOutput_ACU,
   type AgentHookDeltaItem_ACU,
   type AgentHookPatch_ACU,
   type AgentInfoGapDeltaItem_ACU,
   type AgentInfoGapPatch_ACU,
   type AgentMainAction_ACU,
-  type AgentOutlineEditOp_ACU,
   type AgentMaintainerOutput_ACU,
   type AgentModuleDelta_ACU,
   type AgentPlannerOutput_ACU,
@@ -283,47 +283,6 @@ export function parseAgentSubagentToolCalls_ACU(raw: string | null | undefined, 
   return null;
 }
 
-/** 单次 edit_outline 动作里最多允许的编辑操作数。 */
-const OUTLINE_EDIT_LIMIT_ACU = 12;
-
-function parseOutlineEdits_ACU(value: unknown): AgentOutlineEditOp_ACU[] {
-  if (!Array.isArray(value) || !value.length) failProtocol_ACU('edit_outline 动作必须提供非空的 edits 数组');
-  if (value.length > OUTLINE_EDIT_LIMIT_ACU) failProtocol_ACU(`一次 edit_outline 最多 ${OUTLINE_EDIT_LIMIT_ACU} 处编辑；更大的改动请派工 outline-architect`);
-  return value.map((raw, index) => {
-    if (!isRecord_ACU(raw)) failProtocol_ACU(`edits[${index}] 必须是对象`);
-    const op = readText_ACU(raw.op);
-    if (op === 'set_turn_goal') {
-      const turnId = readText_ACU(raw.turnId);
-      const goal = readText_ACU(raw.goal);
-      if (!turnId || !goal) failProtocol_ACU(`edits[${index}] set_turn_goal 需要 turnId 与非空 goal`);
-      return { op, turnId, goal };
-    }
-    if (op === 'insert_turn') {
-      const nodeId = readText_ACU(raw.nodeId);
-      const goal = readText_ACU(raw.goal);
-      const afterTurnId = readText_ACU(raw.afterTurnId) || null;
-      if (!nodeId || !goal) failProtocol_ACU(`edits[${index}] insert_turn 需要 nodeId 与非空 goal`);
-      const pacing = readText_ACU(raw.pacing);
-      if (pacing && !(STAGE_TURN_PACINGS_ACU as readonly string[]).includes(pacing)) {
-        failProtocol_ACU(`edits[${index}] insert_turn 的 pacing 必须是 ${STAGE_TURN_PACINGS_ACU.join(' / ')} 之一，实际收到：${pacing}`);
-      }
-      return pacing ? { op, nodeId, afterTurnId, goal, pacing: pacing as StageTurnPacing_ACU } : { op, nodeId, afterTurnId, goal };
-    }
-    if (op === 'remove_turn') {
-      const turnId = readText_ACU(raw.turnId);
-      if (!turnId) failProtocol_ACU(`edits[${index}] remove_turn 需要 turnId`);
-      return { op, turnId };
-    }
-    if (op === 'set_node_goal') {
-      const nodeId = readText_ACU(raw.nodeId);
-      const goal = readText_ACU(raw.goal);
-      if (!nodeId || !goal) failProtocol_ACU(`edits[${index}] set_node_goal 需要 nodeId 与非空 goal`);
-      return { op, nodeId, goal };
-    }
-    failProtocol_ACU(`edits[${index}].op 必须是 set_turn_goal / insert_turn / remove_turn / set_node_goal 之一，实际收到：${op || '(空)'}`);
-  });
-}
-
 /**
  * 解析主 Agent 的一次协议动作。
  * @param payload 已解析的 JSON 载荷
@@ -336,9 +295,6 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'delegate') {
     if (!allowDelegate) failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
     return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
-  }
-  if (action === 'edit_outline') {
-    return { kind: 'edit_outline', thought, edits: parseOutlineEdits_ACU(payload.edits) };
   }
   if (action === 'finalize') {
     const instruction = readText_ACU(payload.instruction);
@@ -361,7 +317,7 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'read' || action === 'search') {
     return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
   }
-  failProtocol_ACU(`action 必须是 read / search / delegate / edit_outline / finalize / block 之一，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 read / search / delegate / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
 }
 
 function parseCharacterKnowledge_ACU(value: unknown): AgentInfoGapDeltaItem_ACU['characterKnowledge'] {
@@ -489,6 +445,15 @@ function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): Ag
     patch.status = status as AgentStoryArcPatch_ACU['status'];
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'stageNumbers')) patch.stageNumbers = parseStageNumbers_ACU(raw.stageNumbers, `delta.storyArc[${index}].stageNumbers`);
+  if (Object.prototype.hasOwnProperty.call(raw, 'completionStageNumber')) {
+    const value = raw.completionStageNumber;
+    if (value !== null && (!Number.isInteger(value) || (value as number) < 1)) {
+      failProtocol_ACU(`delta.storyArc[${index}].completionStageNumber 必须是从 1 起的整数或 null`);
+    }
+    patch.completionStageNumber = value as number | null;
+  }
+  if (typeof raw.completionState === 'string') patch.completionState = raw.completionState.trim();
+  if (typeof raw.continuationRationale === 'string') patch.continuationRationale = raw.continuationRationale.trim();
   if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 至少要带一个要修改的字段`);
   return patch;
 }
@@ -522,6 +487,9 @@ function parseStoryArcItems_ACU(value: unknown): { items: AgentStoryArcDeltaItem
       withheld: readText_ACU(raw.withheld),
       status: (status || 'planned') as AgentStoryArcDeltaItem_ACU['status'],
       stageNumbers: raw.stageNumbers === undefined ? [] : parseStageNumbers_ACU(raw.stageNumbers, `delta.storyArc[${index}].stageNumbers`),
+      completionStageNumber: raw.completionStageNumber === undefined || raw.completionStageNumber === null ? null : (typeof raw.completionStageNumber === 'number' && Number.isInteger(raw.completionStageNumber) && raw.completionStageNumber >= 1 ? raw.completionStageNumber : failProtocol_ACU(`delta.storyArc[${index}].completionStageNumber 必须是从 1 起的整数或 null`)),
+      completionState: readText_ACU(raw.completionState),
+      continuationRationale: readText_ACU(raw.continuationRationale),
       reason: readText_ACU(raw.reason),
     });
   });
@@ -593,6 +561,23 @@ export function parseAgentReviewerOutput_ACU(payload: Record<string, unknown>): 
     verdict: verdict as AgentReviewerOutput_ACU['verdict'],
     reason: readText_ACU(payload.reason),
     fixes: readTextList_ACU(payload.fixes),
+  };
+}
+
+/** 解析发送前最终审查的结构化只读反馈。 */
+export function parseAgentFinalReviewerOutput_ACU(payload: Record<string, unknown>): AgentFinalReviewerOutput_ACU {
+  const verdict = readText_ACU(payload.verdict);
+  if (!(AGENT_REVIEW_VERDICTS_ACU as readonly string[]).includes(verdict)) {
+    failProtocol_ACU(`最终审查的 verdict 必须是 pass / revise / block，实际收到：${verdict || '(空)'}；资料不足时应先输出 read / search 工具调用`);
+  }
+  return {
+    verdict: verdict as AgentFinalReviewerOutput_ACU['verdict'],
+    summary: readText_ACU(payload.summary),
+    emotionFindings: readTextList_ACU(payload.emotionFindings),
+    worldFindings: readTextList_ACU(payload.worldFindings),
+    logicFindings: readTextList_ACU(payload.logicFindings),
+    requiredFixes: readTextList_ACU(payload.requiredFixes),
+    preserve: readTextList_ACU(payload.preserve),
   };
 }
 

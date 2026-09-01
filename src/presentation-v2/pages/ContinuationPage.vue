@@ -108,6 +108,12 @@
           <AcuFormRow label="精读兜底额度（token）：上下文临近总结阈值时，仍放行不超过该大小的小额精准读取">
             <AcuInput v-model="settingsDraft.agentReadFallbackTokens" type="number" :min="1" />
           </AcuFormRow>
+          <AcuFormRow label="终审读取预算：发送前终审独立可用的 read/search token 上限；填正整数，或形如 50% 的百分比（按总结阈值折算）">
+            <AcuInput v-model="settingsDraft.finalReview.readTokenBudget" type="text" />
+          </AcuFormRow>
+          <AcuFormRow label="终审额外读取轮数：终审首轮之外允许追加 read/search 的次数（0 为只使用固定证据）">
+            <AcuInput v-model="settingsDraft.finalReview.maxExtraReads" type="number" :min="0" :max="10" />
+          </AcuFormRow>
           <AcuFormRow label="主 Agent 迭代上限：一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）">
             <AcuInput v-model="settingsDraft.agentRunBudget.maxIterations" type="number" :min="1" :max="30" />
           </AcuFormRow>
@@ -147,7 +153,9 @@
         </div>
         <div class="acu-v2-continuation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
+          <AcuCheckbox v-model="settingsDraft.finalReview.enabled" label="启用发送前世界书终审" />
         </div>
+        <p class="acu-v2-continuation-page__meta">终审默认关闭；开启后会额外调用 final-reviewer，优先依据本轮命中的世界书条目，并使用独立读取预算与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。</p>
         <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
         <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
         <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
@@ -193,7 +201,11 @@
       <h3>连续性审查子代理提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.reviewer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('reviewer', position)" @delete="index => deletePrompt('reviewer', index)" @move="(index, delta) => movePrompt('reviewer', index, delta)" @update="(index, patch) => updatePrompt('reviewer', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_reviewer')">恢复审查子代理默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。</p>
+
+      <h3>发送前终审子代理提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.finalReviewer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('finalReviewer', position)" @delete="index => deletePrompt('finalReviewer', index)" @move="(index, delta) => movePrompt('finalReviewer', index, delta)" @update="(index, patch) => updatePrompt('finalReviewer', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_final_reviewer')">恢复终审子代理默认值</AcuButton></div>
+      <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。</p>
       <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
     </AcuPanel>
   </section>
@@ -292,6 +304,7 @@ const agentChannelRoles = [
   { role: 'mainlinePlanner', label: '主线推进策划' },
   { role: 'beatPlanner', label: '伏笔与节拍策划' },
   { role: 'reviewer', label: '连续性审查' },
+  { role: 'finalReviewer', label: '发送前终审' },
 ] as const;
 
 type AgentChannelRole = typeof agentChannelRoles[number]['role'];
@@ -335,6 +348,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     contextExtractRules: settings.contextExtractRules.map(rule => ({ ...rule })),
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
     agentRunBudget: { ...settings.agentRunBudget },
+    finalReview: { ...settings.finalReview },
     agentApiPresets: {
       main: { ...settings.agentApiPresets.main },
       outline: { ...settings.agentApiPresets.outline },
@@ -343,6 +357,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       mainlinePlanner: { ...settings.agentApiPresets.mainlinePlanner },
       beatPlanner: { ...settings.agentApiPresets.beatPlanner },
       reviewer: { ...settings.agentApiPresets.reviewer },
+      finalReviewer: { ...settings.agentApiPresets.finalReviewer },
     },
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
     agentPrompts: {
@@ -352,6 +367,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       mainlinePlanner: settings.agentPrompts.mainlinePlanner.map(segment => ({ ...segment })),
       beatPlanner: settings.agentPrompts.beatPlanner.map(segment => ({ ...segment })),
       reviewer: settings.agentPrompts.reviewer.map(segment => ({ ...segment })),
+      finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
     },
   };
 }
@@ -481,6 +497,11 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
     agentReadTokenBudget: normalizedReadBudget(source.agentReadTokenBudget),
     agentReadFallbackTokens: requiredInteger(source.agentReadFallbackTokens, '精读兜底额度'),
+    finalReview: {
+      enabled: source.finalReview.enabled,
+      readTokenBudget: normalizedReadBudget(source.finalReview.readTokenBudget),
+      maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
+    },
     agentRunBudget: {
       maxIterations: requiredRangeInteger(source.agentRunBudget.maxIterations, '主 Agent 迭代上限', 1, 30),
       maxDelegations: requiredRangeInteger(source.agentRunBudget.maxDelegations, '派工总数上限', 0, 20),
@@ -553,9 +574,9 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
+type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer';
 
-/** 取出指定提示词组的数组。大纲组在设置根层，六组 Agent 提示词在 agentPrompts 下。 */
+/** 取出指定提示词组的数组。大纲组在设置根层，其余 Agent 提示词在 agentPrompts 下。 */
 function promptList(key: PromptKey): ContinuationPromptSegment_ACU[] | null {
   if (!settingsDraft.value) return null;
   if (key === 'outlinePrompt') return settingsDraft.value.outlinePrompt;

@@ -14,7 +14,7 @@
 
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
-import { resolveContinuationApiPreset_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
+import { resolveContinuationAgentApiPreset_ACU, resolveContinuationApiPreset_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import {
   ContinuationValidationError_ACU,
@@ -26,17 +26,20 @@ import { AGENT_PREFILLS_ACU } from './agent-defaults';
 import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import {
   compactAgentProtocolError_ACU,
+  parseAgentFinalReviewerOutput_ACU,
   parseAgentJsonPayload_ACU,
   parseAgentMaintainerOutput_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
 } from './agent-protocol';
+import { buildAgentFinalReviewEvidence_ACU, type AgentFinalReviewEvidence_ACU } from './agent-final-review-context';
 import {
   buildAgentWorldbookScanText_ACU,
   renderAgentStoryCatalog_ACU,
   renderAgentStoryOverview_ACU,
   renderAgentStoryTail_ACU,
+  renderAgentOutlineWindow_ACU,
   renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
@@ -51,8 +54,10 @@ import {
   type AgentReadGateConfig_ACU,
   type AgentReadGateState_ACU,
 } from './agent-read-gate';
+import { AGENT_FINAL_REVIEWER_NAME_ACU } from './agent-model';
 import type {
   AgentDelegation_ACU,
+  AgentFinalReviewerOutput_ACU,
   AgentMaintainerOutput_ACU,
   AgentModuleRevisions_ACU,
   AgentPlannerOutput_ACU,
@@ -116,6 +121,30 @@ export interface AgentSubagentRunInput_ACU {
   signal?: AbortSignal | null;
 }
 
+/** 终审由 finalize 前的受控状态机调用，不接受普通 delegation。 */
+export interface AgentFinalReviewRunInput_ACU {
+  settings: ContinuationSettings_ACU;
+  resolveContext: AgentResolveContext_ACU;
+  candidateInstruction: string;
+  currentUserInput: string;
+  planningSummary?: string;
+  createIdentity: (agentName: string, attempt: number) => ContinuationInternalAiRequestIdentity_ACU;
+  isCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
+  signal?: AbortSignal | null;
+}
+
+export interface AgentFinalReviewRunResult_ACU {
+  output: AgentFinalReviewerOutput_ACU;
+  evidence: AgentFinalReviewEvidence_ACU;
+  iterations: number;
+  attempts: number;
+  toolRounds: number;
+  readTokens: number;
+  expandedReads: string[];
+  readRevisions: AgentModuleRevisions_ACU;
+  usage: AiUsageMetadata_ACU | null;
+}
+
 export interface AgentSubagentRuntimeDependencies_ACU {
   callInternalAi: (
     messages: Array<{ role: string; content: string }>,
@@ -125,11 +154,13 @@ export interface AgentSubagentRuntimeDependencies_ACU {
     options?: ContinuationInternalAiCallOptions_ACU,
   ) => Promise<string | null>;
   resolveApiPreset: typeof resolveContinuationApiPreset_ACU;
+  resolveAgentApiPreset?: typeof resolveContinuationAgentApiPreset_ACU;
 }
 
 const defaultDependencies_ACU: AgentSubagentRuntimeDependencies_ACU = {
   callInternalAi: callContinuationInternalAi_ACU,
   resolveApiPreset: resolveContinuationApiPreset_ACU,
+  resolveAgentApiPreset: resolveContinuationAgentApiPreset_ACU,
 };
 
 const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], string> = {
@@ -254,6 +285,8 @@ export class AgentSubagentRuntime_ACU {
       $AGENT_READ_MATERIALS: () => materials,
       $AGENT_TASK: () => input.delegation.prompt,
       $AGENT_WRITE_SCOPE: () => describeWriteScope_ACU(writes),
+      $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
+      $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
       // 资料目录与固定注入：默认提示词按角色矩阵引用；未引用的占位符不产生开销（惰性渲染）。
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
       $STORY_CATALOG: () => renderAgentStoryCatalog_ACU(input.resolveContext),
@@ -373,6 +406,126 @@ export class AgentSubagentRuntime_ACU {
     }
 
     throw subagentFailed_ACU(`${definition.name} 在 ${maxCalls} 次调用内没有交付契约输出`, false, { agentName: definition.name, lastReason, toolRoundsUsed });
+  }
+
+  /**
+   * 运行一次发送前最终审查。它不接受普通 delegation，且固定证据与补充读取共用 finalReview 独立门禁。
+   */
+  async runFinalReview(input: AgentFinalReviewRunInput_ACU): Promise<AgentFinalReviewRunResult_ACU> {
+    const evidence = buildAgentFinalReviewEvidence_ACU(input);
+    const gate: SubagentGate_ACU = {
+      state: createAgentReadGateState_ACU(),
+      config: {
+        historyTokenBudget: input.settings.agentHistoryTokenBudget,
+        readTokenBudget: input.settings.finalReview.readTokenBudget,
+        fallbackTokens: input.settings.agentReadFallbackTokens,
+      },
+      granted: new Set(),
+    };
+    const fixedDecision = await gateAgentReadBatch_ACU(evidence.gateItems, gate.state, gate.config, 0);
+    if (!fixedDecision.allowed) {
+      throw subagentFailed_ACU('终审固定证据超出独立读取预算，终审未执行。', false, {
+        reason: fixedDecision.reason,
+        report: fixedDecision.report,
+        batchTokens: fixedDecision.batchTokens,
+      });
+    }
+    gate.state.grantedTokens += fixedDecision.batchTokens;
+    for (const key of evidence.fixedReadKeys) gate.granted.add(key);
+
+    const rendered = await renderContinuationPrompt_ACU(input.settings.agentPrompts.finalReviewer, {
+      $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
+      $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
+      $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
+      $STORY_TAIL: () => renderAgentStoryTail_ACU(input.resolveContext),
+      $WORLDBOOK_HITS: () => evidence.worldbookEvidence,
+      $AGENT_READ_MATERIALS: () => evidence.supplementalMaterials,
+      $AGENT_TASK: () => input.candidateInstruction,
+    }, 'agent_delegate');
+    const resolveAgentPreset = this.dependencies.resolveAgentApiPreset ?? resolveContinuationAgentApiPreset_ACU;
+    const preset = resolveAgentPreset(input.settings, 'finalReviewer', 'agent_delegate');
+    const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
+    const prefill = AGENT_PREFILLS_ACU.reviewer;
+    const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
+    const maxToolRounds = Math.max(0, input.settings.finalReview.maxExtraReads);
+    const transcript: Array<{ role: string; content: string }> = [];
+    const expandedReads: string[] = [];
+    let toolRoundsUsed = 0;
+    let protocolRejections = 0;
+    let attempt = 0;
+    let lastReason = '';
+    let usageTotal: AiUsageMetadata_ACU | null = null;
+    const addCompleteCount = (current: number | undefined, incoming: number | undefined): number | undefined => (
+      current !== undefined && incoming !== undefined ? current + incoming : undefined
+    );
+    const callOptions: ContinuationInternalAiCallOptions_ACU = {
+      promptCacheEnabled: false,
+      cacheScope: 'final-reviewer',
+      onUsage: usage => {
+        usageTotal = usageTotal
+          ? {
+            promptTokens: addCompleteCount(usageTotal.promptTokens, usage.promptTokens),
+            completionTokens: addCompleteCount(usageTotal.completionTokens, usage.completionTokens),
+            cachedTokens: addCompleteCount(usageTotal.cachedTokens, usage.cachedTokens),
+            cacheWriteTokens: addCompleteCount(usageTotal.cacheWriteTokens, usage.cacheWriteTokens),
+          }
+          : { ...usage };
+      },
+    };
+    const maxCalls = 1 + maxToolRounds + retries + 1;
+    for (let call = 0; call < maxCalls; call += 1) {
+      const identity = input.createIdentity(AGENT_FINAL_REVIEWER_NAME_ACU, attempt);
+      attempt += 1;
+      if (!input.isCurrent(identity)) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
+      }
+      const raw = await callContinuationInternalAiWithRetry_ACU(
+        () => this.dependencies.callInternalAi([...rendered.messages, ...transcript], preset, identity, input.signal, callOptions),
+        {
+          transportRetries: retries,
+          retryDelaySeconds: input.settings.retryDelaySeconds,
+          isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
+        },
+      );
+      if (!input.isCurrent(identity)) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审结果已失效', false));
+      }
+      const rawText = String(raw ?? '').trim();
+      const toolCalls = parseAgentSubagentToolCalls_ACU(raw, prefill);
+      if (toolCalls) {
+        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+        if (toolRoundsUsed >= maxToolRounds) {
+          transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。` });
+          continue;
+        }
+        toolRoundsUsed += 1;
+        transcript.push({ role: 'user', content: await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads) });
+        continue;
+      }
+      try {
+        const payload = parseAgentJsonPayload_ACU(raw, prefill, ['verdict', 'summary', 'emotionFindings', 'worldFindings', 'logicFindings', 'requiredFixes', 'preserve']);
+        return {
+          output: parseAgentFinalReviewerOutput_ACU(payload),
+          evidence,
+          iterations: 1 + toolRoundsUsed,
+          attempts: attempt,
+          toolRounds: toolRoundsUsed,
+          readTokens: gate.state.grantedTokens,
+          expandedReads: [...expandedReads],
+          readRevisions,
+          usage: usageTotal,
+        };
+      } catch (error) {
+        lastReason = compactAgentProtocolError_ACU(error);
+        protocolRejections += 1;
+        if (protocolRejections > retries) {
+          throw subagentFailed_ACU(`最终审查连续 ${retries + 1} 次返回不符合契约`, false, { lastReason });
+        }
+        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+        transcript.push({ role: 'user', content: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合终审契约的 JSON 对象。` });
+      }
+    }
+    throw subagentFailed_ACU(`最终审查在 ${maxCalls} 次调用内没有交付契约输出`, false, { lastReason, toolRoundsUsed });
   }
 
   /**

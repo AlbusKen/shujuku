@@ -366,7 +366,6 @@ export class ContinuationOrchestrator_ACU {
           () => this.isLeaseCurrent_ACU(chatIdentity, lease),
           undefined,
           async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
-          async edits => this.applyOutlineEditsWithinLease_ACU(chatIdentity, lease, edits, 'running'),
           controller.signal,
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
@@ -846,10 +845,10 @@ export class ContinuationOrchestrator_ACU {
   }
 
   /**
-   * 大纲句级编辑事务：主 Agent 通过工具直接增删改未完成部分的句子，不发大纲 AI 调用。
+   * 大纲句级编辑事务：供 UI 等可信租约内入口直接增删改未完成部分的句子。
    * 结构一致性由运行时收尾（重算 suggestedTurns/totalTurns），完成前缀与当前轮由校验强制保护，
    * 编辑结果生成下一个 revision 并立即冻结。校验失败抛 CONTINUATION_AGENT_WRITE_REJECTED，
-   * 由主循环拒绝回灌而不是中止本轮。
+   * 主 Agent 文本协议不调用本事务；大纲问题由它委派 outline-architect 处理。
    */
   async applyOutlineEditsWithinLease_ACU(chatIdentity: string, _lease: Lease_ACU, edits: readonly AgentOutlineEditOp_ACU[], endStatus: 'running' | 'paused'): Promise<{ summary: string }> {
     const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());

@@ -112,7 +112,10 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
     $CURRENT_NODE: () => current ? `${current.node.title}\n${current.node.goal}` : '',
     $CURRENT_TURN_GOAL: () => current?.turn.goal ?? '',
     // 总纲是大纲的方向约束：阶段目标必须落在当前 active 卷的台阶内，否则每个阶段都会各自为政。
-    $STORY_ARC: () => renderAgentStoryArc_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
+    $STORY_ARC: () => renderAgentStoryArc_ACU(
+      readAgentModuleSnapshot_ACU(getChatArray_ACU()),
+      task.stages.filter(item => item.status === 'completed').map(item => item.stageNumber),
+    ),
     $TURN_NUMBER: () => current ? String(current.turnNumber) : '',
     $NODE_TURN_NUMBER: () => current ? String(current.nodeTurnNumber) : '',
   };

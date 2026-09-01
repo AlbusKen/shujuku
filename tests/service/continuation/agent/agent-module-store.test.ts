@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildEmptyAgentModuleSnapshot_ACU,
   readAgentModuleSnapshot_ACU,
+  renderAgentActiveVolumePlanningContext_ACU,
   renderAgentConstraints_ACU,
   renderAgentHooksLedger_ACU,
   renderAgentInfoGap_ACU,
@@ -115,6 +116,24 @@ describe('Agent 资料热上下文渲染', () => {
     expect(renderAgentInfoGap_ACU(empty)).toContain('没有登记的信息差条目');
     expect(renderAgentConstraints_ACU(empty)).toContain('没有登记的长期约束');
   });
+
+  it('活动卷规划上下文区分承载阶段、真实完成进度、剩余目标与禁翻底牌', () => {
+    const snapshot = snapshotAt_ACU(4, {
+      storyArc: [
+        { id: 'VOL-01', scope: 'volume', title: '商行之乱', direction: '主角夺回商行控制权', escalation: '收在印信回归且第三方签名浮现', withheld: '第三方身份', status: 'active', stageNumbers: [1, 2], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' },
+        { id: 'VOL-02', scope: 'volume', title: '追查签名', direction: '追查第三方势力', escalation: '收在幕后势力主动灭口', withheld: '幕后首脑身份', status: 'planned', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' },
+      ],
+    });
+
+    const text = renderAgentActiveVolumePlanningContext_ACU(snapshot, [1]);
+
+    expect(text).toContain('当前 active 卷：[VOL-01]「商行之乱」');
+    expect(text).toContain('已完成阶段 1');
+    expect(text).toContain('已登记但尚未完成阶段 2');
+    expect(text).toContain('主角夺回商行控制权');
+    expect(text).toContain('第三方身份');
+  });
+
 
   it('三个模块都在首行给出修订号，作为写入并发校验的依据', () => {
     const snapshot = snapshotAt_ACU(2, { revisions: { hooks: 4, infoGap: 5, constraints: 6 } });

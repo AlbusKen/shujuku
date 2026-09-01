@@ -7,7 +7,7 @@
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import { AGENT_OUTLINE_AGENT_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
@@ -23,6 +23,16 @@ export interface AgentModuleDefinition_ACU {
   triggers: string[];
   writableBy: AgentSubagentName_ACU[];
 }
+
+/**
+ * 终审只允许由 finalize 前的受控运行时入口调用，绝不能出现在主 Agent 的 delegate 目录中。
+ */
+export const AGENT_FINAL_REVIEWER_DEFINITION_ACU = {
+  name: AGENT_FINAL_REVIEWER_NAME_ACU,
+  kind: 'review' as const,
+  description: '发送前最终审查：核对人物情绪、世界书证据和逻辑边界，只读不写',
+  promptKey: 'finalReviewer' as const,
+};
 
 export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_ACU[] = [
   {

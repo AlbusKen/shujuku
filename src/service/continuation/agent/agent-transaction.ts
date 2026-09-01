@@ -195,6 +195,90 @@ function assertSingleActiveStoryScope_ACU(entries: readonly AgentStoryArcEntry_A
   }
 }
 
+/** 验证卷台阶的生命周期；阶段完成与卷完成是两层事实，不能互相替代。 */
+function assertVolumeLifecycle_ACU(
+  previous: readonly AgentStoryArcEntry_ACU[],
+  next: readonly AgentStoryArcEntry_ACU[],
+  completedStageNumbers: ReadonlySet<number>,
+): void {
+  const volumes = next.filter(entry => entry.scope === 'volume' && !entry.retired);
+  if (!volumes.length) return;
+
+  const previousById = new Map(previous.filter(entry => entry.scope === 'volume' && !entry.retired).map(entry => [entry.id, entry]));
+  const previouslyActive = previous.filter(entry => entry.scope === 'volume' && !entry.retired && entry.status === 'active');
+  for (const volume of volumes) {
+    const prior = previousById.get(volume.id);
+    if (!prior) continue;
+    const newlyRegistered = volume.stageNumbers.filter(stageNumber => !prior.stageNumbers.includes(stageNumber));
+    if (newlyRegistered.length && prior.status !== 'active') {
+      reject_ACU(`阶段进度只能登记到当前 active 卷，卷 ${volume.id} 在改写前状态为 ${prior.status}`, { id: volume.id, priorStatus: prior.status, stageNumbers: newlyRegistered });
+    }
+    for (const stageNumber of newlyRegistered) {
+      if (!completedStageNumbers.has(stageNumber)) {
+        reject_ACU(`卷台阶 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
+      }
+    }
+    if (prior.status === 'done' && volume.status !== 'done') {
+      reject_ACU(`已完成卷 ${volume.id} 不可重新激活`, { id: volume.id, from: prior.status, to: volume.status });
+    }
+    const order: Record<AgentStoryArcEntry_ACU['status'], number> = { planned: 0, active: 1, done: 2 };
+    if (order[volume.status] < order[prior.status]) {
+      reject_ACU(`卷台阶 ${volume.id} 状态只能 planned → active → done 单向推进`, { id: volume.id, from: prior.status, to: volume.status });
+    }
+    if (order[volume.status] > order[prior.status] + 1) {
+      reject_ACU(`卷台阶 ${volume.id} 不可跳过 active 直接从 ${prior.status} 变为 ${volume.status}`, { id: volume.id, from: prior.status, to: volume.status });
+    }
+  }
+
+  if (previouslyActive.length > 1) {
+    reject_ACU(`写入前存在 ${previouslyActive.length} 个 active 卷，无法判定阶段承载归属`, { activeIds: previouslyActive.map(volume => volume.id) });
+  }
+
+  for (const volume of volumes) {
+    if (previousById.has(volume.id)) continue;
+    if (volume.status === 'done') {
+      reject_ACU(`新卷 ${volume.id} 不可直接登记为 done`, { id: volume.id });
+    }
+    for (const stageNumber of volume.stageNumbers) {
+      if (!completedStageNumbers.has(stageNumber)) {
+        reject_ACU(`新卷 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
+      }
+    }
+  }
+
+  for (const volume of volumes) {
+    const prior = previous.find(entry => entry.id === volume.id);
+    if (volume.status !== 'done') continue;
+    if (volume.completionStageNumber === null) {
+      reject_ACU(`卷台阶 ${volume.id} 标记 done 时必须提供 completionStageNumber`, { id: volume.id });
+    }
+    if (!volume.stageNumbers.includes(volume.completionStageNumber)) {
+      reject_ACU(`卷台阶 ${volume.id} 的完成阶段必须已登记进 stageNumbers`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
+    }
+    if (!completedStageNumbers.has(volume.completionStageNumber)) {
+      reject_ACU(`卷台阶 ${volume.id} 的完成阶段尚未真实完成`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
+    }
+    if (!volume.completionState.trim()) {
+      reject_ACU(`卷台阶 ${volume.id} 标记 done 时必须说明已达到的卷末状态`, { id: volume.id });
+    }
+  }
+
+  const unfinished = volumes.filter(volume => volume.status !== 'done');
+  const active = volumes.filter(volume => volume.status === 'active');
+  if (unfinished.length && active.length !== 1) {
+    reject_ACU(`存在未完成卷时必须恰有一个 active 卷，当前为 ${active.length} 个`, { activeIds: active.map(volume => volume.id) });
+  }
+
+  const previousVolumes = previous.filter(entry => entry.scope === 'volume' && !entry.retired);
+  if (previousVolumes.length && previousVolumes.every(volume => volume.status === 'done')) {
+    for (const volume of active) {
+      if (!volume.continuationRationale.trim()) {
+        reject_ACU(`在既有卷全部完成后追加或激活卷 ${volume.id} 时必须说明续卷依据`, { id: volume.id });
+      }
+    }
+  }
+}
+
 function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[]): AgentStoryArcEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
   for (const item of items) {
@@ -223,6 +307,9 @@ function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: Agent
       status: item.status,
       // 进度锚只增不减：upsert 不携带 stageNumbers 时保留既有记录，避免改一次方向就把承载历史抹平。
       stageNumbers: item.stageNumbers.length ? normalizeStageNumbers_ACU(item.stageNumbers) : (previous ? previous.stageNumbers : []),
+      completionStageNumber: item.completionStageNumber ?? (previous?.completionStageNumber ?? null),
+      completionState: item.completionState || previous?.completionState || '',
+      continuationRationale: item.continuationRationale || previous?.continuationRationale || '',
       retired: false,
       retiredReason: '',
     });
@@ -246,6 +333,9 @@ function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: Ag
       withheld: patch.withheld ?? current.withheld,
       status: patch.status ?? current.status,
       stageNumbers: patch.stageNumbers ? normalizeStageNumbers_ACU(patch.stageNumbers) : current.stageNumbers,
+      completionStageNumber: Object.prototype.hasOwnProperty.call(patch, 'completionStageNumber') ? patch.completionStageNumber! : current.completionStageNumber,
+      completionState: patch.completionState ?? current.completionState,
+      continuationRationale: patch.continuationRationale ?? current.continuationRationale,
     };
     if (!merged.title.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
     if (!merged.direction.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
@@ -267,6 +357,7 @@ export function applyAgentModuleDelta_ACU(
   delta: AgentModuleDelta_ACU,
   allowedWrites: readonly string[],
   settledIndex: number,
+  completedStageNumbers: readonly number[] = [],
 ): AgentModuleSnapshot_ACU {
   assertWritePermission_ACU(delta, allowedWrites);
   assertExpectedRevisions_ACU(delta, snapshot);
@@ -284,6 +375,7 @@ export function applyAgentModuleDelta_ACU(
     storyArc = applyStoryArcPatches_ACU(storyArc, delta.storyArcPatches);
     assertSingleActiveStoryScope_ACU(storyArc);
   }
+  if (storyArcTouched) assertVolumeLifecycle_ACU(snapshot.storyArc, storyArc, new Set(completedStageNumbers));
   return {
     ...snapshot,
     hooks,

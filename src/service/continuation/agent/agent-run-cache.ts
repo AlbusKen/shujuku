@@ -16,6 +16,20 @@ export interface AgentRunLedgerSnapshot_ACU {
   outcomes: AgentDelegationOutcome_ACU[];
 }
 
+/** 发送前终审在一次主 Agent 运行内的恢复状态。终审反馈正文同时追加到会话，供跨重启读取。 */
+export const AGENT_FINAL_REVIEW_STATUSES_ACU = ['not_started', 'reviewing', 'feedback_ready', 'consumed'] as const;
+export type AgentFinalReviewStatus_ACU = typeof AGENT_FINAL_REVIEW_STATUSES_ACU[number];
+
+export interface AgentFinalReviewResumeState_ACU {
+  status: AgentFinalReviewStatus_ACU;
+  /** 当前候选指导的稳定 FNV 标识；游标或候选变化后不得复用旧状态。 */
+  candidateFingerprint: string;
+  /** 用于恢复诊断的候选摘要，不保存完整模型提示词。 */
+  candidateSummary: string;
+  /** 已回灌主 Agent 的最终审查结论或失败诊断。 */
+  feedback: string;
+}
+
 export interface AgentRunResumeState_ACU {
   taskId: string;
   /** 保存时刻的大纲游标指纹（stageId#revision#turnId）。游标变了的旧证据不允许污染新轮次。 */
@@ -23,9 +37,20 @@ export interface AgentRunResumeState_ACU {
   /** 恢复后应执行的迭代序号（从 1 开始）。 */
   nextIteration: number;
   ledger: AgentRunLedgerSnapshot_ACU;
+  finalReview: AgentFinalReviewResumeState_ACU;
 }
 
 const statesByChat_ACU = new Map<string, AgentRunResumeState_ACU>();
+
+function cloneFinalReviewState_ACU(value: Partial<AgentFinalReviewResumeState_ACU> | undefined): AgentFinalReviewResumeState_ACU {
+  const status = value?.status;
+  return {
+    status: (AGENT_FINAL_REVIEW_STATUSES_ACU as readonly string[]).includes(status ?? '') ? status as AgentFinalReviewStatus_ACU : 'not_started',
+    candidateFingerprint: typeof value?.candidateFingerprint === 'string' ? value.candidateFingerprint : '',
+    candidateSummary: typeof value?.candidateSummary === 'string' ? value.candidateSummary : '',
+    feedback: typeof value?.feedback === 'string' ? value.feedback : '',
+  };
+}
 
 /**
  * 保存运行状态。同一聊天只保留最新一份（租约保证同聊天无并发循环）。
@@ -43,6 +68,7 @@ export function saveAgentRunState_ACU(chatIdentity: string, state: AgentRunResum
       perAgent: { ...state.ledger.perAgent },
       outcomes: state.ledger.outcomes.map(outcome => ({ ...outcome })),
     },
+    finalReview: cloneFinalReviewState_ACU(state.finalReview),
   });
 }
 
@@ -70,6 +96,7 @@ export function readAgentRunState_ACU(chatIdentity: string, taskId: string, curs
       perAgent: { ...cached.ledger.perAgent },
       outcomes: cached.ledger.outcomes.map(outcome => ({ ...outcome })),
     },
+    finalReview: cloneFinalReviewState_ACU(cached.finalReview),
   };
 }
 

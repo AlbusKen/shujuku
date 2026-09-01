@@ -28,9 +28,9 @@ import {
 } from '../model';
 import { AGENT_PREFILLS_ACU, AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
 import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
-import { clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU } from './agent-run-cache';
+import { AGENT_FINAL_REVIEW_STATUSES_ACU, clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU, type AgentFinalReviewResumeState_ACU } from './agent-run-cache';
 import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
-import { findUnregisteredStageNumbers_ACU, hasActiveStoryArc_ACU, readAgentModuleSnapshot_ACU, renderAgentConstraints_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
+import { findUnregisteredStageNumbers_ACU, hasActiveStoryArc_ACU, hasActiveStoryArcVolume_ACU, readAgentModuleSnapshot_ACU, renderAgentConstraints_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
 import {
   appendAgentConversation_ACU,
   appendPreparedAgentConversationMessages_ACU,
@@ -88,7 +88,6 @@ import {
   type AgentDelegationOutcome_ACU,
   type AgentMainAction_ACU,
   type AgentModuleSnapshot_ACU,
-  type AgentOutlineEditOp_ACU,
   type AgentOutlineOpResult_ACU,
   type AgentRunBudget_ACU,
   type AgentToolCall_ACU,
@@ -197,7 +196,6 @@ function describeRunLabel_ACU(context: AgentResolveContext_ACU): string {
 export function describeAgentActionLabel_ACU(action: AgentMainAction_ACU): string {
   if (action.kind === 'tools') return `调用 ${action.calls.length} 个 read/search 工具`;
   if (action.kind === 'delegate') return `派工 ${action.delegations.length} 项`;
-  if (action.kind === 'edit_outline') return `工具编辑大纲 ${action.edits.length} 处`;
   if (action.kind === 'finalize') return '交付写作指导';
   return '阻断本轮';
 }
@@ -230,6 +228,7 @@ export function renderAgentBudget_ACU(
   ledger: AgentRunLedger_ACU,
   waveLimit: number,
   tool?: { batchesUsed: number; grantedTokens: number; maxReadTokens: number },
+  lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
 ): string {
   const isFinal = iteration >= budget.maxIterations;
   const lines = [
@@ -242,9 +241,15 @@ export function renderAgentBudget_ACU(
     lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次，累计放行约 ${tool.grantedTokens} / ${tool.maxReadTokens} tokens`);
     lines.push('读取预算分配建议：大头留给世界书设定与正文回溯（各约 1/3），剩余用于表格与账本核对。世界书目录与命中提示里每条都标注了 token 开销，按需取用；预算就是给你花的，宁可多读一条设定，也不要闭眼编设定。');
   }
-  lines.push(isFinal
-    ? 'FINAL_ITERATION：本轮已是最后一次迭代，delegate 已被禁用。请基于现有证据输出 finalize；关键信息确实缺失时输出 block，不许伪造。'
-    : '预算充足，可以继续派工。读取与派工都是每轮的正常开销，不算浪费；证据与建议都齐了就立刻 finalize，不要为「或许还能更好」反复加派。');
+  if (lifecycle?.convergenceOnly) {
+    lines.push('CONVERGENCE_ONLY：必要的大纲维护已完成，本次只允许输出 finalize 或 block；不得继续派工。');
+  } else if (lifecycle?.outlineMaintenanceReserveAvailable) {
+    lines.push('FINAL_MAINTENANCE_RESERVE：当前没有可执行大纲。仅可委派一次 outline-architect 创建、继续或维护阶段大纲；其他代理仍被禁用。维护完成后必须 finalize 或 block。');
+  } else {
+    lines.push(isFinal
+      ? 'FINAL_ITERATION：本轮已是最后一次迭代，delegate 已被禁用。请基于现有证据输出 finalize；关键信息确实缺失时输出 block，不许伪造。'
+      : '预算充足，可以继续派工。读取与派工每轮的正常开销，不算浪费；证据与建议都齐了就立刻 finalize，不要为「或许还能更好」反复加派。');
+  }
   return lines.join('\n');
 }
 
@@ -288,6 +293,69 @@ function describePlannerOutcome_ACU(summary: string, recommendation: string, mus
     risks.length ? `风险：${risks.join('；')}` : '',
     summary && !recommendation ? `摘要：${summary}` : '',
   ].filter(Boolean).join('\n');
+}
+
+function fingerprintFinalReviewCandidate_ACU(instruction: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < instruction.length; index += 1) {
+    hash ^= instruction.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${instruction.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function renderFinalReviewFeedback_ACU(
+  status: 'completed' | 'failed' | 'interrupted',
+  candidateFingerprint: string,
+  candidateSummary: string,
+  detail: string,
+): string {
+  const title = status === 'completed' ? '【发送前终审反馈】' : '【发送前终审未完成】';
+  return [
+    title,
+    `候选标识：${candidateFingerprint}`,
+    `候选摘要：${candidateSummary}`,
+    detail,
+    '这是一次性终审的最终回灌。请据此修订指导、派责任代理维护权威计划，或 block；本轮后续 finalize 不会再次触发终审。',
+  ].join('\n');
+}
+
+const FINAL_REVIEW_STATE_DIGEST_ACU = '发送前终审状态';
+
+function normalizeFinalReviewState_ACU(value: unknown): AgentFinalReviewResumeState_ACU | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const status = raw.status;
+  if (typeof status !== 'string' || !(AGENT_FINAL_REVIEW_STATUSES_ACU as readonly string[]).includes(status)) return null;
+  if (typeof raw.candidateFingerprint !== 'string' || typeof raw.candidateSummary !== 'string' || typeof raw.feedback !== 'string') return null;
+  return {
+    status: status as AgentFinalReviewResumeState_ACU['status'],
+    candidateFingerprint: raw.candidateFingerprint,
+    candidateSummary: raw.candidateSummary,
+    feedback: raw.feedback,
+  };
+}
+
+function renderFinalReviewStateRecord_ACU(taskId: string, state: AgentFinalReviewResumeState_ACU): string {
+  return `【发送前终审状态】\n${JSON.stringify({ schemaVersion: 1, taskId, ...state })}`;
+}
+
+function readFinalReviewStateFromConversation_ACU(snapshot: AgentConversationSnapshot_ACU, taskId: string, turnKey: string): AgentFinalReviewResumeState_ACU | null {
+  for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
+    const message = snapshot.messages[index];
+    if (!message || message.turnKey !== turnKey || message.digest !== FINAL_REVIEW_STATE_DIGEST_ACU) continue;
+    const separator = message.text.indexOf('\n');
+    if (separator < 0) continue;
+    try {
+      const raw = JSON.parse(message.text.slice(separator + 1));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw as Record<string, unknown>).taskId !== taskId) continue;
+      const state = normalizeFinalReviewState_ACU(raw);
+      if (state) return state;
+    } catch {
+      // 损坏的历史状态记录不能阻断新轮次；继续寻找更早的合法记录。
+    }
+  }
+  return null;
 }
 
 /** 主 Agent 轮次规划器。替代 V7 的一次性指令生成器，对外只暴露 plan 一个入口。 */
@@ -343,6 +411,11 @@ export class ContinuationAgentTurnPlanner_ACU {
     const identitySeed = request.createInternalRequestIdentity(0);
     const cursorKeyOf = (): string => {
       const execution = request.readContext();
+      const moduleSnapshot = context.moduleSnapshot;
+      return `${execution.stage?.stageId ?? 'pre-outline'}#${execution.revision?.revision ?? 0}#${execution.turn?.id ?? ''}#arc:${moduleSnapshot.revisions.storyArc}#settled:${moduleSnapshot.settledThroughIndex}`;
+    };
+    const conversationTurnKeyOf = (): string => {
+      const execution = request.readContext();
       return `${execution.stage?.stageId ?? 'pre-outline'}#${execution.revision?.revision ?? 0}#${execution.turn?.id ?? ''}`;
     };
     // 中断恢复：上次运行在同任务同游标下失败时，带着已获得的证据从中断迭代继续，
@@ -351,6 +424,11 @@ export class ContinuationAgentTurnPlanner_ACU {
     const ledger: AgentRunLedger_ACU = resumedState
       ? { delegationsUsed: resumedState.ledger.delegationsUsed, perAgent: new Map(Object.entries(resumedState.ledger.perAgent)), outcomes: resumedState.ledger.outcomes }
       : { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
+    let ledgerCursorKey = cursorKeyOf();
+    let finalReview: AgentFinalReviewResumeState_ACU = { status: 'not_started', candidateFingerprint: '', candidateSummary: '', feedback: '' };
+    let postReviewDecisionAvailable = false;
+    let outlineMaintenanceReserveUsed = false;
+    let maintenanceConvergenceAvailable = false;
     // 上次迭代耗尽后恢复时收敛到最后一次迭代：派工被禁用，主 Agent 必须基于已有证据交付或阻断。
     const iterationStart = resumedState ? Math.min(Math.max(1, resumedState.nextIteration), budget.maxIterations) : 1;
     const persistRunState = (nextIteration: number): void => saveAgentRunState_ACU(identitySeed.chatIdentity, {
@@ -358,11 +436,19 @@ export class ContinuationAgentTurnPlanner_ACU {
       cursorKey: cursorKeyOf(),
       nextIteration,
       ledger: { delegationsUsed: ledger.delegationsUsed, perAgent: Object.fromEntries(ledger.perAgent), outcomes: ledger.outcomes },
+      finalReview,
     });
     let totalAttempts = 0;
     let terminalLogged = false;
     let lastConstraintRejection = '';
     let currentIteration = iterationStart;
+    const resetLedgerForAuthorityChange = (): void => {
+      const currentCursorKey = cursorKeyOf();
+      if (currentCursorKey === ledgerCursorKey) return;
+      ledger.delegationsUsed = 0;
+      ledger.perAgent.clear();
+      ledgerCursorKey = currentCursorKey;
+    };
     beginAgentSessionRun_ACU(
       describeRunLabel_ACU(context),
       resumedState
@@ -384,7 +470,23 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
     // 会话在 beginAgentSessionRun_ACU 之后打开：压缩/阈值通知按时间顺序
     // 落在本次运行的分隔条之后，用户能看出它属于哪一次运行。
-    const session = await this.openConversation_ACU(chat, request, cursorKeyOf(), counter, measureOverhead);
+    const session = await this.openConversation_ACU(chat, request, conversationTurnKeyOf(), counter, measureOverhead);
+    if (request.settings.finalReview.enabled) {
+      finalReview = resumedState?.finalReview ?? readFinalReviewStateFromConversation_ACU(session.snapshot(), identitySeed.taskId, session.turnKey) ?? finalReview;
+      postReviewDecisionAvailable = finalReview.status === 'feedback_ready';
+    } else {
+      finalReview = { ...finalReview, status: 'consumed' };
+    }
+    const recordFinalReviewState = async (): Promise<void> => {
+      if (!request.settings.finalReview.enabled) return;
+      session.record([{
+        kind: 'runtime',
+        text: renderFinalReviewStateRecord_ACU(identitySeed.taskId, finalReview),
+        digest: FINAL_REVIEW_STATE_DIGEST_ACU,
+        turnKey: session.turnKey,
+      }]);
+      await session.flush();
+    };
     /** 门禁的 H：主 Agent 当前实际读取的完整上下文（骨架开销 + 实时会话历史）。 */
     const measureContextTokens = async (): Promise<number> =>
       (await measureOverhead()) + await measureAgentPromptTokens_ACU(session.history(), counter);
@@ -392,6 +494,20 @@ export class ContinuationAgentTurnPlanner_ACU {
     if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
       session.record([{ kind: 'turn', text: buildAgentTurnAnnouncement_ACU(context), digest: describeRunLabel_ACU(context), turnKey: session.turnKey }]);
       await session.flush();
+    }
+
+    // 缓存写入 reviewing 后进程若中断，不能重复付费审查。改为可诊断的反馈，让主 Agent 明确裁决。
+    if (request.settings.finalReview.enabled && finalReview.status === 'reviewing') {
+      finalReview = {
+        ...finalReview,
+        status: 'feedback_ready',
+        feedback: renderFinalReviewFeedback_ACU('interrupted', finalReview.candidateFingerprint, finalReview.candidateSummary, '终审请求在拿到可用结论前中断，未将其视为通过。请依据现有资料修订、补证或 block。'),
+      };
+      session.record([{ kind: 'tool', text: finalReview.feedback, digest: '发送前终审中断', turnKey: session.turnKey }]);
+      await session.flush();
+      await recordFinalReviewState();
+      persistRunState(iterationStart);
+      postReviewDecisionAvailable = true;
     }
 
     /** 把本次动作新产生的运行时结论作为工具消息追加进会话，让下一次迭代按真实 role 读到它。 */
@@ -414,7 +530,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       const totalCallLimit = budget.maxIterations + budget.maxReads + 4;
       let totalCalls = 0;
       let iteration = iterationStart;
-      while (iteration <= budget.maxIterations) {
+      while (iteration <= budget.maxIterations || postReviewDecisionAvailable || maintenanceConvergenceAvailable) {
         if (request.signal?.aborted) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '本轮规划已被用户中断', false));
         }
@@ -424,11 +540,20 @@ export class ContinuationAgentTurnPlanner_ACU {
         }
         // 大纲操作会改变游标，每次迭代都从权威状态重读执行上下文。
         context.execution = request.readContext();
+        resetLedgerForAuthorityChange();
         currentIteration = iteration;
         persistRunState(iteration);
-        const allowDelegate = iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations;
-        await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig);
-        const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig);
+        const noExecutableOutline = !context.execution.turn;
+        const outlineMaintenanceReserveAvailable = !maintenanceConvergenceAvailable
+          && !outlineMaintenanceReserveUsed
+          && noExecutableOutline
+          && !!request.applyOutline
+          && (iteration >= budget.maxIterations || ledger.delegationsUsed >= budget.maxDelegations);
+        const allowDelegate = !maintenanceConvergenceAvailable
+          && ((iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations) || outlineMaintenanceReserveAvailable);
+        const lifecycle = { outlineMaintenanceReserveAvailable, convergenceOnly: maintenanceConvergenceAvailable };
+        await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
+        const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle);
         totalAttempts += round.attempts;
         const action = round.action;
         logAgentSession_ACU({
@@ -438,23 +563,103 @@ export class ContinuationAgentTurnPlanner_ACU {
         });
         const outcomesBefore = ledger.outcomes.length;
 
+        if (maintenanceConvergenceAvailable && action.kind !== 'finalize' && action.kind !== 'block') {
+          failLoop_ACU(
+            'CONTINUATION_AGENT_PROTOCOL_INVALID',
+            '必要大纲维护完成后只允许 finalize 或 block，不能继续读取或派工。',
+            { action: action.kind },
+          );
+        }
+
+        if (postReviewDecisionAvailable && action.kind !== 'tools') {
+          logAgentSession_ACU({
+            kind: 'thought',
+            title: `迭代 ${iteration} · 终审反馈后的主 Agent 动作`,
+            detail: `协议动作：${action.kind}`,
+          });
+          finalReview = { ...finalReview, status: 'consumed' };
+          postReviewDecisionAvailable = false;
+          await recordFinalReviewState();
+          persistRunState(iteration);
+        }
+
         if (action.kind === 'tools') {
           // 不推进 iteration：工具批次不占决策迭代额度。
           await this.runToolBatch_ACU(action.calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration);
           continue;
         }
 
-        if (action.kind === 'edit_outline') {
-          await this.runOutlineEdits(action.edits, request, context, ledger);
-          // 大纲可能已变化：记录既有读取地址后清空放行集合，允许重读并只在新消息标记最新快照。
-          for (const key of toolUsage.granted) toolUsage.invalidated.add(key);
-          toolUsage.granted.clear();
-          await commitOutcomes(outcomesBefore);
-          iteration += 1;
-          continue;
-        }
-
         if (action.kind === 'finalize') {
+          if (request.settings.finalReview.enabled && finalReview.status !== 'consumed') {
+            const candidateFingerprint = fingerprintFinalReviewCandidate_ACU(action.instruction);
+            const candidateSummary = action.instruction.slice(0, 500);
+            finalReview = { status: 'reviewing', candidateFingerprint, candidateSummary, feedback: '' };
+            persistRunState(iteration);
+            await recordFinalReviewState();
+            try {
+              const review = await this.dependencies.subagentRuntime.runFinalReview({
+                settings: request.settings,
+                resolveContext: context,
+                candidateInstruction: action.instruction,
+                currentUserInput: context.originInstruction,
+                planningSummary: action.summary,
+                createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+                isCurrent: identity => request.isInternalRequestCurrent(identity),
+                signal: request.signal,
+              });
+              const output = review.output;
+              finalReview = {
+                status: 'feedback_ready',
+                candidateFingerprint,
+                candidateSummary,
+                feedback: renderFinalReviewFeedback_ACU(
+                  'completed',
+                  candidateFingerprint,
+                  candidateSummary,
+                  [
+                    `判词：${output.verdict}`,
+                    output.summary ? `摘要：${output.summary}` : '',
+                    output.emotionFindings.length ? `人物情绪：${output.emotionFindings.join('；')}` : '',
+                    output.worldFindings.length ? `世界书与世界观：${output.worldFindings.join('；')}` : '',
+                    output.logicFindings.length ? `逻辑边界：${output.logicFindings.join('；')}` : '',
+                    output.requiredFixes.length ? `必须修正：${output.requiredFixes.join('；')}` : '',
+                    output.preserve.length ? `必须保留：${output.preserve.join('；')}` : '',
+                  ].filter(Boolean).join('\n'),
+                ),
+              };
+              const initialWorldbookEntryIds = review.evidence.fixedReadKeys
+                .filter(key => key.startsWith('$WORLDBOOK:'))
+                .map(key => key.slice('$WORLDBOOK:'.length));
+              const supplementalSearches = review.expandedReads.filter(label => label.startsWith('search ')).length;
+              const supplementalReads = review.expandedReads.length - supplementalSearches;
+              logAgentSession_ACU({
+                kind: 'thought',
+                title: `迭代 ${iteration} · 发送前终审遥测`,
+                detail: [`判词：${output.verdict}`, `初始世界书命中：${initialWorldbookEntryIds.length}${initialWorldbookEntryIds.length ? ` 条（${initialWorldbookEntryIds.join('、')}）` : ' 条'}`, `补充调阅：read ${supplementalReads} 次，search ${supplementalSearches} 次`, `独立读取：${review.readTokens} tokens`, `工具轮：${review.toolRounds}`, `模型用量：${review.usage ? formatAgentUsageLabel_ACU(review.usage) : '未报告'}`].join('\n'),
+              });
+            } catch (error) {
+              if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
+                throw error;
+              }
+              const reason = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
+              finalReview = {
+                status: 'feedback_ready',
+                candidateFingerprint,
+                candidateSummary,
+                feedback: renderFinalReviewFeedback_ACU('failed', candidateFingerprint, candidateSummary, `终审调用失败：${reason}`),
+              };
+            }
+            session.record([
+              { kind: 'tool', text: finalReview.feedback, digest: '发送前终审反馈', turnKey: session.turnKey },
+              { kind: 'runtime', text: renderFinalReviewStateRecord_ACU(identitySeed.taskId, finalReview), digest: FINAL_REVIEW_STATE_DIGEST_ACU, turnKey: session.turnKey },
+            ]);
+            await session.flush();
+            persistRunState(iteration);
+            postReviewDecisionAvailable = true;
+            logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · 发送前终审完成`, detail: finalReview.feedback });
+            iteration += 1;
+            continue;
+          }
           if (action.constraints) {
             // 约束登记校验失败不终止本轮：把拒绝原因（含活跃约束清单回显）回灌，让主 Agent
             // 在剩余迭代内修正登记，与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
@@ -497,7 +702,12 @@ export class ContinuationAgentTurnPlanner_ACU {
           failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
         }
 
-        snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
+        const delegationResult = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies, outlineMaintenanceReserveAvailable);
+        snapshot = delegationResult.snapshot;
+        if (delegationResult.usedOutlineMaintenanceReserve) {
+          outlineMaintenanceReserveUsed = true;
+          maintenanceConvergenceAvailable = true;
+        }
         // 派工可能结算模块或改写大纲：记录既有读取地址后允许重读最新版。
         for (const key of toolUsage.granted) toolUsage.invalidated.add(key);
         toolUsage.granted.clear();
@@ -615,6 +825,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     allowDelegate: boolean,
     toolUsage: AgentToolUsage_ACU,
     gateConfig: AgentReadGateConfig_ACU,
+    lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
   ) {
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
     let lastReason = '';
@@ -632,7 +843,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (!request.isInternalRequestCurrent(base)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 请求已失效', false));
       }
-      const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig);
+      const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
       const messages = this.spliceHistory_ACU(rendered, session.history());
       // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
       // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
@@ -690,6 +901,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
     toolUsage: AgentToolUsage_ACU,
     gateConfig: AgentReadGateConfig_ACU,
+    lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
   ) {
     return {
       $HISTORY_ANCHOR: () => HISTORY_SENTINEL_ACU,
@@ -715,7 +927,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         batchesUsed: toolUsage.batchesUsed,
         grantedTokens: toolUsage.gateState.grantedTokens,
         maxReadTokens: resolveAgentReadBudget_ACU(gateConfig).effectiveMaxReadTokens,
-      }),
+      }, lifecycle),
       // 以下占位符默认提示词已不再使用（正文全文改目录、大纲改状态行、结果改走会话消息、
       // 约束改 read 按需调阅）；保留解析以兼容旧的自定义提示词。
       $STORY_TEXT: () => renderAgentStoryText_ACU(context),
@@ -737,10 +949,11 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
     toolUsage: AgentToolUsage_ACU,
     gateConfig: AgentReadGateConfig_ACU,
+    lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
   ): Promise<Array<{ role: string; content: string }>> {
     const rendered = await renderContinuationPrompt_ACU(
       request.settings.agentPrompts.main,
-      this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig),
+      this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle),
       'agent_loop',
     );
     return rendered.messages;
@@ -759,44 +972,17 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
     toolUsage: AgentToolUsage_ACU,
     gateConfig: AgentReadGateConfig_ACU,
+    lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
   ): Promise<void> {
     const rendered = await renderContinuationPrompt_ACU(
       [{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }],
-      this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig),
+      this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle),
       'agent_loop',
     );
     const text = rendered.messages[0]?.content?.trim() ?? '';
     if (!text || text === lastRuntimeSnapshotText_ACU(session.snapshot())) return;
     session.record([{ kind: 'runtime', text, digest: '运行时快照', turnKey: session.turnKey }]);
     await session.flush();
-  }
-
-  /**
-   * 执行大纲句级编辑工具。校验失败拒绝回灌，让主 Agent 自己修正而不是中止本轮；
-   * 只有非校验类异常才上抛终止。
-   */
-  private async runOutlineEdits(
-    edits: AgentOutlineEditOp_ACU[],
-    request: ContinuationAgentTurnPlanRequest_ACU,
-    context: AgentResolveContext_ACU,
-    ledger: AgentRunLedger_ACU,
-  ): Promise<void> {
-    const label = 'outline-edit(工具)';
-    if (!request.applyOutlineEdits) {
-      ledger.outcomes.push({ agentName: label, ok: false, summary: '', detail: '', rejectedReason: '正文重试轮次不允许修改大纲，请基于现有大纲交付或阻断' });
-      logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: '正文重试轮次不允许修改大纲', ok: false });
-      return;
-    }
-    try {
-      const result = await request.applyOutlineEdits(edits);
-      ledger.outcomes.push({ agentName: label, ok: true, summary: result.summary, detail: result.summary, rejectedReason: '' });
-      logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑大纲完成', detail: result.summary });
-      context.execution = request.readContext();
-    } catch (error) {
-      if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED') throw error;
-      ledger.outcomes.push({ agentName: label, ok: false, summary: '', detail: '', rejectedReason: error.error.message });
-      logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: error.error.message, ok: false });
-    }
   }
 
   /**
@@ -819,7 +1005,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
   ): Promise<void> {
     if (toolUsage.batchesUsed >= budget.maxReads) {
-      const text = `read/search 工具批次已用尽（上限 ${budget.maxReads} 个批次）。请基于已有资料输出决策动作（delegate / edit_outline / finalize / block），不要再调用工具。`;
+      const text = `read/search 工具批次已用尽（上限 ${budget.maxReads} 个批次）。请基于已有资料输出决策动作（delegate / finalize / block）；大纲调整请委派 outline-architect 或 arc-architect。`;
       session.record([{ kind: 'tool', text, digest: '工具批次已用尽', turnKey: session.turnKey }]);
       logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 工具批次已用尽`, detail: text, ok: false });
       await session.flush();
@@ -910,7 +1096,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const unregistered = findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed);
     const head = `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}），完整内容用 read $STORY_ARC 调阅。`;
     if (!unregistered.length) return `${head}已完成阶段的进度均已登记。`;
-    return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。请派工 arc-architect 回写进度，必要时让它把走完的卷 patch 成 done、下一卷 patch 成 active。`;
+    return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。请派工 arc-architect 仅向当前 active 卷回写这些阶段；只有真实正文达到 escalation 的可判定收束状态时，才以完成阶段编号和卷末状态把该卷 patch 成 done 并激活下一卷。所有既有卷都完成而用户继续写时，先根据最后一卷的后果追加带续卷依据的 active 新卷。`;
   }
 
   private spliceHistory_ACU(
@@ -941,10 +1127,12 @@ export class ContinuationAgentTurnPlanner_ACU {
     chat: any[],
     snapshot: AgentModuleSnapshot_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
-  ): Promise<AgentModuleSnapshot_ACU> {
+    outlineMaintenanceReserveAvailable = false,
+  ): Promise<{ snapshot: AgentModuleSnapshot_ACU; usedOutlineMaintenanceReserve: boolean }> {
     const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
     const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
     const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU);
+    let usedOutlineMaintenanceReserve = false;
     // 未通过预算/波次校验的派工立即记失败条目：这些拒绝是即时判定，没有 running 阶段。
     const rejectImmediately = (agentName: string, reason: string): void => {
       ledger.outcomes.push({ agentName, ok: false, summary: '', detail: '', rejectedReason: reason });
@@ -960,11 +1148,12 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 大纲操作先于同波次其他派工串行执行：它改变游标，后续派工与下一次迭代都要看到新大纲。
     for (const delegation of outlineDelegations) {
       const used = ledger.perAgent.get(delegation.agentName) ?? 0;
-      if (ledger.delegationsUsed >= budget.maxDelegations) {
+      const useReserve = outlineMaintenanceReserveAvailable && !usedOutlineMaintenanceReserve;
+      if (ledger.delegationsUsed >= budget.maxDelegations && !useReserve) {
         rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
         continue;
       }
-      if (used >= budget.maxSameAgent) {
+      if (used >= budget.maxSameAgent && !useReserve) {
         rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
         continue;
       }
@@ -978,8 +1167,16 @@ export class ContinuationAgentTurnPlanner_ACU {
         rejectImmediately(delegation.agentName, '故事总纲还是空的，阶段大纲没有可依据的方向与卷台阶。请先派工 arc-architect 立总纲（全书方向一条 + 卷台阶若干），拿到总纲后再派工排阶段大纲。本次未消耗派工额度。');
         continue;
       }
-      ledger.delegationsUsed += 1;
-      ledger.perAgent.set(delegation.agentName, used + 1);
+      if (!hasActiveStoryArcVolume_ACU(context.moduleSnapshot)) {
+        rejectImmediately(delegation.agentName, '故事总纲的既有卷已全部完成，当前没有可承载下一阶段的 active 卷。请先派工 arc-architect 根据最后一卷的结果、代价、关系变化或未解决问题追加后续卷并设为 active，再派工 outline-architect。本次未消耗派工额度。');
+        continue;
+      }
+      if (useReserve) {
+        usedOutlineMaintenanceReserve = true;
+      } else {
+        ledger.delegationsUsed += 1;
+        ledger.perAgent.set(delegation.agentName, used + 1);
+      }
       const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: '大纲操作执行中', detail: delegation.prompt, status: 'running' });
       let result: AgentOutlineOpResult_ACU;
       try {
@@ -1006,6 +1203,10 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     const accepted: AgentDelegation_ACU[] = [];
     for (const delegation of normalDelegations) {
+      if (outlineMaintenanceReserveAvailable) {
+        rejectImmediately(delegation.agentName, '末轮保留容量只允许 outline-architect 恢复可执行大纲；普通子代理本次未执行。');
+        continue;
+      }
       const used = ledger.perAgent.get(delegation.agentName) ?? 0;
       if (ledger.delegationsUsed + accepted.length >= budget.maxDelegations) {
         rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
@@ -1107,7 +1308,10 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (result.arc) {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
-          const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1);
+          const completedStageNumbers = context.execution.task.stages
+            .filter(stage => stage.status === 'completed')
+            .map(stage => stage.stageNumber);
+          const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers);
           // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
           // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
           if (applied !== nextSnapshot) { nextSnapshot = applied; snapshotChanged = true; }
@@ -1154,7 +1358,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       context.settledThroughIndex = nextSnapshot.settledThroughIndex;
       await this.persistSnapshot_ACU(chat, nextSnapshot);
     }
-    return nextSnapshot;
+    return { snapshot: nextSnapshot, usedOutlineMaintenanceReserve };
   }
 
   private async persistSnapshot_ACU(chat: any[], snapshot: AgentModuleSnapshot_ACU): Promise<void> {
