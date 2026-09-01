@@ -62,11 +62,54 @@ export interface AgentConversationSnapshot_ACU {
  * 非破坏压缩标记。存在楼层记录里而不进消息段：拼接时取 compactedThroughId 最大的标记，
  * id ≤ 该值的消息被投影掉、report 合成为最前的交接消息。删掉承载楼层即自动撤销压缩。
  */
-export interface AgentConversationCompactionMark_ACU {
+export interface AgentConversationCompactionMarkV1_ACU {
+  /** V1 历史标记没有 schemaVersion；仅在下一次成功压缩时升级。 */
+  schemaVersion?: undefined;
   compactedThroughId: number;
   report: string;
   at: number;
 }
+
+/** V2 handoff 的结构化连续性状态；报告正文由该状态确定性渲染。 */
+export interface AgentHandoffSummaryStateV2_ACU {
+  currentGoal: string;
+  effectiveConstraints: string[];
+  decisions: string[];
+  completedItems: string[];
+  pendingItems: string[];
+  blockers: string[];
+  continuityFacts: string[];
+  readKeys: string[];
+  recentTurns: string[];
+}
+
+export interface AgentConversationCompactionMetricsV2_ACU {
+  sourceFromId: number;
+  sourceThroughId: number;
+  beforeTokens: number;
+  afterTokens: number;
+  fixedPromptTokens: number;
+  reportTokens: number;
+  targetTokens: number;
+  triggerTokens: number;
+  droppedMessages: number;
+  droppedTurns: number;
+  degraded: boolean;
+  degradationReason?: string;
+}
+
+export interface AgentConversationCompactionMarkV2_ACU {
+  schemaVersion: 2;
+  compactedThroughId: number;
+  report: string;
+  summaryState: AgentHandoffSummaryStateV2_ACU;
+  at: number;
+  metrics: AgentConversationCompactionMetricsV2_ACU;
+}
+
+export type AgentConversationCompactionMark_ACU =
+  | AgentConversationCompactionMarkV1_ACU
+  | AgentConversationCompactionMarkV2_ACU;
 
 /** 单楼层的会话段记录。segment 是该楼层期间产生的消息增量；compaction 是可选的压缩标记。 */
 export interface AgentConversationFloorRecord_ACU {

@@ -102,12 +102,91 @@ export function validateAgentConversationSnapshot_ACU(raw: unknown): AgentConver
   };
 }
 
-function validateCompactionMark_ACU(raw: unknown): AgentConversationCompactionMark_ACU | undefined {
-  if (!isRecord_ACU(raw)) return undefined;
+function isNonNegativeInteger_ACU(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function isStringArray_ACU(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string' && item.trim().length > 0);
+}
+
+function hasExactKeys_ACU(raw: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every(key => Object.prototype.hasOwnProperty.call(raw, key))
+    && Object.keys(raw).every(key => allowed.has(key));
+}
+
+function validateCompactionMark_ACU(raw: unknown): AgentConversationCompactionMark_ACU | null {
+  if (!isRecord_ACU(raw)) return null;
   const compactedThroughId = typeof raw.compactedThroughId === 'number' && Number.isInteger(raw.compactedThroughId) && raw.compactedThroughId > 0 ? raw.compactedThroughId : 0;
   const report = typeof raw.report === 'string' ? raw.report : '';
-  if (!compactedThroughId || !report.trim()) return undefined;
-  return { compactedThroughId, report, at: typeof raw.at === 'number' && raw.at >= 0 ? raw.at : 0 };
+  const at = isNonNegativeInteger_ACU(raw.at) ? raw.at : -1;
+  if (!compactedThroughId || !report.trim() || at < 0) return null;
+  if (!Object.prototype.hasOwnProperty.call(raw, 'schemaVersion')) {
+    // V1 是已经写入聊天记录的历史格式；兼容读取，直到下一次成功压缩才升级。
+    return { compactedThroughId, report, at };
+  }
+  if (raw.schemaVersion !== 2 || !isRecord_ACU(raw.summaryState) || !isRecord_ACU(raw.metrics)) return null;
+  const state = raw.summaryState;
+  const stateKeys = ['currentGoal', 'effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
+  if (!hasExactKeys_ACU(state, stateKeys)
+    || typeof state.currentGoal !== 'string'
+    || !isStringArray_ACU(state.effectiveConstraints)
+    || !isStringArray_ACU(state.decisions)
+    || !isStringArray_ACU(state.completedItems)
+    || !isStringArray_ACU(state.pendingItems)
+    || !isStringArray_ACU(state.blockers)
+    || !isStringArray_ACU(state.continuityFacts)
+    || !isStringArray_ACU(state.readKeys)
+    || !isStringArray_ACU(state.recentTurns)) return null;
+  const metrics = raw.metrics;
+  const metricKeys = ['sourceFromId', 'sourceThroughId', 'beforeTokens', 'afterTokens', 'fixedPromptTokens', 'reportTokens', 'targetTokens', 'triggerTokens', 'droppedMessages', 'droppedTurns', 'degraded'];
+  if (!hasExactKeys_ACU(metrics, metricKeys, ['degradationReason'])
+    || !isNonNegativeInteger_ACU(metrics.sourceFromId)
+    || !isNonNegativeInteger_ACU(metrics.sourceThroughId)
+    || !isNonNegativeInteger_ACU(metrics.beforeTokens)
+    || !isNonNegativeInteger_ACU(metrics.afterTokens)
+    || !isNonNegativeInteger_ACU(metrics.fixedPromptTokens)
+    || !isNonNegativeInteger_ACU(metrics.reportTokens)
+    || !isNonNegativeInteger_ACU(metrics.targetTokens)
+    || !isNonNegativeInteger_ACU(metrics.triggerTokens)
+    || !isNonNegativeInteger_ACU(metrics.droppedMessages)
+    || !isNonNegativeInteger_ACU(metrics.droppedTurns)
+    || typeof metrics.degraded !== 'boolean'
+    || (Object.prototype.hasOwnProperty.call(metrics, 'degradationReason') && (typeof metrics.degradationReason !== 'string' || !metrics.degradationReason.trim()))
+    || metrics.sourceFromId <= 0
+    || metrics.sourceThroughId < metrics.sourceFromId) return null;
+  return {
+    schemaVersion: 2,
+    compactedThroughId,
+    report,
+    summaryState: {
+      currentGoal: state.currentGoal,
+      effectiveConstraints: [...state.effectiveConstraints],
+      decisions: [...state.decisions],
+      completedItems: [...state.completedItems],
+      pendingItems: [...state.pendingItems],
+      blockers: [...state.blockers],
+      continuityFacts: [...state.continuityFacts],
+      readKeys: [...state.readKeys],
+      recentTurns: [...state.recentTurns],
+    },
+    at,
+    metrics: {
+      sourceFromId: metrics.sourceFromId,
+      sourceThroughId: metrics.sourceThroughId,
+      beforeTokens: metrics.beforeTokens,
+      afterTokens: metrics.afterTokens,
+      fixedPromptTokens: metrics.fixedPromptTokens,
+      reportTokens: metrics.reportTokens,
+      targetTokens: metrics.targetTokens,
+      triggerTokens: metrics.triggerTokens,
+      droppedMessages: metrics.droppedMessages,
+      droppedTurns: metrics.droppedTurns,
+      degraded: metrics.degraded,
+      ...(typeof metrics.degradationReason === 'string' ? { degradationReason: metrics.degradationReason } : {}),
+    },
+  };
 }
 
 /**
@@ -125,9 +204,49 @@ export function validateAgentConversationFloorRecord_ACU(raw: unknown): AgentCon
     updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
     segment,
   };
-  const compaction = validateCompactionMark_ACU(raw.compaction);
-  if (compaction) record.compaction = compaction;
+  if (Object.prototype.hasOwnProperty.call(raw, 'compaction')) {
+    const compaction = validateCompactionMark_ACU(raw.compaction);
+    if (!compaction) {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+        'CONTINUATION_AGENT_SNAPSHOT_INVALID',
+        'load',
+        'Agent 会话压缩标记版本或字段无效',
+        false,
+      ));
+    }
+    record.compaction = compaction;
+  }
   return record;
+}
+
+/** 读取当前生效的压缩标记；与模型投影相同，选择 compactedThroughId 最大的合法标记。 */
+export function readActiveAgentConversationCompactionMark_ACU(chat?: any[]): AgentConversationCompactionMark_ACU | null {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  let active: AgentConversationCompactionMark_ACU | null = null;
+  for (const message of messages) {
+    if (!message || typeof message !== 'object') continue;
+    if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) continue;
+    const raw = (message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU];
+    const record = validateAgentConversationFloorRecord_ACU(raw);
+    if (record?.compaction && (!active || record.compaction.compactedThroughId > active.compactedThroughId)) active = record.compaction;
+  }
+  if (!active) return null;
+  if (!('summaryState' in active)) return { ...active };
+  return {
+    ...active,
+    summaryState: {
+      ...active.summaryState,
+      effectiveConstraints: [...active.summaryState.effectiveConstraints],
+      decisions: [...active.summaryState.decisions],
+      completedItems: [...active.summaryState.completedItems],
+      pendingItems: [...active.summaryState.pendingItems],
+      blockers: [...active.summaryState.blockers],
+      continuityFacts: [...active.summaryState.continuityFacts],
+      readKeys: [...active.summaryState.readKeys],
+      recentTurns: [...active.summaryState.recentTurns],
+    },
+    metrics: { ...active.metrics },
+  };
 }
 
 /** 由压缩标记合成的交接消息。id 复用 compactedThroughId（该 id 的原始消息已被投影掉，不会撞号）。 */
@@ -143,7 +262,6 @@ function buildHandoffMessage_ACU(mark: AgentConversationCompactionMark_ACU): Age
 export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapshot_ACU {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   let collected: AgentConversationMessage_ACU[] = [];
-  let mark: AgentConversationCompactionMark_ACU | null = null;
   let updatedAt = 0;
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
@@ -153,7 +271,6 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
     const record = validateAgentConversationFloorRecord_ACU(raw);
     if (record) {
       collected = [...collected, ...record.segment];
-      if (record.compaction && (!mark || record.compaction.compactedThroughId > mark.compactedThroughId)) mark = record.compaction;
       updatedAt = Math.max(updatedAt, record.updatedAt);
       continue;
     }
@@ -164,6 +281,7 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
       updatedAt = Math.max(updatedAt, legacy.updatedAt);
     }
   }
+  const mark = readActiveAgentConversationCompactionMark_ACU(messages);
   if (!collected.length && !mark) return buildEmptyAgentConversation_ACU();
   let projected = collected;
   if (mark) {

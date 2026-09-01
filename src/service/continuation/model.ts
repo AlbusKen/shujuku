@@ -342,7 +342,7 @@ export interface ContinuationPendingHostTurn_ACU {
   status: 'awaiting_generation' | 'retry_ready' | 'exhausted';
 }
 
-export type ContinuationInternalAiSource_ACU = 'outline' | 'turn_instruction' | 'agent_main' | 'agent_subagent';
+export type ContinuationInternalAiSource_ACU = 'outline' | 'turn_instruction' | 'agent_main' | 'agent_subagent' | 'handoff_summary';
 
 /**
  * Request-scoped provenance for an internal AI call. It deliberately contains

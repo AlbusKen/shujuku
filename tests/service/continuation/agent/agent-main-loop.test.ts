@@ -9,7 +9,7 @@ import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/co
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
 import { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
 import { readAgentRunState_ACU, resetAgentRunCacheForTests_ACU } from '../../../../src/service/continuation/agent/agent-run-cache';
-import type { AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import type { AgentConversationCompactionMark_ACU, AgentConversationCompactionMarkV2_ACU, AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
 
@@ -83,6 +83,7 @@ interface Harness_ACU {
   planner: ContinuationAgentTurnPlanner_ACU;
   request: ContinuationAgentTurnPlanRequest_ACU;
   mainCalls: Array<Array<{ role: string; content: string }>>;
+  handoffCalls: Array<Array<{ role: string; content: string }>>;
   subCalls: Array<Array<{ role: string; content: string }>>;
   written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }>;
   outlineCalls: string[];
@@ -96,6 +97,9 @@ interface Harness_ACU {
 function harness_ACU(options: {
   mainReplies: string[];
   subReplies?: string[];
+  handoffReplies?: string[];
+  compactionWrite?: 'success' | 'false' | 'throw';
+  mutatePersistedCompactionMark?: (mark: AgentConversationCompactionMarkV2_ACU) => AgentConversationCompactionMark_ACU | null;
   budget?: Partial<AgentRunBudget_ACU>;
   snapshot?: AgentModuleSnapshot_ACU;
   isCurrent?: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
@@ -112,7 +116,9 @@ function harness_ACU(options: {
 }): Harness_ACU {
   const mainReplies = [...options.mainReplies];
   const subReplies = [...(options.subReplies ?? [])];
+  const handoffReplies = [...(options.handoffReplies ?? [])];
   const mainCalls: Array<Array<{ role: string; content: string }>> = [];
+  const handoffCalls: Array<Array<{ role: string; content: string }>> = [];
   const subCalls: Array<Array<{ role: string; content: string }>> = [];
   const written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }> = [];
   const outlineCalls: string[] = [];
@@ -120,6 +126,7 @@ function harness_ACU(options: {
   const chat = chat_ACU();
   let snapshot = options.snapshot ?? snapshotWithArc_ACU();
   let conversation = options.conversation ?? buildEmptyAgentConversation_ACU();
+  let persistedCompactionMark: AgentConversationCompactionMark_ACU | null = null;
   const conversationWrites: AgentConversationSnapshot_ACU[] = [];
   let contextFactory = options.context ?? execution_ACU;
 
@@ -131,7 +138,14 @@ function harness_ACU(options: {
 
   const planner = new ContinuationAgentTurnPlanner_ACU({
     resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
-    callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
+    callInternalAi: async (messages, _preset, identity) => {
+      if (identity.source === 'handoff_summary') {
+        handoffCalls.push(messages);
+        return handoffReplies.shift() ?? null;
+      }
+      mainCalls.push(messages);
+      return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}';
+    },
     subagentRuntime,
     readChat: () => chat,
     readModuleSnapshot: () => snapshot,
@@ -147,8 +161,12 @@ function harness_ACU(options: {
       conversationWrites.push(conversation);
       return true;
     },
-    // 压缩标记的内存替身：应用与 readAgentConversation_ACU 相同的投影（交接消息置前 + 截断早期消息）。
+    readCompactionMark: () => persistedCompactionMark,
+    // 压缩标记的内存替身：保存权威 V2 mark，并应用与 readAgentConversation_ACU 相同的投影。
     writeCompactionMark: async (_chat, mark) => {
+      if (options.compactionWrite === 'throw') throw new Error('simulated compaction write failure');
+      if (options.compactionWrite === 'false') return false;
+      persistedCompactionMark = options.mutatePersistedCompactionMark?.(mark as AgentConversationCompactionMarkV2_ACU) ?? mark;
       const handoff: AgentConversationMessage_ACU = { id: mark.compactedThroughId, kind: 'handoff', text: mark.report, digest: '早期会话交接报告', turnKey: '', at: mark.at };
       conversation = { ...conversation, messages: [handoff, ...conversation.messages.filter(message => message.id > mark.compactedThroughId)] };
       conversationWrites.push(conversation);
@@ -186,6 +204,7 @@ function harness_ACU(options: {
     planner,
     request,
     mainCalls,
+    handoffCalls,
     subCalls,
     written,
     outlineCalls,
@@ -281,10 +300,12 @@ describe('主 Agent 会话记录', () => {
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
       context: nextTurnContext_ACU,
     });
-    await h.planner.plan(h.request);
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
+    expect(h.mainCalls).toHaveLength(1);
 
     const messages = h.conversation().messages;
     expect(messages[0].kind).toBe('handoff');
+    expect(h.handoffCalls).toHaveLength(2);
     expect(messages[0].text).toContain('第 1 阶段 · 第 1/6 轮');
     expect(messages[0].text).toContain('交付写作指导');
     expect(messages.some(message => message.text === filler)).toBe(false);
@@ -295,6 +316,7 @@ describe('主 Agent 会话记录', () => {
     const handoffEntry = readAgentSessionLog_ACU().find(entry => entry.kind === 'handoff');
     expect(handoffEntry?.title).toContain('此前内容对当前 AI 不可见');
     expect(handoffEntry?.detail).toBe(messages[0].text);
+    expect(h.handoffCalls).toHaveLength(2);
   });
 
   it('同一轮内到达阈值只登记不压缩，留到下一轮开始时再做', async () => {
@@ -308,7 +330,8 @@ describe('主 Agent 会话记录', () => {
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
-    await h.planner.plan(h.request);
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
+    expect(h.mainCalls).toHaveLength(0);
 
     const messages = h.conversation().messages;
     // 历史没有被重塑：既没有交接报告，早期消息也仍在原处。
@@ -340,9 +363,11 @@ describe('主 Agent 会话记录', () => {
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
-    await h.planner.plan(h.request);
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
+    expect(h.mainCalls).toHaveLength(1);
 
     expect(h.conversation().messages[0].kind).toBe('handoff');
+    expect(h.handoffCalls).toHaveLength(2);
     const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
     // 越界压缩必须自报原因，不能让用户以为轮次边界规则失效了。
     expect(compacted?.detail).toContain('本轮尚未结束');
@@ -359,14 +384,36 @@ describe('主 Agent 会话记录', () => {
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
       context: nextTurnContext_ACU,
     });
-    await h.planner.plan(h.request);
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
+    expect(h.mainCalls).toHaveLength(0);
 
-    // 会话本身只有 3 tokens，但完整上下文超阈值：轮次边界上照样压缩早期轮次。
-    expect(h.conversation().messages[0].kind).toBe('handoff');
-    const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
-    expect(compacted?.detail).toContain('提示词骨架');
-    // 骨架无法靠压缩会话消除，必须如实标注仍超阈值，而不是谎报已达标。
-    expect(compacted?.detail).toContain('压缩后仍超出阈值');
+    // 会话本身只有 3 tokens，交接报告会更大；压缩无进展时必须保留旧投影，
+    // 由最终完整请求预检阻断，而不是伪造一份更长的 handoff。
+    expect(h.conversation().messages[0].kind).toBe('turn');
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
+  });
+
+  it.each([
+    ['写入返回 false', { compactionWrite: 'false' as const }],
+    ['写入抛出异常', { compactionWrite: 'throw' as const }],
+    ['回读报告与候选不一致', { mutatePersistedCompactionMark: (mark: AgentConversationCompactionMarkV2_ACU) => ({ ...mark, report: '被篡改的交接报告' }) }],
+  ])('压缩%s时保留旧会话投影并阻断超限主请求', async (_label, overrides) => {
+    const filler = '守门人'.repeat(400);
+    const h = harness_ACU({
+      conversation: overBudgetConversation_ACU(filler),
+      historyTokenBudget: 200,
+      countTokens: fillerTokens_ACU,
+      mainReplies: ['{"action":"finalize","instruction":"不应发送"}'],
+      context: nextTurnContext_ACU,
+      ...overrides,
+    });
+
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
+
+    expect(h.mainCalls).toHaveLength(0);
+    expect(h.conversation().messages.some(message => message.kind === 'handoff')).toBe(overrides.compactionWrite !== 'false' && overrides.compactionWrite !== 'throw');
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史压缩未提交'))).toBe(true);
   });
 });
 

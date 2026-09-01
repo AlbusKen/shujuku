@@ -9,6 +9,7 @@ import {
   clearAgentConversationField_ACU,
   lastAnnouncedTurnKey_ACU,
   lastRuntimeSnapshotText_ACU,
+  readActiveAgentConversationCompactionMark_ACU,
   readAgentConversation_ACU,
   readAgentConversationTimeline_ACU,
   renderAgentConversationMessages_ACU,
@@ -40,6 +41,10 @@ function floorRecordWith(segment: unknown[], overrides: Record<string, unknown> 
 
 function message_ACU(id: number, kind: AgentConversationMessage_ACU['kind'], text: string, extra: Partial<AgentConversationMessage_ACU> = {}): AgentConversationMessage_ACU {
   return { id, kind, text, digest: '', turnKey: '', at: 0, ...extra };
+}
+
+function v2Mark_ACU(compactedThroughId = 2): any {
+  return { schemaVersion: 2, compactedThroughId, report: 'V2 交接报告', summaryState: { currentGoal: '推进禁区谜团', effectiveConstraints: [], decisions: [], completedItems: [], pendingItems: [], blockers: [], continuityFacts: [], readKeys: [], recentTurns: [] }, at: 1, metrics: { sourceFromId: 1, sourceThroughId: compactedThroughId, beforeTokens: 120, afterTokens: 80, fixedPromptTokens: 20, reportTokens: 10, targetTokens: 96, triggerTokens: 120, droppedMessages: compactedThroughId, droppedTurns: 1, degraded: false } };
 }
 
 // mockReset 而不是 mockClear：once 队列里的失败实现必须一并清掉，否则会泄漏到下一个用例。
@@ -103,6 +108,40 @@ describe('会话分段读取', () => {
     // 标记只存在于被删掉的楼层上时，原始消息原样回来。
     const restored = readAgentConversation_ACU([early]);
     expect(restored.messages.map(item => item.text)).toEqual(['早期通告', '早期输出']);
+  });
+
+  it('V2 标记以结构化摘要状态投影，允许没有 blocker、待办或 readKey 的空类别', () => {
+    const chat = [
+      { mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'turn', '早期通告'), message_ACU(2, 'agent', '早期输出')]) },
+      { mes: 'b', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(3, 'agent', '最近输出')], { compaction: v2Mark_ACU(2) }) },
+    ];
+
+    const projected = readAgentConversation_ACU(chat);
+    expect(projected.messages.map(item => [item.kind, item.text])).toEqual([['handoff', 'V2 交接报告'], ['agent', '最近输出']]);
+    expect(chat[1][AGENT_CONVERSATION_FIELD_ACU].compaction.summaryState.blockers).toEqual([]);
+  });
+
+  it('权威回读选择截止 id 最大的标记，并为 V2 返回独立的结构化状态副本', () => {
+    const chat = [
+      { mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([], { compaction: { compactedThroughId: 1, report: 'V1', at: 1 } }) },
+      { mes: 'b', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([], { compaction: v2Mark_ACU(2) }) },
+    ];
+
+    const active = readActiveAgentConversationCompactionMark_ACU(chat);
+    expect(active).toMatchObject({ schemaVersion: 2, compactedThroughId: 2, report: 'V2 交接报告' });
+    if (!active || active.schemaVersion !== 2) throw new Error('expected V2 mark');
+    active.summaryState.currentGoal = '篡改副本';
+    active.metrics.beforeTokens = 0;
+    expect(chat[1][AGENT_CONVERSATION_FIELD_ACU].compaction.summaryState.currentGoal).toBe('推进禁区谜团');
+    expect(chat[1][AGENT_CONVERSATION_FIELD_ACU].compaction.metrics.beforeTokens).toBe(120);
+  });
+
+  it('拒绝未知或损坏的 V2 压缩标记，而不是把它当作没有压缩', () => {
+    const unknownVersion = [{ mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([], { compaction: { ...v2Mark_ACU(), schemaVersion: 3 } }) }];
+    const blankArrayItem = [{ mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([], { compaction: { ...v2Mark_ACU(), summaryState: { ...v2Mark_ACU().summaryState, blockers: ['   '] } } }) }];
+
+    expect(() => readAgentConversation_ACU(unknownVersion)).toThrow(ContinuationValidationError_ACU);
+    expect(() => readAgentConversation_ACU(blankArrayItem)).toThrow(ContinuationValidationError_ACU);
   });
 
   it('全程无命中时返回空会话', () => {

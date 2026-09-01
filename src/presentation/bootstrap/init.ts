@@ -183,7 +183,6 @@ export   function mainInitialize_ACU() {
       ) {
         // [调试] 检查可用的事件类型
         logDebug_ACU('[提示词模板] 可用的事件类型:', Object.keys(SillyTavern_API_ACU.eventTypes));
-        
         // [提示词模板] 监听 CHAT_COMPLETION_SETTINGS_READY 事件，使用 makeLast 确保在 st-prompt-template 之后执行
         if (SillyTavern_API_ACU.eventTypes.CHAT_COMPLETION_SETTINGS_READY) {
           // 检查是否有 makeLast 方法
@@ -202,7 +201,6 @@ export   function mainInitialize_ACU() {
             logDebug_ACU('[提示词模板] 已注册 CHAT_COMPLETION_SETTINGS_READY 事件监听（on）');
           }
         }
-        
         // P7：聊天被删除时清理其向量外置存档 / IDB 缓存 / flush 任务。
         // 延迟 5s 执行：等宿主完成删除后的状态收敛（characters[].chats、当前聊天切换）再枚举校验。
         const handleChatDeletedForVectorCleanup_ACU = (deletedChatName: unknown): void => {
@@ -250,7 +248,7 @@ export   function mainInitialize_ACU() {
             if (isSqliteMode()) logDebug_ACU('[SQLite] CHAT_CHANGED: 立即销毁旧数据库实例');
           }
 
-          await resetScriptStateForNewChat_ACU(chatFileName);
+          await resetScriptStateForNewChat_ACU(chatFileName, { reason: 'chat_changed' });
 
           // [触发门控] generationGate 重置已搬到 service 层的 resetScriptStateForNewChat_ACU 中
 
@@ -312,7 +310,6 @@ export   function mainInitialize_ACU() {
               logDebug_ACU('[剧情推进] TavernHelper.generate hook registered.');
             }
           }
-          
           // [新增] 切换角色卡（聊天）时，强制从新聊天记录的本地数据读取最新的表格并刷新UI
           logDebug_ACU('ACU: Chat changed, forcing reload of table data from new chat history.');
           const scheduledChatIdentifier_ACU = cleanChatName_ACU(chatFileName);
@@ -408,7 +405,6 @@ export   function mainInitialize_ACU() {
             } catch (restoreFlushError) {
                 logWarn_ACU('[交火向量索引] CHAT_CHANGED 恢复防抖归档队列失败:', restoreFlushError);
             }
-            
             // S0-4：聊天切换加载完成后捕获 checkpoint 保管库（删楼恢复的影子基线）。
             try {
                 captureCheckpointVaultForCurrentChat_ACU();
@@ -458,8 +454,13 @@ export   function mainInitialize_ACU() {
               // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
               // 对非 quiet/非 dryRun/非自动触发的生成开放宽松认领（spv8.9.2 状态法），桥内部只在
               // 存在未绑定序列号的等待轮时才会认领。
-              const allowLooseStart = !dryRun && !isQuietLikeGeneration_ACU(type, params) && !params?.automatic_trigger;
-              getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq, allowLooseStart);
+              const quietLike = isQuietLikeGeneration_ACU(type, params);
+              getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq, {
+                allowOrdinaryLooseClaim: !dryRun && !quietLike && !params?.automatic_trigger,
+                automaticTrigger: Boolean(params?.automatic_trigger),
+                quietLike,
+                dryRun: Boolean(dryRun),
+              });
             } catch (e) {}
           });
         }
@@ -484,13 +485,20 @@ export   function mainInitialize_ACU() {
                 const continuationBridge = getContinuationHostGenerationBridge_ACU();
                 // 宽松认领只对"会产生正文楼层"的生成开放：quiet/dryRun/自动触发生成不许认领，
                 // 否则会误杀等待中的续写轮。判定复用自动填表的生成门控。
-                const allowLooseContinuationClaim = shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext);
-                if (continuationBridge?.claimsGenerationEnded(generationContext?.seq, allowLooseContinuationClaim)) {
+                const quietLike = generationContext ? isQuietLikeGeneration_ACU(generationContext.type, generationContext.params) : false;
+                const automaticTrigger = Boolean(generationContext?.params?.automatic_trigger);
+                const continuationEventContext = {
+                  allowOrdinaryLooseClaim: !generationContext || (!generationContext.dryRun && !quietLike && !automaticTrigger),
+                  automaticTrigger,
+                  quietLike,
+                  dryRun: Boolean(generationContext?.dryRun),
+                };
+                if (continuationBridge?.claimsGenerationEnded(generationContext?.seq, continuationEventContext)) {
                   // 桥只负责续写轮次的归属确认/循环标签校验/自动续下一轮，不再短路后续管线：
                   // 填表与正文优化由下方常规意图派发按各自的判定独立触发（解耦，见 spv 讨论）。
                   // 桥因标签缺失删楼重试时，常规管线的楼层解析（唯一候选 + 有界物化等待）与
                   // evaluateNewMessageAction 的 resolved_message_not_ai 防御会自然跳过该楼。
-                  void continuationBridge.onGenerationEnded(message_id, generationContext?.seq, allowLooseContinuationClaim);
+                  void continuationBridge.onGenerationEnded(message_id, generationContext?.seq, continuationEventContext);
                 }
                 // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
                 // makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须记录捕获时边界，
@@ -683,9 +691,8 @@ export   function mainInitialize_ACU() {
       // [修复] 添加轮询重试机制：如果 chatId 暂时不可用，持续轮询直到可用
       const initWithChatId = async (chatId: string) => {
           logDebug_ACU(`ACU: Initializing with current chat on load: ${chatId}`);
-          await resetScriptStateForNewChat_ACU(chatId);
+          await resetScriptStateForNewChat_ACU(chatId, { reason: 'startup_restore' });
           await loadPresetAndCleanCharacterData_ACU();
-          
           // 再次强制刷新数据和UI，确保初始加载时表格显示正确
           await loadAllChatMessages_ACU();
 

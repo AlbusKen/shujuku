@@ -169,7 +169,7 @@ vi.mock('../../../src/shared/defaults', () => ({
     summaryIndexV2WriteScopeAllowlist: [],
     summaryPromptGroup: []
   },
-  buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [] }),
+  buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [], enabledEntries: {} }),
   buildDefaultAgentWorldbookPromptTemplates_ACU: () => ({
     agentDecisionPromptSegments: [],
     agentSkillifyPromptSegments: [],
@@ -276,6 +276,7 @@ vi.mock('../../../src/shared/utils', () => ({
 
 import {
   saveSettings_ACU,
+  resetPlotWorldbookSelectionForChatChange_ACU,
   loadSettings_ACU,
   buildDefaultSettings_ACU,
   applyTemplateScopeForCurrentChat_ACU,
@@ -324,6 +325,47 @@ beforeEach(() => {
   mockGlobalMeta.zeroTkOccupyModeGlobal = false;
   mockGlobalMeta.vectorMemoryConfigGlobal = null;
   _set_settingsStorageReadyForSave_ACU(true);
+});
+
+// ═══ resetPlotWorldbookSelectionForChatChange_ACU ═══
+describe('resetPlotWorldbookSelectionForChatChange_ACU', () => {
+  it('仅重置剧情世界书选择并保存一次', () => {
+    mockGetConfigStorage.mockReturnValue({ _isTavern: true, getItem: vi.fn(), setItem: vi.fn() });
+    const previousSelection = {
+      source: 'manual',
+      manualSelection: ['旧世界书'],
+      enabledEntries: { '旧世界书': [1, 2] },
+    };
+    const formFillWorldbookConfig = {
+      source: 'manual',
+      manualSelection: ['填表世界书'],
+      enabledEntries: { '填表世界书': [7] },
+    };
+    mockSettings.plotSettings = {
+      plotWorldbookConfig: previousSelection,
+      promptTemplate: '保留的剧情提示词',
+      loopDelaySeconds: 3,
+    };
+    mockSettings.characterSettings = {
+      'chat-a': { worldbookConfig: formFillWorldbookConfig },
+    };
+
+    const result = resetPlotWorldbookSelectionForChatChange_ACU();
+
+    expect(result).toEqual({ saved: true, storageType: 'tavern' });
+    expect(mockSettings.plotSettings).toMatchObject({
+      promptTemplate: '保留的剧情提示词',
+      loopDelaySeconds: 3,
+      plotWorldbookConfig: {
+        source: 'character',
+        manualSelection: [],
+        enabledEntries: {},
+      },
+    });
+    expect(mockSettings.plotSettings.plotWorldbookConfig).not.toBe(previousSelection);
+    expect(mockSettings.characterSettings['chat-a'].worldbookConfig).toBe(formFillWorldbookConfig);
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ═══ saveSettings_ACU ═══

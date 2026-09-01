@@ -20,6 +20,7 @@ export function createSillyTavernContinuationHostBridge_ACU(
       getChat,
       getGenerationSequence: () => 0,
       readPendingHostTurn: () => orchestrator.readPendingHostTurn(),
+      retryCurrentTurn: () => orchestrator.retryCurrentTurn(),
       readAutoContinueState: () => orchestrator.readAutoContinueState(),
       continueTask: () => orchestrator.continueTask(),
       recordHostTurn: input => orchestrator.recordHostTurn(input),

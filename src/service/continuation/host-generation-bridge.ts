@@ -10,6 +10,7 @@ export interface ContinuationHostTurnRuntime_ACU {
   getChatIdentity(): string;
   getChat(): any[];
   getGenerationSequence(): number;
+  retryCurrentTurn(): Promise<{ retryHostGeneration?: boolean }>;
   readPendingHostTurn(): { settings: { loopTags: string; retryDelaySeconds?: number; minGenerationTokens?: number }; pending: { identity: TurnAttemptIdentity_ACU; capture: ContinuationHostGenerationCapture_ACU; status: 'awaiting_generation' | 'retry_ready' | 'exhausted' } } | null;
   readAutoContinueState(): { eligible: boolean; delaySeconds: number };
   continueTask(): Promise<{ preparedTurn?: ContinuationPreparedTurnInstruction_ACU; retryHostGeneration?: boolean }>;
@@ -24,6 +25,20 @@ export interface ContinuationHostTurnRuntime_ACU {
   failHostTurnForStoppedGeneration(identity: TurnAttemptIdentity_ACU): Promise<unknown>;
 }
 
+export interface ContinuationHostGenerationEventContext_ACU {
+  allowOrdinaryLooseClaim: boolean;
+  automaticTrigger: boolean;
+  quietLike: boolean;
+  dryRun: boolean;
+}
+
+type ContinuationHostGenerationEventContextInput_ACU = ContinuationHostGenerationEventContext_ACU | boolean | undefined;
+
+function normalizeGenerationEventContext_ACU(input: ContinuationHostGenerationEventContextInput_ACU): ContinuationHostGenerationEventContext_ACU {
+  if (typeof input === 'boolean') return { allowOrdinaryLooseClaim: input, automaticTrigger: false, quietLike: false, dryRun: false };
+  return input ?? { allowOrdinaryLooseClaim: false, automaticTrigger: false, quietLike: false, dryRun: false };
+}
+
 export interface ContinuationHostGenerationBridgeDependencies_ACU {
   runtime: ContinuationHostTurnRuntime_ACU;
   hostInput: ContinuationHostTurnAdapter_ACU;
@@ -35,6 +50,7 @@ export interface ContinuationHostGenerationBridgeDependencies_ACU {
 }
 
 type StartedHostGeneration_ACU = { identity: TurnAttemptIdentity_ACU; sequence: number; bind: Promise<void> };
+type LocalRetryClaim_ACU = { identity: TurnAttemptIdentity_ACU; mode: 'generate' | 'regenerate'; createdAt: number; sequence: number | null; consumed: boolean };
 
 /**
  * The only bridge that may couple a prepared continuation turn to host input
@@ -52,6 +68,8 @@ export class ContinuationHostGenerationBridge_ACU {
   private sendingIdentity: TurnAttemptIdentity_ACU | null = null;
   private readonly startedByChat = new Map<string, StartedHostGeneration_ACU>();
   private readonly stateListeners = new Set<() => void>();
+  private localRetryClaim: LocalRetryClaim_ACU | null = null;
+  private static readonly LOCAL_RETRY_CLAIM_TTL_MS = 60_000;
 
   constructor(private readonly dependencies: ContinuationHostGenerationBridgeDependencies_ACU) {}
 
@@ -109,22 +127,27 @@ export class ContinuationHostGenerationBridge_ACU {
    * 序列号的等待轮时认领——宿主事件通常在发送返回后的微任务里才送达，没有这条路径
    * 生成开始永远配对不上（spv8.9.2 时代的状态法没有这个问题）。
    */
-  onGenerationStarted(sequence: number, allowLoose = false): boolean {
+  onGenerationStarted(sequence: number, contextInput: ContinuationHostGenerationEventContextInput_ACU = undefined): boolean {
+    const context = normalizeGenerationEventContext_ACU(contextInput);
     const runtime = this.dependencies.runtime;
     const identity = this.sendingIdentity;
     if (identity && identity.chatIdentity === runtime.getChatIdentity()) {
       const pending = runtime.readPendingHostTurn();
       if (!pending || pending.pending.identity.attemptId !== identity.attemptId || pending.pending.capture.generationSeq !== null) return false;
       this.startedByChat.set(identity.chatIdentity, { identity, sequence, bind: runtime.bindHostTurnGeneration(identity, sequence) });
+      if (this.localRetryClaim?.identity.attemptId === identity.attemptId) this.localRetryClaim = null;
       return true;
     }
-    if (!allowLoose) return false;
+    const localRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
+    if (!context.allowOrdinaryLooseClaim && !localRetryClaim) return false;
     const chatIdentity = runtime.getChatIdentity();
     if (this.startedByChat.has(chatIdentity)) return false;
     const snapshot = runtime.readPendingHostTurn();
     if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.capture.generationSeq !== null) return false;
     const pendingIdentity = snapshot.pending.identity;
+    if (localRetryClaim && pendingIdentity.attemptId !== localRetryClaim.identity.attemptId) return false;
     this.startedByChat.set(chatIdentity, { identity: pendingIdentity, sequence, bind: runtime.bindHostTurnGeneration(pendingIdentity, sequence) });
+    if (localRetryClaim) this.localRetryClaim = null;
     return true;
   }
 
@@ -133,22 +156,31 @@ export class ContinuationHostGenerationBridge_ACU {
    * 宽松路径（allowLoose）参考 spv8.9.2 的状态法：只要当前聊天有等待中的宿主轮
    * 且序列号不冲突（未绑定或一致）就认领，归属由唯一候选解析器兜底。
    */
-  claimsGenerationEnded(sequence: number | undefined, allowLoose = false): boolean {
+  claimsGenerationEnded(sequence: number | undefined, contextInput: ContinuationHostGenerationEventContextInput_ACU = undefined): boolean {
+    const context = normalizeGenerationEventContext_ACU(contextInput);
     const runtime = this.dependencies.runtime;
     const started = this.startedByChat.get(runtime.getChatIdentity());
     if (started && sequence !== undefined && started.sequence === sequence) return true;
-    if (!allowLoose) return false;
+    const localRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
+    if (!context.allowOrdinaryLooseClaim && !localRetryClaim) return false;
     const snapshot = runtime.readPendingHostTurn();
     if (!snapshot || snapshot.pending.status !== 'awaiting_generation') return false;
+    if (localRetryClaim && snapshot.pending.identity.attemptId !== localRetryClaim.identity.attemptId) return false;
     const boundSequence = snapshot.pending.capture.generationSeq ?? started?.sequence ?? null;
     return boundSequence === null || sequence === undefined || boundSequence === sequence;
   }
 
-  async onGenerationEnded(eventMessageId: unknown, sequence: number | undefined, allowLoose = false): Promise<void> {
-    if (!this.claimsGenerationEnded(sequence, allowLoose)) return;
+  async onGenerationEnded(eventMessageId: unknown, sequence: number | undefined, contextInput: ContinuationHostGenerationEventContextInput_ACU = undefined): Promise<void> {
+    const context = normalizeGenerationEventContext_ACU(contextInput);
+    const endedOnlyLocalRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
+    if (!this.claimsGenerationEnded(sequence, context)) return;
     const chatIdentity = this.dependencies.runtime.getChatIdentity();
     const started = this.startedByChat.get(chatIdentity) ?? null;
     this.startedByChat.delete(chatIdentity);
+    if (endedOnlyLocalRetryClaim) {
+      endedOnlyLocalRetryClaim.consumed = true;
+      this.localRetryClaim = null;
+    }
     // 宽松路径没有 started 记录：身份以持久化等待轮为准。
     const claimedIdentity = started?.identity ?? this.dependencies.runtime.readPendingHostTurn()?.pending.identity;
     if (!claimedIdentity) return;
@@ -223,6 +255,7 @@ export class ContinuationHostGenerationBridge_ACU {
     const boundSequence = snapshot.pending.capture.generationSeq ?? started?.sequence ?? null;
     if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) return;
     this.startedByChat.delete(chatIdentity);
+    if (this.localRetryClaim?.identity.attemptId === snapshot.pending.identity.attemptId) this.localRetryClaim = null;
     if (started) {
       try { await started.bind; } catch { /* 绑定失败不阻碍中止转换 */ }
     }
@@ -285,7 +318,25 @@ export class ContinuationHostGenerationBridge_ACU {
     const afterReject = this.dependencies.runtime.readPendingHostTurn();
     if (afterReject?.pending.status !== 'retry_ready' || afterReject.pending.identity.attemptId !== identity.attemptId) return;
     await this.dependencies.wait(Math.max(0, retryDelaySeconds) * 1_000);
+    const beforeRetry = this.dependencies.runtime.readPendingHostTurn();
+    if (beforeRetry?.pending.status !== 'retry_ready' || beforeRetry.pending.identity.attemptId !== identity.attemptId) return;
+    const action = await this.dependencies.runtime.retryCurrentTurn();
+    if (!action.retryHostGeneration) return;
     await this.retryHostGeneration();
+  }
+
+  private getMatchingLocalRetryClaim_ACU(context: ContinuationHostGenerationEventContext_ACU, sequence: number | undefined): LocalRetryClaim_ACU | null {
+    const claim = this.localRetryClaim;
+    if (!claim || claim.consumed || !context.automaticTrigger || context.quietLike || context.dryRun) return null;
+    if (this.dependencies.now() - claim.createdAt > ContinuationHostGenerationBridge_ACU.LOCAL_RETRY_CLAIM_TTL_MS) {
+      this.localRetryClaim = null;
+      return null;
+    }
+    if (claim.identity.chatIdentity !== this.dependencies.runtime.getChatIdentity()) return null;
+    if (claim.sequence !== null && sequence !== undefined && claim.sequence !== sequence) return null;
+    const snapshot = this.dependencies.runtime.readPendingHostTurn();
+    if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.identity.attemptId !== claim.identity.attemptId) return null;
+    return claim;
   }
 
   /**
@@ -307,10 +358,13 @@ export class ContinuationHostGenerationBridge_ACU {
       generationSeq: null,
     };
     await runtime.recordHostTurn({ identity: snapshot.pending.identity, capture });
+    const mode = lastIsAi ? 'regenerate' : 'generate';
+    this.localRetryClaim = { identity: snapshot.pending.identity, mode, createdAt: this.dependencies.now(), sequence: null, consumed: false };
     this.sendingIdentity = snapshot.pending.identity;
     this.notifyStateChanges_ACU();
     try {
-      if (!this.dependencies.hostInput.retryGeneration(lastIsAi ? 'regenerate' : 'generate')) {
+      if (!this.dependencies.hostInput.retryGeneration(mode)) {
+        this.localRetryClaim = null;
         await runtime.pauseForHostInputFailure(snapshot.pending.identity);
         return false;
       }

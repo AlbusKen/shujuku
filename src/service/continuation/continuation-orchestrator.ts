@@ -597,7 +597,12 @@ export class ContinuationOrchestrator_ACU {
         const stage = getActiveStage_ACU(task);
         const isLastTurn = stage.completedTurns + 1 === getActiveRevision_ACU(stage).outline.totalTurns;
         const progressed = advanceConfirmedTurn_ACU(task, now, this.timeline_ACU.bind(this), messageIndex);
-        const completedTurn: ContinuationTask_ACU = { ...progressed, pendingHostTurn: null };
+        const completedTurn: ContinuationTask_ACU = {
+          ...progressed,
+          pendingHostTurn: null,
+          lastError: null,
+          stopReason: null,
+        };
         if (!isLastTurn) {
           // 轮边界统一落 paused：自动续写从这个可判定状态出发，页面重载后也能手动恢复。
           advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };

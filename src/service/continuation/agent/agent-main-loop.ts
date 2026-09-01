@@ -36,18 +36,21 @@ import {
   appendPreparedAgentConversationMessages_ACU,
   lastAnnouncedTurnKey_ACU,
   lastRuntimeSnapshotText_ACU,
+  readActiveAgentConversationCompactionMark_ACU,
   readAgentConversation_ACU,
   renderAgentConversationMessages_ACU,
   writeAgentConversationCompactionMark_ACU,
 } from './agent-conversation-store';
+import { createAgentHandoffSemanticSummaryAdapter_ACU, type AgentHandoffSemanticSummaryAdapter_ACU } from './agent-handoff-summarizer';
 import {
-  compactAgentConversation_ACU,
   countAgentTokens_ACU,
   createAgentTokenCounter_ACU,
   measureAgentPromptTokens_ACU,
   resolveAgentCompactionTiming_ACU,
   type TokenCounter_ACU,
 } from './agent-token-budget';
+import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
+import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistration_ACU, applyAgentModuleDelta_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
 import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU } from './agent-protocol';
@@ -112,6 +115,8 @@ export interface ContinuationAgentTurnPlannerDependencies_ACU {
   readModuleSnapshot: (chat: any[]) => AgentModuleSnapshot_ACU;
   writeModuleSnapshot: (chat: any[], targetIndex: number, snapshot: AgentModuleSnapshot_ACU) => Promise<void>;
   readConversation: (chat: any[]) => AgentConversationSnapshot_ACU;
+  /** 读取当前持久化的压缩标记；候选提交必须以该权威回读为准。 */
+  readCompactionMark: typeof readActiveAgentConversationCompactionMark_ACU;
   /** 把新产生的会话消息作为段追加到末楼。分段存储下不再整体重写快照。 */
   appendConversationMessages: typeof appendPreparedAgentConversationMessages_ACU;
   /** 在末楼记录非破坏压缩标记。 */
@@ -131,6 +136,7 @@ const defaultDependencies_ACU: ContinuationAgentTurnPlannerDependencies_ACU = {
   readModuleSnapshot: readAgentModuleSnapshot_ACU,
   writeModuleSnapshot: writeAgentModuleSnapshot_ACU,
   readConversation: readAgentConversation_ACU,
+  readCompactionMark: readActiveAgentConversationCompactionMark_ACU,
   appendConversationMessages: appendPreparedAgentConversationMessages_ACU,
   writeCompactionMark: writeAgentConversationCompactionMark_ACU,
   loadWorldbook: loadAgentWorldbookSnapshot_ACU,
@@ -470,7 +476,17 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
     // 会话在 beginAgentSessionRun_ACU 之后打开：压缩/阈值通知按时间顺序
     // 落在本次运行的分隔条之后，用户能看出它属于哪一次运行。
-    const session = await this.openConversation_ACU(chat, request, conversationTurnKeyOf(), counter, measureOverhead);
+    const handoffSemanticAdapter = createAgentHandoffSemanticSummaryAdapter_ACU(async messages => {
+      const base = request.createInternalRequestIdentity(0);
+      if (!request.isInternalRequestCurrent(base)) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '交接摘要请求已失效', false));
+      const identity: ContinuationInternalAiRequestIdentity_ACU = {
+        ...base,
+        requestId: `${base.requestId || base.attemptId || 'turn'}-handoff-summary`,
+        source: 'handoff_summary',
+      };
+      return this.dependencies.callInternalAi(messages, preset, identity, request.signal, { promptCacheEnabled: false, cacheScope: 'handoff-summary' });
+    });
+    const session = await this.openConversation_ACU(chat, request, conversationTurnKeyOf(), counter, measureOverhead, handoffSemanticAdapter);
     if (request.settings.finalReview.enabled) {
       finalReview = resumedState?.finalReview ?? readFinalReviewStateFromConversation_ACU(session.snapshot(), identitySeed.taskId, session.turnKey) ?? finalReview;
       postReviewDecisionAvailable = finalReview.status === 'feedback_ready';
@@ -553,7 +569,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           && ((iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations) || outlineMaintenanceReserveAvailable);
         const lifecycle = { outlineMaintenanceReserveAvailable, convergenceOnly: maintenanceConvergenceAvailable };
         await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
-        const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle);
+        const round = await this.callMainAgent(request, preset, session, counter, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle);
         totalAttempts += round.attempts;
         const action = round.action;
         logAgentSession_ACU({
@@ -751,6 +767,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     turnKey: string,
     counter: TokenCounter_ACU,
     measureOverhead: () => Promise<number>,
+    semanticAdapter: AgentHandoffSemanticSummaryAdapter_ACU,
   ): Promise<AgentConversationHandle_ACU> {
     let snapshot = this.dependencies.readConversation(chat);
     // 分段存储下落盘只追加新消息。打开时拼出来的所有消息都已持久，
@@ -781,23 +798,48 @@ export class ContinuationAgentTurnPlanner_ACU {
       });
     }
     if (timing.action === 'compact') {
-      const compaction = await compactAgentConversation_ACU(snapshot, budgetTokens, counter, overheadTokens);
-      if (compaction.changed && compaction.mark) {
-        snapshot = compaction.snapshot;
-        // 非破坏压缩：原始消息仍留在各楼的段里，末楼只落一个标记；删掉承载楼即自动撤销压缩。
-        await this.dependencies.writeCompactionMark(chat, compaction.mark);
+      const compaction = await planAgentHistoryCompaction_ACU({
+        snapshot,
+        activeMark: this.dependencies.readCompactionMark(chat),
+        triggerTokens: budgetTokens,
+        fixedPromptTokens: overheadTokens,
+        countTokens: counter,
+        semanticAdapter,
+      });
+      if (compaction.mark) {
+        const candidate = compaction.mark;
+        let committed = false;
+        try {
+          if (await this.dependencies.writeCompactionMark(chat, candidate)) {
+            const persisted = this.dependencies.readCompactionMark(chat);
+            const reread = this.dependencies.readConversation(chat);
+            committed = !!persisted
+              && 'summaryState' in persisted
+              && persisted.compactedThroughId === candidate.compactedThroughId
+              && persisted.report === candidate.report
+              && JSON.stringify(persisted.summaryState) === JSON.stringify(candidate.summaryState)
+              && JSON.stringify(persisted.metrics) === JSON.stringify(candidate.metrics);
+            if (committed) snapshot = reread;
+          }
+        } catch (error) {
+          logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
+        }
+        if (committed) {
         logAgentSession_ACU({
           kind: 'thought',
-          title: `会话历史已压缩（压缩后上下文约 ${compaction.totalTokens} tokens）`,
+          title: `会话历史已压缩（压缩后上下文约 ${compaction.afterTokens} tokens）`,
           detail: [
             `实际读取的完整上下文超出阈值 ${budgetTokens}（其中提示词骨架约 ${overheadTokens} tokens），已把最早的 ${compaction.droppedTurns} 个轮次（${compaction.droppedMessages} 条消息）浓缩成交接报告。`,
             timing.emergency ? `本轮尚未结束，但上下文已达阈值的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍，再不压缩这次请求会因超长直接失败，因此提前压缩。` : '',
-            compaction.withinBudget ? '' : '压缩后仍超出阈值：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。',
+            compaction.status === 'compacted_above_target' ? '压缩后仍高于内部低水位：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。' : '',
           ].filter(Boolean).join(''),
         });
         // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
         // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
         logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: compaction.mark.report });
+        } else {
+          logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩未提交', detail: '压缩候选未通过持久化回读一致性确认，已保留本次运行的旧会话投影。' });
+        }
       }
     }
 
@@ -818,6 +860,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     request: ContinuationAgentTurnPlanRequest_ACU,
     preset: ContinuationResolvedApiPreset_ACU,
     session: AgentConversationHandle_ACU,
+    counter: TokenCounter_ACU,
     context: AgentResolveContext_ACU,
     ledger: AgentRunLedger_ACU,
     budget: AgentRunBudget_ACU,
@@ -845,6 +888,9 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
       const messages = this.spliceHistory_ACU(rendered, session.history());
+      if (request.settings.agentHistoryTokenBudget > 0 && await measureAgentPromptTokens_ACU(messages, counter) > request.settings.agentHistoryTokenBudget) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', '主 Agent 最终请求超过会话 token 阈值，拒绝发送未经确认的上下文', false));
+      }
       // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
       // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
       console.info('[SP·数据库][缓存诊断][agent-main]', trackAgentPromptDrift_ACU('agent-main', messages));

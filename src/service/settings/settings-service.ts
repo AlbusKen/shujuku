@@ -222,6 +222,15 @@ function relaxStoredOriginalDefaultDdls_ACU(templateObj: any): boolean {
   return changed;
 }
 
+export function resetPlotWorldbookSelectionForChatChange_ACU(): SaveSettingsResult_ACU {
+  if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object' || Array.isArray(settings_ACU.plotSettings)) {
+      settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
+  }
+
+  settings_ACU.plotSettings.plotWorldbookConfig = buildDefaultPlotWorldbookConfig_ACU();
+  return saveSettings_ACU();
+}
+
 export function saveSettings_ACU(): SaveSettingsResult_ACU {
   if (!settingsStorageReadyForSave_ACU) {
       if (isIndexedDbAvailable_ACU() && !configIdbCacheLoaded_ACU) {

@@ -245,9 +245,17 @@ describe('ContinuationOrchestrator_ACU', () => {
     const revision = stage.revisions[0];
     const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-a' };
     await recordPendingHostTurn(orchestrator, identity);
+    const staleFailure = store.readPersisted()!;
+    staleFailure.activeTask = {
+      ...staleFailure.activeTask!,
+      stopReason: 'state_invalid',
+      lastError: { code: 'CONTINUATION_TASK_STATE_INVALID', message: '历史宿主归属失败', phase: 'generation_evaluate', retryable: true },
+    };
+    await store.replaceAtomically(staleFailure, { chatIdentity: 'chat-a' });
     expect(orchestrator.readAutoContinueState().eligible).toBe(false);
 
     await orchestrator.confirmCurrentTurn(identity);
+    expect(store.readPersisted()!.activeTask).toMatchObject({ pendingHostTurn: null, stopReason: null, lastError: null });
     expect(orchestrator.readAutoContinueState().eligible).toBe(true);
     await orchestrator.stopTask();
     expect(orchestrator.readAutoContinueState().eligible).toBe(false);

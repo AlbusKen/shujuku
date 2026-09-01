@@ -9,11 +9,13 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; r
   let pending: any = null;
   const autoContinueStates = [...(options.autoContinueStates ?? [])];
   const continuePreparedTurn: any = { identity, instruction: { instruction: '自动续写的下一轮文本' } };
+  const retryCurrentTurn = vi.fn(async () => ({ retryHostGeneration: true }));
   const continueTask = vi.fn(async () => ({ preparedTurn: continuePreparedTurn }));
   const runtime = {
     getChatIdentity: () => chatIdentity, getChat: () => chat, getGenerationSequence: () => 0,
     readPendingHostTurn: () => pending ? { settings: { loopTags: options.tags ?? '<ok>', minGenerationTokens: options.minTokens ?? 0 }, pending } : null,
     readAutoContinueState: vi.fn(() => autoContinueStates.length ? autoContinueStates.shift()! : { eligible: false, delaySeconds: 0 }),
+    retryCurrentTurn,
     continueTask,
     recordHostTurn: vi.fn(async ({ identity: sent, capture }) => { pending = { identity: sent, capture, retryCount: pending?.retryCount ?? 0, status: 'awaiting_generation' }; }),
     bindHostTurnGeneration: vi.fn(async (_identity, generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
@@ -41,7 +43,7 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; r
     materializationRetryDelayMs: 0,
     countTokens: async () => options.tokens ?? 2000,
   });
-  return { bridge, runtime, hostInput, continueTask, wait, setChat: (value: any[]) => { chat = value; }, setChatIdentity: (value: string) => { chatIdentity = value; } };
+  return { bridge, runtime, hostInput, retryCurrentTurn, continueTask, wait, setChat: (value: any[]) => { chat = value; }, setChatIdentity: (value: string) => { chatIdentity = value; } };
 }
 
 describe('ContinuationHostGenerationBridge_ACU', () => {
@@ -150,6 +152,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith(identity);
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+    expect(h.retryCurrentTurn).toHaveBeenCalledBefore(h.hostInput.retryGeneration as any);
     expect(h.hostInput.send).toHaveBeenCalledOnce();
     expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('generate');
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
@@ -177,6 +180,34 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.rejectHostTurnForShortGeneration).toHaveBeenCalledWith({ identity, messageIndex: 1, tokenCount: 12, threshold: 1000 });
     expect(h.hostInput.removeLastMessage).not.toHaveBeenCalled();
     expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('regenerate');
+    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('claims only its own automatic retry generation after the host start event arrives asynchronously', async () => {
+    const h = createHarness();
+    const automaticRetryEvent = { allowOrdinaryLooseClaim: false, automaticTrigger: true, quietLike: false, dryRun: false };
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+
+    await h.bridge.onGenerationEnded(undefined, 7);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>重试正文', message_id: 9 }]);
+
+    expect(h.bridge.onGenerationStarted(8, automaticRetryEvent)).toBe(true);
+    await h.bridge.onGenerationEnded(9, 8, automaticRetryEvent);
+
+    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(identity, 8);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+  });
+
+  it('does not let an ordinary automatic generation claim an awaiting continuation turn', async () => {
+    const h = createHarness();
+    const ordinaryAutomaticEvent = { allowOrdinaryLooseClaim: false, automaticTrigger: true, quietLike: false, dryRun: false };
+    await h.bridge.send(prepared);
+
+    expect(h.bridge.onGenerationStarted(7, ordinaryAutomaticEvent)).toBe(false);
+    expect(h.bridge.claimsGenerationEnded(7, ordinaryAutomaticEvent)).toBe(false);
+    await h.bridge.onGenerationEnded(9, 7, ordinaryAutomaticEvent);
+
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
   });
 

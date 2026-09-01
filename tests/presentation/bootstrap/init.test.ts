@@ -134,7 +134,7 @@ describe('mainInitialize_ACU CHAT_CHANGED 无活动聊天早退', () => {
 
     expect(m.resetTakeover).not.toHaveBeenCalled();
     expect(m.dispose).not.toHaveBeenCalled();
-    expect(m.resetScript).toHaveBeenCalledWith('');
+    expect(m.resetScript).toHaveBeenCalledWith('', { reason: 'chat_changed' });
     expect(m.loadPreset).toHaveBeenCalledOnce();
   });
 });
@@ -225,14 +225,14 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
 
     // 第二个参数是宽松认领开关：普通生成（非 quiet、非 dryRun、非自动触发）才允许，
     // 因为宿主的 GENERATION_STARTED 常在发送返回后的微任务里才到，严格同步配对必然错过。
-    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, true);
+    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     // 生成结束侧的宽松认领沿用自动填表门控的判定结果：会产生正文楼层的生成才允许。
-    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, true);
-    expect(bridge.onGenerationEnded).toHaveBeenCalledWith(42, m.gate.generationSeq, true);
+    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
+    expect(bridge.onGenerationEnded).toHaveBeenCalledWith(42, m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     // 解耦语义：桥只管续写轮次的归属确认/标签校验/自动续轮，不再短路常规管线；
-    // 填表与正文优化按各自的时机独立触发。门控函数被读两次（宽松认领开关一次 + 派发门控一次），
-    // 且 handleNewMessage 照常收到完整意图快照。
-    expect(m.autoUpdate).toHaveBeenCalledTimes(2);
+    // 桥的事件分类直接使用宿主上下文；自动填表门控只负责一次常规派发，
+    // handleNewMessage 仍照常收到完整意图快照。
+    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });
 
@@ -245,8 +245,8 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
 
-    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, true);
-    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, true);
+    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
+    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
     expect(m.autoUpdate).toHaveBeenCalledWith(expect.objectContaining({ seq: m.gate.generationSeq }));
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
@@ -263,8 +263,10 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     m.generationStarted!('normal', { automatic_trigger: true }, false);
 
     // 这三类生成都不是用户点发送产生的，宽松认领会把别人的生成错认成续写轮。
-    for (const call of bridge.onGenerationStarted.mock.calls) expect(call[1]).toBe(false);
+    for (const call of bridge.onGenerationStarted.mock.calls) expect(call[1].allowOrdinaryLooseClaim).toBe(false);
     expect(bridge.onGenerationStarted).toHaveBeenCalledTimes(3);
+    m.generationEnded!(42);
+    expect(bridge.claimsGenerationEnded).toHaveBeenLastCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: false, automaticTrigger: true, quietLike: false, dryRun: false });
   });
 });
 
