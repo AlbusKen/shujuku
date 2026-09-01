@@ -374,6 +374,51 @@ describe('getChatSheetGuideDataForIsolationKey_ACU', () => {
     // 验证函数不抛错
     expect(mockGetCurrentChatTemplateScopeState).toHaveBeenCalled();
   });
+
+  it('scoped Guide 含超宽 seedRows 时返回按最终表头宽度收敛的克隆，且不保存聊天', () => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'chat_override',
+      guideData: {
+        mate: { type: 'chatSheets', version: 2 },
+        sheet_0: {
+          name: '表',
+          content: [['row_id', '名称']],
+          _seedRows: [['7', '铁剑', '旧列']],
+        },
+      },
+    });
+
+    const result = getChatSheetGuideDataForIsolationKey_ACU('');
+
+    expect(result?.sheet_0._seedRows).toEqual([['7', '铁剑']]);
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+  });
+
+  it('preset/global 模板构建出的 Guide 使用相同超宽收敛规则', () => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'preset_link',
+      presetName: 'preset-a',
+    });
+    mockSanitizeTemplateSnapshotForChat.mockReturnValue({
+      templateObj: {
+        sheet_0: { uid: 'sheet_0', name: '表', content: [['row_id', '名称']], _seedRows: [['1', '甲', '旧']] },
+      },
+    });
+
+    const result = getChatSheetGuideDataForIsolationKey_ACU('');
+    expect(result?.sheet_0._seedRows).toEqual([['1', '甲']]);
+  });
+
+  it('不可解释的结构错误仍从 getter 抛出', () => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'chat_override',
+      guideData: {
+        mate: { type: 'chatSheets', version: 2 },
+        sheet_0: { name: '坏表', content: [['名称', '行号']], seedRows: [['铁剑', '1']] },
+      },
+    });
+    expect(() => getChatSheetGuideDataForIsolationKey_ACU('')).toThrow(/Sheet Guide row_id 结构无效/);
+  });
 });
 
 // ═══ setChatSheetGuideDataForIsolationKey_ACU ═══
@@ -407,6 +452,37 @@ describe('setChatSheetGuideDataForIsolationKey_ACU', () => {
     const result = setChatSheetGuideDataForIsolationKey_ACU('', guideData, { reason: 'test' });
     expect(result).toBe(true);
     expect(firstMsg._acu_sheet_guide).toBeDefined();
+  });
+
+  it('setter 接收可收敛的超宽 Guide 时保存规范化结果', () => {
+    const firstMsg: any = {};
+    mockGetChatFirstLayerMessage.mockReturnValue(firstMsg);
+    mockGetChatArray.mockReturnValue([firstMsg]);
+    mockGetChatSheetGuideContainer.mockReturnValue({ version: 2, tags: {} });
+
+    const result = setChatSheetGuideDataForIsolationKey_ACU('', {
+      sheet_0: {
+        uid: 's0',
+        name: '物品表',
+        content: [['row_id', '物品名']],
+        _seedRows: [['7', '铁剑', '旧列']],
+        sourceData: {},
+        updateConfig: {},
+      },
+    }, { reason: 'test' });
+
+    expect(result).toBe(true);
+    expect(firstMsg._acu_sheet_guide.tags[''].data.sheet_0._seedRows).toEqual([['7', '铁剑']]);
+  });
+
+  it('setter 拒绝不可解释的结构错误', () => {
+    const firstMsg: any = {};
+    mockGetChatFirstLayerMessage.mockReturnValue(firstMsg);
+    mockGetChatArray.mockReturnValue([firstMsg]);
+    const result = setChatSheetGuideDataForIsolationKey_ACU('', {
+      sheet_0: { name: '坏表', content: [['名称', '行号']], seedRows: [['铁剑', '1']] },
+    });
+    expect(result).toBe(false);
   });
 
   it('未要求同步 scope 时只写入 guide', () => {

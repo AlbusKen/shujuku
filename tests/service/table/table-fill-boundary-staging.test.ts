@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { planTableFillBoundaryStaging_ACU } from '../../../src/service/table/table-fill-boundary-staging';
+import {
+  assembleBucketWorkingView_ACU,
+  createEmptyTargetOverlay_ACU,
+  extractTargetOverlaySheets_ACU,
+  mergeTargetOverlayFromBucket_ACU,
+  planTableFillBoundaryStaging_ACU,
+} from '../../../src/service/table/table-fill-boundary-staging';
 
 describe('planTableFillBoundaryStaging_ACU', () => {
   it('待填范围跨越唯一 full 根时，把根前索引隔离为 staging 并冻结运行作用域', () => {
@@ -109,5 +115,36 @@ describe('splitMessageIndicesAtBoundary_ACU', () => {
 
   it('非法索引输入抛出规划错误', () => {
     expect(() => splitMessageIndicesAtBoundary_ACU([2, 1], 30)).toThrow(/严格递增/);
+  });
+});
+
+describe('target overlay 连续装配', () => {
+  it('后续 pre bucket 看见前一 bucket 的目标表结果，且不带入未来非目标数据', () => {
+    const overlay = createEmptyTargetOverlay_ACU(['sheet_b']);
+    const afterBucket1 = mergeTargetOverlayFromBucket_ACU(overlay, {
+      mate: { type: 'acu' },
+      sheet_a: { uid: 'sheet_a', name: 'A', content: [['row_id', '值'], ['1', 'future-a']] },
+      sheet_b: { uid: 'sheet_b', name: 'B', content: [['row_id', '值'], ['1', 'b1']] },
+    }, 80);
+    expect(Object.keys(afterBucket1.sheets)).toEqual(['sheet_b']);
+    expect(afterBucket1.sheets.sheet_b.content).toEqual([['row_id', '值'], ['1', 'b1']]);
+
+    const historicalAt80 = {
+      mate: { type: 'acu' },
+      sheet_a: { uid: 'sheet_a', name: 'A', content: [['row_id', '值']] },
+      sheet_b: { uid: 'sheet_b', name: 'B', content: [['row_id', '值']] },
+    };
+    const working = assembleBucketWorkingView_ACU(historicalAt80, afterBucket1);
+    expect(working.sheet_b.content).toEqual([['row_id', '值'], ['1', 'b1']]);
+    expect(working.sheet_a.content).toEqual([['row_id', '值']]);
+
+    const afterBucket2 = mergeTargetOverlayFromBucket_ACU(afterBucket1, {
+      sheet_b: { uid: 'sheet_b', name: 'B', content: [['row_id', '值'], ['1', 'b1-edited']] },
+    }, 90);
+    expect(afterBucket2.sheets.sheet_b.content).toEqual([['row_id', '值'], ['1', 'b1-edited']]);
+    expect(afterBucket2.stagedBucketCount).toBe(2);
+    expect(extractTargetOverlaySheets_ACU({ sheet_a: { uid: 'a' }, sheet_b: afterBucket2.sheets.sheet_b }, ['sheet_b'])).toEqual({
+      sheet_b: afterBucket2.sheets.sheet_b,
+    });
   });
 });

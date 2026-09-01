@@ -1,5 +1,6 @@
 import { CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU } from '../../../data/storage/chat-history';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
+import { logWarn_ACU } from '../../../shared/utils';
 
 export interface SheetGuideRowIdNormalizationResult_ACU<T> {
   guideData: T;
@@ -19,6 +20,17 @@ function isRowIdAlias(value: unknown): boolean {
 
 function label(sheet: any, key: string): string {
   return `表「${String(sheet?.name ?? '') || key}」(${key})`;
+}
+
+function normalizeSeedRowWidth_ACU(row: any[], width: number): boolean {
+  if (!Array.isArray(row) || width < 0) return false;
+  if (row.length === width) return false;
+  if (row.length > width) {
+    row.length = width;
+    return true;
+  }
+  while (row.length < width) row.push(null);
+  return true;
 }
 
 export function normalizeSheetGuideRowIds_ACU<T>(guideData: T): SheetGuideRowIdNormalizationResult_ACU<T> {
@@ -61,29 +73,39 @@ export function normalizeSheetGuideRowIds_ACU<T>(guideData: T): SheetGuideRowIdN
       continue;
     }
     const businessWidth = header.length;
+    const rows = Array.isArray(seedRows) ? seedRows : [];
+    let trimmedCellCount = 0;
+    let convergedRowCount = 0;
     if (header[0] === 'row_id') {
-      // Canonical header; only validate and normalize existing seed identities below.
+      // Canonical header; converge seed rows to the final header width below.
     } else if (isRowIdAlias(header[0])) {
       header[0] = 'row_id';
       changed = true;
     } else {
+      for (const row of rows) {
+        const before = row.length;
+        if (normalizeSeedRowWidth_ACU(row, businessWidth)) {
+          changed = true;
+          convergedRowCount += 1;
+          if (before > businessWidth) trimmedCellCount += before - businessWidth;
+        }
+        row.unshift(null);
+        changed = true;
+      }
       header.unshift('row_id');
       changed = true;
-      for (const row of seedRows || []) {
-        if (row.length > businessWidth) {
-          blockers.push(`${name} 的种子行宽度超过表头，无法安全插入 row_id。`);
-          continue;
-        }
-        while (row.length < businessWidth) row.push(null);
-        row.unshift(null);
+    }
+    for (const row of rows) {
+      const before = row.length;
+      if (normalizeSeedRowWidth_ACU(row, header.length)) {
+        changed = true;
+        if (before !== header.length) convergedRowCount += 1;
+        if (before > header.length) trimmedCellCount += before - header.length;
       }
     }
-    const rows = Array.isArray(seedRows) ? seedRows : [];
-    if (rows.some(row => row.length > header.length)) {
-      blockers.push(`${name} 的种子行宽度超过规范化表头。`);
-      continue;
+    if (trimmedCellCount > 0) {
+      logWarn_ACU(`[SheetGuide] 超宽种子行已按最终表头收敛：sheetKey=${key}, headerWidth=${header.length}, convergedRows=${convergedRowCount}, removedCells=${trimmedCellCount}`);
     }
-    for (const row of rows) while (row.length < header.length) row.push(null);
     const reserved = createStableRowIdReservation_ACU(rows);
     const seen = new Set<string>();
     for (const row of rows) {

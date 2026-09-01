@@ -57786,12 +57786,36 @@ $CONTENT
         };
     }
     class SqlTableService {
-        constructor() {
+        constructor(options) {
             this.mode = 'sqlite';
             this._initialized = false;
+            this.isolatedJsonView_ACU = null;
+            this.isolatedRuntime_ACU = options?.isolatedRuntime === true;
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
-            this.nameMapperOwner_ACU = createNameMapperOwnerToken_ACU('sql-table-service');
+            this.nameMapperOwner_ACU = createNameMapperOwnerToken_ACU(this.isolatedRuntime_ACU ? 'sql-table-service-isolated' : 'sql-table-service');
+        }
+        _readCanonicalView_ACU() {
+            return this.isolatedRuntime_ACU ? this.isolatedJsonView_ACU : currentJsonTableData_ACU;
+        }
+        _publishCanonicalView_ACU(data) {
+            if (this.isolatedRuntime_ACU) {
+                this.isolatedJsonView_ACU = data;
+                return;
+            }
+            _set_currentJsonTableData_ACU(data);
+        }
+        _tryPublishNameMapper_ACU(data) {
+            if (this.isolatedRuntime_ACU)
+                return true;
+            if (!data)
+                return this._buildNameMapper({ mate: DEFAULT_MATE_ACU });
+            return this._buildNameMapper(data);
+        }
+        _releaseNameMapperIfShared_ACU() {
+            if (this.isolatedRuntime_ACU)
+                return;
+            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
         }
         isReady() {
             return this._initialized && this.engine.isReady;
@@ -57802,7 +57826,7 @@ $CONTENT
          * 否则会出现「owner 是本实例、内容却由无所有权入口改写」的脱节。
          */
         refreshNameMapperForData_ACU(data) {
-            return this._buildNameMapper(data);
+            return this._tryPublishNameMapper_ACU(data);
         }
         createRuntimeSnapshot() {
             if (!this._initialized || !this.engine.isReady)
@@ -57813,8 +57837,8 @@ $CONTENT
             if (!(snapshot instanceof Uint8Array))
                 throw new Error('SQLite 运行时快照无效，无法恢复。');
             // 失败时要撤回本实例写入的共享 canonical 视图，避免半成功状态污染其他读者。
-            const previousJsonView = currentJsonTableData_ACU;
-            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
+            const previousJsonView = this._readCanonicalView_ACU();
+            this._releaseNameMapperIfShared_ACU();
             await this.engine.loadFromBinary(snapshot);
             this._existingTableSet = undefined;
             // 映射必须基于「刚从恢复后 engine 成功导出」的视图构建。
@@ -57826,7 +57850,7 @@ $CONTENT
                 this._initialized = false;
                 throw new Error('sqlite_snapshot_restore_failed: 快照恢复后无法导出 canonical 视图。');
             }
-            if (!this._buildNameMapper(restoredView)) {
+            if (!this._tryPublishNameMapper_ACU(restoredView)) {
                 this._initialized = false;
                 this._revertOwnJsonView_ACU(restoredView, previousJsonView);
                 throw new Error('name_mapper_publish_rejected: 快照恢复后未能发布中英文名映射。');
@@ -57904,8 +57928,8 @@ $CONTENT
                     if (runtimeSeedData) {
                         this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true, allowRuntimeDdlFallback: true });
                         this._validateRuntimeSchema_ACU(runtimeSeedData);
-                        _set_currentJsonTableData_ACU(runtimeSeedData);
-                        if (!this._buildNameMapper(runtimeSeedData)) {
+                        this._publishCanonicalView_ACU(runtimeSeedData);
+                        if (!this._tryPublishNameMapper_ACU(runtimeSeedData)) {
                             throw new Error('name_mapper_publish_rejected: 未能发布当前 runtime 的中英文名映射。');
                         }
                         this._initialized = true;
@@ -57929,8 +57953,8 @@ $CONTENT
                 }
                 this.syncBridge.loadFromTableData(mergedData, { strict: true, allowRuntimeDdlFallback: true });
                 this._validateRuntimeSchema_ACU(mergedData);
-                _set_currentJsonTableData_ACU(mergedData);
-                if (!this._buildNameMapper(mergedData)) {
+                this._publishCanonicalView_ACU(mergedData);
+                if (!this._tryPublishNameMapper_ACU(mergedData)) {
                     throw new Error('name_mapper_publish_rejected: 未能发布当前 runtime 的中英文名映射。');
                 }
                 this._initialized = true;
@@ -57956,19 +57980,19 @@ $CONTENT
         }
         async replaceAllData(data) {
             // 替换失败不得把本实例数据永久留在共享 canonical 视图里。
-            const previousJsonView = currentJsonTableData_ACU;
+            const previousJsonView = this._readCanonicalView_ACU();
             let ownJsonView = null;
             try {
                 const cloned = JSON.parse(JSON.stringify(data || {}));
-                releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
+                this._releaseNameMapperIfShared_ACU();
                 this.engine.dispose();
                 this.engine = new SqliteEngine();
                 this.syncBridge = new SyncBridge(this.engine);
                 await this.engine.init();
                 this.syncBridge.loadFromTableData(cloned, { strict: true });
-                _set_currentJsonTableData_ACU(cloned);
+                this._publishCanonicalView_ACU(cloned);
                 ownJsonView = cloned;
-                if (!this._buildNameMapper(cloned)) {
+                if (!this._tryPublishNameMapper_ACU(cloned)) {
                     throw new Error('name_mapper_publish_rejected: 未能发布替换后 runtime 的中英文名映射。');
                 }
                 this._initialized = true;
@@ -57983,7 +58007,7 @@ $CONTENT
                 this._initialized = false;
                 this._existingTableSet = undefined;
                 this._revertOwnJsonView_ACU(ownJsonView, previousJsonView);
-                releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
+                this._releaseNameMapperIfShared_ACU();
                 logError_ACU(`[SqlTableService] 运行时全量替换失败: ${message}`);
                 return { success: false, modifiedKeys: [], appliedEdits: 0, error: message };
             }
@@ -57994,8 +58018,8 @@ $CONTENT
             this.syncBridge = new SyncBridge(this.engine);
             this._initialized = false;
             this._existingTableSet = undefined;
-            _set_currentJsonTableData_ACU(null);
-            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
+            this._publishCanonicalView_ACU(null);
+            this._releaseNameMapperIfShared_ACU();
         }
         /**
          * 获取当前运行时的完整表格数据
@@ -58003,17 +58027,17 @@ $CONTENT
          */
         getCurrentData() {
             if (!this._initialized || !this.engine.isReady) {
-                return currentJsonTableData_ACU;
+                return this._readCanonicalView_ACU();
             }
             try {
-                const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
+                const mate = this._readCanonicalView_ACU()?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
                 const exportedData = this.syncBridge.exportToTableData(mate);
-                _set_currentJsonTableData_ACU(exportedData);
+                this._publishCanonicalView_ACU(exportedData);
                 return exportedData;
             }
             catch (e) {
                 logError_ACU(`[SqlTableService] getCurrentData 失败: ${e?.message}`);
-                return currentJsonTableData_ACU;
+                return this._readCanonicalView_ACU();
             }
         }
         /**
@@ -58035,7 +58059,7 @@ $CONTENT
             const userParams = [];
             (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                const runtimeStatements = rebindSqlMutationIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }));
+                const runtimeStatements = rebindSqlMutationIdentifiers_ACU(normalizedStatements, (this._readCanonicalView_ACU() || { mate: DEFAULT_MATE_ACU }));
                 runtimeStatements.forEach(statement => {
                     userStatements.push(statement);
                     userParams.push(runtimeStatements.length === 1 ? paramsList?.[index] : undefined);
@@ -58074,7 +58098,7 @@ $CONTENT
             this._ensureTablesFromTemplate(scope);
             const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                return rebindSqlMutationIdentifiers_ACU(normalizedStatements, (scope?.runtimeData || currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }), scope?.templateData, { requireKnownTables: Boolean(scope?.templateData), requireKnownInsertColumns: true });
+                return rebindSqlMutationIdentifiers_ACU(normalizedStatements, (scope?.runtimeData || this._readCanonicalView_ACU() || { mate: DEFAULT_MATE_ACU }), scope?.templateData, { requireKnownTables: Boolean(scope?.templateData), requireKnownInsertColumns: true });
             });
             const userStatements = normalizedGroups.flat();
             if (userStatements.length === 0) {
@@ -58112,7 +58136,7 @@ $CONTENT
             try {
                 const result = this.engine.runBatchWithFinalize(statements, statements.map(() => undefined), () => this._exportCurrentDataStrict());
                 const tableData = result.finalizeResult;
-                _set_currentJsonTableData_ACU(tableData);
+                this._publishCanonicalView_ACU(tableData);
                 const modifiedTables = extractTableNamesFromStatements(statements);
                 const modifiedKeys = this._tableNamesToSheetKeys(modifiedTables);
                 logDebug_ACU(`[SqlTableService] 系统 row_id 批量执行成功: ${statements.length} 条语句, ${result.totalChanges} 行受影响`);
@@ -58155,7 +58179,7 @@ $CONTENT
             try {
                 // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
                 const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
-                const runtimeSql = rebindSqlMutationIdentifiers_ACU([normalizedSql], (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }))[0];
+                const runtimeSql = rebindSqlMutationIdentifiers_ACU([normalizedSql], (this._readCanonicalView_ACU() || { mate: DEFAULT_MATE_ACU }))[0];
                 const result = this.engine.run(runtimeSql, params);
                 this._syncToJson();
                 return { changes: result.changes, errors: [] };
@@ -58173,7 +58197,7 @@ $CONTENT
             this.engine.dispose();
             // 本实例可能已被更新的 runtime 置换。只释放自己发布的映射，
             // 否则会把新 runtime 刚发布的 schema 映射清成 unbound。
-            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
+            this._releaseNameMapperIfShared_ACU();
             this._initialized = false;
             this._existingTableSet = undefined;
             logDebug_ACU('[SqlTableService] SQLite 引擎已销毁');
@@ -58188,16 +58212,16 @@ $CONTENT
          * 合法发布了新视图，无条件写回旧值会把它们的更新覆盖掉。
          */
         _revertOwnJsonView_ACU(ownView, previousView) {
-            if (!ownView || currentJsonTableData_ACU !== ownView)
+            if (!ownView || this._readCanonicalView_ACU() !== ownView)
                 return;
-            _set_currentJsonTableData_ACU(previousView);
+            this._publishCanonicalView_ACU(previousView);
         }
         /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
         _resetRuntimeForLoad_ACU() {
             // 新 runtime 在成功 hydrate 前没有可证明匹配的 schema；保留旧 mapper
             // 会让并发/重载后的外部 CRUD 把展示列解析到上一份 SQLite schema。
             // 只撤销本实例发布的映射：其他实例的映射由其自身生命周期负责。
-            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
+            this._releaseNameMapperIfShared_ACU();
             this.engine.dispose();
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
@@ -58315,7 +58339,7 @@ $CONTENT
         }
         _exportCurrentDataStrict() {
             try {
-                const mate = currentJsonTableData_ACU?.mate || DEFAULT_MATE_ACU;
+                const mate = this._readCanonicalView_ACU()?.mate || DEFAULT_MATE_ACU;
                 return this.syncBridge.exportToTableData(mate, { strict: true });
             }
             catch (error) {
@@ -58391,9 +58415,9 @@ $CONTENT
          */
         _syncToJson() {
             try {
-                const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
+                const mate = this._readCanonicalView_ACU()?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
                 const exportedData = this.syncBridge.exportToTableData(mate);
-                _set_currentJsonTableData_ACU(exportedData);
+                this._publishCanonicalView_ACU(exportedData);
                 return exportedData;
             }
             catch (e) {
@@ -58403,14 +58427,14 @@ $CONTENT
         }
         /** 将 SQL 表名映射为 sheetKey */
         _tableNamesToSheetKeys(tableNames) {
-            if (!currentJsonTableData_ACU)
+            const view = this._readCanonicalView_ACU();
+            if (!view)
                 return [];
             const keys = [];
-            for (const [key, value] of Object.entries(currentJsonTableData_ACU)) {
+            for (const key of Object.keys(view)) {
                 if (!key.startsWith('sheet_'))
                     continue;
-                const sheet = value;
-                const runtimeTableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, key);
+                const runtimeTableName = getPhysicalTableNameForSheet_ACU(view, key);
                 if (tableNames.includes(runtimeTableName))
                     keys.push(key);
             }
@@ -58438,7 +58462,7 @@ $CONTENT
             }
             let currentData;
             try {
-                const mate = currentJsonTableData_ACU?.mate || DEFAULT_MATE_ACU;
+                const mate = this._readCanonicalView_ACU()?.mate || DEFAULT_MATE_ACU;
                 currentData = this.syncBridge.exportToTableData(mate);
             }
             catch (error) {
@@ -58496,7 +58520,7 @@ $CONTENT
             const missingSheets = {};
             for (const key of sheetKeys) {
                 // 当前聊天模板是建表结构权威；currentJsonTableData_ACU 可能是旧运行时快照，不能让旧 DDL/CHECK 覆盖模板。
-                const liveSheet = currentJsonTableData_ACU?.[key];
+                const liveSheet = this._readCanonicalView_ACU()?.[key];
                 const sheet = templateData[key] || liveSheet;
                 if (!sheet)
                     continue;
@@ -58509,7 +58533,7 @@ $CONTENT
             if (Object.keys(missingSheets).length === 0) {
                 // 不能因物理表已存在就跳过映射同步：删楼回滚/模板切换可重建
                 // SQLite runtime，却不会制造缺表；此时外部 CRUD 仍需当前 schema 的列映射。
-                if (!this._buildNameMapper(currentJsonTableData_ACU || templateData)) {
+                if (!this._tryPublishNameMapper_ACU(this._readCanonicalView_ACU() || templateData)) {
                     throw new Error('name_mapper_publish_rejected: 未能发布当前 schema 的中英文名映射，已阻止后续写入。');
                 }
                 return;
@@ -58551,15 +58575,18 @@ $CONTENT
             }
             this.syncBridge.loadFromTableData(partialData, { strict: true, allowRuntimeDdlFallback: true });
             // 合并新建的表到当前 JSON 视图
-            if (currentJsonTableData_ACU) {
+            const currentView = this._readCanonicalView_ACU();
+            if (currentView) {
                 for (const [key, sheet] of Object.entries(missingSheets)) {
-                    currentJsonTableData_ACU[key] = sheet;
+                    currentView[key] = sheet;
                 }
+                if (this.isolatedRuntime_ACU)
+                    this.isolatedJsonView_ACU = currentView;
             }
             else {
-                _set_currentJsonTableData_ACU(templateData);
+                this._publishCanonicalView_ACU(templateData);
             }
-            if (!this._buildNameMapper(currentJsonTableData_ACU || templateData)) {
+            if (!this._tryPublishNameMapper_ACU(this._readCanonicalView_ACU() || templateData)) {
                 throw new Error('name_mapper_publish_rejected: 建表后未能发布中英文名映射，已阻止后续写入。');
             }
             logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
@@ -58886,7 +58913,8 @@ $CONTENT
             && typeof candidate.lifecycleEpoch === 'number'
             && (candidate.source === 'merged_refresh'
                 || candidate.source === 'post_save_replay'
-                || candidate.source === 'system_reload_replay')
+                || candidate.source === 'system_reload_replay'
+                || candidate.source === 'boundary_commit_head')
             && typeof candidate.fingerprint === 'string'
             && typeof candidate.createdAt === 'number';
     }
@@ -59343,6 +59371,10 @@ $CONTENT
     // ═══════════════════════════════════════════════════════════════
     // 内部工具函数
     // ═══════════════════════════════════════════════════════════════
+    /** 创建不发布到活跃 runtime 的 SQLite provider，仅供 run-scoped staging 使用。 */
+    function createDetachedSqlTableService_ACU() {
+        return new SqlTableService({ isolatedRuntime: true });
+    }
     /** 根据模式创建 Provider 实例 */
     function createProvider(mode) {
         switch (mode) {
@@ -92095,6 +92127,19 @@ $CONTENT
     function label(sheet, key) {
         return `表「${String(sheet?.name ?? '') || key}」(${key})`;
     }
+    function normalizeSeedRowWidth_ACU(row, width) {
+        if (!Array.isArray(row) || width < 0)
+            return false;
+        if (row.length === width)
+            return false;
+        if (row.length > width) {
+            row.length = width;
+            return true;
+        }
+        while (row.length < width)
+            row.push(null);
+        return true;
+    }
     function normalizeSheetGuideRowIds_ACU(guideData) {
         if (!guideData || typeof guideData !== 'object' || Array.isArray(guideData)) {
             return { guideData, changed: false, blockers: ['Sheet Guide 必须是对象。'] };
@@ -92136,34 +92181,44 @@ $CONTENT
                 continue;
             }
             const businessWidth = header.length;
+            const rows = Array.isArray(seedRows) ? seedRows : [];
+            let trimmedCellCount = 0;
+            let convergedRowCount = 0;
             if (header[0] === 'row_id') {
-                // Canonical header; only validate and normalize existing seed identities below.
+                // Canonical header; converge seed rows to the final header width below.
             }
             else if (isRowIdAlias(header[0])) {
                 header[0] = 'row_id';
                 changed = true;
             }
             else {
+                for (const row of rows) {
+                    const before = row.length;
+                    if (normalizeSeedRowWidth_ACU(row, businessWidth)) {
+                        changed = true;
+                        convergedRowCount += 1;
+                        if (before > businessWidth)
+                            trimmedCellCount += before - businessWidth;
+                    }
+                    row.unshift(null);
+                    changed = true;
+                }
                 header.unshift('row_id');
                 changed = true;
-                for (const row of seedRows || []) {
-                    if (row.length > businessWidth) {
-                        blockers.push(`${name} 的种子行宽度超过表头，无法安全插入 row_id。`);
-                        continue;
-                    }
-                    while (row.length < businessWidth)
-                        row.push(null);
-                    row.unshift(null);
+            }
+            for (const row of rows) {
+                const before = row.length;
+                if (normalizeSeedRowWidth_ACU(row, header.length)) {
+                    changed = true;
+                    if (before !== header.length)
+                        convergedRowCount += 1;
+                    if (before > header.length)
+                        trimmedCellCount += before - header.length;
                 }
             }
-            const rows = Array.isArray(seedRows) ? seedRows : [];
-            if (rows.some(row => row.length > header.length)) {
-                blockers.push(`${name} 的种子行宽度超过规范化表头。`);
-                continue;
+            if (trimmedCellCount > 0) {
+                logWarn_ACU(`[SheetGuide] 超宽种子行已按最终表头收敛：sheetKey=${key}, headerWidth=${header.length}, convergedRows=${convergedRowCount}, removedCells=${trimmedCellCount}`);
             }
-            for (const row of rows)
-                while (row.length < header.length)
-                    row.push(null);
             const reserved = createStableRowIdReservation_ACU(rows);
             const seen = new Set();
             for (const row of rows) {
@@ -103417,6 +103472,173 @@ $CONTENT
             this.name = 'TableFillBoundaryPlanError_ACU';
         }
     }
+    function createTableFillStagingRunContext_ACU(input) {
+        return {
+            runId: input.runId,
+            chatKey: input.chatKey,
+            isolationKey: input.isolationKey,
+            targetSheetKeys: Object.freeze([...input.targetSheetKeys]),
+            originalFullIndex: input.originalFullIndex,
+            originalFullFingerprint: input.originalFullFingerprint ?? null,
+            templateFingerprint: input.templateFingerprint,
+            overlay: createEmptyTargetOverlay_ACU(input.targetSheetKeys),
+        };
+    }
+    function createEmptyTargetOverlay_ACU(targetSheetKeys) {
+        return {
+            targetSheetKeys: Object.freeze([...targetSheetKeys]),
+            sheets: {},
+            lastTargetMessageIndex: null,
+            stagedBucketCount: 0,
+        };
+    }
+    function extractTargetOverlaySheets_ACU(data, targetSheetKeys) {
+        const sheets = {};
+        if (!data || typeof data !== 'object')
+            return sheets;
+        for (const sheetKey of targetSheetKeys) {
+            const sheet = data[sheetKey];
+            if (sheet && typeof sheet === 'object' && !Array.isArray(sheet)) {
+                sheets[sheetKey] = JSON.parse(JSON.stringify(sheet));
+            }
+        }
+        return sheets;
+    }
+    /**
+     * 纯函数：historicalBase + target overlay → bucket working view。
+     * 不写聊天、不写全局 runtime、不碰 provider。
+     */
+    function assembleBucketWorkingView_ACU(historicalBase, overlay) {
+        const base = historicalBase && typeof historicalBase === 'object'
+            ? JSON.parse(JSON.stringify(historicalBase))
+            : {};
+        if (!overlay)
+            return base;
+        for (const sheetKey of overlay.targetSheetKeys) {
+            const overlaySheet = overlay.sheets[sheetKey];
+            if (overlaySheet && typeof overlaySheet === 'object') {
+                base[sheetKey] = JSON.parse(JSON.stringify(overlaySheet));
+            }
+        }
+        return base;
+    }
+    function mergeTargetOverlayFromBucket_ACU(overlay, data, targetMessageIndex) {
+        return {
+            targetSheetKeys: overlay.targetSheetKeys,
+            sheets: {
+                ...overlay.sheets,
+                ...extractTargetOverlaySheets_ACU(data, overlay.targetSheetKeys),
+            },
+            lastTargetMessageIndex: targetMessageIndex,
+            stagedBucketCount: overlay.stagedBucketCount + 1,
+        };
+    }
+    function readOriginalFullFrameFingerprint_ACU(chat, isolationKey, originalFullIndex) {
+        const message = chat[originalFullIndex];
+        if (!message)
+            return null;
+        const container = readIsolatedDataContainer_ACU(message);
+        const tagData = container?.[isolationKey];
+        if (!isV2TagData_ACU(tagData))
+            return null;
+        const frame = tagData.storageFrame;
+        if (!frame || frame.checkpoint?.kind !== 'full')
+            return null;
+        return getOriginalFullFrameFingerprint_ACU(frame);
+    }
+    function canonicalSheetFingerprint_ACU(sheet) {
+        return getTableDataFingerprint_ACU(sheet ?? null);
+    }
+    function failBoundary_ACU(diagnosticCode, error) {
+        return { ok: false, error, diagnosticCode };
+    }
+    function assertCandidateWriteSurface_ACU(liveChat, candidateChat, isolationKey, originalFullIndex, targetSheetKeys) {
+        if (!Array.isArray(liveChat) || !Array.isArray(candidateChat) || liveChat.length !== candidateChat.length) {
+            return 'candidate 改变了消息数量';
+        }
+        const targetSet = new Set(targetSheetKeys);
+        const hostReserved = new Set(['TavernDB_ACU_IsolatedData']);
+        for (let index = 0; index < liveChat.length; index += 1) {
+            const liveMessage = liveChat[index] || {};
+            const candidateMessage = candidateChat[index] || {};
+            const liveHost = {};
+            const candidateHost = {};
+            for (const [key, value] of Object.entries(liveMessage)) {
+                if (!hostReserved.has(key))
+                    liveHost[key] = value;
+            }
+            for (const [key, value] of Object.entries(candidateMessage)) {
+                if (!hostReserved.has(key))
+                    candidateHost[key] = value;
+            }
+            if (getTableDataFingerprint_ACU(liveHost) !== getTableDataFingerprint_ACU(candidateHost)) {
+                return `message[${index}] 宿主字段被改写`;
+            }
+            const liveIso = liveMessage.TavernDB_ACU_IsolatedData && typeof liveMessage.TavernDB_ACU_IsolatedData === 'object'
+                ? liveMessage.TavernDB_ACU_IsolatedData
+                : {};
+            const candidateIso = candidateMessage.TavernDB_ACU_IsolatedData && typeof candidateMessage.TavernDB_ACU_IsolatedData === 'object'
+                ? candidateMessage.TavernDB_ACU_IsolatedData
+                : {};
+            const isolationKeys = new Set([...Object.keys(liveIso), ...Object.keys(candidateIso)]);
+            for (const key of isolationKeys) {
+                if (key !== isolationKey) {
+                    if (getTableDataFingerprint_ACU(liveIso[key] ?? null) !== getTableDataFingerprint_ACU(candidateIso[key] ?? null)) {
+                        return `message[${index}] 非目标 isolationKey 被改写`;
+                    }
+                    continue;
+                }
+                if (index !== originalFullIndex) {
+                    if (getTableDataFingerprint_ACU(liveIso[key] ?? null) !== getTableDataFingerprint_ACU(candidateIso[key] ?? null)) {
+                        return `message[${index}] 目标 isolation 在非根楼层被改写`;
+                    }
+                    continue;
+                }
+                const liveTag = liveIso[key] && typeof liveIso[key] === 'object' ? liveIso[key] : {};
+                const candidateTag = candidateIso[key] && typeof candidateIso[key] === 'object' ? candidateIso[key] : {};
+                const liveFrame = (liveTag.storageFrame || {});
+                const candidateFrame = (candidateTag.storageFrame || {});
+                const liveTagRest = { ...liveTag, storageFrame: undefined };
+                const candidateTagRest = { ...candidateTag, storageFrame: undefined };
+                if (getTableDataFingerprint_ACU(liveTagRest) !== getTableDataFingerprint_ACU(candidateTagRest)) {
+                    return 'full checkpoint 宿主 tag 元数据被改写';
+                }
+                if (getTableDataFingerprint_ACU(liveFrame.checkpoint ?? null) !== getTableDataFingerprint_ACU(candidateFrame.checkpoint ?? null)) {
+                    return 'full checkpoint 本体被改写';
+                }
+                if (getTableDataFingerprint_ACU(liveFrame.logEntries ?? []) !== getTableDataFingerprint_ACU(candidateFrame.logEntries ?? [])) {
+                    return 'logEntries 被改写';
+                }
+                if (getTableDataFingerprint_ACU(liveFrame.headRevision ?? null) !== getTableDataFingerprint_ACU(candidateFrame.headRevision ?? null)) {
+                    return 'headRevision 被改写';
+                }
+                const liveFrameRest = { ...liveFrame };
+                const candidateFrameRest = { ...candidateFrame };
+                delete liveFrameRest.perSheetCheckpoints;
+                delete candidateFrameRest.perSheetCheckpoints;
+                delete liveFrameRest.checkpoint;
+                delete candidateFrameRest.checkpoint;
+                delete liveFrameRest.logEntries;
+                delete candidateFrameRest.logEntries;
+                delete liveFrameRest.headRevision;
+                delete candidateFrameRest.headRevision;
+                if (getTableDataFingerprint_ACU(liveFrameRest) !== getTableDataFingerprint_ACU(candidateFrameRest)) {
+                    return 'storageFrame 其他元数据被改写';
+                }
+                const livePer = liveFrame.perSheetCheckpoints || {};
+                const candidatePer = candidateFrame.perSheetCheckpoints || {};
+                const perKeys = new Set([...Object.keys(livePer), ...Object.keys(candidatePer)]);
+                for (const sheetKey of perKeys) {
+                    if (targetSet.has(sheetKey))
+                        continue;
+                    if (getTableDataFingerprint_ACU(livePer[sheetKey] ?? null) !== getTableDataFingerprint_ACU(candidatePer[sheetKey] ?? null)) {
+                        return `非目标 perSheetCheckpoints[${sheetKey}] 被改写`;
+                    }
+                }
+            }
+        }
+        return null;
+    }
     function requireNonEmptyString_ACU(value, field) {
         const normalized = typeof value === 'string' ? value.trim() : '';
         if (!normalized) {
@@ -103532,30 +103754,28 @@ $CONTENT
         return segments;
     }
     /**
-     * 计划 5.4：跨 full checkpoint 分阶段提交的边界汇合（boundary commit）。
+     * 跨 full checkpoint 分阶段提交的边界汇合。
      *
-     * 边界前 bucket 只进入 run 级隔离 staging（stage_only，不写聊天 V2 frame），
-     * 到达原 full 边界时，本服务把 staging 累计的目标表快照原子折叠为原 full frame
-     * 上的 sheet_rebase，恢复原正式根；边界后继续普通逐 bucket 持久化。
-     *
-     * 不变量（对应计划 §3.2）：
-     *  - 单正式根：事务内复检唯一 full checkpoint（多根 fail-closed）；
-     *  - 严格保存：saveChatToHostStrict_ACU 失败原位回滚，不删除已确认数据；
-     *  - 边界汇合：selected sheets 等于 staging 累计快照，非目标表等于原正式根语义；
-     *  - 零猜测恢复：runId/聊天标识/隔离键/目标表集合不匹配时 fail-closed。
+     * live/candidate 在同一 cutoff 上比较：
+     * - boundary 目标表 == target overlay；非目标表 == liveBoundary
+     * - head 非目标表 == liveHead；目标表必须由 candidate 完整 replay 得到，允许原 suffix log 继续生效
      */
     async function commitStagedSheetsAtFullBoundaryAtomic_ACU(runId, options) {
         const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
         const chatKey = options.chatKey ?? currentChatFileIdentifier_ACU;
+        const targetSheetKeys = [...options.targetSheetKeys];
         return runTableWriteTransaction_ACU({
             source: 'manual_fill',
             reason: 'commitStagedSheetsAtFullBoundaryAtomic',
             isolationKey,
-            writeSet: [{ kind: 'all' }],
+            writeSet: targetSheetKeys.map(sheetKey => ({ kind: 'sheet', sheetKey })),
             maintenanceMode: 'exclusive',
         }, async () => {
+            if (String(currentChatFileIdentifier_ACU || '') !== String(chatKey || '')
+                || String(getCurrentIsolationKey_ACU() || '') !== String(isolationKey || '')) {
+                return failBoundary_ACU('staging_scope_changed', 'boundary commit 复检失败：chatKey 或 isolationKey 已切换。');
+            }
             const chat = getChatArray_ACU();
-            // 1. 复检唯一 full 根：同一 isolationKey 下只允许一个 full checkpoint。
             const fullIndices = [];
             for (let index = 0; index < chat.length; index += 1) {
                 const message = chat[index];
@@ -103570,51 +103790,72 @@ $CONTENT
                     fullIndices.push(index);
             }
             if (fullIndices.length !== 1) {
-                return {
-                    ok: false,
-                    error: `boundary commit 拒绝执行：同一 isolationKey 下存在 ${fullIndices.length} 个 full checkpoint（${fullIndices.join(', ')}），必须唯一。`,
-                    diagnosticCode: 'multiple_full_checkpoints',
-                };
+                return failBoundary_ACU('multiple_full_checkpoints', `boundary commit 拒绝执行：同一 isolationKey 下存在 ${fullIndices.length} 个 full checkpoint（${fullIndices.join(', ')}），必须唯一。`);
             }
             if (fullIndices[0] !== options.originalFullIndex) {
-                return {
-                    ok: false,
-                    error: `boundary commit 原 full 根不匹配：expected=${options.originalFullIndex}, actual=${fullIndices[0]}；拒绝汇合。`,
-                    diagnosticCode: 'full_checkpoint_root_mismatch',
-                };
+                return failBoundary_ACU('full_checkpoint_root_mismatch', `boundary commit 原 full 根不匹配：expected=${options.originalFullIndex}, actual=${fullIndices[0]}；拒绝汇合。`);
             }
-            // 2. 取出原 full frame 完整备份（replay 的正式根）。
             const originalMessage = chat[options.originalFullIndex];
             if (!originalMessage) {
-                return { ok: false, error: `原 full checkpoint 楼层 ${options.originalFullIndex} 不存在，无法汇合。` };
+                return failBoundary_ACU('full_checkpoint_root_mismatch', `原 full checkpoint 楼层 ${options.originalFullIndex} 不存在，无法汇合。`);
             }
             const originalContainer = readIsolatedDataContainer_ACU(originalMessage) || {};
-            const originalTagData = isV2TagData_ACU(originalContainer[isolationKey])
-                ? JSON.parse(JSON.stringify(originalContainer[isolationKey]))
-                : { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } };
-            const frame = originalTagData.storageFrame;
-            if (frame.checkpoint?.kind !== 'full') {
-                return { ok: false, error: `原 full checkpoint 楼层 ${options.originalFullIndex} 的 frame 缺少正式 full 根。` };
+            if (!isV2TagData_ACU(originalContainer[isolationKey])) {
+                return failBoundary_ACU('full_checkpoint_root_mismatch', `原 full checkpoint 楼层 ${options.originalFullIndex} 缺少 V2 数据。`);
             }
-            // 3. 在原 full frame 的 perSheetCheckpoints 为 selected sheets 写 sheet_rebase。
+            const liveFrame = originalContainer[isolationKey].storageFrame;
+            if (liveFrame?.checkpoint?.kind !== 'full') {
+                return failBoundary_ACU('full_checkpoint_root_mismatch', `原 full checkpoint 楼层 ${options.originalFullIndex} 的 frame 缺少正式 full 根。`);
+            }
+            const liveFingerprint = getOriginalFullFrameFingerprint_ACU(liveFrame);
+            if (options.originalFullFingerprint && options.originalFullFingerprint !== liveFingerprint) {
+                return failBoundary_ACU('full_checkpoint_fingerprint_mismatch', `boundary commit 原 full 根指纹不匹配：runId=${runId}, index=${options.originalFullIndex}。`);
+            }
+            const overlaySheets = extractTargetOverlaySheets_ACU(options.stagedSnapshot, targetSheetKeys);
+            for (const sheetKey of targetSheetKeys) {
+                if (!overlaySheets[sheetKey]) {
+                    return failBoundary_ACU('staging_target_snapshot_missing', `boundary commit 缺少 selected sheet 的 staging 快照：${sheetKey}。`);
+                }
+            }
+            const headIndex = Math.max(0, chat.length - 1);
+            let liveBoundary;
+            let liveHead;
+            try {
+                const liveStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat, isolationKey, [options.originalFullIndex, headIndex], { updateRuntimeState: false, compatibilityMode: 'disabled' });
+                liveBoundary = liveStates.get(options.originalFullIndex);
+                liveHead = liveStates.get(headIndex);
+                if (!liveBoundary || liveBoundary.baseKind !== 'full_checkpoint' || !liveBoundary.data) {
+                    return failBoundary_ACU('boundary_replay_mismatch', `boundary commit live boundary replay 未建立正式基底：boundary=${options.originalFullIndex}。`);
+                }
+                if (liveBoundary.requiresCheckpointConvergence || liveBoundary.compatibilityRepairs?.length) {
+                    return failBoundary_ACU('candidate_replay_requires_repair', `boundary commit live boundary replay 依赖兼容修复：boundary=${options.originalFullIndex}。`);
+                }
+                if (!liveHead || liveHead.baseKind !== 'full_checkpoint' || !liveHead.data) {
+                    return failBoundary_ACU('boundary_replay_mismatch', `boundary commit live head replay 未建立正式基底：boundary=${headIndex}。`);
+                }
+                if (liveHead.requiresCheckpointConvergence || liveHead.compatibilityRepairs?.length) {
+                    return failBoundary_ACU('candidate_replay_requires_repair', `boundary commit live head replay 依赖兼容修复：boundary=${headIndex}。`);
+                }
+            }
+            catch (error) {
+                return failBoundary_ACU('boundary_replay_mismatch', `boundary commit live replay 验证异常：${error?.message || String(error)}`);
+            }
+            const originalTagData = JSON.parse(JSON.stringify(originalContainer[isolationKey]));
+            const frame = originalTagData.storageFrame;
             const maxSeq = Math.max(0, ...(frame.logEntries || []).map(entry => Number(entry.seq) || 0));
             const now = Date.now();
             const perSheetCheckpoints = { ...(frame.perSheetCheckpoints || {}) };
-            for (const sheetKey of options.targetSheetKeys) {
-                const sheetData = options.stagedSnapshot[sheetKey];
-                if (!sheetData || typeof sheetData !== 'object') {
-                    return { ok: false, error: `boundary commit 缺少 selected sheet 的 staging 快照：${sheetKey}。`, diagnosticCode: 'staging_snapshot_mismatch' };
-                }
+            for (const sheetKey of targetSheetKeys) {
                 const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
                     createdAt: now,
                     reason: 'manual',
                     sheetKey,
-                    data: sheetData,
+                    data: overlaySheets[sheetKey],
                     event: { filledSheetKeys: [sheetKey], changedSheetKeys: [sheetKey], groupKeys: [] },
                     context: { messageIndex: options.originalFullIndex, isolationKey, reason: 'manual' },
                 });
                 if (!sheetCheckpointResult.checkpoint) {
-                    return { ok: false, error: `boundary commit 无法构建 selected sheet rebase：${sheetKey}：${sheetCheckpointResult.error}`, diagnosticCode: 'staging_snapshot_mismatch' };
+                    return failBoundary_ACU('staging_target_snapshot_missing', `boundary commit 无法构建 selected sheet rebase：${sheetKey}：${sheetCheckpointResult.error}`);
                 }
                 perSheetCheckpoints[sheetKey] = {
                     ...sheetCheckpointResult.checkpoint,
@@ -103626,52 +103867,69 @@ $CONTENT
                 };
             }
             frame.perSheetCheckpoints = perSheetCheckpoints;
-            // 4. 候选聊天：先深度克隆 live chat，再把含 rebase 的原帧工作副本写进候选原楼层。
-            //    全程不触碰 live chat（strict save 失败时原位回滚 chat）。
+            const liveChatClone = JSON.parse(JSON.stringify(chat));
             const candidateChat = JSON.parse(JSON.stringify(chat));
             const candidateOriginalMessage = candidateChat[options.originalFullIndex];
             if (!candidateOriginalMessage) {
-                return { ok: false, error: `候选聊天缺少原 full 楼层 ${options.originalFullIndex}，无法汇合。` };
+                return failBoundary_ACU('full_checkpoint_root_mismatch', `候选聊天缺少原 full 楼层 ${options.originalFullIndex}，无法汇合。`);
             }
             const candidateContainer = readIsolatedDataContainer_ACU(candidateOriginalMessage) || {};
             candidateContainer[isolationKey] = originalTagData;
             candidateOriginalMessage.TavernDB_ACU_IsolatedData = candidateContainer;
-            // 5. 候选 replay 验证：原 full 边界与聊天末端双边界。
+            const writeSurfaceError = assertCandidateWriteSurface_ACU(liveChatClone, candidateChat, isolationKey, options.originalFullIndex, targetSheetKeys);
+            if (writeSurfaceError) {
+                return failBoundary_ACU('candidate_write_surface_violation', `boundary commit 写入面越权：${writeSurfaceError}。`);
+            }
+            let candidateHeadData = null;
             try {
-                // 阶段 H：双边界一次前向捕获（同根）或回退逐次冷 replay，校验语义不变。
-                const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(candidateChat, isolationKey, [options.originalFullIndex, candidateChat.length - 1], { updateRuntimeState: false, compatibilityMode: 'disabled' });
-                for (const [boundary, verifyReplay] of boundaryStates) {
-                    if (!verifyReplay || verifyReplay.baseKind !== 'full_checkpoint' || !verifyReplay.data) {
-                        return { ok: false, error: `boundary commit 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'boundary_replay_mismatch' };
-                    }
-                    if (verifyReplay.requiresCheckpointConvergence || verifyReplay.compatibilityRepairs?.length) {
-                        return { ok: false, error: `boundary commit 候选 replay 依赖兼容修复：boundary=${boundary}。`, diagnosticCode: 'boundary_replay_mismatch' };
-                    }
-                    // selected sheets 必须等于 staging 累计快照。
-                    for (const sheetKey of options.targetSheetKeys) {
-                        const verifySheet = verifyReplay.data?.[sheetKey];
-                        const snapshotSheet = options.stagedSnapshot[sheetKey];
-                        if (JSON.stringify(verifySheet?.content) !== JSON.stringify(snapshotSheet?.content)) {
-                            return { ok: false, error: `boundary commit 后 selected sheet 回放不一致：${sheetKey}。`, diagnosticCode: 'boundary_replay_mismatch' };
+                const candidateStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(candidateChat, isolationKey, [options.originalFullIndex, headIndex], { updateRuntimeState: false, compatibilityMode: 'disabled' });
+                const candidateBoundary = candidateStates.get(options.originalFullIndex);
+                const candidateHead = candidateStates.get(headIndex);
+                if (!candidateBoundary || candidateBoundary.baseKind !== 'full_checkpoint' || !candidateBoundary.data) {
+                    return failBoundary_ACU('boundary_replay_mismatch', `boundary commit 候选 boundary replay 未建立正式基底：boundary=${options.originalFullIndex}。`);
+                }
+                if (candidateBoundary.requiresCheckpointConvergence || candidateBoundary.compatibilityRepairs?.length) {
+                    return failBoundary_ACU('candidate_replay_requires_repair', `boundary commit 候选 boundary replay 依赖兼容修复：boundary=${options.originalFullIndex}。`);
+                }
+                if (!candidateHead || candidateHead.baseKind !== 'full_checkpoint' || !candidateHead.data) {
+                    return failBoundary_ACU('boundary_replay_mismatch', `boundary commit 候选 head replay 未建立正式基底：boundary=${headIndex}。`);
+                }
+                if (candidateHead.requiresCheckpointConvergence || candidateHead.compatibilityRepairs?.length) {
+                    return failBoundary_ACU('candidate_replay_requires_repair', `boundary commit 候选 head replay 依赖兼容修复：boundary=${headIndex}。`);
+                }
+                candidateHeadData = candidateHead.data;
+                const sheetKeys = new Set([
+                    ...Object.keys(liveBoundary.data || {}),
+                    ...Object.keys(liveHead.data || {}),
+                    ...Object.keys(candidateBoundary.data || {}),
+                    ...Object.keys(candidateHead.data || {}),
+                    ...targetSheetKeys,
+                ].filter(key => key.startsWith('sheet_')));
+                for (const sheetKey of sheetKeys) {
+                    const isTarget = targetSheetKeys.includes(sheetKey);
+                    if (isTarget) {
+                        if (canonicalSheetFingerprint_ACU(candidateBoundary.data?.[sheetKey]) !== canonicalSheetFingerprint_ACU(overlaySheets[sheetKey])) {
+                            logWarn_ACU(`[TableFillBoundaryStaging] selected_sheet_boundary_mismatch: runId=${runId}, cutoff=${options.originalFullIndex}, sheetKey=${sheetKey}, overlay=${canonicalSheetFingerprint_ACU(overlaySheets[sheetKey])}, candidate=${canonicalSheetFingerprint_ACU(candidateBoundary.data?.[sheetKey])}`);
+                            return failBoundary_ACU('selected_sheet_boundary_mismatch', `boundary commit 后 selected sheet 边界回放不一致：${sheetKey}。`);
                         }
-                    }
-                    // 非目标表必须等于原正式根语义。
-                    const originalCheckpointData = frame.checkpoint?.data || {};
-                    for (const [sheetKey, sheetValue] of Object.entries(originalCheckpointData)) {
-                        if (!sheetKey.startsWith('sheet_') || options.targetSheetKeys.includes(sheetKey))
-                            continue;
-                        const verifySheet = verifyReplay.data?.[sheetKey];
-                        const originalSheet = sheetValue;
-                        if (JSON.stringify(verifySheet?.content) !== JSON.stringify(originalSheet?.content)) {
-                            return { ok: false, error: `boundary commit 后非目标表回放不一致：${sheetKey}。`, diagnosticCode: 'boundary_replay_mismatch' };
+                        if (!candidateHead.data?.[sheetKey] || typeof candidateHead.data[sheetKey] !== 'object') {
+                            return failBoundary_ACU('selected_sheet_boundary_mismatch', `boundary commit 候选 head 缺少目标表：${sheetKey}。`);
                         }
+                        continue;
+                    }
+                    if (canonicalSheetFingerprint_ACU(candidateBoundary.data?.[sheetKey]) !== canonicalSheetFingerprint_ACU(liveBoundary.data?.[sheetKey])) {
+                        logWarn_ACU(`[TableFillBoundaryStaging] non_target_boundary_mismatch: runId=${runId}, cutoff=${options.originalFullIndex}, sheetKey=${sheetKey}`);
+                        return failBoundary_ACU('non_target_boundary_mismatch', `boundary commit 后非目标表边界回放不一致：${sheetKey}。`);
+                    }
+                    if (canonicalSheetFingerprint_ACU(candidateHead.data?.[sheetKey]) !== canonicalSheetFingerprint_ACU(liveHead.data?.[sheetKey])) {
+                        logWarn_ACU(`[TableFillBoundaryStaging] non_target_head_mismatch: runId=${runId}, cutoff=${headIndex}, sheetKey=${sheetKey}`);
+                        return failBoundary_ACU('non_target_head_mismatch', `boundary commit 后非目标表 head 回放不一致：${sheetKey}。`);
                     }
                 }
             }
             catch (error) {
-                return { ok: false, error: `boundary commit 候选 replay 验证异常：${error?.message || String(error)}`, diagnosticCode: 'boundary_replay_mismatch' };
+                return failBoundary_ACU('boundary_replay_mismatch', `boundary commit 候选 replay 验证异常：${error?.message || String(error)}`);
             }
-            // 6. strict save：失败只撤销 candidate（不恢复已删除数据），原位回滚 chat。
             const before = JSON.parse(JSON.stringify(chat));
             try {
                 chat.length = 0;
@@ -103685,17 +103943,173 @@ $CONTENT
             catch (error) {
                 chat.length = 0;
                 chat.push(...before);
-                return { ok: false, error: `boundary commit 严格保存失败：${error?.message || String(error)}`, diagnosticCode: 'boundary_commit_failed' };
+                return failBoundary_ACU('boundary_strict_save_failed', `boundary commit 严格保存失败：${error?.message || String(error)}`);
             }
-            logDebug_ACU(`[TableFillBoundaryStaging] 已原子汇合：runId=${runId}, originalFull=${options.originalFullIndex}, sheets=${options.targetSheetKeys.join('、')}。`);
+            logDebug_ACU(`[TableFillBoundaryStaging] 已原子汇合：runId=${runId}, originalFull=${options.originalFullIndex}, sheets=${targetSheetKeys.join('、')}。`);
             return {
                 ok: true,
                 boundaryCommitSummary: {
-                    selectedSheetKeys: [...options.targetSheetKeys],
+                    selectedSheetKeys: [...targetSheetKeys],
                     originalFullCheckpointIndex: options.originalFullIndex,
                 },
+                verifiedHeadSnapshot: candidateHeadData ? JSON.parse(JSON.stringify(candidateHeadData)) : {},
             };
         });
+    }
+    async function publishVerifiedBoundaryHead_ACU(input) {
+        try {
+            if (String(currentChatFileIdentifier_ACU || '') !== String(input.chatKey || '')
+                || String(getCurrentIsolationKey_ACU() || '') !== String(input.isolationKey || '')) {
+                return {
+                    ok: false,
+                    error: 'boundary runtime 发布复检失败：chatKey 或 isolationKey 已切换。',
+                    diagnosticCode: 'runtime_publish_failed',
+                };
+            }
+            const snapshot = JSON.parse(JSON.stringify(input.verifiedHeadSnapshot || {}));
+            if (isSqliteMode()) {
+                const envelope = createCanonicalSnapshotEnvelope_ACU({
+                    data: snapshot,
+                    chatIdentity: String(input.chatKey || ''),
+                    isolationKey: String(input.isolationKey || ''),
+                    storageMode: 'sqlite',
+                    lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                    source: 'boundary_commit_head',
+                });
+                if (!envelope) {
+                    return { ok: false, error: 'boundary runtime 发布失败：无法构造 verified head envelope。', diagnosticCode: 'runtime_publish_failed' };
+                }
+                const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                if (!hydrated.ok) {
+                    return {
+                        ok: false,
+                        error: `boundary runtime 发布失败：${hydrated.error || hydrated.failureCode || 'hydrate 未成功'}。持久化聊天仍是权威，请重新 hydrate。`,
+                        diagnosticCode: 'runtime_publish_failed',
+                    };
+                }
+            }
+            _set_currentJsonTableData_ACU(snapshot);
+            return { ok: true };
+        }
+        catch (error) {
+            return {
+                ok: false,
+                error: `boundary runtime 发布异常：${error?.message || String(error)}。持久化聊天仍是权威，请重新 hydrate。`,
+                diagnosticCode: 'runtime_publish_failed',
+            };
+        }
+    }
+
+    function createTableFillStagingSession_ACU(run) {
+        let discarded = false;
+        let detachedProvider = null;
+        const assertScope = (phase) => {
+            if (discarded) {
+                return { ok: false, error: `staging session 已释放，拒绝 ${phase}。`, errorCategory: 'precondition' };
+            }
+            if (String(currentChatFileIdentifier_ACU || '') !== String(run.chatKey || '')
+                || String(getCurrentIsolationKey_ACU() || '') !== String(run.isolationKey || '')) {
+                return { ok: false, error: `staging session ${phase} 检测到聊天或隔离标识已切换。`, errorCategory: 'precondition' };
+            }
+            return null;
+        };
+        const releaseDetached = async () => {
+            if (!detachedProvider)
+                return;
+            try {
+                detachedProvider.dispose();
+            }
+            catch (error) {
+                logWarn_ACU('[TableFillStagingSession] 释放 detached SQLite 失败。', error);
+            }
+            detachedProvider = null;
+        };
+        return {
+            getTargetOverlay() {
+                return run.overlay;
+            },
+            async discard() {
+                discarded = true;
+                await releaseDetached();
+            },
+            async applyBucket(input) {
+                const scopeError = assertScope('applyBucket');
+                if (scopeError)
+                    return scopeError;
+                const workingView = assembleBucketWorkingView_ACU(input.historicalBase, run.overlay);
+                try {
+                    if (input.appliedTableData && typeof input.appliedTableData === 'object') {
+                        run.overlay = mergeTargetOverlayFromBucket_ACU(run.overlay, input.appliedTableData, input.saveTargetIndex);
+                        return { ok: true, overlay: run.overlay, tableData: input.appliedTableData };
+                    }
+                    if (isSqliteMode() && Array.isArray(input.sqlTexts) && input.sqlTexts.length > 0) {
+                        await releaseDetached();
+                        detachedProvider = createDetachedSqlTableService_ACU();
+                        const loaded = await detachedProvider.loadFromData(workingView);
+                        if (loaded.error || !detachedProvider.isReady()) {
+                            await releaseDetached();
+                            return {
+                                ok: false,
+                                error: loaded.error || 'staging detached SQLite 未能就绪。',
+                                errorCategory: 'infrastructure',
+                            };
+                        }
+                        const parseResult = detachedProvider.applyEditsWithSystemRowIds(input.sqlTexts, input.updateMode, input.sqlApplyScope);
+                        if (!parseResult?.success || !parseResult.tableData) {
+                            await releaseDetached();
+                            return {
+                                ok: false,
+                                error: parseResult?.error || 'staging SQL 执行失败。',
+                                errorCategory: 'model',
+                            };
+                        }
+                        const tableData = parseResult.tableData;
+                        run.overlay = mergeTargetOverlayFromBucket_ACU(run.overlay, tableData, input.saveTargetIndex);
+                        await releaseDetached();
+                        logDebug_ACU(`[TableFillStagingSession] SQLite bucket 已累积 overlay：runId=${run.runId}, target=${input.saveTargetIndex}, sheets=${run.targetSheetKeys.join('、')}`);
+                        return { ok: true, overlay: run.overlay, tableData };
+                    }
+                    let workingTableData = JSON.parse(JSON.stringify(workingView));
+                    if (Array.isArray(input.dslResponses)) {
+                        for (const response of input.dslResponses) {
+                            const parseResult = parseAndApplyTableEditsToData_ACU(response.aiResponse, workingTableData, input.updateMode, false);
+                            const parseSuccess = typeof parseResult === 'object' && parseResult !== null ? parseResult.success : !!parseResult;
+                            if (!parseSuccess) {
+                                return {
+                                    ok: false,
+                                    error: (parseResult && typeof parseResult.error === 'string' && parseResult.error)
+                                        ? parseResult.error
+                                        : 'staging DSL 应用失败。',
+                                    errorCategory: 'model',
+                                };
+                            }
+                            if (parseResult?.workingData)
+                                workingTableData = parseResult.workingData;
+                            const parsedKeys = Array.isArray(parseResult?.modifiedKeys) ? parseResult.modifiedKeys : [];
+                            const unauthorized = parsedKeys.filter(sheetKey => !run.targetSheetKeys.includes(sheetKey));
+                            if (unauthorized.length > 0) {
+                                return {
+                                    ok: false,
+                                    error: `staging DSL 越权修改了非目标表（${unauthorized.join(', ')}）。`,
+                                    errorCategory: 'model',
+                                };
+                            }
+                        }
+                    }
+                    run.overlay = mergeTargetOverlayFromBucket_ACU(run.overlay, workingTableData, input.saveTargetIndex);
+                    logDebug_ACU(`[TableFillStagingSession] native bucket 已累积 overlay：runId=${run.runId}, target=${input.saveTargetIndex}, sheets=${run.targetSheetKeys.join('、')}`);
+                    return { ok: true, overlay: run.overlay, tableData: workingTableData };
+                }
+                catch (error) {
+                    await releaseDetached();
+                    return {
+                        ok: false,
+                        error: error?.message || String(error),
+                        errorCategory: 'infrastructure',
+                    };
+                }
+            },
+        };
     }
 
     let registeredUiSurface_ACU = null;
@@ -104349,6 +104763,34 @@ $CONTENT
             return '';
         const preset = overrides[normalizedName];
         return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
+    }
+    async function settleStagedBoundaryAndPublish_ACU(stagingRun, originalFullIndex, session) {
+        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
+            chatKey: stagingRun.chatKey,
+            isolationKey: stagingRun.isolationKey,
+            originalFullIndex,
+            originalFullFingerprint: stagingRun.originalFullFingerprint,
+            templateFingerprint: stagingRun.templateFingerprint,
+            stagedSnapshot: stagingRun.overlay.sheets,
+            targetSheetKeys: stagingRun.targetSheetKeys,
+        });
+        if (commitResult.ok === false) {
+            await session?.discard();
+            return {
+                ok: false,
+                error: commitResult.error,
+                diagnosticCode: commitResult.diagnosticCode ?? 'boundary_commit_failed',
+            };
+        }
+        const published = await publishVerifiedBoundaryHead_ACU({
+            verifiedHeadSnapshot: commitResult.verifiedHeadSnapshot,
+            chatKey: stagingRun.chatKey,
+            isolationKey: stagingRun.isolationKey,
+        });
+        await session?.discard();
+        if (!published.ok)
+            return published;
+        return { ok: true };
     }
     function buildTemplateScopeFromData_ACU(data) {
         if (!data || typeof data !== 'object')
@@ -105484,6 +105926,24 @@ $CONTENT
                 logDebug_ACU('[TemplateScope] 本次 SQL 填表的目标表全部在模板范围外，已跳过提交。');
                 return { success: true, modifiedKeys: [], tableData: baseSnapshot };
             }
+            if (options.commitMode === 'stage_only' && options.stagingSession) {
+                const staged = await options.stagingSession.applyBucket({
+                    historicalBase: baseSnapshot,
+                    saveTargetIndex: options.saveTargetIndex,
+                    updateMode: options.updateMode,
+                    sqlTexts,
+                    sqlApplyScope: capturedSqlApplyScope,
+                });
+                if (staged.ok === false) {
+                    return {
+                        success: false,
+                        modifiedKeys: [],
+                        error: sanitizeRetryFeedback_ACU(staged.error, MAX_WARN_ERROR_LENGTH_ACU),
+                        errorCategory: staged.errorCategory,
+                    };
+                }
+                return { success: true, modifiedKeys: [...options.stagingSession.getTargetOverlay().targetSheetKeys], tableData: staged.tableData };
+            }
             const commitResult = await runTableUpdateCommit_ACU({
                 source: 'group_fill',
                 reason: 'applyUnifiedGroupFillResponses:runtime_sql',
@@ -105733,6 +106193,23 @@ $CONTENT
                     + `本次以初始 checkpoint 形式提交快照（tracked=${keysToTrack.join(',') || '无'}）。`);
             }
             const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet', sheetKey }));
+            if (options.commitMode === 'stage_only' && options.stagingSession) {
+                const staged = await options.stagingSession.applyBucket({
+                    historicalBase: baseSnapshot,
+                    saveTargetIndex: options.saveTargetIndex,
+                    updateMode: options.updateMode,
+                    appliedTableData: workingTableData,
+                });
+                if (staged.ok === false) {
+                    return {
+                        success: false,
+                        modifiedKeys,
+                        error: sanitizeRetryFeedback_ACU(staged.error, MAX_WARN_ERROR_LENGTH_ACU),
+                        errorCategory: staged.errorCategory,
+                    };
+                }
+                return { success: true, modifiedKeys, tableData: staged.tableData };
+            }
             const commitResult = await runTableUpdateCommit_ACU({
                 source: 'group_fill',
                 reason: 'applyUnifiedGroupFillResponses:snapshot',
@@ -105988,7 +106465,9 @@ $CONTENT
                     firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
                     break;
                 }
-                const mergedBatchData = baseResult.data;
+                const mergedBatchData = options.stagingSession
+                    ? assembleBucketWorkingView_ACU(baseResult.data, options.stagingSession.getTargetOverlay())
+                    : baseResult.data;
                 try {
                     bucket.plannedJobs = bucket.plannedJobs.map(plannedJob => ({
                         ...plannedJob,
@@ -106003,7 +106482,9 @@ $CONTENT
                     firstError = firstError || (error instanceof Error ? error.message : String(error));
                     break;
                 }
-                _set_currentJsonTableData_ACU(mergedBatchData);
+                if (!options.stagingSession) {
+                    _set_currentJsonTableData_ACU(mergedBatchData);
+                }
                 const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
                 const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
                 const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(bucketSheetKeys, baseSnapshot), { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey });
@@ -106195,6 +106676,7 @@ $CONTENT
                         sqlApplyScope: executionScope.sqlApplyScope,
                         manualCatchUpRunId: options.manualCatchUpRunId,
                         commitMode: options.commitMode,
+                        stagingSession: options.stagingSession,
                         performanceRunId: options.performanceRunId,
                         performanceParentSpanId: options.performanceParentSpanId,
                     });
@@ -106304,6 +106786,7 @@ $CONTENT
         let committedBucketCount = 0;
         let boundaryCommitted = false;
         let stagingRun = null;
+        let stagingSession = null;
         let boundaryPlan = null;
         // 冻结 run 级 staging scope（与手动追平同款：单 full 根复检、范围、目标表、模板指纹）。
         const isolationKey = getCurrentIsolationKey_ACU();
@@ -106341,39 +106824,35 @@ $CONTENT
                 performanceParentSpanId: options.performanceParentSpanId,
             });
         }
-        stagingRun = {
+        stagingRun = createTableFillStagingRunContext_ACU({
             runId: boundaryPlan.scope.runId,
             chatKey: boundaryPlan.scope.chatKey,
             isolationKey: boundaryPlan.scope.isolationKey,
-            targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
-            stagedWorkingData: null,
-            lastStagedSnapshot: null,
-            lastStagedTargetMessageIndex: null,
-            stagedBucketCount: 0,
-        };
+            targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+            originalFullIndex: boundaryPlan.scope.originalFullIndex,
+            originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(getChatArray_ACU(), boundaryPlan.scope.isolationKey, originalFullIndex),
+            templateFingerprint,
+        });
+        stagingSession = createTableFillStagingSession_ACU(stagingRun);
         const settleStagingBoundary = async () => {
             if (!boundaryPlan || boundaryCommitted)
                 return { ok: true };
-            if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+            if (!stagingRun || stagingRun.overlay.stagedBucketCount === 0) {
                 boundaryCommitted = true;
+                await stagingSession?.discard();
                 return { ok: true };
             }
             const fullIndex = boundaryPlan.scope.originalFullIndex;
             if (fullIndex === null) {
                 boundaryCommitted = true;
+                await stagingSession?.discard();
                 return { ok: true };
             }
-            const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
-                chatKey: stagingRun.chatKey,
-                isolationKey: stagingRun.isolationKey,
-                originalFullIndex: fullIndex,
-                stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
-                targetSheetKeys: stagingRun.targetSheetKeys,
-            });
-            if (!commitResult.ok) {
-                return { ok: false, error: commitResult.error, diagnosticCode: commitResult.diagnosticCode ?? 'boundary_commit_failed' };
-            }
+            const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, fullIndex, stagingSession);
+            if (!settleResult.ok)
+                return settleResult;
             boundaryCommitted = true;
+            stagingSession = null;
             return { ok: true };
         };
         for (const group of normalizedGroups) {
@@ -106397,6 +106876,7 @@ $CONTENT
                     abortController: options.abortController,
                     respectGlobalStop: options.respectGlobalStop,
                     commitMode: 'stage_only',
+                    stagingSession: stagingSession || undefined,
                     replaceExistingIncremental: true,
                     syncAfterCommit: false,
                     onProgress: options.onProgress,
@@ -106408,14 +106888,6 @@ $CONTENT
                     failedGroups.add(group.key);
                     firstError = firstError || preResult.error || '边界前 staging 提交失败。';
                     break;
-                }
-                // 累积 staging 快照：bucket 提交后 runtime 已更新为目标表最新 AI 结果。
-                if (stagingRun) {
-                    const stagedData = currentJsonTableData_ACU || {};
-                    stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
-                    stagingRun.lastStagedTargetMessageIndex = preSegment.saveTargetIndex;
-                    stagingRun.stagedBucketCount += 1;
-                    stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
                 }
             }
             // 首个 post 段提交前收敛 staging：边界前累计快照原子折叠回原根；零 staging 则丢弃。
@@ -106457,13 +106929,14 @@ $CONTENT
             }
         }
         // 所有组都只有 pre-boundary 段（未触发循环内汇合）：正常收尾时仍须把 staging 汇合回原根。
-        if (!boundaryCommitted && stagingRun && stagingRun.stagedBucketCount > 0) {
+        if (!boundaryCommitted && stagingRun && stagingRun.overlay.stagedBucketCount > 0) {
             const settleResult = await settleStagingBoundary();
             if (!settleResult.ok) {
                 normalizedGroups.forEach(g => failedGroups.add(g.key));
                 firstError = firstError || `跨根 staging 收尾汇合失败：${settleResult.error}`;
             }
         }
+        await stagingSession?.discard();
         return failedGroups.size > 0
             ? { success: false, failedGroups: [...failedGroups], error: firstError || '跨根 staging 执行失败。', committedBucketCount }
             : { success: true, failedGroups: [], committedBucketCount };
@@ -107205,9 +107678,10 @@ $CONTENT
         // 保证 run-scoped 隔离（staging 只认本 run 授权的目标表）。
         const runId = createManualCatchUpRunId_ACU();
         // 跨 full checkpoint staging run 状态：冻结 scope 后在 bucket 循环内累积 staging
-        // 快照，到达原 full 边界原子汇合。不能依赖全局状态——必须在 run 内显式跟踪。
+        // overlay，到达原 full 边界原子汇合。不能依赖全局状态——必须在 run 内显式跟踪。
         let boundaryPlan = null;
         let stagingRun = null;
+        let stagingSession = null;
         let boundaryCommitted = false;
         // 旧版“删除全部数据”会将 header-only reset checkpoint 留在原先较晚楼层。
         // 在任何 AI 调用之前修复可证明安全的布局；无法证明安全则阻断，而不是让 bucket
@@ -107275,16 +107749,16 @@ $CONTENT
                         diagnosticCode: 'staging_plan_failed',
                     };
                 }
-                stagingRun = {
+                stagingRun = createTableFillStagingRunContext_ACU({
                     runId,
                     chatKey: boundaryPlan.scope.chatKey,
                     isolationKey: boundaryPlan.scope.isolationKey,
-                    targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
-                    stagedWorkingData: null,
-                    lastStagedSnapshot: null,
-                    lastStagedTargetMessageIndex: null,
-                    stagedBucketCount: 0,
-                };
+                    targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                    originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                    originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(liveChat, isolationKey, anchorPreflight.checkpointMessageIndex),
+                    templateFingerprint,
+                });
+                stagingSession = createTableFillStagingSession_ACU(stagingRun);
                 logDebug_ACU(`[手动追平] 已冻结跨根 staging scope：runId=${runId}, originalFull=${anchorPreflight.checkpointMessageIndex}, preBoundary=${boundaryPlan.preBoundaryIndices.length}。`);
             }
         }
@@ -107457,27 +107931,23 @@ $CONTENT
         const settleStagingBoundary = async () => {
             if (!boundaryPlan || boundaryCommitted)
                 return { ok: true };
-            if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+            if (!stagingRun || stagingRun.overlay.stagedBucketCount === 0) {
                 // 零提交：staging 只是内存状态，直接丢弃，不产生任何持久化改写。
                 boundaryCommitted = true;
+                await stagingSession?.discard();
                 return { ok: true };
             }
             const originalFullIndex = boundaryPlan.scope.originalFullIndex;
             if (originalFullIndex === null) {
                 boundaryCommitted = true;
+                await stagingSession?.discard();
                 return { ok: true };
             }
-            const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(runId, {
-                chatKey: stagingRun.chatKey,
-                isolationKey: stagingRun.isolationKey,
-                originalFullIndex,
-                stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
-                targetSheetKeys: stagingRun.targetSheetKeys,
-            });
-            if (!commitResult.ok) {
-                return { ok: false, error: commitResult.error, diagnosticCode: commitResult.diagnosticCode ?? 'boundary_commit_failed' };
-            }
+            const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, originalFullIndex, stagingSession);
+            if (!settleResult.ok)
+                return settleResult;
             boundaryCommitted = true;
+            stagingSession = null;
             return { ok: true };
         };
         const refreshCommittedDataBeforeExit = async () => {
@@ -107600,7 +108070,7 @@ $CONTENT
                         abortController: options.abortController,
                         respectGlobalStop: false,
                         manualCatchUpRun: true,
-                        ...(isPreBoundarySegment ? { commitMode: 'stage_only' } : {}),
+                        ...(isPreBoundarySegment ? { commitMode: 'stage_only', stagingSession: stagingSession || undefined } : {}),
                         replaceExistingIncremental: true,
                         syncAfterCommit: false,
                         onProgress: event => options.onProgress?.({
@@ -107640,15 +108110,6 @@ $CONTENT
                                 completedSheetMessageIndexByKey[sheetKey] = bucket.saveTargetIndex;
                             });
                             lastCommittedBucketTargetIndex = bucket.saveTargetIndex;
-                            if (isPreBoundarySegment && stagingRun) {
-                                // 边界前 bucket：把 AI 结果累积进 run 级 staging 快照。
-                                // lastStagedSnapshot 只保存本 run 授权的目标表，供边界汇合取数。
-                                const stagedData = currentJsonTableData_ACU || {};
-                                stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
-                                stagingRun.lastStagedTargetMessageIndex = bucket.saveTargetIndex;
-                                stagingRun.stagedBucketCount += 1;
-                                stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
-                            }
                         },
                     });
                     committedBucketCount += result.committedBucketCount;
@@ -107885,6 +108346,7 @@ $CONTENT
         // 分支内使用，普通路径保持 null。
         let boundaryPlan = null;
         let stagingRun = null;
+        let stagingSession = null;
         let boundaryCommitted = false;
         // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
         // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
@@ -107915,26 +108377,22 @@ $CONTENT
         const settleStagingBoundary = async () => {
             if (!boundaryPlan || boundaryCommitted)
                 return { ok: true };
-            if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+            if (!stagingRun || stagingRun.overlay.stagedBucketCount === 0) {
                 boundaryCommitted = true;
+                await stagingSession?.discard();
                 return { ok: true };
             }
             const fullIndex = boundaryPlan.scope.originalFullIndex;
             if (fullIndex === null) {
                 boundaryCommitted = true;
+                await stagingSession?.discard();
                 return { ok: true };
             }
-            const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
-                chatKey: stagingRun.chatKey,
-                isolationKey: stagingRun.isolationKey,
-                originalFullIndex: fullIndex,
-                stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
-                targetSheetKeys: stagingRun.targetSheetKeys,
-            });
-            if (!commitResult.ok) {
-                return { ok: false, error: commitResult.error, diagnosticCode: commitResult.diagnosticCode ?? 'boundary_commit_failed' };
-            }
+            const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, fullIndex, stagingSession);
+            if (!settleResult.ok)
+                return settleResult;
             boundaryCommitted = true;
+            stagingSession = null;
             return { ok: true };
         };
         try {
@@ -108095,16 +108553,16 @@ $CONTENT
                         messageIndices: contextScopeIndices,
                         fullCheckpointIndices: [originalFullIndex],
                     });
-                    stagingRun = {
+                    stagingRun = createTableFillStagingRunContext_ACU({
                         runId: boundaryPlan.scope.runId,
                         chatKey: boundaryPlan.scope.chatKey,
                         isolationKey: boundaryPlan.scope.isolationKey,
-                        targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
-                        stagedWorkingData: null,
-                        lastStagedSnapshot: null,
-                        lastStagedTargetMessageIndex: null,
-                        stagedBucketCount: 0,
-                    };
+                        targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                        originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                        originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(getChatArray_ACU(), currentIsolationKey, originalFullIndex),
+                        templateFingerprint,
+                    });
+                    stagingSession = createTableFillStagingSession_ACU(stagingRun);
                     logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging。`);
                 }
                 // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
@@ -108327,6 +108785,7 @@ $CONTENT
                                     skipWriteTargetAdmission: true,
                                     replaceExistingIncremental: false,
                                     commitMode: 'stage_only',
+                                    stagingSession: stagingSession || undefined,
                                     syncAfterCommit: false,
                                 });
                                 committedBucketCount += preResult.committedBucketCount;
@@ -108334,14 +108793,6 @@ $CONTENT
                                     failedGroups.push({ key: group.key, error: preResult.error || '边界前 staging 提交失败。' });
                                     groupFailed = true;
                                     break;
-                                }
-                                // 累积 staging 快照：bucket 提交后 runtime 已更新为目标表最新 AI 结果。
-                                if (stagingRun) {
-                                    const stagedData = currentJsonTableData_ACU || {};
-                                    stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
-                                    stagingRun.lastStagedTargetMessageIndex = preSegment.saveTargetIndex;
-                                    stagingRun.stagedBucketCount += 1;
-                                    stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
                                 }
                             }
                             // 首个 post 段提交前收敛 staging：边界前累计快照原子折叠回原根。

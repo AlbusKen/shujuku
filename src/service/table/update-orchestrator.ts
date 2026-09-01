@@ -23,13 +23,19 @@ import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 import { recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
 import {
+  assembleBucketWorkingView_ACU,
   commitStagedSheetsAtFullBoundaryAtomic_ACU,
+  createTableFillStagingRunContext_ACU,
   planTableFillBoundaryStaging_ACU,
+  publishVerifiedBoundaryHead_ACU,
+  readOriginalFullFrameFingerprint_ACU,
   splitMessageIndicesAtBoundary_ACU,
   type BoundarySegment_ACU,
+  type TableFillBoundaryDiagnosticCode_ACU,
   type TableFillBoundaryStagingPlan_ACU,
   type TableFillStagingRunContext_ACU,
 } from './table-fill-boundary-staging';
+import { createTableFillStagingSession_ACU, type TableFillStagingSession_ACU } from './table-fill-staging-session';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
@@ -174,7 +180,7 @@ export interface ManualUpdateResult {
     /** terminal manualRefillProgress 是否已严格保存。 */
     terminalProgressSaved?: boolean;
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
-    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required' | 'stale_bucket_after_boundary_checkpoint' | 'staging_plan_failed' | 'boundary_commit_failed';
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required' | 'stale_bucket_after_boundary_checkpoint' | 'staging_plan_failed' | 'boundary_commit_failed' | TableFillBoundaryDiagnosticCode_ACU;
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -182,6 +188,38 @@ export interface ManualCatchUpPlanningResult_ACU {
     success: boolean;
     error?: string;
     plan?: ManualCatchUpPlan_ACU;
+}
+
+async function settleStagedBoundaryAndPublish_ACU(
+    stagingRun: TableFillStagingRunContext_ACU,
+    originalFullIndex: number,
+    session: TableFillStagingSession_ACU | null,
+): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> {
+    const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
+        chatKey: stagingRun.chatKey,
+        isolationKey: stagingRun.isolationKey,
+        originalFullIndex,
+        originalFullFingerprint: stagingRun.originalFullFingerprint,
+        templateFingerprint: stagingRun.templateFingerprint,
+        stagedSnapshot: stagingRun.overlay.sheets,
+        targetSheetKeys: stagingRun.targetSheetKeys,
+    });
+    if (commitResult.ok === false) {
+        await session?.discard();
+        return {
+            ok: false,
+            error: commitResult.error,
+            diagnosticCode: commitResult.diagnosticCode ?? 'boundary_commit_failed',
+        };
+    }
+    const published = await publishVerifiedBoundaryHead_ACU({
+        verifiedHeadSnapshot: commitResult.verifiedHeadSnapshot,
+        chatKey: stagingRun.chatKey,
+        isolationKey: stagingRun.isolationKey,
+    });
+    await session?.discard();
+    if (!published.ok) return published;
+    return { ok: true };
 }
 
 export interface GroupFillJob_ACU {
@@ -1310,6 +1348,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         baseRevision?: string | null;
         manualCatchUpRunId?: string;
         commitMode?: 'persist_v2' | 'stage_only';
+        stagingSession?: TableFillStagingSession_ACU;
         performanceRunId?: string;
         performanceParentSpanId?: string;
     }
@@ -1493,6 +1532,25 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             // 全部目标表都在模板范围外：无需执行也无需提交，避免写出空 entry。
             logDebug_ACU('[TemplateScope] 本次 SQL 填表的目标表全部在模板范围外，已跳过提交。');
             return { success: true, modifiedKeys: [], tableData: baseSnapshot as any };
+        }
+
+        if (options.commitMode === 'stage_only' && options.stagingSession) {
+            const staged = await options.stagingSession.applyBucket({
+                historicalBase: baseSnapshot,
+                saveTargetIndex: options.saveTargetIndex,
+                updateMode: options.updateMode,
+                sqlTexts,
+                sqlApplyScope: capturedSqlApplyScope,
+            });
+            if (staged.ok === false) {
+                return {
+                    success: false,
+                    modifiedKeys: [],
+                    error: sanitizeRetryFeedback_ACU(staged.error, MAX_WARN_ERROR_LENGTH_ACU),
+                    errorCategory: staged.errorCategory,
+                };
+            }
+            return { success: true, modifiedKeys: [...options.stagingSession.getTargetOverlay().targetSheetKeys], tableData: staged.tableData as any };
         }
 
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
@@ -1763,6 +1821,23 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             );
         }
         const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
+        if (options.commitMode === 'stage_only' && options.stagingSession) {
+            const staged = await options.stagingSession.applyBucket({
+                historicalBase: baseSnapshot,
+                saveTargetIndex: options.saveTargetIndex,
+                updateMode: options.updateMode,
+                appliedTableData: workingTableData,
+            });
+            if (staged.ok === false) {
+                return {
+                    success: false,
+                    modifiedKeys,
+                    error: sanitizeRetryFeedback_ACU(staged.error, MAX_WARN_ERROR_LENGTH_ACU),
+                    errorCategory: staged.errorCategory,
+                };
+            }
+            return { success: true, modifiedKeys, tableData: staged.tableData as any };
+        }
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:snapshot',
@@ -1893,8 +1968,9 @@ async function processGroupedRuntimeChunkCore_ACU(
          *  清理前保留的旧 full checkpoint 是预期行为（commitManualRefillSheetSnapshotInRangeAtomic_ACU
          *  在全部 bucket 提交后才原子写新 checkpoint）。豁免仅限重填路径。 */
         skipWriteTargetAdmission?: boolean;
-        /** 提交模式：stage_only 只更新 run 级 staging workingData，不写聊天 V2 frame。 */
+        /** 提交模式：stage_only 只更新 run 级 staging overlay，不写聊天 V2 frame。 */
         commitMode?: 'persist_v2' | 'stage_only';
+        stagingSession?: TableFillStagingSession_ACU;
         performanceRunId?: string;
         performanceParentSpanId?: string;
     } = {}
@@ -2078,7 +2154,9 @@ async function processGroupedRuntimeChunkCore_ACU(
                 break;
             }
 
-            const mergedBatchData = baseResult.data;
+            const mergedBatchData = options.stagingSession
+                ? assembleBucketWorkingView_ACU(baseResult.data, options.stagingSession.getTargetOverlay())
+                : baseResult.data;
             try {
                 bucket.plannedJobs = bucket.plannedJobs.map(plannedJob => ({
                     ...plannedJob,
@@ -2096,7 +2174,9 @@ async function processGroupedRuntimeChunkCore_ACU(
                 firstError = firstError || (error instanceof Error ? error.message : String(error));
                 break;
             }
-            _set_currentJsonTableData_ACU(mergedBatchData);
+            if (!options.stagingSession) {
+                _set_currentJsonTableData_ACU(mergedBatchData);
+            }
             const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
             const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
             const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
@@ -2309,6 +2389,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                 sqlApplyScope: executionScope.sqlApplyScope,
                 manualCatchUpRunId: options.manualCatchUpRunId,
                 commitMode: options.commitMode,
+                stagingSession: options.stagingSession,
                 performanceRunId: options.performanceRunId,
                 performanceParentSpanId: options.performanceParentSpanId,
             });
@@ -2439,6 +2520,7 @@ export async function executeAutoFillStagingGroups_ACU(
     let committedBucketCount = 0;
     let boundaryCommitted = false;
     let stagingRun: TableFillStagingRunContext_ACU | null = null;
+    let stagingSession: TableFillStagingSession_ACU | null = null;
     let boundaryPlan: TableFillBoundaryStagingPlan_ACU | null = null;
 
     // 冻结 run 级 staging scope（与手动追平同款：单 full 根复检、范围、目标表、模板指纹）。
@@ -2476,39 +2558,38 @@ export async function executeAutoFillStagingGroups_ACU(
             performanceParentSpanId: options.performanceParentSpanId,
         });
     }
-    stagingRun = {
+    stagingRun = createTableFillStagingRunContext_ACU({
         runId: boundaryPlan.scope.runId,
         chatKey: boundaryPlan.scope.chatKey,
         isolationKey: boundaryPlan.scope.isolationKey,
-        targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
-        stagedWorkingData: null,
-        lastStagedSnapshot: null,
-        lastStagedTargetMessageIndex: null,
-        stagedBucketCount: 0,
-    };
+        targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+        originalFullIndex: boundaryPlan.scope.originalFullIndex,
+        originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(
+            getChatArray_ACU(),
+            boundaryPlan.scope.isolationKey,
+            originalFullIndex,
+        ),
+        templateFingerprint,
+    });
+    stagingSession = createTableFillStagingSession_ACU(stagingRun);
 
     const settleStagingBoundary = async (): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: string }> => {
         if (!boundaryPlan || boundaryCommitted) return { ok: true };
-        if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+        if (!stagingRun || stagingRun.overlay.stagedBucketCount === 0) {
             boundaryCommitted = true;
+            await stagingSession?.discard();
             return { ok: true };
         }
         const fullIndex = boundaryPlan.scope.originalFullIndex;
         if (fullIndex === null) {
             boundaryCommitted = true;
+            await stagingSession?.discard();
             return { ok: true };
         }
-        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
-            chatKey: stagingRun.chatKey,
-            isolationKey: stagingRun.isolationKey,
-            originalFullIndex: fullIndex,
-            stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
-            targetSheetKeys: stagingRun.targetSheetKeys,
-        });
-        if (!commitResult.ok) {
-            return { ok: false, error: (commitResult as { ok: false; error: string }).error, diagnosticCode: (commitResult as { ok: false; diagnosticCode?: string }).diagnosticCode ?? 'boundary_commit_failed' };
-        }
+        const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, fullIndex, stagingSession);
+        if (!settleResult.ok) return settleResult;
         boundaryCommitted = true;
+        stagingSession = null;
         return { ok: true };
     };
 
@@ -2534,6 +2615,7 @@ export async function executeAutoFillStagingGroups_ACU(
                 abortController: options.abortController,
                 respectGlobalStop: options.respectGlobalStop,
                 commitMode: 'stage_only',
+                stagingSession: stagingSession || undefined,
                 replaceExistingIncremental: true,
                 syncAfterCommit: false,
                 onProgress: options.onProgress,
@@ -2545,14 +2627,6 @@ export async function executeAutoFillStagingGroups_ACU(
                 failedGroups.add(group.key);
                 firstError = firstError || preResult.error || '边界前 staging 提交失败。';
                 break;
-            }
-            // 累积 staging 快照：bucket 提交后 runtime 已更新为目标表最新 AI 结果。
-            if (stagingRun) {
-                const stagedData = (currentJsonTableData_ACU as Record<string, any> | null) || {};
-                stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
-                stagingRun.lastStagedTargetMessageIndex = preSegment.saveTargetIndex;
-                stagingRun.stagedBucketCount += 1;
-                stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
             }
         }
 
@@ -2597,13 +2671,14 @@ export async function executeAutoFillStagingGroups_ACU(
     }
 
     // 所有组都只有 pre-boundary 段（未触发循环内汇合）：正常收尾时仍须把 staging 汇合回原根。
-    if (!boundaryCommitted && stagingRun && stagingRun.stagedBucketCount > 0) {
+    if (!boundaryCommitted && stagingRun && stagingRun.overlay.stagedBucketCount > 0) {
         const settleResult = await settleStagingBoundary();
         if (!settleResult.ok) {
             normalizedGroups.forEach(g => failedGroups.add(g.key));
             firstError = firstError || `跨根 staging 收尾汇合失败：${(settleResult as { ok: false; error: string }).error}`;
         }
     }
+    await stagingSession?.discard();
 
     return failedGroups.size > 0
         ? { success: false, failedGroups: [...failedGroups], error: firstError || '跨根 staging 执行失败。', committedBucketCount }
@@ -3479,9 +3554,10 @@ export async function orchestrateManualCatchUp_ACU(
     // 保证 run-scoped 隔离（staging 只认本 run 授权的目标表）。
     const runId = createManualCatchUpRunId_ACU();
     // 跨 full checkpoint staging run 状态：冻结 scope 后在 bucket 循环内累积 staging
-    // 快照，到达原 full 边界原子汇合。不能依赖全局状态——必须在 run 内显式跟踪。
+    // overlay，到达原 full 边界原子汇合。不能依赖全局状态——必须在 run 内显式跟踪。
     let boundaryPlan: TableFillBoundaryStagingPlan_ACU | null = null;
     let stagingRun: TableFillStagingRunContext_ACU | null = null;
+    let stagingSession: TableFillStagingSession_ACU | null = null;
     let boundaryCommitted = false;
 
     // 旧版“删除全部数据”会将 header-only reset checkpoint 留在原先较晚楼层。
@@ -3549,16 +3625,20 @@ export async function orchestrateManualCatchUp_ACU(
                     diagnosticCode: 'staging_plan_failed',
                 };
             }
-            stagingRun = {
+            stagingRun = createTableFillStagingRunContext_ACU({
                 runId,
                 chatKey: boundaryPlan.scope.chatKey,
                 isolationKey: boundaryPlan.scope.isolationKey,
-                targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
-                stagedWorkingData: null,
-                lastStagedSnapshot: null,
-                lastStagedTargetMessageIndex: null,
-                stagedBucketCount: 0,
-            };
+                targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(
+                    liveChat,
+                    isolationKey,
+                    anchorPreflight.checkpointMessageIndex,
+                ),
+                templateFingerprint,
+            });
+            stagingSession = createTableFillStagingSession_ACU(stagingRun);
             logDebug_ACU(`[手动追平] 已冻结跨根 staging scope：runId=${runId}, originalFull=${anchorPreflight.checkpointMessageIndex}, preBoundary=${boundaryPlan.preBoundaryIndices.length}。`);
         }
     }
@@ -3741,27 +3821,22 @@ export async function orchestrateManualCatchUp_ACU(
     // 只用于正常收尾与 stopped/failed 路径（计划阶段 7：终态必须在收敛后写入）。
     const settleStagingBoundary = async (): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> => {
         if (!boundaryPlan || boundaryCommitted) return { ok: true };
-        if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+        if (!stagingRun || stagingRun.overlay.stagedBucketCount === 0) {
             // 零提交：staging 只是内存状态，直接丢弃，不产生任何持久化改写。
             boundaryCommitted = true;
+            await stagingSession?.discard();
             return { ok: true };
         }
         const originalFullIndex = boundaryPlan.scope.originalFullIndex;
         if (originalFullIndex === null) {
             boundaryCommitted = true;
+            await stagingSession?.discard();
             return { ok: true };
         }
-        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(runId, {
-            chatKey: stagingRun.chatKey,
-            isolationKey: stagingRun.isolationKey,
-            originalFullIndex,
-            stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
-            targetSheetKeys: stagingRun.targetSheetKeys,
-        });
-        if (!commitResult.ok) {
-            return { ok: false, error: (commitResult as { ok: false; error: string }).error, diagnosticCode: (commitResult as { ok: false; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }).diagnosticCode ?? 'boundary_commit_failed' };
-        }
+        const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, originalFullIndex, stagingSession);
+        if (!settleResult.ok) return settleResult;
         boundaryCommitted = true;
+        stagingSession = null;
         return { ok: true };
     };
     const refreshCommittedDataBeforeExit = async (): Promise<void> => {
@@ -3887,7 +3962,7 @@ export async function orchestrateManualCatchUp_ACU(
                     abortController: options.abortController,
                     respectGlobalStop: false,
                     manualCatchUpRun: true,
-                    ...(isPreBoundarySegment ? { commitMode: 'stage_only' as const } : {}),
+                    ...(isPreBoundarySegment ? { commitMode: 'stage_only' as const, stagingSession: stagingSession || undefined } : {}),
                     replaceExistingIncremental: true,
                     syncAfterCommit: false,
                     onProgress: event => options.onProgress?.({
@@ -3927,15 +4002,6 @@ export async function orchestrateManualCatchUp_ACU(
                             completedSheetMessageIndexByKey[sheetKey] = bucket.saveTargetIndex;
                         });
                         lastCommittedBucketTargetIndex = bucket.saveTargetIndex;
-                        if (isPreBoundarySegment && stagingRun) {
-                            // 边界前 bucket：把 AI 结果累积进 run 级 staging 快照。
-                            // lastStagedSnapshot 只保存本 run 授权的目标表，供边界汇合取数。
-                            const stagedData = (currentJsonTableData_ACU as Record<string, any> | null) || {};
-                            stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
-                            stagingRun.lastStagedTargetMessageIndex = bucket.saveTargetIndex;
-                            stagingRun.stagedBucketCount += 1;
-                            stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
-                        }
                     },
                 });
                 committedBucketCount += result.committedBucketCount;
@@ -4188,6 +4254,7 @@ export async function orchestrateManualUpdate_ACU(
     // 分支内使用，普通路径保持 null。
     let boundaryPlan: TableFillBoundaryStagingPlan_ACU | null = null;
     let stagingRun: TableFillStagingRunContext_ACU | null = null;
+    let stagingSession: TableFillStagingSession_ACU | null = null;
     let boundaryCommitted = false;
     // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
     // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
@@ -4216,26 +4283,21 @@ export async function orchestrateManualUpdate_ACU(
     // 边界后段恢复普通逐 bucket 持久化。零 staging 则直接丢弃（不写任何聊天帧）。
     const settleStagingBoundary = async (): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: string }> => {
         if (!boundaryPlan || boundaryCommitted) return { ok: true };
-        if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+        if (!stagingRun || stagingRun.overlay.stagedBucketCount === 0) {
             boundaryCommitted = true;
+            await stagingSession?.discard();
             return { ok: true };
         }
         const fullIndex = boundaryPlan.scope.originalFullIndex;
         if (fullIndex === null) {
             boundaryCommitted = true;
+            await stagingSession?.discard();
             return { ok: true };
         }
-        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
-            chatKey: stagingRun.chatKey,
-            isolationKey: stagingRun.isolationKey,
-            originalFullIndex: fullIndex,
-            stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
-            targetSheetKeys: stagingRun.targetSheetKeys,
-        });
-        if (!commitResult.ok) {
-            return { ok: false, error: (commitResult as { ok: false; error: string }).error, diagnosticCode: (commitResult as { ok: false; diagnosticCode?: string }).diagnosticCode ?? 'boundary_commit_failed' };
-        }
+        const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, fullIndex, stagingSession);
+        if (!settleResult.ok) return settleResult;
         boundaryCommitted = true;
+        stagingSession = null;
         return { ok: true };
     };
 
@@ -4412,16 +4474,20 @@ export async function orchestrateManualUpdate_ACU(
                     messageIndices: contextScopeIndices,
                     fullCheckpointIndices: [originalFullIndex],
                 });
-                stagingRun = {
+                stagingRun = createTableFillStagingRunContext_ACU({
                     runId: boundaryPlan.scope.runId,
                     chatKey: boundaryPlan.scope.chatKey,
                     isolationKey: boundaryPlan.scope.isolationKey,
-                    targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
-                    stagedWorkingData: null,
-                    lastStagedSnapshot: null,
-                    lastStagedTargetMessageIndex: null,
-                    stagedBucketCount: 0,
-                };
+                    targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                    originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                    originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(
+                        getChatArray_ACU(),
+                        currentIsolationKey,
+                        originalFullIndex,
+                    ),
+                    templateFingerprint,
+                });
+                stagingSession = createTableFillStagingSession_ACU(stagingRun);
                 logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging。`);
             }
 
@@ -4650,6 +4716,7 @@ export async function orchestrateManualUpdate_ACU(
                                 skipWriteTargetAdmission: true,
                                 replaceExistingIncremental: false,
                                 commitMode: 'stage_only',
+                                stagingSession: stagingSession || undefined,
                                 syncAfterCommit: false,
                             });
                             committedBucketCount += preResult.committedBucketCount;
@@ -4657,14 +4724,6 @@ export async function orchestrateManualUpdate_ACU(
                                 failedGroups.push({ key: group.key, error: preResult.error || '边界前 staging 提交失败。' });
                                 groupFailed = true;
                                 break;
-                            }
-                            // 累积 staging 快照：bucket 提交后 runtime 已更新为目标表最新 AI 结果。
-                            if (stagingRun) {
-                                const stagedData = (currentJsonTableData_ACU as Record<string, any> | null) || {};
-                                stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
-                                stagingRun.lastStagedTargetMessageIndex = preSegment.saveTargetIndex;
-                                stagingRun.stagedBucketCount += 1;
-                                stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
                             }
                         }
 

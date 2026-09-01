@@ -286,11 +286,138 @@ describe('commitStagedSheetsAtFullBoundaryAtomic_ACU 边界汇合（计划 5.4�
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.diagnosticCode).toBe('boundary_commit_failed');
+    expect(result.diagnosticCode).toBe('boundary_strict_save_failed');
     expect(result.error).toContain('严格保存失败');
     // chat 原位回滚：原 full frame 未被修改。
     expect(JSON.stringify(mocks.chat)).toEqual(JSON.stringify(before));
     const originalTag = mocks.chat[6]?.TavernDB_ACU_IsolatedData?.[isolationKey];
     expect(originalTag?.storageFrame?.perSheetCheckpoints?.sheet_a).toBeUndefined();
+  });
+
+  function buildChatWithNonTargetSuffix(options: {
+    fullIndex: number;
+    suffixIndex: number;
+    headIndex: number;
+    targetSuffix?: boolean;
+  }): { chat: any[]; sheetA120: any; sheetB100: any; sheetBStaged: any } {
+    const mate = { type: 'acu' };
+    const sheetA100 = sheet('表A', [['row_id', '值'], ['1', 'a-at-full']]);
+    const sheetB100 = sheet('表B', [['row_id', '值'], ['1', 'b-at-full']]);
+    const sheetA120 = sheet('表A', [['row_id', '值'], ['1', 'a-at-suffix']]);
+    const sheetBStaged = sheet('表B', [['row_id', '值'], ['1', 'b-at-full'], ['2', 'b-staged']]);
+    const sheetBSuffix = sheet('表B', [['row_id', '值'], ['1', 'b-at-suffix']]);
+    const fullCheckpointResult = buildCanonicalFullCheckpoint_ACU({
+      createdAt: 1000,
+      reason: 'manual',
+      data: { mate, sheet_a: sheetA100, sheet_b: sheetB100 },
+      event: { filledSheetKeys: ['sheet_a', 'sheet_b'], changedSheetKeys: ['sheet_a', 'sheet_b'], groupKeys: [] },
+      context: { messageIndex: options.fullIndex, aiFloor: 1, isolationKey: mocks.isolationKey, reason: 'manual' },
+    });
+    if (!fullCheckpointResult.checkpoint) throw new Error(`构造 full checkpoint 失败：${fullCheckpointResult.error}`);
+    const chat: any[] = [];
+    for (let index = 0; index <= options.headIndex; index += 1) {
+      if (index === options.fullIndex) {
+        chat.push({
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            [mocks.isolationKey]: {
+              _acu_storage_version: 2,
+              storageFrame: {
+                version: 2,
+                checkpoint: fullCheckpointResult.checkpoint,
+                headRevision: 'formal-root',
+                logEntries: [],
+              },
+            },
+          },
+        });
+        continue;
+      }
+      if (index === options.suffixIndex) {
+        const operations = options.targetSuffix
+          ? [{ kind: 'sheet_replace', sheetKey: 'sheet_b', sheet: sheetBSuffix, reason: 'manual_crud' as const }]
+          : [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA120, reason: 'manual_crud' as const }];
+        chat.push({
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            [mocks.isolationKey]: {
+              _acu_storage_version: 2,
+              storageFrame: {
+                version: 2,
+                logEntries: [{
+                  seq: 1,
+                  entryId: 'suffix-edit',
+                  createdAt: 2000,
+                  source: 'manual_crud',
+                  targetMessageIndex: options.suffixIndex,
+                  aiFloor: 2,
+                  filledSheetKeys: [],
+                  changedSheetKeys: [options.targetSuffix ? 'sheet_b' : 'sheet_a'],
+                  operations,
+                }],
+              },
+            },
+          },
+        });
+        continue;
+      }
+      chat.push({ is_user: index % 2 === 1, mes: `m${index}` });
+    }
+    return { chat, sheetA120, sheetB100, sheetBStaged };
+  }
+
+  it('full=100/A@120/head=122：只重填 B 时保留 A 的 checkpoint 后合法增量', async () => {
+    const fixture = buildChatWithNonTargetSuffix({ fullIndex: 100, suffixIndex: 120, headIndex: 122 });
+    mocks.chat.push(...fixture.chat);
+
+    const result = await commitStagedSheetsAtFullBoundaryAtomic_ACU('run-100-120-122', {
+      originalFullIndex: 100,
+      stagedSnapshot: { sheet_b: fixture.sheetBStaged },
+      targetSheetKeys: ['sheet_b'],
+      chatKey: mocks.chatIdentifier,
+      isolationKey: mocks.isolationKey,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.verifiedHeadSnapshot.sheet_a.content).toEqual(fixture.sheetA120.content);
+    expect(result.verifiedHeadSnapshot.sheet_b.content).toEqual(fixture.sheetBStaged.content);
+
+    const replayHead = await loadTableStateFromFramesV2Detailed_ACU(mocks.chat, mocks.isolationKey, {
+      maxMessageIndex: 122,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    expect(JSON.stringify(replayHead?.data?.sheet_a?.content)).toEqual(JSON.stringify(fixture.sheetA120.content));
+    expect(JSON.stringify(replayHead?.data?.sheet_b?.content)).toEqual(JSON.stringify(fixture.sheetBStaged.content));
+
+    const fullFrames = mocks.chat.filter((message: any) => message?.TavernDB_ACU_IsolatedData?.[mocks.isolationKey]?.storageFrame?.checkpoint?.kind === 'full');
+    expect(fullFrames).toHaveLength(1);
+    expect(mocks.chat[100].TavernDB_ACU_IsolatedData[mocks.isolationKey].storageFrame.logEntries).toEqual([]);
+    expect(mocks.chat[120].TavernDB_ACU_IsolatedData[mocks.isolationKey].storageFrame.logEntries).toHaveLength(1);
+  });
+
+  it('目标表 checkpoint 后存在 suffix log 时，head 校验允许 suffix 继续生效', async () => {
+    const fixture = buildChatWithNonTargetSuffix({ fullIndex: 6, suffixIndex: 8, headIndex: 10, targetSuffix: true });
+    mocks.chat.push(...fixture.chat);
+    const stagedB = sheet('表B', [['row_id', '值'], ['1', 'b-rebased']]);
+
+    const result = await commitStagedSheetsAtFullBoundaryAtomic_ACU('run-target-suffix', {
+      originalFullIndex: 6,
+      stagedSnapshot: { sheet_b: stagedB },
+      targetSheetKeys: ['sheet_b'],
+      chatKey: mocks.chatIdentifier,
+      isolationKey: mocks.isolationKey,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const replayHead = await loadTableStateFromFramesV2Detailed_ACU(mocks.chat, mocks.isolationKey, {
+      maxMessageIndex: 10,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    expect(JSON.stringify(replayHead?.data?.sheet_b?.content)).not.toEqual(JSON.stringify(stagedB.content));
+    expect(replayHead?.data?.sheet_b?.content?.[1]?.[1]).toBe('b-at-suffix');
   });
 });

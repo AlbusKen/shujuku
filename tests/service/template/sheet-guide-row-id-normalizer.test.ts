@@ -38,15 +38,80 @@ describe('normalizeSheetGuideRowIds_ACU', () => {
     expect(result.guideData.sheet_a.seedRows).toEqual([['legacy-7', '铁剑']]);
   });
 
-  it('短种子行尾部补 null，超宽或非法种子行 fail-closed', () => {
+  it('短种子行尾部补 null，非法种子行仍 fail-closed，超宽行按最终表头裁剪', () => {
     const shortRow = normalizeSheetGuideRowIds_ACU(guide(['row_id', '名称', '数量'], [['7', '铁剑']]));
     expect(shortRow.blockers).toEqual([]);
     expect(shortRow.guideData.sheet_a.seedRows).toEqual([['7', '铁剑', null]]);
 
-    expect(normalizeSheetGuideRowIds_ACU(guide(['名称'], [['铁剑', '额外列']])).blockers).toHaveLength(1);
+    const oversized = normalizeSheetGuideRowIds_ACU(guide(['名称'], [['铁剑', '额外列']]));
+    expect(oversized.blockers).toEqual([]);
+    expect(oversized.changed).toBe(true);
+    expect(oversized.guideData.sheet_a.seedRows).toEqual([['1', '铁剑']]);
     const nonArrayRows: any = guide(['row_id', '名称']);
     nonArrayRows.sheet_a.seedRows = ['非法行'];
     expect(normalizeSheetGuideRowIds_ACU(nonArrayRows).blockers).toHaveLength(1);
+  });
+
+  it('已有 canonical row_id 表头时，超宽行裁掉右侧单元格', () => {
+    const result = normalizeSheetGuideRowIds_ACU(guide(['row_id', '名称'], [['7', '铁剑', '多余']]));
+    expect(result.blockers).toEqual([]);
+    expect(result.changed).toBe(true);
+    expect(result.guideData.sheet_a.seedRows).toEqual([['7', '铁剑']]);
+  });
+
+  it.each(['id', 'rowId', 'row-id', '行号'])('首列别名 %s 改名后按最终宽度收敛超宽行', (alias) => {
+    const result = normalizeSheetGuideRowIds_ACU(guide([alias, '名称'], [['legacy-7', '铁剑', '旧列']]));
+    expect(result.blockers).toEqual([]);
+    expect(result.guideData.sheet_a.content).toEqual([['row_id', '名称']]);
+    expect(result.guideData.sheet_a.seedRows).toEqual([['legacy-7', '铁剑']]);
+  });
+
+  it('无身份列表头先按业务宽度收敛，再插入 row_id 并分配稳定 ID', () => {
+    const result = normalizeSheetGuideRowIds_ACU(guide(['名称', '数量'], [['铁剑', 1, '旧列'], ['药水']]));
+    expect(result.blockers).toEqual([]);
+    expect(result.guideData.sheet_a.content).toEqual([['row_id', '名称', '数量']]);
+    expect(result.guideData.sheet_a.seedRows).toEqual([['1', '铁剑', 1], ['2', '药水', null]]);
+  });
+
+  it('同表混合短行、等宽行和超宽行时分别补齐、保留、裁剪', () => {
+    const result = normalizeSheetGuideRowIds_ACU(guide(
+      ['row_id', '名称', '数量'],
+      [['1', '短'], ['2', '等宽', 3], ['3', '超宽', 4, '丢弃']],
+    ));
+    expect(result.blockers).toEqual([]);
+    expect(result.guideData.sheet_a.seedRows).toEqual([
+      ['1', '短', null],
+      ['2', '等宽', 3],
+      ['3', '超宽', 4],
+    ]);
+  });
+
+  it('多张表同时超宽时全部成功规范化', () => {
+    const input: any = {
+      mate: { type: 'chatSheets', version: 2 },
+      sheet_a: { uid: 'sheet_a', name: 'A', content: [['row_id', '名称']], seedRows: [['1', '甲', '旧']] },
+      sheet_b: { uid: 'sheet_b', name: 'B', content: [['名称']], seedRows: [['乙', '旧']] },
+    };
+    const result = normalizeSheetGuideRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.guideData.sheet_a.seedRows).toEqual([['1', '甲']]);
+    expect(result.guideData.sheet_b.seedRows).toEqual([['1', '乙']]);
+  });
+
+  it('旧 _seedRows 字段继续被读取并规范化', () => {
+    const input: any = { mate: { type: 'chatSheets', version: 2 }, sheet_a: { uid: 'sheet_a', name: '测试表', content: [['row_id', '名称']], _seedRows: [['7', '铁剑', '旧列']] } };
+    const result = normalizeSheetGuideRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.guideData.sheet_a._seedRows).toEqual([['7', '铁剑']]);
+  });
+
+  it('第二次规范化幂等，输入对象保持不变', () => {
+    const input = guide(['row_id', '名称'], [['7', '铁剑', '旧列']]);
+    const first = normalizeSheetGuideRowIds_ACU(input);
+    const second = normalizeSheetGuideRowIds_ACU(first.guideData);
+    expect(second.changed).toBe(false);
+    expect(second.guideData).toEqual(first.guideData);
+    expect(input.sheet_a.seedRows).toEqual([['7', '铁剑', '旧列']]);
   });
 
   it('同时存在 seedRows 与历史 _seedRows 时，以当前字段 seedRows 为准', () => {

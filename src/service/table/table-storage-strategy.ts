@@ -515,6 +515,11 @@ export function didSqliteFallbackAfterReload_ACU(expectedModeBeforeReload: Stora
 // 内部工具函数
 // ═══════════════════════════════════════════════════════════════
 
+/** 创建不发布到活跃 runtime 的 SQLite provider，仅供 run-scoped staging 使用。 */
+export function createDetachedSqlTableService_ACU(): SqlTableService {
+  return new SqlTableService({ isolatedRuntime: true });
+}
+
 /** 根据模式创建 Provider 实例 */
 function createProvider(mode: StorageMode): ITableStorageProvider {
   switch (mode) {

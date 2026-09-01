@@ -145,6 +145,7 @@ import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/stor
 import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { migrateLegacyStorageToV2OnLoad_ACU } from '../../../src/service/table/storage-v2-migration';
 import { logWarn_ACU, logError_ACU } from '../../../src/shared/utils';
+import { normalizeSheetGuideRowIds_ACU } from '../../../src/service/template/chat-scope/sheet-guide-row-id-normalizer';
 
 describe('migrateContentNullToRowId', () => {
   // ═══════════════════════════════════════════════════════════════
@@ -680,6 +681,63 @@ describe('mergeAllIndependentTables_ACU', () => {
 
     expect(migrateLegacyStorageToV2OnLoad_ACU).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ sheet_0: expect.objectContaining({ content: [['row_id', '物品名称'], ['1', '原始旧数据']] }) }) }));
     expect(result).toEqual(repairedData);
+  });
+
+  it('legacy-v1 超宽 Guide 经真实 normalizer 后仍进入 migration，业务表内容不变', async () => {
+    const oversizedGuide = {
+      mate: { type: 'chatSheets', version: 2 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: '背包物品表',
+        content: [['row_id', '物品名称']],
+        seedRows: [['seed', '模板种子', '旧列']],
+      },
+    };
+    const legacyBusiness = {
+      sheet_0: {
+        name: '背包物品表',
+        content: [['row_id', '物品名称'], ['1', '原始旧数据']],
+      },
+    };
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockImplementation(() => {
+      const normalized = normalizeSheetGuideRowIds_ACU(oversizedGuide);
+      if (normalized.blockers.length > 0) {
+        throw new Error(`Sheet Guide row_id 结构无效：${normalized.blockers.join('；')}`);
+      }
+      expect(normalized.guideData.sheet_0.seedRows).toEqual([['seed', '模板种子']]);
+      return normalized.guideData as any;
+    });
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockImplementation((guideData: any) => ({
+      sheet_0: {
+        uid: 'sheet_0',
+        name: '背包物品表',
+        content: [['row_id', '物品名称']],
+        updateConfig: {},
+        seedRows: guideData?.sheet_0?.seedRows,
+      },
+    }));
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU)
+      .mockReturnValueOnce({ mode: 'legacy-v1' } as any)
+      .mockReturnValueOnce({ mode: 'v2' } as any);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue(legacyBusiness);
+    vi.mocked(migrateLegacyStorageToV2OnLoad_ACU).mockResolvedValueOnce({
+      migrated: true,
+      data: legacyBusiness,
+    } as any);
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(migrateLegacyStorageToV2OnLoad_ACU).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          sheet_0: expect.objectContaining({ content: [['row_id', '物品名称'], ['1', '原始旧数据']] }),
+        }),
+      }),
+    );
+    expect(result).toEqual(legacyBusiness);
   });
 
   it('legacy-v1 迁移声称成功但未返回候选数据时降级为直读旧数据，不再 throw', async () => {

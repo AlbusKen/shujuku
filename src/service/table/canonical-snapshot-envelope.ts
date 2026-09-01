@@ -19,7 +19,8 @@ import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 export type CanonicalSnapshotSource_ACU =
   | 'merged_refresh'
   | 'post_save_replay'
-  | 'system_reload_replay';
+  | 'system_reload_replay'
+  | 'boundary_commit_head';
 
 /**
  * 同一调用链内可信 canonical 数据的显式载体。
@@ -96,7 +97,8 @@ export function isCanonicalSnapshotEnvelope_ACU(
     && typeof candidate.lifecycleEpoch === 'number'
     && (candidate.source === 'merged_refresh'
       || candidate.source === 'post_save_replay'
-      || candidate.source === 'system_reload_replay')
+      || candidate.source === 'system_reload_replay'
+      || candidate.source === 'boundary_commit_head')
     && typeof candidate.fingerprint === 'string'
     && typeof candidate.createdAt === 'number';
 }

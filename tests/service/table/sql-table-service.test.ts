@@ -2714,4 +2714,35 @@ describe('SqlTableService', () => {
       expect(() => service.dispose()).not.toThrow();
     });
   });
+
+  describe('isolatedRuntime', () => {
+    it('loadFromData / apply / dispose 不写全局 JSON，也不发布或释放全局 NameMapper', async () => {
+      const { _set_currentJsonTableData_ACU } = await import('../../../src/service/runtime/state-manager');
+      mockCurrentJsonTableData = {
+        mate: { type: 'acu', version: 1 },
+        sheet_keep: { uid: 'keep', name: 'keep', content: [['row_id', 'v'], ['1', 'shared']] },
+      };
+      const isolated = new SqlTableService({ isolatedRuntime: true });
+      try {
+        const loaded = await isolated.loadFromData(JSON.parse(JSON.stringify(testTableData)));
+        expect(loaded.loaded).toBe(true);
+        expect(isolated.isReady()).toBe(true);
+        expect(mockCurrentJsonTableData.sheet_keep.content[1][1]).toBe('shared');
+        expect(_set_currentJsonTableData_ACU).not.toHaveBeenCalled();
+        expect(mockPublishGlobalNameMapper).not.toHaveBeenCalled();
+        expect(mockPublishGlobalNameMapperEmptySchema).not.toHaveBeenCalled();
+
+        isolated.applyEdits('UPDATE inventory SET quantity = 99 WHERE row_id = 1;');
+        expect(isolated.executeQuery('SELECT quantity FROM inventory WHERE row_id = 1').values).toEqual([[99]]);
+        expect(mockCurrentJsonTableData.sheet_keep.content[1][1]).toBe('shared');
+        expect(_set_currentJsonTableData_ACU).not.toHaveBeenCalled();
+
+        isolated.dispose();
+        expect(mockReleaseGlobalNameMapper).not.toHaveBeenCalled();
+        expect(mockCurrentJsonTableData.sheet_keep.content[1][1]).toBe('shared');
+      } finally {
+        try { isolated.dispose(); } catch (_) { /* already disposed */ }
+      }
+    });
+  });
 });
