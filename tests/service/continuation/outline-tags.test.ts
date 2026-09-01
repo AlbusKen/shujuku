@@ -12,15 +12,17 @@ function tagText_ACU(): string {
     '<stage_title>初入江南</stage_title>',
     '<stage_goal>接管鬼船案调查权</stage_goal>',
     '<stage_tempo>buildup</stage_tempo>',
+    '<stage_role>setup</stage_role>',
+    '<stage_time_span>十日</stage_time_span>',
     '<node>',
     '<node_title>抵达江南府</node_title>',
     '<node_goal>宣示接管权力</node_goal>',
-    '<turn pacing="setup">钦差抵达，宣读圣旨</turn>',
+    '<turn pacing="setup" function="transition" mainline="hold" time="same_day">钦差抵达，宣读圣旨</turn>',
     '</node>',
     '<node>',
     '<node_title>现场勘验</node_title>',
     '<node_goal>寻找关键物证</node_goal>',
-    '<turn pacing="pressure">登船勘验，发现符箓气息</turn>',
+    '<turn pacing="pressure" function="conflict" mainline="step" time="continuous">登船勘验，发现符箓气息</turn>',
     '<turn>义庄闹鬼，稳住仵作问话</turn>',
     '</node>',
   ].join('\n');
@@ -32,9 +34,10 @@ function previousOutline_ACU(): StageOutline_ACU {
     title: '旧阶段标题',
     goal: '旧阶段目标',
     tempo: 'aftermath',
+    role: 'aftermath',
     totalTurns: 4,
     nodes: [
-      { id: 'node-a', title: '节点A', goal: '目标A', suggestedTurns: 3, turns: [{ id: 'turn-a1', goal: '轮A1', pacing: 'setup' as const }, { id: 'turn-a2', goal: '轮A2', pacing: 'pressure' as const }, { id: 'turn-a3', goal: '轮A3', pacing: 'cooldown' as const }] },
+      { id: 'node-a', title: '节点A', goal: '目标A', suggestedTurns: 3, turns: [{ id: 'turn-a1', goal: '轮A1', pacing: 'setup' as const, function: 'daily_bond' as const, mainlineDelta: 'hold' as const, timeAdvance: 'same_day' as const }, { id: 'turn-a2', goal: '轮A2', pacing: 'pressure' as const, function: 'conflict' as const, mainlineDelta: 'step' as const, timeAdvance: 'continuous' as const }, { id: 'turn-a3', goal: '轮A3', pacing: 'cooldown' as const, function: 'recovery' as const, mainlineDelta: 'hold' as const, timeAdvance: 'days' as const }] },
       { id: 'node-b', title: '节点B', goal: '目标B', suggestedTurns: 1, turns: [{ id: 'turn-b1', goal: '轮B1', pacing: 'pressure' as const }] },
     ],
   };
@@ -61,38 +64,40 @@ describe('parseOutlineTags_ACU', () => {
     expect(parsed.title).toBe('初入江南');
     expect(parsed.goal).toBe('接管鬼船案调查权');
     expect(parsed.tempo).toBe('buildup');
+    expect(parsed.role).toBe('setup');
+    expect(parsed.timeSpanGoal).toBe('十日');
     expect(parsed.nodes).toHaveLength(2);
-    expect(parsed.nodes[0]).toMatchObject({ title: '抵达江南府', goal: '宣示接管权力', turns: [{ goal: '钦差抵达，宣读圣旨', pacing: 'setup' }] });
-    // 第二轮没写 pacing：缺属性回落 pressure，与 schema 的默认值口径一致。
+    expect(parsed.nodes[0]).toMatchObject({ title: '抵达江南府', goal: '宣示接管权力', turns: [{ goal: '钦差抵达，宣读圣旨', pacing: 'setup', function: 'transition', mainlineDelta: 'hold', timeAdvance: 'same_day', timeAnchor: null }] });
+    // 解析层保留缺失状态；是否兼容归一化或严格拒绝由 schema 边界决定。
     expect(parsed.nodes[1].turns).toEqual([
-      { goal: '登船勘验，发现符箓气息', pacing: 'pressure' },
-      { goal: '义庄闹鬼，稳住仵作问话', pacing: 'pressure' },
+      { goal: '登船勘验，发现符箓气息', pacing: 'pressure', function: 'conflict', mainlineDelta: 'step', timeAdvance: 'continuous', timeAnchor: null },
+      { goal: '义庄闹鬼，稳住仵作问话', pacing: null, function: null, mainlineDelta: null, timeAdvance: null, timeAnchor: null },
     ]);
   });
 
-  it('解析 pacing 属性：合法值原样保留，非法值与缺失都回落 pressure', () => {
+  it('解析 turn 属性时保留合法值、非法原文与缺失状态', () => {
     const raw = [
       '<node>',
       '<node_title>节点</node_title>',
       '<node_goal>目标</node_goal>',
-      '<turn pacing="cooldown">余波</turn>',
-      "<turn pacing='turn'>反转</turn>",
+      '<turn pacing="cooldown" function="recovery" mainline="hold" time="days">余波</turn>',
+      "<turn pacing='turn' function='reveal' mainline='milestone' time='overnight' anchor='次日清晨'>反转</turn>",
       '<turn pacing="fast">非法值</turn>',
       '<turn>没写</turn>',
       '</node>',
     ].join('\n');
     expect(parseOutlineTags_ACU(raw).nodes[0].turns).toEqual([
-      { goal: '余波', pacing: 'cooldown' },
-      { goal: '反转', pacing: 'turn' },
-      { goal: '非法值', pacing: 'pressure' },
-      { goal: '没写', pacing: 'pressure' },
+      { goal: '余波', pacing: 'cooldown', function: 'recovery', mainlineDelta: 'hold', timeAdvance: 'days', timeAnchor: null },
+      { goal: '反转', pacing: 'turn', function: 'reveal', mainlineDelta: 'milestone', timeAdvance: 'overnight', timeAnchor: '次日清晨' },
+      { goal: '非法值', pacing: 'fast', function: null, mainlineDelta: null, timeAdvance: null, timeAnchor: null },
+      { goal: '没写', pacing: null, function: null, mainlineDelta: null, timeAdvance: null, timeAnchor: null },
     ]);
   });
 
-  it('解析 stage_tempo：合法值原样保留，非法值与缺失都留空交给构建层回落', () => {
+  it('解析阶段枚举时仅规范大小写，不吞掉非法原文', () => {
     const body = '<node><node_goal>目标</node_goal><turn>一轮</turn></node>';
     expect(parseOutlineTags_ACU(`<stage_tempo>SURGE</stage_tempo>${body}`).tempo).toBe('surge');
-    expect(parseOutlineTags_ACU(`<stage_tempo>激烈</stage_tempo>${body}`).tempo).toBeNull();
+    expect(parseOutlineTags_ACU(`<stage_tempo>激烈</stage_tempo>${body}`).tempo).toBe('激烈');
     expect(parseOutlineTags_ACU(body).tempo).toBeNull();
   });
 
@@ -116,7 +121,7 @@ describe('parseOutlineTags_ACU', () => {
     const parsed = parseOutlineTags_ACU(upper);
     expect(parsed.title).toBe('标题');
     expect(parsed.nodes[0].goal).toBe('目标');
-    expect(parsed.nodes[0].turns).toEqual([{ goal: '第一轮', pacing: 'pressure' }]);
+    expect(parsed.nodes[0].turns).toEqual([{ goal: '第一轮', pacing: null, function: null, mainlineDelta: null, timeAdvance: null, timeAnchor: null }]);
   });
 
   it('fails with a raw snippet when no node tag exists', async () => {
@@ -145,10 +150,10 @@ describe('buildStageOutlineFromTags_ACU', () => {
     const outline = buildStageOutlineFromTags_ACU(parsed, allocator_ACU(), { title: '沿用标题', goal: '沿用目标', tempo: 'surge' });
     expect(outline.title).toBe('沿用标题');
     expect(outline.goal).toBe('沿用目标');
-    // 重规划时模型可以不重述形态，此时沿用旧大纲的；没有旧大纲可沿用才落 mixed。
+    // 重规划时模型可以不重述阶段字段，此时沿用旧大纲；首次生成缺失则留给严格校验拒绝。
     expect(outline.tempo).toBe('surge');
     expect(outline.nodes[0].title).toBe('节点1');
-    expect(buildStageOutlineFromTags_ACU(parsed, allocator_ACU()).tempo).toBe('mixed');
+    expect(buildStageOutlineFromTags_ACU(parsed, allocator_ACU()).tempo).toBeUndefined();
   });
 
   it('模型写了形态就以模型的为准，不被旧大纲的形态覆盖', () => {
@@ -164,8 +169,9 @@ describe('spliceOutlineWithCompletedPrefix_ACU', () => {
     expect(spliced.nodes).toHaveLength(3);
     expect(spliced.nodes[0]).toMatchObject({ id: 'node-a', suggestedTurns: 2 });
     expect(spliced.nodes[0].turns.map(turn => turn.id)).toEqual(['turn-a1', 'turn-a2']);
-    // 已完成前缀的节奏标签必须原样带过来，否则重规划会把历史轮次全部当成 pressure。
+    // 已完成前缀的全部节奏、功能、主线和时间元数据必须原样带过来。
     expect(spliced.nodes[0].turns.map(turn => turn.pacing)).toEqual(['setup', 'pressure']);
+    expect(spliced.nodes[0].turns[0]).toMatchObject({ function: 'daily_bond', mainlineDelta: 'hold', timeAdvance: 'same_day' });
     expect(spliced.nodes[1].id).toBe('node-1');
     expect(spliced.totalTurns).toBe(5);
     expect(spliced.title).toBe('初入江南');

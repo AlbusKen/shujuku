@@ -7,24 +7,32 @@
  *
  * 标签契约（与 defaults.ts 的默认大纲提示词一一对应）：
  * <stage_title>…</stage_title> <stage_goal>…</stage_goal> <stage_tempo>mixed</stage_tempo>
- * <node><node_title>…</node_title><node_goal>…</node_goal><turn pacing="setup">…</turn>…</node>
+ * <stage_role>development</stage_role> <stage_time_span>数日</stage_time_span>
+ * <node><node_title>…</node_title><node_goal>…</node_goal>
+ * <turn pacing="setup" function="daily_bond" mainline="hold" time="days" anchor="入城后的第七天">…</turn></node>
  */
 
 import {
   CONTINUATION_SCHEMA_VERSION_ACU,
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
-  STAGE_TEMPOS_ACU,
-  STAGE_TURN_PACINGS_ACU,
   type StageNode_ACU,
   type StageOutline_ACU,
+  type StageRole_ACU,
   type StageTempo_ACU,
+  type StageTurnFunction_ACU,
+  type StageTurnMainlineDelta_ACU,
   type StageTurnPacing_ACU,
+  type StageTurnTimeAdvance_ACU,
 } from './model';
 
 export interface ParsedOutlineTagTurn_ACU {
   goal: string;
-  pacing: StageTurnPacing_ACU;
+  pacing: string | null;
+  function: string | null;
+  mainlineDelta: string | null;
+  timeAdvance: string | null;
+  timeAnchor: string | null;
 }
 
 export interface ParsedOutlineTagNode_ACU {
@@ -36,8 +44,10 @@ export interface ParsedOutlineTagNode_ACU {
 export interface ParsedOutlineTags_ACU {
   title: string;
   goal: string;
-  /** 阶段节奏形态；标签缺失或写错时为 null，由构建层决定回落值。 */
-  tempo: StageTempo_ACU | null;
+  /** 枚举标签保留模型原文；合法性只由严格 schema 校验器裁决。 */
+  tempo: string | null;
+  role: string | null;
+  timeSpanGoal: string | null;
   nodes: ParsedOutlineTagNode_ACU[];
 }
 
@@ -80,16 +90,16 @@ function readTagAttribute_ACU(attributes: string, name: string): string {
   return match ? match[1].trim() : '';
 }
 
-/** 读取 turn 的 pacing 属性。缺失或写错都回落 pressure——标签层不报错，交给 schema 层给出统一口径的错误。 */
-function readTurnPacing_ACU(attributes: string): StageTurnPacing_ACU {
-  const raw = readTagAttribute_ACU(attributes, 'pacing').toLowerCase();
-  return (STAGE_TURN_PACINGS_ACU as readonly string[]).includes(raw) ? raw as StageTurnPacing_ACU : 'pressure';
+function readOptionalAttribute_ACU(attributes: string, name: string, lowerCase = true): string | null {
+  const raw = readTagAttribute_ACU(attributes, name);
+  if (!raw) return null;
+  return lowerCase ? raw.toLowerCase() : raw;
 }
 
-/** 读取 <stage_tempo>。写错或没写返回 null，由构建层回落——重规划时要能沿用旧大纲的形态。 */
-function readStageTempo_ACU(text: string): StageTempo_ACU | null {
-  const raw = readTag_ACU(text, 'stage_tempo').toLowerCase();
-  return (STAGE_TEMPOS_ACU as readonly string[]).includes(raw) ? raw as StageTempo_ACU : null;
+function readOptionalTag_ACU(text: string, tag: string, lowerCase = true): string | null {
+  const raw = readTag_ACU(text, tag);
+  if (!raw) return null;
+  return lowerCase ? raw.toLowerCase() : raw;
 }
 
 /**
@@ -105,11 +115,25 @@ export function parseOutlineTags_ACU(raw: string | null | undefined): ParsedOutl
     failParse_ACU(`返回内容不包含任何 <node> 标签。模型返回片段：${text.trim().slice(0, 300)}`);
   }
   const nodes = nodeBlocks.map((block, index) => {
-    const turns = readTagEntries_ACU(block, 'turn').map(entry => ({ goal: entry.value, pacing: readTurnPacing_ACU(entry.attributes) }));
+    const turns = readTagEntries_ACU(block, 'turn').map(entry => ({
+      goal: entry.value,
+      pacing: readOptionalAttribute_ACU(entry.attributes, 'pacing'),
+      function: readOptionalAttribute_ACU(entry.attributes, 'function'),
+      mainlineDelta: readOptionalAttribute_ACU(entry.attributes, 'mainline'),
+      timeAdvance: readOptionalAttribute_ACU(entry.attributes, 'time'),
+      timeAnchor: readOptionalAttribute_ACU(entry.attributes, 'anchor', false),
+    }));
     if (!turns.length) failParse_ACU(`第 ${index + 1} 个 <node> 中没有任何非空 <turn> 标签`);
     return { title: readTag_ACU(block, 'node_title'), goal: readTag_ACU(block, 'node_goal'), turns };
   });
-  return { title: readTag_ACU(text, 'stage_title'), goal: readTag_ACU(text, 'stage_goal'), tempo: readStageTempo_ACU(text), nodes };
+  return {
+    title: readTag_ACU(text, 'stage_title'),
+    goal: readTag_ACU(text, 'stage_goal'),
+    tempo: readOptionalTag_ACU(text, 'stage_tempo'),
+    role: readOptionalTag_ACU(text, 'stage_role'),
+    timeSpanGoal: readOptionalTag_ACU(text, 'stage_time_span', false),
+    nodes,
+  };
 }
 
 /**
@@ -117,25 +141,43 @@ export function parseOutlineTags_ACU(raw: string | null | undefined): ParsedOutl
  * node/turn id 由 allocateId 分配，suggestedTurns=节点轮数，totalTurns=轮数总和。
  * @param parsed 标签解析结果
  * @param allocateId ID 分配器（与 edit_outline 插入轮次共用同一惯例）
- * @param fallback 重规划时沿用旧大纲的阶段标题/目标/形态（模型可不重述）
- * @returns 结构完整的 StageOutline，内容性缺失（空 goal）留给 schema 校验反馈
+ * @param fallback 重规划时沿用旧大纲的阶段标题、目标、形态与结构角色
+ * @returns 未校验的 StageOutline 载体；缺失/非法枚举会原样进入严格 schema 校验
  */
-export function buildStageOutlineFromTags_ACU(parsed: ParsedOutlineTags_ACU, allocateId: (prefix: string) => string, fallback?: { title?: string; goal?: string; tempo?: StageTempo_ACU }): StageOutline_ACU {
+export function buildStageOutlineFromTags_ACU(
+  parsed: ParsedOutlineTags_ACU,
+  allocateId: (prefix: string) => string,
+  fallback?: { title?: string; goal?: string; tempo?: StageTempo_ACU; role?: StageRole_ACU; timeSpanGoal?: string },
+): StageOutline_ACU {
   const nodes: StageNode_ACU[] = parsed.nodes.map((node, index) => ({
     id: allocateId('node'),
     title: node.title || `节点${index + 1}`,
     goal: node.goal,
     suggestedTurns: node.turns.length,
-    turns: node.turns.map(turn => ({ id: allocateId('turn'), goal: turn.goal, pacing: turn.pacing })),
+    turns: node.turns.map(turn => ({
+      id: allocateId('turn'),
+      goal: turn.goal,
+      ...(turn.pacing !== null ? { pacing: turn.pacing as StageTurnPacing_ACU } : {}),
+      ...(turn.function !== null ? { function: turn.function as StageTurnFunction_ACU } : {}),
+      ...(turn.mainlineDelta !== null ? { mainlineDelta: turn.mainlineDelta as StageTurnMainlineDelta_ACU } : {}),
+      ...(turn.timeAdvance !== null ? { timeAdvance: turn.timeAdvance as StageTurnTimeAdvance_ACU } : {}),
+      ...(turn.timeAnchor !== null ? { timeAnchor: turn.timeAnchor } : {}),
+    } as StageNode_ACU['turns'][number])),
   }));
+  const tempo = parsed.tempo ?? fallback?.tempo;
+  const role = parsed.role ?? fallback?.role;
   return {
     schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
     title: parsed.title || fallback?.title || '',
     goal: parsed.goal || fallback?.goal || '',
-    tempo: parsed.tempo ?? fallback?.tempo ?? 'mixed',
+    ...(tempo !== undefined ? { tempo: tempo as StageTempo_ACU } : {}),
+    ...(role !== undefined ? { role: role as StageRole_ACU } : {}),
+    ...(parsed.timeSpanGoal !== null || fallback?.timeSpanGoal !== undefined
+      ? { timeSpanGoal: parsed.timeSpanGoal ?? fallback?.timeSpanGoal }
+      : {}),
     totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
     nodes,
-  };
+  } as StageOutline_ACU;
 }
 
 /**
@@ -163,6 +205,8 @@ export function spliceOutlineWithCompletedPrefix_ACU(previous: StageOutline_ACU,
     schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
     title: planned.title || previous.title,
     goal: planned.goal || previous.goal,
+    role: planned.role ?? previous.role,
+    timeSpanGoal: planned.timeSpanGoal ?? previous.timeSpanGoal,
     tempo: planned.tempo,
     totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
     nodes,

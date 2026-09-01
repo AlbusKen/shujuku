@@ -1,8 +1,8 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
-import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU } from './agent/agent-defaults';
+import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -272,6 +272,166 @@ function migrateV22OutlinePromptToV23_ACU(raw: unknown): unknown {
   return changed ? outlinePrompt : raw;
 }
 
+const V23_FINAL_INSTRUCTION_TEMPLATE_ACU = [
+  '承接：上一楼结尾的画面与遗留情绪，本轮从哪里接住',
+  '本轮目标：要完成的核心事件（一个场景片段），冲突障碍是什么、主角做什么选择付什么代价',
+  '伏笔与信息差操作：本轮对哪条做埋设/强化/误导/回收，信息允许揭示到哪一层',
+  '硬事实（禁改）：本轮绝对不能改变或提前揭穿的既有事实',
+  '读者回报：本轮给读者的具体获得感（新信息/情绪释放/局势实质变化，至少其一）',
+  '收尾钩子：结尾停在哪个未决点（悬而未决/危机逼近/认知错位选其一），不许越界写到下一轮',
+  '风格（可省略）：视角、节奏、叙述基调等本轮需要的特殊风格要求',
+].join('\n');
+
+/** V26 追加的三段年代学默认段原文；还原历史默认形态与判断“是否已迁移”都以这份清单为准。 */
+const V26_CHRONOLOGY_SEGMENT_CONTENTS_ACU: readonly string[] = [
+  V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU,
+  V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU,
+  V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU,
+];
+
+/** 从当前默认组剥离 V26 追加段，还原 V25 及更早版本的默认形态（V26 只增段、不改既有段原文）。 */
+function stripV26ChronologySegments_ACU(prompts: ContinuationSettings_ACU['agentPrompts']): ContinuationSettings_ACU['agentPrompts'] {
+  for (const key of Object.keys(prompts) as (keyof ContinuationSettings_ACU['agentPrompts'])[]) {
+    prompts[key] = prompts[key].filter(segment => !V26_CHRONOLOGY_SEGMENT_CONTENTS_ACU.includes(segment.content));
+  }
+  return prompts;
+}
+
+/**
+ * 从当前 V24 默认组精确还原 V23 默认组，仅用于识别未改写的存量默认段。
+ * 迁移时只有完整段（含角色、启用状态、可删除和 pinned 元数据）与还原结果一致才替换。
+ */
+function buildV23AgentPromptsForMigration_ACU(): ContinuationSettings_ACU['agentPrompts'] {
+  const prompts = stripV26ChronologySegments_ACU(buildDefaultContinuationAgentPrompts_ACU());
+  // 当前默认已包含 V25 容量段；冻结 V23 形态时必须先移除，否则按索引迁移会把后续段错配。
+  prompts.arcArchitect = prompts.arcArchitect.filter(segment => segment.content !== V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+  const replacements: readonly (readonly [string, string])[] = [
+    [AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, V23_FINAL_INSTRUCTION_TEMPLATE_ACU],
+    [V24_MAIN_AGENT_PACING_RULE_ACU, V23_MAIN_AGENT_PACING_RULE_ACU],
+    ['4. 策划是策划类子代理的职责，不是你的：每轮至少派工 mainline-planner，并在任务里写明本轮 pacing；setup/cooldown 必须允许主线 hold、安静闭合和自然时间流逝，不得要求它补造冲突升级。本轮确有伏笔或信息差操作义务时才加派 beat-planner；低压轮没有真实操作需要时不得为凑钩子强派。最终指导里的相关操作应来自子代理建议或既有账本依据；大转折或已出现冲突时再加连续性审查。你自己调阅资料是为了审核与收敛，不是为了替策划子代理出方案。', '4. 策划是策划类子代理的职责，不是你的：每轮至少派工 mainline-planner 拿主线推进建议；本轮要对伏笔做埋设/强化/误导/回收、或信息差要走设-用-揭步进时，必须加派 beat-planner，最终指导里的伏笔与信息差操作应当来自它的建议而不是你的即兴发挥；大转折或已出现冲突时再加连续性审查。你自己调阅资料是为了审核与收敛，不是为了替策划子代理出方案。'],
+    ['6. 结果回来后先审核再采用：报告与正文、你调阅到的资料或本轮 pacing 冲突、有明显缺漏时，带着具体修正意见重派；达到单代理派工上限仍不合规时，舍弃冲突部分并按已验证资料与 pacing 收敛，不能照单全收。', '6. 结果回来后先审核再采用：报告与正文或你调阅到的资料冲突、有明显缺漏时，带着具体修正意见重派，而不是照单全收。'],
+    ['\n\n我先读取【完整当前阶段大纲】中箭头标出的本轮 pacing，再选择方法，通用的“每轮升级冲突”规则无权覆盖 pacing：\n- setup：允许主线 hold，不要求外部阻碍、选择代价或危机钩子。用具体生活动作与人物互动，让关系、习惯、世界理解、资源、身体或认知发生一项可观察变化，并判断是否适合隔夜、数日后或更久开始。\n- cooldown：不制造新危机；确认上一波代价，处理伤势、情绪、关系与局势理解，允许完整结算和安静闭合。\n- pressure：只推进一个外部冲突；行动、阻碍、悬念齐全，主角作出选择并承担成本。\n- turn：通过既有伏笔、误判或信息揭示改变局势性质，不临时制造真相。\n\n所有档位都拒绝空泛判词。setup/cooldown 的三要素是“场景动作、人物互动、状态变化”；pressure/turn 才使用“行动、阻碍、悬念”。', '\n\n方法论内核：\n1. 冲突阶梯——本轮的障碍必须比上一轮更高一层（章内试探 → 遭遇 → 升级），严禁同一层次的障碍换皮重复。\n2. 主角代理权与成本——关键选择必须由主角做出并承担代价，收益与战果明确归属主角，不写成配角独角戏。\n3. 实质价值变动——本轮必须发生地位、资源、情报或关系上的具体变化，不能只是气氛推进。\n4. 场景三要素——行动、阻碍、悬念缺一不可。\n5. 拒绝空泛判词——不写「气氛紧张」「深化羁绊」这类抽象词，只写具体压力、具体收益、具体动作。'],
+    ['{"summary":"一句话本轮策划要点","recommendation":"自然语言建议正文，开头依次写明本轮 pacing、建议叙事功能、主线增量（hold/micro/step/milestone）和与上一轮的时间关系，再写具体场景动作与必须发生的变化；只有 pressure/turn 才要求冲突升级、选择代价或揭示","mustPreserve":["本轮绝对不能改变的既有事实与 pacing 边界"],"risks":["按此建议可能引发的节奏或连续性风险"]}', '{"summary":"一句话本轮主线要点","recommendation":"自然语言建议正文，写清本轮怎么推进、冲突怎么升级、主角做什么选择、付什么代价、得到什么实质变化","mustPreserve":["本轮绝对不能改变的既有事实"],"risks":["按此推进可能引发的风险"]}'],
+    ['recommendation 是给主控 Agent 的自然语言建议，不代替最终指导。', 'recommendation 里的内容是给主控 Agent 看的创作建议，保持自然语言，不写成字段清单，也不代替它写最终指导。'],
+    ['【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；首条用户要求仅由【本次任务】裁剪传达）', '【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；首条用户要求仅由【本次任务】裁剪传达）'],
+    ['【故事总纲】（建议必须落在当前 active 卷的台阶内）', '【故事总纲】（主线建议必须落在当前 active 卷的台阶内）'],
+    ['【自检清单】先确认本轮 pacing，再应用对应方法；setup/cooldown 没有新危机、新敌对方、局势升级或强制钩子，允许主线 hold，但有具体动作、互动和状态变化；pressure/turn 才检查冲突或揭示；建议落在当前卷且没有提前翻底牌；没有引入未知实体或抽象判词。', '【自检清单】提交前逐条确认：冲突比上一轮升了一层而不是换皮；主角有明确选择和代价；本轮有具体的实质价值变动；建议落在总纲当前卷的台阶内、没有提前翻总纲禁翻的底牌；没有引入注入资料与世界书之外的新实体；没有使用抽象判词。'],
+    ['\n\n方法论内核：\n1. 先读取【完整当前阶段大纲】里本轮 pacing。setup 允许安静闭合或普通生活期待，cooldown 优先结算上一事件的情绪债，pressure 才通常保留行动压力，turn 形成新局面但不强制再制造更大的秘密。\n2. 信息差的完整生命是「设置 → 使用 → 揭示」。揭示后可以完整结束；只有故事自然产生新的认知差时才登记新未知，不能为了续命自动补坑。\n3. 伏笔操作只有埋设、强化、误导、回收（含部分回收）；明确对象与允许层级，低压轮没有真实需要时可以不操作伏笔。\n4. 情绪起点承接上一楼残留；低压轮允许平静、熟悉、恢复或释然，不强迫“压抑后立即反击”。\n5. 收尾方式服从 pacing：安静闭合、开放期待、未决问题和危机钩子都是合法选项，不是每轮都必须留钩子。', '\n\n方法论内核：\n1. 信息差动态——一条信息的完整生命是「设置 → 使用 → 揭示 → 产生新信息差」。本轮要明确处在哪一步，揭示后必须留下新的未知。\n2. 钩子三手法——悬而未决、已知危机逼近、认知错位。本轮结尾至少落一个。\n3. 伏笔操作只有四种：埋设、强化、误导、回收（含部分回收）。我要明确指出本轮对哪几条伏笔做哪一种操作，以及绝对不能提前回收的是哪些。\n4. 情绪微弧继承——本轮的情绪起点必须承接上一楼的情绪残留；压抑之后要有释放，但释放不能来自主角降智。'],
+    ['{"summary":"一句话本轮伏笔与节拍要点","recommendation":"自然语言建议正文，先写本轮 pacing 与适合的收尾方式；有真实需要时再写对哪条伏笔做什么操作、信息差走到哪一步和允许揭到哪层；没有操作时明确本轮以情绪或生活结算为主，不虚构钩子","mustPreserve":["本轮绝对不能提前揭穿或改变的事项与 pacing 边界"],"risks":["按此操作可能引发的风险"]}', '{"summary":"一句话本轮伏笔与节拍要点","recommendation":"自然语言建议正文，写清对哪几条伏笔做什么操作、信息差走到哪一步、允许揭到哪一层、情绪从哪里起到哪里落、结尾用哪种钩子","mustPreserve":["本轮绝对不能提前揭穿或改变的事项"],"risks":["按此操作可能引发的风险"]}'],
+    ['【自检清单】先确认本轮 pacing；每条伏笔操作都对应真实条目且没有越过允许层级；setup/cooldown 没有真实伏笔义务时可以不操作，允许安静闭合或普通期待；信息差已完整揭示时允许结束，不自动制造替代谜团；情绪起点承接上一楼。', '【自检清单】提交前逐条确认：每条伏笔操作都对应账本里真实存在的条目；没有把计划中的回收说成已经回收；揭示层级没有越过 mustPreserve；情绪起点承接了上一楼残留；结尾留下了明确钩子。'],
+    ['\n\n【节奏、日常与时间审查】\n先从完整阶段大纲确认本轮 pacing。setup/cooldown 的候选指导若制造新危机、引入新敌对方、让局势升级或强制危机钩子，判为 revise；低压轮同时必须有具体场景动作、人物互动和至少一项关系、生活、世界理解、资源、身体或认知变化，只有“气氛放松”也判为 revise。pressure/turn 继续检查单一冲突与既有揭示依据。候选若安排隔夜、数日或更久的时间变化，要有相对时间位置和环境、身体、关系、资源或社会状态中的可感知变化；时间仍连续时不凭空要求跳跃。', ''],
+    ['【完整当前阶段大纲】（箭头标出本轮，括号给出 pacing）', '【完整当前阶段大纲】'],
+    ['logicFindings 覆盖控制权、信息、能力、世界规则、因果、当前 pacing 合规、低压轮正向功能、时间位置和适用的战斗附加项。', 'logicFindings 覆盖控制权、信息、能力、世界规则、因果和适用的战斗附加项。'],
+  ];
+  for (const segments of Object.values(prompts)) {
+    for (const segment of segments) {
+      for (const [currentText, v23Text] of replacements) segment.content = segment.content.replace(currentText, v23Text);
+    }
+  }
+  return prompts;
+}
+
+/** V24 默认 Agent 形态：已经包含 pacing 改造，但尚未加入 V25 卷级容量段与 V26 年代学段。 */
+function buildV24AgentPromptsForMigration_ACU(): ContinuationSettings_ACU['agentPrompts'] {
+  const prompts = stripV26ChronologySegments_ACU(buildDefaultContinuationAgentPrompts_ACU());
+  prompts.arcArchitect = prompts.arcArchitect.filter(segment => segment.content !== V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+  return prompts;
+}
+
+function promptSegmentEquals_ACU(left: unknown, right: unknown): boolean {
+  if (!isRecord_ACU(left) || !isRecord_ACU(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.prototype.hasOwnProperty.call(right, key) && left[key] === right[key]);
+}
+
+/** V23 → V24 仅升级完整未改写的默认 Agent 段，保留插入段与任意用户改写。 */
+function migrateV23AgentPromptsToV24_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const v23Defaults = buildV23AgentPromptsForMigration_ACU();
+  const v24Defaults = buildV24AgentPromptsForMigration_ACU();
+  let changed = false;
+  const next = { ...raw };
+  for (const key of Object.keys(v24Defaults) as (keyof typeof v24Defaults)[]) {
+    const segments = raw[key];
+    if (!Array.isArray(segments)) continue;
+    const migrated = segments.map(segment => {
+      const index = v23Defaults[key].findIndex(v23Segment => promptSegmentEquals_ACU(segment, v23Segment));
+      if (index < 0) return segment;
+      changed = true;
+      return v24Defaults[key][index];
+    });
+    next[key] = migrated;
+  }
+  return changed ? next : raw;
+}
+
+/** V24 → V25 只向仍保留默认总纲输出契约的提示词组插入卷级容量契约。 */
+function migrateV24AgentPromptsToV25_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw) || !Array.isArray(raw.arcArchitect)) return raw;
+  if (raw.arcArchitect.some(segment => isRecord_ACU(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU)) return raw;
+  const current = buildDefaultAgentArcArchitectPrompt_ACU();
+  const capacityIndex = current.findIndex(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+  const capacitySegment = current[capacityIndex];
+  const previousContract = current[capacityIndex - 1];
+  if (!capacitySegment || !previousContract) return raw;
+  const anchorIndex = raw.arcArchitect.findIndex(segment => promptSegmentEquals_ACU(segment, previousContract));
+  if (anchorIndex < 0) return raw;
+  const insertIndex = anchorIndex + 1;
+  return {
+    ...raw,
+    arcArchitect: [
+      ...raw.arcArchitect.slice(0, insertIndex),
+      capacitySegment,
+      ...raw.arcArchitect.slice(insertIndex),
+    ],
+  };
+}
+
+/**
+ * V25 → V26 向 main / maintainer / finalReviewer 三组提示词插入年代学默认段。
+ * 只在目标组仍保留紧邻的默认锚段（完整段一致）且尚未包含该段时插入；
+ * 锚段被用户改写时跳过该组，不向自定义提示词注入默认内容。
+ */
+function migrateV25AgentPromptsToV26_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const defaults = buildDefaultContinuationAgentPrompts_ACU();
+  const next = { ...raw };
+  let changed = false;
+  for (const key of ['main', 'maintainer', 'finalReviewer'] as const) {
+    const segments = next[key];
+    if (!Array.isArray(segments)) continue;
+    const defaultsGroup = defaults[key];
+    const insertIndex = defaultsGroup.findIndex(segment => V26_CHRONOLOGY_SEGMENT_CONTENTS_ACU.includes(segment.content));
+    if (insertIndex <= 0) continue;
+    const chronologySegment = defaultsGroup[insertIndex];
+    if (segments.some(segment => isRecord_ACU(segment) && segment.content === chronologySegment.content)) continue;
+    const anchor = defaultsGroup[insertIndex - 1];
+    const anchorIndex = segments.findIndex(segment => promptSegmentEquals_ACU(segment, anchor));
+    if (anchorIndex < 0) continue;
+    next[key] = [...segments.slice(0, anchorIndex + 1), chronologySegment, ...segments.slice(anchorIndex + 1)];
+    changed = true;
+  }
+  return changed ? next : raw;
+}
+
+/** V23 → V24 只在默认节奏段完全未改写时追加独立长篇日常契约。 */
+function migrateV23OutlinePromptToV24_ACU(raw: unknown): unknown {
+  if (!Array.isArray(raw) || raw.some(segment => isRecord_ACU(segment) && segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)) return raw;
+  const index = raw.findIndex(segment => isRecord_ACU(segment)
+    && segment.role === 'user'
+    && segment.content === V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU
+    && segment.enabled === true
+    && segment.deletable === true
+    && !Object.prototype.hasOwnProperty.call(segment, 'pinned'));
+  if (index < 0) return raw;
+  return [
+    ...raw.slice(0, index + 1),
+    { role: 'user', content: V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, enabled: true, deletable: true },
+    ...raw.slice(index + 1),
+  ];
+}
+
 /**
  * 校验七个角色的 AI 渠道配置。
  * @param raw 持久化里的 agentApiPresets 字段
@@ -450,10 +610,26 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
     outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU) {
+  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU;
+  }
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU) {
+    agentPrompts = migrateV23AgentPromptsToV24_ACU(agentPrompts);
+    outlinePrompt = migrateV23OutlinePromptToV24_ACU(outlinePrompt);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU;
+  }
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU) {
+    agentPrompts = migrateV24AgentPromptsToV25_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU;
+  }
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU) {
+    agentPrompts = migrateV25AgentPromptsToV26_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU;
   }
 
   return {

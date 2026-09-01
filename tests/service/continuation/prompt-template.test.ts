@@ -85,7 +85,10 @@ describe('continuation prompt templates', () => {
       },
     ]);
 
-    const [system, user] = buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer;
+    // V26 在 system 与任务段之间插入了故事时间一致性规则段，任务段按内容定位而不是按下标。
+    const finalReviewer = buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer;
+    const system = finalReviewer[0];
+    const user = finalReviewer.find(segment => segment.content.includes('$USER_INTENT'))!;
     expect(system.content).toContain('角色人设参考来源优先级：角色卡（卡片简述和背景设定）> 前文剧情 > 已发生事件概览。');
     expect(system.content).toContain('公平但不冷漠：DM在规则上公平对待<user>和角色，但不用刻意制造障碍，只是不给<user>开绿灯。');
     expect(system.content).toContain('关系阶段变化需要主角和角色的双向互动+标志性事件');

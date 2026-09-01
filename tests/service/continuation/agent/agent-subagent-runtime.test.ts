@@ -58,14 +58,41 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const settings = buildDefaultContinuationSettings_ACU();
     settings.stageSize = 'short';
 
-    expect(renderStoryArcVolumePlanInstruction_ACU(settings)).toContain('中线：新建或全量重构总纲时规划 10–14 卷');
+    const medium = renderStoryArcVolumePlanInstruction_ACU(settings);
+    expect(medium).toContain('中线：新建或全量重构总纲时规划 10–14 卷');
+    expect(medium).toContain('targetStageRange 是解释性容量锚');
+    expect(medium).toContain('约 500–750 轮的数量级检查');
+    expect(medium).toContain('不承诺固定字数或章节数');
     settings.storyArcVolumePlan = 'short';
     expect(renderStoryArcVolumePlanInstruction_ACU(settings)).toContain('短线：新建或全量重构总纲时规划 7–8 卷');
     settings.storyArcVolumePlan = 'long';
-    expect(renderStoryArcVolumePlanInstruction_ACU(settings)).toContain('长线：新建或全量重构总纲时规划 20 卷');
+    const long = renderStoryArcVolumePlanInstruction_ACU(settings);
+    expect(long).toContain('长线：新建或全量重构总纲时规划 20 卷');
+    expect(long).toContain('约 500–750 轮的数量级检查');
+    expect(long).not.toContain('100 章');
     settings.storyArcVolumePlan = 'custom';
     settings.customStoryArcVolumeCount = 16;
     expect(renderStoryArcVolumePlanInstruction_ACU(settings)).toContain('自定义：新建或全量重构总纲时规划 16 卷');
+  });
+
+  it('维护类派工固定写入 hooks/infoGap/chronology，提示词注入年代学账本现状', async () => {
+    const calls: Array<Array<{ role: string; content: string }>> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => {
+        calls.push(messages);
+        return finalReply_ACU;
+      },
+    });
+
+    const result = await runtime.run(input_ACU());
+
+    expect(result.writes).toEqual(['hooks', 'infoGap', 'chronology']);
+    const rendered = calls[0].map(message => message.content).join('\n');
+    expect(rendered).toContain('【故事年代学账本现状】');
+    expect(rendered).toContain('没有已结算的故事时间记录');
+    expect(rendered).toContain('$CHRONOLOGY 故事年代学账本');
+    expect(rendered).toContain('【故事时间结算契约】');
   });
 
   it('renders fixed user intent and the complete current-stage outline from one resolve context', async () => {

@@ -8,15 +8,20 @@ function baseSnapshot_ACU(): AgentModuleSnapshot_ACU {
   return {
     ...buildEmptyAgentModuleSnapshot_ACU(),
     settledThroughIndex: 5,
-    revisions: { hooks: 2, infoGap: 3, constraints: 1, storyArc: 4 },
+    revisions: { hooks: 2, infoGap: 3, constraints: 1, storyArc: 4, chronology: 5 },
     hooks: [{ id: 'H1', summary: '断裂的封印', status: 'planted', importance: 'high', plantedIndex: 2, updatedIndex: 2, plannedPayoff: '第三阶段回收', retired: false, retiredReason: '' }],
     infoGap: [{ id: 'E1', topic: '守门人身份', objectiveFact: '内应', readerKnown: '行为反常', characterKnowledge: [], revealStatus: 'unrevealed', revealIndex: null, retired: false, retiredReason: '' }],
     constraints: [{ id: 'C01-1', text: '不得提前揭穿幕后', reason: '既有裁决', createdIndex: 3 }],
+    chronology: [{ id: 'T1', anchor: '抵达临川城的当日', elapsed: '自开篇约十日', precision: 'approximate' as const, transition: '从渡口行船三日抵达临川城', evidenceIndexes: [2, 3], updatedIndex: 3, retired: false, retiredReason: '' }],
   };
 }
 
 function delta_ACU(patch: Partial<AgentModuleDelta_ACU> = {}): AgentModuleDelta_ACU {
-  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], constraintProposals: [], ...patch };
+  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [], ...patch };
+}
+
+function chronologyItem_ACU(patch: Record<string, unknown> = {}) {
+  return { action: 'upsert' as const, id: 'T2', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate' as const, transition: '在临川城休整七日', evidenceIndexes: [4, 5], reason: '', ...patch };
 }
 
 function hookItem_ACU(patch: Record<string, unknown> = {}) {
@@ -37,10 +42,17 @@ function storyArcItem_ACU(patch: Record<string, unknown> = {}) {
     escalation: '从账目纠纷抬到人身威胁，收在主角拿回印信但发现账本上有第三方签名',
     withheld: '第三方就是主角生父的旧部',
     status: 'active' as const,
+    narrativeRole: 'development' as const,
+    targetStageRange: { min: 2, max: 4 },
+    targetTimeSpan: '约一个月',
+    progressCeiling: '只查明第三方签名存在，不揭示幕后首脑',
+    sustainingThreads: ['主角与账房逐步建立信任'],
+    payoffTargets: ['兑现主角夺回印信的期待'],
     stageNumbers: [] as number[],
     completionStageNumber: null,
     completionState: '',
     continuationRationale: '',
+    completionRationale: '',
     reason: '',
     ...patch,
   };
@@ -63,20 +75,38 @@ describe('Agent 总纲写集事务', () => {
     expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), noEscalation, ['storyArc'], 6)).toThrowError(/escalation/);
   });
 
+  it('新卷的 P2 契约必须完整、范围合法，story 条目不得携带卷级字段', () => {
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [storyArcItem_ACU({ payoffTargets: undefined })],
+    }), ['storyArc'], 6)).toThrowError(/至少需要一条 payoffTargets/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [storyArcItem_ACU({ targetStageRange: { min: 0, max: 2 } })],
+    }), ['storyArc'], 6)).toThrowError(/targetStageRange/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [storyArcItem_ACU({ sustainingThreads: [''] })],
+    }), ['storyArc'], 6)).toThrowError(/sustainingThreads 不得包含空项/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [storyArcItem_ACU({
+        id: 'ARC-STORY', scope: 'story', escalation: '', targetStageRange: undefined, targetTimeSpan: undefined,
+        progressCeiling: undefined, sustainingThreads: undefined, payoffTargets: undefined, completionRationale: undefined,
+      })],
+    }), ['storyArc'], 6)).toThrowError(/不得携带卷级容量字段/);
+  });
+
   it('全书方向只能有一条活跃条目，同一份写集里先 retire 再 upsert 放行', () => {
     const twoStories = delta_ACU({
       storyArc: [
-        storyArcItem_ACU({ id: 'ARC-STORY', scope: 'story', title: '全书方向', escalation: '' }),
-        storyArcItem_ACU({ id: 'ARC-STORY-2', scope: 'story', title: '另一个全书方向', escalation: '' }),
+        storyArcItem_ACU({ id: 'ARC-STORY', scope: 'story', title: '全书方向', escalation: '', narrativeRole: undefined, targetStageRange: undefined, targetTimeSpan: undefined, progressCeiling: undefined, sustainingThreads: undefined, payoffTargets: undefined, completionRationale: undefined }),
+        storyArcItem_ACU({ id: 'ARC-STORY-2', scope: 'story', title: '另一个全书方向', escalation: '', narrativeRole: undefined, targetStageRange: undefined, targetTimeSpan: undefined, progressCeiling: undefined, sustainingThreads: undefined, payoffTargets: undefined, completionRationale: undefined }),
       ],
     });
     expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), twoStories, ['storyArc'], 6)).toThrowError(/只能有一条活跃条目/);
 
-    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ id: 'ARC-STORY', scope: 'story', escalation: '' })] }), ['storyArc'], 6);
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ id: 'ARC-STORY', scope: 'story', escalation: '', narrativeRole: undefined, targetStageRange: undefined, targetTimeSpan: undefined, progressCeiling: undefined, sustainingThreads: undefined, payoffTargets: undefined, completionRationale: undefined })] }), ['storyArc'], 6);
     const replaced = applyAgentModuleDelta_ACU(seeded, delta_ACU({
       storyArc: [
         storyArcItem_ACU({ action: 'retire', id: 'ARC-STORY', reason: '方向已被真实剧情推翻' }),
-        storyArcItem_ACU({ id: 'ARC-STORY-2', scope: 'story', escalation: '' }),
+        storyArcItem_ACU({ id: 'ARC-STORY-2', scope: 'story', escalation: '', narrativeRole: undefined, targetStageRange: undefined, targetTimeSpan: undefined, progressCeiling: undefined, sustainingThreads: undefined, payoffTargets: undefined, completionRationale: undefined }),
       ],
     }), ['storyArc'], 6);
     expect(replaced.storyArc.filter(entry => entry.scope === 'story' && !entry.retired)).toHaveLength(1);
@@ -93,12 +123,12 @@ describe('Agent 总纲写集事务', () => {
 
   it('patch 回写阶段进度只改给定字段，且只给 storyArc 升版本、不动结算水位', () => {
     const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1] })] }), ['storyArc'], 6, [1]);
-    expect(seeded.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 5 });
+    expect(seeded.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 5, chronology: 5 });
 
     const patched = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', stageNumbers: [3, 2, 2] }] }), ['storyArc'], 9, [2, 3]);
     expect(patched.storyArc[0].stageNumbers).toEqual([2, 3]);
     expect(patched.storyArc[0].direction).toBe(seeded.storyArc[0].direction);
-    expect(patched.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 6 });
+    expect(patched.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 6, chronology: 5 });
     expect(patched.settledThroughIndex).toBe(seeded.settledThroughIndex);
   });
 
@@ -130,8 +160,16 @@ describe('Agent 总纲写集事务', () => {
     expect(() => applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '商行控制权已夺回' }] }), ['storyArc'], 8, [1, 2]))
       .toThrowError(/必须已登记进 stageNumbers/);
 
-    const advanced = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [
+    expect(() => applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [
       { id: 'VOL-01', status: 'done', completionStageNumber: 2, completionState: '主角夺回印信，第三方签名浮出水面' },
+      { id: 'VOL-02', status: 'active' },
+    ] }), ['storyArc'], 8, [1, 2])).toThrowError(/payoffTargets 的兑现证据/);
+
+    const advanced = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [
+      {
+        id: 'VOL-01', status: 'done', completionStageNumber: 2,
+        completionState: '主角夺回印信，第三方签名浮出水面；已兑现主角夺回印信的期待；主角与账房逐步建立信任转入下一卷继续经营。',
+      },
       { id: 'VOL-02', status: 'active' },
     ] }), ['storyArc'], 8, [1, 2]);
 
@@ -139,12 +177,34 @@ describe('Agent 总纲写集事务', () => {
     expect(advanced.storyArc.find(item => item.id === 'VOL-02')).toMatchObject({ status: 'active' });
   });
 
+  it('卷容量偏离目标范围时必须说明原因，旧卷没有 P2 契约时仍按旧生命周期兼容', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [
+      storyArcItem_ACU({ id: 'VOL-01', status: 'active', stageNumbers: [1, 2, 3, 4, 5] }),
+    ] }), ['storyArc'], 6, [1, 2, 3, 4, 5]);
+    expect(() => applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{
+      id: 'VOL-01', status: 'done', completionStageNumber: 5,
+      completionState: '已兑现主角夺回印信的期待；主角与账房逐步建立信任转入下一卷继续经营。',
+    }] }), ['storyArc'], 7, [1, 2, 3, 4, 5])).toThrowError(/偏离目标 2–4 时必须给出 completionRationale/);
+
+    const legacy = storyArcItem_ACU({ narrativeRole: undefined, targetStageRange: undefined, targetTimeSpan: undefined, progressCeiling: undefined, sustainingThreads: undefined, payoffTargets: undefined, completionRationale: undefined, stageNumbers: [1] });
+    const { action: _legacyAction, reason: _legacyReason, ...legacyEntry } = legacy;
+    const legacySeeded = {
+      ...baseSnapshot_ACU(),
+      storyArc: [{ ...legacyEntry, retired: false, retiredReason: '' }],
+    } as AgentModuleSnapshot_ACU;
+    const completed = applyAgentModuleDelta_ACU(legacySeeded, delta_ACU({ storyArcPatches: [{
+      id: 'VOL-01', status: 'done', completionStageNumber: 1, completionState: '旧卷既定收束状态已由第一阶段完成。',
+    }] }), ['storyArc'], 7, [1]);
+    expect(completed.storyArc[0]).toMatchObject({ status: 'done', completionStageNumber: 1, targetStageRange: undefined });
+  });
+
   it('已完成卷不能重激活，全部既有卷完成后扩卷必须给出续卷依据', () => {
     const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
       storyArc: [storyArcItem_ACU({ id: 'VOL-01', status: 'active', stageNumbers: [1] })],
     }), ['storyArc'], 6, [1]);
     const completed = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{
-      id: 'VOL-01', status: 'done', completionStageNumber: 1, completionState: '商行印信回到主角手中，第三方签名留下新线索',
+      id: 'VOL-01', status: 'done', completionStageNumber: 1, completionState: '商行印信回到主角手中，第三方签名留下新线索；已兑现主角夺回印信的期待；主角与账房逐步建立信任转入下一卷继续经营。',
+      completionRationale: '本卷在单个高密度阶段内完成，收束证据完整。',
     }] }), ['storyArc'], 7, [1]);
 
     expect(() => applyAgentModuleDelta_ACU(completed, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', status: 'active' }] }), ['storyArc'], 8, [1]))
@@ -207,7 +267,7 @@ describe('Agent 写集事务', () => {
     expect(applied.hooks[0].plantedIndex).toBe(2);
     expect(applied.hooks[0].status).toBe('reinforced');
     expect(applied.hooks[0].updatedIndex).toBe(6);
-    expect(applied.revisions).toEqual({ hooks: 3, infoGap: 3, constraints: 1, storyArc: 4 });
+    expect(applied.revisions).toEqual({ hooks: 3, infoGap: 3, constraints: 1, storyArc: 4, chronology: 5 });
   });
 
   it('retire 必须命中既有条目并给出理由', () => {
@@ -269,6 +329,57 @@ describe('Agent 写集事务', () => {
   it('空 delta 原样返回同一份快照，不产生无意义的版本递增', () => {
     const snapshot = baseSnapshot_ACU();
     expect(applyAgentModuleDelta_ACU(snapshot, delta_ACU(), ['hooks', 'infoGap'], 6)).toBe(snapshot);
+  });
+});
+
+describe('Agent 年代学写集事务', () => {
+  it('chronology 不在授权写集时整份拒绝', () => {
+    const input = delta_ACU({ chronology: [chronologyItem_ACU()] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), input, ['hooks', 'infoGap'], 6)).toThrowError(/未授权模块/);
+  });
+
+  it('声明的 chronology 版本号不匹配时拒绝整份写入', () => {
+    const stale = delta_ACU({ expectedRevisions: { chronology: 4 }, chronology: [chronologyItem_ACU()] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), stale, ['chronology'], 6)).toThrowError(/revision 已变化/);
+  });
+
+  it('合法 upsert 只给 chronology 升版本，并记录本次结算楼层', () => {
+    const applied = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ expectedRevisions: { chronology: 5 }, chronology: [chronologyItem_ACU()] }), ['chronology'], 6);
+
+    expect(applied.chronology).toHaveLength(2);
+    expect(applied.chronology.find(entry => entry.id === 'T2')).toMatchObject({ anchor: '入城后的第七天', evidenceIndexes: [4, 5], updatedIndex: 6, retired: false });
+    expect(applied.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 4, chronology: 6 });
+  });
+
+  it('证据楼层去重升序，未来楼层或空证据拒绝且无部分提交', () => {
+    const normalized = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ evidenceIndexes: [5, 4, 5] })] }), ['chronology'], 6);
+    expect(normalized.chronology.find(entry => entry.id === 'T2')!.evidenceIndexes).toEqual([4, 5]);
+
+    const snapshot = baseSnapshot_ACU();
+    const future = delta_ACU({ chronology: [chronologyItem_ACU({ id: 'T2' }), chronologyItem_ACU({ id: 'T3', evidenceIndexes: [9] })] });
+    expect(() => applyAgentModuleDelta_ACU(snapshot, future, ['chronology'], 6)).toThrowError(/未来楼层/);
+    // 整份 delta 拒绝：前一条合法条目也不得落进快照。
+    expect(snapshot.chronology).toHaveLength(1);
+
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ evidenceIndexes: [] })] }), ['chronology'], 6)).toThrowError(/非空的非负整数楼层数组/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ evidenceIndexes: [1.5] })] }), ['chronology'], 6)).toThrowError(/非空的非负整数楼层数组/);
+  });
+
+  it('upsert 的必填文本不能为空', () => {
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ anchor: ' ' })] }), ['chronology'], 6)).toThrowError(/anchor 不能为空/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ elapsed: '' })] }), ['chronology'], 6)).toThrowError(/elapsed 不能为空/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ transition: '' })] }), ['chronology'], 6)).toThrowError(/transition 不能为空/);
+  });
+
+  it('retire 必须命中既有条目并给出理由；合法 retire 保留条目可追溯', () => {
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ action: 'retire', id: 'T9', reason: '登记错误' })] }), ['chronology'], 6))
+      .toThrowError(/retire 的年代学条目不存在/);
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ action: 'retire', id: 'T1', reason: '' })] }), ['chronology'], 6))
+      .toThrowError(/必须给出理由/);
+
+    const applied = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ action: 'retire', id: 'T1', reason: '证据楼层被删除，事实不再成立' })] }), ['chronology'], 6);
+    expect(applied.chronology[0]).toMatchObject({ id: 'T1', retired: true, retiredReason: '证据楼层被删除，事实不再成立', updatedIndex: 6 });
+    expect(applied.revisions.chronology).toBe(6);
   });
 });
 

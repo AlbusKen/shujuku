@@ -44,6 +44,35 @@ describe('终审世界书证据准备', () => {
     expect(evidence.supplementalMaterials).toContain('世界书检索种子');
   });
 
+  it('终审固定证据包含故事年代学账本，并把 $CHRONOLOGY 记入固定读地址', () => {
+    const context = context_ACU();
+    context.moduleSnapshot = {
+      ...context.moduleSnapshot,
+      revisions: { ...context.moduleSnapshot.revisions, chronology: 1 },
+      chronology: [{ id: 'T1', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '在临川城休整七日', evidenceIndexes: [0], updatedIndex: 0, retired: false, retiredReason: '' }],
+    };
+    const evidence = buildAgentFinalReviewEvidence_ACU({
+      resolveContext: context,
+      currentUserInput: '',
+      candidateInstruction: '一个月后主角伤愈出关。',
+    });
+
+    expect(evidence.supplementalMaterials).toContain('故事年代学账本');
+    expect(evidence.supplementalMaterials).toContain('当前时间锚：入城后的第七天');
+    expect(evidence.supplementalMaterials).toContain('大纲时间字段只是计划');
+    expect(evidence.fixedReadKeys).toContain('$CHRONOLOGY');
+    expect(evidence.gateItems.some(item => item.text.includes('入城后的第七天'))).toBe(true);
+  });
+
+  it('空账本时终审证据如实说明没有已结算的时间事实', () => {
+    const evidence = buildAgentFinalReviewEvidence_ACU({
+      resolveContext: context_ACU(),
+      currentUserInput: '',
+      candidateInstruction: '观察晶屑',
+    });
+    expect(evidence.supplementalMaterials).toContain('没有已结算的故事时间记录');
+  });
+
   it('世界书不可用时保留可诊断证据不足文本', () => {
     const context = context_ACU();
     context.worldbook.available = false;

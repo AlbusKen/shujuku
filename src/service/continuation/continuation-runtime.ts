@@ -22,7 +22,7 @@ import { saveSettings_ACU } from '../settings/settings-service';
 import type { ContinuationHostGenerationBridge_ACU } from './host-generation-bridge';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import { logWarn_ACU } from '../../shared/utils';
-import type { ContinuationEnvelope_ACU, ContinuationSettings_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU } from './model';
+import type { ContinuationEnvelope_ACU, ContinuationSettings_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU, StageTurn_ACU } from './model';
 
 export interface ContinuationRuntime_ACU {
   orchestrator: ContinuationOrchestrator_ACU;
@@ -44,6 +44,11 @@ function allocateContinuationId_ACU(prefix: string): string {
 /** 阶段历史里保留逐轮目标的阶段数（从最新往前数）。更早的阶段只保留节点级摘要。 */
 const STAGE_HISTORY_DETAILED_STAGES_ACU = 2;
 
+function serializeStageTurnMeta_ACU(turn: StageTurn_ACU): string {
+  const anchor = turn.timeAnchor ? `，anchor=${turn.timeAnchor}` : '';
+  return `pacing=${turn.pacing}，function=${turn.function ?? '未标注'}，mainline=${turn.mainlineDelta ?? '未标注'}，time=${turn.timeAdvance ?? '未标注'}${anchor}`;
+}
+
 /**
  * 渲染阶段历史。
  *
@@ -61,10 +66,16 @@ export function serializeStageHistory_ACU(task: ContinuationTask_ACU): string {
     const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
     const head = `## 第 ${stage.stageNumber} 阶段（${stage.status}，已完成 ${stage.completedTurns}/${revision?.outline.totalTurns ?? 0} 轮）`;
     if (!revision) return `${head}\n（该阶段没有可读的大纲。）`;
-    const lines = [head, `标题：${revision.outline.title}`, `目标：${revision.outline.goal}`];
+    const lines = [
+      head,
+      `标题：${revision.outline.title}`,
+      `目标：${revision.outline.goal}`,
+      `结构职责：${revision.outline.role ?? '未标注'}`,
+      `时间目标：${revision.outline.timeSpanGoal ?? '未设定'}`,
+    ];
     for (const node of revision.outline.nodes) {
       lines.push(`- 节点「${node.title}」：${node.goal}`);
-      if (index >= detailedFrom) for (const turn of node.turns) lines.push(`  · ${turn.goal}`);
+      if (index >= detailedFrom) for (const turn of node.turns) lines.push(`  · [${serializeStageTurnMeta_ACU(turn)}] ${turn.goal}`);
     }
     if (index < detailedFrom) lines.push('（该阶段较早，已省略逐轮目标；其事实已进入纪要。）');
     return lines.join('\n');
@@ -86,7 +97,7 @@ function completedPrefix_ACU(stage: ContinuationStage_ACU | null, revision: Stag
     const lines = [`节点「${node.title}」：${node.goal}`];
     for (const turn of turns) {
       turnNumber += 1;
-      lines.push(`已完成第 ${turnNumber} 轮：${turn.goal}`);
+      lines.push(`已完成第 ${turnNumber} 轮：[${serializeStageTurnMeta_ACU(turn)}] ${turn.goal}`);
     }
     parts.push(lines.join('\n'));
   }

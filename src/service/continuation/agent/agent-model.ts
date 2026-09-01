@@ -6,7 +6,15 @@
  */
 
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
-import type { ContinuationInternalAiRequestIdentity_ACU, ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageTurnPacing_ACU } from '../model';
+import type {
+  ContinuationInternalAiRequestIdentity_ACU,
+  ContinuationPromptSegment_ACU,
+  ContinuationSettings_ACU,
+  StageTurnFunction_ACU,
+  StageTurnMainlineDelta_ACU,
+  StageTurnPacing_ACU,
+  StageTurnTimeAdvance_ACU,
+} from '../model';
 
 /** 楼层锚定快照挂在消息对象上的独立字段名，与首楼 `_qrf_continuation` 并列、互不干扰。 */
 export const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
@@ -219,6 +227,10 @@ export type AgentStoryArcScope_ACU = typeof AGENT_STORY_ARC_SCOPES_ACU[number];
 export const AGENT_STORY_ARC_STATUSES_ACU = ['planned', 'active', 'done'] as const;
 export type AgentStoryArcStatus_ACU = typeof AGENT_STORY_ARC_STATUSES_ACU[number];
 
+/** 卷在全书长程结构中的职责；与阶段职责同词但作用域独立。 */
+export const AGENT_VOLUME_NARRATIVE_ROLES_ACU = ['setup', 'development', 'escalation', 'turn', 'payoff', 'aftermath'] as const;
+export type AgentVolumeNarrativeRole_ACU = typeof AGENT_VOLUME_NARRATIVE_ROLES_ACU[number];
+
 /**
  * 一条故事总纲。它是跨阶段的方向锚：阶段大纲只规划 6-10 轮，没有它每个阶段都会
  * 倾向一次性用光手上的料。withheld 是「本层禁止提前翻的底牌」，stageNumbers 是
@@ -243,6 +255,40 @@ export interface AgentStoryArcEntry_ACU {
   completionState: string;
   /** 在所有既有卷完成后追加本卷时，由既有结果推出的依据。 */
   continuationRationale: string;
+  /** 本卷在全书结构中的职责；旧快照可缺失。 */
+  narrativeRole?: AgentVolumeNarrativeRole_ACU;
+  /** 本卷预计承载的阶段数量范围；容量锚，不是机械完成条件。 */
+  targetStageRange?: { min: number; max: number };
+  /** 本卷预计覆盖的故事内部时间。 */
+  targetTimeSpan?: string;
+  /** 本卷主线最多推进到的边界，防止提前打穿后续卷。 */
+  progressCeiling?: string;
+  /** 跨阶段持续经营的关系、利益、认知或生活副线。 */
+  sustainingThreads?: string[];
+  /** 本卷应兑现的既有期待或承诺。 */
+  payoffTargets?: string[];
+  /** 阶段容量偏离目标范围时的完成说明；不得与续卷依据混用。 */
+  completionRationale?: string;
+  retired: boolean;
+  retiredReason: string;
+}
+
+export const AGENT_CHRONOLOGY_PRECISIONS_ACU = ['exact', 'approximate', 'unknown'] as const;
+export type AgentChronologyPrecision_ACU = typeof AGENT_CHRONOLOGY_PRECISIONS_ACU[number];
+
+/** 已发生正文结算出的故事年代学记录；大纲时间计划不得写入。 */
+export interface AgentChronologyEntry_ACU {
+  id: string;
+  /** 该次转换后可用于正文定位的相对时间锚。 */
+  anchor: string;
+  /** 自故事起点累计经过时间；无法可靠量化时明确写 unknown。 */
+  elapsed: string;
+  precision: AgentChronologyPrecision_ACU;
+  /** 从上一锚点到本锚点实际发生的时间转换。 */
+  transition: string;
+  /** 支撑该事实的真实正文楼层；不得引用大纲或运行时 timeline。 */
+  evidenceIndexes: number[];
+  updatedIndex: number;
   retired: boolean;
   retiredReason: string;
 }
@@ -252,6 +298,7 @@ export interface AgentModuleRevisions_ACU {
   infoGap: number;
   constraints: number;
   storyArc: number;
+  chronology: number;
 }
 
 /** 楼层锚定的全量快照。读取=从尾向前找最近的合法快照，删楼即自动回退。 */
@@ -264,9 +311,10 @@ export interface AgentModuleSnapshot_ACU {
   infoGap: AgentInfoGapEntry_ACU[];
   constraints: AgentConstraintEntry_ACU[];
   storyArc: AgentStoryArcEntry_ACU[];
+  chronology: AgentChronologyEntry_ACU[];
 }
 
-export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc'] as const;
+export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology'] as const;
 export type AgentWritableModule_ACU = typeof AGENT_WRITABLE_MODULES_ACU[number];
 
 export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer'] as const;
@@ -356,8 +404,27 @@ export interface AgentBlockAction_ACU {
  * 模型只表达意图；已完成轮次与当前轮的保护由校验层强制。
  */
 export type AgentOutlineEditOp_ACU =
-  | { op: 'set_turn_goal'; turnId: string; goal: string }
-  | { op: 'insert_turn'; nodeId: string; afterTurnId: string | null; goal: string; pacing?: StageTurnPacing_ACU }
+  | {
+      op: 'set_turn_goal';
+      turnId: string;
+      goal: string;
+      pacing?: StageTurnPacing_ACU;
+      function?: StageTurnFunction_ACU;
+      mainlineDelta?: StageTurnMainlineDelta_ACU;
+      timeAdvance?: StageTurnTimeAdvance_ACU;
+      timeAnchor?: string | null;
+    }
+  | {
+      op: 'insert_turn';
+      nodeId: string;
+      afterTurnId: string | null;
+      goal: string;
+      pacing?: StageTurnPacing_ACU;
+      function?: StageTurnFunction_ACU;
+      mainlineDelta?: StageTurnMainlineDelta_ACU;
+      timeAdvance?: StageTurnTimeAdvance_ACU;
+      timeAnchor?: string | null;
+    }
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
@@ -402,6 +469,7 @@ export interface AgentModuleDelta_ACU {
   infoGapPatches: AgentInfoGapPatch_ACU[];
   storyArc: AgentStoryArcDeltaItem_ACU[];
   storyArcPatches: AgentStoryArcPatch_ACU[];
+  chronology: AgentChronologyDeltaItem_ACU[];
   constraintProposals: string[];
 }
 
@@ -417,6 +485,13 @@ export interface AgentStoryArcPatch_ACU {
   completionStageNumber?: number | null;
   completionState?: string;
   continuationRationale?: string;
+  narrativeRole?: AgentVolumeNarrativeRole_ACU;
+  targetStageRange?: { min: number; max: number };
+  targetTimeSpan?: string;
+  progressCeiling?: string;
+  sustainingThreads?: string[];
+  payoffTargets?: string[];
+  completionRationale?: string;
 }
 
 export interface AgentStoryArcDeltaItem_ACU {
@@ -432,6 +507,13 @@ export interface AgentStoryArcDeltaItem_ACU {
   completionStageNumber: number | null;
   completionState: string;
   continuationRationale: string;
+  narrativeRole?: AgentVolumeNarrativeRole_ACU;
+  targetStageRange?: { min: number; max: number };
+  targetTimeSpan?: string;
+  progressCeiling?: string;
+  sustainingThreads?: string[];
+  payoffTargets?: string[];
+  completionRationale?: string;
   reason: string;
 }
 
@@ -475,6 +557,17 @@ export interface AgentInfoGapDeltaItem_ACU {
   characterKnowledge: AgentCharacterKnowledge_ACU[];
   revealStatus: AgentRevealStatus_ACU;
   revealIndex: number | null;
+  reason: string;
+}
+
+export interface AgentChronologyDeltaItem_ACU {
+  action: 'upsert' | 'retire';
+  id: string;
+  anchor: string;
+  elapsed: string;
+  precision: AgentChronologyPrecision_ACU;
+  transition: string;
+  evidenceIndexes: number[];
   reason: string;
 }
 

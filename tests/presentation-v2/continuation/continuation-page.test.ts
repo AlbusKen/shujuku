@@ -68,10 +68,16 @@ function setTask(status = 'paused', pending = false): void {
         completedTurns: 2, revisions: [{
           revision: 2, reason: 'initial', frozen: true,
           outline: {
-            title: '逃离计划', goal: '让主角找到出口', tempo: 'development', totalTurns: 4,
+            title: '逃离计划', goal: '让主角找到出口', tempo: 'mixed', role: 'development', timeSpanGoal: '三日内', totalTurns: 4,
             nodes: [
-              { id: 'node-1', title: '摸清出口守卫', goal: '确认守卫换班规律', suggestedTurns: 2, turns: [{ id: 'turn-1', goal: '观察守卫换班', pacing: 'setup' }, { id: 'turn-2', goal: '用假线索试探守卫', pacing: 'pressure' }] },
-              { id: 'node-2', title: '夺取钥匙', goal: '利用换班空隙夺取钥匙', suggestedTurns: 2, turns: [{ id: 'turn-3', goal: '趁换班夺取钥匙', pacing: 'turn' }, { id: 'turn-4', goal: '带着钥匙撤离并留下追踪钩子', pacing: 'cooldown' }] },
+              { id: 'node-1', title: '摸清出口守卫', goal: '确认守卫换班规律', suggestedTurns: 2, turns: [
+                { id: 'turn-1', goal: '观察守卫换班并熟悉巡逻习惯', pacing: 'setup', function: 'daily_world', mainlineDelta: 'hold', timeAdvance: 'same_day' },
+                { id: 'turn-2', goal: '用假线索试探守卫', pacing: 'pressure', function: 'conflict', mainlineDelta: 'step', timeAdvance: 'continuous' },
+              ] },
+              { id: 'node-2', title: '夺取钥匙', goal: '利用换班空隙夺取钥匙', suggestedTurns: 2, turns: [
+                { id: 'turn-3', goal: '趁换班夺取钥匙', pacing: 'turn', function: 'reveal', mainlineDelta: 'milestone', timeAdvance: 'overnight' },
+                { id: 'turn-4', goal: '三日后伤势恢复并带着钥匙撤离', pacing: 'cooldown', function: 'recovery', mainlineDelta: 'hold', timeAdvance: 'days', timeAnchor: '取得钥匙后的第三日' },
+              ] },
             ],
           },
         }],
@@ -437,11 +443,15 @@ describe('ContinuationPage', () => {
     expect(el.textContent).toContain('已有资料');
     expect(el.textContent).toContain('第 1 阶段：逃离计划');
     expect(el.textContent).toContain('阶段目标：让主角找到出口');
-    expect(el.textContent).toContain('推进');
+    expect(el.textContent).toContain('起伏型');
+    expect(el.textContent).toContain('职责：发展');
+    expect(el.textContent).toContain('故事时间目标：三日内');
     expect(el.textContent).toContain('完成 2 / 4 轮 · 剩余 2 轮');
     expect(el.textContent).toContain('所属 active 卷：[VOL-01]「禁区试探」');
     expect(el.textContent).toContain('摸清出口守卫');
-    expect(el.textContent).toContain('观察守卫换班');
+    expect(el.textContent).toContain('功能：世界日常');
+    expect(el.textContent).toContain('主线：停驻');
+    expect(el.textContent).toContain('时间：数日 · 取得钥匙后的第三日');
     expect(el.textContent).toContain('当前执行');
     expect(el.querySelectorAll('.acu-v2-continuation-materials__turn--done')).toHaveLength(2);
     expect(el.querySelectorAll('.acu-v2-continuation-materials__turn--current')).toHaveLength(1);
@@ -458,7 +468,10 @@ describe('ContinuationPage', () => {
     // 未改动时保存按钮禁用，避免无意义写盘推进 revision。
     expect(buttonByText(el, '保存大纲')!.disabled).toBe(true);
 
-    typeInto(outlineTextarea, JSON.stringify({ ...JSON.parse(outlineTextarea.value), title: '逃离计划 v2' }));
+    const editedOutline = JSON.parse(outlineTextarea.value);
+    editedOutline.title = '逃离计划 v2';
+    editedOutline.nodes[1].turns[0] = { ...editedOutline.nodes[1].turns[0], function: 'payoff', mainlineDelta: 'step', timeAdvance: 'days', timeAnchor: '第二日清晨' };
+    typeInto(outlineTextarea, JSON.stringify(editedOutline));
     await nextTick();
     activeRevision.value = { ...activeRevision.value, revision: 3, outline: { ...activeRevision.value.outline, title: '外部 revision' } };
     await nextTick();
@@ -467,6 +480,9 @@ describe('ContinuationPage', () => {
     await nextTick();
     expect(saveActiveOutline).toHaveBeenCalledOnce();
     expect(saveActiveOutline.mock.calls[0][0]).toMatchObject({ title: '逃离计划 v2' });
+    expect(saveActiveOutline.mock.calls[0][0].nodes[1].turns[0]).toMatchObject({
+      function: 'payoff', mainlineDelta: 'step', timeAdvance: 'days', timeAnchor: '第二日清晨',
+    });
 
     // JSON 写坏时就地报错，不派发给领域层。
     typeInto(outlineTextarea, '{不是 JSON');

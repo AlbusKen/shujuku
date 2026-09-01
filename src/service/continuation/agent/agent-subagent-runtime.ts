@@ -182,7 +182,7 @@ const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = 
 /** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
 const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritableModule_ACU[]> = {
   arc: ['storyArc'],
-  maintain: ['hooks', 'infoGap'],
+  maintain: ['hooks', 'infoGap', 'chronology'],
   plan: [],
   review: [],
 };
@@ -201,16 +201,17 @@ function selectPromptSegments_ACU(settings: ContinuationSettings_ACU, definition
 
 export function renderStoryArcVolumePlanInstruction_ACU(settings: ContinuationSettings_ACU): string {
   const plan = settings.storyArcVolumePlan;
-  if (plan === 'short') return '【总纲卷数计划】短线：新建或全量重构总纲时规划 7–8 卷。';
-  if (plan === 'medium') return '【总纲卷数计划】中线：新建或全量重构总纲时规划 10–14 卷。';
-  if (plan === 'long') return '【总纲卷数计划】长线：新建或全量重构总纲时规划 20 卷。';
+  const capacity = '每个新 volume 必须声明 narrativeRole、targetStageRange、targetTimeSpan、progressCeiling、至少一条 sustainingThreads 和至少一条 payoffTargets。targetStageRange 是解释性容量锚：按单轮约 800–1200 字、标准阶段 6–10 轮校准；60 万字仅对应约 500–750 轮的数量级检查，不承诺固定字数或章节数。';
+  if (plan === 'short') return `【总纲卷数计划】短线：新建或全量重构总纲时规划 7–8 卷。${capacity}`;
+  if (plan === 'medium') return `【总纲卷数计划】中线：新建或全量重构总纲时规划 10–14 卷。${capacity}`;
+  if (plan === 'long') return `【总纲卷数计划】长线：新建或全量重构总纲时规划 20 卷。${capacity}`;
   const count = settings.customStoryArcVolumeCount;
-  return `【总纲卷数计划】自定义：新建或全量重构总纲时规划 ${count ?? '未配置'} 卷。`;
+  return `【总纲卷数计划】自定义：新建或全量重构总纲时规划 ${count ?? '未配置'} 卷。${capacity}`;
 }
 
 function describeWriteScope_ACU(writes: readonly AgentWritableModule_ACU[]): string {
   if (!writes.length) return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
-  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲' };
+  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本' };
   return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
 }
 
@@ -300,6 +301,7 @@ export class AgentSubagentRuntime_ACU {
       $INFO_GAP: () => resolveAgentReadToken_ACU('$INFO_GAP', input.resolveContext).text,
       $ACTIVE_CONSTRAINTS: () => resolveAgentReadToken_ACU('$ACTIVE_CONSTRAINTS', input.resolveContext).text,
       $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
+      $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,
     }, 'agent_delegate');
 
     const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
@@ -437,6 +439,7 @@ export class AgentSubagentRuntime_ACU {
       $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
       $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
       $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
+      $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,
       $STORY_TAIL: () => renderAgentStoryTail_ACU(input.resolveContext),
       $WORLDBOOK_HITS: () => evidence.worldbookEvidence,
       $AGENT_READ_MATERIALS: () => evidence.supplementalMaterials,

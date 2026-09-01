@@ -8,6 +8,8 @@
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import {
   isAgentWritableModule_ACU,
+  type AgentChronologyDeltaItem_ACU,
+  type AgentChronologyEntry_ACU,
   type AgentConstraintEntry_ACU,
   type AgentHookDeltaItem_ACU,
   type AgentHookEntry_ACU,
@@ -23,7 +25,7 @@ import {
   type AgentStoryArcPatch_ACU,
   type AgentWritableModule_ACU,
 } from './agent-model';
-import { normalizeStageNumbers_ACU } from './agent-module-store';
+import { normalizeEvidenceIndexes_ACU, normalizeStageNumbers_ACU } from './agent-module-store';
 
 function reject_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -34,6 +36,7 @@ function collectTouchedModules_ACU(delta: AgentModuleDelta_ACU): AgentWritableMo
   if (delta.hooks.length || delta.hookPatches.length) touched.push('hooks');
   if (delta.infoGap.length || delta.infoGapPatches.length) touched.push('infoGap');
   if (delta.storyArc.length || delta.storyArcPatches.length) touched.push('storyArc');
+  if (delta.chronology.length) touched.push('chronology');
   return touched;
 }
 
@@ -195,6 +198,61 @@ function assertSingleActiveStoryScope_ACU(entries: readonly AgentStoryArcEntry_A
   }
 }
 
+function hasVolumeContractField_ACU(entry: AgentStoryArcEntry_ACU): boolean {
+  return entry.narrativeRole !== undefined
+    || entry.targetStageRange !== undefined
+    || entry.targetTimeSpan !== undefined
+    || entry.progressCeiling !== undefined
+    || entry.sustainingThreads !== undefined
+    || entry.payoffTargets !== undefined
+    || entry.completionRationale !== undefined;
+}
+
+function assertCompleteVolumeContract_ACU(volume: AgentStoryArcEntry_ACU, context: 'new' | 'done'): void {
+  if (!volume.narrativeRole) reject_ACU(`卷台阶 ${volume.id} 缺少 narrativeRole`, { id: volume.id, context });
+  if (!volume.targetStageRange) reject_ACU(`卷台阶 ${volume.id} 缺少 targetStageRange`, { id: volume.id, context });
+  if (!Number.isInteger(volume.targetStageRange.min) || !Number.isInteger(volume.targetStageRange.max)
+    || volume.targetStageRange.min < 1 || volume.targetStageRange.max < volume.targetStageRange.min) {
+    reject_ACU(`卷台阶 ${volume.id} 的 targetStageRange 必须是 min≥1 且 max≥min 的整数范围`, { id: volume.id, context, targetStageRange: volume.targetStageRange });
+  }
+  if (!volume.targetTimeSpan?.trim()) reject_ACU(`卷台阶 ${volume.id} 缺少 targetTimeSpan`, { id: volume.id, context });
+  if (!volume.progressCeiling?.trim()) reject_ACU(`卷台阶 ${volume.id} 缺少 progressCeiling`, { id: volume.id, context });
+  if (!volume.sustainingThreads?.length) reject_ACU(`卷台阶 ${volume.id} 至少需要一条 sustainingThreads`, { id: volume.id, context });
+  if (volume.sustainingThreads.some(thread => !thread.trim())) reject_ACU(`卷台阶 ${volume.id} 的 sustainingThreads 不得包含空项`, { id: volume.id, context });
+  if (!volume.payoffTargets?.length) reject_ACU(`卷台阶 ${volume.id} 至少需要一条 payoffTargets`, { id: volume.id, context });
+  if (volume.payoffTargets.some(target => !target.trim())) reject_ACU(`卷台阶 ${volume.id} 的 payoffTargets 不得包含空项`, { id: volume.id, context });
+}
+
+function assertVolumeCompletionContract_ACU(volume: AgentStoryArcEntry_ACU): void {
+  if (!volume.targetStageRange) return;
+  assertCompleteVolumeContract_ACU(volume, 'done');
+  const stageCount = volume.stageNumbers.length;
+  const withinTarget = stageCount >= volume.targetStageRange.min && stageCount <= volume.targetStageRange.max;
+  if (!withinTarget && !volume.completionRationale?.trim()) {
+    reject_ACU(`卷台阶 ${volume.id} 实际承载 ${stageCount} 个阶段，偏离目标 ${volume.targetStageRange.min}–${volume.targetStageRange.max} 时必须给出 completionRationale`, { id: volume.id, stageCount, targetStageRange: volume.targetStageRange });
+  }
+  for (const target of volume.payoffTargets ?? []) {
+    if (!volume.completionState.includes(target)) {
+      reject_ACU(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 payoffTargets 的兑现证据：${target}`, { id: volume.id, target });
+    }
+  }
+  for (const thread of volume.sustainingThreads ?? []) {
+    if (!volume.completionState.includes(thread)) {
+      reject_ACU(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 sustainingThreads 的完成、转入后续卷或 retire 去向：${thread}`, { id: volume.id, thread });
+    }
+  }
+}
+
+function assertStoryArcContractShape_ACU(entries: readonly AgentStoryArcEntry_ACU[]): void {
+  for (const entry of entries) {
+    if (entry.retired || !hasVolumeContractField_ACU(entry)) continue;
+    if (entry.scope !== 'volume') {
+      reject_ACU(`全书方向 ${entry.id} 不得携带卷级容量字段`, { id: entry.id, scope: entry.scope });
+    }
+    assertCompleteVolumeContract_ACU(entry, 'new');
+  }
+}
+
 /** 验证卷台阶的生命周期；阶段完成与卷完成是两层事实，不能互相替代。 */
 function assertVolumeLifecycle_ACU(
   previous: readonly AgentStoryArcEntry_ACU[],
@@ -236,6 +294,7 @@ function assertVolumeLifecycle_ACU(
 
   for (const volume of volumes) {
     if (previousById.has(volume.id)) continue;
+    assertCompleteVolumeContract_ACU(volume, 'new');
     if (volume.status === 'done') {
       reject_ACU(`新卷 ${volume.id} 不可直接登记为 done`, { id: volume.id });
     }
@@ -261,6 +320,7 @@ function assertVolumeLifecycle_ACU(
     if (!volume.completionState.trim()) {
       reject_ACU(`卷台阶 ${volume.id} 标记 done 时必须说明已达到的卷末状态`, { id: volume.id });
     }
+    assertVolumeCompletionContract_ACU(volume);
   }
 
   const unfinished = volumes.filter(volume => volume.status !== 'done');
@@ -277,6 +337,49 @@ function assertVolumeLifecycle_ACU(
       }
     }
   }
+}
+
+/**
+ * 应用年代学写集。核心防线有三条：
+ * 1. 时间事实必须有真实正文证据，且证据不得越过本次结算水位——未来楼层不是已发生事实。
+ * 2. retire 必须命中既有条目并给理由；漏写不等于删除。
+ * 3. 任一条目失败即整份 delta 拒绝，不做部分登记。
+ */
+function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: AgentChronologyDeltaItem_ACU[], settledIndex: number): AgentChronologyEntry_ACU[] {
+  const byId = new Map(existing.map(entry => [entry.id, entry]));
+  for (const item of items) {
+    if (!item.id.trim()) reject_ACU('年代学条目缺少 id');
+    if (item.action === 'retire') {
+      const current = byId.get(item.id);
+      if (!current) reject_ACU(`retire 的年代学条目不存在：${item.id}`, { id: item.id });
+      if (!item.reason.trim()) reject_ACU(`retire 年代学条目 ${item.id} 必须给出理由`, { id: item.id });
+      byId.set(item.id, { ...current!, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
+      continue;
+    }
+    if (!item.anchor.trim()) reject_ACU(`年代学条目 ${item.id} 的 anchor 不能为空`, { id: item.id });
+    if (!item.elapsed.trim()) reject_ACU(`年代学条目 ${item.id} 的 elapsed 不能为空；无法可靠量化就明确写「未知」或「约……」`, { id: item.id });
+    if (!item.transition.trim()) reject_ACU(`年代学条目 ${item.id} 的 transition 不能为空`, { id: item.id });
+    const evidenceIndexes = normalizeEvidenceIndexes_ACU(item.evidenceIndexes);
+    if (!evidenceIndexes || !evidenceIndexes.length) {
+      reject_ACU(`年代学条目 ${item.id} 的 evidenceIndexes 必须是非空的非负整数楼层数组`, { id: item.id, evidenceIndexes: item.evidenceIndexes });
+    }
+    const future = evidenceIndexes.filter(index => index > settledIndex);
+    if (future.length) {
+      reject_ACU(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
+    }
+    byId.set(item.id, {
+      id: item.id,
+      anchor: item.anchor.trim(),
+      elapsed: item.elapsed.trim(),
+      precision: item.precision,
+      transition: item.transition.trim(),
+      evidenceIndexes,
+      updatedIndex: settledIndex,
+      retired: false,
+      retiredReason: '',
+    });
+  }
+  return [...byId.values()];
 }
 
 function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[]): AgentStoryArcEntry_ACU[] {
@@ -310,12 +413,20 @@ function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: Agent
       completionStageNumber: item.completionStageNumber ?? (previous?.completionStageNumber ?? null),
       completionState: item.completionState || previous?.completionState || '',
       continuationRationale: item.continuationRationale || previous?.continuationRationale || '',
+      narrativeRole: item.narrativeRole ?? previous?.narrativeRole,
+      targetStageRange: item.targetStageRange ?? previous?.targetStageRange,
+      targetTimeSpan: item.targetTimeSpan ?? previous?.targetTimeSpan,
+      progressCeiling: item.progressCeiling ?? previous?.progressCeiling,
+      sustainingThreads: item.sustainingThreads ?? previous?.sustainingThreads,
+      payoffTargets: item.payoffTargets ?? previous?.payoffTargets,
+      completionRationale: item.completionRationale ?? previous?.completionRationale,
       retired: false,
       retiredReason: '',
     });
   }
   const next = [...byId.values()];
   assertSingleActiveStoryScope_ACU(next);
+  assertStoryArcContractShape_ACU(next);
   return next;
 }
 
@@ -336,12 +447,21 @@ function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: Ag
       completionStageNumber: Object.prototype.hasOwnProperty.call(patch, 'completionStageNumber') ? patch.completionStageNumber! : current.completionStageNumber,
       completionState: patch.completionState ?? current.completionState,
       continuationRationale: patch.continuationRationale ?? current.continuationRationale,
+      narrativeRole: patch.narrativeRole ?? current.narrativeRole,
+      targetStageRange: patch.targetStageRange ?? current.targetStageRange,
+      targetTimeSpan: patch.targetTimeSpan ?? current.targetTimeSpan,
+      progressCeiling: patch.progressCeiling ?? current.progressCeiling,
+      sustainingThreads: patch.sustainingThreads ?? current.sustainingThreads,
+      payoffTargets: patch.payoffTargets ?? current.payoffTargets,
+      completionRationale: patch.completionRationale ?? current.completionRationale,
     };
     if (!merged.title.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
     if (!merged.direction.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
     byId.set(patch.id, merged);
   }
-  return [...byId.values()];
+  const next = [...byId.values()];
+  assertStoryArcContractShape_ACU(next);
+  return next;
 }
 
 /**
@@ -366,6 +486,7 @@ export function applyAgentModuleDelta_ACU(
   const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
   const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
   const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
+  const chronologyTouched = delta.chronology.length > 0;
   let hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
   if (delta.hookPatches.length) hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
   let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
@@ -376,16 +497,19 @@ export function applyAgentModuleDelta_ACU(
     assertSingleActiveStoryScope_ACU(storyArc);
   }
   if (storyArcTouched) assertVolumeLifecycle_ACU(snapshot.storyArc, storyArc, new Set(completedStageNumbers));
+  const chronology = chronologyTouched ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;
   return {
     ...snapshot,
     hooks,
     infoGap,
     storyArc,
+    chronology,
     revisions: {
       hooks: snapshot.revisions.hooks + (hooksTouched ? 1 : 0),
       infoGap: snapshot.revisions.infoGap + (infoGapTouched ? 1 : 0),
       constraints: snapshot.revisions.constraints,
       storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
+      chronology: snapshot.revisions.chronology + (chronologyTouched ? 1 : 0),
     },
   };
 }

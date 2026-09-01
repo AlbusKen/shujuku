@@ -7,6 +7,15 @@ import type { AgentSearchCall_ACU } from '../../../../src/service/continuation/a
 
 function context_ACU(): AgentResolveContext_ACU {
   const moduleSnapshot = buildEmptyAgentModuleSnapshot_ACU();
+  moduleSnapshot.storyArc = [{
+    id: 'VOL-01', scope: 'volume', title: '禁区立足', direction: '在禁区边缘建立稳定据点', escalation: '收在据点获得自治权', withheld: '禁区核心真相', status: 'active', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '',
+    narrativeRole: 'development',
+    targetStageRange: { min: 4, max: 6 },
+    targetTimeSpan: '三个月',
+    progressCeiling: '只确认核心入口存在',
+    sustainingThreads: ['经营据点与当地人的互信'],
+    payoffTargets: ['兑现主角获得安全落脚点的期待'],
+  }];
   moduleSnapshot.hooks = [
     { id: 'H1', summary: '守门人手中的黑色晶屑', status: 'planted', importance: 'high', plantedIndex: 3, plannedPayoff: '', retired: false } as any,
     { id: 'H2', summary: '铁门后的低语', status: 'planted', importance: 'mid', plantedIndex: 1, plannedPayoff: '', retired: true } as any,
@@ -23,7 +32,22 @@ function context_ACU(): AgentResolveContext_ACU {
       envelope: {} as any,
       task: { taskId: 't', originInstruction: '推进剧情' } as any,
       stage: { stageNumber: 1 } as any,
-      revision: { outline: { title: '禁区试探', goal: '摸清晶屑来历', totalTurns: 4, nodes: [{ id: 'node-1', title: '试探', goal: '不揭穿', turns: [{ id: 'turn-1', goal: '观察黑色晶屑的反应' }] }] } } as any,
+      revision: { outline: {
+        title: '禁区试探',
+        goal: '摸清晶屑来历',
+        tempo: 'mixed',
+        role: 'development',
+        timeSpanGoal: '三日',
+        totalTurns: 4,
+        nodes: [{
+          id: 'node-1',
+          title: '试探',
+          goal: '不揭穿',
+          turns: [{
+            id: 'turn-1', goal: '观察黑色晶屑的反应', pacing: 'setup', function: 'daily_world', mainlineDelta: 'hold', timeAdvance: 'days', timeAnchor: '第三日清晨',
+          }],
+        }],
+      } } as any,
       node: null,
       turn: null,
       turnNumber: null,
@@ -55,6 +79,39 @@ describe('五域搜索', () => {
     expect(result).toContain('读取地址 $WORLDBOOK:设定集:7');
     // 用户楼层不是正文，不进搜索。
     expect(result).not.toContain('我要进禁区');
+  });
+
+  it('大纲搜索把阶段职责、叙事功能、主线增量与时间元数据纳入可检索文本', () => {
+    const result = runAgentSearch_ACU(call_ACU({ query: 'daily_world', scope: ['outline'] }), context_ACU());
+    expect(result).toContain('function=daily_world');
+    expect(result).toContain('mainline=hold');
+    expect(result).toContain('time=days');
+    expect(result).toContain('anchor=第三日清晨');
+  });
+
+  it('模块搜索纳入卷级容量、时间、进度上限、持续经营线与兑现目标', () => {
+    const result = runAgentSearch_ACU(call_ACU({ query: '经营据点', scope: ['modules'] }), context_ACU());
+    expect(result).toContain('$STORY_ARC:VOL-01');
+    expect(result).toContain('经营据点与当地人的互信');
+    expect(runAgentSearch_ACU(call_ACU({ query: 'targetStageRange=4-6', scope: ['modules'] }), context_ACU())).toContain('$STORY_ARC:VOL-01');
+    expect(runAgentSearch_ACU(call_ACU({ query: '只确认核心入口存在', scope: ['modules'] }), context_ACU())).toContain('$STORY_ARC:VOL-01');
+  });
+
+  it('年代学账本可按锚、经过时间、转换与退休原因检索，命中地址为 $CHRONOLOGY:ID', () => {
+    const context = context_ACU();
+    context.moduleSnapshot.chronology = [
+      { id: 'T1', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '在临川城休整七日', evidenceIndexes: [1, 2], updatedIndex: 2, retired: false, retiredReason: '' },
+      { id: 'T0', anchor: '误登记的锚', elapsed: '未知', precision: 'unknown', transition: '误登记', evidenceIndexes: [1], updatedIndex: 1, retired: true, retiredReason: '证据被删除' },
+    ];
+
+    const byAnchor = runAgentSearch_ACU(call_ACU({ query: '入城后的第七天', scope: ['modules'] }), context);
+    expect(byAnchor).toContain('$CHRONOLOGY:T1');
+    expect(runAgentSearch_ACU(call_ACU({ query: '约十七日', scope: ['modules'] }), context)).toContain('$CHRONOLOGY:T1');
+    expect(runAgentSearch_ACU(call_ACU({ query: '休整七日', scope: ['modules'] }), context)).toContain('$CHRONOLOGY:T1');
+    expect(runAgentSearch_ACU(call_ACU({ query: '证据楼层=1、2', scope: ['modules'] }), context)).toContain('$CHRONOLOGY:T1');
+    const retired = runAgentSearch_ACU(call_ACU({ query: '证据被删除', scope: ['modules'] }), context);
+    expect(retired).toContain('[T0]（已作废）');
+    expect(retired).toContain('$CHRONOLOGY:T0');
   });
 
   it('退休模块条目也可被搜到并标注状态', () => {

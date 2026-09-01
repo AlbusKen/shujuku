@@ -98,11 +98,23 @@ function rejectOutlineEdit_ACU(message: string, details?: Record<string, unknown
  */
 function applyOutlineEditOps_ACU(outline: StageOutline_ACU, edits: readonly AgentOutlineEditOp_ACU[], allocateId: (prefix: string) => string): StageOutline_ACU {
   const draft = cloneOutline_ACU(outline);
+  const applyTurnMetadata = (turn: StageOutline_ACU['nodes'][number]['turns'][number], edit: Extract<AgentOutlineEditOp_ACU, { op: 'set_turn_goal' | 'insert_turn' }>): void => {
+    if (edit.pacing !== undefined) turn.pacing = edit.pacing;
+    if (edit.function !== undefined) turn.function = edit.function;
+    if (edit.mainlineDelta !== undefined) turn.mainlineDelta = edit.mainlineDelta;
+    if (edit.timeAdvance !== undefined) turn.timeAdvance = edit.timeAdvance;
+    if (edit.timeAnchor === null) {
+      delete turn.timeAnchor;
+    } else if (edit.timeAnchor !== undefined) {
+      turn.timeAnchor = edit.timeAnchor;
+    }
+  };
   for (const edit of edits) {
     if (edit.op === 'set_turn_goal') {
       const turn = draft.nodes.flatMap(node => node.turns).find(item => item.id === edit.turnId);
       if (!turn) rejectOutlineEdit_ACU(`set_turn_goal 找不到轮次：${edit.turnId}`, { turnId: edit.turnId });
       turn.goal = edit.goal;
+      applyTurnMetadata(turn, edit);
       continue;
     }
     if (edit.op === 'set_node_goal') {
@@ -114,9 +126,17 @@ function applyOutlineEditOps_ACU(outline: StageOutline_ACU, edits: readonly Agen
     if (edit.op === 'insert_turn') {
       const node = draft.nodes.find(item => item.id === edit.nodeId);
       if (!node) rejectOutlineEdit_ACU(`insert_turn 找不到节点：${edit.nodeId}`, { nodeId: edit.nodeId });
-      // 未指定节奏时按 setup 落值：插入轮多半是为了给挤在一起的剧情腾地方，
-      // 默认落在低压侧才不会让 edit_outline 变成悄悄推高压力的通道。
-      const newTurn = { id: allocateId('turn'), goal: edit.goal, pacing: edit.pacing ?? ('setup' as const) };
+      // 旧编辑协议只提供 goal/pacing；新增语义字段使用保守默认，避免构造缺字段的新 revision。
+      // UI 会展示这些默认值并提醒用户确认；严格校验仍负责拒绝与 pacing 不相容的组合。
+      const newTurn: StageOutline_ACU['nodes'][number]['turns'][number] = {
+        id: allocateId('turn'),
+        goal: edit.goal,
+        pacing: edit.pacing ?? 'setup',
+        function: edit.function ?? 'transition',
+        mainlineDelta: edit.mainlineDelta ?? 'hold',
+        timeAdvance: edit.timeAdvance ?? 'continuous',
+        ...(edit.timeAnchor ? { timeAnchor: edit.timeAnchor } : {}),
+      };
       if (edit.afterTurnId === null) {
         node.turns.unshift(newTurn);
         continue;

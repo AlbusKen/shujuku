@@ -1,7 +1,7 @@
 import { callContinuationInternalAi_ACU, type ContinuationInternalAiCallOptions_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
-import { describeStageTempo_ACU, listStageOutlineTurns_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU, validateStageOutlinePacing_ACU, type StageOutlinePacingContext_ACU } from './outline-schema';
+import { describeStageTempo_ACU, listStageOutlineTurns_ACU, validateGeneratedStageOutline_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutlinePacing_ACU, type StageOutlinePacingContext_ACU } from './outline-schema';
 import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import {
@@ -183,13 +183,19 @@ export class ContinuationOutlinePlanner_ACU {
         }
         const constraints = request.replanConstraints;
         const parsed = parseOutlineTags_ACU(raw);
-        const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal, tempo: constraints.previousOutline.tempo } : undefined);
+        const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? {
+          title: constraints.previousOutline.title,
+          goal: constraints.previousOutline.goal,
+          tempo: constraints.previousOutline.tempo,
+          role: constraints.previousOutline.role,
+          timeSpanGoal: constraints.previousOutline.timeSpanGoal,
+        } : undefined);
         // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
         // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
         const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, built) : built;
         const outline = constraints
           ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
-          : validateStageOutline_ACU(candidate, range);
+          : validateGeneratedStageOutline_ACU(candidate, range);
         // 低压占比只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
         // 迁移回填的 pressure，把它算进占比会让重规划永远无法通过；前缀的连续高压段则由
         // pacingContext.leadingPressureStreak 带入，那部分是真实写过的剧情，必须参与计数。
@@ -242,7 +248,7 @@ export function acceptPlannedStageRevision_ACU(revision: StageRevision_ACU, sett
   const range = resolveContinuationTurnRange_ACU(settings.stageSize, settings.customTurnMin ?? undefined, settings.customTurnMax ?? undefined);
   const outline = replanConstraints
     ? validateReplannedStageOutline_ACU(revision.outline, range, replanConstraints)
-    : validateStageOutline_ACU(revision.outline, range);
+    : validateGeneratedStageOutline_ACU(revision.outline, range);
   return freezePlannedStageRevision_ACU({ ...revision, outline });
 }
 

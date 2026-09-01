@@ -949,7 +949,7 @@ describe('故事总纲门禁', () => {
         '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"围绕第一卷台阶排阶段"}]}',
         '{"action":"finalize","instruction":"按新大纲写"}',
       ],
-      subReplies: ['{"summary":"已立全书方向与第一卷台阶","delta":{"storyArc":[{"action":"upsert","id":"A1","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active"},{"action":"upsert","id":"VOL-01","scope":"volume","title":"第一卷·试探","direction":"摸清禁区门禁规则","escalation":"收在主角第一次被守门人识破","withheld":"晶屑的真实来源","status":"active"}]}}'],
+      subReplies: ['{"summary":"已立全书方向与第一卷台阶","delta":{"storyArc":[{"action":"upsert","id":"A1","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active"},{"action":"upsert","id":"VOL-01","scope":"volume","title":"第一卷·试探","direction":"摸清禁区门禁规则","escalation":"收在主角第一次被守门人识破","withheld":"晶屑的真实来源","status":"active","narrativeRole":"setup","targetStageRange":{"min":2,"max":4},"targetTimeSpan":"约两周","progressCeiling":"只确认门禁规则与守门人的警觉，不揭示晶屑来源","sustainingThreads":["主角与守门人的试探性信任"],"payoffTargets":["兑现主角获得首次入门机会的期待"]}]}}'],
       applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建第 1 阶段大纲「禁区试探」（共 6 轮）' }),
     });
     const original = h.request.applyOutline!;
@@ -1159,6 +1159,36 @@ describe('派工与写集落盘', () => {
     expect(feedback).toContain('约束提议（需你裁决后登记）：本阶段不得确认守门人身份');
   });
 
+  it('维护代理一次结算 hooks/infoGap/chronology 并落进同一份快照', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算最近正文与时间流逝","reads":["$HISTORY_UNSETTLED","$CHRONOLOGY"]}]}',
+        '{"action":"finalize","instruction":"最终指导"}',
+      ],
+      subReplies: [JSON.stringify({
+        summary: '结算了晶屑与三日行程',
+        delta: {
+          hooks: [{ action: 'upsert', id: 'H1', summary: '守门人手中的黑色晶屑', status: 'planted', importance: 'high', plantedIndex: 3 }],
+          chronology: [{ action: 'upsert', id: 'T1', anchor: '抵达禁区外围的第三日', elapsed: '自开篇约三日', precision: 'approximate', transition: '主角一行赶路三日抵达禁区外围', evidenceIndexes: [2, 3] }],
+        },
+      })],
+    });
+
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('最终指导');
+
+    // chronology 与 hooks 在同一事务、同一份快照里生效，水位一并推进。
+    expect(h.written).toHaveLength(1);
+    expect(h.written[0].snapshot.hooks).toHaveLength(1);
+    expect(h.written[0].snapshot.chronology).toHaveLength(1);
+    expect(h.written[0].snapshot.chronology[0]).toMatchObject({ id: 'T1', anchor: '抵达禁区外围的第三日', evidenceIndexes: [2, 3], updatedIndex: 3 });
+    expect(h.written[0].snapshot.revisions).toMatchObject({ hooks: 1, chronology: 1 });
+    expect(h.written[0].snapshot.settledThroughIndex).toBe(3);
+
+    const feedback = h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '结果 1')].content;
+    expect(feedback).toContain('伏笔 1 条、信息差 0 条、故事时间 1 条');
+  });
+
   it('第二次迭代读到的资料是落盘后的新快照', async () => {
     const h = harness_ACU({
       mainReplies: [
@@ -1355,8 +1385,8 @@ describe('子代理运行时', () => {
     expect(text).toContain('$HOOKS_LEDGER 伏笔账本');
     expect(text).toContain('结算未处理正文');
     expect(text).not.toContain('【楼层 0】');
-    // 写入范围由职责固定：maintain 类固定写 hooks + infoGap，不再经派工写集协商。
-    expect(result.writes).toEqual(['hooks', 'infoGap']);
+    // 写入范围由职责固定：maintain 类固定写 hooks + infoGap + chronology，不再经派工写集协商。
+    expect(result.writes).toEqual(['hooks', 'infoGap', 'chronology']);
     expect(result.maintainer?.delta.hooks).toHaveLength(1);
   });
 

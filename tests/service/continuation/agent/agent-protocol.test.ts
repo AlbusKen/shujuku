@@ -130,15 +130,23 @@ describe('主 Agent 动作解析', () => {
       summary: '第一卷已收束并扩充第二卷',
       delta: {
         storyArc: [
-          { action: 'patch', id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '印信回归，第三方签名浮出水面' },
-          { action: 'upsert', id: 'VOL-02', scope: 'volume', title: '追查签名', direction: '追查第三方势力', escalation: '收在幕后势力主动灭口', withheld: '幕后首脑身份', status: 'active', stageNumbers: [], continuationRationale: '第一卷留下的第三方签名将商行争夺推向幕后势力' },
+          { action: 'patch', id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '印信回归，第三方签名浮出水面', completionRationale: '三阶段内完成全部兑现' },
+          {
+            action: 'upsert', id: 'VOL-02', scope: 'volume', title: '追查签名', direction: '追查第三方势力', escalation: '收在幕后势力主动灭口', withheld: '幕后首脑身份', status: 'active', stageNumbers: [], continuationRationale: '第一卷留下的第三方签名将商行争夺推向幕后势力',
+            narrativeRole: 'development', targetStageRange: { min: 4, max: 6 }, targetTimeSpan: '两个月', progressCeiling: '只查明幕后势力的外围组织', sustainingThreads: ['主角与账房的互信'], payoffTargets: ['兑现第三方签名的来源'],
+          },
         ],
       },
     });
 
-    expect(output.delta.storyArcPatches).toEqual([{ id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '印信回归，第三方签名浮出水面' }]);
-    expect(output.delta.storyArc[0]).toMatchObject({ id: 'VOL-02', continuationRationale: '第一卷留下的第三方签名将商行争夺推向幕后势力', completionStageNumber: null, completionState: '' });
+    expect(output.delta.storyArcPatches).toEqual([{ id: 'VOL-01', status: 'done', completionStageNumber: 3, completionState: '印信回归，第三方签名浮出水面', completionRationale: '三阶段内完成全部兑现' }]);
+    expect(output.delta.storyArc[0]).toMatchObject({
+      id: 'VOL-02', narrativeRole: 'development', targetStageRange: { min: 4, max: 6 }, targetTimeSpan: '两个月', progressCeiling: '只查明幕后势力的外围组织', sustainingThreads: ['主角与账房的互信'], payoffTargets: ['兑现第三方签名的来源'],
+      continuationRationale: '第一卷留下的第三方签名将商行争夺推向幕后势力', completionStageNumber: null, completionState: '',
+    });
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { storyArc: [{ action: 'patch', id: 'VOL-01', completionStageNumber: 0 }] } })).toThrowError(/completionStageNumber 必须是从 1 起的整数或 null/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { storyArc: [{ action: 'patch', id: 'VOL-01', targetStageRange: { min: 6, max: 4 } }] } })).toThrowError(/min 不能大于 max/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { storyArc: [{ action: 'patch', id: 'VOL-01', sustainingThreads: [''] }] } })).toThrowError(/必须是非空字符串/);
   });
 
   it('block 必须带明确理由', () => {
@@ -205,6 +213,37 @@ describe('子代理输出解析', () => {
   it('维护类的非法 action 与非数组 delta 都被拒绝', () => {
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'delete', id: 'H1' }] } })).toThrowError(/upsert \/ patch \/ retire/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: '不是数组' } })).toThrowError(/必须是数组/);
+  });
+
+  it('年代学写集正向解析：证据楼层去重升序，expectedRevisions 纳入 chronology', () => {
+    const output = parseAgentMaintainerOutput_ACU({
+      summary: '结算了一次时间跳跃',
+      delta: {
+        expectedRevisions: { chronology: 3 },
+        chronology: [
+          { action: 'upsert', id: 'T1', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '在临川城休整七日', evidenceIndexes: [5, 4, 5] },
+          { action: 'retire', id: 'T0', reason: '证据楼层已被删除' },
+        ],
+      },
+    });
+
+    expect(output.delta.expectedRevisions).toEqual({ chronology: 3 });
+    expect(output.delta.chronology[0]).toMatchObject({ action: 'upsert', id: 'T1', anchor: '入城后的第七天', precision: 'approximate', evidenceIndexes: [4, 5] });
+    expect(output.delta.chronology[1]).toMatchObject({ action: 'retire', id: 'T0', reason: '证据楼层已被删除' });
+  });
+
+  it('年代学写集的非法 action、precision、空证据与非整数证据全部拒绝', () => {
+    const item = { action: 'upsert', id: 'T1', anchor: '入城后的第七天', elapsed: '约十七日', precision: 'approximate', transition: '休整七日', evidenceIndexes: [4] };
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, action: 'patch' }] } })).toThrowError(/action 必须是 upsert \/ retire/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, precision: '大概吧' }] } })).toThrowError(/precision 必须是 exact \/ approximate \/ unknown/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, evidenceIndexes: [] }] } })).toThrowError(/evidenceIndexes 必须是非空数组/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, evidenceIndexes: [1.5] }] } })).toThrowError(/必须是非负整数楼层号/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, evidenceIndexes: ['5'] }] } })).toThrowError(/必须是非负整数楼层号/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, anchor: '' }] } })).toThrowError(/anchor 不能为空/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, elapsed: ' ' }] } })).toThrowError(/elapsed 不能为空/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, transition: '' }] } })).toThrowError(/transition 不能为空/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, id: '' }] } })).toThrowError(/需要非空 id/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: '不是数组' } })).toThrowError(/delta\.chronology 必须是数组/);
   });
 
   it('策划类必须给出 recommendation，资料不足应改走工具调用', () => {

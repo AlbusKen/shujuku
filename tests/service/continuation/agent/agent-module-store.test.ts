@@ -4,6 +4,8 @@ import {
   buildEmptyAgentModuleSnapshot_ACU,
   readAgentModuleSnapshot_ACU,
   renderAgentActiveVolumePlanningContext_ACU,
+  renderAgentChronology_ACU,
+  renderAgentChronologyByIds_ACU,
   renderAgentConstraints_ACU,
   renderAgentHooksLedger_ACU,
   renderAgentInfoGap_ACU,
@@ -60,6 +62,71 @@ describe('Agent 资料快照存储', () => {
     });
 
     expect(validated!.infoGap[0].revealIndex).toBeNull();
+  });
+
+  it('旧总纲缺少 P2 字段仍兼容读取，已出现但损坏的 P2 字段拒绝整份快照', () => {
+    const base = {
+      schemaVersion: 1, settledThroughIndex: 2, updatedAt: 1,
+      revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 1 },
+      hooks: [], infoGap: [], constraints: [],
+      storyArc: [{
+        id: 'VOL-01', scope: 'volume', title: '旧卷', direction: '推进旧主线', escalation: '收在旧卷结点', withheld: '', status: 'active', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '',
+      }],
+    };
+
+    const compatible = validateAgentModuleSnapshot_ACU(base);
+    expect(compatible!.storyArc[0]).toMatchObject({ id: 'VOL-01', narrativeRole: undefined, targetStageRange: undefined });
+    expect(validateAgentModuleSnapshot_ACU({
+      ...base,
+      storyArc: [{ ...base.storyArc[0], targetStageRange: { min: 6, max: 4 } }],
+    })).toBeNull();
+  });
+
+  it('空快照初始化 chronology 为空账本且 revision 为 0', () => {
+    const empty = buildEmptyAgentModuleSnapshot_ACU();
+    expect(empty.chronology).toEqual([]);
+    expect(empty.revisions.chronology).toBe(0);
+  });
+
+  it('旧快照缺 chronology 与其 revision 时兼容读成空账本，不误报数据丢失', () => {
+    const legacy = validateAgentModuleSnapshot_ACU({
+      schemaVersion: 1, settledThroughIndex: 2, updatedAt: 1,
+      revisions: { hooks: 1, infoGap: 0, constraints: 0, storyArc: 0 },
+      hooks: [hook_ACU('H1')], infoGap: [], constraints: [],
+    });
+
+    expect(legacy!.chronology).toEqual([]);
+    expect(legacy!.revisions.chronology).toBe(0);
+    expect(legacy!.hooks).toHaveLength(1);
+  });
+
+  it('合法 chronology 保真读取；已出现但非法的 chronology 使整份快照回退', () => {
+    const entry = { id: 'T1', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '在临川城休整七日', evidenceIndexes: [5, 4, 5], updatedIndex: 5, retired: false, retiredReason: '' };
+    const base = {
+      schemaVersion: 1, settledThroughIndex: 5, updatedAt: 1,
+      revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 2 },
+      hooks: [], infoGap: [], constraints: [], chronology: [entry],
+    };
+
+    const validated = validateAgentModuleSnapshot_ACU(base);
+    expect(validated!.chronology[0]).toMatchObject({ id: 'T1', precision: 'approximate', evidenceIndexes: [4, 5], updatedIndex: 5 });
+    expect(validated!.revisions.chronology).toBe(2);
+
+    // 字段一旦出现就必须整体合法：坏条目不做静默过滤，而是让读取端回退上一份合法快照。
+    expect(validateAgentModuleSnapshot_ACU({ ...base, chronology: '不是数组' })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...base, chronology: [{ ...entry, precision: '大概' }] })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...base, chronology: [{ ...entry, evidenceIndexes: [] }] })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...base, chronology: [{ ...entry, anchor: '' }] })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...base, chronology: [{ ...entry, retired: true, retiredReason: '' }] })).toBeNull();
+
+    // 读取端行为：末楼快照的 chronology 损坏时回退到更早的合法快照。
+    const good = { ...base, settledThroughIndex: 0 };
+    const chat: any[] = [
+      { mes: 'a', [AGENT_MODULE_FIELD_ACU]: good },
+      { mes: 'b', [AGENT_MODULE_FIELD_ACU]: { ...base, chronology: [{ ...entry, precision: '大概' }] } },
+    ];
+    expect(readAgentModuleSnapshot_ACU(chat).revisions.chronology).toBe(2);
+    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(0);
   });
 
   it('写盘保留快照自带的水位（钳制在 0 与目标楼层之间），不再自动顶到目标楼层', async () => {
@@ -120,7 +187,7 @@ describe('Agent 资料热上下文渲染', () => {
   it('活动卷规划上下文区分承载阶段、真实完成进度、剩余目标与禁翻底牌', () => {
     const snapshot = snapshotAt_ACU(4, {
       storyArc: [
-        { id: 'VOL-01', scope: 'volume', title: '商行之乱', direction: '主角夺回商行控制权', escalation: '收在印信回归且第三方签名浮现', withheld: '第三方身份', status: 'active', stageNumbers: [1, 2], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' },
+        { id: 'VOL-01', scope: 'volume', title: '商行之乱', direction: '主角夺回商行控制权', escalation: '收在印信回归且第三方签名浮现', withheld: '第三方身份', status: 'active', stageNumbers: [1, 2], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '', narrativeRole: 'development', targetStageRange: { min: 4, max: 6 }, targetTimeSpan: '两个月', progressCeiling: '只查明第三方签名存在', sustainingThreads: ['主角与账房建立互信'], payoffTargets: ['兑现夺回印信的期待'] },
         { id: 'VOL-02', scope: 'volume', title: '追查签名', direction: '追查第三方势力', escalation: '收在幕后势力主动灭口', withheld: '幕后首脑身份', status: 'planned', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' },
       ],
     });
@@ -128,9 +195,15 @@ describe('Agent 资料热上下文渲染', () => {
     const text = renderAgentActiveVolumePlanningContext_ACU(snapshot, [1]);
 
     expect(text).toContain('当前 active 卷：[VOL-01]「商行之乱」');
+    expect(text).toContain('卷级结构职责：development');
+    expect(text).toContain('目标阶段容量：4–6 个阶段');
+    expect(text).toContain('目标故事时间：两个月');
     expect(text).toContain('已完成阶段 1');
     expect(text).toContain('已登记但尚未完成阶段 2');
     expect(text).toContain('主角夺回商行控制权');
+    expect(text).toContain('主线进度上限：只查明第三方签名存在');
+    expect(text).toContain('持续经营线：主角与账房建立互信');
+    expect(text).toContain('兑现目标：兑现夺回印信的期待');
     expect(text).toContain('第三方身份');
   });
 
@@ -159,6 +232,45 @@ describe('Agent 资料热上下文渲染', () => {
     expect(text).toContain(`超出 ${AGENT_BLOCK_CHAR_LIMIT_ACU} 字上限，已截断`);
     expect(text).toContain('未展示部分不代表不存在');
     expect(text.startsWith('当前修订号=0')).toBe(true);
+  });
+
+  it('年代学热渲染给出当前时间锚与逐条转换，空账本说明事实来源', () => {
+    const empty = renderAgentChronology_ACU(buildEmptyAgentModuleSnapshot_ACU());
+    expect(empty).toContain('当前修订号=0');
+    expect(empty).toContain('没有已结算的故事时间记录');
+    expect(empty).toContain('大纲里的时间字段是计划');
+
+    const snapshot = snapshotAt_ACU(6, {
+      revisions: { ...buildEmptyAgentModuleSnapshot_ACU().revisions, chronology: 3 },
+      chronology: [
+        { id: 'T2', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '在临川城休整七日', evidenceIndexes: [4, 5], updatedIndex: 5, retired: false, retiredReason: '' },
+        { id: 'T1', anchor: '抵达临川城的当日', elapsed: '自开篇约十日', precision: 'approximate', transition: '行船三日抵达', evidenceIndexes: [2], updatedIndex: 3, retired: false, retiredReason: '' },
+        { id: 'T0', anchor: '误登记的锚', elapsed: '未知', precision: 'unknown', transition: '误登记', evidenceIndexes: [1], updatedIndex: 2, retired: true, retiredReason: '登记错误' },
+      ] as any,
+    });
+    const text = renderAgentChronology_ACU(snapshot);
+
+    expect(text.startsWith('当前修订号=3')).toBe(true);
+    // 按结算次序排列后，最新锚是 T2；作废条目不进热上下文但如实标注。
+    expect(text).toContain('当前时间锚：入城后的第七天');
+    expect(text.indexOf('T1')).toBeLessThan(text.indexOf('[T2]'));
+    expect(text).not.toContain('误登记的锚');
+    expect(text).toContain('另有 1 条已作废记录未列出');
+    expect(text).toContain('证据楼层：4、5');
+  });
+
+  it('年代学按 ID 精读含已作废条目，未知 ID 如实提示', () => {
+    const snapshot = snapshotAt_ACU(6, {
+      revisions: { ...buildEmptyAgentModuleSnapshot_ACU().revisions, chronology: 2 },
+      chronology: [
+        { id: 'T0', anchor: '误登记的锚', elapsed: '未知', precision: 'unknown', transition: '误登记', evidenceIndexes: [1], updatedIndex: 2, retired: true, retiredReason: '登记错误' },
+      ] as any,
+    });
+
+    const byId = renderAgentChronologyByIds_ACU(snapshot, ['T0', 'T9']);
+    expect(byId).toContain('误登记的锚');
+    expect(byId).toContain('作废原因：登记错误');
+    expect(byId).toContain('以下 ID 不存在于故事年代学账本：T9');
   });
 
   it('信息差渲染包含客观事实、读者已知与角色知晓', () => {

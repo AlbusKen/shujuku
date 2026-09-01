@@ -29,9 +29,24 @@ function context_ACU(): AgentResolveContext_ACU {
       envelope: {} as any,
       task: { taskId: 't', originInstruction: '推进剧情' } as any,
       stage: { stageNumber: 2 } as any,
-      revision: { outline: { title: '禁区', goal: '进入禁区', totalTurns: 6 } } as any,
-      node: { id: 'n1', title: '试探', goal: '试探守门人', turns: [{ id: 'turn-1', goal: '第一轮' }, { id: 'turn-2', goal: '第二轮' }] } as any,
-      turn: { id: 'turn-2', goal: '第二轮' } as any,
+      revision: { outline: { title: '禁区', goal: '进入禁区', tempo: 'mixed', role: 'development', timeSpanGoal: '三日', totalTurns: 6 } } as any,
+      node: {
+        id: 'n1', title: '试探', goal: '试探守门人', turns: [
+          { id: 'turn-1', goal: '第一轮', pacing: 'setup', function: 'daily_world', mainlineDelta: 'hold', timeAdvance: 'same_day' },
+          {
+            id: 'turn-2',
+            goal: '第二轮',
+            pacing: 'turn',
+            function: 'reveal',
+            mainlineDelta: 'step',
+            timeAdvance: 'days',
+            timeAnchor: '第三日清晨',
+          },
+        ],
+      } as any,
+      turn: {
+        id: 'turn-2', goal: '第二轮', pacing: 'turn', function: 'reveal', mainlineDelta: 'step', timeAdvance: 'days', timeAnchor: '第三日清晨',
+      } as any,
       turnNumber: 2,
       nodeTurnNumber: 2,
     },
@@ -63,6 +78,17 @@ describe('Agent 目录渲染', () => {
     expect(catalog).toContain('$HOOKS_LEDGER');
     expect(catalog).toContain('$ACTIVE_CONSTRAINTS');
     expect(catalog).toContain('仅主 Agent 裁决后登记');
+  });
+
+  it('目录与写入说明公开故事年代学账本，并由维护代理职责固定负责', () => {
+    const moduleCatalog = renderAgentModuleCatalog_ACU();
+    expect(moduleCatalog).toContain('$CHRONOLOGY');
+    expect(moduleCatalog).toContain('故事年代学账本');
+    expect(moduleCatalog).toContain('大纲里的时间字段是计划，不在此账本内');
+
+    const subagentCatalog = renderAgentSubagentCatalog_ACU();
+    expect(subagentCatalog).toContain('$HOOKS_LEDGER、$INFO_GAP、$CHRONOLOGY（职责固定');
+    expect(subagentCatalog).toContain('故事年代学账本');
   });
 
   it('未知代理名查不到定义', () => {
@@ -114,6 +140,11 @@ describe('Agent 读写集解析', () => {
   it('大纲窗口标出本轮位置并声明大纲只是计划', () => {
     const text = resolveAgentReadToken_ACU('$OUTLINE_WINDOW', context_ACU()).text;
     expect(text).toContain('← 本轮');
+    expect(text).toContain('阶段结构职责：development');
+    expect(text).toContain('阶段时间目标：三日');
+    expect(text).toContain('function=reveal');
+    expect(text).toContain('mainline=step');
+    expect(text).toContain('time=days｜anchor=第三日清晨');
     expect(text).toContain('大纲是计划，不是已经发生的事实');
   });
 
@@ -155,8 +186,26 @@ describe('Agent 读写集解析', () => {
     expect(catalog).toContain('$TABLE:表名:起始行-结束行');
     expect(catalog).toContain('$WORLDBOOK:书名:uid');
     expect(catalog).toContain('$TABLE:纪要表:起始行-结束行');
+    expect(catalog).toContain('$CHRONOLOGY / $CHRONOLOGY:ID,ID');
     expect(catalog).not.toContain('$CHRONICLES');
     expect(catalog).toContain('search');
+  });
+
+  it('$CHRONOLOGY 读地址解析为年代学账本，支持按 ID 精读', () => {
+    const context = context_ACU();
+    context.moduleSnapshot = {
+      ...context.moduleSnapshot,
+      revisions: { ...context.moduleSnapshot.revisions, chronology: 1 },
+      chronology: [{ id: 'T1', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '在临川城休整七日', evidenceIndexes: [1], updatedIndex: 1, retired: false, retiredReason: '' }],
+    };
+
+    const full = resolveAgentReadToken_ACU('$CHRONOLOGY', context);
+    expect(full.title).toContain('故事年代学账本');
+    expect(full.text).toContain('当前时间锚：入城后的第七天');
+
+    const byId = resolveAgentReadToken_ACU('$CHRONOLOGY:T1', context);
+    expect(byId.text).toContain('在临川城休整七日');
+    expect(resolveAgentReadToken_ACU('$CHRONOLOGY:T9', context).text).toContain('不存在');
   });
 });
 

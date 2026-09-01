@@ -38,10 +38,12 @@
             <p class="acu-v2-continuation-materials__outline-heading">
               <strong>第 {{ activeStage.stageNumber }} 阶段：{{ activeRevision.outline.title }}</strong>
               <span class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary">{{ TEMPO_LABELS[activeRevision.outline.tempo] ?? activeRevision.outline.tempo }}</span>
+              <span class="acu-v2-continuation-materials__badge">职责：{{ ROLE_LABELS[activeRevision.outline.role ?? ''] ?? activeRevision.outline.role ?? '未标注' }}</span>
               <span class="acu-v2-continuation-materials__badge">revision {{ activeRevision.revision }}</span>
               <span class="acu-v2-continuation-materials__badge">{{ activeRevision.frozen ? '已冻结' : '待确认' }}</span>
             </p>
             <p class="acu-v2-continuation-materials__card-body">阶段目标：{{ activeRevision.outline.goal }}</p>
+            <p class="acu-v2-continuation-materials__card-meta">故事时间目标：{{ activeRevision.outline.timeSpanGoal ?? '未设定' }}</p>
             <p class="acu-v2-continuation-materials__card-meta">完成 {{ activeStage.completedTurns }} / {{ activeRevision.outline.totalTurns }} 轮 · 剩余 {{ remainingTurns(activeStage, activeRevision) }} 轮</p>
             <p class="acu-v2-continuation-materials__card-meta">
               所属 active 卷：{{ activeVolume ? `[${activeVolume.id}]「${activeVolume.title}」` : '未识别（故事总纲尚未加载或当前没有 active 卷）' }}
@@ -60,6 +62,9 @@
                 >
                   <span>第 {{ turnPosition(activeRevision, node.id, turnIndex) }} 轮 · {{ turn.goal }}</span>
                   <span class="acu-v2-continuation-materials__badge">{{ PACING_LABELS[turn.pacing] ?? turn.pacing }}</span>
+                  <span class="acu-v2-continuation-materials__badge">功能：{{ FUNCTION_LABELS[turn.function ?? ''] ?? turn.function ?? '未标注' }}</span>
+                  <span class="acu-v2-continuation-materials__badge">主线：{{ MAINLINE_LABELS[turn.mainlineDelta ?? ''] ?? turn.mainlineDelta ?? '未标注' }}</span>
+                  <span class="acu-v2-continuation-materials__badge">时间：{{ TIME_LABELS[turn.timeAdvance ?? ''] ?? turn.timeAdvance ?? '未标注' }}<template v-if="turn.timeAnchor"> · {{ turn.timeAnchor }}</template></span>
                   <span v-if="turnState(activeRevision, nodeIndex, turnIndex) === 'current'" class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary">当前执行</span>
                 </li>
               </ol>
@@ -68,6 +73,7 @@
 
           <details class="acu-v2-continuation-materials__json">
             <summary>编辑原始 JSON</summary>
+            <p class="acu-v2-continuation-materials__card-meta">修改轮次目标时请同步核对 pacing、function、mainlineDelta、timeAdvance 与 timeAnchor；旧插入操作缺少新字段时会使用 transition / hold / continuous 保守默认。</p>
             <AcuTextarea :model-value="outlineDraft" :rows="16" @update:model-value="onOutlineInput" />
             <p v-if="outlineError" class="acu-v2-continuation-materials__error">{{ outlineError }}</p>
             <div class="acu-v2-continuation-materials__actions">
@@ -87,10 +93,10 @@
           <summary>第 {{ stage.stageNumber }} 阶段 · {{ stage.status }} · {{ stage.completedTurns }} / {{ stageTotalTurns(stage) }} 轮</summary>
           <template v-for="revision in [displayRevision(stage)]" :key="revision?.revision ?? 'no-revision'">
             <section v-if="revision" class="acu-v2-continuation-materials__outline-summary">
-              <p class="acu-v2-continuation-materials__outline-heading"><strong>{{ revision.outline.title }}</strong><span class="acu-v2-continuation-materials__badge">revision {{ revision.revision }}</span><span class="acu-v2-continuation-materials__badge">{{ revision.frozen ? '已冻结' : '待确认' }}</span></p>
+              <p class="acu-v2-continuation-materials__outline-heading"><strong>{{ revision.outline.title }}</strong><span class="acu-v2-continuation-materials__badge">revision {{ revision.revision }}</span><span class="acu-v2-continuation-materials__badge">{{ revision.frozen ? '已冻结' : '待确认' }}</span><span class="acu-v2-continuation-materials__badge">职责：{{ ROLE_LABELS[revision.outline.role ?? ''] ?? revision.outline.role ?? '未标注' }}</span></p>
               <p class="acu-v2-continuation-materials__card-body">阶段目标：{{ revision.outline.goal }}</p>
               <ol class="acu-v2-continuation-materials__list">
-                <li v-for="node in revision.outline.nodes" :key="node.id"><strong>{{ node.title }}</strong>：{{ node.goal }}<ol><li v-for="turn in node.turns" :key="turn.id">{{ turn.goal }} · {{ PACING_LABELS[turn.pacing] ?? turn.pacing }}</li></ol></li>
+                <li v-for="node in revision.outline.nodes" :key="node.id"><strong>{{ node.title }}</strong>：{{ node.goal }}<ol><li v-for="turn in node.turns" :key="turn.id">{{ turn.goal }} · {{ PACING_LABELS[turn.pacing] ?? turn.pacing }} · {{ FUNCTION_LABELS[turn.function ?? ''] ?? turn.function ?? '未标注' }} · 主线 {{ MAINLINE_LABELS[turn.mainlineDelta ?? ''] ?? turn.mainlineDelta ?? '未标注' }} · {{ TIME_LABELS[turn.timeAdvance ?? ''] ?? turn.timeAdvance ?? '未标注' }}<template v-if="turn.timeAnchor">（{{ turn.timeAnchor }}）</template></li></ol></li>
               </ol>
             </section>
             <p v-else class="acu-v2-continuation-materials__empty">该阶段没有可展示的 revision。</p>
@@ -117,7 +123,8 @@
         伏笔 {{ materials.snapshot.value.hooks.length }} 条 ·
         信息差 {{ materials.snapshot.value.infoGap.length }} 条 ·
         长期约束 {{ materials.snapshot.value.constraints.length }} 条 ·
-        修订号 {{ materials.snapshot.value.revisions.hooks }}/{{ materials.snapshot.value.revisions.infoGap }}/{{ materials.snapshot.value.revisions.constraints }}
+        故事时间 {{ materials.snapshot.value.chronology.length }} 条 ·
+        修订号 {{ materials.snapshot.value.revisions.hooks }}/{{ materials.snapshot.value.revisions.infoGap }}/{{ materials.snapshot.value.revisions.constraints }}/{{ materials.snapshot.value.revisions.chronology }}
       </p>
       <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
 
@@ -210,6 +217,39 @@
           </div>
         </details>
       </details>
+
+      <!-- 故事年代学账本 -->
+      <details class="acu-v2-continuation-materials__block" open>
+        <summary>故事年代学账本 · {{ materials.snapshot.value?.chronology.length ?? 0 }} 条<span v-if="materials.modules.chronology.dirty" class="acu-v2-continuation-materials__badge">未保存</span></summary>
+        <p v-if="!materials.snapshot.value?.chronology.length" class="acu-v2-continuation-materials__empty">还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。</p>
+        <div v-else class="acu-v2-continuation-materials__cards">
+          <div
+            v-for="entry in materials.snapshot.value.chronology"
+            :key="entry.id"
+            class="acu-v2-continuation-materials__card"
+            :class="{ 'acu-v2-continuation-materials__card--retired': entry.retired }"
+          >
+            <p class="acu-v2-continuation-materials__card-head">
+              <strong>{{ entry.id }}</strong>
+              <span>{{ entry.anchor }}</span>
+              <span class="acu-v2-continuation-materials__badge">{{ CHRONOLOGY_PRECISION_LABELS[entry.precision] ?? entry.precision }}</span>
+              <span v-if="entry.retired" class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted">已作废{{ entry.retiredReason ? `：${entry.retiredReason}` : '' }}</span>
+            </p>
+            <p class="acu-v2-continuation-materials__card-body">累计经过：{{ entry.elapsed }}</p>
+            <p class="acu-v2-continuation-materials__card-body">时间转换：{{ entry.transition }}</p>
+            <p class="acu-v2-continuation-materials__card-meta">证据楼层 {{ entry.evidenceIndexes.join('、') }} · 结算楼层 {{ entry.updatedIndex }}</p>
+          </div>
+        </div>
+        <details class="acu-v2-continuation-materials__json">
+          <summary>编辑原始 JSON</summary>
+          <AcuTextarea :model-value="materials.modules.chronology.draft" :rows="10" @update:model-value="value => materials.updateDraft('chronology', value)" />
+          <p v-if="materials.modules.chronology.error" class="acu-v2-continuation-materials__error">{{ materials.modules.chronology.error }}</p>
+          <div class="acu-v2-continuation-materials__actions">
+            <AcuButton :disabled="!materials.modules.chronology.dirty" @click="materials.discard('chronology')">放弃修改</AcuButton>
+            <AcuButton variant="primary" :loading="materials.modules.chronology.saving" :disabled="!materials.modules.chronology.dirty" @click="materials.save('chronology')">保存年代学账本</AcuButton>
+          </div>
+        </details>
+      </details>
     </template>
 
     <!-- 故事总纲：结构化展示 + JSON 编辑 -->
@@ -291,9 +331,14 @@ const HOOK_STATUS_LABELS: Record<string, string> = {
 };
 const HOOK_IMPORTANCE_LABELS: Record<string, string> = { high: '重要度：高', mid: '重要度：中', low: '重要度：低' };
 const REVEAL_STATUS_LABELS: Record<string, string> = { unrevealed: '未揭示', partial: '部分揭示', revealed: '已揭示' };
+const CHRONOLOGY_PRECISION_LABELS: Record<string, string> = { exact: '精确', approximate: '近似', unknown: '未知' };
 const ARC_STATUS_LABELS: Record<string, string> = { planned: '计划中', active: '进行中', done: '已完成' };
-const TEMPO_LABELS: Record<string, string> = { opening: '开篇', development: '推进', climax: '高潮', transition: '过渡' };
+const TEMPO_LABELS: Record<string, string> = { buildup: '铺垫型', mixed: '起伏型', surge: '高压型', aftermath: '余波型' };
+const ROLE_LABELS: Record<string, string> = { setup: '建立', development: '发展', escalation: '升级', turn: '转折', payoff: '兑现', aftermath: '余波' };
 const PACING_LABELS: Record<string, string> = { setup: '铺垫', pressure: '施压', turn: '转折', cooldown: '缓冲' };
+const FUNCTION_LABELS: Record<string, string> = { daily_bond: '关系日常', daily_world: '世界日常', recovery: '恢复', preparation: '准备', training: '训练', economy: '经营', side_thread: '支线', conflict: '冲突', reveal: '揭示', payoff: '兑现', transition: '过渡' };
+const MAINLINE_LABELS: Record<string, string> = { hold: '停驻', micro: '微增量', step: '推进', milestone: '里程碑' };
+const TIME_LABELS: Record<string, string> = { continuous: '连续', same_day: '同日稍后', overnight: '隔夜', days: '数日', weeks: '数周', months: '数月', years: '数年' };
 
 const activeTab = ref<TabId>('outline');
 const materials = useContinuationMaterials();

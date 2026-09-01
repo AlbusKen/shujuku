@@ -9,6 +9,7 @@
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import {
+  AGENT_CHRONOLOGY_PRECISIONS_ACU,
   AGENT_HOOK_IMPORTANCES_ACU,
   AGENT_HOOK_STATUSES_ACU,
   AGENT_REVEAL_STATUSES_ACU,
@@ -16,6 +17,8 @@ import {
   AGENT_SEARCH_SCOPES_ACU,
   AGENT_STORY_ARC_SCOPES_ACU,
   AGENT_STORY_ARC_STATUSES_ACU,
+  AGENT_VOLUME_NARRATIVE_ROLES_ACU,
+  type AgentChronologyDeltaItem_ACU,
   type AgentDelegation_ACU,
   type AgentFinalReviewerOutput_ACU,
   type AgentHookDeltaItem_ACU,
@@ -431,6 +434,32 @@ function parseStageNumbers_ACU(value: unknown, path: string): number[] {
   });
 }
 
+function parseTargetStageRange_ACU(value: unknown, path: string): { min: number; max: number } {
+  if (!isRecord_ACU(value)) failProtocol_ACU(`${path} 必须是包含 min / max 的对象`);
+  const { min, max } = value;
+  if (!Number.isInteger(min) || (min as number) < 1 || !Number.isInteger(max) || (max as number) < 1) {
+    failProtocol_ACU(`${path}.min / max 必须是从 1 起的整数`);
+  }
+  if ((min as number) > (max as number)) failProtocol_ACU(`${path}.min 不能大于 max`);
+  return { min: min as number, max: max as number };
+}
+
+function parseStoryArcTextList_ACU(value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) failProtocol_ACU(`${path} 必须是字符串数组`);
+  return value.map((item, index) => {
+    if (typeof item !== 'string' || !item.trim()) failProtocol_ACU(`${path}[${index}] 必须是非空字符串`);
+    return item.trim();
+  });
+}
+
+function parseNarrativeRole_ACU(value: unknown, path: string): AgentStoryArcPatch_ACU['narrativeRole'] {
+  const role = readText_ACU(value);
+  if (!(AGENT_VOLUME_NARRATIVE_ROLES_ACU as readonly string[]).includes(role)) {
+    failProtocol_ACU(`${path} 必须是 ${AGENT_VOLUME_NARRATIVE_ROLES_ACU.join(' / ')}，实际收到：${role || '(空)'}`);
+  }
+  return role as AgentStoryArcPatch_ACU['narrativeRole'];
+}
+
 function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): AgentStoryArcPatch_ACU {
   const id = readText_ACU(raw.id);
   if (!id) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 需要 id`);
@@ -454,6 +483,16 @@ function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): Ag
   }
   if (typeof raw.completionState === 'string') patch.completionState = raw.completionState.trim();
   if (typeof raw.continuationRationale === 'string') patch.continuationRationale = raw.continuationRationale.trim();
+  if (Object.prototype.hasOwnProperty.call(raw, 'narrativeRole')) patch.narrativeRole = parseNarrativeRole_ACU(raw.narrativeRole, `delta.storyArc[${index}].narrativeRole`);
+  if (Object.prototype.hasOwnProperty.call(raw, 'targetStageRange')) patch.targetStageRange = parseTargetStageRange_ACU(raw.targetStageRange, `delta.storyArc[${index}].targetStageRange`);
+  for (const key of ['targetTimeSpan', 'progressCeiling', 'completionRationale'] as const) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) {
+      if (typeof raw[key] !== 'string') failProtocol_ACU(`delta.storyArc[${index}].${key} 必须是字符串`);
+      patch[key] = raw[key].trim();
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'sustainingThreads')) patch.sustainingThreads = parseStoryArcTextList_ACU(raw.sustainingThreads, `delta.storyArc[${index}].sustainingThreads`);
+  if (Object.prototype.hasOwnProperty.call(raw, 'payoffTargets')) patch.payoffTargets = parseStoryArcTextList_ACU(raw.payoffTargets, `delta.storyArc[${index}].payoffTargets`);
   if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 至少要带一个要修改的字段`);
   return patch;
 }
@@ -490,16 +529,84 @@ function parseStoryArcItems_ACU(value: unknown): { items: AgentStoryArcDeltaItem
       completionStageNumber: raw.completionStageNumber === undefined || raw.completionStageNumber === null ? null : (typeof raw.completionStageNumber === 'number' && Number.isInteger(raw.completionStageNumber) && raw.completionStageNumber >= 1 ? raw.completionStageNumber : failProtocol_ACU(`delta.storyArc[${index}].completionStageNumber 必须是从 1 起的整数或 null`)),
       completionState: readText_ACU(raw.completionState),
       continuationRationale: readText_ACU(raw.continuationRationale),
+      narrativeRole: raw.narrativeRole === undefined ? undefined : parseNarrativeRole_ACU(raw.narrativeRole, `delta.storyArc[${index}].narrativeRole`),
+      targetStageRange: raw.targetStageRange === undefined ? undefined : parseTargetStageRange_ACU(raw.targetStageRange, `delta.storyArc[${index}].targetStageRange`),
+      targetTimeSpan: raw.targetTimeSpan === undefined
+        ? undefined
+        : (typeof raw.targetTimeSpan === 'string'
+          ? raw.targetTimeSpan.trim()
+          : failProtocol_ACU(`delta.storyArc[${index}].targetTimeSpan 必须是字符串`)),
+      progressCeiling: raw.progressCeiling === undefined
+        ? undefined
+        : (typeof raw.progressCeiling === 'string'
+          ? raw.progressCeiling.trim()
+          : failProtocol_ACU(`delta.storyArc[${index}].progressCeiling 必须是字符串`)),
+      sustainingThreads: raw.sustainingThreads === undefined ? undefined : parseStoryArcTextList_ACU(raw.sustainingThreads, `delta.storyArc[${index}].sustainingThreads`),
+      payoffTargets: raw.payoffTargets === undefined ? undefined : parseStoryArcTextList_ACU(raw.payoffTargets, `delta.storyArc[${index}].payoffTargets`),
+      completionRationale: raw.completionRationale === undefined
+        ? undefined
+        : (typeof raw.completionRationale === 'string'
+          ? raw.completionRationale.trim()
+          : failProtocol_ACU(`delta.storyArc[${index}].completionRationale 必须是字符串`)),
       reason: readText_ACU(raw.reason),
     });
   });
   return { items, patches };
 }
 
+/**
+ * 解析年代学写集。时间事实的登记契约是硬边界：非法 action、非法 precision、非空必填
+ * 文本缺失、证据数组为空或含非整数楼层都必须拒绝——把坏时间记录静默降级会污染后续
+ * 每一次时间一致性审查的基准。
+ */
+function parseChronologyItems_ACU(value: unknown): AgentChronologyDeltaItem_ACU[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) failProtocol_ACU('delta.chronology 必须是数组');
+  return value.map((raw, index) => {
+    if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.chronology[${index}] 必须是对象`);
+    const action = readText_ACU(raw.action);
+    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.chronology[${index}].action 必须是 upsert / retire，实际收到：${action || '(空)'}`);
+    const id = readText_ACU(raw.id);
+    if (!id) failProtocol_ACU(`delta.chronology[${index}] 需要非空 id`);
+    if (action === 'retire') {
+      return { action, id, anchor: readText_ACU(raw.anchor), elapsed: readText_ACU(raw.elapsed), precision: 'unknown' as const, transition: readText_ACU(raw.transition), evidenceIndexes: [] as number[], reason: readText_ACU(raw.reason) };
+    }
+    const anchor = readText_ACU(raw.anchor);
+    const elapsed = readText_ACU(raw.elapsed);
+    const transition = readText_ACU(raw.transition);
+    if (!anchor) failProtocol_ACU(`delta.chronology[${index}].anchor 不能为空：必须给出可用于正文定位的相对时间锚`);
+    if (!elapsed) failProtocol_ACU(`delta.chronology[${index}].elapsed 不能为空：无法可靠量化时明确写「未知」或「约……」`);
+    if (!transition) failProtocol_ACU(`delta.chronology[${index}].transition 不能为空：写清从上一锚点到本锚点实际发生的时间转换`);
+    const precision = readText_ACU(raw.precision);
+    if (!(AGENT_CHRONOLOGY_PRECISIONS_ACU as readonly string[]).includes(precision)) {
+      failProtocol_ACU(`delta.chronology[${index}].precision 必须是 ${AGENT_CHRONOLOGY_PRECISIONS_ACU.join(' / ')}，实际收到：${precision || '(空)'}`);
+    }
+    if (!Array.isArray(raw.evidenceIndexes) || !raw.evidenceIndexes.length) {
+      failProtocol_ACU(`delta.chronology[${index}].evidenceIndexes 必须是非空数组：每条时间事实都要引用真实正文楼层`);
+    }
+    const evidenceIndexes = raw.evidenceIndexes.map(item => {
+      if (typeof item !== 'number' || !Number.isInteger(item) || item < 0) {
+        failProtocol_ACU(`delta.chronology[${index}].evidenceIndexes 的元素必须是非负整数楼层号，实际收到：${JSON.stringify(item)}`);
+      }
+      return item;
+    });
+    return {
+      action,
+      id,
+      anchor,
+      elapsed,
+      precision: precision as AgentChronologyDeltaItem_ACU['precision'],
+      transition,
+      evidenceIndexes: [...new Set(evidenceIndexes)].sort((left, right) => left - right),
+      reason: readText_ACU(raw.reason),
+    };
+  });
+}
+
 function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expectedRevisions'] {
   if (!isRecord_ACU(value)) return {};
   const result: AgentModuleDelta_ACU['expectedRevisions'] = {};
-  for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc'] as const) {
+  for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology'] as const) {
     const raw = value[key];
     if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0) result[key] = raw;
   }
@@ -516,6 +623,7 @@ export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>)
   const hooks = parseHookItems_ACU(rawDelta.hooks);
   const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap);
   const storyArc = parseStoryArcItems_ACU(rawDelta.storyArc);
+  const chronology = parseChronologyItems_ACU(rawDelta.chronology);
   return {
     summary: readText_ACU(payload.summary),
     delta: {
@@ -526,6 +634,7 @@ export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>)
       infoGapPatches: infoGap.patches,
       storyArc: storyArc.items,
       storyArcPatches: storyArc.patches,
+      chronology,
       constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
     },
   };

@@ -11,6 +11,7 @@ import {
   listStageOutlineTurns_ACU,
   resolveContinuationTurnRange_ACU,
   resolveStageOutlinePacingContext_ACU,
+  validateGeneratedStageOutline_ACU,
   validateReplannedStageOutline_ACU,
   validateStageOutline_ACU,
   validateStageOutlinePacing_ACU,
@@ -24,6 +25,7 @@ function buildOutline_ACU(totalTurns = 6) {
     title: '阶段标题',
     goal: '阶段目标',
     tempo: 'mixed' as StageTempo_ACU,
+    role: 'development' as const,
     totalTurns,
     nodes: [
       {
@@ -35,6 +37,9 @@ function buildOutline_ACU(totalTurns = 6) {
           id: `turn-${index + 1}`,
           goal: `轮次目标 ${index + 1}`,
           pacing: 'pressure' as StageTurnPacing_ACU,
+          function: 'conflict' as const,
+          mainlineDelta: 'step' as const,
+          timeAdvance: 'continuous' as const,
         })),
       },
     ],
@@ -132,12 +137,39 @@ describe('Continuation outline schema', () => {
     expectValidationCode_ACU(() => validateStageOutline_ACU(mismatch, resolveContinuationTurnRange_ACU('standard')), 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH');
   });
 
+  it('新生成路径严格要求阶段角色与每轮功能、主线增量和时间跨度', () => {
+    const range = resolveContinuationTurnRange_ACU('standard');
+    expect(validateGeneratedStageOutline_ACU(buildOutline_ACU(), range)).toMatchObject({ role: 'development' });
+
+    const missingRole = buildOutline_ACU() as Record<string, any>;
+    delete missingRole.role;
+    expectValidationCode_ACU(() => validateGeneratedStageOutline_ACU(missingRole, range), 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID');
+
+    for (const field of ['function', 'mainlineDelta', 'timeAdvance'] as const) {
+      const missingTurnField = buildOutline_ACU() as Record<string, any>;
+      delete missingTurnField.nodes[0].turns[0][field];
+      expectValidationCode_ACU(() => validateGeneratedStageOutline_ACU(missingTurnField, range), 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID');
+    }
+  });
+
+  it('新生成路径拒绝非法组合与缺少锚点的长时间跳跃', () => {
+    const range = resolveContinuationTurnRange_ACU('standard');
+    const setupConflict = buildOutline_ACU();
+    Object.assign(setupConflict.nodes[0].turns[0], { pacing: 'setup', function: 'conflict', mainlineDelta: 'hold' });
+    expectValidationCode_ACU(() => validateGeneratedStageOutline_ACU(setupConflict, range), 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID');
+
+    const longJump = buildOutline_ACU();
+    Object.assign(longJump.nodes[0].turns[0], { function: 'transition', timeAdvance: 'weeks' });
+    expectValidationCode_ACU(() => validateGeneratedStageOutline_ACU(longJump, range), 'CONTINUATION_OUTLINE_FIELD_MISSING');
+  });
+
   it('把 pacing 当可选键：存量大纲缺字段时回填 pressure，写错枚举值则报错', () => {
     const legacy = buildOutline_ACU(3) as Record<string, any>;
     for (const turn of legacy.nodes[0].turns) delete turn.pacing;
 
     const migrated = validateStageOutline_ACU(legacy, resolveContinuationTurnRange_ACU('short'));
     expect(migrated.nodes[0].turns.map(turn => turn.pacing)).toEqual(['pressure', 'pressure', 'pressure']);
+    expect(migrated.nodes[0].turns.map(turn => turn.function)).toEqual(['conflict', 'conflict', 'conflict']);
 
     const bogus = buildOutline_ACU(3) as Record<string, any>;
     bogus.nodes[0].turns[0].pacing = 'fast';
@@ -156,16 +188,25 @@ describe('Continuation outline schema', () => {
   });
 
   it('enforces replan completed-prefix and remaining-turn invariants', () => {
-    const previous = validateStageOutline_ACU(buildOutline_ACU(), resolveContinuationTurnRange_ACU('standard'));
+    const range = resolveContinuationTurnRange_ACU('standard');
+    const previous = validateStageOutline_ACU(buildOutline_ACU(), range);
     const constraints = { previousOutline: previous, completedTurns: 2, expectedRemainingTurns: 4 };
 
-    expect(validateReplannedStageOutline_ACU(buildOutline_ACU(), resolveContinuationTurnRange_ACU('standard'), constraints)).toEqual(previous);
+    expect(validateReplannedStageOutline_ACU(buildOutline_ACU(), range, constraints)).toEqual(previous);
 
     const rewritten = buildOutline_ACU();
     rewritten.nodes[0].turns[1].goal = '篡改已完成目标';
-    expectValidationCode_ACU(() => validateReplannedStageOutline_ACU(rewritten, resolveContinuationTurnRange_ACU('standard'), constraints), 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED');
+    expectValidationCode_ACU(() => validateReplannedStageOutline_ACU(rewritten, range, constraints), 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED');
 
-    expectValidationCode_ACU(() => validateReplannedStageOutline_ACU(buildOutline_ACU(), resolveContinuationTurnRange_ACU('standard'), { ...constraints, expectedRemainingTurns: 3 }), 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH');
+    const missingSuffixField = buildOutline_ACU() as Record<string, any>;
+    delete missingSuffixField.nodes[0].turns[2].function;
+    expectValidationCode_ACU(() => validateReplannedStageOutline_ACU(missingSuffixField, range, constraints), 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID');
+
+    const rewrittenMetadata = buildOutline_ACU();
+    rewrittenMetadata.nodes[0].turns[0].mainlineDelta = 'micro';
+    expectValidationCode_ACU(() => validateReplannedStageOutline_ACU(rewrittenMetadata, range, constraints), 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED');
+
+    expectValidationCode_ACU(() => validateReplannedStageOutline_ACU(buildOutline_ACU(), range, { ...constraints, expectedRemainingTurns: 3 }), 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH');
   });
 });
 
@@ -353,7 +394,7 @@ describe('Continuation defaults', () => {
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
     expect(first.apiPresetMode).toBe('current');
-    expect(first.promptForceDefaultVersion).toBe('spv3.1-continuation-volume-lifecycle-v23');
+    expect(first.promptForceDefaultVersion).toBe('spv3.4-continuation-chronology-v26');
     expect(first.outlinePrompt[0].content).toContain('<stage_title>');
     expect(first.maxConsecutivePressureTurns).toBe(8);
     expect(first.agentPrompts.main[0].content).toContain('主控 Agent');

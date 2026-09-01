@@ -111,7 +111,20 @@ function collectModuleLines_ACU(context: AgentResolveContext_ACU): AgentSearchLi
     lines.push({
       label: `故事总纲 [${entry.id}]${entry.retired ? '（已废止）' : ''}`,
       address: `$STORY_ARC:${entry.id}`,
-      text: [entry.title, entry.direction, entry.escalation, entry.withheld, entry.retiredReason].filter(Boolean).join('｜'),
+      text: [
+        entry.title,
+        entry.narrativeRole,
+        entry.targetStageRange ? `targetStageRange=${entry.targetStageRange.min}-${entry.targetStageRange.max}` : '',
+        entry.targetTimeSpan,
+        entry.direction,
+        entry.escalation,
+        entry.progressCeiling,
+        ...(entry.sustainingThreads ?? []),
+        ...(entry.payoffTargets ?? []),
+        entry.withheld,
+        entry.completionRationale,
+        entry.retiredReason,
+      ].filter(Boolean).join('｜'),
     });
   }
   for (const hook of snapshot.hooks) {
@@ -135,6 +148,20 @@ function collectModuleLines_ACU(context: AgentResolveContext_ACU): AgentSearchLi
       text: [constraint.text, constraint.reason].filter(Boolean).join('｜'),
     });
   }
+  for (const entry of snapshot.chronology) {
+    lines.push({
+      label: `故事年代学 [${entry.id}]${entry.retired ? '（已作废）' : ''}`,
+      address: `$CHRONOLOGY:${entry.id}`,
+      text: [
+        entry.anchor,
+        entry.elapsed,
+        `precision=${entry.precision}`,
+        entry.transition,
+        entry.evidenceIndexes.length ? `证据楼层=${entry.evidenceIndexes.join('、')}` : '',
+        entry.retiredReason,
+      ].filter(Boolean).join('｜'),
+    });
+  }
   return lines;
 }
 
@@ -144,12 +171,14 @@ function collectOutlineLines_ACU(context: AgentResolveContext_ACU): AgentSearchL
   const lines: AgentSearchLine_ACU[] = [{
     label: '大纲 阶段标题',
     address: '$OUTLINE_WINDOW',
-    text: `${revision.outline.title}｜${revision.outline.goal}`,
+    text: `${revision.outline.title}｜${revision.outline.goal}｜tempo=${revision.outline.tempo}｜role=${revision.outline.role ?? '未标注'}｜timeSpan=${revision.outline.timeSpanGoal ?? '未设定'}`,
   }];
   for (const node of revision.outline.nodes) {
     lines.push({ label: `大纲 节点[${node.id}]`, address: '$OUTLINE_WINDOW', text: `${node.title}｜${node.goal}` });
     for (const turn of node.turns) {
-      lines.push({ label: `大纲 轮次[${turn.id}]（${turn.pacing}）`, address: '$OUTLINE_WINDOW', text: turn.goal });
+      const metadata = `pacing=${turn.pacing}｜function=${turn.function ?? '未标注'}｜mainline=${turn.mainlineDelta ?? '未标注'}｜time=${turn.timeAdvance ?? '未标注'}${turn.timeAnchor ? `｜anchor=${turn.timeAnchor}` : ''}`;
+      // 搜索器匹配 text 而不是 label；元数据必须进入正文，不能只做不可检索的展示装饰。
+      lines.push({ label: `大纲 轮次[${turn.id}]`, address: '$OUTLINE_WINDOW', text: `${metadata}｜${turn.goal}` });
     }
   }
   return lines;

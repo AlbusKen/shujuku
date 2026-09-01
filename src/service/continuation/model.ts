@@ -159,6 +159,18 @@ export interface ContinuationTurnRange_ACU {
 export const STAGE_TURN_PACINGS_ACU = ['setup', 'pressure', 'turn', 'cooldown'] as const;
 export type StageTurnPacing_ACU = typeof STAGE_TURN_PACINGS_ACU[number];
 
+/** 单轮承担的叙事功能；与 pacing 分离，避免把低压误解为“没有功能”。 */
+export const STAGE_TURN_FUNCTIONS_ACU = ['daily_bond', 'daily_world', 'recovery', 'preparation', 'training', 'economy', 'side_thread', 'conflict', 'reveal', 'payoff', 'transition'] as const;
+export type StageTurnFunction_ACU = typeof STAGE_TURN_FUNCTIONS_ACU[number];
+
+/** 单轮对主线的实际增量。hold 是低压轮的合法结果，不等于无变化。 */
+export const STAGE_TURN_MAINLINE_DELTAS_ACU = ['hold', 'micro', 'step', 'milestone'] as const;
+export type StageTurnMainlineDelta_ACU = typeof STAGE_TURN_MAINLINE_DELTAS_ACU[number];
+
+/** 单轮与上一轮之间的故事时间跨度级别；题材相关时间语义由 timeAnchor 补充。 */
+export const STAGE_TURN_TIME_ADVANCES_ACU = ['continuous', 'same_day', 'overnight', 'days', 'weeks', 'months', 'years'] as const;
+export type StageTurnTimeAdvance_ACU = typeof STAGE_TURN_TIME_ADVANCES_ACU[number];
+
 /** setup 与 cooldown 合称低压轮，是节奏配比校验里被计数的那一侧。 */
 export const STAGE_TURN_DOWNTIME_PACINGS_ACU: readonly StageTurnPacing_ACU[] = ['setup', 'cooldown'];
 
@@ -174,10 +186,18 @@ export const STAGE_TURN_DOWNTIME_PACINGS_ACU: readonly StageTurnPacing_ACU[] = [
 export const STAGE_TEMPOS_ACU = ['buildup', 'mixed', 'surge', 'aftermath'] as const;
 export type StageTempo_ACU = typeof STAGE_TEMPOS_ACU[number];
 
+/** 阶段在卷级结构中的职责；它描述结构位置，StageTempo 描述能量形态。 */
+export const STAGE_ROLES_ACU = ['setup', 'development', 'escalation', 'turn', 'payoff', 'aftermath'] as const;
+export type StageRole_ACU = typeof STAGE_ROLES_ACU[number];
+
 export interface StageTurn_ACU {
   id: string;
   goal: string;
   pacing: StageTurnPacing_ACU;
+  function?: StageTurnFunction_ACU;
+  mainlineDelta?: StageTurnMainlineDelta_ACU;
+  timeAdvance?: StageTurnTimeAdvance_ACU;
+  timeAnchor?: string;
 }
 
 export interface StageNode_ACU {
@@ -192,6 +212,10 @@ export interface StageOutline_ACU {
   schemaVersion: typeof CONTINUATION_SCHEMA_VERSION_ACU;
   title: string;
   goal: string;
+  /** 阶段在当前卷中的结构职责；旧快照可缺失，由兼容读取路径保守归一化。 */
+  role?: StageRole_ACU;
+  /** 阶段预计覆盖的故事内部时间目标。 */
+  timeSpanGoal?: string;
   /** 本阶段的节奏形态。决定低压轮下限，也决定下一阶段能选什么形态。 */
   tempo: StageTempo_ACU;
   totalTurns: number;
