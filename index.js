@@ -168144,7 +168144,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_17$7 = { class: "acu-v2-session-feed__title" };
     const _hoisted_18$7 = { class: "acu-v2-session-feed__time" };
     const _hoisted_19$7 = ["onClick"];
-    const _hoisted_20$5 = {
+    const _hoisted_20$6 = {
 	key: 1,
 	class: "acu-v2-session-feed__detail"
     };
@@ -168305,7 +168305,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, toDisplayString(entry.detail), 9, _hoisted_19$7)) : createCommentVNode("v-if", true),
 									entry.detail && $setup.isExpanded(entry) ? (openBlock(), createElementBlock(
 										"p",
-										_hoisted_20$5,
+										_hoisted_20$6,
 										toDisplayString(entry.detail),
 										1
 										/* TEXT */
@@ -168793,7 +168793,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_17$6 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_18$6 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_19$6 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_20$4 = { class: "acu-v2-continuation-materials__outline-nodes" };
+    const _hoisted_20$5 = { class: "acu-v2-continuation-materials__outline-nodes" };
     const _hoisted_21$4 = { class: "acu-v2-continuation-materials__card-head" };
     const _hoisted_22$3 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_23$3 = { class: "acu-v2-continuation-materials__card-body" };
@@ -168806,13 +168806,13 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary"
     };
-    const _hoisted_30$1 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_31$1 = {
+    const _hoisted_30$2 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_31$2 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_32$1 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_33$1 = {
+    const _hoisted_32$2 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_33$2 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__empty"
     };
@@ -169145,7 +169145,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						)
 					]),
-					createBaseVNode("div", _hoisted_20$4, [(openBlock(true), createElementBlock(
+					createBaseVNode("div", _hoisted_20$5, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($props.activeRevision.outline.nodes, (node, nodeIndex) => {
@@ -169241,7 +169241,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))]),
-					createBaseVNode("details", _hoisted_30$1, [
+					createBaseVNode("details", _hoisted_30$2, [
 						_cache[23] || (_cache[23] = createBaseVNode(
 							"summary",
 							null,
@@ -169263,12 +169263,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.outlineError ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_31$1,
+							_hoisted_31$2,
 							toDisplayString($setup.outlineError),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_32$1, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_32$2, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.outlineDirty,
 							onClick: $setup.syncOutlineDraft
 						}, {
@@ -169292,7 +169292,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							_: 1
 						}, 8, ["loading", "disabled"])])
 					])
-				])) : (openBlock(), createElementBlock("p", _hoisted_33$1, "当前没有已冻结的阶段大纲可编辑。")), (openBlock(true), createElementBlock(
+				])) : (openBlock(), createElementBlock("p", _hoisted_33$2, "当前没有已冻结的阶段大纲可编辑。")), (openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.historyStages, (stage) => {
@@ -170589,7 +170589,6 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     const INHERIT_CHANNEL_VALUE = '__inherit__';
-    /** 取出指定提示词组的数组。大纲组在设置根层，其余 Agent 提示词在 agentPrompts 下。 */
     var _sfc_main$m = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationPage',
         setup(__props, { expose: __expose }) {
@@ -170663,6 +170662,46 @@ Expected function or array of functions, received type ${typeof value}.`
                 { role: 'reviewer', label: '连续性审查' },
                 { role: 'finalReviewer', label: '发送前终审' },
             ];
+            const expandedGroups = reactive({});
+            function isGroupExpanded(key) {
+                return expandedGroups[key] === true;
+            }
+            function toggleGroup(key) {
+                expandedGroups[key] = !isGroupExpanded(key);
+            }
+            /** 折叠态下的一行摘要：让用户不展开也能看到关键取值。 */
+            const runGroupMeta = computed(() => {
+                const s = settingsDraft.value;
+                if (!s)
+                    return '';
+                return `阶段上限 ${s.maxAutomaticStages} · 正文重试 ${s.generationRetryLimit} 次`;
+            });
+            const contextGroupMeta = computed(() => {
+                const s = settingsDraft.value;
+                if (!s)
+                    return '';
+                return `窗口 ${s.storyWindowFloors} 楼 · 总结阈值 ${s.agentHistoryTokenBudget}`;
+            });
+            const budgetGroupMeta = computed(() => {
+                const s = settingsDraft.value;
+                if (!s)
+                    return '';
+                return `迭代 ${s.agentRunBudget.maxIterations} · 派工 ${s.agentRunBudget.maxDelegations} · 并发 ${s.agentRunBudget.maxConcurrent}`;
+            });
+            const finalReviewGroupMeta = computed(() => (settingsDraft.value?.finalReview.enabled ? '已开启' : '已关闭'));
+            const channelGroupMeta = computed(() => {
+                const presets = settingsDraft.value?.agentApiPresets;
+                if (!presets)
+                    return '';
+                const customized = agentChannelRoles.filter(channel => presets[channel.role]?.mode !== 'inherit').length;
+                return customized ? `${customized} 个单独指定` : '全部跟随默认';
+            });
+            const rulesGroupMeta = computed(() => {
+                const s = settingsDraft.value;
+                if (!s)
+                    return '';
+                return `提取 ${s.contextExtractRules.length} · 排除 ${s.contextExcludeRules.length}`;
+            });
             const agentChannelOptions = computed(() => [
                 { value: INHERIT_CHANNEL_VALUE, label: '跟随全局默认' },
                 ...continuationApiPresetOptions.value,
@@ -170938,6 +170977,25 @@ Expected function or array of functions, received type ${typeof value}.`
                     scheduleSettingsSave();
                 }
             }
+            const promptGroups = [
+                { key: 'outlinePrompt', kind: 'outline', title: '大纲子代理（outline-architect）提示词', restoreLabel: '恢复大纲提示词默认值' },
+                { key: 'main', kind: 'agent_main', title: '主 Agent 提示词', restoreLabel: '恢复主 Agent 默认值', note: '$HISTORY_ANCHOR 段标记会话记录的插入位置，本身不发送；删掉它会让会话记录退回到序列最前面。' },
+                { key: 'arcArchitect', kind: 'agent_arc', title: '故事总纲子代理（arc-architect）提示词', restoreLabel: '恢复总纲子代理默认值' },
+                { key: 'maintainer', kind: 'agent_maintainer', title: '伏笔与认知维护子代理提示词', restoreLabel: '恢复维护子代理默认值', note: '该代理不接收用户目标或阶段大纲，避免计划污染事实结算。' },
+                { key: 'mainlinePlanner', kind: 'agent_mainline', title: '主线推进策划子代理提示词', restoreLabel: '恢复主线策划默认值' },
+                { key: 'beatPlanner', kind: 'agent_beat', title: '伏笔与节拍策划子代理提示词', restoreLabel: '恢复节拍策划默认值' },
+                { key: 'reviewer', kind: 'agent_reviewer', title: '连续性审查子代理提示词', restoreLabel: '恢复审查子代理默认值' },
+                { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时才会被调用。' },
+            ];
+            /** 折叠态摘要：启用段数 / 总段数。 */
+            function promptGroupMeta(key) {
+                const prompts = promptList(key);
+                if (!prompts)
+                    return '';
+                const enabled = prompts.filter(segment => segment.enabled !== false).length;
+                return `${enabled}/${prompts.length} 段启用`;
+            }
+            /** 取出指定提示词组的数组。大纲组在设置根层，其余 Agent 提示词在 agentPrompts 下。 */
             function promptList(key) {
                 if (!settingsDraft.value)
                     return null;
@@ -171066,14 +171124,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-c41b05b7] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-c41b05b7] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-c41b05b7] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-c41b05b7] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-c41b05b7] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-c41b05b7] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-c41b05b7] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-c41b05b7] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-c41b05b7] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-c41b05b7] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-c41b05b7] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-c41b05b7] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-c41b05b7] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-c41b05b7] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-c41b05b7] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-c41b05b7");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_c41b05b7_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-9fb8f746] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-9fb8f746] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-9fb8f746] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-9fb8f746] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-9fb8f746] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-9fb8f746] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-9fb8f746] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-9fb8f746] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-9fb8f746] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-9fb8f746] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-9fb8f746] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-9fb8f746] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-9fb8f746] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-9fb8f746] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-9fb8f746]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-9fb8f746] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-9fb8f746] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-9fb8f746] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-9fb8f746] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-9fb8f746");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_9fb8f746_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-continuation-page" };
     const _hoisted_2$k = {
@@ -171083,32 +171141,36 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3$h = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_4$e = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_5$d = { class: "acu-v2-continuation-page__toggles" };
-    const _hoisted_6$c = {
+    const _hoisted_6$c = { class: "acu-v2-continuation-page__groups" };
+    const _hoisted_7$a = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_8$a = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_9$9 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_10$9 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_11$9 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_12$9 = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_7$a = {
+    const _hoisted_13$7 = {
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_8$a = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
-    const _hoisted_9$9 = {
+    const _hoisted_14$7 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
+    const _hoisted_15$7 = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_10$9 = {
+    const _hoisted_16$6 = {
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_11$9 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_12$9 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_13$7 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_14$7 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_15$7 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_16$6 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_17$5 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_17$5 = { class: "acu-v2-continuation-page__groups" };
     const _hoisted_18$5 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_19$5 = {
+	key: 0,
+	class: "acu-v2-continuation-page__meta"
+    };
+    const _hoisted_20$4 = {
 	key: 2,
 	class: "acu-v2-continuation-page__error"
     };
@@ -171174,7 +171236,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[74] || (_cache[74] = [createTextVNode(
+					default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -171208,15 +171270,18 @@ Expected function or array of functions, received type ${typeof value}.`
 			}), $setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
 				key: 0,
 				title: "续写设置",
-				description: "修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。"
+				description: "修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠，默认值已能满足大多数场景。"
 			}, {
 				default: withCtx(() => [
 					createBaseVNode("div", _hoisted_4$e, [
-						createVNode($setup["AcuFormRow"], { label: "阶段规模" }, {
+						createVNode($setup["AcuFormRow"], {
+							label: "阶段规模",
+							hint: "一个阶段规划多少轮正文；轮数越多，单个大纲覆盖的剧情越长。"
+						}, {
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.settingsDraft.stageSize = $event) },
-								[..._cache[75] || (_cache[75] = [
+								[..._cache[42] || (_cache[42] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -171251,11 +171316,14 @@ Expected function or array of functions, received type ${typeof value}.`
 							), [[vModelSelect, $setup.settingsDraft.stageSize]])]),
 							_: 1
 						}),
-						createVNode($setup["AcuFormRow"], { label: "故事总纲卷数" }, {
+						createVNode($setup["AcuFormRow"], {
+							label: "故事总纲卷数",
+							hint: "故事总纲预计分多少卷推进，影响总纲子代理的整体节奏规划。"
+						}, {
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.settingsDraft.storyArcVolumePlan = $event) },
-								[..._cache[76] || (_cache[76] = [
+								[..._cache[43] || (_cache[43] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -171292,7 +171360,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						}),
 						$setup.settingsDraft.storyArcVolumePlan === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
 							key: 0,
-							label: "自定义总纲卷数"
+							label: "自定义总纲卷数",
+							hint: "1–50 的整数。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								modelValue: $setup.settingsDraft.customStoryArcVolumeCount,
@@ -171305,7 +171374,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						})) : createCommentVNode("v-if", true),
 						$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
 							key: 1,
-							label: "最少轮次"
+							label: "最少轮次",
+							hint: "1–50 的整数，且不能大于最多轮次。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								modelValue: $setup.settingsDraft.customTurnMin,
@@ -171318,7 +171388,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						})) : createCommentVNode("v-if", true),
 						$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
 							key: 2,
-							label: "最多轮次"
+							label: "最多轮次",
+							hint: "1–50 的整数。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								modelValue: $setup.settingsDraft.customTurnMax,
@@ -171329,210 +171400,10 @@ Expected function or array of functions, received type ${typeof value}.`
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
-						createVNode($setup["AcuFormRow"], { label: "连续高压轮上限：跨阶段累计多少轮没有日常/余波轮就强制安排一轮，0 为不作要求。每阶段的松紧由大纲自选的节奏形态决定，这里只兜底极端情况" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.maxConsecutivePressureTurns,
-								"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
-								type: "number",
-								min: 0,
-								max: $setup.maxConsecutivePressureTurnsMax
-							}, null, 8, ["modelValue", "max"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "自动阶段上限" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.maxAutomaticStages,
-								"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
-								type: "number",
-								min: 1
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "正文重试次数" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.generationRetryLimit,
-								"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "正文最低 token 数：酒馆生成低于该值视为截断或出错并自动重试，0 为不检查" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.minGenerationTokens,
-								"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.minGenerationTokens = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "内部 AI 重试次数" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.internalAiRetryLimit,
-								"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "轮次延迟（秒）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.loopDelaySeconds,
-								"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "重试延迟（秒）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.retryDelaySeconds,
-								"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "总时长（分钟，0 为不设总时长）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.totalDurationMinutes,
-								"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "正文可读窗口楼数：只有最近这么多 AI 楼层能被 Agent 读取/搜索，更早剧情走纪要回溯（0 为不开放正文读取）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.storyWindowFloors,
-								"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "正文目录尾部全文楼数：最近几楼直接注入全文作承接锚点，其余窗口内楼层只进目录按需调阅" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.storyTailFloors,
-								"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.storyTailFloors = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "会话自动总结阈值（token）：按主 Agent 实际读取的完整上下文统计（含提示词、工具结果与子代理报告），超过后在下一轮开始前把最早轮次浓缩成交接报告，0 为不总结" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentHistoryTokenBudget,
-								"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
-								type: "number",
-								min: 0
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "读取预算：一次规划内 read/search 结果的累计 token 上限；填正整数，或形如 30% 的百分比（按总结阈值折算）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentReadTokenBudget,
-								"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.agentReadTokenBudget = $event),
-								type: "text"
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "精读兜底额度（token）：上下文临近总结阈值时，仍放行不超过该大小的小额精准读取" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentReadFallbackTokens,
-								"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.agentReadFallbackTokens = $event),
-								type: "number",
-								min: 1
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "终审读取预算：发送前终审独立可用的 read/search token 上限；填正整数，或形如 50% 的百分比（按总结阈值折算）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.finalReview.readTokenBudget,
-								"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.finalReview.readTokenBudget = $event),
-								type: "text"
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "终审额外读取轮数：终审首轮之外允许追加 read/search 的次数（0 为只使用固定证据）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.finalReview.maxExtraReads,
-								"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.finalReview.maxExtraReads = $event),
-								type: "number",
-								min: 0,
-								max: 10
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "主 Agent 迭代上限：一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentRunBudget.maxIterations,
-								"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
-								type: "number",
-								min: 1,
-								max: 30
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "派工总数上限：一次规划内最多派出多少个子代理任务（0 为禁止派工）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentRunBudget.maxDelegations,
-								"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
-								type: "number",
-								min: 0,
-								max: 20
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "单代理派工上限：同一个子代理在一次规划内最多被派几次" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentRunBudget.maxSameAgent,
-								"onUpdate:modelValue": _cache[24] || (_cache[24] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
-								type: "number",
-								min: 1,
-								max: 10
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "并发派工上限：同一波次最多同时运行几个子代理" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentRunBudget.maxConcurrent,
-								"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
-								type: "number",
-								min: 1,
-								max: 6
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "读取批次上限：主 Agent 一次规划内 read/search 工具批次的次数上限（0 为禁止读取）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentRunBudget.maxReads,
-								"onUpdate:modelValue": _cache[26] || (_cache[26] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
-								type: "number",
-								min: 0,
-								max: 30
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "子代理工具轮上限：子代理首轮之外还允许几轮 read/search 追加读取（0 为只靠固定注入与派工种子）" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.agentRunBudget.maxExtraReads,
-								"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
-								type: "number",
-								min: 0,
-								max: 10
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "循环标签" }, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.loopTags,
-								"onUpdate:modelValue": _cache[28] || (_cache[28] = ($event) => $setup.settingsDraft.loopTags = $event),
-								type: "text"
-							}, null, 8, ["modelValue"])]),
-							_: 1
-						}),
-						createVNode($setup["AcuFormRow"], { label: "API 预设（全局默认）" }, {
+						createVNode($setup["AcuFormRow"], {
+							label: "API 预设（全局默认）",
+							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。"
+						}, {
 							default: withCtx(() => [createVNode($setup["AcuSelect"], {
 								options: $setup.continuationApiPresetOptions,
 								"model-value": $setup.continuationApiPresetValue,
@@ -171545,66 +171416,416 @@ Expected function or array of functions, received type ${typeof value}.`
 							])]),
 							_: 1
 						}),
-						(openBlock(), createElementBlock(
-							Fragment,
-							null,
-							renderList($setup.agentChannelRoles, (channel) => {
-								return createVNode($setup["AcuFormRow"], {
-									key: channel.role,
-									label: `渠道 · ${channel.label}`
-								}, {
-									default: withCtx(() => [createVNode($setup["AcuSelect"], {
-										options: $setup.agentChannelOptions,
-										"model-value": $setup.agentChannelValue(channel.role),
-										"onUpdate:modelValue": (value) => $setup.applyAgentChannel(channel.role, value)
-									}, null, 8, [
-										"options",
-										"model-value",
-										"onUpdate:modelValue"
-									])]),
-									_: 2
-								}, 1032, ["label"]);
-							}),
-							64
-							/* STABLE_FRAGMENT */
-						))
+						createVNode($setup["AcuFormRow"], {
+							label: "总时长（分钟）",
+							hint: "到点后自动停止任务，0 为不限时。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.totalDurationMinutes,
+								"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						})
 					]),
 					createBaseVNode("div", _hoisted_5$d, [createVNode($setup["AcuCheckbox"], {
 						modelValue: $setup.settingsDraft.outlinePreview,
-						"onUpdate:modelValue": _cache[29] || (_cache[29] = ($event) => $setup.settingsDraft.outlinePreview = $event),
+						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.outlinePreview = $event),
 						label: "大纲产出后先预览再执行"
 					}, null, 8, ["modelValue"]), createVNode($setup["AcuCheckbox"], {
 						modelValue: $setup.settingsDraft.finalReview.enabled,
-						"onUpdate:modelValue": _cache[30] || (_cache[30] = ($event) => $setup.settingsDraft.finalReview.enabled = $event),
+						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.finalReview.enabled = $event),
 						label: "启用发送前世界书终审"
 					}, null, 8, ["modelValue"])]),
-					_cache[77] || (_cache[77] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-continuation-page__meta" },
-						"终审默认关闭；开启后会额外调用 final-reviewer，优先依据本轮命中的世界书条目，并使用独立读取预算与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。",
-						-1
-						/* CACHED */
-					)),
-					createVNode($setup["AcuRulePairList"], {
-						modelValue: $setup.settingsDraft.contextExtractRules,
-						"onUpdate:modelValue": _cache[31] || (_cache[31] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
-						label: "上下文提取规则"
-					}, null, 8, ["modelValue"]),
-					createVNode($setup["AcuRulePairList"], {
-						modelValue: $setup.settingsDraft.contextExcludeRules,
-						"onUpdate:modelValue": _cache[32] || (_cache[32] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
-						label: "上下文排除规则"
-					}, null, 8, ["modelValue"]),
+					createBaseVNode("div", _hoisted_6$c, [
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "运行与重试",
+							meta: $setup.runGroupMeta,
+							expanded: $setup.isGroupExpanded("run"),
+							"body-id": "acu-continuation-group-run",
+							onToggle: _cache[18] || (_cache[18] = ($event) => $setup.toggleGroup("run"))
+						}, {
+							default: withCtx(() => [createBaseVNode("div", _hoisted_7$a, [
+								createVNode($setup["AcuFormRow"], {
+									label: "自动阶段上限",
+									hint: "连续自动推进多少个阶段后暂停，等待你确认。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.maxAutomaticStages,
+										"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
+										type: "number",
+										min: 1
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "正文重试次数",
+									hint: "酒馆生成失败或被判定截断时最多重试几次。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.generationRetryLimit,
+										"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "正文最低 token 数",
+									hint: "酒馆生成低于该值视为截断或出错并自动重试，0 为不检查。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.minGenerationTokens,
+										"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.minGenerationTokens = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "内部 AI 重试次数",
+									hint: "Agent 自身调用 API 失败时的重试次数。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.internalAiRetryLimit,
+										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "轮次延迟（秒）",
+									hint: "每轮正文完成后等待多久再开始下一轮。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.loopDelaySeconds,
+										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "重试延迟（秒）",
+									hint: "失败后等待多久再重试；遇到 429 限流可适当调大。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.retryDelaySeconds,
+										"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "连续高压轮上限",
+									hint: "跨阶段累计多少轮没有日常/余波轮就强制安排一轮，0 为不作要求。每阶段的松紧由大纲自选的节奏形态决定，这里只兜底极端情况。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.maxConsecutivePressureTurns,
+										"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
+										type: "number",
+										min: 0,
+										max: $setup.maxConsecutivePressureTurnsMax
+									}, null, 8, ["modelValue", "max"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "循环标签",
+									hint: "逗号分隔；正文中缺少任一标签就视为生成失败并重试。留空不检查。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.loopTags,
+										"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.loopTags = $event),
+										type: "text"
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								})
+							])]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "正文读取与上下文",
+							meta: $setup.contextGroupMeta,
+							expanded: $setup.isGroupExpanded("context"),
+							"body-id": "acu-continuation-group-context",
+							onToggle: _cache[24] || (_cache[24] = ($event) => $setup.toggleGroup("context"))
+						}, {
+							default: withCtx(() => [createBaseVNode("div", _hoisted_8$a, [
+								createVNode($setup["AcuFormRow"], {
+									label: "正文可读窗口楼数",
+									hint: "只有最近这么多 AI 楼层能被 Agent 读取/搜索，更早剧情走纪要回溯；0 为不开放正文读取。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.storyWindowFloors,
+										"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "正文目录尾部全文楼数",
+									hint: "最近几楼直接注入全文作承接锚点，其余窗口内楼层只进目录按需调阅。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.storyTailFloors,
+										"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.storyTailFloors = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "会话自动总结阈值（token）",
+									hint: "按主 Agent 实际读取的完整上下文统计（含提示词、工具结果与子代理报告），超过后在下一轮开始前把最早轮次浓缩成交接报告；0 为不总结。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentHistoryTokenBudget,
+										"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
+										type: "number",
+										min: 0
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "读取预算",
+									hint: "一次规划内 read/search 结果的累计 token 上限；填正整数，或形如 30% 的百分比（按总结阈值折算）。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentReadTokenBudget,
+										"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.agentReadTokenBudget = $event),
+										type: "text"
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "精读兜底额度（token）",
+									hint: "上下文临近总结阈值时，仍放行不超过该大小的小额精准读取。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentReadFallbackTokens,
+										"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.agentReadFallbackTokens = $event),
+										type: "number",
+										min: 1
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								})
+							])]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "Agent 运行预算",
+							meta: $setup.budgetGroupMeta,
+							expanded: $setup.isGroupExpanded("budget"),
+							"body-id": "acu-continuation-group-budget",
+							onToggle: _cache[31] || (_cache[31] = ($event) => $setup.toggleGroup("budget"))
+						}, {
+							default: withCtx(() => [createBaseVNode("div", _hoisted_9$9, [
+								createVNode($setup["AcuFormRow"], {
+									label: "主 Agent 迭代上限",
+									hint: "一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）。范围 1–30。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentRunBudget.maxIterations,
+										"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
+										type: "number",
+										min: 1,
+										max: 30
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "派工总数上限",
+									hint: "一次规划内最多派出多少个子代理任务，0 为禁止派工。范围 0–20。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentRunBudget.maxDelegations,
+										"onUpdate:modelValue": _cache[26] || (_cache[26] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
+										type: "number",
+										min: 0,
+										max: 20
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "单代理派工上限",
+									hint: "同一个子代理在一次规划内最多被派几次。范围 1–10。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentRunBudget.maxSameAgent,
+										"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
+										type: "number",
+										min: 1,
+										max: 10
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "并发派工上限",
+									hint: "同一波次最多同时运行几个子代理；API 限流严格时调小。范围 1–6。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentRunBudget.maxConcurrent,
+										"onUpdate:modelValue": _cache[28] || (_cache[28] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
+										type: "number",
+										min: 1,
+										max: 6
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "读取批次上限",
+									hint: "主 Agent 一次规划内 read/search 工具批次的次数上限，0 为禁止读取。范围 0–30。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentRunBudget.maxReads,
+										"onUpdate:modelValue": _cache[29] || (_cache[29] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
+										type: "number",
+										min: 0,
+										max: 30
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "子代理工具轮上限",
+									hint: "子代理首轮之外还允许几轮 read/search 追加读取，0 为只靠固定注入与派工种子。范围 0–10。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.agentRunBudget.maxExtraReads,
+										"onUpdate:modelValue": _cache[30] || (_cache[30] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
+										type: "number",
+										min: 0,
+										max: 10
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								})
+							])]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "发送前终审",
+							meta: $setup.finalReviewGroupMeta,
+							expanded: $setup.isGroupExpanded("finalReview"),
+							"body-id": "acu-continuation-group-final-review",
+							onToggle: _cache[34] || (_cache[34] = ($event) => $setup.toggleGroup("finalReview"))
+						}, {
+							default: withCtx(() => [createBaseVNode("div", _hoisted_10$9, [createVNode($setup["AcuFormRow"], {
+								label: "终审读取预算",
+								hint: "发送前终审独立可用的 read/search token 上限；填正整数，或形如 50% 的百分比（按总结阈值折算）。"
+							}, {
+								default: withCtx(() => [createVNode($setup["AcuInput"], {
+									modelValue: $setup.settingsDraft.finalReview.readTokenBudget,
+									"onUpdate:modelValue": _cache[32] || (_cache[32] = ($event) => $setup.settingsDraft.finalReview.readTokenBudget = $event),
+									type: "text"
+								}, null, 8, ["modelValue"])]),
+								_: 1
+							}), createVNode($setup["AcuFormRow"], {
+								label: "终审额外读取轮数",
+								hint: "终审首轮之外允许追加 read/search 的次数，0 为只使用固定证据。范围 0–10。"
+							}, {
+								default: withCtx(() => [createVNode($setup["AcuInput"], {
+									modelValue: $setup.settingsDraft.finalReview.maxExtraReads,
+									"onUpdate:modelValue": _cache[33] || (_cache[33] = ($event) => $setup.settingsDraft.finalReview.maxExtraReads = $event),
+									type: "number",
+									min: 0,
+									max: 10
+								}, null, 8, ["modelValue"])]),
+								_: 1
+							})]), _cache[44] || (_cache[44] = createBaseVNode(
+								"p",
+								{ class: "acu-v2-continuation-page__meta" },
+								"终审默认关闭；开启后会额外调用 final-reviewer，优先依据本轮命中的世界书条目，并使用独立读取预算与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。",
+								-1
+								/* CACHED */
+							))]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "各 Agent 渠道",
+							meta: $setup.channelGroupMeta,
+							expanded: $setup.isGroupExpanded("channels"),
+							"body-id": "acu-continuation-group-channels",
+							onToggle: _cache[35] || (_cache[35] = ($event) => $setup.toggleGroup("channels"))
+						}, {
+							default: withCtx(() => [_cache[45] || (_cache[45] = createBaseVNode(
+								"p",
+								{ class: "acu-v2-continuation-page__meta" },
+								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审查类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。",
+								-1
+								/* CACHED */
+							)), createBaseVNode("div", _hoisted_11$9, [(openBlock(), createElementBlock(
+								Fragment,
+								null,
+								renderList($setup.agentChannelRoles, (channel) => {
+									return createVNode($setup["AcuFormRow"], {
+										key: channel.role,
+										label: channel.label
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuSelect"], {
+											options: $setup.agentChannelOptions,
+											"model-value": $setup.agentChannelValue(channel.role),
+											"onUpdate:modelValue": (value) => $setup.applyAgentChannel(channel.role, value)
+										}, null, 8, [
+											"options",
+											"model-value",
+											"onUpdate:modelValue"
+										])]),
+										_: 2
+									}, 1032, ["label"]);
+								}),
+								64
+								/* STABLE_FRAGMENT */
+							))])]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "上下文提取与排除规则",
+							meta: $setup.rulesGroupMeta,
+							expanded: $setup.isGroupExpanded("rules"),
+							"body-id": "acu-continuation-group-rules",
+							onToggle: _cache[38] || (_cache[38] = ($event) => $setup.toggleGroup("rules"))
+						}, {
+							default: withCtx(() => [
+								_cache[46] || (_cache[46] = createBaseVNode(
+									"p",
+									{ class: "acu-v2-continuation-page__meta" },
+									"提取规则只保留正文中匹配「起始–结束」标记之间的内容；排除规则则把匹配段落剔除。两者都为空时使用完整正文。",
+									-1
+									/* CACHED */
+								)),
+								createVNode($setup["AcuRulePairList"], {
+									modelValue: $setup.settingsDraft.contextExtractRules,
+									"onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+									label: "上下文提取规则"
+								}, null, 8, ["modelValue"]),
+								createVNode($setup["AcuRulePairList"], {
+									modelValue: $setup.settingsDraft.contextExcludeRules,
+									"onUpdate:modelValue": _cache[37] || (_cache[37] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+									label: "上下文排除规则"
+								}, null, 8, ["modelValue"])
+							]),
+							_: 1
+						}, 8, ["meta", "expanded"])
+					]),
 					$setup.settingsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_6$c,
+						_hoisted_12$9,
 						toDisplayString($setup.settingsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
 					$setup.settingsNotice ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_7$a,
+						_hoisted_13$7,
 						toDisplayString($setup.settingsNotice),
 						1
 						/* TEXT */
@@ -171620,17 +171841,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。"
 		}, {
 			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_8$a, [
+				createBaseVNode("div", _hoisted_14$7, [
 					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
-						default: withCtx(() => [..._cache[78] || (_cache[78] = [createTextVNode(
+						default: withCtx(() => [..._cache[47] || (_cache[47] = [createTextVNode(
 							"导出提示词 JSON",
 							-1
 							/* CACHED */
 						)])]),
 						_: 1
 					}),
-					createVNode($setup["AcuButton"], { onClick: _cache[33] || (_cache[33] = ($event) => $setup.promptImportInput?.click()) }, {
-						default: withCtx(() => [..._cache[79] || (_cache[79] = [createTextVNode(
+					createVNode($setup["AcuButton"], { onClick: _cache[39] || (_cache[39] = ($event) => $setup.promptImportInput?.click()) }, {
+						default: withCtx(() => [..._cache[48] || (_cache[48] = [createTextVNode(
 							"导入提示词 JSON",
 							-1
 							/* CACHED */
@@ -171653,250 +171874,133 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				$setup.promptIoError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_9$9,
+					_hoisted_15$7,
 					toDisplayString($setup.promptIoError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.promptIoNotice ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_10$9,
+					_hoisted_16$6,
 					toDisplayString($setup.promptIoNotice),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				_cache[88] || (_cache[88] = createBaseVNode(
-					"h3",
+				createBaseVNode("div", _hoisted_17$5, [(openBlock(), createElementBlock(
+					Fragment,
 					null,
-					"大纲子代理（outline-architect）提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.outlinePrompt,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[34] || (_cache[34] = (position) => $setup.addPrompt("outlinePrompt", position)),
-					onDelete: _cache[35] || (_cache[35] = (index) => $setup.deletePrompt("outlinePrompt", index)),
-					onMove: _cache[36] || (_cache[36] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
-					onUpdate: _cache[37] || (_cache[37] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_11$9, [createVNode($setup["AcuButton"], { onClick: _cache[38] || (_cache[38] = ($event) => $setup.restorePrompt("outline")) }, {
-					default: withCtx(() => [..._cache[80] || (_cache[80] = [createTextVNode(
-						"恢复大纲提示词默认值",
-						-1
-						/* CACHED */
-					)])]),
+					renderList($setup.promptGroups, (group) => {
+						return createVNode($setup["AcuDisclosureGroup"], {
+							key: group.key,
+							class: "acu-v2-continuation-page__group",
+							label: group.title,
+							meta: $setup.promptGroupMeta(group.key),
+							expanded: $setup.isGroupExpanded(`prompt:${group.key}`),
+							"body-id": `acu-continuation-prompt-${group.key}`,
+							onToggle: ($event) => $setup.toggleGroup(`prompt:${group.key}`)
+						}, {
+							default: withCtx(() => [
+								createVNode($setup["AcuPromptSegments"], {
+									segments: $setup.promptList(group.key) ?? [],
+									"role-options": $setup.continuationRoleOptions,
+									"show-slot": false,
+									"show-enabled": true,
+									"allow-move": true,
+									onAdd: (position) => $setup.addPrompt(group.key, position),
+									onDelete: (index) => $setup.deletePrompt(group.key, index),
+									onMove: (index, delta) => $setup.movePrompt(group.key, index, delta),
+									onUpdate: (index, patch) => $setup.updatePrompt(group.key, index, patch)
+								}, null, 8, [
+									"segments",
+									"onAdd",
+									"onDelete",
+									"onMove",
+									"onUpdate"
+								]),
+								createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(group.kind) }, {
+									default: withCtx(() => [createTextVNode(
+										toDisplayString(group.restoreLabel),
+										1
+										/* TEXT */
+									)]),
+									_: 2
+								}, 1032, ["onClick"])]),
+								group.note ? (openBlock(), createElementBlock(
+									"p",
+									_hoisted_19$5,
+									toDisplayString(group.note),
+									1
+									/* TEXT */
+								)) : createCommentVNode("v-if", true)
+							]),
+							_: 2
+						}, 1032, [
+							"label",
+							"meta",
+							"expanded",
+							"body-id",
+							"onToggle"
+						]);
+					}),
+					64
+					/* STABLE_FRAGMENT */
+				)), createVNode($setup["AcuDisclosureGroup"], {
+					class: "acu-v2-continuation-page__group",
+					label: "占位符速查",
+					meta: "参考",
+					expanded: $setup.isGroupExpanded("prompt:reference"),
+					"body-id": "acu-continuation-prompt-reference",
+					onToggle: _cache[40] || (_cache[40] = ($event) => $setup.toggleGroup("prompt:reference"))
+				}, {
+					default: withCtx(() => [..._cache[49] || (_cache[49] = [
+						createBaseVNode(
+							"h4",
+							{ class: "acu-v2-continuation-page__subheading" },
+							"大纲子代理",
+							-1
+							/* CACHED */
+						),
+						createBaseVNode(
+							"p",
+							{ class: "acu-v2-continuation-page__meta" },
+							"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$STORY_OVERVIEW（事件概览：纪要表概览全量 + 召回 AM 码展开纪要）、$STORY_TAIL（尾部楼层全文）、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。",
+							-1
+							/* CACHED */
+						),
+						createBaseVNode(
+							"h4",
+							{ class: "acu-v2-continuation-page__subheading" },
+							"主 Agent",
+							-1
+							/* CACHED */
+						),
+						createBaseVNode(
+							"p",
+							{ class: "acu-v2-continuation-page__meta" },
+							"$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。正文三层注入：$STORY_OVERVIEW（事件概览：纪要表概览全量，召回 AM 码展开对应纪要）、$STORY_TAIL（尾部楼层全文）、$STORY_CATALOG（楼层纯索引：楼号、字数、开头摘录、读取地址）。目录与状态占位符：$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录，含 token 估算）、$WORLDBOOK_HITS（本轮语境命中的世界书条目提示）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$HISTORY_UNSETTLED（未结算正文全量，仅 AI 楼层）、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。",
+							-1
+							/* CACHED */
+						),
+						createBaseVNode(
+							"h4",
+							{ class: "acu-v2-continuation-page__subheading" },
+							"各子代理",
+							-1
+							/* CACHED */
+						),
+						createBaseVNode(
+							"p",
+							{ class: "acu-v2-continuation-page__meta" },
+							"子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。",
+							-1
+							/* CACHED */
+						)
+					])]),
 					_: 1
-				})]),
-				_cache[89] || (_cache[89] = createBaseVNode(
-					"p",
-					{ class: "acu-v2-continuation-page__meta" },
-					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$STORY_OVERVIEW（事件概览：纪要表概览全量 + 召回 AM 码展开纪要）、$STORY_TAIL（尾部楼层全文）、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。",
-					-1
-					/* CACHED */
-				)),
-				_cache[90] || (_cache[90] = createBaseVNode(
-					"h3",
-					null,
-					"主 Agent 提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.main,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[39] || (_cache[39] = (position) => $setup.addPrompt("main", position)),
-					onDelete: _cache[40] || (_cache[40] = (index) => $setup.deletePrompt("main", index)),
-					onMove: _cache[41] || (_cache[41] = (index, delta) => $setup.movePrompt("main", index, delta)),
-					onUpdate: _cache[42] || (_cache[42] = (index, patch) => $setup.updatePrompt("main", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_12$9, [createVNode($setup["AcuButton"], { onClick: _cache[43] || (_cache[43] = ($event) => $setup.restorePrompt("agent_main")) }, {
-					default: withCtx(() => [..._cache[81] || (_cache[81] = [createTextVNode(
-						"恢复主 Agent 默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[91] || (_cache[91] = createBaseVNode(
-					"p",
-					{ class: "acu-v2-continuation-page__meta" },
-					"$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。正文三层注入：$STORY_OVERVIEW（事件概览：纪要表概览全量，召回 AM 码展开对应纪要）、$STORY_TAIL（尾部楼层全文）、$STORY_CATALOG（楼层纯索引：楼号、字数、开头摘录、读取地址）。目录与状态占位符：$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录，含 token 估算）、$WORLDBOOK_HITS（本轮语境命中的世界书条目提示）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$HISTORY_UNSETTLED（未结算正文全量，仅 AI 楼层）、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。",
-					-1
-					/* CACHED */
-				)),
-				_cache[92] || (_cache[92] = createBaseVNode(
-					"h3",
-					null,
-					"故事总纲子代理（arc-architect）提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.arcArchitect,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[44] || (_cache[44] = (position) => $setup.addPrompt("arcArchitect", position)),
-					onDelete: _cache[45] || (_cache[45] = (index) => $setup.deletePrompt("arcArchitect", index)),
-					onMove: _cache[46] || (_cache[46] = (index, delta) => $setup.movePrompt("arcArchitect", index, delta)),
-					onUpdate: _cache[47] || (_cache[47] = (index, patch) => $setup.updatePrompt("arcArchitect", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_13$7, [createVNode($setup["AcuButton"], { onClick: _cache[48] || (_cache[48] = ($event) => $setup.restorePrompt("agent_arc")) }, {
-					default: withCtx(() => [..._cache[82] || (_cache[82] = [createTextVNode(
-						"恢复总纲子代理默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[93] || (_cache[93] = createBaseVNode(
-					"h3",
-					null,
-					"伏笔与认知维护子代理提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.maintainer,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[49] || (_cache[49] = (position) => $setup.addPrompt("maintainer", position)),
-					onDelete: _cache[50] || (_cache[50] = (index) => $setup.deletePrompt("maintainer", index)),
-					onMove: _cache[51] || (_cache[51] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
-					onUpdate: _cache[52] || (_cache[52] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_14$7, [createVNode($setup["AcuButton"], { onClick: _cache[53] || (_cache[53] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
-					default: withCtx(() => [..._cache[83] || (_cache[83] = [createTextVNode(
-						"恢复维护子代理默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[94] || (_cache[94] = createBaseVNode(
-					"h3",
-					null,
-					"主线推进策划子代理提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.mainlinePlanner,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[54] || (_cache[54] = (position) => $setup.addPrompt("mainlinePlanner", position)),
-					onDelete: _cache[55] || (_cache[55] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
-					onMove: _cache[56] || (_cache[56] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
-					onUpdate: _cache[57] || (_cache[57] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_15$7, [createVNode($setup["AcuButton"], { onClick: _cache[58] || (_cache[58] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
-					default: withCtx(() => [..._cache[84] || (_cache[84] = [createTextVNode(
-						"恢复主线策划默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[95] || (_cache[95] = createBaseVNode(
-					"h3",
-					null,
-					"伏笔与节拍策划子代理提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.beatPlanner,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[59] || (_cache[59] = (position) => $setup.addPrompt("beatPlanner", position)),
-					onDelete: _cache[60] || (_cache[60] = (index) => $setup.deletePrompt("beatPlanner", index)),
-					onMove: _cache[61] || (_cache[61] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
-					onUpdate: _cache[62] || (_cache[62] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_16$6, [createVNode($setup["AcuButton"], { onClick: _cache[63] || (_cache[63] = ($event) => $setup.restorePrompt("agent_beat")) }, {
-					default: withCtx(() => [..._cache[85] || (_cache[85] = [createTextVNode(
-						"恢复节拍策划默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[96] || (_cache[96] = createBaseVNode(
-					"h3",
-					null,
-					"连续性审查子代理提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.reviewer,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[64] || (_cache[64] = (position) => $setup.addPrompt("reviewer", position)),
-					onDelete: _cache[65] || (_cache[65] = (index) => $setup.deletePrompt("reviewer", index)),
-					onMove: _cache[66] || (_cache[66] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
-					onUpdate: _cache[67] || (_cache[67] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_17$5, [createVNode($setup["AcuButton"], { onClick: _cache[68] || (_cache[68] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
-					default: withCtx(() => [..._cache[86] || (_cache[86] = [createTextVNode(
-						"恢复审查子代理默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[97] || (_cache[97] = createBaseVNode(
-					"h3",
-					null,
-					"发送前终审子代理提示词",
-					-1
-					/* CACHED */
-				)),
-				createVNode($setup["AcuPromptSegments"], {
-					segments: $setup.settingsDraft.agentPrompts.finalReviewer,
-					"role-options": $setup.continuationRoleOptions,
-					"show-slot": false,
-					"show-enabled": true,
-					"allow-move": true,
-					onAdd: _cache[69] || (_cache[69] = (position) => $setup.addPrompt("finalReviewer", position)),
-					onDelete: _cache[70] || (_cache[70] = (index) => $setup.deletePrompt("finalReviewer", index)),
-					onMove: _cache[71] || (_cache[71] = (index, delta) => $setup.movePrompt("finalReviewer", index, delta)),
-					onUpdate: _cache[72] || (_cache[72] = (index, patch) => $setup.updatePrompt("finalReviewer", index, patch))
-				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuButton"], { onClick: _cache[73] || (_cache[73] = ($event) => $setup.restorePrompt("agent_final_reviewer")) }, {
-					default: withCtx(() => [..._cache[87] || (_cache[87] = [createTextVNode(
-						"恢复终审子代理默认值",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})]),
-				_cache[98] || (_cache[98] = createBaseVNode(
-					"p",
-					{ class: "acu-v2-continuation-page__meta" },
-					"子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。",
-					-1
-					/* CACHED */
-				)),
+				}, 8, ["expanded"])]),
 				$setup.settingsError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_19$5,
+					_hoisted_20$4,
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
@@ -171906,7 +172010,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-c41b05b7"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-9fb8f746"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
@@ -176070,13 +176174,13 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-data-mgmt-page__cleanup-section",
 	"aria-labelledby": "acu-cleanup-auto-title"
     };
-    const _hoisted_30 = { class: "acu-v2-data-mgmt-page__form-stack" };
-    const _hoisted_31 = {
+    const _hoisted_30$1 = { class: "acu-v2-data-mgmt-page__form-stack" };
+    const _hoisted_31$1 = {
 	class: "acu-v2-data-mgmt-page__cleanup-section",
 	"aria-labelledby": "acu-cleanup-manual-title"
     };
-    const _hoisted_32 = { class: "acu-v2-data-mgmt-page__meta" };
-    const _hoisted_33 = { class: "acu-v2-data-mgmt-page__form-grid" };
+    const _hoisted_32$1 = { class: "acu-v2-data-mgmt-page__meta" };
+    const _hoisted_33$1 = { class: "acu-v2-data-mgmt-page__form-grid" };
     const _hoisted_34 = { class: "acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup" };
     function _sfc_render$g(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$g, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
@@ -176655,7 +176759,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					" 自动清理 ",
 					-1
 					/* CACHED */
-				)), createBaseVNode("div", _hoisted_30, [createVNode($setup["AcuFormRow"], {
+				)), createBaseVNode("div", _hoisted_30$1, [createVNode($setup["AcuFormRow"], {
 					label: "保留数据层数",
 					hint: "自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。"
 				}, {
@@ -176669,7 +176773,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["disabled", "model-value"])]),
 					_: 1
 				})])]),
-				createBaseVNode("section", _hoisted_31, [
+				createBaseVNode("section", _hoisted_31$1, [
 					_cache[34] || (_cache[34] = createBaseVNode(
 						"h3",
 						{
@@ -176682,12 +176786,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					)),
 					createBaseVNode(
 						"p",
-						_hoisted_32,
+						_hoisted_32$1,
 						" 当前聊天 " + toDisplayString($setup.flow.aiMessageCount.value) + " 个 AI 楼层 · 将处理：" + toDisplayString($setup.flow.rangeLabel.value),
 						1
 						/* TEXT */
 					),
-					createBaseVNode("div", _hoisted_33, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_33$1, [createVNode($setup["AcuFormRow"], {
 						label: "起始楼层",
 						hint: "从第N个楼层 AI 回复开始，留空为第 1 层。"
 					}, {
@@ -178434,6 +178538,502 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
+    const RETRY_LATER = '稍等片刻后重试一次，很多问题是服务商偶发抖动。';
+    const SEE_PREVIOUS_LOG = '查看紧邻的上一条日志，通常会给出更具体的原因（HTTP 状态码、解析失败的内容等）。';
+    const EXPORT_LOGS = '如果反复出现，点日志面板的「导出」把日志连同复现步骤反馈给作者。';
+    const RULES = [
+        // ─── 主动中止 ───
+        {
+            id: 'aborted',
+            test: /request aborted|aborterror|the user aborted|已中止|已取消|用户取消|用户中止|abort signal|signal is aborted/,
+            summary: '请求被主动中止（通常是你点了停止、切换了聊天，或关闭了面板）。',
+            steps: [
+                '如果是你主动停止的，这条记录可以忽略。',
+                '如果没有手动停止却出现中止，检查网络是否在请求途中断开，然后重试。',
+            ],
+        },
+        // ─── 浏览器存储 ───
+        {
+            id: 'storage-quota',
+            test: /quotaexceeded|exceeded the quota|storage.*full|out of storage|存储空间不足|localstorage/,
+            summary: '浏览器本地存储空间不足，设置或缓存写不进去。',
+            steps: [
+                '到「数据管理」页清理不再需要的历史数据或导入缓存。',
+                '清理浏览器里其他站点 / 扩展占用的存储空间。',
+                '隐私 / 无痕模式下存储会被限制，请改用普通窗口。',
+            ],
+        },
+        // ─── 启动 / 宿主 ───
+        {
+            id: 'startup',
+            test: /等待 ?sillytavern|core apis not available|getcontext\(\)|not ready after|jquery|#extensionsmenu|failed to initialize\. core|插件启动|插件无法启动|host doc|failed to load one or more critical apis/,
+            summary: '插件初始化失败：没有等到酒馆核心接口就绪。',
+            steps: [
+                '刷新页面（Ctrl+F5）。',
+                '确认酒馆版本不过旧，并在扩展管理里启用了本插件。',
+                '同时安装了很多扩展时加载会变慢，稍等加载完成再打开插件；仍失败请检查浏览器控制台里其他扩展的报错。',
+            ],
+        },
+        {
+            id: 'ui-not-ready',
+            test: /ui元素未初始化|cannot find .*dom|popup dom|ui surface is not registered|界面未初始化/,
+            summary: '界面还没加载完成就触发了操作。',
+            steps: [
+                '关闭并重新打开插件面板。',
+                '仍出现时刷新页面。',
+            ],
+        },
+        // ─── 酒馆侧 API 配置 ───
+        {
+            id: 'tavern-profile',
+            test: /未选择酒馆连接预设|无法找到id为|没有配置api|没有选择预设|连接预设.*(不存在|无效|失败)|connection profile/,
+            summary: '所选的酒馆「连接预设」不可用：被删除、改名，或里面没有配置 API。',
+            steps: [
+                '打开酒馆左上角「API 连接」→「连接配置」，确认该预设存在且已经绑定 API 与预设。',
+                '回到本插件「API」页重新选择一次连接预设并保存。',
+                '也可以改用「自定义 API」，直接填写地址、密钥和模型。',
+            ],
+        },
+        {
+            id: 'tavern-helper-missing',
+            test: /tavernhelper\.generateraw|未检测到酒馆助手|主api生成不可用|connectionmanagerrequestservice 不可用|请检查酒馆版本|js-slash-runner/,
+            summary: '缺少「酒馆助手（TavernHelper）」扩展，或酒馆版本过旧，无法调用酒馆主 API。',
+            steps: [
+                '在酒馆扩展管理里安装并启用「酒馆助手（JS-Slash-Runner）」。',
+                '把酒馆更新到最新版本后刷新页面。',
+                '临时方案：到「API」页改用「自定义 API」，不依赖酒馆主 API。',
+            ],
+        },
+        {
+            id: 'api-config-incomplete',
+            test: /url或模型未配置|缺少 ?embedding ?endpoint|缺少 ?embedding ?model|rerank endpoint 为空|rerank model 为空|api.*(未配置|未填写)|endpoint.*(为空|missing)|未配置api/,
+            summary: 'API 配置不完整：接口地址、密钥或模型名有一项没填。',
+            steps: [
+                '到「API」页补全该预设的接口地址、API Key 和模型名，然后保存预设。',
+                '向量相关报错请到「交火模式」页检查 Embedding / Rerank 的地址与模型。',
+                '确认对应功能（填表 / 剧情推进 / 续写）选择的是这个已补全的预设。',
+            ],
+        },
+        // ─── HTTP 状态码 ───
+        {
+            id: 'http-401',
+            test: /\b401\b|unauthorized|invalid[ _-]?api[ _-]?key|incorrect api key|invalid x-api-key|authentication[ _-]?error|invalid_api_key|no auth credentials|令牌无效|密钥无效|api key 无效/,
+            summary: 'API 拒绝了请求：密钥无效、填错或已过期（401）。',
+            steps: [
+                '到「API」页打开当前使用的预设，检查 API Key 是否完整、有没有多余空格。',
+                '确认这个 Key 对应的服务商与接口地址一致（比如 OpenAI 的 Key 不能填到 Claude 地址）。',
+                '如果是中转站，登录站点确认 Key 仍然有效、余额充足。',
+            ],
+        },
+        {
+            id: 'http-403',
+            test: /\b403\b|forbidden|permission[ _-]?denied|not allowed to|access denied|无权访问|权限不足/,
+            summary: '服务商拒绝访问（403）：Key 没有权限，或请求来源被限制。',
+            steps: [
+                '确认该 Key 有权使用所选模型（部分模型需要单独开通）。',
+                '一些服务商会拒绝来自浏览器的直连请求：把该 API 预设改为走「酒馆连接预设」由酒馆后端转发。',
+                '如果是中转站，联系站方确认账号是否被限制。',
+            ],
+        },
+        {
+            id: 'http-404',
+            test: /\b404\b|not[ _]found.*(model|endpoint|route)|model.*(not found|does not exist|not exist)|no such model|unknown model|invalid model|模型不存在|找不到模型/,
+            summary: '接口地址或模型名不存在（404）。',
+            steps: [
+                '到「API」页检查接口地址是否完整，不同服务商对结尾是否带 /v1 要求不同，按服务商文档填写。',
+                '点击「拉取模型列表」重新选择模型，避免手写模型名拼错。',
+                '确认服务商仍然提供该模型，旧模型可能已下线。',
+            ],
+        },
+        {
+            id: 'http-429',
+            test: /\b429\b|rate[ _-]?limit|too many requests|quota|insufficient (balance|funds)|exceeded your current|resource[ _-]?exhausted|请求过于频繁|限流|额度不足|余额不足|欠费|配额/,
+            summary: '请求过于频繁被限流，或账户额度 / 余额已用完（429）。',
+            steps: [
+                '先等 1–2 分钟再重试；短时间内连续重试只会让限流更久。',
+                '登录服务商后台确认余额与额度是否充足。',
+                '在对应功能的设置里调大「重试延迟」/「轮次延迟」，或调小并发数、批处理大小。',
+                '智能续写会连续发起大量请求，请使用支持高 RPM 的 API，不要用公益站。',
+            ],
+        },
+        {
+            id: 'http-5xx',
+            test: /\b(500|502|503|504|529)\b|bad gateway|service unavailable|gateway time-?out|internal server error|overloaded|server error|服务器错误|服务不可用|上游.*(错误|超时)/,
+            summary: '服务商服务器出错或过载（5xx），不是本地配置问题。',
+            steps: [
+                RETRY_LATER,
+                '持续出现时换一个模型或换一条 API 渠道。',
+                '如果用的是中转站，查看站方公告确认是否在维护。',
+            ],
+        },
+        {
+            id: 'context-length',
+            test: /context[ _-]?length|maximum context|context window|too many tokens|tokens? (exceed|limit|too long)|prompt is too long|input is too long|max_tokens.*(exceed|invalid)|超出.*(上下文|长度)|上下文.*(超限|过长)|token.*超/,
+            summary: '发送给模型的内容太长，超出了模型的上下文上限。',
+            steps: [
+                '填表：到「填表规则」把「批处理大小」/「上下文楼层数」调小一些。',
+                '智能续写：调小「正文可读窗口楼数」「会话自动总结阈值」与各项读取预算。',
+                '换用上下文更大的模型，或精简过长的自定义提示词与世界书条目。',
+            ],
+        },
+        {
+            id: 'http-400',
+            test: /\b400\b|bad request|invalid_request_error|unsupported parameter|invalid parameter|unrecognized request argument|unknown parameter|参数错误|请求参数无效/,
+            summary: '服务商认为请求内容有问题（400）：通常是模型名或某个参数不被支持。',
+            steps: [
+                '到「API」页确认模型名拼写正确，最好通过「拉取模型列表」选择。',
+                '如果调整过 temperature / top_p 等高级参数或开启了「严格 JSON」，先恢复默认再试。',
+                '换一个模型试试：部分模型不支持 system 角色或某些字段。',
+            ],
+        },
+        // ─── 网络 ───
+        {
+            id: 'network-cors',
+            test: /\bcors\b|cross-origin|access-control-allow-origin|preflight/,
+            summary: '浏览器跨域被拦截（CORS）：该服务商不允许网页直接调用。',
+            steps: [
+                '把该 API 预设改为走「酒馆连接预设」，由酒馆后端代为转发。',
+                '或者使用支持浏览器直连的中转服务。',
+            ],
+        },
+        {
+            id: 'network',
+            test: /failed to fetch|networkerror|network error|net::err|econnrefused|econnreset|enotfound|etimedout|getaddrinfo|socket hang up|fetch failed|timed? ?out|timeout|无法连接|连接被拒绝|网络错误|请求超时|超时/,
+            summary: '网络连不上目标服务，或者等待响应超时。',
+            steps: [
+                '检查本机网络、代理 / VPN 是否正常；把接口地址复制到浏览器地址栏，确认能打开。',
+                '超时多半是模型响应太慢：稍后重试，或换用响应更快的模型。',
+                '酒馆若部署在远程服务器，确认服务器本身能访问该 API 地址。',
+            ],
+        },
+        // ─── 内容审查 ───
+        {
+            id: 'content-filter',
+            test: /content[ _-]?filter|content_policy|safety (setting|filter|system)|blocked by|flagged|prohibited_content|recitation|内容审查|违规内容|敏感内容|安全策略/,
+            summary: '内容被服务商的安全审查拦截，模型拒绝或截断了输出。',
+            steps: [
+                '换用审查宽松的模型或渠道，官方渠道对成人 / 暴力内容通常很严格。',
+                '调整提示词或世界书里触发审查的表述。',
+                '如果是填表被拦截，可先手动填表跳过这一层。',
+            ],
+        },
+        // ─── 模板变量 / 表达式 ───
+        {
+            id: 'template-vars',
+            test: /\[条件模板\]|\[db\.(expr|rand|calc|max|min)\]|\[orm\]|模板变量|evaluatecondexpression|表达式执行失败|随机数生成失败/,
+            summary: '世界书 / 提示词里的模板变量表达式（{{db.xxx}} 或条件模板）解析失败。',
+            steps: [
+                '打开对应的世界书条目或提示词，检查日志里给出的表达式写法：括号、引号是否配对，表名列名是否正确。',
+                '对照插件自带的语法参考（syntax-reference）核对函数名与参数。',
+                '先把表达式替换成一个最简单的例子确认能跑通，再逐步加复杂度。',
+            ],
+        },
+        // ─── 表格结构 ───
+        {
+            id: 'column-not-found',
+            test: /column .* not found|no such column|column mapping is unavailable|absent from canonical headers|cannot find .* column|column index .* out of bounds|找不到.*列|列.*不存在|列名.*无效/,
+            summary: '找不到指定的列：列名与当前表头不一致。',
+            steps: [
+                '到「高级工具」→ SQL 控制台点「查看表结构」，核对准确的列名。',
+                '提示词或模板中的列名要与表格表头完全一致（包含空格、括号）。',
+                '如果刚改过模板，打开表格编辑器重新保存一次，让结构同步到数据库。',
+            ],
+        },
+        {
+            id: 'table-not-found',
+            test: /table "[^"]*" not found|no such table|has no content|表格?\s*[「"“]?[^\s」"”]{0,40}[」"”]?\s*(不存在|未找到)|找不到表|表不存在/,
+            summary: '找不到指定的表格（或表格是空的）。',
+            steps: [
+                '检查表名是否拼写正确；中文表名和英文表名不能混用。',
+                '确认当前聊天已经加载了表格模板（在「填表规则」页能看到表格列表）。',
+                '到「高级工具」→ SQL 控制台点「查看所有表」，用列出的表名重试。',
+            ],
+        },
+        {
+            id: 'row-out-of-bounds',
+            test: /row index .* out of bounds|row_id not found|cannot (modify|delete) header row|行号.*越界|行.*不存在|找不到.*行/,
+            summary: '行号越界，或找不到对应的行。',
+            steps: [
+                '行号从 1 开始计数，0 是表头不能修改或删除。',
+                '打开表格编辑器确认目标行确实存在。',
+                '如果是 AI 生成的编辑指令，多为模型幻觉，重试即可。',
+            ],
+        },
+        // ─── SQLite ───
+        {
+            id: 'sqlite-init',
+            test: /sql\.js|wasm|sqlite.*(初始化|init|加载|load).*(失败|fail|异常)|sqlite runtime unavailable|fallback 到原生|回退.*原生|sqlite mode expected|exported no table data|sqlite provider|sqlite 不可用/,
+            summary: 'SQLite 引擎加载失败，已自动回退到原生（JSON）存储模式。',
+            steps: [
+                '刷新酒馆页面（Ctrl+F5）后重试。',
+                '检查浏览器的广告拦截 / 安全插件是否拦截了 .wasm 文件下载。',
+                '重新安装本插件以确保文件完整。回退期间表格仍可用，只是 SQL 相关功能受限。',
+            ],
+        },
+        {
+            id: 'sql-constraint',
+            test: /unique constraint|constraint failed|not null constraint|foreign key constraint|datatype mismatch|主键冲突|唯一约束/,
+            summary: 'SQL 写入违反了表约束（重复主键 / 空值 / 类型不匹配）。',
+            steps: [
+                '插入的行与已有行 row_id 重复：改用 UPDATE，或让系统自动分配 row_id。',
+                '如果是 AI 生成的语句，重试一次让模型重新生成。',
+                '手写 SQL 时确认列类型与填入值一致。',
+            ],
+        },
+        {
+            id: 'sql-syntax',
+            test: /syntax error|near "|sql.*(执行失败|failed|error)|sqlite_error|execute failed|批量执行失败|快照 sql/,
+            summary: 'SQL 语句执行失败：语法有误，或引用了不存在的表 / 列。',
+            steps: [
+                '如果是你在 SQL 控制台手写的语句，检查拼写、引号是否配对、语句末尾的分号。',
+                '如果是 AI 生成的语句，多为模型输出错误，重试即可。',
+                '用「查看所有表」「查看表结构」核对表名与列名。',
+            ],
+        },
+        // ─── 表格数据状态 ───
+        {
+            id: 'table-data-not-loaded',
+            test: /tabledata is not loaded|currentjsontabledata_acu is (null|not (loaded|available))|chat history is empty|表格数据.*(未加载|不可用)|聊天记录为空|获取聊天记录失败|save aborted/,
+            summary: '表格数据尚未加载，或当前聊天里还没有消息。',
+            steps: [
+                '确认当前聊天里至少有一条 AI 回复；全新的聊天需要先发一条消息。',
+                '切换一次聊天或刷新页面，让表格重新加载。',
+                '如果反复出现，到「数据管理」页检查当前聊天的表格状态。',
+            ],
+        },
+        {
+            id: 'table-persist-model',
+            test: /table persistence requires|direct unsafe writes/,
+            summary: '有脚本尝试绕过安全写入通道直接改表，被插件拒绝。',
+            steps: [
+                '这通常来自第三方脚本或旧版角色卡脚本；本插件数据未受影响。',
+                '请脚本作者改用本插件公开的表格 API（updateCell / updateRow / executeSql 等）。',
+            ],
+        },
+        // ─── 设置持久化 ───
+        {
+            id: 'settings-persist',
+            test: /failed to (save|persist|load).*settings|settings.*(save|load|persist).*fail|保存.*(设置|预设|配置|阈值|次数|频率|大小|并发|楼层|保留数).*失败|设置.*(保存|读取).*失败|failed to load or parse settings/,
+            summary: '设置保存或读取失败。',
+            steps: [
+                '刷新页面后重新修改并保存一次。',
+                '如果读取失败已回落到默认值，到「数据管理」页用之前导出的配置恢复。',
+                '检查浏览器存储是否已满或被隐私设置限制。',
+            ],
+        },
+        // ─── JSON / 解析 ───
+        {
+            id: 'json-import',
+            // 第二组限定「文件导入」语境：TemplateAssistant 这类 AI 草稿解析失败不算导入问题。
+            test: haystack => /json|parse|解析|unexpected token|unexpected end/.test(haystack)
+                && /导入|import|\[模板|模板文件|template (file|json)|预设|preset|主题|theme|合并配置/.test(haystack),
+            summary: '导入的文件不是合法 JSON，或结构与本插件要求的不一致。',
+            steps: [
+                '确认导入的是本插件「导出」功能生成的 JSON 文件，而不是别的插件或手改过的文件。',
+                '用记事本打开文件，检查是否被截断、开头结尾的大括号是否完整。',
+                '如果是从聊天 / 网页复制的内容，先粘贴到编辑器里检查再另存为 .json。',
+            ],
+        },
+        {
+            id: 'json-ai-output',
+            test: /json.*(解析|parse|sanitiz)|parse.*json|unexpected token|unexpected end of json|is not valid json|sanitization|loose row object|failed to parse (command|or apply)|解析\/应用失败|解析失败|解析出错|解析异常/,
+            summary: 'AI 输出的 JSON / 指令格式不正确，插件解析不了。',
+            steps: [
+                '这通常是模型偶发抖动，直接重试一次。',
+                '频繁出现时换用指令遵循更好的模型（更大参数、或官方渠道）。',
+                '填表可到「填表规则」开启「严格 JSON」或降低 temperature；检查自定义提示词是否要求了额外的输出格式。',
+            ],
+        },
+        {
+            id: 'empty-response',
+            test: /未返回预期的文本响应|返回无效响应|unknown response format|failed to parse response|empty response|响应为空|返回为空|空响应|返回内容为空|已返回 null/,
+            summary: 'AI 返回了空内容或无法识别的格式。',
+            steps: [
+                RETRY_LATER,
+                '可能触发了服务商的内容审查（部分模型被拦截时会静默返回空），换个模型或调整内容再试。',
+                '如果开启了流式输出，到「API」页关闭该预设的流式后再试。',
+            ],
+        },
+        // ─── 向量 / 存储 / 检查点 ───
+        {
+            id: 'vector',
+            test: /embedding|rerank|向量|vector/,
+            summary: '交火模式（向量索引）相关操作失败。',
+            steps: [
+                '到「交火模式」页检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',
+                SEE_PREVIOUS_LOG,
+                '可先暂时关闭交火模式，不影响填表等基础功能。',
+            ],
+        },
+        {
+            id: 'storage-mode-switch',
+            test: /存储模式.*(切换|回滚)|storage mode (switch|rollback)/,
+            summary: '存储模式切换失败，已尝试回滚到切换前的状态。',
+            steps: [
+                '确认当前没有正在进行的填表或续写任务，等它们结束后再切换。',
+                '刷新页面后再试一次。',
+                '切换前建议先到「数据管理」页导出一份数据备份。',
+            ],
+        },
+        {
+            id: 'checkpoint-replay',
+            test: /checkpoint|v2 replay|replay|snapshot hydrate|数据库重建|回放|增量更新流程失败|merge base|compaction|staging|provisional|临时根/,
+            summary: '表格历史回放 / 检查点处理失败，当前显示的数据可能不是最新。',
+            steps: [
+                '先刷新页面，或切出去再切回这个聊天，让插件重新加载。',
+                '到「数据管理」页导出一份数据备份，避免后续操作覆盖。',
+                '使用「数据管理」里的诊断 / 恢复工具修复；仍不行请导出日志反馈。',
+            ],
+        },
+        // ─── 世界书 ───
+        {
+            id: 'worldbook',
+            test: /world ?book|lorebook|世界书|worldbook/,
+            summary: '世界书读取或写入失败。',
+            steps: [
+                '确认当前角色已绑定世界书，且目标世界书没有被删除或重命名。',
+                '打开酒馆自带的世界书面板，确认该世界书能正常打开。',
+                '如果刚改过绑定，到对应功能页重新选择一次目标世界书。',
+            ],
+        },
+        // ─── 外部脚本调用 ───
+        {
+            id: 'deprecated-api',
+            test: /已弃用|deprecated/,
+            summary: '有其他脚本调用了本插件已弃用的接口。',
+            steps: [
+                '不影响本插件正常运行，可以忽略。',
+                '如果是你自己写的脚本，按日志提示改用新接口；如果是角色卡或第三方扩展，联系其作者更新。',
+            ],
+        },
+        {
+            id: 'invalid-params',
+            test: /must be (an? )?(array|object|non-empty|integer)|is required\.?|invalid (params|input|rowindex|preset name|context settings)|received invalid input|参数无效|参数不合法/,
+            summary: '外部脚本调用本插件接口时传入的参数不合法。',
+            steps: [
+                '这类调用通常来自角色卡脚本或其他扩展，本插件数据不受影响。',
+                '如果是你写的脚本，按提示修正参数类型（例如 rowIndex 必须是从 1 开始的整数）。',
+                '否则联系脚本作者处理。',
+            ],
+        },
+        {
+            id: 'preset-not-found',
+            test: /preset .* not found|预设.*(不存在|未找到|找不到)|无法找到.*预设|找不到.*预设/,
+            summary: '找不到指定名称的预设。',
+            steps: [
+                '检查预设名是否拼写正确，注意大小写和空格。',
+                '到对应功能页（API / 填表规则 / 剧情推进）确认该预设仍然存在，可能已被删除或改名。',
+                '重新选择一次预设并保存。',
+            ],
+        },
+        {
+            id: 'callback',
+            test: /callback/,
+            summary: '第三方脚本注册到本插件的回调函数执行出错。',
+            steps: [
+                '错误来自其他脚本内部，不影响本插件的填表结果。',
+                '联系该脚本 / 角色卡作者排查。',
+            ],
+        },
+        // ─── 按功能模块兜底 ───
+        {
+            id: 'template',
+            test: /模板|template/,
+            summary: '表格模板处理失败。',
+            steps: [
+                '确认导入的是本插件导出的模板 JSON，且每张表都有表头行。',
+                '到「填表规则」页重新选择模板，或恢复默认模板后再导入自定义模板。',
+                SEE_PREVIOUS_LOG,
+            ],
+        },
+        {
+            id: 'content-optimization',
+            test: /正文优化|正文替换|content replace|reoptimize|重新优化/,
+            summary: '正文替换 / 重新优化执行失败。',
+            steps: [
+                SEE_PREVIOUS_LOG,
+                '到「正文替换」页确认规则与所选 API 预设是否正常。',
+                '可先临时关闭该功能验证问题是否消失。',
+            ],
+        },
+        {
+            id: 'plot',
+            test: /剧情推进|plot/,
+            summary: '剧情推进任务执行失败。',
+            steps: [
+                '到「剧情推进」页检查所选 API 预设与世界书配置。',
+                '如果刚编辑过任务提示词，检查占位符（$ 开头）是否拼写正确。',
+                SEE_PREVIOUS_LOG,
+            ],
+        },
+        {
+            id: 'import',
+            test: /外部导入|import|导入/,
+            summary: '外部导入流程失败。',
+            steps: [
+                '确认导入文件为 UTF-8 编码，且分块大小设置不要过大。',
+                '导入前确认已选择目标世界书。',
+                '到「外部导入」页先「清空导入缓存」再重试。',
+            ],
+        },
+        {
+            id: 'fill',
+            test: /manual (refill|update)|重填|填表|update process|\bbatch\b|merge|合并|fillfirstlayer|数据加载|triggerupdate|manualupdate/,
+            summary: '填表 / 数据合并流程失败。',
+            steps: [
+                SEE_PREVIOUS_LOG,
+                '到「填表规则」把批处理大小调小后重试。',
+                '可到「填表工作台」使用手动填表 / 重填。',
+            ],
+        },
+        {
+            id: 'continuation',
+            test: /continuation|续写|agent/,
+            summary: 'Agent / 智能续写相关操作出错。',
+            steps: [
+                '智能续写：查看「智能续写」页会话流里的错误提示，并展开「各 Agent 渠道」确认每个渠道的 API 预设仍然存在。',
+                '如果是超预算 / 超时，调大对应的预算或延迟；实在卡住可「一键清空」后重新开始任务。',
+                'Agent 世界书：到「Agent」页确认接管模式与目标世界书配置。',
+            ],
+        },
+        {
+            id: 'export',
+            test: /导出|export/,
+            summary: '导出失败。',
+            steps: [
+                '检查浏览器是否拦截了文件下载（地址栏右侧通常有提示）。',
+                '刷新页面后重试；仍失败请导出日志反馈。',
+            ],
+        },
+        // ─── 通用兜底 ───
+        {
+            id: 'generic',
+            test: () => true,
+            summary: '插件内部操作失败。',
+            steps: [
+                '先重试一次；如果和 API 相关，稍等片刻再试。',
+                '刷新页面后再做一次同样的操作。',
+                EXPORT_LOGS,
+            ],
+        },
+    ];
+    /**
+     * 为一条日志匹配处理建议。只对 error 级日志给建议；warn / debug 返回 null。
+     */
+    function resolveLogErrorHint(entry) {
+        if (entry.level !== 'error')
+            return null;
+        const haystack = `${entry.tag} ${entry.message}`.toLowerCase();
+        for (const rule of RULES) {
+            const matched = typeof rule.test === 'function' ? rule.test(haystack) : rule.test.test(haystack);
+            if (matched)
+                return { id: rule.id, summary: rule.summary, steps: rule.steps };
+        }
+        return null;
+    }
+    /** 供测试与调试使用：规则 ID 列表（按匹配优先级排序）。 */
+    const LOG_ERROR_HINT_RULE_IDS = RULES.map(rule => rule.id);
+
     /**
      * useLogViewer — 运行日志页业务流编排
      *
@@ -178620,7 +179220,7 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             logs: {
                 title: "运行日志",
-                description: "查看数据库运行日志。筛选仅影响显示和导出。未看到日志请开启采集后重试。",
+                description: "查看数据库运行日志。筛选仅影响显示和导出。未看到日志请开启采集后重试。每条报错下方都附有处理建议，点「怎么处理」可展开具体步骤。",
             },
         },
     };
@@ -178632,6 +179232,21 @@ Expected function or array of functions, received type ${typeof value}.`
             const sqlFlow = useSqlConsole();
             const logFlow = useLogViewer();
             const logListRef = ref(null);
+            /** 日志条目不可变，按 id 缓存匹配结果，避免每次列表刷新都对全部条目重跑规则。 */
+            const hintCache = new Map();
+            function hintFor(entry) {
+                if (entry.level !== 'error')
+                    return null;
+                let hint = hintCache.get(entry.id);
+                if (hint === undefined) {
+                    hint = resolveLogErrorHint(entry);
+                    // 缓冲区上限 2000 条，缓存略大于它即可；超出时整体清掉，避免长期运行后无限增长。
+                    if (hintCache.size > 4000)
+                        hintCache.clear();
+                    hintCache.set(entry.id, hint);
+                }
+                return hint;
+            }
             const panelNavItems = [
                 { id: 'advanced-tools-sql-panel', label: advancedToolsCopy.nav.sql },
                 { id: 'advanced-tools-log-panel', label: advancedToolsCopy.nav.logs },
@@ -178677,14 +179292,14 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             onMounted(sqlFlow.refresh);
             watch(() => logFlow.visibleLogs.value.length, scrollLogListToTop, { flush: 'post' });
-            const __returned__ = { sqlFlow, logFlow, logListRef, panelNavItems, onSqlEditorKeydown, formatTime, formatSqlCell, logLevelVariant, setLogLevelFilter, scrollLogListToTop, AcuBadge, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuSelect, AcuTextarea, AcuToggle, get advancedToolsCopy() { return advancedToolsCopy; } };
+            const __returned__ = { sqlFlow, logFlow, logListRef, hintCache, hintFor, panelNavItems, onSqlEditorKeydown, formatTime, formatSqlCell, logLevelVariant, setLogLevelFilter, scrollLogListToTop, AcuBadge, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuSelect, AcuTextarea, AcuToggle, get advancedToolsCopy() { return advancedToolsCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-advanced-tools-page[data-v-e9e14f38] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-advanced-tools-page__sql-panel[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-panel[data-v-e9e14f38] {\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__quick-actions[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-actions[data-v-e9e14f38] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-textarea[data-v-e9e14f38] {\n  font-family: var(--acu-font-mono);\n  min-height: 210px;\n  white-space: pre;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-e9e14f38] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  align-items: center;\n  justify-content: flex-end;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-e9e14f38] {\n  margin-left: auto;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n}\n.acu-v2-advanced-tools-page__sql-status--success[data-v-e9e14f38] {\n  color: var(--acu-success);\n}\n.acu-v2-advanced-tools-page__sql-status--warning[data-v-e9e14f38] {\n  color: var(--acu-warning);\n}\n.acu-v2-advanced-tools-page__sql-status--error[data-v-e9e14f38] {\n  color: var(--acu-danger);\n}\n.acu-v2-advanced-tools-page__sql-result-section[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__sql-history-section[data-v-e9e14f38] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-v2-advanced-tools-page__sql-history-section[data-v-e9e14f38] {\n  padding-top: 12px;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-v2-advanced-tools-page__section-title[data-v-e9e14f38] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-advanced-tools-page__empty[data-v-e9e14f38] {\n  min-height: 96px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  text-align: center;\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__empty--compact[data-v-e9e14f38] {\n  min-height: 72px;\n}\n.acu-v2-advanced-tools-page__empty--log[data-v-e9e14f38] {\n  min-height: 180px;\n  border: 0;\n}\n.acu-v2-advanced-tools-page__sql-table-wrap[data-v-e9e14f38] {\n  max-height: 330px;\n  overflow: auto;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-result-table[data-v-e9e14f38] {\n  width: 100%;\n  border-collapse: collapse;\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__sql-result-table td[data-v-e9e14f38] {\n  max-width: 300px;\n  padding: 7px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-e9e14f38] {\n  position: sticky;\n  top: 0;\n  z-index: 1;\n  background: var(--acu-bg-1);\n  color: var(--acu-text-1);\n  font-weight: 600;\n}\n.acu-v2-advanced-tools-page__sql-result-table tbody tr[data-v-e9e14f38]:nth-child(even) {\n  background: color-mix(in srgb, var(--acu-text-3) 5%, transparent);\n}\n.acu-v2-advanced-tools-page__cell-null[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__empty-cell[data-v-e9e14f38] {\n  color: var(--acu-text-3);\n  font-style: italic;\n}\n.acu-v2-advanced-tools-page__sql-result-meta[data-v-e9e14f38] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  text-align: right;\n}\n.acu-v2-advanced-tools-page__sql-error[data-v-e9e14f38] {\n  margin: 0;\n  min-height: 96px;\n  padding: 12px;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-danger) 8%, transparent);\n  color: var(--acu-danger);\n  white-space: pre-wrap;\n  word-break: break-word;\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-e9e14f38] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n  align-items: stretch;\n}\n.acu-v2-advanced-tools-page__keyword-row[data-v-e9e14f38] {\n  grid-column: 1 / -1;\n}\n.acu-v2-advanced-tools-page__log-control-row[data-v-e9e14f38] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-e9e14f38] {\n  min-width: 0;\n  display: flex;\n  flex-wrap: wrap;\n  gap: 10px 14px;\n  align-items: center;\n  justify-content: space-between;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] {\n  width: max-content;\n  max-width: 100%;\n  display: grid;\n  grid-template-columns: max-content max-content;\n  gap: 10px 18px;\n  align-items: center;\n  justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] .acu-toggle {\n  width: max-content;\n  max-width: none;\n  min-width: max-content;\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] .acu-toggle__label {\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__hint[data-v-e9e14f38] {\n  max-width: 100%;\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-list[data-v-e9e14f38] {\n  overflow: auto;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-e9e14f38] {\n  max-height: 230px;\n}\n.acu-v2-advanced-tools-page__log-list[data-v-e9e14f38] {\n  min-height: 360px;\n  max-height: 58vh;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-row[data-v-e9e14f38] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n  align-items: baseline;\n  padding: 7px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-e9e14f38] {\n  display: flex;\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n  padding-block: 9px;\n  border: 0;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: transparent;\n  color: inherit;\n  cursor: pointer;\n  font: inherit;\n  text-align: left;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-advanced-tools-page__log-row[data-v-e9e14f38] {\n  display: flex;\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n  padding-block: 9px;\n}\n.acu-v2-advanced-tools-page__log-meta[data-v-e9e14f38] {\n  min-width: 0;\n  display: flex;\n  flex-wrap: wrap;\n  gap: 6px 8px;\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-history-meta[data-v-e9e14f38] {\n  flex-wrap: nowrap;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-e9e14f38]:last-child,\n.acu-v2-advanced-tools-page__log-row[data-v-e9e14f38]:last-child {\n  border-bottom: 0;\n}\n.acu-v2-advanced-tools-page__sql-history-item--failure[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-row--error[data-v-e9e14f38] {\n  background: color-mix(in srgb, var(--acu-danger) 7%, transparent);\n}\n.acu-v2-advanced-tools-page__log-row--warn[data-v-e9e14f38] {\n  background: color-mix(in srgb, var(--acu-warning) 6%, transparent);\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-e9e14f38]:hover {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-e9e14f38]:focus-visible {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n  outline: none;\n}\n.acu-v2-advanced-tools-page__log-time[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-tag[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-message[data-v-e9e14f38] {\n  min-width: 0;\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-advanced-tools-page__log-time[data-v-e9e14f38] {\n  color: var(--acu-text-3);\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-tag[data-v-e9e14f38] {\n  flex: 1 1 180px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-message[data-v-e9e14f38] {\n  margin: 0;\n  color: var(--acu-text-1);\n  white-space: pre-wrap;\n  word-break: break-word;\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__log-body[data-v-e9e14f38] {\n  display: block;\n  width: 100%;\n}\n@media (max-width: 1080px) {\n.acu-v2-advanced-tools-page[data-v-e9e14f38] {\n    padding: 14px;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-e9e14f38] {\n    justify-content: stretch;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-e9e14f38] {\n    width: 100%;\n    margin-left: 0;\n    text-align: right;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-e9e14f38] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-e9e14f38] {\n    align-items: stretch;\n    flex-direction: column;\n    justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] {\n    align-self: flex-start;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-e9e14f38],\n  .acu-v2-advanced-tools-page__log-row[data-v-e9e14f38] {\n    padding-inline: 9px;\n}\n}\n", "src/presentation-v2/pages/AdvancedToolsPage.vue#style-0-e9e14f38");
-    var AdvancedToolsPage_vue_vue_type_style_index_0_scoped_e9e14f38_lang = null;
+    injectSfcStyle("\n.acu-v2-advanced-tools-page[data-v-bd030ca2] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-advanced-tools-page__sql-panel[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-panel[data-v-bd030ca2] {\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__quick-actions[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-actions[data-v-bd030ca2] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-textarea[data-v-bd030ca2] {\n  font-family: var(--acu-font-mono);\n  min-height: 210px;\n  white-space: pre;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-bd030ca2] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  align-items: center;\n  justify-content: flex-end;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-bd030ca2] {\n  margin-left: auto;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n}\n.acu-v2-advanced-tools-page__sql-status--success[data-v-bd030ca2] {\n  color: var(--acu-success);\n}\n.acu-v2-advanced-tools-page__sql-status--warning[data-v-bd030ca2] {\n  color: var(--acu-warning);\n}\n.acu-v2-advanced-tools-page__sql-status--error[data-v-bd030ca2] {\n  color: var(--acu-danger);\n}\n.acu-v2-advanced-tools-page__sql-result-section[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__sql-history-section[data-v-bd030ca2] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-v2-advanced-tools-page__sql-history-section[data-v-bd030ca2] {\n  padding-top: 12px;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-v2-advanced-tools-page__section-title[data-v-bd030ca2] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-advanced-tools-page__empty[data-v-bd030ca2] {\n  min-height: 96px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  text-align: center;\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__empty--compact[data-v-bd030ca2] {\n  min-height: 72px;\n}\n.acu-v2-advanced-tools-page__empty--log[data-v-bd030ca2] {\n  min-height: 180px;\n  border: 0;\n}\n.acu-v2-advanced-tools-page__sql-table-wrap[data-v-bd030ca2] {\n  max-height: 330px;\n  overflow: auto;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-result-table[data-v-bd030ca2] {\n  width: 100%;\n  border-collapse: collapse;\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__sql-result-table td[data-v-bd030ca2] {\n  max-width: 300px;\n  padding: 7px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-bd030ca2] {\n  position: sticky;\n  top: 0;\n  z-index: 1;\n  background: var(--acu-bg-1);\n  color: var(--acu-text-1);\n  font-weight: 600;\n}\n.acu-v2-advanced-tools-page__sql-result-table tbody tr[data-v-bd030ca2]:nth-child(even) {\n  background: color-mix(in srgb, var(--acu-text-3) 5%, transparent);\n}\n.acu-v2-advanced-tools-page__cell-null[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__empty-cell[data-v-bd030ca2] {\n  color: var(--acu-text-3);\n  font-style: italic;\n}\n.acu-v2-advanced-tools-page__sql-result-meta[data-v-bd030ca2] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  text-align: right;\n}\n.acu-v2-advanced-tools-page__sql-error[data-v-bd030ca2] {\n  margin: 0;\n  min-height: 96px;\n  padding: 12px;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-danger) 8%, transparent);\n  color: var(--acu-danger);\n  white-space: pre-wrap;\n  word-break: break-word;\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-bd030ca2] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n  align-items: stretch;\n}\n.acu-v2-advanced-tools-page__keyword-row[data-v-bd030ca2] {\n  grid-column: 1 / -1;\n}\n.acu-v2-advanced-tools-page__log-control-row[data-v-bd030ca2] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-bd030ca2] {\n  min-width: 0;\n  display: flex;\n  flex-wrap: wrap;\n  gap: 10px 14px;\n  align-items: center;\n  justify-content: space-between;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-bd030ca2] {\n  width: max-content;\n  max-width: 100%;\n  display: grid;\n  grid-template-columns: max-content max-content;\n  gap: 10px 18px;\n  align-items: center;\n  justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-bd030ca2] .acu-toggle {\n  width: max-content;\n  max-width: none;\n  min-width: max-content;\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-bd030ca2] .acu-toggle__label {\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__hint[data-v-bd030ca2] {\n  max-width: 100%;\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-list[data-v-bd030ca2] {\n  overflow: auto;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-bd030ca2] {\n  max-height: 230px;\n}\n.acu-v2-advanced-tools-page__log-list[data-v-bd030ca2] {\n  min-height: 360px;\n  max-height: 58vh;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-row[data-v-bd030ca2] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n  align-items: baseline;\n  padding: 7px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-bd030ca2] {\n  display: flex;\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n  padding-block: 9px;\n  border: 0;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: transparent;\n  color: inherit;\n  cursor: pointer;\n  font: inherit;\n  text-align: left;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-advanced-tools-page__log-row[data-v-bd030ca2] {\n  display: flex;\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n  padding-block: 9px;\n}\n.acu-v2-advanced-tools-page__log-meta[data-v-bd030ca2] {\n  min-width: 0;\n  display: flex;\n  flex-wrap: wrap;\n  gap: 6px 8px;\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-history-meta[data-v-bd030ca2] {\n  flex-wrap: nowrap;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-bd030ca2]:last-child,\n.acu-v2-advanced-tools-page__log-row[data-v-bd030ca2]:last-child {\n  border-bottom: 0;\n}\n.acu-v2-advanced-tools-page__sql-history-item--failure[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-row--error[data-v-bd030ca2] {\n  background: color-mix(in srgb, var(--acu-danger) 7%, transparent);\n}\n.acu-v2-advanced-tools-page__log-row--warn[data-v-bd030ca2] {\n  background: color-mix(in srgb, var(--acu-warning) 6%, transparent);\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-bd030ca2]:hover {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-bd030ca2]:focus-visible {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n  outline: none;\n}\n.acu-v2-advanced-tools-page__log-time[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-tag[data-v-bd030ca2],\n.acu-v2-advanced-tools-page__log-message[data-v-bd030ca2] {\n  min-width: 0;\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-advanced-tools-page__log-time[data-v-bd030ca2] {\n  color: var(--acu-text-3);\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-tag[data-v-bd030ca2] {\n  flex: 1 1 180px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-message[data-v-bd030ca2] {\n  margin: 0;\n  color: var(--acu-text-1);\n  white-space: pre-wrap;\n  word-break: break-word;\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__log-body[data-v-bd030ca2] {\n  display: block;\n  width: 100%;\n}\n.acu-v2-advanced-tools-page__log-hint[data-v-bd030ca2] {\n  min-width: 0;\n  margin-top: 2px;\n  border-left: 2px solid color-mix(in srgb, var(--acu-warning) 70%, transparent);\n  border-radius: 0 var(--acu-radius-sm) var(--acu-radius-sm) 0;\n  background: color-mix(in srgb, var(--acu-warning) 6%, var(--acu-bg-1));\n  font-family: var(--acu-font-sans, inherit);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-bd030ca2] {\n  display: flex;\n  align-items: baseline;\n  gap: 6px;\n  padding: 6px 10px;\n  color: var(--acu-text-2);\n  cursor: pointer;\n  list-style: none;\n  user-select: none;\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-bd030ca2]::-webkit-details-marker {\n  display: none;\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-bd030ca2]:hover {\n  background: var(--acu-hover-overlay);\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-bd030ca2]:focus-visible {\n  outline: none;\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-advanced-tools-page__log-hint-icon[data-v-bd030ca2] {\n  flex: 0 0 auto;\n  color: var(--acu-warning);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-advanced-tools-page__log-hint-text[data-v-bd030ca2] {\n  flex: 1 1 auto;\n  min-width: 0;\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__log-hint-toggle[data-v-bd030ca2] {\n  flex: 0 0 auto;\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-caption, 11px);\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-hint-toggle[data-v-bd030ca2]::after {\n  content: ' ▾';\n}\n.acu-v2-advanced-tools-page__log-hint[open] .acu-v2-advanced-tools-page__log-hint-toggle[data-v-bd030ca2]::after {\n  content: ' ▴';\n}\n.acu-v2-advanced-tools-page__log-hint-steps[data-v-bd030ca2] {\n  margin: 0;\n  padding: 2px 10px 8px 30px;\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-hint-steps li[data-v-bd030ca2] {\n  margin: 2px 0;\n  overflow-wrap: anywhere;\n}\n@media (max-width: 1080px) {\n.acu-v2-advanced-tools-page[data-v-bd030ca2] {\n    padding: 14px;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-bd030ca2] {\n    justify-content: stretch;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-bd030ca2] {\n    width: 100%;\n    margin-left: 0;\n    text-align: right;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-bd030ca2] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-bd030ca2] {\n    align-items: stretch;\n    flex-direction: column;\n    justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-bd030ca2] {\n    align-self: flex-start;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-bd030ca2],\n  .acu-v2-advanced-tools-page__log-row[data-v-bd030ca2] {\n    padding-inline: 9px;\n}\n}\n", "src/presentation-v2/pages/AdvancedToolsPage.vue#style-0-bd030ca2");
+    var AdvancedToolsPage_vue_vue_type_style_index_0_scoped_bd030ca2_lang = null;
 
     const _hoisted_1$c = { class: "acu-v2-advanced-tools-page" };
     const _hoisted_2$b = {
@@ -178744,6 +179359,10 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_27$1 = { class: "acu-v2-advanced-tools-page__log-time" };
     const _hoisted_28 = { class: "acu-v2-advanced-tools-page__log-tag" };
     const _hoisted_29 = { class: "acu-v2-advanced-tools-page__log-message acu-v2-advanced-tools-page__log-body" };
+    const _hoisted_30 = ["data-hint-id"];
+    const _hoisted_31 = { class: "acu-v2-advanced-tools-page__log-hint-summary" };
+    const _hoisted_32 = { class: "acu-v2-advanced-tools-page__log-hint-text" };
+    const _hoisted_33 = { class: "acu-v2-advanced-tools-page__log-hint-steps" };
     function _sfc_render$c(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$c, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], {
 		class: "acu-v2-advanced-tools-page__tools-grid",
@@ -179133,36 +179752,83 @@ Expected function or array of functions, received type ${typeof value}.`
 									key: entry.id,
 									class: normalizeClass(["acu-v2-advanced-tools-page__log-row", `acu-v2-advanced-tools-page__log-row--${entry.level}`])
 								},
-								[createBaseVNode("div", _hoisted_26$1, [
+								[
+									createBaseVNode("div", _hoisted_26$1, [
+										createBaseVNode(
+											"span",
+											_hoisted_27$1,
+											toDisplayString($setup.formatTime(entry.timestamp)),
+											1
+											/* TEXT */
+										),
+										createVNode($setup["AcuBadge"], { variant: $setup.logLevelVariant(entry.level) }, {
+											default: withCtx(() => [createTextVNode(
+												toDisplayString(entry.level.toUpperCase()),
+												1
+												/* TEXT */
+											)]),
+											_: 2
+										}, 1032, ["variant"]),
+										createBaseVNode(
+											"span",
+											_hoisted_28,
+											toDisplayString(entry.tag),
+											1
+											/* TEXT */
+										)
+									]),
 									createBaseVNode(
-										"span",
-										_hoisted_27$1,
-										toDisplayString($setup.formatTime(entry.timestamp)),
+										"code",
+										_hoisted_29,
+										toDisplayString(entry.message),
 										1
 										/* TEXT */
 									),
-									createVNode($setup["AcuBadge"], { variant: $setup.logLevelVariant(entry.level) }, {
-										default: withCtx(() => [createTextVNode(
-											toDisplayString(entry.level.toUpperCase()),
+									$setup.hintFor(entry) ? (openBlock(), createElementBlock("details", {
+										key: 0,
+										class: "acu-v2-advanced-tools-page__log-hint",
+										"data-hint-id": $setup.hintFor(entry).id
+									}, [createBaseVNode("summary", _hoisted_31, [
+										_cache[14] || (_cache[14] = createBaseVNode(
+											"i",
+											{
+												class: "fa-solid fa-lightbulb acu-v2-advanced-tools-page__log-hint-icon",
+												"aria-hidden": "true"
+											},
+											null,
+											-1
+											/* CACHED */
+										)),
+										createBaseVNode(
+											"span",
+											_hoisted_32,
+											toDisplayString($setup.hintFor(entry).summary),
 											1
 											/* TEXT */
-										)]),
-										_: 2
-									}, 1032, ["variant"]),
-									createBaseVNode(
-										"span",
-										_hoisted_28,
-										toDisplayString(entry.tag),
-										1
-										/* TEXT */
-									)
-								]), createBaseVNode(
-									"code",
-									_hoisted_29,
-									toDisplayString(entry.message),
-									1
-									/* TEXT */
-								)],
+										),
+										_cache[15] || (_cache[15] = createBaseVNode(
+											"span",
+											{ class: "acu-v2-advanced-tools-page__log-hint-toggle" },
+											"怎么处理",
+											-1
+											/* CACHED */
+										))
+									]), createBaseVNode("ol", _hoisted_33, [(openBlock(true), createElementBlock(
+										Fragment,
+										null,
+										renderList($setup.hintFor(entry).steps, (step, stepIndex) => {
+											return openBlock(), createElementBlock(
+												"li",
+												{ key: stepIndex },
+												toDisplayString(step),
+												1
+												/* TEXT */
+											);
+										}),
+										128
+										/* KEYED_FRAGMENT */
+									))])], 8, _hoisted_30)) : createCommentVNode("v-if", true)
+								],
 								2
 								/* CLASS */
 							);
@@ -179179,7 +179845,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var AdvancedToolsPage = /*#__PURE__*/ _export_sfc(_sfc_main$c, [["render", _sfc_render$c], ["__scopeId", "data-v-e9e14f38"]]);
+    var AdvancedToolsPage = /*#__PURE__*/ _export_sfc(_sfc_main$c, [["render", _sfc_render$c], ["__scopeId", "data-v-bd030ca2"]]);
 
     const developerCopy = {
         panels: {

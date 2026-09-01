@@ -547,6 +547,45 @@ describe('ContinuationPage', () => {
     }
   });
 
+  it('续写设置：常用项直接可见，高级参数与提示词按分组折叠，可展开', async () => {
+    setSettings();
+    setTask();
+    const { app, el } = await mountPage();
+
+    const groups = Array.from(el.querySelectorAll<HTMLElement>('.acu-v2-continuation-page__group'));
+    const labels = groups.map(group => group.querySelector('.acu-disclosure-group__label')?.textContent?.trim());
+    expect(labels).toEqual(expect.arrayContaining([
+      '运行与重试', '正文读取与上下文', 'Agent 运行预算', '发送前终审', '各 Agent 渠道', '上下文提取与排除规则',
+      '主 Agent 提示词', '发送前终审子代理提示词', '占位符速查',
+    ]));
+    // 默认全部收起。
+    for (const group of groups) {
+      expect(group.querySelector('.acu-disclosure-group__header')?.getAttribute('aria-expanded')).toBe('false');
+    }
+    // 折叠态摘要露出关键取值。
+    const metas = groups.map(group => group.querySelector('.acu-disclosure-group__meta')?.textContent?.trim());
+    expect(metas).toEqual(expect.arrayContaining(['阶段上限 6 · 正文重试 3 次', '已关闭', '全部跟随默认', '1/1 段启用']));
+
+    // 常用项在分组外面可直接操作；高级项（如正文可读窗口楼数）折叠在分组里。
+    const topLevelLabels = Array.from(el.querySelectorAll<HTMLElement>('.acu-form-row__label'))
+      .filter(label => !label.closest('.acu-v2-continuation-page__group'))
+      .map(label => label.textContent?.trim());
+    expect(topLevelLabels).toContain('阶段规模');
+    expect(topLevelLabels).toContain('API 预设（全局默认）');
+    expect(topLevelLabels).not.toContain('正文可读窗口楼数');
+    // 长说明改为 hint 小字，不再塞进 label。
+    expect(el.querySelector('.acu-form-row__hint')).not.toBeNull();
+    for (const label of el.querySelectorAll<HTMLElement>('.acu-form-row__label')) {
+      expect((label.textContent ?? '').length).toBeLessThan(24);
+    }
+
+    const runGroup = groups.find(group => group.textContent?.includes('运行与重试'))!;
+    runGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+    await nextTick();
+    expect(runGroup.querySelector('.acu-disclosure-group__header')?.getAttribute('aria-expanded')).toBe('true');
+    app.unmount();
+  });
+
   it('Agent 规划占用时保存返回 busy：显示排队提示并自动重试，落盘后提示消失', async () => {
     vi.useFakeTimers();
     try {

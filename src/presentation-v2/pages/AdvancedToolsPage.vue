@@ -223,6 +223,20 @@
               <span class="acu-v2-advanced-tools-page__log-tag">{{ entry.tag }}</span>
             </div>
             <code class="acu-v2-advanced-tools-page__log-message acu-v2-advanced-tools-page__log-body">{{ entry.message }}</code>
+            <details
+              v-if="hintFor(entry)"
+              class="acu-v2-advanced-tools-page__log-hint"
+              :data-hint-id="hintFor(entry)!.id"
+            >
+              <summary class="acu-v2-advanced-tools-page__log-hint-summary">
+                <i class="fa-solid fa-lightbulb acu-v2-advanced-tools-page__log-hint-icon" aria-hidden="true"></i>
+                <span class="acu-v2-advanced-tools-page__log-hint-text">{{ hintFor(entry)!.summary }}</span>
+                <span class="acu-v2-advanced-tools-page__log-hint-toggle">怎么处理</span>
+              </summary>
+              <ol class="acu-v2-advanced-tools-page__log-hint-steps">
+                <li v-for="(step, stepIndex) in hintFor(entry)!.steps" :key="stepIndex">{{ step }}</li>
+              </ol>
+            </details>
           </div>
         </div>
       </AcuPanel>
@@ -243,14 +257,30 @@ import AcuPanelGrid from '../components/_lib/AcuPanelGrid.vue';
 import AcuSelect from '../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../components/_lib/AcuTextarea.vue';
 import AcuToggle from '../components/_lib/AcuToggle.vue';
-import { type LogLevel } from '../../shared/log-buffer';
+import { type LogEntry, type LogLevel } from '../../shared/log-buffer';
 import { useSqlConsole } from '../composables/useSqlConsole';
+import { type LogErrorHint, resolveLogErrorHint } from '../composables/log-error-hints';
 import { type LogLevelFilter, useLogViewer } from '../composables/useLogViewer';
 import { advancedToolsCopy } from '../copy/advanced-tools-copy';
 
 const sqlFlow = useSqlConsole();
 const logFlow = useLogViewer();
 const logListRef = ref<HTMLElement | null>(null);
+
+/** 日志条目不可变，按 id 缓存匹配结果，避免每次列表刷新都对全部条目重跑规则。 */
+const hintCache = new Map<number, LogErrorHint | null>();
+
+function hintFor(entry: LogEntry): LogErrorHint | null {
+  if (entry.level !== 'error') return null;
+  let hint = hintCache.get(entry.id);
+  if (hint === undefined) {
+    hint = resolveLogErrorHint(entry);
+    // 缓冲区上限 2000 条，缓存略大于它即可；超出时整体清掉，避免长期运行后无限增长。
+    if (hintCache.size > 4000) hintCache.clear();
+    hintCache.set(entry.id, hint);
+  }
+  return hint;
+}
 const panelNavItems = [
   { id: 'advanced-tools-sql-panel', label: advancedToolsCopy.nav.sql },
   { id: 'advanced-tools-log-panel', label: advancedToolsCopy.nav.logs },
@@ -646,6 +676,79 @@ watch(() => logFlow.visibleLogs.value.length, scrollLogListToTop, { flush: 'post
 .acu-v2-advanced-tools-page__log-body {
   display: block;
   width: 100%;
+}
+
+.acu-v2-advanced-tools-page__log-hint {
+  min-width: 0;
+  margin-top: 2px;
+  border-left: 2px solid color-mix(in srgb, var(--acu-warning) 70%, transparent);
+  border-radius: 0 var(--acu-radius-sm) var(--acu-radius-sm) 0;
+  background: color-mix(in srgb, var(--acu-warning) 6%, var(--acu-bg-1));
+  font-family: var(--acu-font-sans, inherit);
+  font-size: var(--acu-font-size-body, 12px);
+  line-height: 1.55;
+}
+
+.acu-v2-advanced-tools-page__log-hint-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  color: var(--acu-text-2);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.acu-v2-advanced-tools-page__log-hint-summary::-webkit-details-marker {
+  display: none;
+}
+
+.acu-v2-advanced-tools-page__log-hint-summary:hover {
+  background: var(--acu-hover-overlay);
+}
+
+.acu-v2-advanced-tools-page__log-hint-summary:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);
+}
+
+.acu-v2-advanced-tools-page__log-hint-icon {
+  flex: 0 0 auto;
+  color: var(--acu-warning);
+  font-size: var(--acu-font-size-caption, 11px);
+}
+
+.acu-v2-advanced-tools-page__log-hint-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.acu-v2-advanced-tools-page__log-hint-toggle {
+  flex: 0 0 auto;
+  color: var(--acu-accent);
+  font-size: var(--acu-font-size-caption, 11px);
+  white-space: nowrap;
+}
+
+.acu-v2-advanced-tools-page__log-hint-toggle::after {
+  content: ' ▾';
+}
+
+.acu-v2-advanced-tools-page__log-hint[open] .acu-v2-advanced-tools-page__log-hint-toggle::after {
+  content: ' ▴';
+}
+
+.acu-v2-advanced-tools-page__log-hint-steps {
+  margin: 0;
+  padding: 2px 10px 8px 30px;
+  color: var(--acu-text-2);
+}
+
+.acu-v2-advanced-tools-page__log-hint-steps li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 1080px) {

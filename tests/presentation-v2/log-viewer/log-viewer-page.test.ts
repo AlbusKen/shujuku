@@ -110,6 +110,31 @@ describe('AdvancedToolsPage log panel', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('error 日志下方附带可展开的处理建议，warn / debug 不带', async () => {
+    const { mount, logBuffer } = await mountAdvancedToolsLogPanel(false, true);
+    logBuffer.clearLogs();
+    logBuffer.pushLog('error', ['[ACU]', '[正文优化] API调用失败: Error: API请求失败: 429 rate limit']);
+    logBuffer.pushLog('warn', ['[ACU]', '[SQL] 一条警告']);
+    await waitForUi(30);
+
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-advanced-tools-page__log-row'));
+    expect(rows.length).toBe(2);
+    const errorRow = rows.find(row => row.classList.contains('acu-v2-advanced-tools-page__log-row--error'))!;
+    const warnRow = rows.find(row => row.classList.contains('acu-v2-advanced-tools-page__log-row--warn'))!;
+
+    const hint = errorRow.querySelector<HTMLDetailsElement>('.acu-v2-advanced-tools-page__log-hint');
+    expect(hint).not.toBeNull();
+    expect(hint!.dataset.hintId).toBe('http-429');
+    expect(hint!.open).toBe(false);
+    expect(hint!.textContent).toContain('限流');
+    expect(hint!.textContent).toContain('怎么处理');
+    expect(hint!.querySelectorAll('.acu-v2-advanced-tools-page__log-hint-steps li').length).toBeGreaterThan(0);
+
+    expect(warnRow.querySelector('.acu-v2-advanced-tools-page__log-hint')).toBeNull();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('按级别和关键词筛选日志列表', async () => {
     const { mount } = await mountAdvancedToolsLogPanel();
 
