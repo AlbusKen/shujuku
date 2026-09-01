@@ -1,8 +1,20 @@
-import { callContinuationInternalAi_ACU, type ContinuationInternalAiCallOptions_ACU } from './internal-ai-call';
+import { callContinuationInternalAi_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, type ContinuationInternalAiCallOptions_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
-import { describeStageTempo_ACU, listStageOutlineTurns_ACU, validateGeneratedStageOutline_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutlinePacing_ACU, type StageOutlinePacingContext_ACU } from './outline-schema';
-import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
+import {
+  describeStageTempo_ACU,
+  listStageOutlineTurns_ACU,
+  resolveContinuationTurnRange_ACU,
+  validateEditedStageOutline_ACU,
+  validateGeneratedStageOutlineDraft_ACU,
+  validateReplannedStageOutline_ACU,
+  validateReplannedStageOutlineDraft_ACU,
+  validateStageOutlinePacing_ACU,
+  type OutlineMissingField_ACU,
+  type StageOutlinePacingContext_ACU,
+  type StageOutlineValidation_ACU,
+} from './outline-schema';
+import { applyOutlineFixes_ACU, buildStageOutlineFromTags_ACU, parseOutlineFixes_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import {
   ContinuationValidationError_ACU,
@@ -33,9 +45,16 @@ export interface ContinuationOutlinePlanningRequest_ACU {
 export interface ContinuationOutlinePlanningResult_ACU {
   outline: StageOutline_ACU;
   attempts: number;
+  /** 为补齐缺失标记而额外发起的修补轮次数（不含整份重来）。 */
+  repairRounds: number;
+  /** 修补轮用尽后仍由运行时按 pacing 补默认的字段数。 */
+  inferredFields: number;
   apiPreset: Pick<ContinuationResolvedApiPreset_ACU, 'presetName' | 'source' | 'reason'>;
   requiresReview: boolean;
 }
+
+/** 每次整份生成之后最多追加的增量修补轮数。修补轮输出极小，不与整份重来共用重试额度。 */
+export const CONTINUATION_OUTLINE_REPAIR_ROUNDS_ACU = 2;
 
 export interface ContinuationOutlinePlannerDependencies_ACU {
   resolveApiPreset: typeof resolveContinuationAgentApiPreset_ACU;
@@ -139,6 +158,92 @@ export function renderContinuationPacingContext_ACU(context: StageOutlinePacingC
   return lines.join('\n');
 }
 
+const MISSING_FIELD_LABELS_ACU: Record<OutlineMissingField_ACU['field'], string> = {
+  pacing: 'pacing（setup / pressure / turn / cooldown）',
+  function: 'function（daily_bond / daily_world / recovery / preparation / training / economy / side_thread / conflict / reveal / payoff / transition）',
+  mainlineDelta: 'mainline（hold / micro / step / milestone）',
+  timeAdvance: 'time（continuous / same_day / overnight / days / weeks / months / years）',
+  timeAnchor: 'anchor（time 为 weeks / months / years 时的相对时间锚，如「入城后的第七天」）',
+  tempo: 'tempo（buildup / mixed / surge / aftermath）',
+  role: 'role（setup / development / escalation / turn / payoff / aftermath）',
+};
+
+const FIX_ATTRIBUTE_NAMES_ACU: Record<OutlineMissingField_ACU['field'], string> = {
+  pacing: 'pacing',
+  function: 'function',
+  mainlineDelta: 'mainline',
+  timeAdvance: 'time',
+  timeAnchor: 'anchor',
+  tempo: 'tempo',
+  role: 'role',
+};
+
+/**
+ * 渲染增量修补请求：只列缺项，按模型自己输出里的节点/轮次位置引用，并给出最小回复格式。
+ * 位置换算：整份大纲里前 prefixNodeCount 个节点是重规划保留的前缀，模型看不到也不需要动。
+ * @param missing 草稿校验收集到的缺项
+ * @param prefixNodeCount 拼接进来的前缀节点数
+ * @returns 回灌给模型的修补请求文本
+ */
+export function renderOutlineRepairRequest_ACU(missing: readonly OutlineMissingField_ACU[], prefixNodeCount: number): string {
+  const grouped = new Map<string, { node: number | null; turn: number | null; goalHead: string; fields: OutlineMissingField_ACU[] }>();
+  for (const item of missing) {
+    const node = item.nodeIndex === null ? null : item.nodeIndex - prefixNodeCount + 1;
+    const turn = item.turnIndex === null ? null : item.turnIndex + 1;
+    const key = node === null ? 'stage' : `${node}:${turn}`;
+    const bucket = grouped.get(key) ?? { node, turn, goalHead: item.goalHead, fields: [] };
+    bucket.fields.push(item);
+    grouped.set(key, bucket);
+  }
+  const lines: string[] = ['你上一份大纲的结构已被接受，只有下列标记缺失或不是合法枚举值。只需补这些标记，不要重发整份大纲，不要改动任何 goal 正文：'];
+  const examples: string[] = [];
+  for (const bucket of grouped.values()) {
+    const fieldText = bucket.fields.map(item => {
+      const label = MISSING_FIELD_LABELS_ACU[item.field];
+      return item.actual === undefined ? `缺 ${label}` : `${label} 写成了「${String(item.actual)}」`;
+    }).join('；');
+    if (bucket.node === null) {
+      lines.push(`- 阶段级：${fieldText}`);
+      examples.push(`<fix stage ${bucket.fields.map(item => `${FIX_ATTRIBUTE_NAMES_ACU[item.field]}="…"`).join(' ')}/>`);
+    } else {
+      lines.push(`- 节点${bucket.node} 第${bucket.turn}轮（「${bucket.goalHead}」）：${fieldText}`);
+      examples.push(`<fix node="${bucket.node}" turn="${bucket.turn}" ${bucket.fields.map(item => `${FIX_ATTRIBUTE_NAMES_ACU[item.field]}="…"`).join(' ')}/>`);
+    }
+  }
+  lines.push('回复格式，每条一行，只填标准枚举值：');
+  lines.push(...[...new Set(examples)]);
+  lines.push('例：<fix node="1" turn="2" function="daily_bond" time="overnight"/>');
+  return lines.join('\n');
+}
+
+/**
+ * 整份重来时的回灌：错误原因 + 一份最小合法样例。快速模型对“照这个样子写”比对规则描述更服从。
+ * @param error 上次校验错误
+ */
+export function renderOutlineRetryRequest_ACU(error: ContinuationError_ACU): string {
+  return [
+    '上次输出未通过校验，请按下列错误修正后重新输出完整标签（只输出标签，不要 <think>、不要 JSON）。',
+    compactValidationError_ACU(error),
+    '每个 <turn> 的写法示例：',
+    '<turn pacing="setup" function="daily_bond" mainline="hold" time="overnight">两人在灶前分工做晚饭，她第一次把咸淡交给他决定</turn>',
+    '<turn pacing="pressure" function="conflict" mainline="step" time="continuous">守卫在城门盘查信物，主角被迫交出一半银两换取放行</turn>',
+    '阶段级标签示例：<stage_tempo>mixed</stage_tempo> <stage_role>development</stage_role>',
+  ].join('\n');
+}
+
+function missingFieldError_ACU(missing: readonly OutlineMissingField_ACU[]): ContinuationValidationError_ACU {
+  const hard = missing.filter(item => !item.defaulted);
+  const first = hard[0];
+  const where = first.nodeIndex === null ? 'outline' : `nodes[${first.nodeIndex}].turns[${first.turnIndex}]`;
+  return new ContinuationValidationError_ACU(createContinuationError_ACU(
+    'CONTINUATION_OUTLINE_FIELD_MISSING',
+    'outline_validate',
+    `${MISSING_FIELD_LABELS_ACU[first.field]} 缺失或非法且无法安全补全：${where}${first.actual === undefined ? '' : `（写成了「${String(first.actual)}」）`}。每个 <turn> 都必须带合法的 pacing，阶段必须带合法的 <stage_tempo>`,
+    false,
+    { path: `${where}.${first.field}`, actual: first.actual, hardMissing: hard.length },
+  ));
+}
+
 function isRetryableOutlineError_ACU(error: ContinuationError_ACU): boolean {
   if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID') return true;
   if (error.phase === 'outline_validate') return true;
@@ -166,36 +271,68 @@ export class ContinuationOutlinePlanner_ACU {
     const transcript: Array<{ role: string; content: string }> = [];
     let lastRaw = '';
 
+    let repairRounds = 0;
+    const constraints = request.replanConstraints;
+    const callModel = async (attempt: number, messages: Array<{ role: string; content: string }>): Promise<string> => {
+      const identity = request.createInternalRequestIdentity(attempt);
+      const isCurrent = request.isInternalRequestCurrent;
+      if (!isCurrent(identity)) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
+      }
+      const raw = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
+        promptCacheEnabled: false,
+        cacheScope: 'outline',
+        minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.outline,
+      });
+      if (!isCurrent(identity)) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
+      }
+      return String(raw ?? '');
+    };
+    const buildFromRaw = (raw: string): StageOutline_ACU => buildStageOutlineFromTags_ACU(parseOutlineTags_ACU(raw), request.allocateId, constraints ? {
+      title: constraints.previousOutline.title,
+      goal: constraints.previousOutline.goal,
+      tempo: constraints.previousOutline.tempo,
+      role: constraints.previousOutline.role,
+      timeSpanGoal: constraints.previousOutline.timeSpanGoal,
+    } : undefined);
+    // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
+    // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
+    const validateDraft = (planned: StageOutline_ACU): { validation: StageOutlineValidation_ACU; prefixNodeCount: number } => {
+      const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, planned) : planned;
+      const validation = constraints
+        ? validateReplannedStageOutlineDraft_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
+        : validateGeneratedStageOutlineDraft_ACU(candidate, range);
+      return { validation, prefixNodeCount: candidate.nodes.length - planned.nodes.length };
+    };
+
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        const identity = request.createInternalRequestIdentity(attempt);
-        const isCurrent = request.isInternalRequestCurrent;
-        if (!isCurrent(identity)) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
+        lastRaw = await callModel(attempt, [...rendered.messages, ...transcript]);
+        let planned = buildFromRaw(lastRaw);
+        let { validation, prefixNodeCount } = validateDraft(planned);
+        // 增量修补：结构已经合法、只差标记时，不整份重来，只向模型索要缺项。
+        // 修补轮对话独立于外层 transcript：修好即丢弃，整份重来时模型不需要再看这段。
+        const repairTranscript: Array<{ role: string; content: string }> = [{ role: 'assistant', content: lastRaw.trim() || '(空输出)' }];
+        for (let round = 0; round < CONTINUATION_OUTLINE_REPAIR_ROUNDS_ACU && validation.missing.length; round += 1) {
+          repairTranscript.push({ role: 'user', content: renderOutlineRepairRequest_ACU(validation.missing, prefixNodeCount) });
+          repairRounds += 1;
+          const reply = await callModel(attempt, [...rendered.messages, ...transcript, ...repairTranscript]);
+          repairTranscript.push({ role: 'assistant', content: reply.trim() || '(空输出)' });
+          const fixes = parseOutlineFixes_ACU(reply);
+          if (fixes.length) {
+            planned = applyOutlineFixes_ACU(planned, fixes);
+          } else if (/<node(\s[^>]*)?>/i.test(reply)) {
+            // 模型没按 <fix> 回复而是重发了整份大纲：接受它，按新输出继续。
+            lastRaw = reply;
+            planned = buildFromRaw(reply);
+          } else {
+            break;
+          }
+          ({ validation, prefixNodeCount } = validateDraft(planned));
         }
-        const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], preset, identity, undefined, {
-          promptCacheEnabled: false,
-          cacheScope: 'outline',
-        });
-        lastRaw = String(raw ?? '');
-        if (!isCurrent(identity)) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
-        }
-        const constraints = request.replanConstraints;
-        const parsed = parseOutlineTags_ACU(raw);
-        const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? {
-          title: constraints.previousOutline.title,
-          goal: constraints.previousOutline.goal,
-          tempo: constraints.previousOutline.tempo,
-          role: constraints.previousOutline.role,
-          timeSpanGoal: constraints.previousOutline.timeSpanGoal,
-        } : undefined);
-        // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
-        // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
-        const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, built) : built;
-        const outline = constraints
-          ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
-          : validateGeneratedStageOutline_ACU(candidate, range);
+        if (validation.missing.some(item => !item.defaulted)) throw missingFieldError_ACU(validation.missing);
+        const outline = validation.outline;
         // 低压占比只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
         // 迁移回填的 pressure，把它算进占比会让重规划永远无法通过；前缀的连续高压段则由
         // pacingContext.leadingPressureStreak 带入，那部分是真实写过的剧情，必须参与计数。
@@ -206,7 +343,14 @@ export class ContinuationOutlinePlanner_ACU {
           maxConsecutivePressureTurns: request.settings.maxConsecutivePressureTurns,
           skipTurns: constraints ? constraints.completedTurns : 0,
         });
-        return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };
+        return {
+          outline,
+          attempts: attempt + 1,
+          repairRounds,
+          inferredFields: validation.missing.length,
+          apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason },
+          requiresReview: request.settings.outlinePreview,
+        };
       } catch (error) {
         lastError = toPlannerError_ACU(error);
         if (!isRetryableOutlineError_ACU(lastError)) throw error;
@@ -221,7 +365,7 @@ export class ContinuationOutlinePlanner_ACU {
         }
         if (attempt < retries) {
           transcript.push({ role: 'assistant', content: lastRaw.trim() || '(空输出)' });
-          transcript.push({ role: 'user', content: `上次输出未通过校验，请按下列错误修正后重新输出完整标签。\n${compactValidationError_ACU(lastError)}` });
+          transcript.push({ role: 'user', content: renderOutlineRetryRequest_ACU(lastError) });
         }
       }
     }
@@ -246,9 +390,10 @@ export function acceptPlannedStageRevision_ACU(revision: StageRevision_ACU, sett
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_REVISION_FROZEN', 'replan', '已冻结的阶段 revision 不可编辑', false));
   }
   const range = resolveContinuationTurnRange_ACU(settings.stageSize, settings.customTurnMin ?? undefined, settings.customTurnMax ?? undefined);
+  // 用户手改的预览：结构必须合法，语义标记缺失按 pacing 补默认并标记 inferred，不因少写一个属性而存不下。
   const outline = replanConstraints
     ? validateReplannedStageOutline_ACU(revision.outline, range, replanConstraints)
-    : validateGeneratedStageOutline_ACU(revision.outline, range);
+    : validateEditedStageOutline_ACU(revision.outline, range);
   return freezePlannedStageRevision_ACU({ ...revision, outline });
 }
 

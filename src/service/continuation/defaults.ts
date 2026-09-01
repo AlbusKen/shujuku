@@ -21,6 +21,24 @@ export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationS
 /** V23 默认节奏段原文。V24 迁移只在该段完全未改写时追加长篇日常契约。 */
 export const V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU = '【节奏：先定阶段形态，再排每轮松紧】\n\n第一步，用 <stage_tempo> 定这个阶段整体是什么形态。四档：\n- buildup 铺垫型：低压为主，攒关系、攒信息、攒资源，为后面的爆发蓄力。本阶段低压轮至少占一半。\n- mixed 起伏型：常规推进，松紧交替。本阶段低压轮至少占四分之一。\n- surge 高压型：决战、逃亡、连环变故这类一口气压到底的段落。允许整个阶段一轮低压都没有。\n- aftermath 余波型：消化上一段高压的代价，疗伤、复盘、关系重建、局势重新洗牌。本阶段低压轮至少占六成。\n选哪一档取决于总纲里本卷台阶推进到了哪一步，以及前面刚写完的是什么——当前节奏状态见下方的「节奏状态」段。\n\n第二步，给每个 <turn> 标 pacing 四档之一：\n- setup 铺垫日常：关系推进、生活场景、准备工作、信息沉淀。没有外部危机，价值体现在人物关系变化、读者对角色的理解加深、或为后续埋线。\n- pressure 冲突推进：危机、对抗、外部高压。主角被逼做出选择并付出代价。\n- turn 转折揭示：反转、信息揭露、伏笔回收。局势的性质在这一轮发生改变。\n- cooldown 余波消化：战后疗伤、复盘、情绪落地、关系在事件之后的重新校准。\n\n硬性要求（不满足会被系统打回重排）：\n1. 本阶段低压轮（setup + cooldown）的数量不得低于该形态对应的下限。\n2. 上一阶段是 surge 时，本阶段不能再选 surge，只能选 aftermath 或 mixed。\n3. 连续高压轮（pressure + turn）不得超过给定的上限，该计数跨阶段累计——前一阶段结尾连着三轮高压，本阶段开头就只剩上限减三轮的余量。surge 阶段豁免这一条。\n\n关键：低压轮放在哪里由你决定，不要均匀分散。\n把低压轮每隔三四轮撒一个，读者会感觉到一台节拍器，那比全程高压更假。真实的节奏是波浪：可以开头连着两轮日常把人物关系立住，然后连着四轮高压一口气推到底；也可以前面一路紧绷，最后两轮全用来收拾残局。同一份大纲里，「日常日常高压高压高压高压」和「高压高压高压高压日常日常」是完全不同的两段故事，但它们的低压轮数量一样——你要选的是哪一种叙事，而不是凑够数量。\n\n为什么需要低压轮：读者对紧张的感知是相对的。连续八轮全是危机，第八轮的危机读起来和第一轮一样甚至更钝；前面有一段安静，后面那场危机才重新有分量。同理，重大冲突之后不给余波，人物的代价就没有落点。低压轮不是浪费篇幅，它是让高压轮生效的前提。\nsetup 与 cooldown 轮同样要写具体：写清谁和谁在什么场景做什么、这一轮之后他们之间有什么变化，不要写「日常互动」「气氛缓和」这种空话。';
 
+/**
+ * V23 及更早默认大纲提示词里的三段原文（system 协议段、首条 assistant 确认、方法论 assistant 确认）。
+ * V24 改写了标签协议（新增 stage_role / turn 四维属性），但当初只追加了长篇契约段，没有替换这三段，
+ * 导致老用户的大纲模型仍按旧协议输出、被新校验器整份打回。迁移时按全文精确比对替换为当前默认。
+ */
+export const V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU = '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段规划剧情大纲。\n输出格式：把大纲内容写入下列标签，标签外可以自由书写你的思路与分析，系统只读取标签内的内容。\n<stage_title>阶段标题</stage_title>\n<stage_goal>阶段整体目标</stage_goal>\n<stage_tempo>本阶段节奏形态，取值只能是 buildup / mixed / surge / aftermath 之一，含义见节奏条款</stage_tempo>\n<node>\n<node_title>节点标题</node_title>\n<node_goal>节点目标</node_goal>\n<turn pacing="setup">本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）</turn>\n</node>\n每个 <turn> 都必须带 pacing 属性，取值只能是 setup / pressure / turn / cooldown 四者之一，含义见节奏条款。\n节点数量不限，每个 <node> 内至少一个 <turn>；全部 <turn> 的总数就是本阶段的轮数，必须落在给定的阶段轮数范围内。\n不要输出 JSON，不要输出 id、编号或轮数统计字段——结构编号全部由系统自动生成。';
+export const V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU = '收到。我作为小说阶段规划助手，会把阶段标题、阶段目标、阶段节奏形态、各节点与逐轮剧情目标分别写入 <stage_title>、<stage_goal>、<stage_tempo>、<node>、<node_title>、<node_goal>、<turn> 标签中，并给每个 <turn> 标注 pacing 属性；标签外只写思路分析，不输出 JSON、id 或任何编号统计字段，并保证全部 <turn> 总数落在给定的轮数范围内。';
+export const V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU = '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量算清楚这个阶段装得下多少内容，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 先按总纲台阶与当前节奏状态定 <stage_tempo>，再按该形态的下限安排低压轮——低压轮按叙事需要成段安放，不平均分散成节拍器；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标只承载故事总纲当前 active 卷尚未完成的一段，不触碰总纲里标注为禁止提前释放的底牌；单个阶段结束只留下跨阶段悬念，不擅自收束整卷。只有活动卷规划上下文显示卷级收束条件已被真实完成阶段满足时，才交由 arc-architect 切卷；所有既有卷完成时先扩充后续 active 卷。\n我会将这些原则落实到各个标签的内容中。';
+
+/** V24–V26 默认大纲提示词的上下文注入段原文；V27 迁移只在该段未改写时替换为带账本注入的新段。 */
+export const V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU = '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。';
+
+/**
+ * V27 上下文注入段：大纲模型没有 read/search 工具，却被要求规划伏笔操作、揭示层级与时间锚。
+ * 把伏笔账本、信息差、年代学与长期约束固定注入，它才有事实依据，而不是凭概览记忆编。
+ */
+export const V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU = '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n【长期约束】（用户与主控登记的红线与偏好，规划必须遵守）：\n$ACTIVE_CONSTRAINTS\n\n【伏笔账本】（已进入正文的伏笔及其状态；轮目标里的埋设/强化/误导/回收只能针对这里的条目或明确的新埋设）：\n$HOOKS_LEDGER\n\n【信息差时间线】（客观事实、读者已知与各角色知晓状态；“允许揭示到哪一层”以此为基准）：\n$INFO_GAP\n\n【故事年代学账本】（已发生正文结算出的时间事实；每轮的 time 与 anchor 必须与当前时间锚相容）：\n$CHRONOLOGY\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。';
+
 /** V24 长篇日常契约：给低压轮独立的正向义务，并显式要求规划故事时间。 */
 export const V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU = '【真正日常、主线停驻与故事时间】\n真正日常不是“危机暂时没发生”，而是角色在世界中持续生活。setup 轮至少承担一种独立功能：关系日常（共同生活与相处模式变化）、世界日常（饮食、职业、交通、制度、节庆或交易）、成长日常（训练、学习、劳动或恢复产生积累）、经营日常（资源、生产与消费发生变化）、支线日常（暂不引爆主线但以后会反作用于主线）、时间过渡（让一夜、数日或数周合理流逝）。\n\n战前讨论、等待下一次行动、采购武器或突然发现敌情仍是冲突链的附属间隙，不能冒充真正日常。setup 与 cooldown 允许主线保持不动：不推进核心矛盾、不揭示重大情报、不制造敌方动作，这不是失败；但必须通过具体场景动作与人物互动，让关系、生活状态、世界理解、资源积累、身体恢复或人物认知至少发生一项可观察变化。\n\n连续发生不再是默认答案。规划每轮时必须判断它与上一轮是紧接、同日稍后、隔夜、数日后还是更久；没有必须立即处理的危机时，应主动考虑让故事时间自然流逝。若 buildup 或 aftermath 阶段所有轮都挤在同一天，轮目标必须说明为何不能跨夜或跨日。发生时间跳跃时，在目标里写清新的相对时间锚，并点出环境、身体、关系、资源或社会状态中的两项可感知变化。\n\n低压轮的完成标准是“场景动作 + 人物互动 + 状态变化”，不是流水账；允许安静闭合或留下普通生活期待，不强制制造危机钩子。';
 
@@ -69,7 +87,7 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
+    content: V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU,
     enabled: true,
     deletable: true,
   },
@@ -163,6 +181,11 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU = 'spv3.2-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU = 'spv3.3-continuation-volume-capacity-v25';
 /** Chronology ledger version: maintainer settles story-time facts, main agent and final reviewer enforce time-jump obligations. */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU = 'spv3.4-continuation-chronology-v26';
+/**
+ * Outline ledger injection version: the stage-outline prompt now receives hooks, info-gap,
+ * chronology and long-term constraints; V23-era outline protocol segments are migrated precisely.
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU = 'spv3.5-continuation-outline-ledgers-v27';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -229,7 +252,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU,
   };
 }
 

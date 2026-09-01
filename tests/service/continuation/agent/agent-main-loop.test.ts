@@ -1434,9 +1434,40 @@ describe('子代理运行时', () => {
     replies = ['不是 JSON', '{"delta":{"hooks":[{"action":"delete","id":"H1"}]}}'];
     const settings = buildDefaultContinuationSettings_ACU();
     settings.internalAiRetryLimit = 1;
-    await expect(runtime.run(input_ACU({ settings } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SUBAGENT_FAILED' } });
-    expect(calls).toHaveLength(2);
+    // 第 2 次回复结构合法但 H1 非法：进入条目修补轮（2 轮），模型始终不重发 H1 修正版 → 失败。
+    await expect(runtime.run(input_ACU({ settings } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SUBAGENT_FAILED', details: { rejected: [{ module: 'hooks', id: 'H1' }] } } });
+    expect(calls).toHaveLength(4);
     expect(calls[1].map(message => message.content).join('\n')).toContain('没有被采纳');
+    const repair = calls[2].map(message => message.content).join('\n');
+    expect(repair).toContain('需要修正的条目');
+    expect(repair).toContain('hooks[0]（id=H1）');
+    expect(repair).toContain('upsert / patch / retire');
+  });
+
+  it('输出被截断时抢救完整条目并只索要剩余条目，按 id 合并后一次交付', async () => {
+    const truncated = '{"summary":"结算完成","delta":{"hooks":[{"action":"upsert","id":"H1","summary":"晶屑"},{"action":"upsert","id":"H2","summary":"信物"},{"action":"upsert","id":"H3","summ';
+    const rest = '{"delta":{"hooks":[{"action":"upsert","id":"H3","summary":"残图"}],"infoGap":[{"action":"upsert","id":"E1","topic":"守门人身份"}]}}';
+    replies = [truncated, rest];
+    const result = await runtime.run(input_ACU());
+    expect(calls).toHaveLength(2);
+    const continuation = calls[1].map(message => message.content).join('\n');
+    expect(continuation).toContain('被截断');
+    expect(continuation).toContain('已收下的条目：伏笔：H1、H2');
+    expect(result.maintainer?.summary).toBe('结算完成');
+    expect(result.maintainer?.delta.hooks.map(item => item.id)).toEqual(['H1', 'H2', 'H3']);
+    expect(result.maintainer?.delta.infoGap.map(item => item.id)).toEqual(['E1']);
+  });
+
+  it('个别条目非法时收下其余条目，只让模型重发修正版并按 id 覆盖', async () => {
+    replies = [
+      '{"summary":"结算","delta":{"hooks":[{"action":"upsert","id":"H1","summary":"晶屑"}],"chronology":[{"action":"upsert","id":"T1","anchor":"入城第三日","elapsed":"三日","precision":"精确","transition":"过了两天","evidenceIndexes":[3]}]}}',
+      '{"delta":{"chronology":[{"action":"upsert","id":"T1","anchor":"入城第三日","elapsed":"三日","precision":"exact","transition":"过了两天","evidenceIndexes":[3]}]}}',
+    ];
+    const result = await runtime.run(input_ACU());
+    expect(calls).toHaveLength(2);
+    expect(calls[1].map(message => message.content).join('\n')).toContain('chronology[0]（id=T1）');
+    expect(result.maintainer?.delta.hooks).toHaveLength(1);
+    expect(result.maintainer?.delta.chronology).toEqual([expect.objectContaining({ id: 'T1', precision: 'exact', evidenceIndexes: [3] })]);
   });
 
   it('派工中途轮次失效时立刻停止', async () => {

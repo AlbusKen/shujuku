@@ -9,6 +9,7 @@ import {
   STAGE_TURN_FUNCTIONS_ACU,
   STAGE_TURN_MAINLINE_DELTAS_ACU,
   STAGE_TURN_PACINGS_ACU,
+  STAGE_TURN_SOFT_FIELDS_ACU,
   STAGE_TURN_TIME_ADVANCES_ACU,
   type ContinuationErrorCode_ACU,
   type ContinuationErrorPhase_ACU,
@@ -24,6 +25,7 @@ import {
   type StageTurnFunction_ACU,
   type StageTurnMainlineDelta_ACU,
   type StageTurnPacing_ACU,
+  type StageTurnSoftField_ACU,
   type StageTurnTimeAdvance_ACU,
 } from './model';
 
@@ -37,13 +39,56 @@ const TURN_KEYS_ACU = ['id', 'goal'] as const;
  * pacing 晚于 turn 的其余字段加入。信封每次加载都会对所有历史 revision 重跑本校验器，
  * 写成必填会让全部存量任务加载即失败，因此它是可选键：缺失时回填 pressure。
  */
-const TURN_OPTIONAL_KEYS_ACU = ['pacing', 'function', 'mainlineDelta', 'timeAdvance', 'timeAnchor'] as const;
+const TURN_OPTIONAL_KEYS_ACU = ['pacing', 'function', 'mainlineDelta', 'timeAdvance', 'timeAnchor', 'inferred'] as const;
 const DEFAULT_TURN_PACING_ACU: StageTurnPacing_ACU = 'pressure';
-const DEFAULT_TURN_FUNCTION_ACU: StageTurnFunction_ACU = 'transition';
-const DEFAULT_TURN_MAINLINE_DELTA_ACU: StageTurnMainlineDelta_ACU = 'hold';
-const DEFAULT_TURN_TIME_ADVANCE_ACU: StageTurnTimeAdvance_ACU = 'continuous';
+
+/**
+ * 语义字段按 pacing 分档回填。回填值必须与 pacing 自洽：给 pressure 轮填 hold/transition
+ * 会让旧阶段在后续编辑时被组合规则打回，也会把“冲突轮”显示成“过渡轮”。
+ */
+const TURN_SOFT_DEFAULTS_ACU: Record<StageTurnPacing_ACU, { function: StageTurnFunction_ACU; mainlineDelta: StageTurnMainlineDelta_ACU; timeAdvance: StageTurnTimeAdvance_ACU }> = {
+  setup: { function: 'transition', mainlineDelta: 'hold', timeAdvance: 'same_day' },
+  cooldown: { function: 'recovery', mainlineDelta: 'hold', timeAdvance: 'overnight' },
+  pressure: { function: 'conflict', mainlineDelta: 'step', timeAdvance: 'continuous' },
+  turn: { function: 'reveal', mainlineDelta: 'step', timeAdvance: 'continuous' },
+};
 
 type StageOutlineValidationMode_ACU = 'persisted' | 'generated' | 'replanned';
+
+/**
+ * 软字段（function / mainlineDelta / timeAdvance / role，以及新生成时的 pacing / tempo）缺失或非法时的处理策略：
+ * - default：按 pacing 分档补默认并打 inferred 标记（旧快照读取、用户手改、Agent 编辑）
+ * - collect：同样补默认，但把缺项收集进 missing 列表供调用方向模型索要修补（生成链路）
+ * - reject：直接抛出字段错误（保留给需要硬失败的调用方）
+ */
+export type OutlineSoftFieldPolicy_ACU = 'default' | 'collect' | 'reject';
+
+export type OutlineMissingFieldName_ACU = 'pacing' | 'function' | 'mainlineDelta' | 'timeAdvance' | 'timeAnchor' | 'tempo' | 'role';
+
+/** 一条待修补的缺项。nodeIndex/turnIndex 是整份大纲里的 0 基位置；阶段级字段两者为 null。 */
+export interface OutlineMissingField_ACU {
+  field: OutlineMissingFieldName_ACU;
+  nodeIndex: number | null;
+  turnIndex: number | null;
+  /** 该轮 goal 的开头，供修补提示引用定位。 */
+  goalHead: string;
+  /** 模型原文（缺失时为 undefined）。 */
+  actual: unknown;
+  /** 缺失后是否已被默认值填补（pacing / tempo 不能安全默认，为 false）。 */
+  defaulted: boolean;
+}
+
+export interface StageOutlineValidation_ACU {
+  outline: StageOutline_ACU;
+  missing: OutlineMissingField_ACU[];
+}
+
+interface ValidationState_ACU {
+  mode: StageOutlineValidationMode_ACU;
+  policy: OutlineSoftFieldPolicy_ACU;
+  strictFromTurn: number;
+  missing: OutlineMissingField_ACU[];
+}
 
 const LONG_TIME_ADVANCES_ACU: readonly StageTurnTimeAdvance_ACU[] = ['weeks', 'months', 'years'];
 
@@ -106,23 +151,18 @@ function requireText_ACU(value: unknown, path: string): string {
 }
 
 function optionalText_ACU(value: unknown, path: string): string | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string' && !value.trim()) return undefined;
   return requireText_ACU(value, path);
 }
 
-function requireEnum_ACU<T extends string>(
-  value: unknown,
-  path: string,
-  values: readonly T[],
-  label: string,
-  required: boolean,
-  fallback: T,
-): T {
-  if (value === undefined && !required) return fallback;
-  if (typeof value !== 'string' || !values.includes(value as T)) {
-    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `${label}必须是 ${values.join(' / ')} 之一：${path}`, { path, actual: value });
-  }
-  return value as T;
+function isEnumValue_ACU<T extends string>(value: unknown, values: readonly T[]): value is T {
+  return typeof value === 'string' && values.includes(value as T);
+}
+
+function goalHead_ACU(goal: unknown): string {
+  const flat = typeof goal === 'string' ? goal.replace(/\s+/g, ' ').trim() : '';
+  return flat.length <= 24 ? flat : `${flat.slice(0, 24)}…`;
 }
 
 function requirePositiveInteger_ACU(value: unknown, path: string): number {
@@ -135,54 +175,107 @@ function requirePositiveInteger_ACU(value: unknown, path: string): number {
   return value;
 }
 
-function validateTurnSemantics_ACU(turn: StageTurn_ACU, role: StageRole_ACU, path: string): void {
-  if (turn.pacing === 'setup' && turn.function === 'conflict') {
-    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `setup 轮不能承担 conflict 功能：${path}`, { path, rule: 'setup_conflict' });
+/**
+ * 解析一个软枚举字段。合法直接返回；缺失/非法时按策略处理：reject 抛错，
+ * default/collect 返回 fallback 并（collect 时）记录缺项。
+ */
+function resolveSoftEnum_ACU<T extends string>(
+  state: ValidationState_ACU,
+  strict: boolean,
+  value: unknown,
+  values: readonly T[],
+  field: OutlineMissingFieldName_ACU,
+  label: string,
+  path: string,
+  fallback: T | null,
+  position: { nodeIndex: number | null; turnIndex: number | null; goalHead: string },
+): { value: T; inferred: boolean } {
+  if (isEnumValue_ACU(value, values)) return { value, inferred: false };
+  const missing = value === undefined || value === null || value === '';
+  // 非严格（持久化 / 已完成前缀）路径：缺失静默回填；写了非法值仍然是数据损坏，必须报。
+  if (!strict) {
+    if (missing && fallback !== null) return { value: fallback, inferred: true };
+    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `${label}必须是 ${values.join(' / ')} 之一：${path}`, { path, actual: value });
   }
-  if ((turn.pacing === 'setup' || turn.pacing === 'cooldown') && turn.mainlineDelta === 'milestone'
-    && !(turn.function === 'payoff' && role === 'payoff')) {
-    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `低压轮不能推进 milestone，除非 payoff 阶段以 payoff 功能兑现既有目标：${path}`, { path, rule: 'downtime_milestone' });
-  }
-  if (turn.pacing === 'pressure' && turn.mainlineDelta === 'hold'
-    && !/(维持|僵持|拖延|牵制|封锁|守住|承受|压制|持续)/.test(turn.goal)) {
-    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `pressure 轮使用 hold 时，目标必须说明既有压力如何被维持或承受：${path}`, { path, rule: 'pressure_hold' });
-  }
-  if (LONG_TIME_ADVANCES_ACU.includes(turn.timeAdvance!) && !turn.timeAnchor) {
-    fail_ACU('CONTINUATION_OUTLINE_FIELD_MISSING', 'outline_validate', `较大时间跨度必须提供 timeAnchor：${path}.timeAnchor`, { path: `${path}.timeAnchor`, rule: 'long_time_anchor' });
-  }
-  if (LONG_TIME_ADVANCES_ACU.includes(turn.timeAdvance!) && turn.function !== 'transition') {
-    const changeGroups = [
-      /(环境|季节|天气|温度|光线|街道|田野)/,
-      /(身体|伤势|体力|疲惫|恢复|健康)/,
-      /(关系|信任|默契|亲近|疏远)/,
-      /(资源|金钱|粮食|库存|装备|生产|消费)/,
-      /(社会|制度|局势|舆论|市场|组织)/,
-    ];
-    if (changeGroups.filter(pattern => pattern.test(turn.goal)).length < 2) {
-      fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `weeks/months/years 的轮目标必须描述至少两类可感知变化，或明确使用 transition 功能：${path}`, { path, rule: 'long_time_changes' });
+  if (state.policy === 'reject' || fallback === null) {
+    if (state.policy === 'collect' && fallback === null) {
+      // pacing / tempo 没有安全默认：先记缺项，用占位值让结构校验能继续，最终由调用方决定是否硬失败。
+      state.missing.push({ field, ...position, actual: value, defaulted: false });
+      return { value: values[0], inferred: true };
     }
+    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `${label}必须是 ${values.join(' / ')} 之一：${path}`, { path, actual: value });
   }
-  if (['daily_bond', 'daily_world', 'economy', 'training'].includes(turn.function!)
-    && !/(改变|形成|熟悉|增加|减少|恢复|积累|学会|掌握|改善|恶化|调整|建立|消耗|补充|确认|理解|信任|疏远|亲近|适应|完成)/.test(turn.goal)) {
-    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `日常、经营或训练轮必须写出可观察变化，不能只写活动名称：${path}`, { path, rule: 'observable_change' });
-  }
+  if (state.policy === 'collect') state.missing.push({ field, ...position, actual: value, defaulted: true });
+  return { value: fallback, inferred: true };
 }
 
-function validateTurn_ACU(raw: unknown, path: string, requireNewFields: boolean, role: StageRole_ACU): StageTurn_ACU {
+/**
+ * 组合规则只保留与 pacing 直接矛盾、能被机械判定的两条；不再用关键词正则猜测 goal 散文里
+ * 有没有“可观察变化”——那类规则在真实语料上误杀率太高，只会逼模型堆关键词。
+ * 矛盾组合按策略处理：严格生成时记为缺项（让模型改），其余路径降级到 pacing 默认值并标记 inferred。
+ */
+function reconcileTurnSemantics_ACU(state: ValidationState_ACU, strict: boolean, turn: StageTurn_ACU, role: StageRole_ACU, position: { nodeIndex: number; turnIndex: number; goalHead: string }): void {
+  const inferred = new Set(turn.inferred ?? []);
+  const defaults = TURN_SOFT_DEFAULTS_ACU[turn.pacing];
+  if (turn.pacing === 'setup' && turn.function === 'conflict') {
+    if (strict && state.policy === 'collect') state.missing.push({ field: 'function', nodeIndex: position.nodeIndex, turnIndex: position.turnIndex, goalHead: position.goalHead, actual: 'conflict（setup 轮不能承担 conflict 功能）', defaulted: true });
+    else if (strict && state.policy === 'reject') fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `setup 轮不能承担 conflict 功能：nodes[${position.nodeIndex}].turns[${position.turnIndex}]`, { rule: 'setup_conflict' });
+    turn.function = defaults.function;
+    inferred.add('function');
+  }
+  if ((turn.pacing === 'setup' || turn.pacing === 'cooldown') && turn.mainlineDelta === 'milestone' && !(turn.function === 'payoff' && role === 'payoff')) {
+    if (strict && state.policy === 'collect') state.missing.push({ field: 'mainlineDelta', nodeIndex: position.nodeIndex, turnIndex: position.turnIndex, goalHead: position.goalHead, actual: 'milestone（低压轮不能推进 milestone，除非 payoff 阶段以 payoff 功能兑现）', defaulted: true });
+    else if (strict && state.policy === 'reject') fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `低压轮不能推进 milestone：nodes[${position.nodeIndex}].turns[${position.turnIndex}]`, { rule: 'downtime_milestone' });
+    turn.mainlineDelta = 'micro';
+    inferred.add('mainlineDelta');
+  }
+  if (strict && LONG_TIME_ADVANCES_ACU.includes(turn.timeAdvance!) && !turn.timeAnchor) {
+    // anchor 是自然语言，没有可机械补的默认值；严格生成时索要，其余路径放行。
+    if (state.policy === 'collect') state.missing.push({ field: 'timeAnchor', nodeIndex: position.nodeIndex, turnIndex: position.turnIndex, goalHead: position.goalHead, actual: undefined, defaulted: true });
+    else if (state.policy === 'reject') fail_ACU('CONTINUATION_OUTLINE_FIELD_MISSING', 'outline_validate', `较大时间跨度必须提供 timeAnchor：nodes[${position.nodeIndex}].turns[${position.turnIndex}].timeAnchor`, { rule: 'long_time_anchor' });
+  }
+  if (inferred.size) turn.inferred = [...inferred] as StageTurn_ACU['inferred'];
+  else delete turn.inferred;
+}
+
+function validateInferred_ACU(value: unknown, path: string): StageTurn_ACU['inferred'] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some(item => !isEnumValue_ACU(item, STAGE_TURN_SOFT_FIELDS_ACU))) {
+    fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `inferred 必须是 ${STAGE_TURN_SOFT_FIELDS_ACU.join(' / ')} 的数组：${path}`, { path });
+  }
+  return value.length ? [...new Set(value as StageTurn_ACU['inferred'])] : undefined;
+}
+
+function validateTurn_ACU(raw: unknown, path: string, strict: boolean, role: StageRole_ACU, state: ValidationState_ACU, nodeIndex: number, turnIndex: number): StageTurn_ACU {
   if (!isRecord_ACU(raw)) {
     fail_ACU('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
   }
   assertExactKeys_ACU(raw, TURN_KEYS_ACU, path, TURN_OPTIONAL_KEYS_ACU);
+  const goal = requireText_ACU(raw.goal, `${path}.goal`);
+  const position = { nodeIndex, turnIndex, goalHead: goalHead_ACU(goal) };
+  const pacing = resolveSoftEnum_ACU(state, strict, raw.pacing, STAGE_TURN_PACINGS_ACU, 'pacing', '节奏档', `${path}.pacing`, strict ? null : DEFAULT_TURN_PACING_ACU, position);
+  const defaults = TURN_SOFT_DEFAULTS_ACU[pacing.value];
+  const fn = resolveSoftEnum_ACU(state, strict, raw.function, STAGE_TURN_FUNCTIONS_ACU, 'function', '叙事功能', `${path}.function`, defaults.function, position);
+  const mainline = resolveSoftEnum_ACU(state, strict, raw.mainlineDelta, STAGE_TURN_MAINLINE_DELTAS_ACU, 'mainlineDelta', '主线增量', `${path}.mainlineDelta`, defaults.mainlineDelta, position);
+  const time = resolveSoftEnum_ACU(state, strict, raw.timeAdvance, STAGE_TURN_TIME_ADVANCES_ACU, 'timeAdvance', '时间跨度', `${path}.timeAdvance`, defaults.timeAdvance, position);
+  const persistedInferred = validateInferred_ACU(raw.inferred, `${path}.inferred`) ?? [];
+  const inferred = new Set<StageTurnSoftField_ACU>(persistedInferred);
+  if (fn.inferred) inferred.add('function'); else inferred.delete('function');
+  if (mainline.inferred) inferred.add('mainlineDelta'); else inferred.delete('mainlineDelta');
+  if (time.inferred) inferred.add('timeAdvance'); else inferred.delete('timeAdvance');
   const turn: StageTurn_ACU = {
     id: requireText_ACU(raw.id, `${path}.id`),
-    goal: requireText_ACU(raw.goal, `${path}.goal`),
-    pacing: requireEnum_ACU(raw.pacing, `${path}.pacing`, STAGE_TURN_PACINGS_ACU, '节奏档', requireNewFields, DEFAULT_TURN_PACING_ACU),
-    function: requireEnum_ACU(raw.function, `${path}.function`, STAGE_TURN_FUNCTIONS_ACU, '叙事功能', requireNewFields, DEFAULT_TURN_FUNCTION_ACU),
-    mainlineDelta: requireEnum_ACU(raw.mainlineDelta, `${path}.mainlineDelta`, STAGE_TURN_MAINLINE_DELTAS_ACU, '主线增量', requireNewFields, DEFAULT_TURN_MAINLINE_DELTA_ACU),
-    timeAdvance: requireEnum_ACU(raw.timeAdvance, `${path}.timeAdvance`, STAGE_TURN_TIME_ADVANCES_ACU, '时间跨度', requireNewFields, DEFAULT_TURN_TIME_ADVANCE_ACU),
+    goal,
+    pacing: pacing.value,
+    function: fn.value,
+    mainlineDelta: mainline.value,
+    timeAdvance: time.value,
     timeAnchor: optionalText_ACU(raw.timeAnchor, `${path}.timeAnchor`),
+    ...(inferred.size ? { inferred: [...inferred] } : {}),
   };
-  if (requireNewFields) validateTurnSemantics_ACU(turn, role, path);
+  if (turn.timeAnchor === undefined) delete turn.timeAnchor;
+  // pacing 本身缺失时它只是占位值，拿它去判组合矛盾没有意义，等模型补上 pacing 再判。
+  if (!pacing.inferred) reconcileTurnSemantics_ACU(state, strict, turn, role, position);
   return turn;
 }
 
@@ -191,9 +284,8 @@ function validateNode_ACU(
   index: number,
   turnIds: Set<string>,
   role: StageRole_ACU,
-  mode: StageOutlineValidationMode_ACU,
+  state: ValidationState_ACU,
   turnOffset: number,
-  strictFromTurn: number,
 ): StageNode_ACU {
   const path = `nodes[${index}]`;
   if (!isRecord_ACU(raw)) {
@@ -207,8 +299,11 @@ function validateNode_ACU(
   const turns = raw.turns.map((turn, turnIndex) => validateTurn_ACU(
     turn,
     `${path}.turns[${turnIndex}]`,
-    mode === 'generated' || (mode === 'replanned' && turnOffset + turnIndex >= strictFromTurn),
+    state.mode === 'generated' || (state.mode === 'replanned' && turnOffset + turnIndex >= state.strictFromTurn),
     role,
+    state,
+    index,
+    turnIndex,
   ));
   if (turns.length !== suggestedTurns) {
     fail_ACU('CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'outline_validate', `节点轮次数与 suggestedTurns 不一致：${path}`, { path, expected: suggestedTurns, actual: turns.length });
@@ -247,16 +342,7 @@ function defaultStageRoleForTempo_ACU(tempo: StageTempo_ACU): StageRole_ACU {
   return 'development';
 }
 
-function validateStageTempo_ACU(raw: unknown, required: boolean): StageTempo_ACU {
-  return requireEnum_ACU(raw, 'outline.tempo', STAGE_TEMPOS_ACU, '阶段节奏形态', required, DEFAULT_STAGE_TEMPO_ACU);
-}
-
-function validateStageOutlineByMode_ACU(
-  raw: unknown,
-  range: ContinuationTurnRange_ACU,
-  mode: StageOutlineValidationMode_ACU,
-  strictFromTurn = 0,
-): StageOutline_ACU {
+function validateStageOutlineWithState_ACU(raw: unknown, range: ContinuationTurnRange_ACU, state: ValidationState_ACU): StageOutline_ACU {
   if (!isRecord_ACU(raw)) {
     fail_ACU('CONTINUATION_OUTLINE_NOT_OBJECT', 'outline_validate', '阶段大纲必须是单一 JSON 对象');
   }
@@ -276,14 +362,15 @@ function validateStageOutlineByMode_ACU(
   if (raw.nodes.length === 0) {
     fail_ACU('CONTINUATION_OUTLINE_NODES_EMPTY', 'outline_validate', 'nodes 不能为空');
   }
-  const requireNewFields = mode !== 'persisted';
-  const tempo = validateStageTempo_ACU(raw.tempo, requireNewFields);
-  const role = requireEnum_ACU(raw.role, 'outline.role', STAGE_ROLES_ACU, '阶段结构角色', requireNewFields, defaultStageRoleForTempo_ACU(tempo));
+  const strictStage = state.mode !== 'persisted';
+  const stagePosition: { nodeIndex: number | null; turnIndex: number | null; goalHead: string } = { nodeIndex: null, turnIndex: null, goalHead: '' };
+  const tempo = resolveSoftEnum_ACU(state, strictStage, raw.tempo, STAGE_TEMPOS_ACU, 'tempo', '阶段节奏形态', 'outline.tempo', strictStage ? null : DEFAULT_STAGE_TEMPO_ACU, stagePosition);
+  const role = resolveSoftEnum_ACU(state, strictStage, raw.role, STAGE_ROLES_ACU, 'role', '阶段结构角色', 'outline.role', defaultStageRoleForTempo_ACU(tempo.value), stagePosition);
   const nodeIds = new Set<string>();
   const turnIds = new Set<string>();
   let turnOffset = 0;
   const nodes = raw.nodes.map((node, index) => {
-    const validated = validateNode_ACU(node, index, turnIds, role, mode, turnOffset, strictFromTurn);
+    const validated = validateNode_ACU(node, index, turnIds, role.value, state, turnOffset);
     if (nodeIds.has(validated.id)) {
       fail_ACU('CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'outline_validate', `节点 ID 重复：${validated.id}`, { id: validated.id });
     }
@@ -299,22 +386,41 @@ function validateStageOutlineByMode_ACU(
     schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
     title: requireText_ACU(raw.title, 'outline.title'),
     goal: requireText_ACU(raw.goal, 'outline.goal'),
-    role,
+    role: role.value,
     timeSpanGoal: optionalText_ACU(raw.timeSpanGoal, 'outline.timeSpanGoal'),
-    tempo,
+    tempo: tempo.value,
     totalTurns: raw.totalTurns,
     nodes,
   };
 }
 
-/** 兼容读取持久化大纲；缺失的新字段仅在返回值中保守归一化，不改写磁盘。 */
-export function validatePersistedStageOutline_ACU(raw: unknown, range: ContinuationTurnRange_ACU): StageOutline_ACU {
-  return validateStageOutlineByMode_ACU(raw, range, 'persisted');
+function runValidation_ACU(raw: unknown, range: ContinuationTurnRange_ACU, mode: StageOutlineValidationMode_ACU, policy: OutlineSoftFieldPolicy_ACU, strictFromTurn = 0): StageOutlineValidation_ACU {
+  const state: ValidationState_ACU = { mode, policy, strictFromTurn, missing: [] };
+  const outline = validateStageOutlineWithState_ACU(raw, range, state);
+  return { outline, missing: state.missing };
 }
 
-/** 新生成大纲的严格边界：核心标签缺失、非法枚举和非法组合都会回灌模型修正。 */
+/** 兼容读取持久化大纲；缺失的新字段仅在返回值中按 pacing 分档回填并标记 inferred，不改写磁盘。 */
+export function validatePersistedStageOutline_ACU(raw: unknown, range: ContinuationTurnRange_ACU): StageOutline_ACU {
+  return runValidation_ACU(raw, range, 'persisted', 'default').outline;
+}
+
+/** 新生成大纲的硬边界：核心标签缺失、非法枚举和非法组合都直接拒绝（保留给需要硬失败的调用方）。 */
 export function validateGeneratedStageOutline_ACU(raw: unknown, range: ContinuationTurnRange_ACU): StageOutline_ACU {
-  return validateStageOutlineByMode_ACU(raw, range, 'generated');
+  return runValidation_ACU(raw, range, 'generated', 'reject').outline;
+}
+
+/**
+ * 新生成大纲的草稿校验：结构错误仍抛出；软字段缺失或非法时补默认并收集到 missing，
+ * 由生成链路决定是向模型索要修补还是接受默认值。pacing / tempo 缺失也会进 missing 且 defaulted=false。
+ */
+export function validateGeneratedStageOutlineDraft_ACU(raw: unknown, range: ContinuationTurnRange_ACU): StageOutlineValidation_ACU {
+  return runValidation_ACU(raw, range, 'generated', 'collect');
+}
+
+/** 用户手改或运行时编辑后的大纲：结构必须合法，软字段缺失按 pacing 补默认并标记 inferred。 */
+export function validateEditedStageOutline_ACU(raw: unknown, range: ContinuationTurnRange_ACU): StageOutline_ACU {
+  return runValidation_ACU(raw, range, 'generated', 'default').outline;
 }
 
 /** 兼容既有调用方；该名称固定表示持久化/旧快照读取路径。 */
@@ -472,8 +578,11 @@ export function validateStageOutlinePacing_ACU(turns: readonly StageTurn_ACU[], 
   }
 }
 
-/** Ensures a replan preserves completed turns and allocates exactly the remaining quota. */
-export function validateReplannedStageOutline_ACU(raw: unknown, range: ContinuationTurnRange_ACU, constraints: ContinuationReplanConstraints_ACU): StageOutline_ACU {
+/**
+ * 重规划核心：前缀逐字保留、剩余轮数符合额度。软字段策略由调用方决定：
+ * 生成链路用 collect 收集缺项索要修补；编辑/手改路径用 default 直接补默认。
+ */
+function validateReplannedWithPolicy_ACU(raw: unknown, range: ContinuationTurnRange_ACU, constraints: ContinuationReplanConstraints_ACU, policy: OutlineSoftFieldPolicy_ACU): StageOutlineValidation_ACU {
   if (!Number.isInteger(constraints.completedTurns) || constraints.completedTurns < 0 || !Number.isInteger(constraints.expectedRemainingTurns) || constraints.expectedRemainingTurns < 0) {
     fail_ACU('CONTINUATION_REPLAN_CONTEXT_INVALID', 'replan', '重新规划约束必须包含非负整数');
   }
@@ -482,7 +591,8 @@ export function validateReplannedStageOutline_ACU(raw: unknown, range: Continuat
   if (constraints.completedTurns > previousTurns.length) {
     fail_ACU('CONTINUATION_REPLAN_CONTEXT_INVALID', 'replan', '已完成轮数超过旧 revision 的轮次总数', { completedTurns: constraints.completedTurns, totalTurns: previousTurns.length });
   }
-  const outline = validateStageOutlineByMode_ACU(raw, range, 'replanned', constraints.completedTurns);
+  const validation = runValidation_ACU(raw, range, 'replanned', policy, constraints.completedTurns);
+  const outline = validation.outline;
   const candidateTurns = flattenTurns_ACU(outline);
   const completedPrefix = previousTurns.slice(0, constraints.completedTurns);
   if (candidateTurns.length < completedPrefix.length) {
@@ -499,5 +609,15 @@ export function validateReplannedStageOutline_ACU(raw: unknown, range: Continuat
   if (remainingTurns !== constraints.expectedRemainingTurns) {
     fail_ACU('CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH', 'replan', '重新规划结果的剩余轮数不符合额度', { expected: constraints.expectedRemainingTurns, actual: remainingTurns });
   }
-  return outline;
+  return validation;
+}
+
+/** Ensures a replan preserves completed turns and allocates exactly the remaining quota; soft fields default with inferred marks. */
+export function validateReplannedStageOutline_ACU(raw: unknown, range: ContinuationTurnRange_ACU, constraints: ContinuationReplanConstraints_ACU): StageOutline_ACU {
+  return validateReplannedWithPolicy_ACU(raw, range, constraints, 'default').outline;
+}
+
+/** 重规划草稿校验：结构错误抛出，软字段缺项收集到 missing 供生成链路索要修补。 */
+export function validateReplannedStageOutlineDraft_ACU(raw: unknown, range: ContinuationTurnRange_ACU, constraints: ContinuationReplanConstraints_ACU): StageOutlineValidation_ACU {
+  return validateReplannedWithPolicy_ACU(raw, range, constraints, 'collect');
 }

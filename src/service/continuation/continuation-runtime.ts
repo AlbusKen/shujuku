@@ -13,7 +13,7 @@ import {
   renderAgentStoryTail_ACU,
   type AgentContextRules_ACU,
 } from './agent/agent-placeholder-resolver';
-import { readAgentModuleSnapshot_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
+import { readAgentModuleSnapshot_ACU, renderAgentChronology_ACU, renderAgentConstraints_ACU, renderAgentHooksByIds_ACU, renderAgentInfoGapByIds_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
 import { ContinuationWorldbookContext_ACU } from './worldbook-context';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
 import { registerContinuationHostGenerationBridge_ACU } from './host-generation-bridge-registry';
@@ -127,6 +127,11 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
       readAgentModuleSnapshot_ACU(getChatArray_ACU()),
       task.stages.filter(item => item.status === 'completed').map(item => item.stageNumber),
     ),
+    // 大纲模型没有 read/search 工具：伏笔操作、揭示层级、时间锚与红线只能靠固定注入拿到事实依据。
+    $HOOKS_LEDGER: () => renderAgentHooksByIds_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
+    $INFO_GAP: () => renderAgentInfoGapByIds_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
+    $CHRONOLOGY: () => renderAgentChronology_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
+    $ACTIVE_CONSTRAINTS: () => renderAgentConstraints_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
     $TURN_NUMBER: () => current ? String(current.turnNumber) : '',
     $NODE_TURN_NUMBER: () => current ? String(current.nodeTurnNumber) : '',
   };

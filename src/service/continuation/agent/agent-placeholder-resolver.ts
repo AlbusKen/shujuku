@@ -397,6 +397,66 @@ export function renderAgentTurnPacingGuidance_ACU(pacing: StageTurnPacing_ACU | 
   return `本轮节奏：${pacing}。${TURN_PACING_GUIDANCE_ACU[pacing]}`;
 }
 
+const TURN_FUNCTION_LABELS_ACU: Record<NonNullable<StageTurn_ACU['function']>, string> = {
+  daily_bond: '关系日常',
+  daily_world: '世界日常',
+  recovery: '恢复余波',
+  preparation: '准备',
+  training: '训练/成长',
+  economy: '经营',
+  side_thread: '支线',
+  conflict: '冲突',
+  reveal: '揭示',
+  payoff: '兑现',
+  transition: '过渡',
+};
+
+const TURN_MAINLINE_LABELS_ACU: Record<NonNullable<StageTurn_ACU['mainlineDelta']>, string> = {
+  hold: '主线停驻',
+  micro: '主线微推进',
+  step: '主线前进一步',
+  milestone: '主线里程碑',
+};
+
+const TURN_TIME_LABELS_ACU: Record<NonNullable<StageTurn_ACU['timeAdvance']>, string> = {
+  continuous: '紧接上一轮',
+  same_day: '同日稍后',
+  overnight: '隔夜',
+  days: '数日后',
+  weeks: '数周后',
+  months: '数月后',
+  years: '数年后',
+};
+
+const LONG_TIME_ADVANCES_ACU: ReadonlySet<string> = new Set(['days', 'weeks', 'months', 'years']);
+
+/**
+ * 渲染本轮的完整四维标记与由此触发的义务：pacing 指导 + 叙事功能 / 主线增量 / 时间关系 / 时间锚。
+ * 时间跨度较大时把 V26 的时间跳跃义务直接写在这里，主 Agent 不必再去大纲窗口的箭头行比对。
+ * 系统补全的字段单独点名，避免把推断值当成作者意图。
+ * @param turn 当前轮次；无可执行轮次时传 null
+ */
+export function renderAgentTurnGuidance_ACU(turn: StageTurn_ACU | null): string {
+  if (!turn) return renderAgentTurnPacingGuidance_ACU(null);
+  const lines = [renderAgentTurnPacingGuidance_ACU(turn.pacing)];
+  const marks: string[] = [];
+  if (turn.function) marks.push(`叙事功能=${turn.function}（${TURN_FUNCTION_LABELS_ACU[turn.function]}）`);
+  if (turn.mainlineDelta) marks.push(`主线增量=${turn.mainlineDelta}（${TURN_MAINLINE_LABELS_ACU[turn.mainlineDelta]}）`);
+  if (turn.timeAdvance) marks.push(`时间关系=${turn.timeAdvance}（${TURN_TIME_LABELS_ACU[turn.timeAdvance]}）`);
+  if (turn.timeAnchor) marks.push(`时间锚=${turn.timeAnchor}`);
+  if (marks.length) lines.push(`本轮标记：${marks.join('；')}。`);
+  if (turn.inferred?.length) {
+    lines.push(`注意：${turn.inferred.join('、')} 是系统按节奏档保守补全的推断值，不是大纲作者的明确意图；与正文实际情况冲突时以正文为准。`);
+  }
+  if (turn.timeAdvance && LONG_TIME_ADVANCES_ACU.has(turn.timeAdvance)) {
+    lines.push('时间跳跃义务：本轮计划跨越较长故事时间，finalize 的 instruction 必须写明新的相对时间锚、至少两项可感知变化（季节天气、身体伤势、衣着环境、关系熟悉度、资源经营、社会状态等），以及上一紧迫问题为何允许被跨过的连续性桥梁；不得用摘要跳过此前已承诺的关键场景。先 read $CHRONOLOGY 核对累计时间。');
+  }
+  if (turn.mainlineDelta === 'hold') {
+    lines.push('本轮主线允许停驻：不推进核心矛盾、不揭示重大情报、不制造敌方动作，但必须有一项可观察的非危机变化。');
+  }
+  return lines.join('\n');
+}
+
 /**
  * 渲染当前大纲窗口：本阶段目标、当前节点与本节点全部轮次目标。
  * 大纲缺失或当前阶段已完成时如实说明状态，并指出必须先派工大纲子代理。
@@ -411,6 +471,7 @@ function renderTurnSemanticMeta_ACU(turn: StageTurn_ACU): string {
     `time=${turn.timeAdvance ?? '未标注'}`,
   ];
   if (turn.timeAnchor) parts.push(`anchor=${turn.timeAnchor}`);
+  if (turn.inferred?.length) parts.push(`系统补全=${turn.inferred.join(',')}`);
   return parts.join('｜');
 }
 
@@ -563,7 +624,7 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
     case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
     case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
     case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
-    case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnPacingGuidance_ACU(context.execution.turn?.pacing ?? null) };
+    case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnGuidance_ACU(context.execution.turn ?? null) };
     case '$USER_INTENT': return { title, text: context.originInstruction || '（用户未提供初始要求）' };
     case '$TABLE_GLOBAL': return { title, text: renderAgentTableByAliases_ACU('global', context.tableData) };
     case '$TABLE_CHARACTERS': return { title, text: renderAgentTableByAliases_ACU('characters', context.tableData) };

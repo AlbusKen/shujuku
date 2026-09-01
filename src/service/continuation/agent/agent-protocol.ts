@@ -8,6 +8,7 @@
  */
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
+import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
 import {
   AGENT_CHRONOLOGY_PRECISIONS_ACU,
   AGENT_HOOK_IMPORTANCES_ACU,
@@ -115,6 +116,21 @@ function stripMarkdownFences_ACU(text: string): string {
   return text.replace(/```[a-zA-Z]*\n?/g, '').trim();
 }
 
+/** 统一的原文预处理：剥推理块。围栏由花括号扫描天然跳过，不在这里处理。 */
+function normalizeModelText_ACU(raw: string | null | undefined): string {
+  return typeof raw === 'string' ? stripReasoningBlocks_ACU(raw) : '';
+}
+
+/** 在候选文本里按优先级提取全部可解析的顶层对象（严格失败时走宽松 JSON）。 */
+function parseObjectsFrom_ACU(candidate: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const extracted of extractJsonObjects_ACU(candidate)) {
+    const parsed = parseJsonLenient_ACU(extracted);
+    if (isRecord_ACU(parsed)) records.push(parsed);
+  }
+  return records;
+}
+
 /**
  * 解析一份 Agent 协议载荷。对返回形态宽容：模型可以完整重输 JSON、只续写预填充、
  * 或在 JSON 前后写自然语言——运行时按判别键从全文中挑出正确的动作对象。
@@ -124,21 +140,14 @@ function stripMarkdownFences_ACU(text: string): string {
  * @returns 解析出的对象
  */
 export function parseAgentJsonPayload_ACU(raw: string | null | undefined, prefill = '', requiredKeys: readonly string[] = []): Record<string, unknown> {
-  const text = typeof raw === 'string' ? raw : '';
+  const text = normalizeModelText_ACU(raw);
   if (!text.trim()) failProtocol_ACU('内部 AI 返回为空');
   // 剥掉围栏后以 { 开头视为完整重输，原文优先；否则视为续写预填充，拼接候选优先。
   const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
   const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
   let firstParsed: Record<string, unknown> | null = null;
   for (const candidate of candidates) {
-    for (const extracted of extractJsonObjects_ACU(candidate)) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(extracted);
-      } catch {
-        continue;
-      }
-      if (!isRecord_ACU(parsed)) continue;
+    for (const parsed of parseObjectsFrom_ACU(candidate)) {
       if (!requiredKeys.length || requiredKeys.some(key => key in parsed)) return parsed;
       if (!firstParsed) firstParsed = parsed;
     }
@@ -146,6 +155,38 @@ export function parseAgentJsonPayload_ACU(raw: string | null | undefined, prefil
   // 没有对象命中判别键时退回首个可解析对象，让上层契约校验给出准确的字段级报错。
   if (firstParsed) return firstParsed;
   failProtocol_ACU(`返回内容不包含可解析的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
+}
+
+export interface AgentJsonPayloadDraft_ACU {
+  payload: Record<string, unknown>;
+  /** 输出在 JSON 中途被截断，payload 只含抢救出的完整条目。 */
+  truncated: boolean;
+}
+
+/**
+ * 契约载荷的草稿解析：完整 JSON 直接返回；配平失败时尝试抢救截断的 JSON——保留已写完的
+ * 条目、丢掉未完成的尾部，并标记 truncated，让调用方向模型索要“剩余条目”而不是整份重来。
+ * @param raw 模型返回的原始文本
+ * @param prefill 尾段预填充
+ * @param requiredKeys 契约对象判别键
+ */
+export function parseAgentJsonPayloadDraft_ACU(raw: string | null | undefined, prefill = '', requiredKeys: readonly string[] = []): AgentJsonPayloadDraft_ACU {
+  const text = normalizeModelText_ACU(raw);
+  if (text.trim()) {
+    // 先判截断：外层对象没配平时，花括号扫描会把内部条目当成独立对象抓出来（条目也有 summary 键），
+    // 必须在严格解析之前抢救外层，否则会把一条伏笔当成整份契约。已配平时 salvage 返回 null，走严格路径。
+    const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+    const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+    for (const candidate of candidates) {
+      const salvaged = salvageTruncatedJson_ACU(stripMarkdownFences_ACU(candidate));
+      if (!salvaged) continue;
+      const parsed = parseJsonLenient_ACU(salvaged.json);
+      if (isRecord_ACU(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
+        return { payload: parsed, truncated: true };
+      }
+    }
+  }
+  return { payload: parseAgentJsonPayload_ACU(raw, prefill, requiredKeys), truncated: false };
 }
 
 function parseDelegations_ACU(value: unknown): AgentDelegation_ACU[] {
@@ -220,18 +261,12 @@ interface ParsedActionObjects_ACU {
 
 /** 按 parseAgentJsonPayload 的候选优先级提取全部带 action 键的顶层对象。 */
 function collectActionObjects_ACU(raw: string | null | undefined, prefill: string): ParsedActionObjects_ACU {
-  const text = typeof raw === 'string' ? raw : '';
-  if (!text.trim()) failProtocol_ACU('内部 AI 返回为空');
+  const text = normalizeModelText_ACU(raw);
+  if (!text.trim()) failProtocol_ACU('内部 AI 返回为空（或只有推理文字，没有任何动作 JSON）');
   const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
   const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
   for (const candidate of candidates) {
-    const records: Record<string, unknown>[] = [];
-    for (const extracted of extractJsonObjects_ACU(candidate)) {
-      try {
-        const parsed = JSON.parse(extracted);
-        if (isRecord_ACU(parsed) && 'action' in parsed) records.push(parsed);
-      } catch { /* 无法解析的碎片直接跳过，由后续候选或报错兜底。 */ }
-    }
+    const records = parseObjectsFrom_ACU(candidate).filter(parsed => 'action' in parsed);
     if (records.length) return { records };
   }
   failProtocol_ACU(`返回内容不包含带 action 字段的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
@@ -264,24 +299,15 @@ export function parseAgentMainOutput_ACU(raw: string | null | undefined, prefill
  * @returns 工具调用列表；输出里没有任何 read / search 对象时返回 null（应按契约解析）
  */
 export function parseAgentSubagentToolCalls_ACU(raw: string | null | undefined, prefill: string): AgentToolCall_ACU[] | null {
-  const text = typeof raw === 'string' ? raw : '';
+  const text = normalizeModelText_ACU(raw);
   if (!text.trim()) return null;
   const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
   const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
   for (const candidate of candidates) {
-    const toolRecords: Record<string, unknown>[] = [];
-    let sawAnyRecord = false;
-    for (const extracted of extractJsonObjects_ACU(candidate)) {
-      try {
-        const parsed = JSON.parse(extracted);
-        if (!isRecord_ACU(parsed)) continue;
-        sawAnyRecord = true;
-        const action = readText_ACU(parsed.action);
-        if (action === 'read' || action === 'search') toolRecords.push(parsed);
-      } catch { /* 跳过碎片 */ }
-    }
+    const records = parseObjectsFrom_ACU(candidate);
+    const toolRecords = records.filter(parsed => { const action = readText_ACU(parsed.action); return action === 'read' || action === 'search'; });
     if (toolRecords.length) return toolRecords.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(parseAgentToolCall_ACU);
-    if (sawAnyRecord) return null;
+    if (records.length) return null;
   }
   return null;
 }
@@ -374,12 +400,35 @@ function parseInfoGapPatch_ACU(raw: Record<string, unknown>, index: number): Age
   return patch;
 }
 
-function parseHookItems_ACU(value: unknown): { items: AgentHookDeltaItem_ACU[]; patches: AgentHookPatch_ACU[] } {
+/** 契约里单条被拒的条目：合法条目已收下，只有这些需要模型重发。 */
+export interface AgentContractRejection_ACU {
+  module: 'hooks' | 'infoGap' | 'storyArc' | 'chronology';
+  index: number;
+  id: string;
+  reason: string;
+}
+
+type RejectionSink_ACU = AgentContractRejection_ACU[] | undefined;
+
+/**
+ * 逐条解析时的收集包装：给了 sink 就把单条协议错误记下并跳过该条，没给就按原样抛出。
+ * 数组本身不是数组这类结构错误不在此范围，始终抛出。
+ */
+function collectItem_ACU(sink: RejectionSink_ACU, module: AgentContractRejection_ACU['module'], index: number, raw: unknown, parse: () => void): void {
+  try {
+    parse();
+  } catch (error) {
+    if (!sink || !(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_PROTOCOL_INVALID') throw error;
+    sink.push({ module, index, id: isRecord_ACU(raw) ? readText_ACU(raw.id) : '', reason: error.error.message });
+  }
+}
+
+function parseHookItems_ACU(value: unknown, rejected?: RejectionSink_ACU): { items: AgentHookDeltaItem_ACU[]; patches: AgentHookPatch_ACU[] } {
   if (value === undefined || value === null) return { items: [], patches: [] };
   if (!Array.isArray(value)) failProtocol_ACU('delta.hooks 必须是数组');
   const items: AgentHookDeltaItem_ACU[] = [];
   const patches: AgentHookPatch_ACU[] = [];
-  value.forEach((raw, index) => {
+  value.forEach((raw, index) => collectItem_ACU(rejected, 'hooks', index, raw, () => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.hooks[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
     if (action === 'patch') { patches.push(parseHookPatch_ACU(raw, index)); return; }
@@ -396,16 +445,16 @@ function parseHookItems_ACU(value: unknown): { items: AgentHookDeltaItem_ACU[]; 
       plannedPayoff: readText_ACU(raw.plannedPayoff),
       reason: readText_ACU(raw.reason),
     });
-  });
+  }));
   return { items, patches };
 }
 
-function parseInfoGapItems_ACU(value: unknown): { items: AgentInfoGapDeltaItem_ACU[]; patches: AgentInfoGapPatch_ACU[] } {
+function parseInfoGapItems_ACU(value: unknown, rejected?: RejectionSink_ACU): { items: AgentInfoGapDeltaItem_ACU[]; patches: AgentInfoGapPatch_ACU[] } {
   if (value === undefined || value === null) return { items: [], patches: [] };
   if (!Array.isArray(value)) failProtocol_ACU('delta.infoGap 必须是数组');
   const items: AgentInfoGapDeltaItem_ACU[] = [];
   const patches: AgentInfoGapPatch_ACU[] = [];
-  value.forEach((raw, index) => {
+  value.forEach((raw, index) => collectItem_ACU(rejected, 'infoGap', index, raw, () => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.infoGap[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
     if (action === 'patch') { patches.push(parseInfoGapPatch_ACU(raw, index)); return; }
@@ -422,7 +471,7 @@ function parseInfoGapItems_ACU(value: unknown): { items: AgentInfoGapDeltaItem_A
       revealIndex: typeof raw.revealIndex === 'number' && Number.isInteger(raw.revealIndex) && raw.revealIndex >= 0 ? raw.revealIndex : null,
       reason: readText_ACU(raw.reason),
     });
-  });
+  }));
   return { items, patches };
 }
 
@@ -497,12 +546,12 @@ function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): Ag
   return patch;
 }
 
-function parseStoryArcItems_ACU(value: unknown): { items: AgentStoryArcDeltaItem_ACU[]; patches: AgentStoryArcPatch_ACU[] } {
+function parseStoryArcItems_ACU(value: unknown, rejected?: RejectionSink_ACU): { items: AgentStoryArcDeltaItem_ACU[]; patches: AgentStoryArcPatch_ACU[] } {
   if (value === undefined || value === null) return { items: [], patches: [] };
   if (!Array.isArray(value)) failProtocol_ACU('delta.storyArc 必须是数组');
   const items: AgentStoryArcDeltaItem_ACU[] = [];
   const patches: AgentStoryArcPatch_ACU[] = [];
-  value.forEach((raw, index) => {
+  value.forEach((raw, index) => collectItem_ACU(rejected, 'storyArc', index, raw, () => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.storyArc[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
     if (action === 'patch') { patches.push(parseStoryArcPatch_ACU(raw, index)); return; }
@@ -550,7 +599,7 @@ function parseStoryArcItems_ACU(value: unknown): { items: AgentStoryArcDeltaItem
           : failProtocol_ACU(`delta.storyArc[${index}].completionRationale 必须是字符串`)),
       reason: readText_ACU(raw.reason),
     });
-  });
+  }));
   return { items, patches };
 }
 
@@ -559,17 +608,19 @@ function parseStoryArcItems_ACU(value: unknown): { items: AgentStoryArcDeltaItem
  * 文本缺失、证据数组为空或含非整数楼层都必须拒绝——把坏时间记录静默降级会污染后续
  * 每一次时间一致性审查的基准。
  */
-function parseChronologyItems_ACU(value: unknown): AgentChronologyDeltaItem_ACU[] {
+function parseChronologyItems_ACU(value: unknown, rejected?: RejectionSink_ACU): AgentChronologyDeltaItem_ACU[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) failProtocol_ACU('delta.chronology 必须是数组');
-  return value.map((raw, index) => {
+  const items: AgentChronologyDeltaItem_ACU[] = [];
+  value.forEach((raw, index) => collectItem_ACU(rejected, 'chronology', index, raw, () => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.chronology[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
     if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.chronology[${index}].action 必须是 upsert / retire，实际收到：${action || '(空)'}`);
     const id = readText_ACU(raw.id);
     if (!id) failProtocol_ACU(`delta.chronology[${index}] 需要非空 id`);
     if (action === 'retire') {
-      return { action, id, anchor: readText_ACU(raw.anchor), elapsed: readText_ACU(raw.elapsed), precision: 'unknown' as const, transition: readText_ACU(raw.transition), evidenceIndexes: [] as number[], reason: readText_ACU(raw.reason) };
+      items.push({ action, id, anchor: readText_ACU(raw.anchor), elapsed: readText_ACU(raw.elapsed), precision: 'unknown' as const, transition: readText_ACU(raw.transition), evidenceIndexes: [] as number[], reason: readText_ACU(raw.reason) });
+      return;
     }
     const anchor = readText_ACU(raw.anchor);
     const elapsed = readText_ACU(raw.elapsed);
@@ -590,7 +641,7 @@ function parseChronologyItems_ACU(value: unknown): AgentChronologyDeltaItem_ACU[
       }
       return item;
     });
-    return {
+    items.push({
       action,
       id,
       anchor,
@@ -599,8 +650,9 @@ function parseChronologyItems_ACU(value: unknown): AgentChronologyDeltaItem_ACU[
       transition,
       evidenceIndexes: [...new Set(evidenceIndexes)].sort((left, right) => left - right),
       reason: readText_ACU(raw.reason),
-    };
-  });
+    });
+  }));
+  return items;
 }
 
 function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expectedRevisions'] {
@@ -619,25 +671,110 @@ function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expec
  * @returns 摘要 + 写集事务 + 追加读取请求
  */
 export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>): AgentMaintainerOutput_ACU {
+  const draft = parseAgentMaintainerOutputDraft_ACU(payload);
+  if (draft.rejected.length) failProtocol_ACU(draft.rejected[0].reason, { rejected: draft.rejected.length });
+  return draft.output;
+}
+
+export interface AgentMaintainerOutputDraft_ACU {
+  output: AgentMaintainerOutput_ACU;
+  rejected: AgentContractRejection_ACU[];
+}
+
+/**
+ * 维护/总纲契约的草稿解析：合法条目收进 output，单条非法的记进 rejected 而不是整份拒绝，
+ * 让运行时只向模型索要需要修正的那几条。数组结构本身非法仍然抛出。
+ * @param payload 已解析的 JSON 载荷
+ */
+export function parseAgentMaintainerOutputDraft_ACU(payload: Record<string, unknown>): AgentMaintainerOutputDraft_ACU {
   const rawDelta = isRecord_ACU(payload.delta) ? payload.delta : {};
-  const hooks = parseHookItems_ACU(rawDelta.hooks);
-  const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap);
-  const storyArc = parseStoryArcItems_ACU(rawDelta.storyArc);
-  const chronology = parseChronologyItems_ACU(rawDelta.chronology);
+  const rejected: AgentContractRejection_ACU[] = [];
+  const hooks = parseHookItems_ACU(rawDelta.hooks, rejected);
+  const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap, rejected);
+  const storyArc = parseStoryArcItems_ACU(rawDelta.storyArc, rejected);
+  const chronology = parseChronologyItems_ACU(rawDelta.chronology, rejected);
   return {
-    summary: readText_ACU(payload.summary),
+    output: {
+      summary: readText_ACU(payload.summary),
+      delta: {
+        expectedRevisions: parseExpectedRevisions_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions),
+        hooks: hooks.items,
+        hookPatches: hooks.patches,
+        infoGap: infoGap.items,
+        infoGapPatches: infoGap.patches,
+        storyArc: storyArc.items,
+        storyArcPatches: storyArc.patches,
+        chronology,
+        constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
+      },
+    },
+    rejected,
+  };
+}
+
+/**
+ * 按 (模块, id) 把后一份契约草稿合并进前一份：同 id 后者覆盖，新 id 追加，约束提议取并集，
+ * 摘要与 expectedRevisions 以首次非空为准。用于截断续写与条目修补的多轮累积。
+ * @param base 已累积的输出
+ * @param incoming 本轮新收到的输出
+ */
+export function mergeAgentMaintainerOutputs_ACU(base: AgentMaintainerOutput_ACU, incoming: AgentMaintainerOutput_ACU): AgentMaintainerOutput_ACU {
+  const mergeById = <T extends { id: string }>(left: readonly T[], right: readonly T[]): T[] => {
+    const byId = new Map<string, T>();
+    const order: string[] = [];
+    let anonymous = 0;
+    for (const item of [...left, ...right]) {
+      const key = item.id.trim() || `__anonymous_${anonymous++}`;
+      if (!byId.has(key)) order.push(key);
+      byId.set(key, item);
+    }
+    return order.map(key => byId.get(key)!);
+  };
+  const revisions = { ...incoming.delta.expectedRevisions, ...base.delta.expectedRevisions };
+  return {
+    summary: base.summary || incoming.summary,
     delta: {
-      expectedRevisions: parseExpectedRevisions_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions),
-      hooks: hooks.items,
-      hookPatches: hooks.patches,
-      infoGap: infoGap.items,
-      infoGapPatches: infoGap.patches,
-      storyArc: storyArc.items,
-      storyArcPatches: storyArc.patches,
-      chronology,
-      constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
+      expectedRevisions: revisions,
+      hooks: mergeById(base.delta.hooks, incoming.delta.hooks),
+      hookPatches: mergeById(base.delta.hookPatches, incoming.delta.hookPatches),
+      infoGap: mergeById(base.delta.infoGap, incoming.delta.infoGap),
+      infoGapPatches: mergeById(base.delta.infoGapPatches, incoming.delta.infoGapPatches),
+      storyArc: mergeById(base.delta.storyArc, incoming.delta.storyArc),
+      storyArcPatches: mergeById(base.delta.storyArcPatches, incoming.delta.storyArcPatches),
+      chronology: mergeById(base.delta.chronology, incoming.delta.chronology),
+      constraintProposals: [...new Set([...base.delta.constraintProposals, ...incoming.delta.constraintProposals])],
     },
   };
+}
+
+/**
+ * 渲染截断/条目修补的续写请求：告诉模型哪些条目已收下（不要重发）、哪些条目要修正、
+ * 以及输出是否在中途被截断需要从下一条继续。回复只需含剩余/修正条目。
+ */
+export function renderAgentContractContinuationRequest_ACU(accepted: AgentMaintainerOutput_ACU, rejected: readonly AgentContractRejection_ACU[], truncated: boolean): string {
+  const acceptedIds: string[] = [];
+  for (const [label, list] of [
+    ['伏笔', [...accepted.delta.hooks, ...accepted.delta.hookPatches]],
+    ['信息差', [...accepted.delta.infoGap, ...accepted.delta.infoGapPatches]],
+    ['总纲', [...accepted.delta.storyArc, ...accepted.delta.storyArcPatches]],
+    ['年代学', accepted.delta.chronology],
+  ] as const) {
+    const ids = list.map(item => item.id).filter(Boolean);
+    if (ids.length) acceptedIds.push(`${label}：${ids.join('、')}`);
+  }
+  const lines: string[] = [];
+  if (truncated) {
+    lines.push('你上一次的输出在 JSON 中途被截断。截断前已写完整的条目已经收下，不要重发它们；请从被截断的那一条开始，只输出剩余条目。');
+  } else {
+    lines.push('你上一次的输出大部分已收下，只有下列条目不符合契约，请只重发这些条目（修正后），其余不要重发。');
+  }
+  if (acceptedIds.length) lines.push(`已收下的条目：${acceptedIds.join('；')}。`);
+  if (rejected.length) {
+    lines.push('需要修正的条目：');
+    for (const item of rejected) lines.push(`- ${item.module}[${item.index}]${item.id ? `（id=${item.id}）` : ''}：${item.reason}`);
+  }
+  lines.push('回复格式与原契约相同，只是 delta 里各数组只放剩余或修正的条目；summary 可省略；所有条目都写完时 delta 各数组为空即可。');
+  return lines.join('\n');
 }
 
 /**

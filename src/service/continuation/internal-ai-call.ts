@@ -1,6 +1,6 @@
 import { callAIWithResolvedPreset_ACU, type AiUsageMetadata_ACU } from '../ai/api-call';
 import type { ContinuationResolvedApiPreset_ACU } from './api-preset';
-import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from './model';
+import { ContinuationValidationError_ACU, type ContinuationAgentApiPresetRole_ACU, type ContinuationInternalAiRequestIdentity_ACU } from './model';
 import {
   beginContinuationInternalAiMainApiInvocation_ACU,
   beginContinuationInternalAiRequest_ACU,
@@ -25,7 +25,26 @@ export interface ContinuationInternalAiCallOptions_ACU {
   cacheScope?: string;
   /** 响应带回 token 用量时回调。并发调用各自持有闭包，互不干扰。 */
   onUsage?: (usage: AiUsageMetadata_ACU) => void;
+  /** 本次调用的最大输出 token 下限；预设值更大时沿用预设。缺省不抬。 */
+  minOutputTokens?: number;
 }
+
+/**
+ * 各角色单次输出的 token 下限。总纲一次要写十几卷的完整契约、大纲一次要写整阶段的逐轮标记、
+ * 维护代理一次要结算多楼正文的三本账，这三类输出随任务体量增长，4096 的通用默认经常在
+ * JSON/标签中间被切断。策划与审查输出短，保持通用默认即可。
+ * 取 8192 而不是更高：它是当前主流模型普遍接受的输出上限，再往上部分渠道会直接拒绝请求。
+ */
+export const CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU: Readonly<Record<ContinuationAgentApiPresetRole_ACU, number>> = {
+  main: 4096,
+  outline: 8192,
+  arcArchitect: 8192,
+  maintainer: 8192,
+  mainlinePlanner: 4096,
+  beatPlanner: 4096,
+  reviewer: 4096,
+  finalReviewer: 4096,
+};
 
 /**
  * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
@@ -98,6 +117,10 @@ export async function callContinuationInternalAi_ACU(
 ): Promise<string | null> {
   beginContinuationInternalAiRequest_ACU(identity);
   const cacheEnabled = options?.promptCacheEnabled === true;
+  const extras = {
+    ...(cacheEnabled ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source, preset) } : {}),
+    ...(options?.minOutputTokens ? { minOutputTokens: options.minOutputTokens } : {}),
+  };
   try {
     return await callAIWithResolvedPreset_ACU(
       messages,
@@ -108,9 +131,7 @@ export async function callContinuationInternalAi_ACU(
         afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
         ...(options?.onUsage ? { onUsage: options.onUsage } : {}),
       },
-      cacheEnabled
-        ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source, preset) }
-        : undefined,
+      Object.keys(extras).length ? extras : undefined,
     );
   } finally {
     // A bound host lifecycle remains registered until its matching ended event.

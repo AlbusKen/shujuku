@@ -466,6 +466,11 @@ export interface ResolvedPresetCallLifecycle_ACU {
 export interface ResolvedPresetCallExtras_ACU {
     /** OpenAI 兼容缓存路由 key。稳定的 key 让同一会话的请求落到同一缓存命名空间。 */
     promptCacheKey?: string;
+    /**
+     * 本次调用的最大输出 token 下限：预设里的 max_tokens 小于它时抬到该值，大于时沿用预设。
+     * 三条路径（tavern / 主 API / custom）都生效。用于总纲、大纲这类输出体量随任务增长的调用。
+     */
+    minOutputTokens?: number;
 }
 
 /** tavern 模式请求的串行队列尾。/profile 是全局状态，并发切换会互相踩，必须串行「切换→发送→恢复」。 */
@@ -526,7 +531,9 @@ export async function callAIWithResolvedPreset_ACU(
         if (!usage) return;
         try { lifecycle.onUsage(usage); } catch { /* 用量回调异常不允许影响调用主流程。 */ }
     };
-    const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
+    const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
+    const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras!.minOutputTokens!)) : 0;
+    const maxTokens = Math.max(presetMaxTokens, floor);
     if (resolved.apiMode === 'tavern') {
         if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
         const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);

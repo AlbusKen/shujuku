@@ -13,7 +13,7 @@
  */
 
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
-import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
+import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { resolveContinuationAgentApiPreset_ACU, resolveContinuationApiPreset_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import {
@@ -26,12 +26,16 @@ import { AGENT_PREFILLS_ACU } from './agent-defaults';
 import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import {
   compactAgentProtocolError_ACU,
+  mergeAgentMaintainerOutputs_ACU,
   parseAgentFinalReviewerOutput_ACU,
   parseAgentJsonPayload_ACU,
-  parseAgentMaintainerOutput_ACU,
+  parseAgentJsonPayloadDraft_ACU,
+  parseAgentMaintainerOutputDraft_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
+  renderAgentContractContinuationRequest_ACU,
+  type AgentContractRejection_ACU,
 } from './agent-protocol';
 import { buildAgentFinalReviewEvidence_ACU, type AgentFinalReviewEvidence_ACU } from './agent-final-review-context';
 import {
@@ -179,6 +183,12 @@ const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = 
   review: ['verdict'],
 };
 
+/**
+ * 契约类子代理（总纲/维护）在一次派工里最多追加的续写/修补轮数。
+ * 输出被截断或个别条目非法时，只索要剩余或修正条目，不整份重来；这两轮不占协议重试额度。
+ */
+export const AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU = 2;
+
 /** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
 const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritableModule_ACU[]> = {
   arc: ['storyArc'],
@@ -323,6 +333,7 @@ export class AgentSubagentRuntime_ACU {
       promptCacheEnabled: false,
       // 每个子代理的提示词前缀不同，独立缓存命名空间避免互相挤占路由。
       cacheScope: `sub-${definition.name}`,
+      minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
       onUsage: usage => {
         usageTotal = usageTotal
           ? {
@@ -339,8 +350,35 @@ export class AgentSubagentRuntime_ACU {
           };
       },
     };
-    // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮。到界仍未交付即失败。
-    const maxCalls = 1 + maxToolRounds + retries + 1;
+    // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮 + 契约续写/修补轮。到界仍未交付即失败。
+    const contractKind = definition.kind === 'arc' || definition.kind === 'maintain';
+    const maxContinuations = contractKind ? AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU : 0;
+    const maxCalls = 1 + maxToolRounds + retries + 1 + maxContinuations;
+    // 契约草稿累积：截断或单条非法时不整份重来，先收下合法条目，再只向模型索要剩余/修正条目。
+    let accumulated: AgentMaintainerOutput_ACU | null = null;
+    let continuationsUsed = 0;
+    // 跨轮未清偿的被拒条目：模型在续写里没有重发修正版就不能算完成，否则条目会被静默丢掉。
+    let outstanding: AgentContractRejection_ACU[] = [];
+    const acceptedKeys = (output: AgentMaintainerOutput_ACU): Set<string> => new Set([
+      ...[...output.delta.hooks, ...output.delta.hookPatches].map(item => `hooks:${item.id}`),
+      ...[...output.delta.infoGap, ...output.delta.infoGapPatches].map(item => `infoGap:${item.id}`),
+      ...[...output.delta.storyArc, ...output.delta.storyArcPatches].map(item => `storyArc:${item.id}`),
+      ...output.delta.chronology.map(item => `chronology:${item.id}`),
+    ]);
+    const deliverContract = (output: AgentMaintainerOutput_ACU): AgentSubagentRunResult_ACU => ({
+      agentName: definition.name,
+      kind: definition.kind,
+      writes,
+      arc: definition.kind === 'arc' ? output : null,
+      maintainer: definition.kind === 'maintain' ? output : null,
+      planner: null,
+      reviewer: null,
+      iterations: 1 + toolRoundsUsed,
+      attempts: attempt,
+      expandedReads: [...expandedReads],
+      readRevisions,
+      usage: usageTotal,
+    });
 
     for (let call = 0; call < maxCalls; call += 1) {
       const identity = input.createIdentity(definition.name, attempt);
@@ -380,13 +418,35 @@ export class AgentSubagentRuntime_ACU {
       }
 
       try {
+        if (contractKind) {
+          const draft = parseAgentJsonPayloadDraft_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+          const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
+          accumulated = accumulated ? mergeAgentMaintainerOutputs_ACU(accumulated, parsed.output) : parsed.output;
+          // 上一轮被拒的条目：本轮重发了合法版本即清偿；没有 id 的条目无法匹配，本轮过后不再追讨。
+          const nowAccepted = acceptedKeys(parsed.output);
+          outstanding = outstanding.filter(item => item.id && !nowAccepted.has(`${item.module}:${item.id}`));
+          const pending: AgentContractRejection_ACU[] = [...outstanding, ...parsed.rejected];
+          outstanding = pending;
+          if (!draft.truncated && !pending.length) return deliverContract(accumulated);
+          if (continuationsUsed >= maxContinuations) {
+            if (pending.length) {
+              throw subagentFailed_ACU(`${definition.name} 仍有 ${pending.length} 条条目不符合契约（续写/修补 ${continuationsUsed} 轮后）`, false, { agentName: definition.name, lastReason: pending[0].reason, rejected: pending });
+            }
+            // 只剩截断：已收下的条目本身都完整，接受它们，未写出的部分留给下一轮派工。
+            return deliverContract(accumulated);
+          }
+          continuationsUsed += 1;
+          transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+          transcript.push({ role: 'user', content: renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated) });
+          continue;
+        }
         const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
         return {
           agentName: definition.name,
           kind: definition.kind,
           writes,
-          arc: definition.kind === 'arc' ? parseAgentMaintainerOutput_ACU(payload) : null,
-          maintainer: definition.kind === 'maintain' ? parseAgentMaintainerOutput_ACU(payload) : null,
+          arc: null,
+          maintainer: null,
           planner: definition.kind === 'plan' ? parseAgentPlannerOutput_ACU(payload) : null,
           reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
           iterations: 1 + toolRoundsUsed,
@@ -396,6 +456,7 @@ export class AgentSubagentRuntime_ACU {
           usage: usageTotal,
         };
       } catch (error) {
+        if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_SUBAGENT_FAILED') throw error;
         lastReason = compactAgentProtocolError_ACU(error);
         protocolRejections += 1;
         if (protocolRejections > retries) {
@@ -464,6 +525,7 @@ export class AgentSubagentRuntime_ACU {
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
       promptCacheEnabled: false,
       cacheScope: 'final-reviewer',
+      minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
       onUsage: usage => {
         usageTotal = usageTotal
           ? {

@@ -10,10 +10,10 @@ import {
   V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU,
   V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
-import { renderAgentTurnPacingGuidance_ACU } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
+import { renderAgentTurnGuidance_ACU, renderAgentTurnPacingGuidance_ACU } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
 import {
   buildDefaultContinuationSettings_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU,
   V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU,
 } from '../../../../src/service/continuation/defaults';
 
@@ -25,7 +25,7 @@ describe('continuation P0 pacing prompt contracts', () => {
   it('assembles the V24 outline contract under the current default version', () => {
     const settings = buildDefaultContinuationSettings_ACU();
 
-    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU);
+    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU);
     expect(settings.outlinePrompt.some(segment => segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)).toBe(true);
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('setup 与 cooldown 允许主线保持不动');
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('隔夜、数日后还是更久');
@@ -98,5 +98,21 @@ describe('continuation P0 pacing prompt contracts', () => {
 
     expect(pressure).toContain('只推进一个冲突');
     expect(turn).toContain('已经埋过的东西');
+  });
+
+  it('本轮节奏段渲染四维标记、系统补全提示与长时间跳跃义务', () => {
+    const jump = renderAgentTurnGuidance_ACU({ id: 't1', goal: 'g', pacing: 'setup', function: 'training', mainlineDelta: 'hold', timeAdvance: 'weeks', timeAnchor: '入门后第二个月', inferred: ['mainlineDelta'] });
+    expect(jump).toContain('本轮节奏：setup');
+    expect(jump).toContain('叙事功能=training');
+    expect(jump).toContain('时间锚=入门后第二个月');
+    expect(jump).toContain('mainlineDelta 是系统按节奏档保守补全的推断值');
+    expect(jump).toContain('时间跳跃义务');
+    expect(jump).toContain('read $CHRONOLOGY');
+    expect(jump).toContain('本轮主线允许停驻');
+
+    const tight = renderAgentTurnGuidance_ACU({ id: 't2', goal: 'g', pacing: 'pressure', function: 'conflict', mainlineDelta: 'step', timeAdvance: 'continuous' });
+    expect(tight).not.toContain('时间跳跃义务');
+    expect(tight).not.toContain('系统');
+    expect(renderAgentTurnGuidance_ACU(null)).toContain('尚无可执行的大纲轮次');
   });
 });

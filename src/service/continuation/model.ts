@@ -190,6 +190,10 @@ export type StageTempo_ACU = typeof STAGE_TEMPOS_ACU[number];
 export const STAGE_ROLES_ACU = ['setup', 'development', 'escalation', 'turn', 'payoff', 'aftermath'] as const;
 export type StageRole_ACU = typeof STAGE_ROLES_ACU[number];
 
+/** 可由运行时保守补全的轮次语义字段。 */
+export const STAGE_TURN_SOFT_FIELDS_ACU = ['function', 'mainlineDelta', 'timeAdvance'] as const;
+export type StageTurnSoftField_ACU = typeof STAGE_TURN_SOFT_FIELDS_ACU[number];
+
 export interface StageTurn_ACU {
   id: string;
   goal: string;
@@ -198,6 +202,11 @@ export interface StageTurn_ACU {
   mainlineDelta?: StageTurnMainlineDelta_ACU;
   timeAdvance?: StageTurnTimeAdvance_ACU;
   timeAnchor?: string;
+  /**
+   * 由运行时按 pacing 保守补全、而非模型或作者明确给出的字段。
+   * 用于 UI 标注与主 Agent 提示，避免把推断值当成原始意图。
+   */
+  inferred?: StageTurnSoftField_ACU[];
 }
 
 export interface StageNode_ACU {

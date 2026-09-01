@@ -17,9 +17,10 @@
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
-import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
+import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
+import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
 import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
@@ -63,7 +64,7 @@ import {
   renderAgentStoryOverview_ACU,
   renderAgentStoryTail_ACU,
   renderAgentStoryText_ACU,
-  renderAgentTurnPacingGuidance_ACU,
+  renderAgentTurnGuidance_ACU,
   renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
@@ -179,6 +180,30 @@ function failLoop_ACU(
   details?: Record<string, unknown>,
 ): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'agent_loop', message, false, details));
+}
+
+/**
+ * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 按当前状态给出的最可能合法动作样例。
+ * 快速模型对“照这个样子写”远比对“请修正”服从；样例按状态选择，避免把不合时宜的动作推给它。
+ */
+export function renderMainProtocolRejection_ACU(reason: string, execution: ContinuationAgentExecutionContext_ACU, allowDelegate: boolean): string {
+  const lines = [
+    `你上一次的输出没有被采纳。原因：${reason}`,
+    '只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
+  ];
+  const hasTurn = !!execution.turn;
+  if (!hasTurn && allowDelegate) {
+    lines.push('{"thought":"先建立大纲","action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按总纲当前 active 卷规划本阶段","reads":[]}]}');
+  }
+  lines.push('{"thought":"需要核对正文","action":"read","reads":["$STORY_TAIL","$HOOKS_LEDGER"]}');
+  if (allowDelegate) {
+    lines.push('{"thought":"先结算再策划","action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算未结算正文，对照上一轮目标评估达成度","reads":[]},{"agentName":"mainline-planner","prompt":"本轮 pacing=setup，允许主线 hold","reads":[]}]}');
+  }
+  if (hasTurn) {
+    lines.push('{"thought":"证据已足够","action":"finalize","instruction":"承接：……\\n本轮场景任务：……\\n必须发生的变化：……","summary":"一句话要点"}');
+  }
+  lines.push('{"thought":"关键资料缺失","action":"block","reason":"……","unresolved":["……"]}');
+  return lines.join('\n');
 }
 
 /**
@@ -877,6 +902,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
       promptCacheEnabled: false,
       cacheScope: 'agent-main',
+      minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.main,
       onUsage: usage => { callUsage = usage; },
     };
 
@@ -925,7 +951,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         // 被拒绝的原文也要留在会话里：模型必须看到自己上一次到底写了什么才能真正修正。
         session.record([
           { kind: 'agent', text: rawText || '(空输出)', digest: '输出被协议层拒绝', turnKey: session.turnKey },
-          { kind: 'tool', text: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出一个符合协议的 JSON 对象。`, digest: `协议拒绝：${lastReason}`, turnKey: session.turnKey },
+          { kind: 'tool', text: renderMainProtocolRejection_ACU(lastReason, request.readContext(), allowDelegate), digest: `协议拒绝：${lastReason}`, turnKey: session.turnKey },
         ]);
         await session.flush();
         // 会话流必须展示模型原文片段：解析被拒不等于模型没输出，用户要能看到它实际返回了什么。
@@ -964,7 +990,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       $CURRENT_TURN_GOAL: () => context.execution.turn?.goal || '（尚无可执行的大纲轮次，需先创建或继续大纲）',
       $UNSETTLED_RANGE: () => this.renderUnsettledRange_ACU(context),
       $STORY_ARC_STATE: () => this.renderStoryArcState_ACU(context),
-      $CURRENT_TURN_PACING: () => renderAgentTurnPacingGuidance_ACU(context.execution.turn?.pacing ?? null),
+      $CURRENT_TURN_PACING: () => renderAgentTurnGuidance_ACU(context.execution.turn ?? null),
       $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU(),
       $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU(),
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),

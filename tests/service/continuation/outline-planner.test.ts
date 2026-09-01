@@ -95,6 +95,55 @@ describe('ContinuationOutlinePlanner_ACU', () => {
     expect(result.outline.totalTurns).toBe(6);
   });
 
+  it('缺标记时只发起增量修补轮，合并 <fix> 后通过，不整份重来', async () => {
+    const draft = `<stage_title>阶段标题</stage_title>\n<stage_goal>阶段目标</stage_goal>\n<stage_tempo>mixed</stage_tempo>\n<node>\n<node_title>节点</node_title>\n<node_goal>节点目标</node_goal>\n<turn pacing="setup">两人第一次一起做晚饭</turn>\n${tagTurns_ACU(5, '目标', 1)}\n</node>`;
+    const fixes = '<think>补属性</think>\n<fix node="1" turn="1" function="关系日常" mainline="不推进" time="overnight"/>\n<fix stage role="development"/>';
+    const { planner, callInternalAi } = createPlanner_ACU([draft, fixes]);
+    const result = await planner.plan(request_ACU(settings_ACU(0)));
+    expect(callInternalAi).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ attempts: 1, repairRounds: 1, inferredFields: 0 });
+    expect(result.outline.role).toBe('development');
+    expect(result.outline.nodes[0].turns[0]).toEqual({ id: 'turn-fresh-2', goal: '两人第一次一起做晚饭', pacing: 'setup', function: 'daily_bond', mainlineDelta: 'hold', timeAdvance: 'overnight' });
+    const repairRequest = lastMessageContent_ACU(callInternalAi, 1);
+    expect(repairRequest).toContain('节点1 第1轮（「两人第一次一起做晚饭」）');
+    expect(repairRequest).toContain('缺 function');
+    expect(repairRequest).toContain('缺 mainline');
+    expect(repairRequest).toContain('缺 role');
+    expect(repairRequest).toContain('<fix node="1" turn="1"');
+    expect(repairRequest).not.toContain('重新输出完整标签');
+  });
+
+  it('修补轮用尽后接受软字段默认并标记 inferred，pacing 仍缺则整份重来', async () => {
+    const softDraft = `<stage_tempo>mixed</stage_tempo><stage_role>development</stage_role><node><node_goal>节点目标</node_goal><turn pacing="setup">日常</turn>${tagTurns_ACU(5, '目标', 1)}</node>`;
+    // 修补回复既无 <fix> 也无整份大纲：不再追问，直接接受默认，省下一次注定无用的调用。
+    const { planner, callInternalAi } = createPlanner_ACU([softDraft, '我不知道怎么补']);
+    const result = await planner.plan(request_ACU(settings_ACU(0)));
+    expect(callInternalAi).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ attempts: 1, repairRounds: 1, inferredFields: 3 });
+    expect(result.outline.nodes[0].turns[0]).toMatchObject({ function: 'transition', mainlineDelta: 'hold', timeAdvance: 'same_day', inferred: ['function', 'mainlineDelta', 'timeAdvance'] });
+    // 漏写的阶段标题/目标由节点信息兜底，不作为结构错误。
+    expect(result.outline.title).toBe('未命名阶段');
+    expect(result.outline.goal).toBe('节点目标');
+
+    const hardDraft = `<stage_tempo>mixed</stage_tempo><stage_role>development</stage_role><node><node_goal>节点目标</node_goal><turn>没写节奏</turn>${tagTurns_ACU(5, '目标', 1)}</node>`;
+    const second = createPlanner_ACU([hardDraft, '不会', tagOutline_ACU(6)]);
+    const recovered = await second.planner.plan(request_ACU(settings_ACU(1)));
+    expect(recovered.attempts).toBe(2);
+    expect(second.callInternalAi).toHaveBeenCalledTimes(3);
+    const retry = lastMessageContent_ACU(second.callInternalAi, 2);
+    expect(retry).toContain('pacing');
+    expect(retry).toContain('<turn pacing="setup" function="daily_bond"');
+  });
+
+  it('修补轮里模型重发整份大纲时按新输出继续', async () => {
+    const draft = `<stage_tempo>mixed</stage_tempo><node><node_goal>节点目标</node_goal><turn pacing="setup">日常</turn>${tagTurns_ACU(5, '目标', 1)}</node>`;
+    const { planner, callInternalAi } = createPlanner_ACU([draft, tagOutline_ACU(6)]);
+    const result = await planner.plan(request_ACU(settings_ACU(0)));
+    expect(callInternalAi).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ attempts: 1, repairRounds: 1, inferredFields: 0 });
+    expect(result.outline.title).toBe('阶段标题');
+  });
+
   it('retries untagged output and feeds back a compact error with the reason message', async () => {
     const { planner, callInternalAi } = createPlanner_ACU(['这段返回没有任何标签', tagOutline_ACU(6)]);
     const result = await planner.plan(request_ACU(settings_ACU(1), { resolvers: { $ORIGIN_INSTRUCTION: () => '继续' } }));

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ContinuationValidationError_ACU, type StageOutline_ACU } from '../../../src/service/continuation/model';
-import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from '../../../src/service/continuation/outline-tags';
+import { applyOutlineFixes_ACU, buildStageOutlineFromTags_ACU, parseOutlineFixes_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from '../../../src/service/continuation/outline-tags';
 
 function allocator_ACU() {
   let counter = 0;
@@ -94,6 +94,60 @@ describe('parseOutlineTags_ACU', () => {
     ]);
   });
 
+  it('接受带空格的引号 anchor、中英文别名与全角引号', () => {
+    const raw = [
+      '<node><node_goal>目标</node_goal>',
+      '<turn pacing="铺垫日常" function="关系日常" mainline="不推进" time="数日" anchor="抵达临川城后 第三周">目标一</turn>',
+      "<turn pacing='Cool-Down' function='疗伤' mainline='Step' time='next day' anchor='day 7 after arrival'>目标二</turn>",
+      '<turn pacing=“pressure” function=“对抗” mainline=“推进一步” time=“紧接”>目标三</turn>',
+      '</node>',
+    ].join('\n');
+    expect(parseOutlineTags_ACU(raw).nodes[0].turns).toEqual([
+      { goal: '目标一', pacing: 'setup', function: 'daily_bond', mainlineDelta: 'hold', timeAdvance: 'days', timeAnchor: '抵达临川城后 第三周' },
+      { goal: '目标二', pacing: 'cooldown', function: 'recovery', mainlineDelta: 'step', timeAdvance: 'overnight', timeAnchor: 'day 7 after arrival' },
+      { goal: '目标三', pacing: 'pressure', function: 'conflict', mainlineDelta: 'step', timeAdvance: 'continuous', timeAnchor: null },
+    ]);
+  });
+
+  it('接受子标签与方括号前缀两种标记形态，并剥掉推理块', () => {
+    const raw = [
+      '<think>先想想节奏……{"draft": 1}</think>',
+      '<node><node_goal>目标</node_goal>',
+      '<turn><pacing>setup</pacing><function>training</function><mainline>hold</mainline><time>weeks</time><anchor>入门后第二个月</anchor>在铁匠铺打下手</turn>',
+      '<turn>[turn|reveal|step|continuous]信物的真正主人露面</turn>',
+      '<turn>[pacing=cooldown; time=overnight]【回忆】夜里两人各自失眠</turn>',
+      '<turn>【回忆】这个方括号只是正文</turn>',
+      '</node>',
+    ].join('\n');
+    expect(parseOutlineTags_ACU(raw).nodes[0].turns).toEqual([
+      { goal: '在铁匠铺打下手', pacing: 'setup', function: 'training', mainlineDelta: 'hold', timeAdvance: 'weeks', timeAnchor: '入门后第二个月' },
+      { goal: '信物的真正主人露面', pacing: 'turn', function: 'reveal', mainlineDelta: 'step', timeAdvance: 'continuous', timeAnchor: null },
+      { goal: '【回忆】夜里两人各自失眠', pacing: 'cooldown', function: null, mainlineDelta: null, timeAdvance: 'overnight', timeAnchor: null },
+      { goal: '【回忆】这个方括号只是正文', pacing: null, function: null, mainlineDelta: null, timeAdvance: null, timeAnchor: null },
+    ]);
+  });
+
+  it('解析与应用 <fix> 修补：按位置合并，非法值忽略', () => {
+    const planned = buildStageOutlineFromTags_ACU(parseOutlineTags_ACU('<node><node_goal>目标</node_goal><turn pacing="setup">一</turn><turn>二</turn></node><node><node_goal>目标2</node_goal><turn pacing="pressure">三</turn></node>'), allocator_ACU());
+    const fixes = parseOutlineFixes_ACU([
+      '<think>补</think>',
+      '<fix node="1" turn="1" function="关系日常" time="overnight"/>',
+      '<fix node="1" turn="2" pacing="pressure" mainline="step" function="不存在的功能">',
+      '<fix node=2 turn=1 anchor="围城第五日" time="days"></fix>',
+      '<fix stage tempo="起伏型" role="development" time_span="十日"/>',
+      '<fix node="9" turn="1" function="conflict"/>',
+    ].join('\n'));
+    expect(fixes).toHaveLength(5);
+    const fixed = applyOutlineFixes_ACU(planned, fixes);
+    expect(fixed.nodes[0].turns[0]).toMatchObject({ pacing: 'setup', function: 'daily_bond', timeAdvance: 'overnight' });
+    expect(fixed.nodes[0].turns[1]).toMatchObject({ pacing: 'pressure', mainlineDelta: 'step' });
+    expect(fixed.nodes[0].turns[1].function).toBeUndefined();
+    expect(fixed.nodes[1].turns[0]).toMatchObject({ timeAnchor: '围城第五日', timeAdvance: 'days' });
+    expect(fixed).toMatchObject({ tempo: 'mixed', role: 'development', timeSpanGoal: '十日' });
+    expect(applyOutlineFixes_ACU(planned, [])).toBe(planned);
+    expect(parseOutlineFixes_ACU('没有任何修补')).toEqual([]);
+  });
+
   it('解析阶段枚举时仅规范大小写，不吞掉非法原文', () => {
     const body = '<node><node_goal>目标</node_goal><turn>一轮</turn></node>';
     expect(parseOutlineTags_ACU(`<stage_tempo>SURGE</stage_tempo>${body}`).tempo).toBe('surge');
@@ -180,7 +234,9 @@ describe('spliceOutlineWithCompletedPrefix_ACU', () => {
   });
 
   it('keeps previous stage title and goal when the replan omits them', () => {
-    const planned = buildStageOutlineFromTags_ACU(parseOutlineTags_ACU('<node><node_goal>目标</node_goal><turn>新的一轮</turn></node>'), allocator_ACU());
+    // 重规划链路总是把旧大纲作为 fallback 传入；此时漏写的标题/目标不走节点兜底，交给拼接沿用旧值。
+    const previous = previousOutline_ACU();
+    const planned = buildStageOutlineFromTags_ACU(parseOutlineTags_ACU('<node><node_goal>目标</node_goal><turn>新的一轮</turn></node>'), allocator_ACU(), { title: previous.title, goal: previous.goal, tempo: previous.tempo, role: previous.role });
     const spliced = spliceOutlineWithCompletedPrefix_ACU(previousOutline_ACU(), 4, planned);
     expect(spliced.title).toBe('旧阶段标题');
     expect(spliced.goal).toBe('旧阶段目标');

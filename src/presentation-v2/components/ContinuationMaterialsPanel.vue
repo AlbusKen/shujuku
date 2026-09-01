@@ -65,6 +65,7 @@
                   <span class="acu-v2-continuation-materials__badge">功能：{{ FUNCTION_LABELS[turn.function ?? ''] ?? turn.function ?? '未标注' }}</span>
                   <span class="acu-v2-continuation-materials__badge">主线：{{ MAINLINE_LABELS[turn.mainlineDelta ?? ''] ?? turn.mainlineDelta ?? '未标注' }}</span>
                   <span class="acu-v2-continuation-materials__badge">时间：{{ TIME_LABELS[turn.timeAdvance ?? ''] ?? turn.timeAdvance ?? '未标注' }}<template v-if="turn.timeAnchor"> · {{ turn.timeAnchor }}</template></span>
+                  <span v-if="turn.inferred?.length" class="acu-v2-continuation-materials__badge" title="这些字段由系统按节奏档保守补全，不是大纲模型或作者明确给出的；可在原始 JSON 里修正">系统补全：{{ turn.inferred.map(field => INFERRED_FIELD_LABELS[field] ?? field).join('、') }}</span>
                   <span v-if="turnState(activeRevision, nodeIndex, turnIndex) === 'current'" class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary">当前执行</span>
                 </li>
               </ol>
@@ -73,7 +74,7 @@
 
           <details class="acu-v2-continuation-materials__json">
             <summary>编辑原始 JSON</summary>
-            <p class="acu-v2-continuation-materials__card-meta">修改轮次目标时请同步核对 pacing、function、mainlineDelta、timeAdvance 与 timeAnchor；旧插入操作缺少新字段时会使用 transition / hold / continuous 保守默认。</p>
+            <p class="acu-v2-continuation-materials__card-meta">修改轮次目标时请同步核对 pacing、function、mainlineDelta、timeAdvance 与 timeAnchor；缺少的语义字段保存时会按 pacing 补默认并标注「系统补全」，标注为 inferred 的字段改成明确值后标注自动消失。</p>
             <AcuTextarea :model-value="outlineDraft" :rows="16" @update:model-value="onOutlineInput" />
             <p v-if="outlineError" class="acu-v2-continuation-materials__error">{{ outlineError }}</p>
             <div class="acu-v2-continuation-materials__actions">
@@ -339,6 +340,7 @@ const PACING_LABELS: Record<string, string> = { setup: '铺垫', pressure: '施�
 const FUNCTION_LABELS: Record<string, string> = { daily_bond: '关系日常', daily_world: '世界日常', recovery: '恢复', preparation: '准备', training: '训练', economy: '经营', side_thread: '支线', conflict: '冲突', reveal: '揭示', payoff: '兑现', transition: '过渡' };
 const MAINLINE_LABELS: Record<string, string> = { hold: '停驻', micro: '微增量', step: '推进', milestone: '里程碑' };
 const TIME_LABELS: Record<string, string> = { continuous: '连续', same_day: '同日稍后', overnight: '隔夜', days: '数日', weeks: '数周', months: '数月', years: '数年' };
+const INFERRED_FIELD_LABELS: Record<string, string> = { function: '功能', mainlineDelta: '主线', timeAdvance: '时间' };
 
 const activeTab = ref<TabId>('outline');
 const materials = useContinuationMaterials();
