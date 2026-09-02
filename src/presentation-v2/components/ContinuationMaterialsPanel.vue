@@ -16,7 +16,7 @@
     </div>
 
     <p v-if="clearPending" class="acu-v2-continuation-materials__confirm">
-      清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲）。
+      清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲、年代学、百科资料库）。
       小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。
       <span class="acu-v2-continuation-materials__confirm-actions">
         <AcuButton variant="danger" :loading="busy" @click="confirmClear">确认清空</AcuButton>
@@ -265,6 +265,56 @@
       </details>
     </template>
 
+    <!-- 百科资料库：web-researcher 从互联网查到的原作/公开设定，按实体分条 -->
+    <template v-else-if="activeTab === 'webRefs'">
+      <p class="acu-v2-continuation-materials__meta">
+        百科资料库由 web-researcher 子代理从萌娘百科、维基百科、百度百科或网页查到后写入，按实体（人物、法术、物品、事件…）分条。
+        每条固定只有「名称 + 一句话简介」，详情自由格式。Agent 上下文里只注入预览行，详情由它们按 ID 精读。
+        它记录的是原作/公开设定，不是本故事已发生的事实；与世界书或正文冲突时以后者为准。
+      </p>
+      <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
+        条目 {{ materials.snapshot.value.webRefs.length }} 条（活跃 {{ materials.snapshot.value.webRefs.filter(entry => !entry.retired).length }}）· 修订号 {{ materials.snapshot.value.revisions.webRefs }}
+      </p>
+      <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
+      <p v-if="!materials.snapshot.value?.webRefs.length" class="acu-v2-continuation-materials__empty">
+        还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。
+      </p>
+      <div v-else class="acu-v2-continuation-materials__cards">
+        <details
+          v-for="ref in materials.snapshot.value.webRefs"
+          :key="ref.id"
+          class="acu-v2-continuation-materials__card"
+          :class="{ 'acu-v2-continuation-materials__card--retired': ref.retired }"
+        >
+          <summary class="acu-v2-continuation-materials__card-head">
+            <strong>{{ ref.id }}</strong>
+            <span>{{ ref.title }}</span>
+            <span class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary">{{ WEB_REF_SOURCE_LABELS[ref.source] ?? ref.source }}</span>
+            <span v-for="tag in ref.tags" :key="tag" class="acu-v2-continuation-materials__badge">{{ tag }}</span>
+            <span v-if="ref.sourceStatus !== 'ok'" class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted">{{ WEB_REF_STATUS_LABELS[ref.sourceStatus] ?? ref.sourceStatus }}</span>
+            <span v-if="ref.retired" class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted">已退休{{ ref.retiredReason ? `：${ref.retiredReason}` : '' }}</span>
+          </summary>
+          <p class="acu-v2-continuation-materials__card-body">{{ ref.brief }}</p>
+          <p v-if="ref.summary" class="acu-v2-continuation-materials__card-body">{{ ref.summary }}</p>
+          <p class="acu-v2-continuation-materials__card-meta">
+            <a :href="ref.url" target="_blank" rel="noopener noreferrer">{{ ref.url }}</a>
+            <template v-if="ref.query"> · 检索词：{{ ref.query }}</template>
+            <template v-if="ref.fetchedAt"> · 抓取于 {{ new Date(ref.fetchedAt).toLocaleString() }}</template>
+          </p>
+        </details>
+      </div>
+      <details class="acu-v2-continuation-materials__json">
+        <summary>编辑原始 JSON</summary>
+        <p class="acu-v2-continuation-materials__card-meta">每条至少需要 id、title（名称）、url、brief（一句话简介）；summary 为自由格式详情，tags 可选。网页原文不保存。手动新增的条目 source 可写 web。</p>
+        <AcuTextarea :model-value="materials.modules.webRefs.draft" :rows="14" @update:model-value="value => materials.updateDraft('webRefs', value)" />
+        <p v-if="materials.modules.webRefs.error" class="acu-v2-continuation-materials__error">{{ materials.modules.webRefs.error }}</p>
+        <div class="acu-v2-continuation-materials__actions">
+          <AcuButton :disabled="!materials.modules.webRefs.dirty" @click="materials.discard('webRefs')">放弃修改</AcuButton>
+          <AcuButton variant="primary" :loading="materials.modules.webRefs.saving" :disabled="!materials.modules.webRefs.dirty" @click="materials.save('webRefs')">保存百科资料库</AcuButton>
+        </div>
+      </details>
+    </template>
+
     <!-- 故事总纲：结构化展示 + JSON 编辑 -->
     <template v-else>
       <p class="acu-v2-continuation-materials__meta">
@@ -335,6 +385,7 @@ const TABS = [
   { id: 'outline', label: '阶段大纲' },
   { id: 'modules', label: '本地资料' },
   { id: 'storyArc', label: '故事总纲' },
+  { id: 'webRefs', label: '百科资料' },
 ] as const;
 
 type TabId = typeof TABS[number]['id'];
@@ -346,6 +397,8 @@ const HOOK_IMPORTANCE_LABELS: Record<string, string> = { high: '重要度：高'
 const REVEAL_STATUS_LABELS: Record<string, string> = { unrevealed: '未揭示', partial: '部分揭示', revealed: '已揭示' };
 const CHRONOLOGY_PRECISION_LABELS: Record<string, string> = { exact: '精确', approximate: '近似', unknown: '未知' };
 const ARC_STATUS_LABELS: Record<string, string> = { planned: '计划中', active: '进行中', done: '已完成' };
+const WEB_REF_SOURCE_LABELS: Record<string, string> = { moegirl: '萌娘百科', wikipedia_zh: '中文维基', wikipedia_en: '英文维基', baidu: '百度百科', web: '网页' };
+const WEB_REF_STATUS_LABELS: Record<string, string> = { ok: '正常', unavailable: '来源不可用', blocked: '被拦截' };
 const TEMPO_LABELS: Record<string, string> = { buildup: '铺垫型', mixed: '起伏型', surge: '高压型', aftermath: '余波型' };
 const ROLE_LABELS: Record<string, string> = { setup: '建立', development: '发展', escalation: '升级', turn: '转折', payoff: '兑现', aftermath: '余波' };
 const PACING_LABELS: Record<string, string> = { setup: '铺垫', pressure: '施压', turn: '转折', cooldown: '缓冲' };
@@ -480,6 +533,8 @@ defineExpose({ reload });
 .acu-v2-continuation-materials__cards { display: grid; gap: 8px; }
 .acu-v2-continuation-materials__card { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px; }
 .acu-v2-continuation-materials__card--retired { opacity: 0.55; }
+.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head { cursor: pointer; list-style: none; }
+.acu-v2-continuation-materials__card-meta a { color: inherit; word-break: break-all; }
 .acu-v2-continuation-materials__card-head { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-continuation-materials__card-body { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
 .acu-v2-continuation-materials__card-meta { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }

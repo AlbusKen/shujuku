@@ -84,6 +84,7 @@
         <div class="acu-v2-continuation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
           <AcuCheckbox v-model="settingsDraft.finalReview.enabled" label="启用发送前世界书终审" />
+          <AcuCheckbox v-model="settingsDraft.webResearch.enabled" label="启用开场百科检索（同人推荐）" />
         </div>
 
         <div class="acu-v2-continuation-page__groups">
@@ -141,10 +142,10 @@
               <AcuFormRow label="会话自动总结阈值（token）" hint="按主 Agent 实际读取的完整上下文统计（含提示词、工具结果与子代理报告），超过后在下一轮开始前把最早轮次浓缩成交接报告；0 为不总结。">
                 <AcuInput v-model="settingsDraft.agentHistoryTokenBudget" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="读取预算" hint="一次规划内 read/search 结果的累计 token 上限；填正整数，或形如 30% 的百分比（按总结阈值折算）。">
+              <AcuFormRow label="单批次读取上限" hint="一次 read/search 工具批次最多可注入多少 token；超过整批打回。不同批次不累计，填正整数或形如 20% 的百分比（按总结阈值折算）。">
                 <AcuInput v-model="settingsDraft.agentReadTokenBudget" type="text" />
               </AcuFormRow>
-              <AcuFormRow label="精读兜底额度（token）" hint="上下文临近总结阈值时，仍放行不超过该大小的小额精准读取。">
+              <AcuFormRow label="临近总结时的精读额度（token）" hint="上下文即将触发总结时，只有不超过此大小的单批次读取会放行；默认 6000。">
                 <AcuInput v-model="settingsDraft.agentReadFallbackTokens" type="number" :min="1" />
               </AcuFormRow>
             </div>
@@ -189,14 +190,51 @@
             @toggle="toggleGroup('finalReview')"
           >
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="终审读取预算" hint="发送前终审独立可用的 read/search token 上限；填正整数，或形如 50% 的百分比（按总结阈值折算）。">
+              <AcuFormRow label="终审单批次读取上限" hint="终审每次 read/search 工具批次最多可注入多少 token；超过整批打回。填正整数或形如 20% 的百分比（按总结阈值折算）。">
                 <AcuInput v-model="settingsDraft.finalReview.readTokenBudget" type="text" />
               </AcuFormRow>
               <AcuFormRow label="终审额外读取轮数" hint="终审首轮之外允许追加 read/search 的次数，0 为只使用固定证据。范围 0–10。">
                 <AcuInput v-model="settingsDraft.finalReview.maxExtraReads" type="number" :min="0" :max="10" />
               </AcuFormRow>
             </div>
-            <p class="acu-v2-continuation-page__meta">终审默认关闭；开启后会额外调用 final-reviewer，优先依据本轮命中的世界书条目，并使用独立读取预算与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。</p>
+            <p class="acu-v2-continuation-page__meta">终审默认关闭；开启后会额外调用 final-reviewer，先看世界书目录与命中预览，再按实际需要 search/read 精读条目。它使用独立的单批次读取上限与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。</p>
+          </AcuDisclosureGroup>
+
+          <AcuDisclosureGroup
+            class="acu-v2-continuation-page__group"
+            label="网页检索"
+            :meta="webResearchGroupMeta"
+            :expanded="isGroupExpanded('webResearch')"
+            body-id="acu-continuation-group-web-research"
+            @toggle="toggleGroup('webResearch')"
+          >
+            <p class="acu-v2-continuation-page__meta">开启后，新任务第一次规划前会自动派工 web-researcher，从勾选的百科查清原作人物、组织、能力与设定，按实体分条写进「百科资料库」（资料面板 → 百科资料）；之后主 Agent 也能按需再派。所有出网只由该子代理执行：维基与萌娘走浏览器直连，百度与网页抓取经酒馆服务器同源转发。</p>
+            <div class="acu-v2-continuation-page__toggles">
+              <AcuCheckbox v-model="settingsDraft.webResearch.sources.moegirl" label="萌娘百科" />
+              <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaZh" label="中文维基百科" />
+              <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaEn" label="英文维基百科" />
+              <AcuCheckbox v-model="settingsDraft.webResearch.sources.baidu" label="百度百科（经酒馆转发）" />
+            </div>
+            <div class="acu-v2-continuation-page__settings-grid">
+              <AcuFormRow label="搜索引擎" hint="百科查不到时的兜底搜索。DuckDuckGo 免 key；Serper / Tavily 使用酒馆「API 密钥」里已配置的 key；SearXNG 需填实例地址。">
+                <AcuSelect v-model="settingsDraft.webResearch.searchProvider" :options="webSearchProviderOptions" />
+              </AcuFormRow>
+              <AcuFormRow v-if="settingsDraft.webResearch.searchProvider === 'searxng'" label="SearXNG 实例地址" hint="形如 https://searx.example.org">
+                <AcuInput v-model="settingsDraft.webResearch.searxngBaseUrl" type="text" />
+              </AcuFormRow>
+              <AcuFormRow label="单次工具轮上限" hint="web-researcher 一次派工里搜索/抓取/本地调阅的轮数上限。范围 1–20。">
+                <AcuInput v-model="settingsDraft.webResearch.maxToolRounds" type="number" :min="1" :max="20" />
+              </AcuFormRow>
+              <AcuFormRow label="单次抓取页数上限" hint="单次检索最多阅读的外部页面数。页面正文仅在检索子代理当次上下文中使用，不会写入聊天。范围 1–30。">
+                <AcuInput v-model="settingsDraft.webResearch.maxPages" type="number" :min="1" :max="30" />
+              </AcuFormRow>
+              <AcuFormRow label="单页阅读字数上限" hint="检索子代理归纳资料时可读取的单页正文上限；正文不保存。范围 500–20000。">
+                <AcuInput v-model="settingsDraft.webResearch.pageCharLimit" type="number" :min="500" :max="20000" />
+              </AcuFormRow>
+              <AcuFormRow label="域名黑名单" hint="web_read 不得抓取的域名，逗号或换行分隔；内网与酒馆自身始终被拦。">
+                <AcuTextarea v-model="settingsDraft.webResearch.blockedDomains" :rows="3" />
+              </AcuFormRow>
+            </div>
           </AcuDisclosureGroup>
 
           <AcuDisclosureGroup
@@ -286,7 +324,7 @@
           <h4 class="acu-v2-continuation-page__subheading">主 Agent</h4>
           <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。正文三层注入：$STORY_OVERVIEW（事件概览：纪要表概览全量，召回 AM 码展开对应纪要）、$STORY_TAIL（尾部楼层全文）、$STORY_CATALOG（楼层纯索引：楼号、字数、开头摘录、读取地址）。目录与状态占位符：$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录，含 token 估算）、$WORLDBOOK_HITS（本轮语境命中的世界书条目提示）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$HISTORY_UNSETTLED（未结算正文全量，仅 AI 楼层）、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
           <h4 class="acu-v2-continuation-page__subheading">各子代理</h4>
-          <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。</p>
+          <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC / $CHRONOLOGY / $WEB_REFS（本地资料；$WEB_REFS 只给名称 + 一句话简介的预览）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）；网页检索子代理另有 $WEB_TOOL_CATALOG（出网工具说明与本次配额）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。</p>
         </AcuDisclosureGroup>
       </div>
       <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
@@ -389,7 +427,15 @@ const agentChannelRoles = [
   { role: 'beatPlanner', label: '伏笔与节拍策划' },
   { role: 'reviewer', label: '连续性审查' },
   { role: 'finalReviewer', label: '发送前终审' },
+  { role: 'webResearcher', label: '网页检索' },
 ] as const;
+
+const webSearchProviderOptions = [
+  { value: 'duckduckgo', label: 'DuckDuckGo（免 key）' },
+  { value: 'serper', label: 'Serper（Google，需酒馆已配 key）' },
+  { value: 'tavily', label: 'Tavily（需酒馆已配 key）' },
+  { value: 'searxng', label: 'SearXNG（自建/公共实例）' },
+];
 
 type AgentChannelRole = typeof agentChannelRoles[number]['role'];
 
@@ -424,6 +470,14 @@ const budgetGroupMeta = computed(() => {
 });
 
 const finalReviewGroupMeta = computed(() => (settingsDraft.value?.finalReview.enabled ? '已开启' : '已关闭'));
+
+const webResearchGroupMeta = computed(() => {
+  const web = settingsDraft.value?.webResearch;
+  if (!web) return '';
+  if (!web.enabled) return '已关闭';
+  const sources = [web.sources.moegirl && '萌娘', web.sources.wikipediaZh && '中文维基', web.sources.wikipediaEn && '英文维基', web.sources.baidu && '百度'].filter(Boolean);
+  return `已开启 · ${sources.length ? sources.join('/') : '无百科来源'} · ${web.searchProvider}`;
+});
 
 const channelGroupMeta = computed(() => {
   const presets = settingsDraft.value?.agentApiPresets;
@@ -478,6 +532,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
     agentRunBudget: { ...settings.agentRunBudget },
     finalReview: { ...settings.finalReview },
+    webResearch: { ...settings.webResearch, sources: { ...settings.webResearch.sources } },
     agentApiPresets: {
       main: { ...settings.agentApiPresets.main },
       outline: { ...settings.agentApiPresets.outline },
@@ -487,6 +542,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       beatPlanner: { ...settings.agentApiPresets.beatPlanner },
       reviewer: { ...settings.agentApiPresets.reviewer },
       finalReviewer: { ...settings.agentApiPresets.finalReviewer },
+      webResearcher: { ...settings.agentApiPresets.webResearcher },
     },
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
     agentPrompts: {
@@ -497,6 +553,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       beatPlanner: settings.agentPrompts.beatPlanner.map(segment => ({ ...segment })),
       reviewer: settings.agentPrompts.reviewer.map(segment => ({ ...segment })),
       finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
+      webResearcher: settings.agentPrompts.webResearcher.map(segment => ({ ...segment })),
     },
   };
 }
@@ -590,7 +647,7 @@ function normalizedReadBudget(value: unknown): number | string {
     return `${percent}%`;
   }
   const fixed = Number(raw);
-  if (!Number.isInteger(fixed) || fixed < 1) throw new Error('读取预算必须是正整数，或形如 30% 的百分比');
+  if (!Number.isInteger(fixed) || fixed < 1) throw new Error('读取上限必须是正整数，或形如 20% 的百分比');
   return fixed;
 }
 
@@ -625,11 +682,21 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     storyTailFloors: requiredInteger(source.storyTailFloors, '正文目录尾部全文楼数'),
     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
     agentReadTokenBudget: normalizedReadBudget(source.agentReadTokenBudget),
-    agentReadFallbackTokens: requiredInteger(source.agentReadFallbackTokens, '精读兜底额度'),
+    agentReadFallbackTokens: requiredInteger(source.agentReadFallbackTokens, '临近总结时的精读额度'),
     finalReview: {
       enabled: source.finalReview.enabled,
       readTokenBudget: normalizedReadBudget(source.finalReview.readTokenBudget),
       maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
+    },
+    webResearch: {
+      enabled: source.webResearch.enabled,
+      sources: { ...source.webResearch.sources },
+      searchProvider: source.webResearch.searchProvider,
+      searxngBaseUrl: String(source.webResearch.searxngBaseUrl ?? '').trim(),
+      maxToolRounds: requiredRangeInteger(source.webResearch.maxToolRounds, '网页检索单次工具轮上限', 1, 20),
+      maxPages: requiredRangeInteger(source.webResearch.maxPages, '网页检索单次抓取页数上限', 1, 30),
+      pageCharLimit: requiredRangeInteger(source.webResearch.pageCharLimit, '网页检索单页阅读字数上限', 500, 20000),
+      blockedDomains: String(source.webResearch.blockedDomains ?? ''),
     },
     agentRunBudget: {
       maxIterations: requiredRangeInteger(source.agentRunBudget.maxIterations, '主 Agent 迭代上限', 1, 30),
@@ -642,6 +709,9 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
   };
   if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.minGenerationTokens < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
     throw new Error('续写设置中的数值不能低于允许范围');
+  }
+  if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {
+    throw new Error('搜索引擎选择 SearXNG 时必须填写实例地址');
   }
   if (normalized.apiPresetMode === 'fixed') {
     const presetName = normalized.fixedApiPresetName.trim();
@@ -703,7 +773,7 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer';
+type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer' | 'webResearcher';
 
 interface PromptGroupDef {
   key: PromptKey;
@@ -723,6 +793,7 @@ const promptGroups: PromptGroupDef[] = [
   { key: 'beatPlanner', kind: 'agent_beat', title: '伏笔与节拍策划子代理提示词', restoreLabel: '恢复节拍策划默认值' },
   { key: 'reviewer', kind: 'agent_reviewer', title: '连续性审查子代理提示词', restoreLabel: '恢复审查子代理默认值' },
   { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时才会被调用。' },
+  { key: 'webResearcher', kind: 'agent_web_researcher', title: '网页检索子代理（web-researcher）提示词', restoreLabel: '恢复网页检索默认值', note: '仅在「启用开场百科检索」开启时才会被调用。专属占位符：$WEB_TOOL_CATALOG（出网工具说明与本次配额）、$WEB_REFS（百科资料库预览）。' },
 ];
 
 /** 折叠态摘要：启用段数 / 总段数。 */

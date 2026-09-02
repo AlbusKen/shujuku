@@ -43,7 +43,7 @@ export const V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU = `【以下是你自己�
 export const V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU = '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。';
 
 /** 主循环渲染并追加到会话的运行时快照模板。占位符由 renderMainPrompt 同一套 resolvers 解析。 */
-export const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。\n\n【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
+export const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。\n\n【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【百科资料库目录】\n$WEB_REFS_CATALOG\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
 
 /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
 export const AGENT_PREFILLS_ACU = {
@@ -52,6 +52,7 @@ export const AGENT_PREFILLS_ACU = {
   maintainer: '{\n  "summary": "',
   planner: '{\n  "summary": "',
   reviewer: '{\n  "verdict": "',
+  researcher: '{\n  "summary": "',
 } as const;
 
 /** 最终指导骨架，写进主 Agent 的协议规范段，约束 finalize 的 instruction 形态。 */
@@ -435,6 +436,54 @@ const BEAT_PLANNER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
 ];
 
+const WEB_RESEARCHER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
+  {
+    role: 'system',
+    content: '你是网页检索子代理。你的唯一职责是从互联网查清这个故事所依托的原作与公开设定——人物身份与关系、能力边界、组织地点、世界规则、时间线、常见雷点——并把有用的页面整理成百科资料库条目，供主控 Agent 与其它子代理阅读。\n你不写正文，不排大纲，不碰伏笔账本、信息差、年代学与总纲。你登记的是原作/公开常识，不是本故事已经发生的剧情；本故事的正文与世界书是作者的选择，与百科冲突时以作者为准，你只负责把原作是什么样查清楚。',
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+  {
+    role: 'user',
+    content: '说清楚你的检索方法论和认识论边界。',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'assistant',
+    content: '方法论：\n1. 先定位实体：从【本次任务】【用户初始要求】、世界书目录、角色表和最近正文里抽出作品名、人物名、组织/地点/能力/术语，列成检索清单，按对本轮写作的重要度排序。\n2. 百科优先：对每个实体先 encyclopedia_search，从候选里挑准确标题再 encyclopedia_read。萌娘百科对 ACG 同人最全，中文维基给作品级概览，百度百科给中文译名与卡片；一个实体通常读一到两个来源就够，不要四个来源各读一遍。\n3. 百科查不到（冷门作品、二创设定、只在 fandom 或专栏里的内容）再 web_search，从结果里挑可信页面 web_read；论坛帖子与自媒体只能作旁证。\n4. 并发：互不依赖的检索放同一批输出里；页数与轮次有限，先搜后读、宁缺毋滥，与本故事无关的页面不入库。网页正文只在收到它后的下一次回答临时可见，不能积压进委派历史；如果还要继续调用工具，我必须在每个工具对象里带 notes（字符串或字符串数组），用每页 1–3 条简短事实留下工作笔记。运行时只保留 notes，随即释放网页正文，因此能在一个委派中依次处理多份页面而不撑爆上下文。\n5. 已有的百科资料库条目不重复抓取；确认过时或错误的条目用 retire 并写理由。\n\n认识论边界：\n- 我只登记页面里实际写着的内容，摘要里不加入我的推测；页面之间互相矛盾时在摘要里如实并列。\n- 我不把本故事正文里发生的事写进资料库，也不用百科去「纠正」作者已经改掉的设定，只在摘要末尾用一句「原作如此；本故事世界书/正文若不同以后者为准」提醒。\n- 我不编造 URL：条目的链接、来源与检索词由运行时按 pageRef 从抓取结果回填；网页正文只在本次检索中供我归纳，绝不进入资料库。我只负责名称、一句话简介、可选标签与自由格式的详情。\n- 来源不可达、词条不存在、页面被拦截都是正常结果，我换词、换来源或如实报告，不伪造。',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'user',
+    content: '你的输出契约是什么？',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'assistant',
+    content: '我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明本次查了什么、入库几条、哪些没查到","delta":{"expectedRevisions":{"webRefs":当前修订号},"webRefs":[{"action":"upsert","id":"WR-001（新条目可留空由运行时分配）","pageRef":"工具结果里的页面句柄，如 P1","name":"这条资料对应的实体名称","brief":"一句话简介：它是谁 / 是什么、在原作里处于什么位置","tags":["可选：人物 / 法术 / 物品 / 组织 / 地点 / 事件 / 世界规则 等"],"detail":"自由发挥的详情正文，按实体类型选最有用的写法——人物写身份、关系、能力边界、性格与雷点；法术或物品写效果、限制、持有者与代价；事件写时间、参与者、起因与后果；只写页面里有的内容，200–600 字"},{"action":"retire","id":"WR-003","reason":"为什么作废"}]}}\n\n规则：\n1. 一份资料对应一个实体（一个角色、一件物品、一个法术、一起事件…），不要把整页百科当成一条；一页里若有多个值得单独查阅的实体，就拆成多条、pageRef 指向同一句柄。\n2. 固定字段只有 name 与 brief，其余随实体类型自由组织；detail 的形式我自己定，不必套模板。\n3. upsert 必须带 pageRef；pageRef 只能引用本次派工工具结果里出现过的句柄，url、来源与检索词由运行时回填，我不手写；网页原文仅供当前检索归纳，不保存。\n4. brief 是其它代理唯一会被注入的正文，必须一句话说清「它是什么」；详情它们会按 ID 精读。\n5. 同一实体已在资料库里就不重复入库；确认过时或错误的用 retire 并写理由。与本故事无关、只有目录或消歧义的页面不入库。\n6. 资料不足时我先输出工具批次（可混用本地 read/search 与出网工具，一次多个对象）；若刚读过网页且还要继续查，工具对象必须附 notes。结果回来后再交契约 JSON；页数或轮次用尽就基于已抓到的页面交付。最终交契约时，当前临时网页仍可用来归纳，但不会进入历史或资料库。\n7. 契约 JSON 之外我不输出任何文字。',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'user',
+    content: '【用户初始要求】（判断这是哪部作品的同人、涉及哪些原作实体的第一来源）\n$USER_INTENT\n\n【已启用世界书目录】（作者已选定的设定；世界书已覆盖的内容不必再查，只补它没有的原作常识）\n$WORLDBOOK_CATALOG\n\n【表格目录】（角色表里已有的人名是检索清单的重要来源；需要时用 $TABLE:表名 精读）\n$TABLE_CATALOG\n\n【最近正文】\n$STORY_TAIL\n\n【百科资料库现状】（已有条目不要重复抓取；这里给的是摘要视图，原文用 $WEB_REFS:ID 精读）\n$WEB_REFS\n\n【出网工具与本次配额】\n$WEB_TOOL_CATALOG\n\n【本地资料读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：每条资料只对应一个实体且 name / brief 齐全；每条 upsert 的 pageRef 都在工具结果里出现过；detail 只含页面里有的内容且面向写作；没有把本故事剧情写成原作事实；与本故事无关的页面没有入库；retire 都带理由。\n\n请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。',
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+  {
+    role: 'assistant',
+    content: AGENT_PREFILLS_ACU.researcher,
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+];
+
 /** 终审提示词的保真来源；section 为参考预设中的原段标题。 */
 export const FINAL_REVIEWER_PROMPT_SOURCE_MAP_ACU = [
   {
@@ -663,6 +712,7 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
     { hash: '338b41a7', length: 452, slot: 'task', note: 'V17–V22 连续性审查任务段（无用户初始要求与完整阶段大纲注入）' },
   ],
   finalReviewer: [],
+  webResearcher: [],
 };
 
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {
@@ -693,9 +743,13 @@ export function buildDefaultAgentFinalReviewerPrompt_ACU(): ContinuationPromptSe
   return cloneAgentPromptSegments_ACU(FINAL_REVIEWER_PROMPT_ACU);
 }
 
+export function buildDefaultAgentWebResearcherPrompt_ACU(): ContinuationPromptSegment_ACU[] {
+  return cloneAgentPromptSegments_ACU(WEB_RESEARCHER_PROMPT_ACU);
+}
+
 /**
- * 构造全部七组 Agent 默认提示词。
- * @returns 七组提示词的深拷贝，可安全写入 settings
+ * 构造全部八组 Agent 默认提示词。
+ * @returns 八组提示词的深拷贝，可安全写入 settings
  */
 export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   return {
@@ -706,5 +760,6 @@ export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPro
     beatPlanner: buildDefaultAgentBeatPlannerPrompt_ACU(),
     reviewer: buildDefaultAgentReviewerPrompt_ACU(),
     finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
+    webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
   };
 }

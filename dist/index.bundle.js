@@ -4034,6 +4034,20 @@ $CONTENT
     const VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU = 'spv9.2-chronicle-source-text';
     /** 源文本升级前的 minScore 默认值；仅用于识别"用户从未改过"的配置。 */
     const VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU = [0.45];
+    /**
+     * 召回参数一次性强制覆盖（spv9.2）：把"召回参数"面板里的阈值/TopK/最低分/候选上限/固定写入
+     * 以及 rerank 每批条数统一刷成新默认值。API 地址、密钥、模型、提示词、命名空间不在覆盖范围内。
+     */
+    const VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU = 'spv9.2-recall-params-force-override';
+    const VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU = [
+        'summaryIndexKeywordMinRows',
+        'topK',
+        'minScore',
+        'recallCandidateLimit',
+        'bm25CandidateLimit',
+        'recentFixedInjectCount',
+        'rerankBatchSize',
+    ];
     // note 列号改 0 基（与 $0 序列化对齐）+ 失效硬约束措辞改为写作规范；仍用默认模板的用户一次性刷新。
     const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8.5-table-note-zero-based-columns';
     // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
@@ -95968,6 +95982,24 @@ $CONTENT
                 vectorConfig.sourceTextUpgradeVersion = VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU;
                 shouldPersistSettingsAfterLoad_ACU = true;
             }
+            // [spv9.2] 召回参数一次性强制覆盖为新默认值：源文本升级后旧的阈值/TopK/候选上限/固定写入
+            // 已不适配。只覆盖 VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU 列出的召回参数；
+            // API 地址、密钥、模型名、提示词、命名空间一律不动。marker 写入后用户再改会被永久保留。
+            if (vectorConfig.recallParamsForceOverrideVersion !== VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU) {
+                const changed = [];
+                for (const key of VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU) {
+                    const nextValue = defaultVectorMemoryConfig_ACU[key];
+                    if (typeof nextValue === 'undefined')
+                        continue;
+                    if (vectorConfig[key] !== nextValue) {
+                        vectorConfig[key] = cloneDefaultValue_ACU(nextValue);
+                        changed.push(`${key}=${String(nextValue)}`);
+                    }
+                }
+                vectorConfig.recallParamsForceOverrideVersion = VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU;
+                shouldPersistSettingsAfterLoad_ACU = true;
+                logDebug_ACU(`[交火模式配置] 已一次性覆盖召回参数为 spv9.2 默认值${changed.length ? `：${changed.join(', ')}` : '（无变化）'}`);
+            }
         }
         settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
         settingsStorageReadyForSave_ACU = true;
@@ -102151,6 +102183,10 @@ $CONTENT
      *   - writeGeneration：T0a 后最大长度 24（时间戳 base36 8 + 7 + 7 = 22，留 2 字符余量）
      * preflight 通过 ⇒ 真实构造必通过（不允许 preflight 放过、persist 再抛）。
      * 返回 { ok: true } 或 { ok: false, error }，不 throw。
+     *
+     * 注：scope token 已改为定长 SHA-256 指纹，路径长度不再随聊天名/隔离码变化，
+     * 正常情况下本 preflight 不会再拦截用户数据；保留它是为了在有人放宽 indexId /
+     * writeGeneration 上界时仍能在烧 embedding 之前失败。
      */
     function preflightVectorIndexSnapshotPath_ACU(parts) {
         const indexIdPlaceholder = 'snap_' + 'z'.repeat(8);
@@ -116828,9 +116864,11 @@ $CONTENT
             this.error = error;
         }
     }
-    const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer'];
-    /** 可独立配置 AI 渠道的八个角色：主 Agent、大纲子代理、五个派工子代理与最终审查。 */
-    const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer'];
+    const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher'];
+    /** 可独立配置 AI 渠道的九个角色：主 Agent、大纲子代理、六个派工子代理与最终审查。 */
+    const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher'];
+    /** 通用网页搜索的提供方。duckduckgo 免 key 经酒馆转发抓 HTML；其余复用酒馆自身「网页搜索」已配置的 key 或实例。 */
+    const CONTINUATION_WEB_SEARCH_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'];
     /**
      * 单轮的节奏档位。这是解决「事件事件事件、全程没有日常」的核心手段：
      * - setup：铺垫日常（关系推进、生活场景、准备工作，无外部危机）
@@ -116894,9 +116932,9 @@ $CONTENT
     const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
     /** 骨架里固定注入全文的末尾 AI 楼层数默认值（承接锚点）。 */
     const AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU = 2;
-    /** read/search 累计 token 预算默认值：按 agentHistoryTokenBudget 的百分比折算。 */
-    const AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU = '30%';
-    /** 临近历史预算阈值时仍放行的精读兜底额度默认值（token）。 */
+    /** 单个 read/search 工具批次 token 上限：按 agentHistoryTokenBudget 的百分比折算。 */
+    const AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU = '20%';
+    /** 临近总结阈值时仍放行的精读兜底额度默认值（token）。 */
     const AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU = 6000;
     /**
      * 主 Agent 上下文自动总结阈值的默认值。统计口径是主 Agent 每次请求实际读取的完整上下文：
@@ -116926,8 +116964,13 @@ $CONTENT
     /** 卷在全书长程结构中的职责；与阶段职责同词但作用域独立。 */
     const AGENT_VOLUME_NARRATIVE_ROLES_ACU = ['setup', 'development', 'escalation', 'turn', 'payoff', 'aftermath'];
     const AGENT_CHRONOLOGY_PRECISIONS_ACU = ['exact', 'approximate', 'unknown'];
-    const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology'];
-    const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer'];
+    /** 百科资料库条目的来源渠道。baidu 走酒馆服务器同源转发，其余为浏览器直连 MediaWiki API。 */
+    const AGENT_WEB_REF_SOURCES_ACU = ['moegirl', 'wikipedia_zh', 'wikipedia_en', 'baidu', 'web'];
+    /** 抓取状态：ok 正常；unavailable 来源不可达或无词条；blocked 被域名策略或内容类型拒绝。 */
+    const AGENT_WEB_REF_STATUSES_ACU = ['ok', 'unavailable', 'blocked'];
+    const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs'];
+    const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher'];
+    const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';
     /** 最终审查是 finalize 前由运行时受控触发的内部代理，不进入主 Agent 可委派名称集合。 */
     const AGENT_FINAL_REVIEWER_NAME_ACU = 'final-reviewer';
     /**
@@ -116937,6 +116980,7 @@ $CONTENT
     const AGENT_OUTLINE_AGENT_NAME_ACU = 'outline-architect';
     /** search 工具可检索的资料域。 */
     const AGENT_SEARCH_SCOPES_ACU = ['story', 'tables', 'modules', 'outline', 'worldbook'];
+    const AGENT_WEB_TOOL_ACTIONS_ACU = ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'];
     const DEFAULT_AGENT_RUN_BUDGET_ACU = {
         maxIterations: 8,
         maxDelegations: 6,
@@ -116990,7 +117034,7 @@ $CONTENT
     /** V19 默认上下文排布问答的 assistant 答。V20 改为快照在会话内追加，迁移时只替换这份未改写原文。 */
     const V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU = '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。';
     /** 主循环渲染并追加到会话的运行时快照模板。占位符由 renderMainPrompt 同一套 resolvers 解析。 */
-    const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。\n\n【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
+    const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。\n\n【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【百科资料库目录】\n$WEB_REFS_CATALOG\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
     /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
     const AGENT_PREFILLS_ACU = {
         main: '{\n  "thought": "',
@@ -116998,6 +117042,7 @@ $CONTENT
         maintainer: '{\n  "summary": "',
         planner: '{\n  "summary": "',
         reviewer: '{\n  "verdict": "',
+        researcher: '{\n  "summary": "',
     };
     /** 最终指导骨架，写进主 Agent 的协议规范段，约束 finalize 的 instruction 形态。 */
     const AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU = [
@@ -117368,6 +117413,53 @@ $CONTENT
             pinned: true,
         },
     ];
+    const WEB_RESEARCHER_PROMPT_ACU = [
+        {
+            role: 'system',
+            content: '你是网页检索子代理。你的唯一职责是从互联网查清这个故事所依托的原作与公开设定——人物身份与关系、能力边界、组织地点、世界规则、时间线、常见雷点——并把有用的页面整理成百科资料库条目，供主控 Agent 与其它子代理阅读。\n你不写正文，不排大纲，不碰伏笔账本、信息差、年代学与总纲。你登记的是原作/公开常识，不是本故事已经发生的剧情；本故事的正文与世界书是作者的选择，与百科冲突时以作者为准，你只负责把原作是什么样查清楚。',
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+        {
+            role: 'user',
+            content: '说清楚你的检索方法论和认识论边界。',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            content: '方法论：\n1. 先定位实体：从【本次任务】【用户初始要求】、世界书目录、角色表和最近正文里抽出作品名、人物名、组织/地点/能力/术语，列成检索清单，按对本轮写作的重要度排序。\n2. 百科优先：对每个实体先 encyclopedia_search，从候选里挑准确标题再 encyclopedia_read。萌娘百科对 ACG 同人最全，中文维基给作品级概览，百度百科给中文译名与卡片；一个实体通常读一到两个来源就够，不要四个来源各读一遍。\n3. 百科查不到（冷门作品、二创设定、只在 fandom 或专栏里的内容）再 web_search，从结果里挑可信页面 web_read；论坛帖子与自媒体只能作旁证。\n4. 并发：互不依赖的检索放同一批输出里；页数与轮次有限，先搜后读、宁缺毋滥，与本故事无关的页面不入库。网页正文只在收到它后的下一次回答临时可见，不能积压进委派历史；如果还要继续调用工具，我必须在每个工具对象里带 notes（字符串或字符串数组），用每页 1–3 条简短事实留下工作笔记。运行时只保留 notes，随即释放网页正文，因此能在一个委派中依次处理多份页面而不撑爆上下文。\n5. 已有的百科资料库条目不重复抓取；确认过时或错误的条目用 retire 并写理由。\n\n认识论边界：\n- 我只登记页面里实际写着的内容，摘要里不加入我的推测；页面之间互相矛盾时在摘要里如实并列。\n- 我不把本故事正文里发生的事写进资料库，也不用百科去「纠正」作者已经改掉的设定，只在摘要末尾用一句「原作如此；本故事世界书/正文若不同以后者为准」提醒。\n- 我不编造 URL：条目的链接、来源与检索词由运行时按 pageRef 从抓取结果回填；网页正文只在本次检索中供我归纳，绝不进入资料库。我只负责名称、一句话简介、可选标签与自由格式的详情。\n- 来源不可达、词条不存在、页面被拦截都是正常结果，我换词、换来源或如实报告，不伪造。',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'user',
+            content: '你的输出契约是什么？',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            content: '我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明本次查了什么、入库几条、哪些没查到","delta":{"expectedRevisions":{"webRefs":当前修订号},"webRefs":[{"action":"upsert","id":"WR-001（新条目可留空由运行时分配）","pageRef":"工具结果里的页面句柄，如 P1","name":"这条资料对应的实体名称","brief":"一句话简介：它是谁 / 是什么、在原作里处于什么位置","tags":["可选：人物 / 法术 / 物品 / 组织 / 地点 / 事件 / 世界规则 等"],"detail":"自由发挥的详情正文，按实体类型选最有用的写法——人物写身份、关系、能力边界、性格与雷点；法术或物品写效果、限制、持有者与代价；事件写时间、参与者、起因与后果；只写页面里有的内容，200–600 字"},{"action":"retire","id":"WR-003","reason":"为什么作废"}]}}\n\n规则：\n1. 一份资料对应一个实体（一个角色、一件物品、一个法术、一起事件…），不要把整页百科当成一条；一页里若有多个值得单独查阅的实体，就拆成多条、pageRef 指向同一句柄。\n2. 固定字段只有 name 与 brief，其余随实体类型自由组织；detail 的形式我自己定，不必套模板。\n3. upsert 必须带 pageRef；pageRef 只能引用本次派工工具结果里出现过的句柄，url、来源与检索词由运行时回填，我不手写；网页原文仅供当前检索归纳，不保存。\n4. brief 是其它代理唯一会被注入的正文，必须一句话说清「它是什么」；详情它们会按 ID 精读。\n5. 同一实体已在资料库里就不重复入库；确认过时或错误的用 retire 并写理由。与本故事无关、只有目录或消歧义的页面不入库。\n6. 资料不足时我先输出工具批次（可混用本地 read/search 与出网工具，一次多个对象）；若刚读过网页且还要继续查，工具对象必须附 notes。结果回来后再交契约 JSON；页数或轮次用尽就基于已抓到的页面交付。最终交契约时，当前临时网页仍可用来归纳，但不会进入历史或资料库。\n7. 契约 JSON 之外我不输出任何文字。',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'user',
+            content: '【用户初始要求】（判断这是哪部作品的同人、涉及哪些原作实体的第一来源）\n$USER_INTENT\n\n【已启用世界书目录】（作者已选定的设定；世界书已覆盖的内容不必再查，只补它没有的原作常识）\n$WORLDBOOK_CATALOG\n\n【表格目录】（角色表里已有的人名是检索清单的重要来源；需要时用 $TABLE:表名 精读）\n$TABLE_CATALOG\n\n【最近正文】\n$STORY_TAIL\n\n【百科资料库现状】（已有条目不要重复抓取；这里给的是摘要视图，原文用 $WEB_REFS:ID 精读）\n$WEB_REFS\n\n【出网工具与本次配额】\n$WEB_TOOL_CATALOG\n\n【本地资料读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：每条资料只对应一个实体且 name / brief 齐全；每条 upsert 的 pageRef 都在工具结果里出现过；detail 只含页面里有的内容且面向写作；没有把本故事剧情写成原作事实；与本故事无关的页面没有入库；retire 都带理由。\n\n请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。',
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+        {
+            role: 'assistant',
+            content: AGENT_PREFILLS_ACU.researcher,
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+    ];
     /** 终审提示词的保真来源；section 为参考预设中的原段标题。 */
     const FINAL_REVIEWER_PROMPT_SOURCE_MAP_ACU = [
         {
@@ -117555,6 +117647,7 @@ $CONTENT
             { hash: '338b41a7', length: 452, slot: 'task', note: 'V17–V22 连续性审查任务段（无用户初始要求与完整阶段大纲注入）' },
         ],
         finalReviewer: [],
+        webResearcher: [],
     };
     function buildDefaultAgentMainPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
@@ -117577,9 +117670,12 @@ $CONTENT
     function buildDefaultAgentFinalReviewerPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(FINAL_REVIEWER_PROMPT_ACU);
     }
+    function buildDefaultAgentWebResearcherPrompt_ACU() {
+        return cloneAgentPromptSegments_ACU(WEB_RESEARCHER_PROMPT_ACU);
+    }
     /**
-     * 构造全部七组 Agent 默认提示词。
-     * @returns 七组提示词的深拷贝，可安全写入 settings
+     * 构造全部八组 Agent 默认提示词。
+     * @returns 八组提示词的深拷贝，可安全写入 settings
      */
     function buildDefaultContinuationAgentPrompts_ACU() {
         return {
@@ -117590,6 +117686,7 @@ $CONTENT
             beatPlanner: buildDefaultAgentBeatPlannerPrompt_ACU(),
             reviewer: buildDefaultAgentReviewerPrompt_ACU(),
             finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
+            webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
         };
     }
 
@@ -117777,10 +117874,28 @@ $CONTENT
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU = 8;
     /** 连续高压轮上限的可配置上限。再大就等于关闭这条兜底。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU = 20;
-    /** 终审独立读取预算；与主 Agent 预算隔离，按会话总结阈值折算。 */
-    const CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU = '50%';
+    /** 终审单个读取批次上限；与主 Agent 设置独立，按会话总结阈值折算。 */
+    const CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU = '20%';
     /** 终审允许的额外 worldbook read/search 工具轮上限。 */
     const CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU = 6;
+    /** 网页检索子代理单次派工的工具轮上限：搜 + 读 + 补搜的典型路径需要 6–8 轮。 */
+    const CONTINUATION_WEB_RESEARCH_MAX_TOOL_ROUNDS_DEFAULT_ACU = 8;
+    /** 单次派工最多精读的页面数。每页原文都会随资料快照落进楼层，多了会撑大聊天文件。 */
+    const CONTINUATION_WEB_RESEARCH_MAX_PAGES_DEFAULT_ACU = 8;
+    /** 单页存入资料库的原文字数上限。 */
+    const CONTINUATION_WEB_RESEARCH_PAGE_CHAR_LIMIT_DEFAULT_ACU = 4000;
+    function buildDefaultContinuationWebResearchSettings_ACU() {
+        return {
+            enabled: false,
+            sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false, baidu: true },
+            searchProvider: 'duckduckgo',
+            searxngBaseUrl: '',
+            maxToolRounds: CONTINUATION_WEB_RESEARCH_MAX_TOOL_ROUNDS_DEFAULT_ACU,
+            maxPages: CONTINUATION_WEB_RESEARCH_MAX_PAGES_DEFAULT_ACU,
+            pageCharLimit: CONTINUATION_WEB_RESEARCH_PAGE_CHAR_LIMIT_DEFAULT_ACU,
+            blockedDomains: '',
+        };
+    }
     function clonePromptSegments_ACU(segments) {
         return segments.map(segment => ({ ...segment }));
     }
@@ -117819,6 +117934,7 @@ $CONTENT
             agentReadTokenBudget: AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
             agentReadFallbackTokens: AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
             finalReview: { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxExtraReads: CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU },
+            webResearch: buildDefaultContinuationWebResearchSettings_ACU(),
             contextExtractRules: [],
             contextExcludeRules: [],
             agentRunBudget: { ...DEFAULT_AGENT_RUN_BUDGET_ACU },
@@ -118483,6 +118599,8 @@ $CONTENT
         '$STORY_OVERVIEW', '$STORY_TAIL', '$HISTORY_UNSETTLED', '$WORLDBOOK_HITS',
         // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚、跨阶段节奏状态。
         '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET', '$PACING_CONTEXT',
+        // 百科资料库：全量摘要 / 目录行 / web-researcher 专用的出网工具说明。
+        '$WEB_REFS', '$WEB_REFS_CATALOG', '$WEB_TOOL_CATALOG',
     ];
     /**
      * 占位符替换用的交替式正则。必须按长度降序排列：存在 $STORY_ARC 与 $STORY_ARC_STATE
@@ -118563,6 +118681,8 @@ $CONTENT
             agentPrompts.reviewer = buildDefaultAgentReviewerPrompt_ACU();
         if (kind === 'agent_final_reviewer')
             agentPrompts.finalReviewer = buildDefaultAgentFinalReviewerPrompt_ACU();
+        if (kind === 'agent_web_researcher')
+            agentPrompts.webResearcher = buildDefaultAgentWebResearcherPrompt_ACU();
         return { ...settings, agentPrompts };
     }
 
@@ -118647,6 +118767,7 @@ $CONTENT
             beatPlanner: validateContinuationPromptSegments_ACU(raw.beatPlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
             reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
             finalReviewer: validateContinuationPromptSegments_ACU(raw.finalReviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
+            webResearcher: validateContinuationPromptSegments_ACU(raw.webResearcher, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
         };
     }
     /**
@@ -119142,7 +119263,7 @@ $CONTENT
         return result;
     }
     /**
-     * 校验 read/search 累计预算配置。接受正整数（固定 token 数）或 "1%"-"100%" 百分比串
+     * 校验 read/search 单批次上限配置。接受正整数（固定 token 数）或 "1%"-"100%" 百分比串
      * （按 agentHistoryTokenBudget 折算）；非法值直接拒绝而不是静默回退，与信封其余字段同构。
      */
     function validateReadTokenBudget_ACU(raw) {
@@ -119160,6 +119281,38 @@ $CONTENT
                 return numeric;
         }
         fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
+    }
+    function validateWebResearchSettings_ACU(raw) {
+        if (!isRecord_ACU$6(raw))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch 必须是对象');
+        requireKeys_ACU(raw, ['enabled', 'sources', 'searchProvider', 'searxngBaseUrl', 'maxToolRounds', 'maxPages', 'pageCharLimit', 'blockedDomains'], 'settings.webResearch');
+        if (!isRecord_ACU$6(raw.sources))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch.sources 必须是对象');
+        requireKeys_ACU(raw.sources, ['moegirl', 'wikipediaZh', 'wikipediaEn', 'baidu'], 'settings.webResearch.sources');
+        if (!CONTINUATION_WEB_SEARCH_PROVIDERS_ACU.includes(raw.searchProvider)) {
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch.searchProvider 非法');
+        }
+        const bounded = (value, path, minimum, maximum) => {
+            if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是 ${minimum} 到 ${maximum} 之间的整数：${path}`, { path });
+            }
+            return value;
+        };
+        return {
+            enabled: requireBoolean_ACU(raw.enabled, 'settings.webResearch.enabled'),
+            sources: {
+                moegirl: requireBoolean_ACU(raw.sources.moegirl, 'settings.webResearch.sources.moegirl'),
+                wikipediaZh: requireBoolean_ACU(raw.sources.wikipediaZh, 'settings.webResearch.sources.wikipediaZh'),
+                wikipediaEn: requireBoolean_ACU(raw.sources.wikipediaEn, 'settings.webResearch.sources.wikipediaEn'),
+                baidu: requireBoolean_ACU(raw.sources.baidu, 'settings.webResearch.sources.baidu'),
+            },
+            searchProvider: raw.searchProvider,
+            searxngBaseUrl: requireString_ACU(raw.searxngBaseUrl, 'settings.webResearch.searxngBaseUrl'),
+            maxToolRounds: bounded(raw.maxToolRounds, 'settings.webResearch.maxToolRounds', 1, 20),
+            maxPages: bounded(raw.maxPages, 'settings.webResearch.maxPages', 1, 30),
+            pageCharLimit: bounded(raw.pageCharLimit, 'settings.webResearch.pageCharLimit', 500, 20000),
+            blockedDomains: requireString_ACU(raw.blockedDomains, 'settings.webResearch.blockedDomains'),
+        };
     }
     function validateFinalReviewSettings_ACU(raw) {
         if (!isRecord_ACU$6(raw))
@@ -119215,6 +119368,12 @@ $CONTENT
         if (isRecord_ACU$6(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
             raw.agentPrompts.finalReviewer = buildDefaultContinuationAgentPrompts_ACU().finalReviewer;
         }
+        // 网页检索子代理晚于其余提示词组加入；存量信封缺键即补默认，不必整组重刷。
+        if (isRecord_ACU$6(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
+            raw.agentPrompts.webResearcher = buildDefaultContinuationAgentPrompts_ACU().webResearcher;
+        }
+        if (!Object.prototype.hasOwnProperty.call(raw, 'webResearch'))
+            raw.webResearch = buildDefaultContinuationWebResearchSettings_ACU();
         // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets'))
             raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
@@ -119259,7 +119418,7 @@ $CONTENT
             raw.storyArcVolumePlan = 'medium';
         if (!Object.prototype.hasOwnProperty.call(raw, 'customStoryArcVolumeCount'))
             raw.customStoryArcVolumeCount = null;
-        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'webResearch', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
         requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
         if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
@@ -119369,6 +119528,7 @@ $CONTENT
             storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
             storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
             finalReview: validateFinalReviewSettings_ACU(raw.finalReview),
+            webResearch: validateWebResearchSettings_ACU(raw.webResearch),
             contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
             agentRunBudget: validateAgentRunBudget_ACU(raw.agentRunBudget),
             apiPresetMode: raw.apiPresetMode, fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
@@ -119766,6 +119926,7 @@ $CONTENT
         beatPlanner: 4096,
         reviewer: 4096,
         finalReviewer: 4096,
+        webResearcher: 8192,
     };
     /**
      * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
@@ -119890,13 +120051,13 @@ $CONTENT
         throw lastError;
     }
 
-    const defaultDependencies_ACU$4 = {
+    const defaultDependencies_ACU$5 = {
         resolvePreset: resolveApiConfigByPreset_ACU,
     };
     function failPreset_ACU(phase, reason) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_API_PRESET_MISSING', phase, reason === 'empty' ? '固定智能续写 API 预设不能为空' : '智能续写 API 预设不存在或已失效', false, { reason }));
     }
-    function resolveContinuationApiPreset_ACU(settings, phase, dependencies = defaultDependencies_ACU$4) {
+    function resolveContinuationApiPreset_ACU(settings, phase, dependencies = defaultDependencies_ACU$5) {
         if (settings.apiPresetMode === 'fixed') {
             const presetName = settings.fixedApiPresetName.trim();
             if (!presetName)
@@ -119933,7 +120094,7 @@ $CONTENT
      * @param phase 出错时记录的阶段
      * @returns 解析后的渠道；固定预设缺失时抛 CONTINUATION_API_PRESET_MISSING
      */
-    function resolveContinuationAgentApiPreset_ACU(settings, role, phase, dependencies = defaultDependencies_ACU$4) {
+    function resolveContinuationAgentApiPreset_ACU(settings, role, phase, dependencies = defaultDependencies_ACU$5) {
         const choice = settings.agentApiPresets?.[role];
         if (!choice || choice.mode === 'inherit')
             return resolveContinuationApiPreset_ACU(settings, phase, dependencies);
@@ -120614,7 +120775,7 @@ $CONTENT
 
     /** 每次整份生成之后最多追加的增量修补轮数。修补轮输出极小，不与整份重来共用重试额度。 */
     const CONTINUATION_OUTLINE_REPAIR_ROUNDS_ACU = 2;
-    const defaultDependencies_ACU$3 = {
+    const defaultDependencies_ACU$4 = {
         resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
         callInternalAi: callContinuationInternalAi_ACU,
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
@@ -120792,7 +120953,7 @@ $CONTENT
             || error.code === 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH';
     }
     class ContinuationOutlinePlanner_ACU {
-        constructor(dependencies = defaultDependencies_ACU$3) {
+        constructor(dependencies = defaultDependencies_ACU$4) {
             this.dependencies = dependencies;
         }
         async plan(request, apiDependencies) {
@@ -121484,12 +121645,13 @@ $CONTENT
             schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
             settledThroughIndex: -1,
             updatedAt: 0,
-            revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 0 },
+            revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 0, webRefs: 0 },
             hooks: [],
             infoGap: [],
             constraints: [],
             storyArc: [],
             chronology: [],
+            webRefs: [],
         };
     }
     /** 证据楼层列表：只接受非负整数，去重后升序。是否越过结算水位由事务层校验。 */
@@ -121667,6 +121829,44 @@ $CONTENT
             retiredReason,
         };
     }
+    /** 取一段文本的首句，用作旧条目缺失 brief 时的兼容兜底。 */
+    function firstSentence_ACU(text) {
+        const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+        if (!flat)
+            return '';
+        const cut = flat.split(/(?<=[。！？!?\.])\s*|\n/)[0] ?? flat;
+        return cut.length > 80 ? `${cut.slice(0, 80)}…` : cut;
+    }
+    /**
+     * 校验一条资料库记录。固定内容是 title 与 brief；summary 为可空的自由格式详情。
+     * 旧条目的 extract 字段故意不读取：升级后不再让网页原文继续扩张聊天快照。
+     */
+    function validateWebRefEntry_ACU(raw) {
+        if (!isRecord_ACU$4(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const title = readText_ACU$1(raw.title).trim();
+        const url = readText_ACU$1(raw.url).trim();
+        if (!id || !title || !url)
+            return null;
+        const tags = Array.isArray(raw.tags)
+            ? raw.tags.filter((item) => typeof item === 'string' && !!item.trim()).map(item => item.trim())
+            : [];
+        return {
+            id,
+            title,
+            source: readEnum_ACU(raw.source, AGENT_WEB_REF_SOURCES_ACU, 'web'),
+            url,
+            query: readText_ACU$1(raw.query),
+            tags,
+            brief: readText_ACU$1(raw.brief).trim() || firstSentence_ACU(readText_ACU$1(raw.summary)),
+            summary: readText_ACU$1(raw.summary),
+            sourceStatus: readEnum_ACU(raw.sourceStatus, AGENT_WEB_REF_STATUSES_ACU, 'unavailable'),
+            fetchedAt: typeof raw.fetchedAt === 'number' && raw.fetchedAt >= 0 ? raw.fetchedAt : 0,
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
     function validateConstraintEntry_ACU(raw) {
         if (!isRecord_ACU$4(raw))
             return null;
@@ -121707,6 +121907,9 @@ $CONTENT
         const validatedChronology = chronology.map(validateChronologyEntry_ACU);
         if (validatedChronology.some(entry => entry === null))
             return null;
+        if (Object.prototype.hasOwnProperty.call(raw, 'webRefs') && !Array.isArray(raw.webRefs))
+            return null;
+        const webRefs = Array.isArray(raw.webRefs) ? raw.webRefs : [];
         return {
             schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
             settledThroughIndex,
@@ -121717,12 +121920,14 @@ $CONTENT
                 constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
                 storyArc: Math.max(0, readIndex_ACU(raw.revisions.storyArc)),
                 chronology: Math.max(0, readIndex_ACU(raw.revisions.chronology)),
+                webRefs: Math.max(0, readIndex_ACU(raw.revisions.webRefs)),
             },
             hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
             infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
             constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
             storyArc: validatedStoryArc,
             chronology: validatedChronology,
+            webRefs: webRefs.flatMap(item => { const entry = validateWebRefEntry_ACU(item); return entry ? [entry] : []; }),
         };
     }
     /**
@@ -121762,12 +121967,14 @@ $CONTENT
                 constraints: Math.max(0, readIndex_ACU(revisions.constraints)),
                 storyArc: Math.max(0, readIndex_ACU(revisions.storyArc)),
                 chronology: Math.max(0, readIndex_ACU(revisions.chronology)),
+                webRefs: Math.max(0, readIndex_ACU(revisions.webRefs)),
             },
             hooks: pick(raw.hooks, validateHookEntry_ACU, 'hooks'),
             infoGap: pick(raw.infoGap, validateInfoGapEntry_ACU, 'infoGap'),
             constraints: pick(raw.constraints, validateConstraintEntry_ACU, 'constraints'),
             storyArc: pick(raw.storyArc, validateStoryArcEntry_ACU, 'storyArc'),
             chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
+            webRefs: pick(raw.webRefs, validateWebRefEntry_ACU, 'webRefs'),
         };
         return { snapshot, problems };
     }
@@ -121889,6 +122096,7 @@ $CONTENT
                 constraints: current.revisions.constraints + 1,
                 storyArc: current.revisions.storyArc + 1,
                 chronology: current.revisions.chronology + 1,
+                webRefs: current.revisions.webRefs + 1,
             },
         };
         const validated = validateAgentModuleSnapshot_ACU(merged);
@@ -121900,6 +122108,7 @@ $CONTENT
             ['长期约束 constraints', merged.constraints, validated.constraints],
             ['故事总纲 storyArc', merged.storyArc, validated.storyArc],
             ['故事年代学账本 chronology', merged.chronology, validated.chronology],
+            ['百科资料库 webRefs', merged.webRefs, validated.webRefs],
         ];
         for (const [label, input, accepted] of checks) {
             const inputLength = Array.isArray(input) ? input.length : 0;
@@ -122203,6 +122412,65 @@ $CONTENT
      */
     function renderAgentChronologyByIds_ACU(snapshot, ids) {
         return renderModuleEntries_ACU({ label: '故事年代学账本', revision: snapshot.revisions.chronology, entries: sortChronology_ACU(snapshot.chronology), render: renderChronologyEntry_ACU }, ids);
+    }
+    const WEB_REF_SOURCE_LABELS_ACU = {
+        moegirl: '萌娘百科',
+        wikipedia_zh: '中文维基',
+        wikipedia_en: '英文维基',
+        baidu: '百度百科',
+        web: '网页',
+    };
+    const WEB_REF_STATUS_LABELS_ACU = {
+        ok: '正常',
+        unavailable: '来源不可用',
+        blocked: '被拦截',
+    };
+    /** 唯一会进入预览上下文的资料形态：名称 + 一句话简介。 */
+    function renderWebRefPreview_ACU(entry) {
+        const flags = [
+            entry.tags.length ? entry.tags.join('/') : '',
+            entry.sourceStatus !== 'ok' ? WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus] : '',
+            entry.retired ? '已退休' : '',
+        ].filter(Boolean);
+        return `- [${entry.id}]「${entry.title}」${entry.brief || '（无简介）'}${flags.length ? `（${flags.join('；')}）` : ''}`;
+    }
+    /** 按 ID 查询时才给自由格式详情与来源；网页原文不会被保存。 */
+    function renderWebRefFull_ACU(entry) {
+        return [
+            `- [${entry.id}]「${entry.title}」来源=${WEB_REF_SOURCE_LABELS_ACU[entry.source]} 状态=${WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus]}${entry.retired ? ' 已退休' : ''}`,
+            `  简介：${entry.brief || '（无）'}`,
+            `  链接：${entry.url}`,
+            entry.query ? `  检索词：${entry.query}` : '',
+            entry.tags.length ? `  标签：${entry.tags.join('、')}` : '',
+            entry.summary ? `  详情：\n${entry.summary}` : '  详情：（未写）',
+            entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
+        ].filter(Boolean).join('\n');
+    }
+    /** 将所有活跃资料压成预览，供主 Agent 运行时快照注入。 */
+    function renderAgentWebRefsCatalog_ACU(snapshot, enabled) {
+        const active = snapshot.webRefs.filter(entry => !entry.retired);
+        if (!active.length) {
+            return enabled
+                ? '百科资料库为空。开场检索尚未产出条目，或来源均不可达；需要原作/公开设定时派工 web-researcher。'
+                : '百科资料库为空（网页检索功能未启用）。';
+        }
+        return truncateAgentBlock_ACU([
+            `百科资料库 ${active.length} 条（外部参考资料，非本故事已发生事实；与世界书或正文冲突时以后者为准）。下面只是名称与一句话简介，详情用 read $WEB_REFS:ID 精读：`,
+            ...active.map(renderWebRefPreview_ACU),
+        ].join('\n'));
+    }
+    /** 不传 ID 也只返回预览；按 ID 才返回详情。 */
+    function renderAgentWebRefsByIds_ACU(snapshot, ids) {
+        if (!ids || !ids.length) {
+            const head = `当前修订号=${snapshot.revisions.webRefs}`;
+            const active = snapshot.webRefs.filter(entry => !entry.retired);
+            const retiredCount = snapshot.webRefs.length - active.length;
+            const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
+            if (!active.length)
+                return `${head}\n百科资料库当前没有活跃条目。${tail}`;
+            return `${head}\n百科资料库活跃条目 ${active.length} 条（预览：名称 + 一句话简介；详情用 $WEB_REFS:ID 精读）：\n${active.map(renderWebRefPreview_ACU).join('\n')}${tail}`;
+        }
+        return renderModuleEntries_ACU({ label: '百科资料库', revision: snapshot.revisions.webRefs, entries: snapshot.webRefs, render: renderWebRefFull_ACU }, ids);
     }
 
     /**
@@ -123777,6 +124045,13 @@ $CONTENT
             triggers: ['策划结果之间存在冲突', '本轮触碰长期约束红线', '大阶段转折或伏笔密集轮次'],
             promptKey: 'reviewer',
         },
+        {
+            name: AGENT_WEB_RESEARCHER_NAME_ACU,
+            kind: 'research',
+            description: '从互联网查原作与公开设定：优先萌娘百科、维基百科、百度百科，查不到再用搜索引擎与网页抓取；把有用的页面写成带摘要的百科资料库条目（$WEB_REFS）供其它代理阅读。只登记原作/公开常识，不写本故事剧情',
+            triggers: ['任务启用了开场检索且资料库为空时由运行时自动派工，无需你派', '正文或大纲新登场了原作人物、组织、地点、能力、术语，而百科资料库与世界书都没有对应条目', '需要核对某个原作设定（关系、能力边界、时间线、禁忌）而现有资料无法回答'],
+            promptKey: 'webResearcher',
+        },
     ];
     const AGENT_MODULE_DEFINITIONS_ACU = [
         {
@@ -123809,6 +124084,12 @@ $CONTENT
             triggers: ['规划或审查跨夜、数日、数周及更久的时间跳跃', '核对伤势恢复、训练/生产周期、旅行耗时、季节天气与关系熟悉度是否与累计时间相容', '最终指导需要给出可靠的相对时间锚'],
             writableBy: ['hook-cognition-maintainer'],
         },
+        {
+            token: '$WEB_REFS',
+            description: '百科资料库：web-researcher 从萌娘百科、维基百科、百度百科或网页查到的原作/公开设定，按实体（人物、法术、物品、组织、事件…）分条，每条固定有名称与一句话简介，另有自由格式详情与来源链接。目录与全量读只给「名称 + 简介」预览，详情按 ID 精读；网页原文不保存。它是外部参考，不是本故事已发生的事实；与世界书或正文冲突时以世界书和正文为准',
+            triggers: ['同人写作需要核对原作人物关系、能力边界、组织与地点设定', '大纲或策划涉及原作术语而世界书没有覆盖', '审查候选指导是否违背原作常识'],
+            writableBy: [AGENT_WEB_RESEARCHER_NAME_ACU],
+        },
     ];
     /** 子代理目录里的类型中文名。 */
     const KIND_DISPLAY_LABELS_ACU = {
@@ -123816,6 +124097,7 @@ $CONTENT
         maintain: '结算维护',
         plan: '策划',
         review: '审查',
+        research: '网页检索',
     };
     /** 按职责固定的写入说明，进子代理目录的「写入」行。 */
     const KIND_WRITE_LABELS_ACU = {
@@ -123823,7 +124105,13 @@ $CONTENT
         maintain: '$HOOKS_LEDGER、$INFO_GAP、$CHRONOLOGY（职责固定；约束只能提议，由主 Agent 裁决登记）',
         plan: '无（只返回建议）',
         review: '无（只返回判词）',
+        research: '$WEB_REFS（职责固定；只写外部参考资料，不碰叙事模块）',
     };
+    function isDefinitionVisible_ACU(name, options) {
+        if (name === AGENT_WEB_RESEARCHER_NAME_ACU)
+            return options?.webResearchEnabled === true;
+        return true;
+    }
     /**
      * 大纲子代理的目录块。它不走通用子代理运行时：运行时会按任务状态自动推断
      * 创建 / 维护 / 继续三种操作，并用独立的大纲提示词与既有资料完成生成与校验，
@@ -123842,23 +124130,30 @@ $CONTENT
      * 渲染子代理能力目录。
      * @returns 主 Agent 可见的摘要文本，不含子代理内部提示词
      */
-    function renderAgentSubagentCatalog_ACU() {
-        const blocks = AGENT_SUBAGENT_DEFINITIONS_ACU.map(definition => [
+    function renderAgentSubagentCatalog_ACU(options) {
+        const blocks = AGENT_SUBAGENT_DEFINITIONS_ACU
+            .filter(definition => isDefinitionVisible_ACU(definition.name, options))
+            .map(definition => [
             `- name: ${definition.name}`,
             `  类型: ${KIND_DISPLAY_LABELS_ACU[definition.kind]}`,
             `  职责: ${definition.description}`,
             `  适用时机: ${definition.triggers.join('；')}`,
-            '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
+            definition.kind === 'research'
+                ? '  读取: 除本地资料外还能出网（百科 API、搜索引擎、网页抓取）；派工 prompt 写清要查的作品、人物或设定名，reads 可留空'
+                : '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
             `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
         ].join('\n'));
         return [OUTLINE_AGENT_CATALOG_BLOCK_ACU, ...blocks].join('\n');
     }
     /**
      * 渲染资料模块目录。
+     * @param options 网页检索关闭且资料库为空时不列 $WEB_REFS，避免主 Agent 去读一个不存在的库
      * @returns 主 Agent 可见的模块摘要文本，只说模块是什么、何时用、谁能写
      */
-    function renderAgentModuleCatalog_ACU() {
-        const blocks = AGENT_MODULE_DEFINITIONS_ACU.map(definition => [
+    function renderAgentModuleCatalog_ACU(options) {
+        const blocks = AGENT_MODULE_DEFINITIONS_ACU
+            .filter(definition => definition.token !== '$WEB_REFS' || options?.webResearchEnabled === true || options?.webRefsPresent === true)
+            .map(definition => [
             `- 占位符: ${definition.token}`,
             `  内容: ${definition.description}`,
             `  适用时机: ${definition.triggers.join('；')}`,
@@ -123882,6 +124177,7 @@ $CONTENT
             '- $INFO_GAP / $INFO_GAP:ID,ID：认知与信息差时间线全部活跃条目，或按 ID 精读。',
             '- $ACTIVE_CONSTRAINTS / $ACTIVE_CONSTRAINTS:ID,ID：长期约束全部条目，或按 ID 精读。',
             '- $CHRONOLOGY / $CHRONOLOGY:ID,ID：故事年代学账本（已发生正文结算出的时间锚、累计经过时间与转换证据），或按 ID 精读（含已作废条目）。',
+            '- $WEB_REFS / $WEB_REFS:ID,ID：百科资料库——全量只给每条「名称 + 一句话简介」预览；按 ID 精读才有自由格式详情与来源链接，不保存网页原文。它是原作/公开设定的外部参考，不是本故事事实。',
             '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
             '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
             '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
@@ -123896,6 +124192,21 @@ $CONTENT
      */
     function findAgentSubagentDefinition_ACU(name) {
         return AGENT_SUBAGENT_DEFINITIONS_ACU.find(definition => definition.name === name) ?? null;
+    }
+    /**
+     * 渲染 web-researcher 的出网工具说明：按设置列出启用的百科来源、搜索提供方与页数上限。
+     * 只注入该子代理，主 Agent 与其它子代理看不到这些动作名。
+     */
+    function renderAgentWebToolCatalog_ACU(input) {
+        const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
+        return [
+            '出网工具（与本地 read/search 一样以 JSON 对象表达，可同批并发；结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
+            `- {"action":"encyclopedia_search","query":"角色名 或 作品名","sources":["moegirl","wikipedia_zh"]}：在百科里找候选词条。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
+            '- {"action":"encyclopedia_read","source":"moegirl","title":"候选里的准确标题"}：精读词条正文，返回带句柄的页面。',
+            `- {"action":"web_search","query":"关键词"}：通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
+            '- {"action":"web_read","url":"https://…"}：抓取任意网页正文。内网、酒馆自身与黑名单域名会被拒绝。',
+            `每次精读/抓取算一页，本次派工最多 ${input.maxPages} 页（已用 ${input.pagesUsed}），每页原文截断到 ${input.pageCharLimit} 字。同一页面不要重复抓取。`,
+        ].join('\n');
     }
 
     const fields_ACU = ['effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
@@ -124973,7 +125284,82 @@ $CONTENT
                 constraints: snapshot.revisions.constraints,
                 storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
                 chronology: snapshot.revisions.chronology + (chronologyTouched ? 1 : 0),
+                webRefs: snapshot.revisions.webRefs,
             },
+        };
+    }
+    /** 百科资料库条目 ID 前缀；模型漏写 id 时由运行时按此前缀顺延分配。 */
+    const AGENT_WEB_REF_ID_PREFIX_ACU = 'WR-';
+    /**
+     * 分配下一个可用的百科资料库 ID。按既有 WR-### 最大序号 +1，避免与退休条目撞号。
+     * @param existing 当前全部条目（含退休）
+     * @param taken 本次写集里已占用的 id
+     */
+    function nextAgentWebRefId_ACU(existing, taken = new Set()) {
+        let max = 0;
+        for (const id of [...existing.map(entry => entry.id), ...taken]) {
+            const matched = /^WR-(\d+)$/.exec(id);
+            if (matched)
+                max = Math.max(max, Number.parseInt(matched[1], 10));
+        }
+        return `${AGENT_WEB_REF_ID_PREFIX_ACU}${String(max + 1).padStart(3, '0')}`;
+    }
+    /**
+     * 应用 web-researcher 的百科资料库写集。与叙事模块同一防线：retire 必须命中且给理由、
+     * 任一条目失败整份拒绝、修订号并发校验；upsert 对既有条目按 id 覆盖但保留首次入库时间。
+     * 写入不推进结算水位——百科条目不是正文事实。
+     * @param snapshot 当前快照
+     * @param output 子代理运行时已把 pageRef 回填成完整条目的输出
+     * @param expectedRevision 子代理读到资料那一刻的 webRefs 修订号；与当前不一致即拒绝
+     * @param now 入库时间
+     * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）
+     */
+    function applyAgentWebRefsDelta_ACU(snapshot, output, expectedRevision, now = Date.now()) {
+        if (!output.items.length)
+            return snapshot;
+        if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
+            reject_ACU('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs });
+        }
+        const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
+        const taken = new Set();
+        for (const item of output.items) {
+            if (item.action === 'retire') {
+                const current = byId.get(item.id);
+                if (!current)
+                    reject_ACU(`retire 的百科条目不存在：${item.id}`, { id: item.id });
+                if (!item.reason.trim())
+                    reject_ACU(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
+                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
+                continue;
+            }
+            if (!item.title.trim())
+                reject_ACU(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
+            if (!item.brief.trim())
+                reject_ACU(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
+            if (!item.url.trim())
+                reject_ACU(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
+            const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
+            taken.add(id);
+            const previous = byId.get(id);
+            byId.set(id, {
+                id,
+                title: item.title.trim(),
+                source: item.source,
+                url: item.url.trim(),
+                query: item.query,
+                tags: [...new Set(item.tags.map(tag => tag.trim()).filter(Boolean))],
+                brief: item.brief.trim(),
+                summary: item.summary.trim(),
+                sourceStatus: item.sourceStatus,
+                fetchedAt: previous?.fetchedAt || now,
+                retired: false,
+                retiredReason: '',
+            });
+        }
+        return {
+            ...snapshot,
+            webRefs: [...byId.values()],
+            revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
         };
     }
     /** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
@@ -125329,6 +125715,158 @@ $CONTENT
                 return null;
         }
         return null;
+    }
+    const ENCYCLOPEDIA_SOURCE_ALIASES_ACU = {
+        moegirl: 'moegirl', 萌娘百科: 'moegirl', 萌娘: 'moegirl', moe: 'moegirl',
+        wikipedia_zh: 'wikipedia_zh', wikipedia: 'wikipedia_zh', zhwiki: 'wikipedia_zh', 维基百科: 'wikipedia_zh', 中文维基: 'wikipedia_zh', 维基: 'wikipedia_zh',
+        wikipedia_en: 'wikipedia_en', enwiki: 'wikipedia_en', 英文维基: 'wikipedia_en',
+        baidu: 'baidu', baike: 'baidu', 百度百科: 'baidu', 百度: 'baidu',
+    };
+    function parseEncyclopediaSource_ACU(value, path) {
+        const raw = readText_ACU(value);
+        const source = ENCYCLOPEDIA_SOURCE_ALIASES_ACU[raw] ?? ENCYCLOPEDIA_SOURCE_ALIASES_ACU[raw.toLowerCase()];
+        if (!source)
+            failProtocol_ACU(`${path} 必须是 moegirl / wikipedia_zh / wikipedia_en / baidu 之一，实际收到：${raw || '(空)'}`);
+        return source;
+    }
+    /**
+     * 把一个 JSON 载荷解析成 web-researcher 的出网工具调用。
+     * @param payload 已解析且 action 为四种出网动作之一的载荷
+     */
+    function parseAgentWebToolCall_ACU(payload) {
+        const action = readText_ACU(payload.action);
+        if (action === 'encyclopedia_search') {
+            const query = readText_ACU(payload.query);
+            if (!query)
+                failProtocol_ACU('encyclopedia_search 必须提供非空 query');
+            const rawSources = payload.sources === undefined || payload.sources === null ? [] : (Array.isArray(payload.sources) ? payload.sources : [payload.sources]);
+            const sources = [...new Set(rawSources.map((item, index) => parseEncyclopediaSource_ACU(item, `encyclopedia_search.sources[${index}]`)))];
+            return { kind: 'encyclopedia_search', query, sources };
+        }
+        if (action === 'encyclopedia_read') {
+            const title = readText_ACU(payload.title);
+            if (!title)
+                failProtocol_ACU('encyclopedia_read 必须提供非空 title（词条标题，从 encyclopedia_search 的候选里复制）');
+            return { kind: 'encyclopedia_read', source: parseEncyclopediaSource_ACU(payload.source, 'encyclopedia_read.source'), title };
+        }
+        if (action === 'web_search') {
+            const query = readText_ACU(payload.query);
+            if (!query)
+                failProtocol_ACU('web_search 必须提供非空 query');
+            return { kind: 'web_search', query };
+        }
+        if (action === 'web_read') {
+            const url = readText_ACU(payload.url);
+            if (!url)
+                failProtocol_ACU('web_read 必须提供非空 url');
+            return { kind: 'web_read', url };
+        }
+        failProtocol_ACU(`出网工具动作必须是 ${AGENT_WEB_TOOL_ACTIONS_ACU.join(' / ')}，实际收到：${action || '(空)'}`);
+    }
+    function isWebToolAction_ACU(action) {
+        return AGENT_WEB_TOOL_ACTIONS_ACU.includes(action);
+    }
+    /**
+     * 从 web-researcher 输出里提取工具并发批次：本地 read/search 与四种出网工具混排。
+     * @returns 工具调用列表；输出里没有任何工具对象时返回 null（应按契约解析）
+     */
+    function parseAgentResearcherToolCalls_ACU(raw, prefill) {
+        const text = normalizeModelText_ACU(raw);
+        if (!text.trim())
+            return null;
+        const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+        const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        for (const candidate of candidates) {
+            const records = parseObjectsFrom_ACU(candidate);
+            const toolRecords = records.filter(parsed => {
+                const action = readText_ACU(parsed.action);
+                return action === 'read' || action === 'search' || isWebToolAction_ACU(action);
+            });
+            if (toolRecords.length) {
+                return toolRecords.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(record => (isWebToolAction_ACU(readText_ACU(record.action)) ? parseAgentWebToolCall_ACU(record) : parseAgentToolCall_ACU(record)));
+            }
+            if (records.length)
+                return null;
+        }
+        return null;
+    }
+    /**
+     * 提取 web-researcher 为已读网页写下的精炼工作笔记。网页正文不进子代理历史；
+     * 下一次工具动作须把从上一批网页获得的事实写入 notes，运行时仅保留这部分。
+     */
+    function parseAgentResearcherWorkingNotes_ACU(raw, prefill) {
+        const text = normalizeModelText_ACU(raw);
+        if (!text.trim())
+            return [];
+        const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+        const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        for (const candidate of candidates) {
+            const records = parseObjectsFrom_ACU(candidate);
+            const notes = [];
+            for (const record of records) {
+                const action = readText_ACU(record.action);
+                if (!action || (!isWebToolAction_ACU(action) && action !== 'read' && action !== 'search'))
+                    continue;
+                const rawNotes = record.notes ?? record.workingNotes;
+                const items = Array.isArray(rawNotes) ? rawNotes : [rawNotes];
+                for (const item of items) {
+                    const note = readText_ACU(item);
+                    if (note)
+                        notes.push(note.length > 800 ? `${note.slice(0, 800)}…` : note);
+                }
+            }
+            if (notes.length || records.length)
+                return [...new Set(notes)].slice(0, 12);
+        }
+        return [];
+    }
+    /**
+     * 解析 web-researcher 的契约输出（回填前）。每条资料以一个实体分份，固定字段只有
+     * name（名称）与 brief（一句话简介）；detail 自由发挥。upsert 必须带 pageRef、name、brief；
+     * retire 必须带 id 与 reason。
+     * @param payload 已解析的 JSON 载荷
+     */
+    function parseAgentResearcherOutput_ACU(payload) {
+        const rawDelta = isRecord_ACU$3(payload.delta) ? payload.delta : payload;
+        const list = rawDelta.webRefs ?? rawDelta.entries ?? rawDelta.items;
+        if (list === undefined || list === null) {
+            return { summary: readText_ACU(payload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions), items: [] };
+        }
+        if (!Array.isArray(list))
+            failProtocol_ACU('delta.webRefs 必须是数组');
+        const items = list.map((raw, index) => {
+            if (!isRecord_ACU$3(raw))
+                failProtocol_ACU(`delta.webRefs[${index}] 必须是对象`);
+            const actionText = readText_ACU(raw.action) || 'upsert';
+            if (actionText !== 'upsert' && actionText !== 'retire')
+                failProtocol_ACU(`delta.webRefs[${index}].action 必须是 upsert / retire`);
+            const action = actionText;
+            const id = readText_ACU(raw.id);
+            if (action === 'retire') {
+                if (!id)
+                    failProtocol_ACU(`delta.webRefs[${index}] retire 需要 id`);
+                return { action, id, pageRef: '', title: '', tags: [], brief: '', summary: '', reason: readText_ACU(raw.reason) };
+            }
+            const pageRef = readText_ACU(raw.pageRef ?? raw.page ?? raw.ref);
+            if (!pageRef)
+                failProtocol_ACU(`delta.webRefs[${index}] upsert 必须带 pageRef（工具结果里的页面句柄，如 P1）；不允许手写 url 或原文`);
+            const title = readText_ACU(raw.name ?? raw.title);
+            if (!title)
+                failProtocol_ACU(`delta.webRefs[${index}]（pageRef=${pageRef}）的 name 不能为空：写这条资料对应的实体名称（角色 / 物品 / 法术 / 事件…）`);
+            const brief = readText_ACU(raw.brief ?? raw.intro ?? raw.oneLine);
+            if (!brief)
+                failProtocol_ACU(`delta.webRefs[${index}]「${title}」的 brief 不能为空：一句话说清它是什么`);
+            const detailRaw = raw.detail ?? raw.summary ?? raw.body;
+            const summary = typeof detailRaw === 'string' ? detailRaw.trim() : (detailRaw && typeof detailRaw === 'object' ? JSON.stringify(detailRaw, null, 1) : '');
+            return { action, id, pageRef, title, tags: readTextList_ACU(raw.tags), brief, summary, reason: '' };
+        });
+        return { summary: readText_ACU(payload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions), items };
+    }
+    function parseWebRefsExpectedRevision_ACU(value) {
+        if (!isRecord_ACU$3(value))
+            return undefined;
+        const raw = value.webRefs;
+        return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
     }
     /**
      * 解析主 Agent 的一次协议动作。
@@ -125727,7 +126265,7 @@ $CONTENT
         if (!isRecord_ACU$3(value))
             return {};
         const result = {};
-        for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology']) {
+        for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs']) {
             const raw = value[key];
             if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0)
                 result[key] = raw;
@@ -125958,7 +126496,7 @@ $CONTENT
     }
     // 依赖表里的函数一律延迟绑定：直接引用会在模块求值时就解析 pipeline 的导出，
     // 让「谁先被 import」决定本模块能否加载。改成调用时解析后，加载顺序不再影响可用性。
-    const defaultDependencies_ACU$2 = {
+    const defaultDependencies_ACU$3 = {
         resolveRelevantBookNames: resolveRelevantBookNames_ACU,
         resolveInjectionTarget: () => getInjectionTargetLorebook_ACU(),
         getIsolationPrefix: () => getIsolationPrefix_ACU(),
@@ -125970,7 +126508,7 @@ $CONTENT
      * Continuation 的只读世界书 seam。它只读取当前注入目标世界书，绝不调度剧情任务或写入宿主状态。
      */
     class ContinuationWorldbookContext_ACU {
-        constructor(dependencies = defaultDependencies_ACU$2) {
+        constructor(dependencies = defaultDependencies_ACU$3) {
             this.dependencies = dependencies;
         }
         async readRelevantBackground(scanText) {
@@ -126185,6 +126723,7 @@ $CONTENT
         $INFO_GAP: '认知与信息差时间线',
         $ACTIVE_CONSTRAINTS: '长期约束',
         $CHRONOLOGY: '故事年代学账本',
+        $WEB_REFS: '百科资料库',
         $TABLE_GLOBAL: '全局数据表',
         $TABLE_CHARACTERS: '角色表',
         $TABLE_CHRONICLES: '纪要表',
@@ -126686,6 +127225,13 @@ $CONTENT
                 ? { title: `故事年代学条目 ${chronologyIds.join('、')}`, text: renderAgentChronologyByIds_ACU(context.moduleSnapshot, chronologyIds) }
                 : { title: '故事年代学账本（已发生正文结算出的时间事实）', text: renderAgentChronology_ACU(context.moduleSnapshot) };
         }
+        const webRefIds = splitIdSuffix_ACU(normalized, '$WEB_REFS');
+        if (webRefIds !== null) {
+            return {
+                title: webRefIds.length ? `百科资料库条目 ${webRefIds.join('、')}（外部参考，非本故事事实）` : '百科资料库（全部活跃条目摘要；外部参考，非本故事事实）',
+                text: renderAgentWebRefsByIds_ACU(context.moduleSnapshot, webRefIds.length ? webRefIds : undefined),
+            };
+        }
         const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;
         switch (normalized) {
             case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
@@ -126721,8 +127267,9 @@ $CONTENT
     /**
      * service/continuation/agent/agent-search.ts — 五域 grep 式搜索工具
      *
-     * 搜索域即资料域：story（窗口内 AI 正文）、tables（全部表格行）、modules（伏笔/信息差/约束，
-     * 含退休条目）、outline（当前修订的大纲文本）、worldbook（已启用条目全文）。
+     * 搜索域即资料域：story（窗口内 AI 正文）、tables（全部表格行）、modules（伏笔/信息差/约束/
+     * 总纲/年代学/百科资料库，含退休条目）、outline（当前修订的大纲文本）、worldbook（已启用条目全文）。
+     * 互联网检索不在此列——那是 web-researcher 专用的出网工具，见 agent-web-client.ts。
      *
      * 核心原则「地址即读法」：每条命中都附带可直接复制进 read 的读取地址。
      * 三层护栏（照抄奶龙code search_in_files 思路）：单行居中截断、maxResults 条数上限、
@@ -126844,6 +127391,11 @@ $CONTENT
                 text: [constraint.text, constraint.reason].filter(Boolean).join('｜'),
             });
         }
+        for (const entry of snapshot.webRefs) {
+            const head = `百科资料库 [${entry.id}]${entry.retired ? '（已退休）' : ''}`;
+            const address = `$WEB_REFS:${entry.id}`;
+            lines.push({ label: `${head}（名称/简介/标签/详情）`, address, text: [entry.title, entry.brief, ...entry.tags, entry.summary].filter(Boolean).join('｜') });
+        }
         for (const entry of snapshot.chronology) {
             lines.push({
                 label: `故事年代学 [${entry.id}]${entry.retired ? '（已作废）' : ''}`,
@@ -126961,20 +127513,19 @@ $CONTENT
     /**
      * service/continuation/agent/agent-read-gate.ts — read/search 结果注入前的 Token 门禁
      *
-     * 完整移植奶龙code FileReadContextGate 的三量状态机（S/H/M/F + 运行内累计 P），
-     * 防止一次大读取把预算吃完，同时永远给精准小额读取留路。
+     * 单批次 read/search 注入门禁。每个工具批次独立判定，避免一份过大的读取撑爆上下文；
+     * 总次数由主循环 / 子代理运行预算控制，超过上下文阈值交给既有总结机制处理。
      *
      * 四个量：
-     * - S：agentHistoryTokenBudget（会话压缩阈值，已有设置；<=0 视为不限）
-     * - H：本批次注入前的完整上下文实测（骨架 overhead + 会话历史，调用方传入；与压缩判定同口径）
-     * - M：agentReadTokenBudget 解析后的本次运行 read/search 累计预算（固定值或 S 的百分比）
+     * - S：agentHistoryTokenBudget（会话压缩阈值，同时用于百分比折算）
+     * - M：agentReadTokenBudget 解析后的**单批次** read/search 上限（固定值或 S 的百分比）
      * - F：min(agentReadFallbackTokens, M)，临近 S 时仍放行的精读兜底额度
+     * - B：本批次全部材料的实测 token
      *
-     * 状态机（顺序不可调整，逐字对应 gateReadFileBatch）：
-     * - T = P + B > M → 打回（读取总预算耗尽；P 跨动作累计，防拆分绕过）
-     * - 否则若 S > 0 且 H 可用且 H + B > S：B > F → 打回（临近压缩阈值，只许精读额度内的小读取）；
-     *   B <= F → 放行（已足够精准，随后越阈交给现有压缩时机机制处理）
-     * - 否则 → 放行
+     * 状态机：
+     * - B > M 直接整批打回；
+     * - 否则 H + B > S 且 B > F 时打回，持续要求缩小到 F 以下；
+     * - B <= F 时放行，由既有总结机制处理超长上下文。
      *
      * 打回报告不含正文，只含各目标实测 token 数、四量与剩余额度，尾附修正协议。
      * 门禁统一作用于三条注入路径：主 Agent 工具批次、子代理工具轮次、派工种子材料。
@@ -126983,7 +127534,7 @@ $CONTENT
         return { grantedTokens: 0 };
     }
     /**
-     * 解析 read/search 累计预算（沿用奶龙code parseMaxReadConfig / resolveFileReadTokenBudget 语义）。
+     * 解析 read/search 单批次上限。
      * 百分比按 S 折算；S 不限（<=0）时按默认历史预算折算，保证百分比配置永远可解析。
      * @param config 三项预算设置
      * @returns 有效 M / F 与解析依据
@@ -127004,8 +127555,8 @@ $CONTENT
             }
         }
         if (!Number.isFinite(effectiveMaxReadTokens) || effectiveMaxReadTokens < 1) {
-            // 损坏配置回退默认 30%，与设置校验层的默认一致。
-            effectiveMaxReadTokens = Math.floor(percentBase * 0.3);
+            // 损坏配置回退默认 20%，与设置校验层的默认一致。
+            effectiveMaxReadTokens = Math.floor(percentBase * 0.2);
             basis = 'history-budget-percent';
         }
         const configuredFallback = Number.isFinite(config.fallbackTokens) && config.fallbackTokens >= 1 ? Math.floor(config.fallbackTokens) : 6000;
@@ -127013,17 +127564,17 @@ $CONTENT
     }
     function buildRejectionReport_ACU(reason, items, itemTokens, batchTokens, state, budget, historyTokenBudget, contextTokens) {
         const itemLines = items.map((item, index) => `- ${item.label}：实测 ${itemTokens[index]} tokens`);
-        const remainingRead = Math.max(0, budget.effectiveMaxReadTokens - state.grantedTokens);
         const lines = ['【读取被门禁打回：内容未注入，不要原样重试】'];
-        if (reason === 'read-budget-exceeded') {
-            lines.push(`原因：本次运行的 read/search 累计预算即将耗尽。已用 ${state.grantedTokens} tokens，本批次需要 ${batchTokens} tokens，预算上限 ${budget.effectiveMaxReadTokens} tokens（剩余额度 ${remainingRead} tokens）。`);
+        if (reason === 'read-batch-too-large') {
+            lines.push(`原因：本次 read/search 工具批次需要 ${batchTokens} tokens，超过单批次上限 ${budget.effectiveMaxReadTokens} tokens。该上限不跨批次累计；缩小本批内容后可在下一轮继续读取。`);
         }
         else {
             const headroom = Math.max(0, historyTokenBudget - contextTokens);
-            lines.push(`原因：上下文临近压缩阈值。当前上下文实测 ${contextTokens} tokens，压缩阈值 ${historyTokenBudget} tokens（阈值前余量 ${headroom} tokens）；本批次 ${batchTokens} tokens 超过精读兜底额度 ${budget.effectiveFallbackTokens} tokens——临近阈值时只放行该额度内的小读取。`);
+            lines.push(`原因：上下文临近总结阈值。当前上下文实测 ${contextTokens} tokens，总结阈值 ${historyTokenBudget} tokens（阈值前余量 ${headroom} tokens）；本批次 ${batchTokens} tokens 大于精读兜底额度 ${budget.effectiveFallbackTokens} tokens。请持续缩小读取范围，直到单批次不超过 ${budget.effectiveFallbackTokens} tokens；届时会放行并由总结机制处理超长上下文。`);
         }
         lines.push('本批次各目标的实测大小：', ...itemLines);
-        lines.push(`修正协议：先用 search 定位相关剧情，再用更小的目标重试——正文改用更窄的 $STORY_RANGE 区间，表格改按 $TABLE:表名:起始行-结束行 分段读，模块改按 ID 精读（如 $HOOKS_LEDGER:H001），让下一次请求落在剩余额度（${Math.min(remainingRead, reason === 'near-compaction-overflow' ? budget.effectiveFallbackTokens : remainingRead)} tokens）内。`);
+        const nextLimit = reason === 'near-compaction-overflow' ? budget.effectiveFallbackTokens : budget.effectiveMaxReadTokens;
+        lines.push(`修正协议：先用 search 定位相关剧情，再用更小的目标重试——正文改用更窄的 $STORY_RANGE 区间，表格改按 $TABLE:表名:起始行-结束行 分段读，模块改按 ID 精读（如 $HOOKS_LEDGER:H001），让下一次请求落在 ${nextLimit} tokens 内。`);
         return lines.join('\n');
     }
     /**
@@ -127035,7 +127586,7 @@ $CONTENT
      * @param items 待注入材料
      * @param state 运行内累计状态（P）
      * @param config 预算设置
-     * @param contextTokens H：本批次注入前的完整上下文实测；<=0 表示不可用（跳过 S 判定）
+     * @param contextTokens H：本批次注入前的完整上下文实测；临近总结阈值时只放行 F 以内的精读
      * @param count token 统计函数，缺省 countAgentTokens_ACU
      * @returns 判定结果；拒绝时 report 为可直接回灌的打回报告
      */
@@ -127052,15 +127603,487 @@ $CONTENT
             itemTokens,
             report: buildRejectionReport_ACU(reason, items, itemTokens, batchTokens, state, budget, config.historyTokenBudget, contextTokens),
         });
-        // T = P + B > M：读取累计预算耗尽。跨动作累计，同批拆开发也一样会被拦。
-        if (state.grantedTokens + batchTokens > budget.effectiveMaxReadTokens)
-            return decide('read-budget-exceeded');
-        // H + B > S：临近压缩阈值。B <= F 表示已经精细到最小读取，放行（随后交给压缩机制）；否则打回。
-        if (config.historyTokenBudget > 0 && contextTokens > 0 && contextTokens + batchTokens > config.historyTokenBudget) {
-            if (batchTokens > budget.effectiveFallbackTokens)
-                return decide('near-compaction-overflow');
+        // 每个工具批次独立判定：不存在跨批次累计额度。
+        if (batchTokens > budget.effectiveMaxReadTokens)
+            return decide('read-batch-too-large');
+        if (config.historyTokenBudget > 0 && contextTokens > 0 && contextTokens + batchTokens > config.historyTokenBudget
+            && batchTokens > budget.effectiveFallbackTokens) {
+            return decide('near-compaction-overflow');
         }
+        void state;
         return { allowed: true, batchTokens, itemTokens, report: '' };
+    }
+
+    /**
+     * service/continuation/agent/agent-web-client.ts — web-researcher 专用的出网客户端
+     *
+     * 四类能力：
+     * - 百科检索 / 精读：维基百科与萌娘百科走 MediaWiki API（带 origin=* 的 CORS，浏览器直连）；
+     *   百度百科没有 CORS 头，经酒馆服务器 `/api/search/visit`（html:false 原样透传）同源转发。
+     * - 通用搜索：DuckDuckGo HTML 版经 /visit 抓页解析（免 key）；Serper / Tavily / SearXNG 复用
+     *   酒馆自身「网页搜索」扩展已配置的 key 或实例，走 `/api/search/<provider>`。
+     * - 任意网页抓取：经 /visit 抓 HTML，抽纯文本并按字数截断。
+     *
+     * 出网只发生在这里，且只由 web-researcher 调用。所有 URL 先过域名黑名单（内网、酒馆自身、
+     * 用户追加），所有响应都截断到设置上限，所有失败都以文本结果返回而不是抛错——
+     * 子代理要看到失败原因才能换词重搜，而不是让整次派工崩掉。
+     */
+    const AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU = {
+        moegirl: '萌娘百科',
+        wikipedia_zh: '中文维基百科',
+        wikipedia_en: '英文维基百科',
+        baidu: '百度百科',
+    };
+    /** 单次出网请求超时。百科 API 通常 1–3 秒；网页抓取给宽一点。 */
+    const WEB_REQUEST_TIMEOUT_MS_ACU = 20000;
+    /** 搜索结果条数上限：再多也只是让模型多花 token 挑选。 */
+    const SEARCH_RESULT_LIMIT_ACU = 8;
+    /** 百科检索候选条数上限。 */
+    const ENCYCLOPEDIA_CANDIDATE_LIMIT_ACU = 6;
+    /** 百度词条卡片 abstract 请求长度上限（该接口参数）。 */
+    const BAIDU_ABSTRACT_LENGTH_ACU = 3000;
+    const MEDIAWIKI_ENDPOINTS_ACU = {
+        moegirl: { api: 'https://zh.moegirl.org.cn/api.php', page: 'https://zh.moegirl.org.cn/' },
+        wikipedia_zh: { api: 'https://zh.wikipedia.org/w/api.php', page: 'https://zh.wikipedia.org/wiki/' },
+        wikipedia_en: { api: 'https://en.wikipedia.org/w/api.php', page: 'https://en.wikipedia.org/wiki/' },
+    };
+    /** 始终拦截的主机模式：本机、内网、链路本地、.local 与酒馆自身。 */
+    const ALWAYS_BLOCKED_HOST_PATTERNS_ACU = [
+        /^localhost$/i,
+        /\.local$/i,
+        /^127\./,
+        /^10\./,
+        /^192\.168\./,
+        /^172\.(1[6-9]|2\d|3[01])\./,
+        /^169\.254\./,
+        /^0\./,
+        /^\[?::1\]?$/,
+        /^\[?fe80:/i,
+        /^\[?fc00:/i,
+        /^\[?fd/i,
+    ];
+    const defaultDependencies_ACU$2 = {
+        fetch: (input, init) => globalThis.fetch(input, init),
+        hostHeaders: getHostRequestHeaders_ACU,
+        now: () => Date.now(),
+    };
+    function decodeHtmlEntities_ACU(text) {
+        return text
+            .replace(/&nbsp;/g, ' ')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;|&apos;/g, "'")
+            .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number.parseInt(code, 10)))
+            .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)));
+    }
+    function stripTags_ACU(html) {
+        // 百科页面的上标是引用角标（<sup>4</sup>），进正文只会变成噪音数字。
+        const withoutSup = html.replace(/<sup[^>]*>[\s\S]*?<\/sup>/gi, '');
+        // 行内标签（加粗、链接、高亮）直接去掉，不能变成空格把一个词拆成两半；块级标签才换成空格。
+        const withoutInline = withoutSup.replace(/<\/?(b|i|em|strong|span|a|mark|u|small|font|code)\b[^>]*>/gi, '');
+        return decodeHtmlEntities_ACU(withoutInline.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+    }
+    /**
+     * 折叠 MediaWiki extract 与网页正文里的空白：萌娘百科的模板表格会残留成片的制表符与空行。
+     * 保留段落边界（双换行）以便按行编入搜索索引。
+     */
+    function collapseWhitespace_ACU(text) {
+        return text
+            .replace(/\r/g, '')
+            .replace(/[ \t\u00a0\u3000]+/g, ' ')
+            .replace(/ *\n */g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+    /**
+     * 把整页 HTML 抽成可读纯文本：去脚本样式导航，块级标签换行，去标签解实体，折叠空白。
+     * 不追求 Readability 级别的正文提取——原文按字数截断后由模型自己挑重点。
+     * @param html 页面 HTML
+     * @returns { title, text }
+     */
+    function extractReadableText_ACU(html) {
+        const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+        const title = titleMatch ? stripTags_ACU(titleMatch[1]) : '';
+        let body = html
+            .replace(/<!--[\s\S]*?-->/g, ' ')
+            .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, ' ')
+            .replace(/<title[^>]*>[\s\S]*?<\/title>/gi, ' ')
+            .replace(/<(script|style|noscript|svg|iframe|template)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+            .replace(/<(nav|header|footer|aside|form)[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+        body = body.replace(/<\/(p|div|li|h[1-6]|tr|section|article|blockquote|pre|dd|dt)>/gi, '\n').replace(/<br\s*\/?>/gi, '\n');
+        const text = collapseWhitespace_ACU(decodeHtmlEntities_ACU(body.replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' '));
+        return { title, text };
+    }
+    /**
+     * 截断到字数上限并标注；上限以内原样返回。
+     */
+    function truncateWebText_ACU(text, limit) {
+        if (text.length <= limit)
+            return text;
+        return `${text.slice(0, limit)}\n（原文超出 ${limit} 字上限，已截断；未展示部分不代表不存在）`;
+    }
+    /**
+     * 解析用户追加的域名黑名单：逗号 / 换行 / 空白分隔，小写，去掉协议与路径。
+     */
+    function parseBlockedDomains_ACU(raw) {
+        return String(raw ?? '')
+            .split(/[\n,，;；\s]+/)
+            .map(item => item.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
+            .filter(Boolean);
+    }
+    /**
+     * 判定 URL 是否允许抓取。
+     * @returns 允许时返回 null；否则返回拒绝原因
+     */
+    function evaluateWebUrlPolicy_ACU(rawUrl, blockedDomains, hostOrigin) {
+        let url;
+        try {
+            url = new URL(String(rawUrl ?? '').trim());
+        }
+        catch {
+            return 'URL 格式非法（必须是完整的 http(s) 地址）';
+        }
+        if (url.protocol !== 'http:' && url.protocol !== 'https:')
+            return '只允许 http / https 协议';
+        if (url.port && url.port !== '80' && url.port !== '443')
+            return '不允许非标准端口';
+        const host = url.hostname.toLowerCase();
+        if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':'))
+            return '不允许直接访问 IP 地址';
+        if (ALWAYS_BLOCKED_HOST_PATTERNS_ACU.some(pattern => pattern.test(host)))
+            return '内网或本机地址被拦截';
+        if (hostOrigin) {
+            try {
+                if (new URL(hostOrigin).hostname.toLowerCase() === host)
+                    return '不允许抓取酒馆服务器自身';
+            }
+            catch { /* 宿主 origin 不可解析时忽略该项 */ }
+        }
+        for (const blocked of blockedDomains) {
+            if (host === blocked || host.endsWith(`.${blocked}`))
+                return `域名 ${host} 在黑名单内`;
+        }
+        return null;
+    }
+    function encyclopediaPageUrl_ACU(source, title) {
+        if (source === 'baidu')
+            return `https://baike.baidu.com/item/${encodeURIComponent(title)}`;
+        return `${MEDIAWIKI_ENDPOINTS_ACU[source].page}${encodeURIComponent(title.replace(/ /g, '_'))}`;
+    }
+    /** 客户端实例。无状态：页面缓存由子代理运行时按派工持有。 */
+    class AgentWebClient_ACU {
+        constructor(dependencies = defaultDependencies_ACU$2) {
+            this.dependencies = dependencies;
+        }
+        /** 直连 fetch（百科 API），带超时。 */
+        async fetchDirect_ACU(url, init) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), WEB_REQUEST_TIMEOUT_MS_ACU);
+            try {
+                return await this.dependencies.fetch(url, { ...init, signal: controller.signal });
+            }
+            finally {
+                clearTimeout(timer);
+            }
+        }
+        /**
+         * 经酒馆服务器 /api/search/visit 同源转发。html=true 只接受 text/html 并返回正文；
+         * html=false 原样透传任意 content-type（百度 openapi 的 JSON 就靠这个）。
+         */
+        async visitViaHost_ACU(url, html) {
+            try {
+                const response = await this.fetchDirect_ACU('/api/search/visit', {
+                    method: 'POST',
+                    headers: { ...this.dependencies.hostHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, html }),
+                });
+                if (!response.ok) {
+                    return { ok: false, reason: response.status === 400 ? '酒馆服务器拒绝了该 URL（格式、端口或 IP 直连不被允许）' : `酒馆服务器转发失败（HTTP ${response.status}）：目标站点可能拒绝访问、返回了非 HTML 内容或需要登录` };
+                }
+                return { ok: true, text: await response.text() };
+            }
+            catch (error) {
+                return { ok: false, reason: `酒馆服务器转发请求异常：${error instanceof Error ? error.message : String(error)}` };
+            }
+        }
+        async fetchMediawikiJson_ACU(source, params) {
+            const search = new URLSearchParams({ ...params, format: 'json', origin: '*', utf8: '1' });
+            const url = `${MEDIAWIKI_ENDPOINTS_ACU[source].api}?${search.toString()}`;
+            try {
+                const response = await this.fetchDirect_ACU(url, { method: 'GET' });
+                if (!response.ok)
+                    return { ok: false, reason: `${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]} 返回 HTTP ${response.status}` };
+                const data = await response.json();
+                if (data && typeof data === 'object' && data.error) {
+                    return { ok: false, reason: `${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]} API 错误：${String(data.error.info ?? data.error.code ?? '未知')}` };
+                }
+                return { ok: true, data };
+            }
+            catch (error) {
+                return { ok: false, reason: `${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]} 请求失败（网络不可达或被浏览器拦截）：${error instanceof Error ? error.message : String(error)}` };
+            }
+        }
+        /**
+         * 在一个百科来源里检索候选词条。
+         * 萌娘百科关闭了 list=search，改用 opensearch（前缀匹配，返回标题与链接）；维基用全文 search。
+         */
+        async searchEncyclopedia(source, query) {
+            const trimmed = query.trim();
+            if (!trimmed)
+                return { candidates: [], note: '检索词为空' };
+            if (source === 'baidu') {
+                // 百度没有公开的检索接口，词条卡片按精确名称命中；命中即视为唯一候选。
+                const card = await this.fetchBaiduCard_ACU(trimmed);
+                if (card.ok === false)
+                    return { candidates: [], note: card.reason };
+                return { candidates: [{ source, title: card.title, url: card.url, snippet: card.desc }], note: '' };
+            }
+            if (source === 'moegirl') {
+                const result = await this.fetchMediawikiJson_ACU(source, { action: 'opensearch', search: trimmed, limit: String(ENCYCLOPEDIA_CANDIDATE_LIMIT_ACU), redirects: 'resolve' });
+                if (result.ok === false)
+                    return { candidates: [], note: result.reason };
+                const titles = Array.isArray(result.data) ? result.data[1] : [];
+                const urls = Array.isArray(result.data) ? result.data[3] : [];
+                const list = Array.isArray(titles) ? titles : [];
+                const candidates = list.map((title, index) => ({
+                    source,
+                    title: String(title),
+                    url: Array.isArray(urls) && typeof urls[index] === 'string' ? urls[index] : encyclopediaPageUrl_ACU(source, String(title)),
+                    snippet: '',
+                }));
+                return { candidates, note: candidates.length ? '' : '萌娘百科 opensearch 无候选（它按标题前缀匹配，试试角色全名、作品名或去掉修饰词）' };
+            }
+            const result = await this.fetchMediawikiJson_ACU(source, { action: 'query', list: 'search', srsearch: trimmed, srlimit: String(ENCYCLOPEDIA_CANDIDATE_LIMIT_ACU) });
+            if (result.ok === false)
+                return { candidates: [], note: result.reason };
+            const hits = result.data?.query?.search;
+            const candidates = (Array.isArray(hits) ? hits : []).flatMap(hit => {
+                const title = typeof hit?.title === 'string' ? hit.title : '';
+                return title ? [{ source, title, url: encyclopediaPageUrl_ACU(source, title), snippet: stripTags_ACU(String(hit.snippet ?? '')) }] : [];
+            });
+            return { candidates, note: candidates.length ? '' : `${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]} 无命中` };
+        }
+        /**
+         * 精读一个百科词条的纯文本正文。
+         * @param source 百科来源
+         * @param title 词条标题（可来自 searchEncyclopedia 的候选）
+         * @param charLimit 原文字数上限
+         */
+        async readEncyclopedia(source, title, charLimit) {
+            const trimmed = title.trim();
+            const url = encyclopediaPageUrl_ACU(source, trimmed);
+            if (!trimmed)
+                return { source, title: '', url, text: '', status: 'unavailable', note: '词条标题为空' };
+            if (source === 'baidu') {
+                const card = await this.fetchBaiduCard_ACU(trimmed);
+                if (card.ok === false)
+                    return { source, title: trimmed, url, text: '', status: 'unavailable', note: card.reason };
+                return { source, title: card.title, url: card.url, text: truncateWebText_ACU(card.text, charLimit), status: 'ok', note: '' };
+            }
+            const result = await this.fetchMediawikiJson_ACU(source, { action: 'query', prop: 'extracts', explaintext: '1', exlimit: '1', exsectionformat: 'plain', redirects: '1', titles: trimmed });
+            if (result.ok === false)
+                return { source, title: trimmed, url, text: '', status: 'unavailable', note: result.reason };
+            const pages = result.data?.query?.pages;
+            const page = pages && typeof pages === 'object' ? Object.values(pages)[0] : null;
+            if (!page || page.missing !== undefined || typeof page.extract !== 'string') {
+                return { source, title: trimmed, url, text: '', status: 'unavailable', note: `${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]} 没有名为「${trimmed}」的词条；先用 encyclopedia_search 找准确标题` };
+            }
+            const resolvedTitle = typeof page.title === 'string' && page.title ? page.title : trimmed;
+            const text = collapseWhitespace_ACU(page.extract);
+            if (!text)
+                return { source, title: resolvedTitle, url: encyclopediaPageUrl_ACU(source, resolvedTitle), text: '', status: 'unavailable', note: '词条存在但正文为空（可能是消歧义页或纯模板页）' };
+            return { source, title: resolvedTitle, url: encyclopediaPageUrl_ACU(source, resolvedTitle), text: truncateWebText_ACU(text, charLimit), status: 'ok', note: '' };
+        }
+        /** 百度百科词条卡片（旧版 openapi，无 CORS，经酒馆转发）。 */
+        async fetchBaiduCard_ACU(key) {
+            const api = `https://baike.baidu.com/api/openapi/BaikeLemmaCardApi?scope=103&format=json&appid=379020&bk_key=${encodeURIComponent(key)}&bk_length=${BAIDU_ABSTRACT_LENGTH_ACU}`;
+            const visited = await this.visitViaHost_ACU(api, false);
+            if (visited.ok === false)
+                return { ok: false, reason: `百度百科不可用：${visited.reason}` };
+            let data;
+            try {
+                data = JSON.parse(visited.text);
+            }
+            catch {
+                return { ok: false, reason: '百度百科返回了非 JSON 内容（接口可能已变更或触发了验证）' };
+            }
+            if (!data || typeof data !== 'object' || (!data.title && !data.abstract)) {
+                const message = typeof data?.errmsg === 'string' ? data.errmsg : '无此词条';
+                return { ok: false, reason: `百度百科无命中「${key}」：${message}。百度只按精确词条名匹配，试试角色全名或作品内译名` };
+            }
+            const title = String(data.title ?? key);
+            const url = typeof data.url === 'string' && data.url ? String(data.url).replace(/^http:/, 'https:') : encyclopediaPageUrl_ACU('baidu', title);
+            const desc = stripTags_ACU(String(data.desc ?? ''));
+            const cardLines = [];
+            if (Array.isArray(data.card)) {
+                for (const item of data.card) {
+                    const name = stripTags_ACU(String(item?.name ?? ''));
+                    const values = Array.isArray(item?.value) ? item.value.map((value) => stripTags_ACU(String(value ?? ''))).filter(Boolean) : [];
+                    if (name && values.length)
+                        cardLines.push(`${name}：${values.join('、')}`);
+                }
+            }
+            const abstract = collapseWhitespace_ACU(stripTags_ACU(String(data.abstract ?? '')));
+            const text = [desc ? `简介：${desc}` : '', cardLines.length ? `【词条卡片】\n${cardLines.join('\n')}` : '', abstract ? `【概述】\n${abstract}` : ''].filter(Boolean).join('\n\n');
+            return { ok: true, title, url, desc, text };
+        }
+        /**
+         * 通用网页搜索。
+         * @param query 检索词
+         * @param settings 网页检索设置（提供方与 SearXNG 地址）
+         */
+        async webSearch(query, settings) {
+            const trimmed = query.trim();
+            if (!trimmed)
+                return { hits: [], note: '检索词为空' };
+            const provider = settings.searchProvider;
+            if (provider === 'duckduckgo')
+                return this.searchDuckDuckGo_ACU(trimmed);
+            if (provider === 'searxng')
+                return this.searchSearxng_ACU(trimmed, settings.searxngBaseUrl);
+            return this.searchViaHostProvider_ACU(provider, trimmed);
+        }
+        async searchDuckDuckGo_ACU(query) {
+            const visited = await this.visitViaHost_ACU(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, true);
+            if (visited.ok === false)
+                return { hits: [], note: `DuckDuckGo 不可用：${visited.reason}` };
+            return { hits: parseDuckDuckGoHtml_ACU(visited.text), note: '' };
+        }
+        async searchSearxng_ACU(query, baseUrl) {
+            if (!baseUrl.trim())
+                return { hits: [], note: 'SearXNG 实例地址未配置（续写设置 → 网页检索）' };
+            try {
+                const response = await this.fetchDirect_ACU('/api/search/searxng', {
+                    method: 'POST',
+                    headers: { ...this.dependencies.hostHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ baseUrl: baseUrl.trim(), query }),
+                });
+                if (!response.ok)
+                    return { hits: [], note: `SearXNG 请求失败（HTTP ${response.status}）` };
+                return { hits: parseSearxngHtml_ACU(await response.text()), note: '' };
+            }
+            catch (error) {
+                return { hits: [], note: `SearXNG 请求异常：${error instanceof Error ? error.message : String(error)}` };
+            }
+        }
+        async searchViaHostProvider_ACU(provider, query) {
+            try {
+                const response = await this.fetchDirect_ACU(`/api/search/${provider}`, {
+                    method: 'POST',
+                    headers: { ...this.dependencies.hostHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query }),
+                });
+                if (response.status === 400)
+                    return { hits: [], note: `${provider} 未在酒馆里配置 API key（酒馆设置 → API 密钥）` };
+                if (!response.ok)
+                    return { hits: [], note: `${provider} 请求失败（HTTP ${response.status}）` };
+                const data = await response.json();
+                const hits = [];
+                if (provider === 'serper') {
+                    for (const item of Array.isArray(data?.organic) ? data.organic : []) {
+                        if (typeof item?.link === 'string')
+                            hits.push({ title: String(item.title ?? ''), url: item.link, snippet: String(item.snippet ?? '') });
+                    }
+                    if (data?.answerBox?.snippet)
+                        hits.unshift({ title: String(data.answerBox.title ?? '精选摘要'), url: String(data.answerBox.link ?? ''), snippet: String(data.answerBox.snippet) });
+                }
+                else {
+                    for (const item of Array.isArray(data?.results) ? data.results : []) {
+                        if (typeof item?.url === 'string')
+                            hits.push({ title: String(item.title ?? ''), url: item.url, snippet: String(item.content ?? '') });
+                    }
+                    if (typeof data?.answer === 'string' && data.answer.trim())
+                        hits.unshift({ title: 'Tavily 综合回答', url: '', snippet: data.answer.trim() });
+                }
+                return { hits: hits.slice(0, SEARCH_RESULT_LIMIT_ACU), note: '' };
+            }
+            catch (error) {
+                return { hits: [], note: `${provider} 请求异常：${error instanceof Error ? error.message : String(error)}` };
+            }
+        }
+        /**
+         * 抓取任意网页并抽纯文本。
+         * @param url 目标地址
+         * @param settings 黑名单与字数上限
+         * @param hostOrigin 酒馆自身 origin，用于拒绝抓自己
+         */
+        async webRead(url, settings, hostOrigin) {
+            const trimmed = String(url ?? '').trim();
+            const denied = evaluateWebUrlPolicy_ACU(trimmed, parseBlockedDomains_ACU(settings.blockedDomains), hostOrigin);
+            if (denied)
+                return { source: 'web', title: '', url: trimmed, text: '', status: 'blocked', note: denied };
+            const visited = await this.visitViaHost_ACU(trimmed, true);
+            if (visited.ok === false)
+                return { source: 'web', title: '', url: trimmed, text: '', status: 'unavailable', note: visited.reason };
+            const extracted = extractReadableText_ACU(visited.text);
+            if (!extracted.text)
+                return { source: 'web', title: extracted.title, url: trimmed, text: '', status: 'unavailable', note: '页面没有可读文本（可能是纯脚本渲染的页面）' };
+            return { source: 'web', title: extracted.title || trimmed, url: trimmed, text: truncateWebText_ACU(extracted.text, settings.pageCharLimit), status: 'ok', note: '' };
+        }
+    }
+    /** 解析 DuckDuckGo HTML 版结果页：`result__a` 是标题链接（带 uddg 跳转参数），`result__snippet` 是摘要。 */
+    function parseDuckDuckGoHtml_ACU(html) {
+        const hits = [];
+        const blocks = html.split(/<div[^>]*class="[^"]*\bresult\b[^"]*"/i).slice(1);
+        for (const block of blocks) {
+            const anchor = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+            if (!anchor)
+                continue;
+            const snippetMatch = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>|<div[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block);
+            const href = decodeHtmlEntities_ACU(anchor[1]);
+            const uddg = /[?&]uddg=([^&]+)/.exec(href);
+            let url = href;
+            if (uddg) {
+                try {
+                    url = decodeURIComponent(uddg[1]);
+                }
+                catch {
+                    url = href;
+                }
+            }
+            else if (url.startsWith('//')) {
+                url = `https:${url}`;
+            }
+            if (!/^https?:\/\//i.test(url))
+                continue;
+            hits.push({ title: stripTags_ACU(anchor[2]), url, snippet: stripTags_ACU(snippetMatch?.[1] ?? snippetMatch?.[2] ?? '') });
+            if (hits.length >= SEARCH_RESULT_LIMIT_ACU)
+                break;
+        }
+        return hits;
+    }
+    /** 解析 SearXNG 结果页：`article.result` 内 `h3 > a` 为标题链接，`p.content` 为摘要。 */
+    function parseSearxngHtml_ACU(html) {
+        const hits = [];
+        const blocks = html.split(/<article[^>]*class="[^"]*\bresult\b[^"]*"/i).slice(1);
+        for (const block of blocks) {
+            const anchor = /<h3[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+            if (!anchor)
+                continue;
+            const url = decodeHtmlEntities_ACU(anchor[1]);
+            if (!/^https?:\/\//i.test(url))
+                continue;
+            const content = /<p[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/p>/i.exec(block);
+            hits.push({ title: stripTags_ACU(anchor[2]), url, snippet: stripTags_ACU(content?.[1] ?? '') });
+            if (hits.length >= SEARCH_RESULT_LIMIT_ACU)
+                break;
+        }
+        return hits;
+    }
+    /** 按设置得到启用的百科来源列表；全部关闭时返回空数组，由调用方给出提示。 */
+    function enabledEncyclopediaSources_ACU(settings) {
+        const list = [];
+        if (settings.sources.moegirl)
+            list.push('moegirl');
+        if (settings.sources.wikipediaZh)
+            list.push('wikipedia_zh');
+        if (settings.sources.wikipediaEn)
+            list.push('wikipedia_en');
+        if (settings.sources.baidu)
+            list.push('baidu');
+        return list;
     }
 
     function unique_ACU(values) {
@@ -127079,22 +128102,6 @@ $CONTENT
         }
         return unique_ACU(candidates).slice(0, 48);
     }
-    function selectWorldbookEntries_ACU(entries, seeds) {
-        const haystack = seeds.join('\n').toLowerCase();
-        return entries.filter(entry => entry.constant || [entry.title, ...entry.keys].some(term => term && haystack.includes(term.toLowerCase())));
-    }
-    function renderFullWorldbookEvidence_ACU(entries) {
-        if (!entries.length)
-            return '';
-        return entries.map(entry => `### ${entry.title}（${entry.bookName}#${entry.uid}）\n${entry.content}`).join('\n\n');
-    }
-    function selectFinalReviewWorldbookEntries_ACU(context, seeds) {
-        const snapshot = context.worldbook;
-        if (!snapshot?.available)
-            return [];
-        const hits = selectWorldbookEntries_ACU(snapshot.entries, seeds);
-        return hits;
-    }
     function buildAgentFinalReviewEvidence_ACU(input) {
         const { resolveContext: context } = input;
         const outline = renderAgentOutlineWindow_ACU(context);
@@ -127104,9 +128111,8 @@ $CONTENT
         const chronology = resolveAgentReadToken_ACU('$CHRONOLOGY', context).text;
         const seedSource = [context.originInstruction, input.currentUserInput, input.candidateInstruction, outline, tail].join('\n');
         const worldbookSeeds = extractAgentFinalReviewWorldbookSeeds_ACU(seedSource);
-        const worldbookEntries = selectFinalReviewWorldbookEntries_ACU(context, worldbookSeeds);
         const worldbookEvidence = context.worldbook?.available
-            ? (renderFullWorldbookEvidence_ACU(worldbookEntries) || '没有命中或常开世界书条目。不要凭印象判定世界观冲突；先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读全文。')
+            ? renderAgentWorldbookHits_ACU(context.worldbook, seedSource)
             : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证，并可用 worldbook scope 的 search 补查。';
         const supplementalMaterials = [
             `### 本轮用户输入\n${input.currentUserInput || '（本轮没有额外用户输入）'}`,
@@ -127120,10 +128126,7 @@ $CONTENT
             supplementalMaterials,
             worldbookEvidence,
             worldbookSeeds,
-            fixedReadKeys: unique_ACU([
-                '$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY',
-                ...worldbookEntries.map(entry => `$WORLDBOOK:${entry.bookName}:${entry.uid}`),
-            ]),
+            fixedReadKeys: unique_ACU(['$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY']),
             gateItems: [
                 { label: '用户初始要求', text: context.originInstruction || '（用户未提供初始要求）' },
                 { label: '本轮用户输入', text: input.currentUserInput || '（本轮没有额外用户输入）' },
@@ -127132,7 +128135,7 @@ $CONTENT
                 { label: '故事总纲', text: storyArc },
                 { label: '最近正文', text: tail },
                 { label: '长期约束、故事年代学账本、策划摘要、检索种子与世界书目录', text: supplementalMaterials },
-                { label: '命中世界书条目全文', text: worldbookEvidence },
+                { label: '本轮语境命中的世界书条目预览', text: worldbookEvidence },
             ],
         };
     }
@@ -127166,6 +128169,7 @@ $CONTENT
         callInternalAi: callContinuationInternalAi_ACU,
         resolveApiPreset: resolveContinuationApiPreset_ACU,
         resolveAgentApiPreset: resolveContinuationAgentApiPreset_ACU,
+        hostOrigin: () => (typeof location !== 'undefined' ? location.origin : ''),
     };
     const PROMPT_KEY_PREFILLS_ACU = {
         arcArchitect: AGENT_PREFILLS_ACU.arc,
@@ -127173,6 +128177,7 @@ $CONTENT
         mainlinePlanner: AGENT_PREFILLS_ACU.planner,
         beatPlanner: AGENT_PREFILLS_ACU.planner,
         reviewer: AGENT_PREFILLS_ACU.reviewer,
+        webResearcher: AGENT_PREFILLS_ACU.researcher,
     };
     /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
     const KIND_PAYLOAD_KEYS_ACU = {
@@ -127180,6 +128185,7 @@ $CONTENT
         maintain: ['delta', 'summary'],
         plan: ['recommendation', 'summary'],
         review: ['verdict'],
+        research: ['delta', 'summary'],
     };
     /**
      * 契约类子代理（总纲/维护）在一次派工里最多追加的续写/修补轮数。
@@ -127192,6 +128198,7 @@ $CONTENT
         maintain: ['hooks', 'infoGap', 'chronology'],
         plan: [],
         review: [],
+        research: ['webRefs'],
     };
     function rejectDelegation_ACU(message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -127217,7 +128224,7 @@ $CONTENT
     function describeWriteScope_ACU(writes) {
         if (!writes.length)
             return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
-        const labels = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本' };
+        const labels = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本', webRefs: '$WEB_REFS 百科资料库' };
         return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
     }
     /**
@@ -127229,6 +128236,43 @@ $CONTENT
         if (last && last.role === 'assistant')
             return [...messages.slice(0, -1), extra, last];
         return [...messages, extra];
+    }
+    function researcherProtocolError_ACU(message) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', message, true));
+    }
+    /**
+     * 用页面缓存回填 web-researcher 契约里的 pageRef。句柄不存在按协议错误处理并回灌可用句柄清单，
+     * 让模型改正而不是让运行时猜；pageRef 指向抓取失败的页面同样拒绝——没有可靠来源就不能入库。
+     */
+    function resolveResearcherDraft_ACU(draft, cache) {
+        const available = [...cache.pages.keys()];
+        const items = draft.items.map((item) => {
+            if (item.action === 'retire') {
+                return { action: 'retire', id: item.id, title: '', source: 'web', url: '', query: '', tags: [], brief: '', summary: '', sourceStatus: 'ok', reason: item.reason };
+            }
+            const key = item.pageRef.trim().toUpperCase();
+            const page = cache.pages.get(key);
+            if (!page) {
+                researcherProtocolError_ACU(`pageRef「${item.pageRef}」不在本次派工的工具结果里。可用句柄：${available.length ? available.join('、') : '（尚未抓取任何页面，先用 encyclopedia_read / web_read 抓取）'}`);
+            }
+            if (page.status !== 'ok' || !page.text) {
+                researcherProtocolError_ACU(`pageRef「${item.pageRef}」对应的页面抓取失败（${page.note || page.status}），不能入库；换来源或换词重抓，或从契约里去掉这一条`);
+            }
+            return {
+                action: 'upsert',
+                id: item.id,
+                title: item.title || page.title,
+                source: page.source,
+                url: page.url,
+                query: page.query,
+                tags: item.tags,
+                brief: item.brief,
+                summary: item.summary,
+                sourceStatus: page.status,
+                reason: '',
+            };
+        });
+        return { summary: draft.summary, expectedRevision: draft.expectedRevision, items };
     }
     /** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
     function resolveMaterial_ACU(token, context) {
@@ -127280,6 +128324,9 @@ $CONTENT
             const overviewMaxRows = definition.promptKey === 'mainlinePlanner'
                 ? AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.mainlinePlanner
                 : AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.default;
+            const isResearch = definition.kind === 'research';
+            const webSettings = input.settings.webResearch;
+            const pageCache = { pages: new Map(), byUrl: new Map(), pagesUsed: 0 };
             const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
                 $AGENT_READ_MATERIALS: () => materials,
                 $AGENT_TASK: () => input.delegation.prompt,
@@ -127300,6 +128347,14 @@ $CONTENT
                 $ACTIVE_CONSTRAINTS: () => resolveAgentReadToken_ACU('$ACTIVE_CONSTRAINTS', input.resolveContext).text,
                 $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
                 $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,
+                $WEB_REFS: () => resolveAgentReadToken_ACU('$WEB_REFS', input.resolveContext).text,
+                $WEB_TOOL_CATALOG: () => renderAgentWebToolCatalog_ACU({
+                    sources: enabledEncyclopediaSources_ACU(webSettings).map(source => `${source}（${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]}）`),
+                    provider: webSettings.searchProvider,
+                    maxPages: webSettings.maxPages,
+                    pageCharLimit: webSettings.pageCharLimit,
+                    pagesUsed: pageCache.pagesUsed,
+                }),
             }, 'agent_delegate');
             const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
             // 总纲卷数计划是随设置变化的运行时指令，不进提示词模板；但它必须落在尾部预填充之前——
@@ -127308,9 +128363,15 @@ $CONTENT
                 ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
                 : rendered.messages;
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-            const maxToolRounds = Math.max(0, input.budget.maxExtraReads);
+            // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads。
+            const maxToolRounds = Math.max(0, isResearch ? webSettings.maxToolRounds : input.budget.maxExtraReads);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
             const transcript = [];
+            /**
+             * 待消费的网页正文：只临时附在下一次模型调用里，绝不能写入 transcript。
+             * 模型借本次输出里的 notes 将有用事实压进历史后，这块正文即被释放。
+             */
+            let pendingResearchEvidence = '';
             const expandedReads = [];
             let toolRoundsUsed = 0;
             let protocolRejections = 0;
@@ -127363,6 +128424,7 @@ $CONTENT
                 maintainer: definition.kind === 'maintain' ? output : null,
                 planner: null,
                 reviewer: null,
+                researcher: null,
                 iterations: 1 + toolRoundsUsed,
                 attempts: attempt,
                 expandedReads: [...expandedReads],
@@ -127376,7 +128438,9 @@ $CONTENT
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
                 }
                 // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([...baseMessages, ...transcript], input.preset, identity, input.signal, callOptions), {
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(pendingResearchEvidence
+                    ? insertBeforeTrailingPrefill_ACU([...baseMessages, ...transcript], { role: 'user', content: pendingResearchEvidence })
+                    : [...baseMessages, ...transcript], input.preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -127386,18 +128450,63 @@ $CONTENT
                 }
                 const rawText = String(raw ?? '').trim();
                 // 工具批次优先于契约解析：输出里出现任意 read/search 对象即视为继续调阅。
-                const toolCalls = parseAgentSubagentToolCalls_ACU(raw, prefill);
+                const toolCalls = isResearch ? parseAgentResearcherToolCalls_ACU(raw, prefill) : parseAgentSubagentToolCalls_ACU(raw, prefill);
                 if (toolCalls) {
+                    // 当前输出正是对上一批临时网页正文的归纳机会。只持久保留模型显式给出的短笔记。
+                    if (isResearch && pendingResearchEvidence) {
+                        const notes = parseAgentResearcherWorkingNotes_ACU(raw, prefill);
+                        if (notes.length) {
+                            transcript.push({
+                                role: 'user',
+                                content: `【已归纳的网页检索笔记】\n${notes.map((note, index) => `${index + 1}. ${note}`).join('\n')}\n以上是此前网页的压缩笔记；原网页正文已释放，不能再凭记忆补细节。`,
+                            });
+                        }
+                        else {
+                            transcript.push({
+                                role: 'user',
+                                content: '你刚读过的网页正文已经释放，但你没有写 notes。后续只能基于已保留的资料与新页面工作；若该网页的事实仍重要，请重新抓取并在下一次工具动作里用 notes 写下精炼要点。',
+                            });
+                        }
+                        pendingResearchEvidence = '';
+                    }
                     transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
                     if (toolRoundsUsed >= maxToolRounds) {
-                        transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
+                        transcript.push({ role: 'user', content: isResearch
+                                ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。`
+                                : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
                         continue;
                     }
                     toolRoundsUsed += 1;
-                    transcript.push({ role: 'user', content: await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads) });
+                    const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+                    if (isResearch) {
+                        pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${toolResult}`;
+                    }
+                    else {
+                        transcript.push({ role: 'user', content: toolResult });
+                    }
                     continue;
                 }
                 try {
+                    if (isResearch) {
+                        const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU.research);
+                        const draft = parseAgentResearcherOutput_ACU(payload);
+                        const researcher = resolveResearcherDraft_ACU(draft, pageCache);
+                        return {
+                            agentName: definition.name,
+                            kind: definition.kind,
+                            writes,
+                            arc: null,
+                            maintainer: null,
+                            planner: null,
+                            reviewer: null,
+                            researcher,
+                            iterations: 1 + toolRoundsUsed,
+                            attempts: attempt,
+                            expandedReads: [...expandedReads],
+                            readRevisions,
+                            usage: usageTotal,
+                        };
+                    }
                     if (contractKind) {
                         const draft = parseAgentJsonPayloadDraft_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
                         const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
@@ -127439,6 +128548,7 @@ $CONTENT
                         maintainer: null,
                         planner: definition.kind === 'plan' ? parseAgentPlannerOutput_ACU(payload) : null,
                         reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
+                        researcher: null,
                         iterations: 1 + toolRoundsUsed,
                         attempts: attempt,
                         expandedReads: [...expandedReads],
@@ -127582,11 +128692,21 @@ $CONTENT
          * 执行子代理的一个工具批次并渲染结果文本。
          * 与主循环同一门禁语义：批内去重与已放行地址拆分、整批过门禁、打回报告直接作为结果回灌。
          */
-        async executeToolCalls_ACU(calls, context, gate, expandedReads) {
+        async executeToolCalls_ACU(calls, context, gate, expandedReads, research) {
             const fresh = [];
             const duplicated = [];
             const seenInBatch = new Set();
+            // 出网工具不过读取门禁：它们的成本由页数与字数上限约束，结果直接回灌。
+            const webSections = [];
             for (const call of calls) {
+                if (call.kind === 'encyclopedia_search' || call.kind === 'encyclopedia_read' || call.kind === 'web_search' || call.kind === 'web_read') {
+                    if (!research) {
+                        webSections.push(`出网工具 ${call.kind} 只有 web-researcher 可用，本次未执行。`);
+                        continue;
+                    }
+                    webSections.push(await this.executeWebToolCall_ACU(call, research.settings, research.cache, expandedReads));
+                    continue;
+                }
                 if (call.kind === 'read') {
                     for (const raw of call.reads) {
                         const key = String(raw ?? '').trim();
@@ -127612,7 +128732,7 @@ $CONTENT
                 }
                 fresh.push({ key, label, text: `### 搜索「${call.query}」\n${runAgentSearch_ACU(call, context)}` });
             }
-            const sections = [];
+            const sections = [...webSections];
             if (duplicated.length) {
                 sections.push(`以下调阅本次派工已放行，完整内容见上文，不再重注：${duplicated.join('、')}。`);
             }
@@ -127631,10 +128751,92 @@ $CONTENT
                     sections.push(decision.report);
                 }
             }
-            else if (!duplicated.length) {
+            else if (!duplicated.length && !webSections.length) {
                 sections.push('本次工具批次没有任何有效的读取地址或搜索请求。请检查 read 的 reads 数组与 search 的 query。');
             }
             return `【工具结果】\n${sections.join('\n\n')}`;
+        }
+        /**
+         * 执行一个出网工具调用并渲染结果。每个抓到的页面登记进句柄缓存（P1、P2…），
+         * 结果文本带句柄，契约里的 pageRef 据此回填。同一 URL 重抓复用旧句柄、不计页数。
+         */
+        async executeWebToolCall_ACU(call, settings, cache, expandedReads) {
+            const client = this.dependencies.webClient ?? (this.dependencies.webClient = new AgentWebClient_ACU());
+            const webSettings = settings.webResearch;
+            const registerPage = (page, query) => {
+                const existing = cache.byUrl.get(page.url);
+                if (existing)
+                    return existing;
+                const handle = `P${cache.pages.size + 1}`;
+                cache.pages.set(handle, { ...page, query });
+                cache.byUrl.set(page.url, handle);
+                if (page.status === 'ok')
+                    cache.pagesUsed += 1;
+                return handle;
+            };
+            const renderPage = (handle, page, reused) => {
+                const head = `### [页面句柄 ${handle}]「${page.title || '（无标题）'}」来源=${page.source === 'web' ? '网页' : AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[page.source]}｜${page.url}`;
+                if (page.status !== 'ok')
+                    return `${head}\n抓取失败（${page.status}）：${page.note}`;
+                if (reused)
+                    return `${head}\n（该页面本次派工已抓取过，原文见上文，不再重注）`;
+                return `${head}\n${page.text}`;
+            };
+            const pagesExhausted = () => (cache.pagesUsed >= webSettings.maxPages
+                ? `本次派工的页面配额已用尽（${webSettings.maxPages} 页）。请基于已抓到的页面交付契约 JSON。`
+                : null);
+            if (call.kind === 'encyclopedia_search') {
+                const sources = call.sources.length ? call.sources : enabledEncyclopediaSources_ACU(webSettings);
+                if (!sources.length)
+                    return `### 百科检索「${call.query}」\n没有可用的百科来源（设置里全部关闭）。请改用 web_search。`;
+                const disabled = call.sources.filter(source => !enabledEncyclopediaSources_ACU(webSettings).includes(source));
+                const results = await Promise.all(sources.filter(source => !disabled.includes(source)).map(async (source) => ({ source, ...(await client.searchEncyclopedia(source, call.query)) })));
+                expandedReads.push(`encyclopedia_search "${call.query}"`);
+                const lines = [];
+                for (const result of results) {
+                    const label = AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[result.source];
+                    if (!result.candidates.length) {
+                        lines.push(`- ${label}：无候选${result.note ? `（${result.note}）` : ''}`);
+                        continue;
+                    }
+                    lines.push(`- ${label}：`);
+                    for (const candidate of result.candidates) {
+                        lines.push(`  · 「${candidate.title}」${candidate.snippet ? `：${candidate.snippet.slice(0, 120)}` : ''}｜精读：{"action":"encyclopedia_read","source":"${candidate.source}","title":"${candidate.title.replace(/"/g, '\\"')}"}`);
+                    }
+                }
+                if (disabled.length)
+                    lines.push(`- 以下来源在设置里已关闭，未检索：${disabled.map(source => AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]).join('、')}`);
+                return `### 百科检索「${call.query}」\n${lines.join('\n')}`;
+            }
+            if (call.kind === 'encyclopedia_read') {
+                if (!enabledEncyclopediaSources_ACU(webSettings).includes(call.source)) {
+                    return `### 百科精读「${call.title}」\n来源 ${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[call.source]} 在设置里已关闭，未执行。`;
+                }
+                const exhausted = pagesExhausted();
+                if (exhausted)
+                    return `### 百科精读「${call.title}」\n${exhausted}`;
+                const page = await client.readEncyclopedia(call.source, call.title, webSettings.pageCharLimit);
+                const reused = cache.byUrl.has(page.url);
+                const handle = registerPage(page, call.title);
+                expandedReads.push(`encyclopedia_read ${call.source}:${call.title}`);
+                return renderPage(handle, page, reused);
+            }
+            if (call.kind === 'web_search') {
+                const result = await client.webSearch(call.query, webSettings);
+                expandedReads.push(`web_search "${call.query}"`);
+                if (!result.hits.length)
+                    return `### 网页搜索「${call.query}」\n无结果${result.note ? `：${result.note}` : ''}。换更短的关键词、加上作品名，或改用 encyclopedia_search。`;
+                const lines = result.hits.map((hit, index) => `${index + 1}. 「${hit.title || '（无标题）'}」${hit.url ? `｜${hit.url}` : ''}${hit.snippet ? `\n   ${hit.snippet.slice(0, 200)}` : ''}${hit.url ? `\n   抓取：{"action":"web_read","url":"${hit.url}"}` : ''}`);
+                return `### 网页搜索「${call.query}」（提供方：${webSettings.searchProvider}）\n${lines.join('\n')}`;
+            }
+            const exhausted = pagesExhausted();
+            if (exhausted)
+                return `### 网页抓取 ${call.url}\n${exhausted}`;
+            const page = await client.webRead(call.url, webSettings, this.dependencies.hostOrigin?.());
+            const reused = cache.byUrl.has(page.url);
+            const handle = registerPage(page, call.url);
+            expandedReads.push(`web_read ${call.url}`);
+            return renderPage(handle, page, reused);
         }
     }
 
@@ -127893,7 +129095,7 @@ $CONTENT
      * @param iteration 当前迭代序号，从 1 开始
      * @param ledger 运行账本
      * @param waveLimit 本轮实际可用的同波次并发上限
-     * @param tool 可选的 read/search 用量（批次数、已放行 token、累计预算 M）
+     * @param tool 可选的 read/search 用量（批次数、累计遥测、单批次上限 M）
      * @returns 自然语言文本；进入最后一轮时明确禁止继续派工
      */
     function renderAgentBudget_ACU(budget, iteration, ledger, waveLimit, tool, lifecycle) {
@@ -127905,8 +129107,8 @@ $CONTENT
             `并发上限：同一波次最多 ${waveLimit} 个子代理`,
         ];
         if (tool) {
-            lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次，累计放行约 ${tool.grantedTokens} / ${tool.maxReadTokens} tokens`);
-            lines.push('读取预算分配建议：大头留给世界书设定与正文回溯（各约 1/3），剩余用于表格与账本核对。世界书目录与命中提示里每条都标注了 token 开销，按需取用；预算就是给你花的，宁可多读一条设定，也不要闭眼编设定。');
+            lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次；单批次上限约 ${tool.maxReadTokens} tokens（本次累计已读取约 ${tool.grantedTokens} tokens，仅作遥测，不扣减后续批次额度）`);
+            lines.push('单批次读取过大时，先用 search 定位、再缩小到正文楼层区间、表格行区间或模块 ID；不同批次不共享 token 额度。临近总结阈值时，只有不超过精读兜底额度的小批次会被放行，随后由总结机制处理。世界书目录与命中提示里每条都标注了 token 估算，按本轮需求精读。');
         }
         if (lifecycle?.convergenceOnly) {
             lines.push('CONVERGENCE_ONLY：必要的大纲维护已完成，本次只允许输出 finalize 或 block；不得继续派工。');
@@ -127941,6 +129143,23 @@ $CONTENT
     }
     /** 参与波次并发判定的四个派工子代理渠道角色。 */
     const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'];
+    /** 参与波次并发判定的子代理渠道角色：网页检索未启用时不派它，其渠道也就不该拖累并发。 */
+    function subagentPresetRoles_ACU(settings) {
+        return settings.webResearch?.enabled ? [...SUBAGENT_PRESET_ROLES_ACU, 'webResearcher'] : SUBAGENT_PRESET_ROLES_ACU;
+    }
+    /**
+     * 开场检索的派工文案：只在任务刚创建、资料库为空时由运行时自动发起。
+     * 检索清单的来源（用户初始要求、世界书目录、角色表）已固定注入子代理提示词，这里只交代范围与边界。
+     */
+    function buildOpeningResearchPrompt_ACU(originInstruction) {
+        return [
+            '开场检索：这是一个新续写任务的第一次规划，百科资料库还是空的。',
+            '请从用户初始要求、世界书目录、角色表与最近正文里识别这个故事依托的原作与已登场的原作实体（人物、组织、地点、能力、术语），按对开篇写作的重要度排序，优先把主角、核心配角、核心设定与世界规则查清并入库。',
+            '只登记原作/公开设定常识，不把本故事正文写成原作事实；世界书已详细覆盖的条目不必重复查。',
+            '查不到的实体在 summary 里如实列出，不要硬凑。',
+            originInstruction ? `用户初始要求原文：${originInstruction}` : '',
+        ].filter(Boolean).join('\n');
+    }
     /**
      * 计算同波次实际可用的并发上限。
      * @param settings 续写设置
@@ -127949,7 +129168,7 @@ $CONTENT
      *          因为主 API 的归因机制不支持并发内部请求
      */
     function resolveWaveLimit_ACU(settings, budget) {
-        const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
+        const hasCurrentChannel = subagentPresetRoles_ACU(settings).some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
         return hasCurrentChannel ? 1 : Math.max(1, budget.maxConcurrent);
     }
     function describePlannerOutcome_ACU(summary, recommendation, mustPreserve, risks) {
@@ -128195,6 +129414,13 @@ $CONTENT
                 await session.flush();
             };
             try {
+                // 开场检索：新任务第一次规划、资料库为空时，先把原作设定查进百科资料库再让主 Agent 开跑。
+                // 受控入口，不消耗主 Agent 的派工额度；失败只记结果不掐断规划。
+                if (this.shouldRunOpeningResearch_ACU(request, context, resumedState !== null)) {
+                    const outcomesBefore = ledger.outcomes.length;
+                    snapshot = await this.runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, apiDependencies);
+                    await commitOutcomes(outcomesBefore);
+                }
                 // 工具批次（read/search）不消耗决策迭代：读资料是正常成本，不该挤压派工与交付的空间。
                 // totalCalls 是防死循环的硬上限——模型反复发工具批次时由 maxReads 与它双重兜底。
                 const totalCallLimit = budget.maxIterations + budget.maxReads + 4;
@@ -128284,15 +129510,12 @@ $CONTENT
                                         output.preserve.length ? `必须保留：${output.preserve.join('；')}` : '',
                                     ].filter(Boolean).join('\n')),
                                 };
-                                const initialWorldbookEntryIds = review.evidence.fixedReadKeys
-                                    .filter(key => key.startsWith('$WORLDBOOK:'))
-                                    .map(key => key.slice('$WORLDBOOK:'.length));
                                 const supplementalSearches = review.expandedReads.filter(label => label.startsWith('search ')).length;
                                 const supplementalReads = review.expandedReads.length - supplementalSearches;
                                 logAgentSession_ACU({
                                     kind: 'thought',
                                     title: `迭代 ${iteration} · 发送前终审遥测`,
-                                    detail: [`判词：${output.verdict}`, `初始世界书命中：${initialWorldbookEntryIds.length}${initialWorldbookEntryIds.length ? ` 条（${initialWorldbookEntryIds.join('、')}）` : ' 条'}`, `补充调阅：read ${supplementalReads} 次，search ${supplementalSearches} 次`, `独立读取：${review.readTokens} tokens`, `工具轮：${review.toolRounds}`, `模型用量：${review.usage ? formatAgentUsageLabel_ACU(review.usage) : '未报告'}`].join('\n'),
+                                    detail: [`判词：${output.verdict}`, '初始世界书：仅目录与命中预览，不自动精读全文', `补充调阅：read ${supplementalReads} 次，search ${supplementalSearches} 次`, `独立读取：${review.readTokens} tokens`, `工具轮：${review.toolRounds}`, `模型用量：${review.usage ? formatAgentUsageLabel_ACU(review.usage) : '未报告'}`].join('\n'),
                                 });
                             }
                             catch (error) {
@@ -128618,8 +129841,12 @@ $CONTENT
                 $UNSETTLED_RANGE: () => this.renderUnsettledRange_ACU(context),
                 $STORY_ARC_STATE: () => this.renderStoryArcState_ACU(context),
                 $CURRENT_TURN_PACING: () => renderAgentTurnGuidance_ACU(context.execution.turn ?? null),
-                $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU(),
-                $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU(),
+                $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU({ webResearchEnabled: request.settings.webResearch.enabled }),
+                $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU({
+                    webResearchEnabled: request.settings.webResearch.enabled,
+                    webRefsPresent: context.moduleSnapshot.webRefs.some(entry => !entry.retired),
+                }),
+                $WEB_REFS_CATALOG: () => renderAgentWebRefsCatalog_ACU(context.moduleSnapshot, request.settings.webResearch.enabled),
                 $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
                 $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(context.tableData),
                 $BUDGET: () => renderAgentBudget_ACU(budget, iteration, ledger, resolveWaveLimit_ACU(request.settings, budget), {
@@ -128779,6 +130006,92 @@ $CONTENT
                 return [...history.map(item => ({ ...item })), ...result];
             return result;
         }
+        /**
+         * 开场检索的触发条件：功能开启、任务尚无任何阶段（第一次规划）、资料库没有活跃条目，
+         * 且不是中断恢复（恢复运行的证据已在会话里，重跑只会白烧一次）。
+         */
+        shouldRunOpeningResearch_ACU(request, context, resumed) {
+            if (!request.settings.webResearch.enabled || resumed)
+                return false;
+            if (context.execution.task.stages.length > 0)
+                return false;
+            return !context.moduleSnapshot.webRefs.some(entry => !entry.retired);
+        }
+        /**
+         * 受控地跑一次 web-researcher 并把结果写进资料快照。与普通派工的区别：不占派工额度、
+         * 不受波次并发限制、失败不抛——开场检索是锦上添花，网络不通不该让整轮规划失败。
+         */
+        async runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, apiDependencies) {
+            const delegation = { agentName: AGENT_WEB_RESEARCHER_NAME_ACU, prompt: buildOpeningResearchPrompt_ACU(context.originInstruction), reads: [] };
+            const entryId = logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: '开场百科检索执行中', detail: delegation.prompt, status: 'running' });
+            try {
+                const preset = this.dependencies.resolveApiPreset(request.settings, 'webResearcher', 'agent_delegate', apiDependencies);
+                const result = await this.dependencies.subagentRuntime.run({
+                    delegation,
+                    settings: request.settings,
+                    resolveContext: context,
+                    budget,
+                    preset,
+                    createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+                    isCurrent: identity => request.isInternalRequestCurrent(identity),
+                    signal: request.signal,
+                });
+                const settled = this.settleResearcherResult_ACU(result, snapshot);
+                ledger.outcomes.push(settled.outcome);
+                updateAgentSession_ACU(entryId, {
+                    title: `开场百科检索${settled.outcome.ok ? '完成' : '未采用'}${result.usage ? ` · ${formatAgentUsageLabel_ACU(result.usage)}` : ''}`,
+                    detail: settled.outcome.ok ? [settled.outcome.summary, settled.outcome.detail].filter(Boolean).join('\n') : settled.outcome.rejectedReason,
+                    ok: settled.outcome.ok,
+                });
+                if (settled.snapshot !== snapshot) {
+                    context.moduleSnapshot = settled.snapshot;
+                    await this.persistSnapshot_ACU(chat, settled.snapshot);
+                }
+                return settled.snapshot;
+            }
+            catch (error) {
+                if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE')
+                    throw error;
+                const reason = compactAgentProtocolError_ACU(error);
+                updateAgentSession_ACU(entryId, { title: '开场百科检索失败', detail: `${reason}\n主 Agent 将在没有百科资料库的情况下继续规划；需要时它仍可派工 web-researcher 重试。`, ok: false });
+                ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `开场百科检索失败：${reason}` });
+                return snapshot;
+            }
+        }
+        /**
+         * 把 web-researcher 的输出落到快照：pageRef 已由子代理运行时回填，这里只做事务校验与修订号并发校验。
+         * 不推进结算水位。
+         */
+        settleResearcherResult_ACU(result, snapshot) {
+            const researcher = result.researcher;
+            if (!researcher) {
+                return { snapshot, outcome: { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '网页检索子代理没有返回可用输出' } };
+            }
+            try {
+                const expected = researcher.expectedRevision ?? result.readRevisions.webRefs;
+                const applied = applyAgentWebRefsDelta_ACU(snapshot, researcher, expected);
+                const upserts = researcher.items.filter(item => item.action === 'upsert');
+                const retires = researcher.items.filter(item => item.action === 'retire');
+                const catalog = upserts.map(item => `[${item.id || '新'}]「${item.title}」${item.brief}`).join('；');
+                return {
+                    snapshot: applied,
+                    outcome: {
+                        agentName: result.agentName,
+                        ok: true,
+                        summary: researcher.summary || `百科资料库更新 ${upserts.length} 条`,
+                        detail: [
+                            `百科资料库：新增/更新 ${upserts.length} 条${retires.length ? `、退休 ${retires.length} 条` : ''}${catalog ? `：${catalog}` : ''}`,
+                            upserts.length ? '以上只是预览；详情与原文用 read $WEB_REFS:ID 精读，派工时也可把该地址写进 reads。它们是原作/公开设定的外部参考，不是本故事事实。' : '',
+                            result.expandedReads.length ? `检索轨迹：${result.expandedReads.slice(0, 12).join('、')}${result.expandedReads.length > 12 ? '…' : ''}` : '',
+                        ].filter(Boolean).join('\n'),
+                        rejectedReason: '',
+                    },
+                };
+            }
+            catch (error) {
+                return { snapshot, outcome: { agentName: result.agentName, ok: false, summary: researcher.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) } };
+            }
+        }
         async runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies, outlineMaintenanceReserveAvailable = false) {
             const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
             const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
@@ -128868,7 +130181,7 @@ $CONTENT
                     continue;
                 }
                 if (accepted.length >= waveLimit) {
-                    const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
+                    const hasCurrentChannel = subagentPresetRoles_ACU(request.settings).some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
                     const why = waveLimit === 1 && hasCurrentChannel
                         ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
                         : `同一波次并发上限为 ${waveLimit} 个`;
@@ -128881,6 +130194,10 @@ $CONTENT
                         rejectImmediately(delegation.agentName, gate.reason);
                         continue;
                     }
+                }
+                if (delegation.agentName === AGENT_WEB_RESEARCHER_NAME_ACU && !request.settings.webResearch.enabled) {
+                    rejectImmediately(delegation.agentName, '网页检索功能未启用（续写设置 → 启用开场百科检索），web-researcher 不可派工。请基于世界书与已有资料继续。');
+                    continue;
                 }
                 accepted.push(delegation);
             }
@@ -129011,6 +130328,16 @@ $CONTENT
                     }, result.usage);
                     continue;
                 }
+                if (result.researcher) {
+                    // 与总纲分支同理：只换快照，不推进结算水位——百科条目不是正文事实。
+                    const settled = this.settleResearcherResult_ACU(result, nextSnapshot);
+                    if (settled.snapshot !== nextSnapshot) {
+                        nextSnapshot = settled.snapshot;
+                        snapshotChanged = true;
+                    }
+                    settleOutcome(item.delegation, settled.outcome, result.usage);
+                    continue;
+                }
                 settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' }, result.usage);
             }
             if (snapshotChanged) {
@@ -129032,7 +130359,7 @@ $CONTENT
             logAgentSession_ACU({
                 kind: 'thought',
                 title: `资料快照已写入楼层 ${targetIndex}`,
-                detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
+                detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
                 ok: true,
             });
         }
@@ -170603,7 +171930,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-session-feed__detail"
     };
-    const _hoisted_21$5 = {
+    const _hoisted_21$6 = {
 	key: 2,
 	class: "acu-v2-session-feed__running"
     };
@@ -170779,7 +172106,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			$props.running ? (openBlock(), createElementBlock("div", _hoisted_21$5, [..._cache[0] || (_cache[0] = [createBaseVNode(
+			$props.running ? (openBlock(), createElementBlock("div", _hoisted_21$6, [..._cache[0] || (_cache[0] = [createBaseVNode(
 				"span",
 				{ class: "acu-v2-session-feed__pulse" },
 				null,
@@ -170988,14 +172315,15 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-335bc4fb"]]);
 
-    /** 用户可分模块编辑的五项资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
-    const CONTINUATION_MATERIAL_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology'];
+    /** 用户可分模块编辑的六项资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
+    const CONTINUATION_MATERIAL_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs'];
     const CONTINUATION_MATERIAL_MODULE_LABELS_ACU = {
         hooks: '伏笔账本',
         infoGap: '认知与信息差',
         constraints: '长期约束',
         storyArc: '故事总纲',
         chronology: '故事年代学账本',
+        webRefs: '百科资料库',
     };
     function errorMessage_ACU$1(error) {
         if (error instanceof ContinuationValidationError_ACU)
@@ -171030,6 +172358,7 @@ Expected function or array of functions, received type ${typeof value}.`
             constraints: emptyModuleState_ACU(),
             storyArc: emptyModuleState_ACU(),
             chronology: emptyModuleState_ACU(),
+            webRefs: emptyModuleState_ACU(),
         });
         function resetModule(module, current) {
             modules[module] = { draft: moduleDraftText_ACU(current, module), dirty: false, error: '', saving: false };
@@ -171112,6 +172441,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 { id: 'outline', label: '阶段大纲' },
                 { id: 'modules', label: '本地资料' },
                 { id: 'storyArc', label: '故事总纲' },
+                { id: 'webRefs', label: '百科资料' },
             ];
             const HOOK_STATUS_LABELS = {
                 planted: '已埋设', reinforced: '已强化', misled: '已误导', partially_paid: '部分回收', paid: '已回收', abandoned: '已放弃',
@@ -171120,6 +172450,8 @@ Expected function or array of functions, received type ${typeof value}.`
             const REVEAL_STATUS_LABELS = { unrevealed: '未揭示', partial: '部分揭示', revealed: '已揭示' };
             const CHRONOLOGY_PRECISION_LABELS = { exact: '精确', approximate: '近似', unknown: '未知' };
             const ARC_STATUS_LABELS = { planned: '计划中', active: '进行中', done: '已完成' };
+            const WEB_REF_SOURCE_LABELS = { moegirl: '萌娘百科', wikipedia_zh: '中文维基', wikipedia_en: '英文维基', baidu: '百度百科', web: '网页' };
+            const WEB_REF_STATUS_LABELS = { ok: '正常', unavailable: '来源不可用', blocked: '被拦截' };
             const TEMPO_LABELS = { buildup: '铺垫型', mixed: '起伏型', surge: '高压型', aftermath: '余波型' };
             const ROLE_LABELS = { setup: '建立', development: '发展', escalation: '升级', turn: '转折', payoff: '兑现', aftermath: '余波' };
             const PACING_LABELS = { setup: '铺垫', pressure: '施压', turn: '转折', cooldown: '缓冲' };
@@ -171215,14 +172547,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     syncOutlineDraft();
             }, { immediate: true });
             __expose({ reload });
-            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, outlineDraft, outlineError, outlineDirty, clearPending, activeVolume, historyStages, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, AcuButton, AcuTextarea };
+            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, outlineDraft, outlineError, outlineDirty, clearPending, activeVolume, historyStages, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-3b2141c1] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-3b2141c1] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-3b2141c1] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-3b2141c1] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-3b2141c1] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-3b2141c1] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-3b2141c1] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-3b2141c1] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-3b2141c1] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-3b2141c1] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-3b2141c1] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-3b2141c1] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-3b2141c1] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-3b2141c1] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-3b2141c1] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-3b2141c1] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-3b2141c1], .acu-v2-continuation-materials__outline-node[data-v-3b2141c1] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-3b2141c1] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-3b2141c1] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-3b2141c1] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-3b2141c1] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-3b2141c1] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-3b2141c1] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-3b2141c1] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-3b2141c1] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-3b2141c1] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--retired[data-v-3b2141c1] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card-head[data-v-3b2141c1] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-3b2141c1] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-3b2141c1] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-3b2141c1] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-3b2141c1] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-3b2141c1] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-3b2141c1] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-3b2141c1] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-3b2141c1] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-3b2141c1] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-3b2141c1] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-3b2141c1] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-3b2141c1");
-    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_3b2141c1_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-f4c5f493] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-f4c5f493] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-f4c5f493] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-f4c5f493] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-f4c5f493] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-f4c5f493] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-f4c5f493] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-f4c5f493] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-f4c5f493] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-f4c5f493] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-f4c5f493] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-f4c5f493] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-f4c5f493] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-f4c5f493] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-f4c5f493] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-f4c5f493] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-f4c5f493], .acu-v2-continuation-materials__outline-node[data-v-f4c5f493] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-f4c5f493] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-f4c5f493] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-f4c5f493] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-f4c5f493] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-f4c5f493] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-f4c5f493] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-f4c5f493] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-f4c5f493] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-f4c5f493] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--retired[data-v-f4c5f493] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-f4c5f493] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-f4c5f493] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-f4c5f493] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-f4c5f493] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-f4c5f493] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-f4c5f493] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-f4c5f493] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-f4c5f493] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-f4c5f493] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-f4c5f493] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-f4c5f493] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-f4c5f493] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-f4c5f493] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-f4c5f493] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-f4c5f493");
+    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_f4c5f493_lang = null;
 
     const _hoisted_1$n = { class: "acu-v2-continuation-materials" };
     const _hoisted_2$l = { class: "acu-v2-continuation-materials__tabs" };
@@ -171253,8 +172585,8 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_18$6 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_19$6 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_20$5 = { class: "acu-v2-continuation-materials__outline-nodes" };
-    const _hoisted_21$4 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_22$3 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_21$5 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_22$4 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_23$3 = { class: "acu-v2-continuation-materials__card-body" };
     const _hoisted_24$3 = { class: "acu-v2-continuation-materials__turns" };
     const _hoisted_25$3 = { class: "acu-v2-continuation-materials__badge" };
@@ -171450,9 +172782,12 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_101 = { class: "acu-v2-continuation-materials__card-head" };
     const _hoisted_102 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_103 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_104 = {
+    const _hoisted_103 = {
 	key: 0,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
+    const _hoisted_104 = {
+	key: 1,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
     const _hoisted_105 = { class: "acu-v2-continuation-materials__card-body" };
@@ -171460,17 +172795,53 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_107 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__card-meta"
-    };
-    const _hoisted_108 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_107 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_108 = ["href"];
     const _hoisted_109 = { class: "acu-v2-continuation-materials__json" };
     const _hoisted_110 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
     const _hoisted_111 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_112 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__meta"
+    };
+    const _hoisted_113 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_114 = {
+	key: 2,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_115 = {
+	key: 3,
+	class: "acu-v2-continuation-materials__cards"
+    };
+    const _hoisted_116 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_117 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
+    const _hoisted_118 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_119 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
+    const _hoisted_120 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_121 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__card-body"
+    };
+    const _hoisted_122 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__card-meta"
+    };
+    const _hoisted_123 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_124 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_125 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_126 = { class: "acu-v2-continuation-materials__actions" };
     function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$n, [
 		createBaseVNode("div", _hoisted_2$l, [(openBlock(), createElementBlock(
@@ -171490,7 +172861,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			loading: $props.busy,
 			onClick: $setup.reload
 		}, {
-			default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+			default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
 				"刷新",
 				-1
 				/* CACHED */
@@ -171501,15 +172872,15 @@ Expected function or array of functions, received type ${typeof value}.`
 			loading: $props.busy,
 			onClick: $setup.requestClear
 		}, {
-			default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+			default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
 				"一键清空",
 				-1
 				/* CACHED */
 			)])]),
 			_: 1
 		}, 8, ["loading"])])]),
-		$setup.clearPending ? (openBlock(), createElementBlock("p", _hoisted_5$e, [_cache[20] || (_cache[20] = createTextVNode(
-			" 清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲）。 小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。 ",
+		$setup.clearPending ? (openBlock(), createElementBlock("p", _hoisted_5$e, [_cache[23] || (_cache[23] = createTextVNode(
+			" 清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲、年代学、百科资料库）。 小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。 ",
 			-1
 			/* CACHED */
 		)), createBaseVNode("span", _hoisted_6$d, [createVNode($setup["AcuButton"], {
@@ -171517,14 +172888,14 @@ Expected function or array of functions, received type ${typeof value}.`
 			loading: $props.busy,
 			onClick: $setup.confirmClear
 		}, {
-			default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+			default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
 				"确认清空",
 				-1
 				/* CACHED */
 			)])]),
 			_: 1
 		}, 8, ["loading"]), createVNode($setup["AcuButton"], { onClick: _cache[0] || (_cache[0] = ($event) => $setup.clearPending = false) }, {
-			default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
+			default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
 				"取消",
 				-1
 				/* CACHED */
@@ -171621,7 +172992,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								key: node.id,
 								class: "acu-v2-continuation-materials__outline-node"
 							}, [
-								createBaseVNode("p", _hoisted_21$4, [createBaseVNode(
+								createBaseVNode("p", _hoisted_21$5, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(node.title),
@@ -171629,7 +173000,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									/* TEXT */
 								), createBaseVNode(
 									"span",
-									_hoisted_22$3,
+									_hoisted_22$4,
 									toDisplayString(node.turns.length) + " 轮",
 									1
 									/* TEXT */
@@ -171717,14 +173088,14 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* KEYED_FRAGMENT */
 					))]),
 					createBaseVNode("details", _hoisted_31$2, [
-						_cache[23] || (_cache[23] = createBaseVNode(
+						_cache[26] || (_cache[26] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
 							-1
 							/* CACHED */
 						)),
-						_cache[24] || (_cache[24] = createBaseVNode(
+						_cache[27] || (_cache[27] = createBaseVNode(
 							"p",
 							{ class: "acu-v2-continuation-materials__card-meta" },
 							"修改轮次目标时请同步核对 pacing、function、mainlineDelta、timeAdvance 与 timeAnchor；缺少的语义字段保存时会按 pacing 补默认并标注「系统补全」，标注为 inferred 的字段改成明确值后标注自动消失。",
@@ -171747,7 +173118,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.outlineDirty,
 							onClick: $setup.syncOutlineDraft
 						}, {
-							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -171759,7 +173130,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.outlineDirty,
 							onClick: $setup.saveOutline
 						}, {
-							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
+							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
 								"保存大纲",
 								-1
 								/* CACHED */
@@ -171938,7 +173309,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			{ key: 2 },
 			[
 				createCommentVNode(" 本地资料：伏笔 / 信息差 / 长期约束 分类型结构化展示，各自独立 JSON 编辑与保存 "),
-				_cache[38] || (_cache[38] = createBaseVNode(
+				_cache[41] || (_cache[41] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-materials__meta" },
 					" 本地资料由子代理结算写入，也可以在这里分模块手动修正。保存走与子代理相同的结构校验并推进修订号； 每个模块独立保存，只提交本模块数据，不影响其他模块（含未保存的草稿）。 ",
@@ -171974,7 +173345,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							64
 							/* STABLE_FRAGMENT */
 						)) : createCommentVNode("v-if", true),
-						_cache[25] || (_cache[25] = createTextVNode(
+						_cache[28] || (_cache[28] = createTextVNode(
 							"。 ",
 							-1
 							/* CACHED */
@@ -172094,7 +173465,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* KEYED_FRAGMENT */
 					))])),
 					createBaseVNode("details", _hoisted_58, [
-						_cache[28] || (_cache[28] = createBaseVNode(
+						_cache[31] || (_cache[31] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -172117,7 +173488,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.hooks.dirty,
 							onClick: _cache[2] || (_cache[2] = ($event) => $setup.materials.discard("hooks"))
 						}, {
-							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
+							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -172129,7 +173500,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.hooks.dirty,
 							onClick: _cache[3] || (_cache[3] = ($event) => $setup.materials.save("hooks"))
 						}, {
-							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
 								"保存伏笔账本",
 								-1
 								/* CACHED */
@@ -172234,7 +173605,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* KEYED_FRAGMENT */
 					))])),
 					createBaseVNode("details", _hoisted_71, [
-						_cache[31] || (_cache[31] = createBaseVNode(
+						_cache[34] || (_cache[34] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -172257,7 +173628,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.infoGap.dirty,
 							onClick: _cache[5] || (_cache[5] = ($event) => $setup.materials.discard("infoGap"))
 						}, {
-							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
+							default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -172269,7 +173640,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.infoGap.dirty,
 							onClick: _cache[6] || (_cache[6] = ($event) => $setup.materials.save("infoGap"))
 						}, {
-							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
+							default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
 								"保存信息差",
 								-1
 								/* CACHED */
@@ -172328,7 +173699,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* KEYED_FRAGMENT */
 					))])),
 					createBaseVNode("details", _hoisted_81, [
-						_cache[34] || (_cache[34] = createBaseVNode(
+						_cache[37] || (_cache[37] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -172351,7 +173722,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.constraints.dirty,
 							onClick: _cache[8] || (_cache[8] = ($event) => $setup.materials.discard("constraints"))
 						}, {
-							default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+							default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -172363,7 +173734,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.constraints.dirty,
 							onClick: _cache[9] || (_cache[9] = ($event) => $setup.materials.save("constraints"))
 						}, {
-							default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
+							default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
 								"保存长期约束",
 								-1
 								/* CACHED */
@@ -172450,7 +173821,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* KEYED_FRAGMENT */
 					))])),
 					createBaseVNode("details", _hoisted_94, [
-						_cache[37] || (_cache[37] = createBaseVNode(
+						_cache[40] || (_cache[40] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -172473,7 +173844,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.chronology.dirty,
 							onClick: _cache[11] || (_cache[11] = ($event) => $setup.materials.discard("chronology"))
 						}, {
-							default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
+							default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -172485,7 +173856,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.chronology.dirty,
 							onClick: _cache[12] || (_cache[12] = ($event) => $setup.materials.save("chronology"))
 						}, {
-							default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
+							default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
 								"保存年代学账本",
 								-1
 								/* CACHED */
@@ -172497,22 +173868,22 @@ Expected function or array of functions, received type ${typeof value}.`
 			],
 			64
 			/* STABLE_FRAGMENT */
-		)) : (openBlock(), createElementBlock(
+		)) : $setup.activeTab === "webRefs" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 3 },
 			[
-				createCommentVNode(" 故事总纲：结构化展示 + JSON 编辑 "),
-				_cache[42] || (_cache[42] = createBaseVNode(
+				createCommentVNode(" 百科资料库：web-researcher 从互联网查到的原作/公开设定，按实体分条 "),
+				_cache[46] || (_cache[46] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-materials__meta" },
-					" 故事总纲由 arc-architect 子代理维护：全书方向一条 + 若干卷台阶。也可以在这里手动修正，保存走同一套结构校验并推进修订号。 ",
+					" 百科资料库由 web-researcher 子代理从萌娘百科、维基百科、百度百科或网页查到后写入，按实体（人物、法术、物品、事件…）分条。 每条固定只有「名称 + 一句话简介」，详情自由格式。Agent 上下文里只注入预览行，详情由它们按 ID 精读。 它记录的是原作/公开设定，不是本故事已发生的事实；与世界书或正文冲突时以后者为准。 ",
 					-1
 					/* CACHED */
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
 					_hoisted_97,
-					" 总纲 " + toDisplayString($setup.materials.snapshot.value.storyArc.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.storyArc),
+					" 条目 " + toDisplayString($setup.materials.snapshot.value.webRefs.length) + " 条（活跃 " + toDisplayString($setup.materials.snapshot.value.webRefs.filter((entry) => !entry.retired).length) + "）· 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.webRefs),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
@@ -172523,7 +173894,204 @@ Expected function or array of functions, received type ${typeof value}.`
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_99, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_100, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_99, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_100, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.materials.snapshot.value.webRefs, (ref) => {
+						return openBlock(), createElementBlock(
+							"details",
+							{
+								key: ref.id,
+								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": ref.retired }])
+							},
+							[
+								createBaseVNode("summary", _hoisted_101, [
+									createBaseVNode(
+										"strong",
+										null,
+										toDisplayString(ref.id),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"span",
+										null,
+										toDisplayString(ref.title),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"span",
+										_hoisted_102,
+										toDisplayString($setup.WEB_REF_SOURCE_LABELS[ref.source] ?? ref.source),
+										1
+										/* TEXT */
+									),
+									(openBlock(true), createElementBlock(
+										Fragment,
+										null,
+										renderList(ref.tags, (tag) => {
+											return openBlock(), createElementBlock(
+												"span",
+												{
+													key: tag,
+													class: "acu-v2-continuation-materials__badge"
+												},
+												toDisplayString(tag),
+												1
+												/* TEXT */
+											);
+										}),
+										128
+										/* KEYED_FRAGMENT */
+									)),
+									ref.sourceStatus !== "ok" ? (openBlock(), createElementBlock(
+										"span",
+										_hoisted_103,
+										toDisplayString($setup.WEB_REF_STATUS_LABELS[ref.sourceStatus] ?? ref.sourceStatus),
+										1
+										/* TEXT */
+									)) : createCommentVNode("v-if", true),
+									ref.retired ? (openBlock(), createElementBlock(
+										"span",
+										_hoisted_104,
+										"已退休" + toDisplayString(ref.retiredReason ? `：${ref.retiredReason}` : ""),
+										1
+										/* TEXT */
+									)) : createCommentVNode("v-if", true)
+								]),
+								createBaseVNode(
+									"p",
+									_hoisted_105,
+									toDisplayString(ref.brief),
+									1
+									/* TEXT */
+								),
+								ref.summary ? (openBlock(), createElementBlock(
+									"p",
+									_hoisted_106,
+									toDisplayString(ref.summary),
+									1
+									/* TEXT */
+								)) : createCommentVNode("v-if", true),
+								createBaseVNode("p", _hoisted_107, [
+									createBaseVNode("a", {
+										href: ref.url,
+										target: "_blank",
+										rel: "noopener noreferrer"
+									}, toDisplayString(ref.url), 9, _hoisted_108),
+									ref.query ? (openBlock(), createElementBlock(
+										Fragment,
+										{ key: 0 },
+										[createTextVNode(
+											" · 检索词：" + toDisplayString(ref.query),
+											1
+											/* TEXT */
+										)],
+										64
+										/* STABLE_FRAGMENT */
+									)) : createCommentVNode("v-if", true),
+									ref.fetchedAt ? (openBlock(), createElementBlock(
+										Fragment,
+										{ key: 1 },
+										[createTextVNode(
+											" · 抓取于 " + toDisplayString(new Date(ref.fetchedAt).toLocaleString()),
+											1
+											/* TEXT */
+										)],
+										64
+										/* STABLE_FRAGMENT */
+									)) : createCommentVNode("v-if", true)
+								])
+							],
+							2
+							/* CLASS */
+						);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])),
+				createBaseVNode("details", _hoisted_109, [
+					_cache[44] || (_cache[44] = createBaseVNode(
+						"summary",
+						null,
+						"编辑原始 JSON",
+						-1
+						/* CACHED */
+					)),
+					_cache[45] || (_cache[45] = createBaseVNode(
+						"p",
+						{ class: "acu-v2-continuation-materials__card-meta" },
+						"每条至少需要 id、title（名称）、url、brief（一句话简介）；summary 为自由格式详情，tags 可选。网页原文不保存。手动新增的条目 source 可写 web。",
+						-1
+						/* CACHED */
+					)),
+					createVNode($setup["AcuTextarea"], {
+						"model-value": $setup.materials.modules.webRefs.draft,
+						rows: 14,
+						"onUpdate:modelValue": _cache[13] || (_cache[13] = (value) => $setup.materials.updateDraft("webRefs", value))
+					}, null, 8, ["model-value"]),
+					$setup.materials.modules.webRefs.error ? (openBlock(), createElementBlock(
+						"p",
+						_hoisted_110,
+						toDisplayString($setup.materials.modules.webRefs.error),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true),
+					createBaseVNode("div", _hoisted_111, [createVNode($setup["AcuButton"], {
+						disabled: !$setup.materials.modules.webRefs.dirty,
+						onClick: _cache[14] || (_cache[14] = ($event) => $setup.materials.discard("webRefs"))
+					}, {
+						default: withCtx(() => [..._cache[42] || (_cache[42] = [createTextVNode(
+							"放弃修改",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled"]), createVNode($setup["AcuButton"], {
+						variant: "primary",
+						loading: $setup.materials.modules.webRefs.saving,
+						disabled: !$setup.materials.modules.webRefs.dirty,
+						onClick: _cache[15] || (_cache[15] = ($event) => $setup.materials.save("webRefs"))
+					}, {
+						default: withCtx(() => [..._cache[43] || (_cache[43] = [createTextVNode(
+							"保存百科资料库",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["loading", "disabled"])])
+				])
+			],
+			64
+			/* STABLE_FRAGMENT */
+		)) : (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 4 },
+			[
+				createCommentVNode(" 故事总纲：结构化展示 + JSON 编辑 "),
+				_cache[50] || (_cache[50] = createBaseVNode(
+					"p",
+					{ class: "acu-v2-continuation-materials__meta" },
+					" 故事总纲由 arc-architect 子代理维护：全书方向一条 + 若干卷台阶。也可以在这里手动修正，保存走同一套结构校验并推进修订号。 ",
+					-1
+					/* CACHED */
+				)),
+				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_112,
+					" 总纲 " + toDisplayString($setup.materials.snapshot.value.storyArc.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.storyArc),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_113,
+					toDisplayString($setup.materials.loadError.value),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_114, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_115, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.storyArc, (arc) => {
@@ -172534,7 +174102,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": arc.retired }])
 							},
 							[
-								createBaseVNode("p", _hoisted_101, [
+								createBaseVNode("p", _hoisted_116, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -172544,14 +174112,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_102,
+										_hoisted_117,
 										toDisplayString(arc.scope === "story" ? "全书方向" : "卷台阶"),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_103,
+										_hoisted_118,
 										toDisplayString($setup.ARC_STATUS_LABELS[arc.status] ?? arc.status),
 										1
 										/* TEXT */
@@ -172565,7 +174133,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									arc.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_104,
+										_hoisted_119,
 										"已退休" + toDisplayString(arc.retiredReason ? `：${arc.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -172573,28 +174141,28 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_105,
+									_hoisted_120,
 									"方向：" + toDisplayString(arc.direction),
 									1
 									/* TEXT */
 								),
 								arc.escalation ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_106,
+									_hoisted_121,
 									"冲突高度：" + toDisplayString(arc.escalation),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								arc.withheld ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_107,
+									_hoisted_122,
 									"禁翻底牌：" + toDisplayString(arc.withheld),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								createBaseVNode(
 									"p",
-									_hoisted_108,
+									_hoisted_123,
 									" 已承载阶段：" + toDisplayString(arc.stageNumbers.length ? arc.stageNumbers.join("、") : "（尚未承载）"),
 									1
 									/* TEXT */
@@ -172607,8 +174175,8 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_109, [
-					_cache[41] || (_cache[41] = createBaseVNode(
+				createBaseVNode("details", _hoisted_124, [
+					_cache[49] || (_cache[49] = createBaseVNode(
 						"summary",
 						null,
 						"编辑原始 JSON",
@@ -172618,20 +174186,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					createVNode($setup["AcuTextarea"], {
 						"model-value": $setup.materials.modules.storyArc.draft,
 						rows: 14,
-						"onUpdate:modelValue": _cache[13] || (_cache[13] = (value) => $setup.materials.updateDraft("storyArc", value))
+						"onUpdate:modelValue": _cache[16] || (_cache[16] = (value) => $setup.materials.updateDraft("storyArc", value))
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.storyArc.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_110,
+						_hoisted_125,
 						toDisplayString($setup.materials.modules.storyArc.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_111, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_126, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.storyArc.dirty,
-						onClick: _cache[14] || (_cache[14] = ($event) => $setup.materials.discard("storyArc"))
+						onClick: _cache[17] || (_cache[17] = ($event) => $setup.materials.discard("storyArc"))
 					}, {
-						default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
+						default: withCtx(() => [..._cache[47] || (_cache[47] = [createTextVNode(
 							"放弃修改",
 							-1
 							/* CACHED */
@@ -172641,9 +174209,9 @@ Expected function or array of functions, received type ${typeof value}.`
 						variant: "primary",
 						loading: $setup.materials.modules.storyArc.saving,
 						disabled: !$setup.materials.modules.storyArc.dirty,
-						onClick: _cache[15] || (_cache[15] = ($event) => $setup.materials.save("storyArc"))
+						onClick: _cache[18] || (_cache[18] = ($event) => $setup.materials.save("storyArc"))
 					}, {
-						default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
+						default: withCtx(() => [..._cache[48] || (_cache[48] = [createTextVNode(
 							"保存故事总纲",
 							-1
 							/* CACHED */
@@ -172657,7 +174225,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		))
 	]);
     }
-    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-3b2141c1"]]);
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-f4c5f493"]]);
 
     /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -173222,6 +174790,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 { role: 'beatPlanner', label: '伏笔与节拍策划' },
                 { role: 'reviewer', label: '连续性审查' },
                 { role: 'finalReviewer', label: '发送前终审' },
+                { role: 'webResearcher', label: '网页检索' },
+            ];
+            const webSearchProviderOptions = [
+                { value: 'duckduckgo', label: 'DuckDuckGo（免 key）' },
+                { value: 'serper', label: 'Serper（Google，需酒馆已配 key）' },
+                { value: 'tavily', label: 'Tavily（需酒馆已配 key）' },
+                { value: 'searxng', label: 'SearXNG（自建/公共实例）' },
             ];
             const expandedGroups = reactive({});
             function isGroupExpanded(key) {
@@ -173250,6 +174825,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 return `迭代 ${s.agentRunBudget.maxIterations} · 派工 ${s.agentRunBudget.maxDelegations} · 并发 ${s.agentRunBudget.maxConcurrent}`;
             });
             const finalReviewGroupMeta = computed(() => (settingsDraft.value?.finalReview.enabled ? '已开启' : '已关闭'));
+            const webResearchGroupMeta = computed(() => {
+                const web = settingsDraft.value?.webResearch;
+                if (!web)
+                    return '';
+                if (!web.enabled)
+                    return '已关闭';
+                const sources = [web.sources.moegirl && '萌娘', web.sources.wikipediaZh && '中文维基', web.sources.wikipediaEn && '英文维基', web.sources.baidu && '百度'].filter(Boolean);
+                return `已开启 · ${sources.length ? sources.join('/') : '无百科来源'} · ${web.searchProvider}`;
+            });
             const channelGroupMeta = computed(() => {
                 const presets = settingsDraft.value?.agentApiPresets;
                 if (!presets)
@@ -173303,6 +174887,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
                     agentRunBudget: { ...settings.agentRunBudget },
                     finalReview: { ...settings.finalReview },
+                    webResearch: { ...settings.webResearch, sources: { ...settings.webResearch.sources } },
                     agentApiPresets: {
                         main: { ...settings.agentApiPresets.main },
                         outline: { ...settings.agentApiPresets.outline },
@@ -173312,6 +174897,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         beatPlanner: { ...settings.agentApiPresets.beatPlanner },
                         reviewer: { ...settings.agentApiPresets.reviewer },
                         finalReviewer: { ...settings.agentApiPresets.finalReviewer },
+                        webResearcher: { ...settings.agentApiPresets.webResearcher },
                     },
                     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
                     agentPrompts: {
@@ -173322,6 +174908,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         beatPlanner: settings.agentPrompts.beatPlanner.map(segment => ({ ...segment })),
                         reviewer: settings.agentPrompts.reviewer.map(segment => ({ ...segment })),
                         finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
+                        webResearcher: settings.agentPrompts.webResearcher.map(segment => ({ ...segment })),
                     },
                 };
             }
@@ -173420,7 +175007,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 const fixed = Number(raw);
                 if (!Number.isInteger(fixed) || fixed < 1)
-                    throw new Error('读取预算必须是正整数，或形如 30% 的百分比');
+                    throw new Error('读取上限必须是正整数，或形如 20% 的百分比');
                 return fixed;
             }
             function normalizeSettingsDraft() {
@@ -173455,11 +175042,21 @@ Expected function or array of functions, received type ${typeof value}.`
                     storyTailFloors: requiredInteger(source.storyTailFloors, '正文目录尾部全文楼数'),
                     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
                     agentReadTokenBudget: normalizedReadBudget(source.agentReadTokenBudget),
-                    agentReadFallbackTokens: requiredInteger(source.agentReadFallbackTokens, '精读兜底额度'),
+                    agentReadFallbackTokens: requiredInteger(source.agentReadFallbackTokens, '临近总结时的精读额度'),
                     finalReview: {
                         enabled: source.finalReview.enabled,
                         readTokenBudget: normalizedReadBudget(source.finalReview.readTokenBudget),
                         maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
+                    },
+                    webResearch: {
+                        enabled: source.webResearch.enabled,
+                        sources: { ...source.webResearch.sources },
+                        searchProvider: source.webResearch.searchProvider,
+                        searxngBaseUrl: String(source.webResearch.searxngBaseUrl ?? '').trim(),
+                        maxToolRounds: requiredRangeInteger(source.webResearch.maxToolRounds, '网页检索单次工具轮上限', 1, 20),
+                        maxPages: requiredRangeInteger(source.webResearch.maxPages, '网页检索单次抓取页数上限', 1, 30),
+                        pageCharLimit: requiredRangeInteger(source.webResearch.pageCharLimit, '网页检索单页阅读字数上限', 500, 20000),
+                        blockedDomains: String(source.webResearch.blockedDomains ?? ''),
                     },
                     agentRunBudget: {
                         maxIterations: requiredRangeInteger(source.agentRunBudget.maxIterations, '主 Agent 迭代上限', 1, 30),
@@ -173472,6 +175069,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 };
                 if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.minGenerationTokens < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
                     throw new Error('续写设置中的数值不能低于允许范围');
+                }
+                if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {
+                    throw new Error('搜索引擎选择 SearXNG 时必须填写实例地址');
                 }
                 if (normalized.apiPresetMode === 'fixed') {
                     const presetName = normalized.fixedApiPresetName.trim();
@@ -173547,6 +175147,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 { key: 'beatPlanner', kind: 'agent_beat', title: '伏笔与节拍策划子代理提示词', restoreLabel: '恢复节拍策划默认值' },
                 { key: 'reviewer', kind: 'agent_reviewer', title: '连续性审查子代理提示词', restoreLabel: '恢复审查子代理默认值' },
                 { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时才会被调用。' },
+                { key: 'webResearcher', kind: 'agent_web_researcher', title: '网页检索子代理（web-researcher）提示词', restoreLabel: '恢复网页检索默认值', note: '仅在「启用开场百科检索」开启时才会被调用。专属占位符：$WEB_TOOL_CATALOG（出网工具说明与本次配额）、$WEB_REFS（百科资料库预览）。' },
             ];
             /** 折叠态摘要：启用段数 / 总段数。 */
             function promptGroupMeta(key) {
@@ -173695,14 +175296,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, webSearchProviderOptions, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, webResearchGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-259a95a4] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-259a95a4] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-259a95a4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-259a95a4] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-259a95a4] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-259a95a4] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-259a95a4] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-259a95a4] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-259a95a4] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-259a95a4] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-259a95a4] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-259a95a4] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-259a95a4] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-259a95a4] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-259a95a4]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-259a95a4] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-259a95a4] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-259a95a4] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-259a95a4] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-259a95a4");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_259a95a4_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-9b48e849] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-9b48e849] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-9b48e849] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-9b48e849] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-9b48e849] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-9b48e849] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-9b48e849] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-9b48e849] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-9b48e849] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-9b48e849] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-9b48e849] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-9b48e849] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-9b48e849] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-9b48e849] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-9b48e849] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-9b48e849] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-9b48e849] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-9b48e849] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-9b48e849] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-9b48e849]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-9b48e849] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-9b48e849] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-9b48e849] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-9b48e849] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-9b48e849] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-9b48e849");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_9b48e849_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-continuation-page" };
     const _hoisted_2$k = {
@@ -173717,31 +175318,33 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$a = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_9$9 = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_10$9 = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_11$9 = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_12$9 = {
+    const _hoisted_11$9 = { class: "acu-v2-continuation-page__toggles" };
+    const _hoisted_12$9 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_13$7 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_14$7 = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_13$7 = {
-	key: 1,
-	class: "acu-v2-continuation-page__meta"
-    };
-    const _hoisted_14$7 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
     const _hoisted_15$7 = {
-	key: 0,
-	class: "acu-v2-continuation-page__error"
-    };
-    const _hoisted_16$6 = {
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_17$5 = { class: "acu-v2-continuation-page__groups" };
-    const _hoisted_18$5 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_19$5 = {
+    const _hoisted_16$6 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
+    const _hoisted_17$5 = {
+	key: 0,
+	class: "acu-v2-continuation-page__error"
+    };
+    const _hoisted_18$5 = {
+	key: 1,
+	class: "acu-v2-continuation-page__meta"
+    };
+    const _hoisted_19$5 = { class: "acu-v2-continuation-page__groups" };
+    const _hoisted_20$4 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_21$4 = {
 	key: 0,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_20$4 = {
+    const _hoisted_22$3 = {
 	key: 2,
 	class: "acu-v2-continuation-page__error"
     };
@@ -173807,7 +175410,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
+					default: withCtx(() => [..._cache[53] || (_cache[53] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -173852,7 +175455,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.settingsDraft.stageSize = $event) },
-								[..._cache[42] || (_cache[42] = [
+								[..._cache[54] || (_cache[54] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -173894,7 +175497,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.settingsDraft.storyArcVolumePlan = $event) },
-								[..._cache[43] || (_cache[43] = [
+								[..._cache[55] || (_cache[55] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -174000,15 +175603,23 @@ Expected function or array of functions, received type ${typeof value}.`
 							_: 1
 						})
 					]),
-					createBaseVNode("div", _hoisted_5$d, [createVNode($setup["AcuCheckbox"], {
-						modelValue: $setup.settingsDraft.outlinePreview,
-						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.outlinePreview = $event),
-						label: "大纲产出后先预览再执行"
-					}, null, 8, ["modelValue"]), createVNode($setup["AcuCheckbox"], {
-						modelValue: $setup.settingsDraft.finalReview.enabled,
-						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.finalReview.enabled = $event),
-						label: "启用发送前世界书终审"
-					}, null, 8, ["modelValue"])]),
+					createBaseVNode("div", _hoisted_5$d, [
+						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.outlinePreview,
+							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.outlinePreview = $event),
+							label: "大纲产出后先预览再执行"
+						}, null, 8, ["modelValue"]),
+						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.finalReview.enabled,
+							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.finalReview.enabled = $event),
+							label: "启用发送前世界书终审"
+						}, null, 8, ["modelValue"]),
+						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.webResearch.enabled,
+							"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.webResearch.enabled = $event),
+							label: "启用开场百科检索（同人推荐）"
+						}, null, 8, ["modelValue"])
+					]),
 					createBaseVNode("div", _hoisted_6$c, [
 						createVNode($setup["AcuDisclosureGroup"], {
 							class: "acu-v2-continuation-page__group",
@@ -174016,7 +175627,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.runGroupMeta,
 							expanded: $setup.isGroupExpanded("run"),
 							"body-id": "acu-continuation-group-run",
-							onToggle: _cache[18] || (_cache[18] = ($event) => $setup.toggleGroup("run"))
+							onToggle: _cache[19] || (_cache[19] = ($event) => $setup.toggleGroup("run"))
 						}, {
 							default: withCtx(() => [createBaseVNode("div", _hoisted_7$a, [
 								createVNode($setup["AcuFormRow"], {
@@ -174025,7 +175636,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.maxAutomaticStages,
-										"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
+										"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
 										type: "number",
 										min: 1
 									}, null, 8, ["modelValue"])]),
@@ -174037,7 +175648,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.generationRetryLimit,
-										"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
+										"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174049,7 +175660,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.minGenerationTokens,
-										"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.minGenerationTokens = $event),
+										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.minGenerationTokens = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174061,7 +175672,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.internalAiRetryLimit,
-										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
+										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174073,7 +175684,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.loopDelaySeconds,
-										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
+										"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174085,7 +175696,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.retryDelaySeconds,
-										"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
+										"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174097,7 +175708,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.maxConsecutivePressureTurns,
-										"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
+										"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
 										type: "number",
 										min: 0,
 										max: $setup.maxConsecutivePressureTurnsMax
@@ -174110,7 +175721,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.loopTags,
-										"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.loopTags = $event),
+										"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.loopTags = $event),
 										type: "text"
 									}, null, 8, ["modelValue"])]),
 									_: 1
@@ -174124,7 +175735,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.contextGroupMeta,
 							expanded: $setup.isGroupExpanded("context"),
 							"body-id": "acu-continuation-group-context",
-							onToggle: _cache[24] || (_cache[24] = ($event) => $setup.toggleGroup("context"))
+							onToggle: _cache[25] || (_cache[25] = ($event) => $setup.toggleGroup("context"))
 						}, {
 							default: withCtx(() => [createBaseVNode("div", _hoisted_8$a, [
 								createVNode($setup["AcuFormRow"], {
@@ -174133,7 +175744,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.storyWindowFloors,
-										"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
+										"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174145,7 +175756,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.storyTailFloors,
-										"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.storyTailFloors = $event),
+										"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.storyTailFloors = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -174157,30 +175768,30 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentHistoryTokenBudget,
-										"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
+										"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
 								createVNode($setup["AcuFormRow"], {
-									label: "读取预算",
-									hint: "一次规划内 read/search 结果的累计 token 上限；填正整数，或形如 30% 的百分比（按总结阈值折算）。"
+									label: "单批次读取上限",
+									hint: "一次 read/search 工具批次最多可注入多少 token；超过整批打回。不同批次不累计，填正整数或形如 20% 的百分比（按总结阈值折算）。"
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentReadTokenBudget,
-										"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.agentReadTokenBudget = $event),
+										"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.agentReadTokenBudget = $event),
 										type: "text"
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
 								createVNode($setup["AcuFormRow"], {
-									label: "精读兜底额度（token）",
-									hint: "上下文临近总结阈值时，仍放行不超过该大小的小额精准读取。"
+									label: "临近总结时的精读额度（token）",
+									hint: "上下文即将触发总结时，只有不超过此大小的单批次读取会放行；默认 6000。"
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentReadFallbackTokens,
-										"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.agentReadFallbackTokens = $event),
+										"onUpdate:modelValue": _cache[24] || (_cache[24] = ($event) => $setup.settingsDraft.agentReadFallbackTokens = $event),
 										type: "number",
 										min: 1
 									}, null, 8, ["modelValue"])]),
@@ -174195,7 +175806,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.budgetGroupMeta,
 							expanded: $setup.isGroupExpanded("budget"),
 							"body-id": "acu-continuation-group-budget",
-							onToggle: _cache[31] || (_cache[31] = ($event) => $setup.toggleGroup("budget"))
+							onToggle: _cache[32] || (_cache[32] = ($event) => $setup.toggleGroup("budget"))
 						}, {
 							default: withCtx(() => [createBaseVNode("div", _hoisted_9$9, [
 								createVNode($setup["AcuFormRow"], {
@@ -174204,7 +175815,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxIterations,
-										"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
+										"onUpdate:modelValue": _cache[26] || (_cache[26] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
 										type: "number",
 										min: 1,
 										max: 30
@@ -174217,7 +175828,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxDelegations,
-										"onUpdate:modelValue": _cache[26] || (_cache[26] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
+										"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
 										type: "number",
 										min: 0,
 										max: 20
@@ -174230,7 +175841,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxSameAgent,
-										"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
+										"onUpdate:modelValue": _cache[28] || (_cache[28] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
 										type: "number",
 										min: 1,
 										max: 10
@@ -174243,7 +175854,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxConcurrent,
-										"onUpdate:modelValue": _cache[28] || (_cache[28] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
+										"onUpdate:modelValue": _cache[29] || (_cache[29] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
 										type: "number",
 										min: 1,
 										max: 6
@@ -174256,7 +175867,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxReads,
-										"onUpdate:modelValue": _cache[29] || (_cache[29] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
+										"onUpdate:modelValue": _cache[30] || (_cache[30] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
 										type: "number",
 										min: 0,
 										max: 30
@@ -174269,7 +175880,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxExtraReads,
-										"onUpdate:modelValue": _cache[30] || (_cache[30] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
+										"onUpdate:modelValue": _cache[31] || (_cache[31] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
 										type: "number",
 										min: 0,
 										max: 10
@@ -174285,15 +175896,15 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.finalReviewGroupMeta,
 							expanded: $setup.isGroupExpanded("finalReview"),
 							"body-id": "acu-continuation-group-final-review",
-							onToggle: _cache[34] || (_cache[34] = ($event) => $setup.toggleGroup("finalReview"))
+							onToggle: _cache[35] || (_cache[35] = ($event) => $setup.toggleGroup("finalReview"))
 						}, {
 							default: withCtx(() => [createBaseVNode("div", _hoisted_10$9, [createVNode($setup["AcuFormRow"], {
-								label: "终审读取预算",
-								hint: "发送前终审独立可用的 read/search token 上限；填正整数，或形如 50% 的百分比（按总结阈值折算）。"
+								label: "终审单批次读取上限",
+								hint: "终审每次 read/search 工具批次最多可注入多少 token；超过整批打回。填正整数或形如 20% 的百分比（按总结阈值折算）。"
 							}, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.settingsDraft.finalReview.readTokenBudget,
-									"onUpdate:modelValue": _cache[32] || (_cache[32] = ($event) => $setup.settingsDraft.finalReview.readTokenBudget = $event),
+									"onUpdate:modelValue": _cache[33] || (_cache[33] = ($event) => $setup.settingsDraft.finalReview.readTokenBudget = $event),
 									type: "text"
 								}, null, 8, ["modelValue"])]),
 								_: 1
@@ -174303,19 +175914,135 @@ Expected function or array of functions, received type ${typeof value}.`
 							}, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.settingsDraft.finalReview.maxExtraReads,
-									"onUpdate:modelValue": _cache[33] || (_cache[33] = ($event) => $setup.settingsDraft.finalReview.maxExtraReads = $event),
+									"onUpdate:modelValue": _cache[34] || (_cache[34] = ($event) => $setup.settingsDraft.finalReview.maxExtraReads = $event),
 									type: "number",
 									min: 0,
 									max: 10
 								}, null, 8, ["modelValue"])]),
 								_: 1
-							})]), _cache[44] || (_cache[44] = createBaseVNode(
+							})]), _cache[56] || (_cache[56] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-continuation-page__meta" },
-								"终审默认关闭；开启后会额外调用 final-reviewer，优先依据本轮命中的世界书条目，并使用独立读取预算与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。",
+								"终审默认关闭；开启后会额外调用 final-reviewer，先看世界书目录与命中预览，再按实际需要 search/read 精读条目。它使用独立的单批次读取上限与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。",
 								-1
 								/* CACHED */
 							))]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
+							label: "网页检索",
+							meta: $setup.webResearchGroupMeta,
+							expanded: $setup.isGroupExpanded("webResearch"),
+							"body-id": "acu-continuation-group-web-research",
+							onToggle: _cache[46] || (_cache[46] = ($event) => $setup.toggleGroup("webResearch"))
+						}, {
+							default: withCtx(() => [
+								_cache[57] || (_cache[57] = createBaseVNode(
+									"p",
+									{ class: "acu-v2-continuation-page__meta" },
+									"开启后，新任务第一次规划前会自动派工 web-researcher，从勾选的百科查清原作人物、组织、能力与设定，按实体分条写进「百科资料库」（资料面板 → 百科资料）；之后主 Agent 也能按需再派。所有出网只由该子代理执行：维基与萌娘走浏览器直连，百度与网页抓取经酒馆服务器同源转发。",
+									-1
+									/* CACHED */
+								)),
+								createBaseVNode("div", _hoisted_11$9, [
+									createVNode($setup["AcuCheckbox"], {
+										modelValue: $setup.settingsDraft.webResearch.sources.moegirl,
+										"onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => $setup.settingsDraft.webResearch.sources.moegirl = $event),
+										label: "萌娘百科"
+									}, null, 8, ["modelValue"]),
+									createVNode($setup["AcuCheckbox"], {
+										modelValue: $setup.settingsDraft.webResearch.sources.wikipediaZh,
+										"onUpdate:modelValue": _cache[37] || (_cache[37] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaZh = $event),
+										label: "中文维基百科"
+									}, null, 8, ["modelValue"]),
+									createVNode($setup["AcuCheckbox"], {
+										modelValue: $setup.settingsDraft.webResearch.sources.wikipediaEn,
+										"onUpdate:modelValue": _cache[38] || (_cache[38] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaEn = $event),
+										label: "英文维基百科"
+									}, null, 8, ["modelValue"]),
+									createVNode($setup["AcuCheckbox"], {
+										modelValue: $setup.settingsDraft.webResearch.sources.baidu,
+										"onUpdate:modelValue": _cache[39] || (_cache[39] = ($event) => $setup.settingsDraft.webResearch.sources.baidu = $event),
+										label: "百度百科（经酒馆转发）"
+									}, null, 8, ["modelValue"])
+								]),
+								createBaseVNode("div", _hoisted_12$9, [
+									createVNode($setup["AcuFormRow"], {
+										label: "搜索引擎",
+										hint: "百科查不到时的兜底搜索。DuckDuckGo 免 key；Serper / Tavily 使用酒馆「API 密钥」里已配置的 key；SearXNG 需填实例地址。"
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuSelect"], {
+											modelValue: $setup.settingsDraft.webResearch.searchProvider,
+											"onUpdate:modelValue": _cache[40] || (_cache[40] = ($event) => $setup.settingsDraft.webResearch.searchProvider = $event),
+											options: $setup.webSearchProviderOptions
+										}, null, 8, ["modelValue"])]),
+										_: 1
+									}),
+									$setup.settingsDraft.webResearch.searchProvider === "searxng" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+										key: 0,
+										label: "SearXNG 实例地址",
+										hint: "形如 https://searx.example.org"
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuInput"], {
+											modelValue: $setup.settingsDraft.webResearch.searxngBaseUrl,
+											"onUpdate:modelValue": _cache[41] || (_cache[41] = ($event) => $setup.settingsDraft.webResearch.searxngBaseUrl = $event),
+											type: "text"
+										}, null, 8, ["modelValue"])]),
+										_: 1
+									})) : createCommentVNode("v-if", true),
+									createVNode($setup["AcuFormRow"], {
+										label: "单次工具轮上限",
+										hint: "web-researcher 一次派工里搜索/抓取/本地调阅的轮数上限。范围 1–20。"
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuInput"], {
+											modelValue: $setup.settingsDraft.webResearch.maxToolRounds,
+											"onUpdate:modelValue": _cache[42] || (_cache[42] = ($event) => $setup.settingsDraft.webResearch.maxToolRounds = $event),
+											type: "number",
+											min: 1,
+											max: 20
+										}, null, 8, ["modelValue"])]),
+										_: 1
+									}),
+									createVNode($setup["AcuFormRow"], {
+										label: "单次抓取页数上限",
+										hint: "单次检索最多阅读的外部页面数。页面正文仅在检索子代理当次上下文中使用，不会写入聊天。范围 1–30。"
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuInput"], {
+											modelValue: $setup.settingsDraft.webResearch.maxPages,
+											"onUpdate:modelValue": _cache[43] || (_cache[43] = ($event) => $setup.settingsDraft.webResearch.maxPages = $event),
+											type: "number",
+											min: 1,
+											max: 30
+										}, null, 8, ["modelValue"])]),
+										_: 1
+									}),
+									createVNode($setup["AcuFormRow"], {
+										label: "单页阅读字数上限",
+										hint: "检索子代理归纳资料时可读取的单页正文上限；正文不保存。范围 500–20000。"
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuInput"], {
+											modelValue: $setup.settingsDraft.webResearch.pageCharLimit,
+											"onUpdate:modelValue": _cache[44] || (_cache[44] = ($event) => $setup.settingsDraft.webResearch.pageCharLimit = $event),
+											type: "number",
+											min: 500,
+											max: 2e4
+										}, null, 8, ["modelValue"])]),
+										_: 1
+									}),
+									createVNode($setup["AcuFormRow"], {
+										label: "域名黑名单",
+										hint: "web_read 不得抓取的域名，逗号或换行分隔；内网与酒馆自身始终被拦。"
+									}, {
+										default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+											modelValue: $setup.settingsDraft.webResearch.blockedDomains,
+											"onUpdate:modelValue": _cache[45] || (_cache[45] = ($event) => $setup.settingsDraft.webResearch.blockedDomains = $event),
+											rows: 3
+										}, null, 8, ["modelValue"])]),
+										_: 1
+									})
+								])
+							]),
 							_: 1
 						}, 8, ["meta", "expanded"]),
 						createVNode($setup["AcuDisclosureGroup"], {
@@ -174324,15 +176051,15 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.channelGroupMeta,
 							expanded: $setup.isGroupExpanded("channels"),
 							"body-id": "acu-continuation-group-channels",
-							onToggle: _cache[35] || (_cache[35] = ($event) => $setup.toggleGroup("channels"))
+							onToggle: _cache[47] || (_cache[47] = ($event) => $setup.toggleGroup("channels"))
 						}, {
-							default: withCtx(() => [_cache[45] || (_cache[45] = createBaseVNode(
+							default: withCtx(() => [_cache[58] || (_cache[58] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-continuation-page__meta" },
 								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审查类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。",
 								-1
 								/* CACHED */
-							)), createBaseVNode("div", _hoisted_11$9, [(openBlock(), createElementBlock(
+							)), createBaseVNode("div", _hoisted_13$7, [(openBlock(), createElementBlock(
 								Fragment,
 								null,
 								renderList($setup.agentChannelRoles, (channel) => {
@@ -174363,10 +176090,10 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.rulesGroupMeta,
 							expanded: $setup.isGroupExpanded("rules"),
 							"body-id": "acu-continuation-group-rules",
-							onToggle: _cache[38] || (_cache[38] = ($event) => $setup.toggleGroup("rules"))
+							onToggle: _cache[50] || (_cache[50] = ($event) => $setup.toggleGroup("rules"))
 						}, {
 							default: withCtx(() => [
-								_cache[46] || (_cache[46] = createBaseVNode(
+								_cache[59] || (_cache[59] = createBaseVNode(
 									"p",
 									{ class: "acu-v2-continuation-page__meta" },
 									"提取规则只保留正文中匹配「起始–结束」标记之间的内容；排除规则则把匹配段落剔除。两者都为空时使用完整正文。",
@@ -174375,12 +176102,12 @@ Expected function or array of functions, received type ${typeof value}.`
 								)),
 								createVNode($setup["AcuRulePairList"], {
 									modelValue: $setup.settingsDraft.contextExtractRules,
-									"onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+									"onUpdate:modelValue": _cache[48] || (_cache[48] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
 									label: "上下文提取规则"
 								}, null, 8, ["modelValue"]),
 								createVNode($setup["AcuRulePairList"], {
 									modelValue: $setup.settingsDraft.contextExcludeRules,
-									"onUpdate:modelValue": _cache[37] || (_cache[37] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+									"onUpdate:modelValue": _cache[49] || (_cache[49] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
 									label: "上下文排除规则"
 								}, null, 8, ["modelValue"])
 							]),
@@ -174389,14 +176116,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					]),
 					$setup.settingsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_12$9,
+						_hoisted_14$7,
 						toDisplayString($setup.settingsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
 					$setup.settingsNotice ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_13$7,
+						_hoisted_15$7,
 						toDisplayString($setup.settingsNotice),
 						1
 						/* TEXT */
@@ -174412,17 +176139,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。"
 		}, {
 			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_14$7, [
+				createBaseVNode("div", _hoisted_16$6, [
 					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
-						default: withCtx(() => [..._cache[47] || (_cache[47] = [createTextVNode(
+						default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
 							"导出提示词 JSON",
 							-1
 							/* CACHED */
 						)])]),
 						_: 1
 					}),
-					createVNode($setup["AcuButton"], { onClick: _cache[39] || (_cache[39] = ($event) => $setup.promptImportInput?.click()) }, {
-						default: withCtx(() => [..._cache[48] || (_cache[48] = [createTextVNode(
+					createVNode($setup["AcuButton"], { onClick: _cache[51] || (_cache[51] = ($event) => $setup.promptImportInput?.click()) }, {
+						default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
 							"导入提示词 JSON",
 							-1
 							/* CACHED */
@@ -174445,19 +176172,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				$setup.promptIoError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_15$7,
+					_hoisted_17$5,
 					toDisplayString($setup.promptIoError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.promptIoNotice ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_16$6,
+					_hoisted_18$5,
 					toDisplayString($setup.promptIoNotice),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_17$5, [(openBlock(), createElementBlock(
+				createBaseVNode("div", _hoisted_19$5, [(openBlock(), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.promptGroups, (group) => {
@@ -174488,7 +176215,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									"onMove",
 									"onUpdate"
 								]),
-								createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(group.kind) }, {
+								createBaseVNode("div", _hoisted_20$4, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(group.kind) }, {
 									default: withCtx(() => [createTextVNode(
 										toDisplayString(group.restoreLabel),
 										1
@@ -174498,7 +176225,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, 1032, ["onClick"])]),
 								group.note ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_19$5,
+									_hoisted_21$4,
 									toDisplayString(group.note),
 									1
 									/* TEXT */
@@ -174521,9 +176248,9 @@ Expected function or array of functions, received type ${typeof value}.`
 					meta: "参考",
 					expanded: $setup.isGroupExpanded("prompt:reference"),
 					"body-id": "acu-continuation-prompt-reference",
-					onToggle: _cache[40] || (_cache[40] = ($event) => $setup.toggleGroup("prompt:reference"))
+					onToggle: _cache[52] || (_cache[52] = ($event) => $setup.toggleGroup("prompt:reference"))
 				}, {
-					default: withCtx(() => [..._cache[49] || (_cache[49] = [
+					default: withCtx(() => [..._cache[62] || (_cache[62] = [
 						createBaseVNode(
 							"h4",
 							{ class: "acu-v2-continuation-page__subheading" },
@@ -174562,7 +176289,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						createBaseVNode(
 							"p",
 							{ class: "acu-v2-continuation-page__meta" },
-							"子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。",
+							"子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC / $CHRONOLOGY / $WEB_REFS（本地资料；$WEB_REFS 只给名称 + 一句话简介的预览）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）；网页检索子代理另有 $WEB_TOOL_CATALOG（出网工具说明与本次配额）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW；主 Agent、总纲代理、连续性审查与终审固定获得 $USER_INTENT；大纲代理对应使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不接收用户目标或阶段大纲，避免计划污染事实结算。",
 							-1
 							/* CACHED */
 						)
@@ -174571,7 +176298,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["expanded"])]),
 				$setup.settingsError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_20$4,
+					_hoisted_22$3,
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
@@ -174581,7 +176308,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-259a95a4"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-9b48e849"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

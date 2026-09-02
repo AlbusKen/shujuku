@@ -14,6 +14,7 @@ import {
   buildDefaultAgentMaintainerPrompt_ACU,
   buildDefaultAgentReviewerPrompt_ACU,
   buildDefaultAgentFinalReviewerPrompt_ACU,
+  buildDefaultAgentWebResearcherPrompt_ACU,
 } from './agent/agent-defaults';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
@@ -33,6 +34,8 @@ export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$STORY_OVERVIEW', '$STORY_TAIL', '$HISTORY_UNSETTLED', '$WORLDBOOK_HITS',
   // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚、跨阶段节奏状态。
   '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET', '$PACING_CONTEXT',
+  // 百科资料库：全量摘要 / 目录行 / web-researcher 专用的出网工具说明。
+  '$WEB_REFS', '$WEB_REFS_CATALOG', '$WEB_TOOL_CATALOG',
 ] as const;
 
 export type ContinuationPromptPlaceholder_ACU = typeof CONTINUATION_PROMPT_PLACEHOLDERS_ACU[number];
@@ -45,7 +48,7 @@ const PLACEHOLDER_ALTERNATION_ACU = [...CONTINUATION_PROMPT_PLACEHOLDERS_ACU]
   .sort((left, right) => right.length - left.length)
   .map(token => token.replace(/[$]/g, '\\$'))
   .join('|');
-export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer' | 'agent_final_reviewer';
+export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer' | 'agent_final_reviewer' | 'agent_web_researcher';
 type PlaceholderResolver_ACU = () => string | Promise<string | null | undefined> | null | undefined;
 
 function failPrompt_ACU(code: 'CONTINUATION_ENVELOPE_INVALID' | 'CONTINUATION_PROMPT_INVALID' | 'CONTINUATION_PROMPT_EMPTY', phase: ContinuationErrorPhase_ACU, message: string, details?: Record<string, unknown>): never {
@@ -102,5 +105,6 @@ export function restoreContinuationPromptDefault_ACU(settings: ContinuationSetti
   if (kind === 'agent_beat') agentPrompts.beatPlanner = buildDefaultAgentBeatPlannerPrompt_ACU();
   if (kind === 'agent_reviewer') agentPrompts.reviewer = buildDefaultAgentReviewerPrompt_ACU();
   if (kind === 'agent_final_reviewer') agentPrompts.finalReviewer = buildDefaultAgentFinalReviewerPrompt_ACU();
+  if (kind === 'agent_web_researcher') agentPrompts.webResearcher = buildDefaultAgentWebResearcherPrompt_ACU();
   return { ...settings, agentPrompts };
 }

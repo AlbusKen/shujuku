@@ -21,6 +21,7 @@ import {
   renderAgentHooksByIds_ACU,
   renderAgentInfoGapByIds_ACU,
   renderAgentStoryArcByIds_ACU,
+  renderAgentWebRefsByIds_ACU,
 } from './agent-module-store';
 import { AGENT_TABLE_ALIASES_ACU, findAgentSheetsByAliases_ACU, renderAgentTableByAliases_ACU, renderAgentTableByName_ACU, type AgentTableRowRange_ACU } from './agent-tables';
 import {
@@ -51,6 +52,7 @@ const READ_TOKEN_TITLES_ACU: Record<string, string> = {
   $INFO_GAP: '认知与信息差时间线',
   $ACTIVE_CONSTRAINTS: '长期约束',
   $CHRONOLOGY: '故事年代学账本',
+  $WEB_REFS: '百科资料库',
   $TABLE_GLOBAL: '全局数据表',
   $TABLE_CHARACTERS: '角色表',
   $TABLE_CHRONICLES: '纪要表',
@@ -613,6 +615,13 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
     return chronologyIds.length
       ? { title: `故事年代学条目 ${chronologyIds.join('、')}`, text: renderAgentChronologyByIds_ACU(context.moduleSnapshot, chronologyIds) }
       : { title: '故事年代学账本（已发生正文结算出的时间事实）', text: renderAgentChronology_ACU(context.moduleSnapshot) };
+  }
+  const webRefIds = splitIdSuffix_ACU(normalized, '$WEB_REFS');
+  if (webRefIds !== null) {
+    return {
+      title: webRefIds.length ? `百科资料库条目 ${webRefIds.join('、')}（外部参考，非本故事事实）` : '百科资料库（全部活跃条目摘要；外部参考，非本故事事实）',
+      text: renderAgentWebRefsByIds_ACU(context.moduleSnapshot, webRefIds.length ? webRefIds : undefined),
+    };
   }
 
   const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;

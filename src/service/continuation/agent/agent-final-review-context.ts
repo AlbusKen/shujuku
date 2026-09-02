@@ -1,5 +1,5 @@
 import { renderAgentOutlineWindow_ACU, renderAgentStoryTail_ACU, resolveAgentReadToken_ACU, type AgentResolveContext_ACU } from './agent-placeholder-resolver';
-import { renderAgentWorldbookCatalog_ACU, type AgentWorldbookEntryView_ACU } from './agent-worldbook-read';
+import { renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU } from './agent-worldbook-read';
 import type { AgentGateItem_ACU } from './agent-read-gate';
 
 export interface AgentFinalReviewEvidenceInput_ACU {
@@ -34,23 +34,6 @@ export function extractAgentFinalReviewWorldbookSeeds_ACU(text: string): string[
   return unique_ACU(candidates).slice(0, 48);
 }
 
-function selectWorldbookEntries_ACU(entries: readonly AgentWorldbookEntryView_ACU[], seeds: readonly string[]): AgentWorldbookEntryView_ACU[] {
-  const haystack = seeds.join('\n').toLowerCase();
-  return entries.filter(entry => entry.constant || [entry.title, ...entry.keys].some(term => term && haystack.includes(term.toLowerCase())));
-}
-
-function renderFullWorldbookEvidence_ACU(entries: readonly AgentWorldbookEntryView_ACU[]): string {
-  if (!entries.length) return '';
-  return entries.map(entry => `### ${entry.title}（${entry.bookName}#${entry.uid}）\n${entry.content}`).join('\n\n');
-}
-
-function selectFinalReviewWorldbookEntries_ACU(context: AgentResolveContext_ACU, seeds: readonly string[]): AgentWorldbookEntryView_ACU[] {
-  const snapshot = context.worldbook;
-  if (!snapshot?.available) return [];
-  const hits = selectWorldbookEntries_ACU(snapshot.entries, seeds);
-  return hits;
-}
-
 export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenceInput_ACU): AgentFinalReviewEvidence_ACU {
   const { resolveContext: context } = input;
   const outline = renderAgentOutlineWindow_ACU(context);
@@ -60,9 +43,8 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
   const chronology = resolveAgentReadToken_ACU('$CHRONOLOGY', context).text;
   const seedSource = [context.originInstruction, input.currentUserInput, input.candidateInstruction, outline, tail].join('\n');
   const worldbookSeeds = extractAgentFinalReviewWorldbookSeeds_ACU(seedSource);
-  const worldbookEntries = selectFinalReviewWorldbookEntries_ACU(context, worldbookSeeds);
   const worldbookEvidence = context.worldbook?.available
-    ? (renderFullWorldbookEvidence_ACU(worldbookEntries) || '没有命中或常开世界书条目。不要凭印象判定世界观冲突；先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读全文。')
+    ? renderAgentWorldbookHits_ACU(context.worldbook, seedSource)
     : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证，并可用 worldbook scope 的 search 补查。';
   const supplementalMaterials = [
     `### 本轮用户输入\n${input.currentUserInput || '（本轮没有额外用户输入）'}`,
@@ -76,10 +58,7 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
     supplementalMaterials,
     worldbookEvidence,
     worldbookSeeds,
-    fixedReadKeys: unique_ACU([
-      '$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY',
-      ...worldbookEntries.map(entry => `$WORLDBOOK:${entry.bookName}:${entry.uid}`),
-    ]),
+    fixedReadKeys: unique_ACU(['$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY']),
     gateItems: [
       { label: '用户初始要求', text: context.originInstruction || '（用户未提供初始要求）' },
       { label: '本轮用户输入', text: input.currentUserInput || '（本轮没有额外用户输入）' },
@@ -88,7 +67,7 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
       { label: '故事总纲', text: storyArc },
       { label: '最近正文', text: tail },
       { label: '长期约束、故事年代学账本、策划摘要、检索种子与世界书目录', text: supplementalMaterials },
-      { label: '命中世界书条目全文', text: worldbookEvidence },
+      { label: '本轮语境命中的世界书条目预览', text: worldbookEvidence },
     ],
   };
 }

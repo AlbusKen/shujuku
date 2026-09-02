@@ -20,9 +20,11 @@ import {
   type AgentModuleDelta_ACU,
   type AgentModuleRevisions_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentResearcherOutput_ACU,
   type AgentStoryArcDeltaItem_ACU,
   type AgentStoryArcEntry_ACU,
   type AgentStoryArcPatch_ACU,
+  type AgentWebRefEntry_ACU,
   type AgentWritableModule_ACU,
 } from './agent-model';
 import { normalizeEvidenceIndexes_ACU, normalizeStageNumbers_ACU } from './agent-module-store';
@@ -517,7 +519,83 @@ export function applyAgentModuleDelta_ACU(
       constraints: snapshot.revisions.constraints,
       storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
       chronology: snapshot.revisions.chronology + (chronologyTouched ? 1 : 0),
+      webRefs: snapshot.revisions.webRefs,
     },
+  };
+}
+
+/** 百科资料库条目 ID 前缀；模型漏写 id 时由运行时按此前缀顺延分配。 */
+export const AGENT_WEB_REF_ID_PREFIX_ACU = 'WR-';
+
+/**
+ * 分配下一个可用的百科资料库 ID。按既有 WR-### 最大序号 +1，避免与退休条目撞号。
+ * @param existing 当前全部条目（含退休）
+ * @param taken 本次写集里已占用的 id
+ */
+export function nextAgentWebRefId_ACU(existing: readonly AgentWebRefEntry_ACU[], taken: ReadonlySet<string> = new Set()): string {
+  let max = 0;
+  for (const id of [...existing.map(entry => entry.id), ...taken]) {
+    const matched = /^WR-(\d+)$/.exec(id);
+    if (matched) max = Math.max(max, Number.parseInt(matched[1], 10));
+  }
+  return `${AGENT_WEB_REF_ID_PREFIX_ACU}${String(max + 1).padStart(3, '0')}`;
+}
+
+/**
+ * 应用 web-researcher 的百科资料库写集。与叙事模块同一防线：retire 必须命中且给理由、
+ * 任一条目失败整份拒绝、修订号并发校验；upsert 对既有条目按 id 覆盖但保留首次入库时间。
+ * 写入不推进结算水位——百科条目不是正文事实。
+ * @param snapshot 当前快照
+ * @param output 子代理运行时已把 pageRef 回填成完整条目的输出
+ * @param expectedRevision 子代理读到资料那一刻的 webRefs 修订号；与当前不一致即拒绝
+ * @param now 入库时间
+ * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）
+ */
+export function applyAgentWebRefsDelta_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  output: AgentResearcherOutput_ACU,
+  expectedRevision: number | undefined,
+  now: number = Date.now(),
+): AgentModuleSnapshot_ACU {
+  if (!output.items.length) return snapshot;
+  if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
+    reject_ACU('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs });
+  }
+  const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
+  const taken = new Set<string>();
+  for (const item of output.items) {
+    if (item.action === 'retire') {
+      const current = byId.get(item.id);
+      if (!current) reject_ACU(`retire 的百科条目不存在：${item.id}`, { id: item.id });
+      if (!item.reason.trim()) reject_ACU(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
+      byId.set(item.id, { ...current!, retired: true, retiredReason: item.reason.trim() });
+      continue;
+    }
+    if (!item.title.trim()) reject_ACU(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
+    if (!item.brief.trim()) reject_ACU(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
+    if (!item.url.trim()) reject_ACU(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
+    const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
+    taken.add(id);
+    const previous = byId.get(id);
+    byId.set(id, {
+      id,
+      title: item.title.trim(),
+      source: item.source,
+      url: item.url.trim(),
+      query: item.query,
+      tags: [...new Set(item.tags.map(tag => tag.trim()).filter(Boolean))],
+      brief: item.brief.trim(),
+      summary: item.summary.trim(),
+      sourceStatus: item.sourceStatus,
+      fetchedAt: previous?.fetchedAt || now,
+      retired: false,
+      retiredReason: '',
+    });
+  }
+  return {
+    ...snapshot,
+    webRefs: [...byId.values()],
+    revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
   };
 }
 

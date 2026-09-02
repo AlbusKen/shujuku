@@ -20,12 +20,15 @@ import {
   AGENT_STORY_ARC_SCOPES_ACU,
   AGENT_STORY_ARC_STATUSES_ACU,
   AGENT_VOLUME_NARRATIVE_ROLES_ACU,
+  AGENT_WEB_REF_SOURCES_ACU,
+  AGENT_WEB_REF_STATUSES_ACU,
   type AgentChronologyEntry_ACU,
   type AgentConstraintEntry_ACU,
   type AgentHookEntry_ACU,
   type AgentInfoGapEntry_ACU,
   type AgentModuleSnapshot_ACU,
   type AgentStoryArcEntry_ACU,
+  type AgentWebRefEntry_ACU,
 } from './agent-model';
 
 const IMPORTANCE_WEIGHTS_ACU: Record<string, number> = { high: 3, mid: 2, low: 1 };
@@ -51,12 +54,13 @@ export function buildEmptyAgentModuleSnapshot_ACU(): AgentModuleSnapshot_ACU {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex: -1,
     updatedAt: 0,
-    revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 0 },
+    revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 0, webRefs: 0 },
     hooks: [],
     infoGap: [],
     constraints: [],
     storyArc: [],
     chronology: [],
+    webRefs: [],
   };
 }
 
@@ -220,6 +224,43 @@ function validateChronologyEntry_ACU(raw: unknown): AgentChronologyEntry_ACU | n
   };
 }
 
+/** 取一段文本的首句，用作旧条目缺失 brief 时的兼容兜底。 */
+export function firstSentence_ACU(text: string): string {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+  const cut = flat.split(/(?<=[。！？!?\.])\s*|\n/)[0] ?? flat;
+  return cut.length > 80 ? `${cut.slice(0, 80)}…` : cut;
+}
+
+/**
+ * 校验一条资料库记录。固定内容是 title 与 brief；summary 为可空的自由格式详情。
+ * 旧条目的 extract 字段故意不读取：升级后不再让网页原文继续扩张聊天快照。
+ */
+export function validateWebRefEntry_ACU(raw: unknown): AgentWebRefEntry_ACU | null {
+  if (!isRecord_ACU(raw)) return null;
+  const id = readText_ACU(raw.id).trim();
+  const title = readText_ACU(raw.title).trim();
+  const url = readText_ACU(raw.url).trim();
+  if (!id || !title || !url) return null;
+  const tags = Array.isArray(raw.tags)
+    ? raw.tags.filter((item): item is string => typeof item === 'string' && !!item.trim()).map(item => item.trim())
+    : [];
+  return {
+    id,
+    title,
+    source: readEnum_ACU(raw.source, AGENT_WEB_REF_SOURCES_ACU, 'web') as AgentWebRefEntry_ACU['source'],
+    url,
+    query: readText_ACU(raw.query),
+    tags,
+    brief: readText_ACU(raw.brief).trim() || firstSentence_ACU(readText_ACU(raw.summary)),
+    summary: readText_ACU(raw.summary),
+    sourceStatus: readEnum_ACU(raw.sourceStatus, AGENT_WEB_REF_STATUSES_ACU, 'unavailable') as AgentWebRefEntry_ACU['sourceStatus'],
+    fetchedAt: typeof raw.fetchedAt === 'number' && raw.fetchedAt >= 0 ? raw.fetchedAt : 0,
+    retired: raw.retired === true,
+    retiredReason: readText_ACU(raw.retiredReason),
+  };
+}
+
 function validateConstraintEntry_ACU(raw: unknown): AgentConstraintEntry_ACU | null {
   if (!isRecord_ACU(raw)) return null;
   const id = readText_ACU(raw.id).trim();
@@ -251,6 +292,8 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
   const chronology = Array.isArray(raw.chronology) ? raw.chronology : [];
   const validatedChronology = chronology.map(validateChronologyEntry_ACU);
   if (validatedChronology.some(entry => entry === null)) return null;
+  if (Object.prototype.hasOwnProperty.call(raw, 'webRefs') && !Array.isArray(raw.webRefs)) return null;
+  const webRefs = Array.isArray(raw.webRefs) ? raw.webRefs : [];
   return {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex,
@@ -261,12 +304,14 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
       constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
       storyArc: Math.max(0, readIndex_ACU(raw.revisions.storyArc)),
       chronology: Math.max(0, readIndex_ACU(raw.revisions.chronology)),
+      webRefs: Math.max(0, readIndex_ACU(raw.revisions.webRefs)),
     },
     hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
     infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
     constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
     storyArc: validatedStoryArc as AgentStoryArcEntry_ACU[],
     chronology: validatedChronology as AgentChronologyEntry_ACU[],
+    webRefs: webRefs.flatMap(item => { const entry = validateWebRefEntry_ACU(item); return entry ? [entry] : []; }),
   };
 }
 
@@ -297,12 +342,14 @@ function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSn
       constraints: Math.max(0, readIndex_ACU(revisions.constraints)),
       storyArc: Math.max(0, readIndex_ACU(revisions.storyArc)),
       chronology: Math.max(0, readIndex_ACU(revisions.chronology)),
+      webRefs: Math.max(0, readIndex_ACU(revisions.webRefs)),
     },
     hooks: pick(raw.hooks, validateHookEntry_ACU, 'hooks'),
     infoGap: pick(raw.infoGap, validateInfoGapEntry_ACU, 'infoGap'),
     constraints: pick(raw.constraints, validateConstraintEntry_ACU, 'constraints'),
     storyArc: pick(raw.storyArc, validateStoryArcEntry_ACU, 'storyArc'),
     chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
+    webRefs: pick(raw.webRefs, validateWebRefEntry_ACU, 'webRefs'),
   };
   return { snapshot, problems };
 }
@@ -433,6 +480,7 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
       constraints: current.revisions.constraints + 1,
       storyArc: current.revisions.storyArc + 1,
       chronology: current.revisions.chronology + 1,
+      webRefs: current.revisions.webRefs + 1,
     },
   };
   const validated = validateAgentModuleSnapshot_ACU(merged);
@@ -443,6 +491,7 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
     ['长期约束 constraints', merged.constraints, validated.constraints],
     ['故事总纲 storyArc', merged.storyArc, validated.storyArc],
     ['故事年代学账本 chronology', merged.chronology, validated.chronology],
+    ['百科资料库 webRefs', merged.webRefs, validated.webRefs],
   ];
   for (const [label, input, accepted] of checks) {
     const inputLength = Array.isArray(input) ? input.length : 0;
@@ -769,4 +818,68 @@ export function renderAgentChronology_ACU(snapshot: AgentModuleSnapshot_ACU): st
  */
 export function renderAgentChronologyByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
   return renderModuleEntries_ACU({ label: '故事年代学账本', revision: snapshot.revisions.chronology, entries: sortChronology_ACU(snapshot.chronology), render: renderChronologyEntry_ACU }, ids);
+}
+
+export const WEB_REF_SOURCE_LABELS_ACU: Record<AgentWebRefEntry_ACU['source'], string> = {
+  moegirl: '萌娘百科',
+  wikipedia_zh: '中文维基',
+  wikipedia_en: '英文维基',
+  baidu: '百度百科',
+  web: '网页',
+};
+
+const WEB_REF_STATUS_LABELS_ACU: Record<AgentWebRefEntry_ACU['sourceStatus'], string> = {
+  ok: '正常',
+  unavailable: '来源不可用',
+  blocked: '被拦截',
+};
+
+/** 唯一会进入预览上下文的资料形态：名称 + 一句话简介。 */
+function renderWebRefPreview_ACU(entry: AgentWebRefEntry_ACU): string {
+  const flags = [
+    entry.tags.length ? entry.tags.join('/') : '',
+    entry.sourceStatus !== 'ok' ? WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus] : '',
+    entry.retired ? '已退休' : '',
+  ].filter(Boolean);
+  return `- [${entry.id}]「${entry.title}」${entry.brief || '（无简介）'}${flags.length ? `（${flags.join('；')}）` : ''}`;
+}
+
+/** 按 ID 查询时才给自由格式详情与来源；网页原文不会被保存。 */
+function renderWebRefFull_ACU(entry: AgentWebRefEntry_ACU): string {
+  return [
+    `- [${entry.id}]「${entry.title}」来源=${WEB_REF_SOURCE_LABELS_ACU[entry.source]} 状态=${WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus]}${entry.retired ? ' 已退休' : ''}`,
+    `  简介：${entry.brief || '（无）'}`,
+    `  链接：${entry.url}`,
+    entry.query ? `  检索词：${entry.query}` : '',
+    entry.tags.length ? `  标签：${entry.tags.join('、')}` : '',
+    entry.summary ? `  详情：\n${entry.summary}` : '  详情：（未写）',
+    entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+/** 将所有活跃资料压成预览，供主 Agent 运行时快照注入。 */
+export function renderAgentWebRefsCatalog_ACU(snapshot: AgentModuleSnapshot_ACU, enabled: boolean): string {
+  const active = snapshot.webRefs.filter(entry => !entry.retired);
+  if (!active.length) {
+    return enabled
+      ? '百科资料库为空。开场检索尚未产出条目，或来源均不可达；需要原作/公开设定时派工 web-researcher。'
+      : '百科资料库为空（网页检索功能未启用）。';
+  }
+  return truncateAgentBlock_ACU([
+    `百科资料库 ${active.length} 条（外部参考资料，非本故事已发生事实；与世界书或正文冲突时以后者为准）。下面只是名称与一句话简介，详情用 read $WEB_REFS:ID 精读：`,
+    ...active.map(renderWebRefPreview_ACU),
+  ].join('\n'));
+}
+
+/** 不传 ID 也只返回预览；按 ID 才返回详情。 */
+export function renderAgentWebRefsByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
+  if (!ids || !ids.length) {
+    const head = `当前修订号=${snapshot.revisions.webRefs}`;
+    const active = snapshot.webRefs.filter(entry => !entry.retired);
+    const retiredCount = snapshot.webRefs.length - active.length;
+    const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
+    if (!active.length) return `${head}\n百科资料库当前没有活跃条目。${tail}`;
+    return `${head}\n百科资料库活跃条目 ${active.length} 条（预览：名称 + 一句话简介；详情用 $WEB_REFS:ID 精读）：\n${active.map(renderWebRefPreview_ACU).join('\n')}${tail}`;
+  }
+  return renderModuleEntries_ACU({ label: '百科资料库', revision: snapshot.revisions.webRefs, entries: snapshot.webRefs, render: renderWebRefFull_ACU }, ids);
 }

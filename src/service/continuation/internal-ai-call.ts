@@ -44,6 +44,7 @@ export const CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU: Readonly<Record<Continua
   beatPlanner: 4096,
   reviewer: 4096,
   finalReviewer: 4096,
+  webResearcher: 8192,
 };
 
 /**

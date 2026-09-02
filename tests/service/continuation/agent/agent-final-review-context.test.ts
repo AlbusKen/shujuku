@@ -29,7 +29,7 @@ function context_ACU() {
 }
 
 describe('终审世界书证据准备', () => {
-  it('从终审输入提取检索种子并注入命中与常开条目的全文', () => {
+  it('从终审输入提取检索种子，只注入命中与常开条目的预览及精读地址', () => {
     const evidence = buildAgentFinalReviewEvidence_ACU({
       resolveContext: context_ACU(),
       currentUserInput: '让主角询问守门人晶屑。',
@@ -38,9 +38,14 @@ describe('终审世界书证据准备', () => {
     });
 
     expect(evidence.worldbookSeeds).toContain('晶屑');
-    expect(evidence.worldbookEvidence).toContain('旁人不得带离铁门。');
-    expect(evidence.worldbookEvidence).toContain('只知道铁门前发生的事。');
-    expect(evidence.fixedReadKeys).toEqual(expect.arrayContaining(['$WORLDBOOK:设定集:7', '$WORLDBOOK:设定集:9']));
+    expect(evidence.worldbookEvidence).toContain('晶屑设定（关键词命中｜约 24 token）→ $WORLDBOOK:设定集:7');
+    expect(evidence.worldbookEvidence).toContain('守门人（常开｜约 16 token）→ $WORLDBOOK:设定集:9');
+    expect(evidence.worldbookEvidence).not.toContain('旁人不得带离铁门。');
+    expect(evidence.worldbookEvidence).not.toContain('只知道铁门前发生的事。');
+    expect(evidence.fixedReadKeys).not.toContain('$WORLDBOOK:设定集:7');
+    expect(evidence.fixedReadKeys).not.toContain('$WORLDBOOK:设定集:9');
+    expect(evidence.gateItems.some(item => item.label.includes('预览') && item.text.includes('旁人不得带离铁门。'))).toBe(false);
+    expect(evidence.supplementalMaterials).toContain('晶屑设定｜关键词：晶屑、禁区｜摘要：黑色晶屑只能由守门人…');
     expect(evidence.supplementalMaterials).toContain('世界书检索种子');
   });
 

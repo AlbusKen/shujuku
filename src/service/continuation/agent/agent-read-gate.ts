@@ -1,20 +1,19 @@
 /**
  * service/continuation/agent/agent-read-gate.ts — read/search 结果注入前的 Token 门禁
  *
- * 完整移植奶龙code FileReadContextGate 的三量状态机（S/H/M/F + 运行内累计 P），
- * 防止一次大读取把预算吃完，同时永远给精准小额读取留路。
+ * 单批次 read/search 注入门禁。每个工具批次独立判定，避免一份过大的读取撑爆上下文；
+ * 总次数由主循环 / 子代理运行预算控制，超过上下文阈值交给既有总结机制处理。
  *
  * 四个量：
- * - S：agentHistoryTokenBudget（会话压缩阈值，已有设置；<=0 视为不限）
- * - H：本批次注入前的完整上下文实测（骨架 overhead + 会话历史，调用方传入；与压缩判定同口径）
- * - M：agentReadTokenBudget 解析后的本次运行 read/search 累计预算（固定值或 S 的百分比）
+ * - S：agentHistoryTokenBudget（会话压缩阈值，同时用于百分比折算）
+ * - M：agentReadTokenBudget 解析后的**单批次** read/search 上限（固定值或 S 的百分比）
  * - F：min(agentReadFallbackTokens, M)，临近 S 时仍放行的精读兜底额度
+ * - B：本批次全部材料的实测 token
  *
- * 状态机（顺序不可调整，逐字对应 gateReadFileBatch）：
- * - T = P + B > M → 打回（读取总预算耗尽；P 跨动作累计，防拆分绕过）
- * - 否则若 S > 0 且 H 可用且 H + B > S：B > F → 打回（临近压缩阈值，只许精读额度内的小读取）；
- *   B <= F → 放行（已足够精准，随后越阈交给现有压缩时机机制处理）
- * - 否则 → 放行
+ * 状态机：
+ * - B > M 直接整批打回；
+ * - 否则 H + B > S 且 B > F 时打回，持续要求缩小到 F 以下；
+ * - B <= F 时放行，由既有总结机制处理超长上下文。
  *
  * 打回报告不含正文，只含各目标实测 token 数、四量与剩余额度，尾附修正协议。
  * 门禁统一作用于三条注入路径：主 Agent 工具批次、子代理工具轮次、派工种子材料。
@@ -30,7 +29,7 @@ export interface AgentGateItem_ACU {
   text: string;
 }
 
-/** 运行内累计状态（P）。一次规划运行一个实例，跨迭代/跨动作累计，去重命中不计入。 */
+/** 保留状态对象以兼容调用侧的工具遥测；单批次门禁不再累计扣减。 */
 export interface AgentReadGateState_ACU {
   grantedTokens: number;
 }
@@ -42,14 +41,14 @@ export function createAgentReadGateState_ACU(): AgentReadGateState_ACU {
 export interface AgentReadGateConfig_ACU {
   /** S：会话压缩阈值（agentHistoryTokenBudget）；<=0 视为不限。 */
   historyTokenBudget: number;
-  /** M 原始配置（agentReadTokenBudget）：正整数或 "30%" 百分比串。 */
+  /** M 原始配置（agentReadTokenBudget）：正整数或 "20%" 百分比串。 */
   readTokenBudget: number | string;
   /** F 原始配置（agentReadFallbackTokens）。 */
   fallbackTokens: number;
 }
 
 export interface AgentReadBudgetResolution_ACU {
-  /** M：有效累计读取预算。 */
+  /** M：有效单批次读取上限。 */
   effectiveMaxReadTokens: number;
   /** F：有效精读兜底额度 = min(配置值, M)。 */
   effectiveFallbackTokens: number;
@@ -57,7 +56,7 @@ export interface AgentReadBudgetResolution_ACU {
 }
 
 /**
- * 解析 read/search 累计预算（沿用奶龙code parseMaxReadConfig / resolveFileReadTokenBudget 语义）。
+ * 解析 read/search 单批次上限。
  * 百分比按 S 折算；S 不限（<=0）时按默认历史预算折算，保证百分比配置永远可解析。
  * @param config 三项预算设置
  * @returns 有效 M / F 与解析依据
@@ -77,15 +76,15 @@ export function resolveAgentReadBudget_ACU(config: AgentReadGateConfig_ACU): Age
     }
   }
   if (!Number.isFinite(effectiveMaxReadTokens) || effectiveMaxReadTokens < 1) {
-    // 损坏配置回退默认 30%，与设置校验层的默认一致。
-    effectiveMaxReadTokens = Math.floor(percentBase * 0.3);
+    // 损坏配置回退默认 20%，与设置校验层的默认一致。
+    effectiveMaxReadTokens = Math.floor(percentBase * 0.2);
     basis = 'history-budget-percent';
   }
   const configuredFallback = Number.isFinite(config.fallbackTokens) && config.fallbackTokens >= 1 ? Math.floor(config.fallbackTokens) : 6000;
   return { effectiveMaxReadTokens, effectiveFallbackTokens: Math.min(configuredFallback, effectiveMaxReadTokens), basis };
 }
 
-export type AgentReadGateRejectReason_ACU = 'read-budget-exceeded' | 'near-compaction-overflow';
+export type AgentReadGateRejectReason_ACU = 'read-batch-too-large' | 'near-compaction-overflow';
 
 export interface AgentReadGateDecision_ACU {
   allowed: boolean;
@@ -109,16 +108,16 @@ function buildRejectionReport_ACU(
   contextTokens: number,
 ): string {
   const itemLines = items.map((item, index) => `- ${item.label}：实测 ${itemTokens[index]} tokens`);
-  const remainingRead = Math.max(0, budget.effectiveMaxReadTokens - state.grantedTokens);
   const lines: string[] = ['【读取被门禁打回：内容未注入，不要原样重试】'];
-  if (reason === 'read-budget-exceeded') {
-    lines.push(`原因：本次运行的 read/search 累计预算即将耗尽。已用 ${state.grantedTokens} tokens，本批次需要 ${batchTokens} tokens，预算上限 ${budget.effectiveMaxReadTokens} tokens（剩余额度 ${remainingRead} tokens）。`);
+  if (reason === 'read-batch-too-large') {
+    lines.push(`原因：本次 read/search 工具批次需要 ${batchTokens} tokens，超过单批次上限 ${budget.effectiveMaxReadTokens} tokens。该上限不跨批次累计；缩小本批内容后可在下一轮继续读取。`);
   } else {
     const headroom = Math.max(0, historyTokenBudget - contextTokens);
-    lines.push(`原因：上下文临近压缩阈值。当前上下文实测 ${contextTokens} tokens，压缩阈值 ${historyTokenBudget} tokens（阈值前余量 ${headroom} tokens）；本批次 ${batchTokens} tokens 超过精读兜底额度 ${budget.effectiveFallbackTokens} tokens——临近阈值时只放行该额度内的小读取。`);
+    lines.push(`原因：上下文临近总结阈值。当前上下文实测 ${contextTokens} tokens，总结阈值 ${historyTokenBudget} tokens（阈值前余量 ${headroom} tokens）；本批次 ${batchTokens} tokens 大于精读兜底额度 ${budget.effectiveFallbackTokens} tokens。请持续缩小读取范围，直到单批次不超过 ${budget.effectiveFallbackTokens} tokens；届时会放行并由总结机制处理超长上下文。`);
   }
   lines.push('本批次各目标的实测大小：', ...itemLines);
-  lines.push(`修正协议：先用 search 定位相关剧情，再用更小的目标重试——正文改用更窄的 $STORY_RANGE 区间，表格改按 $TABLE:表名:起始行-结束行 分段读，模块改按 ID 精读（如 $HOOKS_LEDGER:H001），让下一次请求落在剩余额度（${Math.min(remainingRead, reason === 'near-compaction-overflow' ? budget.effectiveFallbackTokens : remainingRead)} tokens）内。`);
+  const nextLimit = reason === 'near-compaction-overflow' ? budget.effectiveFallbackTokens : budget.effectiveMaxReadTokens;
+  lines.push(`修正协议：先用 search 定位相关剧情，再用更小的目标重试——正文改用更窄的 $STORY_RANGE 区间，表格改按 $TABLE:表名:起始行-结束行 分段读，模块改按 ID 精读（如 $HOOKS_LEDGER:H001），让下一次请求落在 ${nextLimit} tokens 内。`);
   return lines.join('\n');
 }
 
@@ -131,7 +130,7 @@ function buildRejectionReport_ACU(
  * @param items 待注入材料
  * @param state 运行内累计状态（P）
  * @param config 预算设置
- * @param contextTokens H：本批次注入前的完整上下文实测；<=0 表示不可用（跳过 S 判定）
+ * @param contextTokens H：本批次注入前的完整上下文实测；临近总结阈值时只放行 F 以内的精读
  * @param count token 统计函数，缺省 countAgentTokens_ACU
  * @returns 判定结果；拒绝时 report 为可直接回灌的打回报告
  */
@@ -155,11 +154,12 @@ export async function gateAgentReadBatch_ACU(
     report: buildRejectionReport_ACU(reason, items, itemTokens, batchTokens, state, budget, config.historyTokenBudget, contextTokens),
   });
 
-  // T = P + B > M：读取累计预算耗尽。跨动作累计，同批拆开发也一样会被拦。
-  if (state.grantedTokens + batchTokens > budget.effectiveMaxReadTokens) return decide('read-budget-exceeded');
-  // H + B > S：临近压缩阈值。B <= F 表示已经精细到最小读取，放行（随后交给压缩机制）；否则打回。
-  if (config.historyTokenBudget > 0 && contextTokens > 0 && contextTokens + batchTokens > config.historyTokenBudget) {
-    if (batchTokens > budget.effectiveFallbackTokens) return decide('near-compaction-overflow');
+  // 每个工具批次独立判定：不存在跨批次累计额度。
+  if (batchTokens > budget.effectiveMaxReadTokens) return decide('read-batch-too-large');
+  if (config.historyTokenBudget > 0 && contextTokens > 0 && contextTokens + batchTokens > config.historyTokenBudget
+    && batchTokens > budget.effectiveFallbackTokens) {
+    return decide('near-compaction-overflow');
   }
+  void state;
   return { allowed: true, batchTokens, itemTokens, report: '' };
 }

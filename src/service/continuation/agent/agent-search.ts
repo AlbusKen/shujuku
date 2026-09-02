@@ -1,8 +1,9 @@
 /**
  * service/continuation/agent/agent-search.ts — 五域 grep 式搜索工具
  *
- * 搜索域即资料域：story（窗口内 AI 正文）、tables（全部表格行）、modules（伏笔/信息差/约束，
- * 含退休条目）、outline（当前修订的大纲文本）、worldbook（已启用条目全文）。
+ * 搜索域即资料域：story（窗口内 AI 正文）、tables（全部表格行）、modules（伏笔/信息差/约束/
+ * 总纲/年代学/百科资料库，含退休条目）、outline（当前修订的大纲文本）、worldbook（已启用条目全文）。
+ * 互联网检索不在此列——那是 web-researcher 专用的出网工具，见 agent-web-client.ts。
  *
  * 核心原则「地址即读法」：每条命中都附带可直接复制进 read 的读取地址。
  * 三层护栏（照抄奶龙code search_in_files 思路）：单行居中截断、maxResults 条数上限、
@@ -147,6 +148,11 @@ function collectModuleLines_ACU(context: AgentResolveContext_ACU): AgentSearchLi
       address: `$ACTIVE_CONSTRAINTS:${constraint.id}`,
       text: [constraint.text, constraint.reason].filter(Boolean).join('｜'),
     });
+  }
+  for (const entry of snapshot.webRefs) {
+    const head = `百科资料库 [${entry.id}]${entry.retired ? '（已退休）' : ''}`;
+    const address = `$WEB_REFS:${entry.id}`;
+    lines.push({ label: `${head}（名称/简介/标签/详情）`, address, text: [entry.title, entry.brief, ...entry.tags, entry.summary].filter(Boolean).join('｜') });
   }
   for (const entry of snapshot.chronology) {
     lines.push({

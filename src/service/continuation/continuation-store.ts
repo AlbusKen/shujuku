@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, buildDefaultContinuationWebResearchSettings_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
 import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, AGENT_PROMPT_DEFAULT_LINEAGE_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, findAgentPromptSlot_ACU, hashAgentPromptContent_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU, type AgentPromptSlotKey_ACU } from './agent/agent-defaults';
 import {
@@ -11,7 +11,7 @@ import {
   AGENT_STORY_WINDOW_DEFAULT_ACU,
   DEFAULT_AGENT_RUN_BUDGET_ACU,
 } from './agent/agent-model';
-import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, CONTINUATION_AGENT_PROMPT_KEYS_ACU } from './model';
+import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, CONTINUATION_AGENT_PROMPT_KEYS_ACU, CONTINUATION_WEB_SEARCH_PROVIDERS_ACU } from './model';
 import { resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
 import { validateContinuationPromptSegments_ACU } from './prompt-template';
 import {
@@ -113,6 +113,7 @@ function validateAgentPrompts_ACU(raw: unknown): ContinuationSettings_ACU['agent
     beatPlanner: validateContinuationPromptSegments_ACU(raw.beatPlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     finalReviewer: validateContinuationPromptSegments_ACU(raw.finalReviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
+    webResearcher: validateContinuationPromptSegments_ACU(raw.webResearcher, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
   };
 }
 
@@ -580,7 +581,7 @@ function validateAgentApiPresets_ACU(raw: unknown): ContinuationSettings_ACU['ag
 }
 
 /**
- * 校验 read/search 累计预算配置。接受正整数（固定 token 数）或 "1%"-"100%" 百分比串
+ * 校验 read/search 单批次上限配置。接受正整数（固定 token 数）或 "1%"-"100%" 百分比串
  * （按 agentHistoryTokenBudget 折算）；非法值直接拒绝而不是静默回退，与信封其余字段同构。
  */
 function validateReadTokenBudget_ACU(raw: unknown): number | string {
@@ -595,6 +596,37 @@ function validateReadTokenBudget_ACU(raw: unknown): number | string {
     if (Number.isInteger(numeric) && numeric >= 1) return numeric;
   }
   fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
+}
+
+function validateWebResearchSettings_ACU(raw: unknown): ContinuationSettings_ACU['webResearch'] {
+  if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch 必须是对象');
+  requireKeys_ACU(raw, ['enabled', 'sources', 'searchProvider', 'searxngBaseUrl', 'maxToolRounds', 'maxPages', 'pageCharLimit', 'blockedDomains'], 'settings.webResearch');
+  if (!isRecord_ACU(raw.sources)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch.sources 必须是对象');
+  requireKeys_ACU(raw.sources, ['moegirl', 'wikipediaZh', 'wikipediaEn', 'baidu'], 'settings.webResearch.sources');
+  if (!(CONTINUATION_WEB_SEARCH_PROVIDERS_ACU as readonly string[]).includes(raw.searchProvider as string)) {
+    fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch.searchProvider 非法');
+  }
+  const bounded = (value: unknown, path: string, minimum: number, maximum: number): number => {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
+      fail_ACU('CONTINUATION_ENVELOPE_INVALID', `字段必须是 ${minimum} 到 ${maximum} 之间的整数：${path}`, { path });
+    }
+    return value;
+  };
+  return {
+    enabled: requireBoolean_ACU(raw.enabled, 'settings.webResearch.enabled'),
+    sources: {
+      moegirl: requireBoolean_ACU(raw.sources.moegirl, 'settings.webResearch.sources.moegirl'),
+      wikipediaZh: requireBoolean_ACU(raw.sources.wikipediaZh, 'settings.webResearch.sources.wikipediaZh'),
+      wikipediaEn: requireBoolean_ACU(raw.sources.wikipediaEn, 'settings.webResearch.sources.wikipediaEn'),
+      baidu: requireBoolean_ACU(raw.sources.baidu, 'settings.webResearch.sources.baidu'),
+    },
+    searchProvider: raw.searchProvider as ContinuationSettings_ACU['webResearch']['searchProvider'],
+    searxngBaseUrl: requireString_ACU(raw.searxngBaseUrl, 'settings.webResearch.searxngBaseUrl'),
+    maxToolRounds: bounded(raw.maxToolRounds, 'settings.webResearch.maxToolRounds', 1, 20),
+    maxPages: bounded(raw.maxPages, 'settings.webResearch.maxPages', 1, 30),
+    pageCharLimit: bounded(raw.pageCharLimit, 'settings.webResearch.pageCharLimit', 500, 20000),
+    blockedDomains: requireString_ACU(raw.blockedDomains, 'settings.webResearch.blockedDomains'),
+  };
 }
 
 function validateFinalReviewSettings_ACU(raw: unknown): ContinuationSettings_ACU['finalReview'] {
@@ -649,6 +681,11 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (isRecord_ACU(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
     raw.agentPrompts.finalReviewer = buildDefaultContinuationAgentPrompts_ACU().finalReviewer;
   }
+  // 网页检索子代理晚于其余提示词组加入；存量信封缺键即补默认，不必整组重刷。
+  if (isRecord_ACU(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
+    raw.agentPrompts.webResearcher = buildDefaultContinuationAgentPrompts_ACU().webResearcher;
+  }
+  if (!Object.prototype.hasOwnProperty.call(raw, 'webResearch')) raw.webResearch = buildDefaultContinuationWebResearchSettings_ACU();
   // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets')) raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
   // 主 Agent 会话改造之前的信封没有这两项；补默认即无感迁移，不必让用户重建配置。
@@ -679,7 +716,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   // 总纲卷数与阶段轮次是两条独立的尺度。旧信封没有卷数计划时默认采用中线档。
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyArcVolumePlan')) raw.storyArcVolumePlan = 'medium';
   if (!Object.prototype.hasOwnProperty.call(raw, 'customStoryArcVolumeCount')) raw.customStoryArcVolumeCount = null;
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'webResearch', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -779,6 +816,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
     storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
     finalReview: validateFinalReviewSettings_ACU(raw.finalReview),
+    webResearch: validateWebResearchSettings_ACU(raw.webResearch),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
     agentRunBudget: validateAgentRunBudget_ACU(raw.agentRunBudget),
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),

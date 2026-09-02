@@ -19,6 +19,7 @@ import {
   AGENT_STORY_ARC_SCOPES_ACU,
   AGENT_STORY_ARC_STATUSES_ACU,
   AGENT_VOLUME_NARRATIVE_ROLES_ACU,
+  AGENT_WEB_TOOL_ACTIONS_ACU,
   type AgentChronologyDeltaItem_ACU,
   type AgentDelegation_ACU,
   type AgentFinalReviewerOutput_ACU,
@@ -35,6 +36,8 @@ import {
   type AgentStoryArcDeltaItem_ACU,
   type AgentStoryArcPatch_ACU,
   type AgentToolCall_ACU,
+  type AgentWebRefSource_ACU,
+  type AgentWebToolCall_ACU,
 } from './agent-model';
 
 function failProtocol_ACU(reason: string, details?: Record<string, unknown>): never {
@@ -322,6 +325,167 @@ export function parseAgentSubagentToolCalls_ACU(raw: string | null | undefined, 
     if (records.length) return null;
   }
   return null;
+}
+
+const ENCYCLOPEDIA_SOURCE_ALIASES_ACU: Record<string, Exclude<AgentWebRefSource_ACU, 'web'>> = {
+  moegirl: 'moegirl', 萌娘百科: 'moegirl', 萌娘: 'moegirl', moe: 'moegirl',
+  wikipedia_zh: 'wikipedia_zh', wikipedia: 'wikipedia_zh', zhwiki: 'wikipedia_zh', 维基百科: 'wikipedia_zh', 中文维基: 'wikipedia_zh', 维基: 'wikipedia_zh',
+  wikipedia_en: 'wikipedia_en', enwiki: 'wikipedia_en', 英文维基: 'wikipedia_en',
+  baidu: 'baidu', baike: 'baidu', 百度百科: 'baidu', 百度: 'baidu',
+};
+
+function parseEncyclopediaSource_ACU(value: unknown, path: string): Exclude<AgentWebRefSource_ACU, 'web'> {
+  const raw = readText_ACU(value);
+  const source = ENCYCLOPEDIA_SOURCE_ALIASES_ACU[raw] ?? ENCYCLOPEDIA_SOURCE_ALIASES_ACU[raw.toLowerCase()];
+  if (!source) failProtocol_ACU(`${path} 必须是 moegirl / wikipedia_zh / wikipedia_en / baidu 之一，实际收到：${raw || '(空)'}`);
+  return source;
+}
+
+/**
+ * 把一个 JSON 载荷解析成 web-researcher 的出网工具调用。
+ * @param payload 已解析且 action 为四种出网动作之一的载荷
+ */
+export function parseAgentWebToolCall_ACU(payload: Record<string, unknown>): AgentWebToolCall_ACU {
+  const action = readText_ACU(payload.action);
+  if (action === 'encyclopedia_search') {
+    const query = readText_ACU(payload.query);
+    if (!query) failProtocol_ACU('encyclopedia_search 必须提供非空 query');
+    const rawSources = payload.sources === undefined || payload.sources === null ? [] : (Array.isArray(payload.sources) ? payload.sources : [payload.sources]);
+    const sources = [...new Set(rawSources.map((item, index) => parseEncyclopediaSource_ACU(item, `encyclopedia_search.sources[${index}]`)))];
+    return { kind: 'encyclopedia_search', query, sources };
+  }
+  if (action === 'encyclopedia_read') {
+    const title = readText_ACU(payload.title);
+    if (!title) failProtocol_ACU('encyclopedia_read 必须提供非空 title（词条标题，从 encyclopedia_search 的候选里复制）');
+    return { kind: 'encyclopedia_read', source: parseEncyclopediaSource_ACU(payload.source, 'encyclopedia_read.source'), title };
+  }
+  if (action === 'web_search') {
+    const query = readText_ACU(payload.query);
+    if (!query) failProtocol_ACU('web_search 必须提供非空 query');
+    return { kind: 'web_search', query };
+  }
+  if (action === 'web_read') {
+    const url = readText_ACU(payload.url);
+    if (!url) failProtocol_ACU('web_read 必须提供非空 url');
+    return { kind: 'web_read', url };
+  }
+  failProtocol_ACU(`出网工具动作必须是 ${AGENT_WEB_TOOL_ACTIONS_ACU.join(' / ')}，实际收到：${action || '(空)'}`);
+}
+
+function isWebToolAction_ACU(action: string): boolean {
+  return (AGENT_WEB_TOOL_ACTIONS_ACU as readonly string[]).includes(action);
+}
+
+/**
+ * 从 web-researcher 输出里提取工具并发批次：本地 read/search 与四种出网工具混排。
+ * @returns 工具调用列表；输出里没有任何工具对象时返回 null（应按契约解析）
+ */
+export function parseAgentResearcherToolCalls_ACU(raw: string | null | undefined, prefill: string): Array<AgentToolCall_ACU | AgentWebToolCall_ACU> | null {
+  const text = normalizeModelText_ACU(raw);
+  if (!text.trim()) return null;
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  for (const candidate of candidates) {
+    const records = parseObjectsFrom_ACU(candidate);
+    const toolRecords = records.filter(parsed => {
+      const action = readText_ACU(parsed.action);
+      return action === 'read' || action === 'search' || isWebToolAction_ACU(action);
+    });
+    if (toolRecords.length) {
+      return toolRecords.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(record => (
+        isWebToolAction_ACU(readText_ACU(record.action)) ? parseAgentWebToolCall_ACU(record) : parseAgentToolCall_ACU(record)
+      ));
+    }
+    if (records.length) return null;
+  }
+  return null;
+}
+
+/**
+ * 提取 web-researcher 为已读网页写下的精炼工作笔记。网页正文不进子代理历史；
+ * 下一次工具动作须把从上一批网页获得的事实写入 notes，运行时仅保留这部分。
+ */
+export function parseAgentResearcherWorkingNotes_ACU(raw: string | null | undefined, prefill: string): string[] {
+  const text = normalizeModelText_ACU(raw);
+  if (!text.trim()) return [];
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  for (const candidate of candidates) {
+    const records = parseObjectsFrom_ACU(candidate);
+    const notes: string[] = [];
+    for (const record of records) {
+      const action = readText_ACU(record.action);
+      if (!action || (!isWebToolAction_ACU(action) && action !== 'read' && action !== 'search')) continue;
+      const rawNotes = record.notes ?? record.workingNotes;
+      const items = Array.isArray(rawNotes) ? rawNotes : [rawNotes];
+      for (const item of items) {
+        const note = readText_ACU(item);
+        if (note) notes.push(note.length > 800 ? `${note.slice(0, 800)}…` : note);
+      }
+    }
+    if (notes.length || records.length) return [...new Set(notes)].slice(0, 12);
+  }
+  return [];
+}
+
+/** web-researcher 契约里的单条写集（pageRef 尚未回填）。 */
+export interface AgentResearcherDraftItem_ACU {
+  action: 'upsert' | 'retire';
+  id: string;
+  pageRef: string;
+  title: string;
+  tags: string[];
+  brief: string;
+  summary: string;
+  reason: string;
+}
+
+export interface AgentResearcherDraft_ACU {
+  summary: string;
+  expectedRevision: number | undefined;
+  items: AgentResearcherDraftItem_ACU[];
+}
+
+/**
+ * 解析 web-researcher 的契约输出（回填前）。每条资料以一个实体分份，固定字段只有
+ * name（名称）与 brief（一句话简介）；detail 自由发挥。upsert 必须带 pageRef、name、brief；
+ * retire 必须带 id 与 reason。
+ * @param payload 已解析的 JSON 载荷
+ */
+export function parseAgentResearcherOutput_ACU(payload: Record<string, unknown>): AgentResearcherDraft_ACU {
+  const rawDelta = isRecord_ACU(payload.delta) ? payload.delta : payload;
+  const list = rawDelta.webRefs ?? rawDelta.entries ?? rawDelta.items;
+  if (list === undefined || list === null) {
+    return { summary: readText_ACU(payload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions), items: [] };
+  }
+  if (!Array.isArray(list)) failProtocol_ACU('delta.webRefs 必须是数组');
+  const items = list.map((raw, index): AgentResearcherDraftItem_ACU => {
+    if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.webRefs[${index}] 必须是对象`);
+    const actionText = readText_ACU(raw.action) || 'upsert';
+    if (actionText !== 'upsert' && actionText !== 'retire') failProtocol_ACU(`delta.webRefs[${index}].action 必须是 upsert / retire`);
+    const action = actionText as 'upsert' | 'retire';
+    const id = readText_ACU(raw.id);
+    if (action === 'retire') {
+      if (!id) failProtocol_ACU(`delta.webRefs[${index}] retire 需要 id`);
+      return { action, id, pageRef: '', title: '', tags: [], brief: '', summary: '', reason: readText_ACU(raw.reason) };
+    }
+    const pageRef = readText_ACU(raw.pageRef ?? raw.page ?? raw.ref);
+    if (!pageRef) failProtocol_ACU(`delta.webRefs[${index}] upsert 必须带 pageRef（工具结果里的页面句柄，如 P1）；不允许手写 url 或原文`);
+    const title = readText_ACU(raw.name ?? raw.title);
+    if (!title) failProtocol_ACU(`delta.webRefs[${index}]（pageRef=${pageRef}）的 name 不能为空：写这条资料对应的实体名称（角色 / 物品 / 法术 / 事件…）`);
+    const brief = readText_ACU(raw.brief ?? raw.intro ?? raw.oneLine);
+    if (!brief) failProtocol_ACU(`delta.webRefs[${index}]「${title}」的 brief 不能为空：一句话说清它是什么`);
+    const detailRaw = raw.detail ?? raw.summary ?? raw.body;
+    const summary = typeof detailRaw === 'string' ? detailRaw.trim() : (detailRaw && typeof detailRaw === 'object' ? JSON.stringify(detailRaw, null, 1) : '');
+    return { action, id, pageRef, title, tags: readTextList_ACU(raw.tags), brief, summary, reason: '' };
+  });
+  return { summary: readText_ACU(payload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions), items };
+}
+
+function parseWebRefsExpectedRevision_ACU(value: unknown): number | undefined {
+  if (!isRecord_ACU(value)) return undefined;
+  const raw = value.webRefs;
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
 }
 
 /**
@@ -671,7 +835,7 @@ function parseChronologyItems_ACU(value: unknown, rejected?: RejectionSink_ACU):
 function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expectedRevisions'] {
   if (!isRecord_ACU(value)) return {};
   const result: AgentModuleDelta_ACU['expectedRevisions'] = {};
-  for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology'] as const) {
+  for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs'] as const) {
     const raw = value[key];
     if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0) result[key] = raw;
   }

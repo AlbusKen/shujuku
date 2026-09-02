@@ -31,7 +31,7 @@ import { AGENT_PREFILLS_ACU, AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent
 import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
 import { AGENT_FINAL_REVIEW_STATUSES_ACU, clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU, type AgentFinalReviewResumeState_ACU } from './agent-run-cache';
 import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
-import { findUnregisteredStageNumbers_ACU, hasActiveStoryArc_ACU, hasActiveStoryArcVolume_ACU, readAgentModuleSnapshot_ACU, renderAgentConstraints_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
+import { findUnregisteredStageNumbers_ACU, hasActiveStoryArc_ACU, hasActiveStoryArcVolume_ACU, readAgentModuleSnapshot_ACU, renderAgentConstraints_ACU, renderAgentWebRefsCatalog_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
 import {
   appendAgentConversation_ACU,
   appendPreparedAgentConversationMessages_ACU,
@@ -53,7 +53,7 @@ import {
 import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
-import { applyAgentConstraintRegistration_ACU, applyAgentModuleDelta_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
+import { applyAgentConstraintRegistration_ACU, applyAgentModuleDelta_ACU, applyAgentWebRefsDelta_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
 import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU } from './agent-protocol';
 import {
   buildAgentWorldbookScanText_ACU,
@@ -84,6 +84,7 @@ import { trackAgentPromptDrift_ACU } from './agent-prompt-drift';
 import {
   AGENT_HISTORY_EMERGENCY_FACTOR_ACU,
   AGENT_OUTLINE_AGENT_NAME_ACU,
+  AGENT_WEB_RESEARCHER_NAME_ACU,
   DEFAULT_AGENT_RUN_BUDGET_ACU,
   type AgentConversationAppend_ACU,
   type AgentConversationSnapshot_ACU,
@@ -281,7 +282,7 @@ export function buildAgentTurnAnnouncement_ACU(context: AgentResolveContext_ACU)
  * @param iteration 当前迭代序号，从 1 开始
  * @param ledger 运行账本
  * @param waveLimit 本轮实际可用的同波次并发上限
- * @param tool 可选的 read/search 用量（批次数、已放行 token、累计预算 M）
+ * @param tool 可选的 read/search 用量（批次数、累计遥测、单批次上限 M）
  * @returns 自然语言文本；进入最后一轮时明确禁止继续派工
  */
 export function renderAgentBudget_ACU(
@@ -300,8 +301,8 @@ export function renderAgentBudget_ACU(
     `并发上限：同一波次最多 ${waveLimit} 个子代理`,
   ];
   if (tool) {
-    lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次，累计放行约 ${tool.grantedTokens} / ${tool.maxReadTokens} tokens`);
-    lines.push('读取预算分配建议：大头留给世界书设定与正文回溯（各约 1/3），剩余用于表格与账本核对。世界书目录与命中提示里每条都标注了 token 开销，按需取用；预算就是给你花的，宁可多读一条设定，也不要闭眼编设定。');
+    lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次；单批次上限约 ${tool.maxReadTokens} tokens（本次累计已读取约 ${tool.grantedTokens} tokens，仅作遥测，不扣减后续批次额度）`);
+    lines.push('单批次读取过大时，先用 search 定位、再缩小到正文楼层区间、表格行区间或模块 ID；不同批次不共享 token 额度。临近总结阈值时，只有不超过精读兜底额度的小批次会被放行，随后由总结机制处理。世界书目录与命中提示里每条都标注了 token 估算，按本轮需求精读。');
   }
   if (lifecycle?.convergenceOnly) {
     lines.push('CONVERGENCE_ONLY：必要的大纲维护已完成，本次只允许输出 finalize 或 block；不得继续派工。');
@@ -336,6 +337,25 @@ export function renderAgentToolResults_ACU(outcomes: readonly AgentDelegationOut
 /** 参与波次并发判定的四个派工子代理渠道角色。 */
 const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
 
+/** 参与波次并发判定的子代理渠道角色：网页检索未启用时不派它，其渠道也就不该拖累并发。 */
+function subagentPresetRoles_ACU(settings: ContinuationSettings_ACU): ReadonlyArray<typeof SUBAGENT_PRESET_ROLES_ACU[number] | 'webResearcher'> {
+  return settings.webResearch?.enabled ? [...SUBAGENT_PRESET_ROLES_ACU, 'webResearcher'] : SUBAGENT_PRESET_ROLES_ACU;
+}
+
+/**
+ * 开场检索的派工文案：只在任务刚创建、资料库为空时由运行时自动发起。
+ * 检索清单的来源（用户初始要求、世界书目录、角色表）已固定注入子代理提示词，这里只交代范围与边界。
+ */
+function buildOpeningResearchPrompt_ACU(originInstruction: string): string {
+  return [
+    '开场检索：这是一个新续写任务的第一次规划，百科资料库还是空的。',
+    '请从用户初始要求、世界书目录、角色表与最近正文里识别这个故事依托的原作与已登场的原作实体（人物、组织、地点、能力、术语），按对开篇写作的重要度排序，优先把主角、核心配角、核心设定与世界规则查清并入库。',
+    '只登记原作/公开设定常识，不把本故事正文写成原作事实；世界书已详细覆盖的条目不必重复查。',
+    '查不到的实体在 summary 里如实列出，不要硬凑。',
+    originInstruction ? `用户初始要求原文：${originInstruction}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 /**
  * 计算同波次实际可用的并发上限。
  * @param settings 续写设置
@@ -344,7 +364,7 @@ const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner
  *          因为主 API 的归因机制不支持并发内部请求
  */
 function resolveWaveLimit_ACU(settings: ContinuationSettings_ACU, budget: AgentRunBudget_ACU): number {
-  const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
+  const hasCurrentChannel = subagentPresetRoles_ACU(settings).some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
   return hasCurrentChannel ? 1 : Math.max(1, budget.maxConcurrent);
 }
 
@@ -597,6 +617,13 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
 
     try {
+      // 开场检索：新任务第一次规划、资料库为空时，先把原作设定查进百科资料库再让主 Agent 开跑。
+      // 受控入口，不消耗主 Agent 的派工额度；失败只记结果不掐断规划。
+      if (this.shouldRunOpeningResearch_ACU(request, context, resumedState !== null)) {
+        const outcomesBefore = ledger.outcomes.length;
+        snapshot = await this.runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, apiDependencies);
+        await commitOutcomes(outcomesBefore);
+      }
       // 工具批次（read/search）不消耗决策迭代：读资料是正常成本，不该挤压派工与交付的空间。
       // totalCalls 是防死循环的硬上限——模型反复发工具批次时由 maxReads 与它双重兜底。
       const totalCallLimit = budget.maxIterations + budget.maxReads + 4;
@@ -699,15 +726,12 @@ export class ContinuationAgentTurnPlanner_ACU {
                   ].filter(Boolean).join('\n'),
                 ),
               };
-              const initialWorldbookEntryIds = review.evidence.fixedReadKeys
-                .filter(key => key.startsWith('$WORLDBOOK:'))
-                .map(key => key.slice('$WORLDBOOK:'.length));
               const supplementalSearches = review.expandedReads.filter(label => label.startsWith('search ')).length;
               const supplementalReads = review.expandedReads.length - supplementalSearches;
               logAgentSession_ACU({
                 kind: 'thought',
                 title: `迭代 ${iteration} · 发送前终审遥测`,
-                detail: [`判词：${output.verdict}`, `初始世界书命中：${initialWorldbookEntryIds.length}${initialWorldbookEntryIds.length ? ` 条（${initialWorldbookEntryIds.join('、')}）` : ' 条'}`, `补充调阅：read ${supplementalReads} 次，search ${supplementalSearches} 次`, `独立读取：${review.readTokens} tokens`, `工具轮：${review.toolRounds}`, `模型用量：${review.usage ? formatAgentUsageLabel_ACU(review.usage) : '未报告'}`].join('\n'),
+                detail: [`判词：${output.verdict}`, '初始世界书：仅目录与命中预览，不自动精读全文', `补充调阅：read ${supplementalReads} 次，search ${supplementalSearches} 次`, `独立读取：${review.readTokens} tokens`, `工具轮：${review.toolRounds}`, `模型用量：${review.usage ? formatAgentUsageLabel_ACU(review.usage) : '未报告'}`].join('\n'),
               });
             } catch (error) {
               if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
@@ -1079,8 +1103,12 @@ export class ContinuationAgentTurnPlanner_ACU {
       $UNSETTLED_RANGE: () => this.renderUnsettledRange_ACU(context),
       $STORY_ARC_STATE: () => this.renderStoryArcState_ACU(context),
       $CURRENT_TURN_PACING: () => renderAgentTurnGuidance_ACU(context.execution.turn ?? null),
-      $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU(),
-      $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU(),
+      $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU({ webResearchEnabled: request.settings.webResearch.enabled }),
+      $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU({
+        webResearchEnabled: request.settings.webResearch.enabled,
+        webRefsPresent: context.moduleSnapshot.webRefs.some(entry => !entry.retired),
+      }),
+      $WEB_REFS_CATALOG: () => renderAgentWebRefsCatalog_ACU(context.moduleSnapshot, request.settings.webResearch.enabled),
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
       $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(context.tableData),
       $BUDGET: () => renderAgentBudget_ACU(budget, iteration, ledger, resolveWaveLimit_ACU(request.settings, budget), {
@@ -1278,6 +1306,98 @@ export class ContinuationAgentTurnPlanner_ACU {
     return result;
   }
 
+  /**
+   * 开场检索的触发条件：功能开启、任务尚无任何阶段（第一次规划）、资料库没有活跃条目，
+   * 且不是中断恢复（恢复运行的证据已在会话里，重跑只会白烧一次）。
+   */
+  private shouldRunOpeningResearch_ACU(request: ContinuationAgentTurnPlanRequest_ACU, context: AgentResolveContext_ACU, resumed: boolean): boolean {
+    if (!request.settings.webResearch.enabled || resumed) return false;
+    if (context.execution.task.stages.length > 0) return false;
+    return !context.moduleSnapshot.webRefs.some(entry => !entry.retired);
+  }
+
+  /**
+   * 受控地跑一次 web-researcher 并把结果写进资料快照。与普通派工的区别：不占派工额度、
+   * 不受波次并发限制、失败不抛——开场检索是锦上添花，网络不通不该让整轮规划失败。
+   */
+  private async runOpeningResearch_ACU(
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
+    ledger: AgentRunLedger_ACU,
+    budget: AgentRunBudget_ACU,
+    chat: any[],
+    snapshot: AgentModuleSnapshot_ACU,
+    apiDependencies?: ContinuationApiPresetDependencies_ACU,
+  ): Promise<AgentModuleSnapshot_ACU> {
+    const delegation: AgentDelegation_ACU = { agentName: AGENT_WEB_RESEARCHER_NAME_ACU, prompt: buildOpeningResearchPrompt_ACU(context.originInstruction), reads: [] };
+    const entryId = logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: '开场百科检索执行中', detail: delegation.prompt, status: 'running' });
+    try {
+      const preset = this.dependencies.resolveApiPreset(request.settings, 'webResearcher', 'agent_delegate', apiDependencies);
+      const result = await this.dependencies.subagentRuntime.run({
+        delegation,
+        settings: request.settings,
+        resolveContext: context,
+        budget,
+        preset,
+        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+        isCurrent: identity => request.isInternalRequestCurrent(identity),
+        signal: request.signal,
+      });
+      const settled = this.settleResearcherResult_ACU(result, snapshot);
+      ledger.outcomes.push(settled.outcome);
+      updateAgentSession_ACU(entryId, {
+        title: `开场百科检索${settled.outcome.ok ? '完成' : '未采用'}${result.usage ? ` · ${formatAgentUsageLabel_ACU(result.usage)}` : ''}`,
+        detail: settled.outcome.ok ? [settled.outcome.summary, settled.outcome.detail].filter(Boolean).join('\n') : settled.outcome.rejectedReason,
+        ok: settled.outcome.ok,
+      });
+      if (settled.snapshot !== snapshot) {
+        context.moduleSnapshot = settled.snapshot;
+        await this.persistSnapshot_ACU(chat, settled.snapshot);
+      }
+      return settled.snapshot;
+    } catch (error) {
+      if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
+      const reason = compactAgentProtocolError_ACU(error);
+      updateAgentSession_ACU(entryId, { title: '开场百科检索失败', detail: `${reason}\n主 Agent 将在没有百科资料库的情况下继续规划；需要时它仍可派工 web-researcher 重试。`, ok: false });
+      ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `开场百科检索失败：${reason}` });
+      return snapshot;
+    }
+  }
+
+  /**
+   * 把 web-researcher 的输出落到快照：pageRef 已由子代理运行时回填，这里只做事务校验与修订号并发校验。
+   * 不推进结算水位。
+   */
+  private settleResearcherResult_ACU(result: AgentSubagentRunResult_ACU, snapshot: AgentModuleSnapshot_ACU): { snapshot: AgentModuleSnapshot_ACU; outcome: AgentDelegationOutcome_ACU } {
+    const researcher = result.researcher;
+    if (!researcher) {
+      return { snapshot, outcome: { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '网页检索子代理没有返回可用输出' } };
+    }
+    try {
+      const expected = researcher.expectedRevision ?? result.readRevisions.webRefs;
+      const applied = applyAgentWebRefsDelta_ACU(snapshot, researcher, expected);
+      const upserts = researcher.items.filter(item => item.action === 'upsert');
+      const retires = researcher.items.filter(item => item.action === 'retire');
+      const catalog = upserts.map(item => `[${item.id || '新'}]「${item.title}」${item.brief}`).join('；');
+      return {
+        snapshot: applied,
+        outcome: {
+          agentName: result.agentName,
+          ok: true,
+          summary: researcher.summary || `百科资料库更新 ${upserts.length} 条`,
+          detail: [
+            `百科资料库：新增/更新 ${upserts.length} 条${retires.length ? `、退休 ${retires.length} 条` : ''}${catalog ? `：${catalog}` : ''}`,
+            upserts.length ? '以上只是预览；详情与原文用 read $WEB_REFS:ID 精读，派工时也可把该地址写进 reads。它们是原作/公开设定的外部参考，不是本故事事实。' : '',
+            result.expandedReads.length ? `检索轨迹：${result.expandedReads.slice(0, 12).join('、')}${result.expandedReads.length > 12 ? '…' : ''}` : '',
+          ].filter(Boolean).join('\n'),
+          rejectedReason: '',
+        },
+      };
+    } catch (error) {
+      return { snapshot, outcome: { agentName: result.agentName, ok: false, summary: researcher.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) } };
+    }
+  }
+
   private async runDelegations(
     action: AgentDelegateAction_ACU,
     request: ContinuationAgentTurnPlanRequest_ACU,
@@ -1377,7 +1497,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         continue;
       }
       if (accepted.length >= waveLimit) {
-        const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
+        const hasCurrentChannel = subagentPresetRoles_ACU(request.settings).some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
         const why = waveLimit === 1 && hasCurrentChannel
           ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
           : `同一波次并发上限为 ${waveLimit} 个`;
@@ -1390,6 +1510,10 @@ export class ContinuationAgentTurnPlanner_ACU {
           rejectImmediately(delegation.agentName, gate.reason);
           continue;
         }
+      }
+      if (delegation.agentName === AGENT_WEB_RESEARCHER_NAME_ACU && !request.settings.webResearch.enabled) {
+        rejectImmediately(delegation.agentName, '网页检索功能未启用（续写设置 → 启用开场百科检索），web-researcher 不可派工。请基于世界书与已有资料继续。');
+        continue;
       }
       accepted.push(delegation);
     }
@@ -1517,6 +1641,13 @@ export class ContinuationAgentTurnPlanner_ACU {
         }, result.usage);
         continue;
       }
+      if (result.researcher) {
+        // 与总纲分支同理：只换快照，不推进结算水位——百科条目不是正文事实。
+        const settled = this.settleResearcherResult_ACU(result, nextSnapshot);
+        if (settled.snapshot !== nextSnapshot) { nextSnapshot = settled.snapshot; snapshotChanged = true; }
+        settleOutcome(item.delegation, settled.outcome, result.usage);
+        continue;
+      }
       settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' }, result.usage);
     }
 
@@ -1540,7 +1671,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     logAgentSession_ACU({
       kind: 'thought',
       title: `资料快照已写入楼层 ${targetIndex}`,
-      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
+      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
       ok: true,
     });
   }

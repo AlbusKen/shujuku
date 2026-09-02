@@ -7,14 +7,19 @@
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
+  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher';
+}
+
+/** 目录渲染的可选开关：网页检索关闭时，web-researcher 及其资料模块不进主 Agent 视野。 */
+export interface AgentCatalogOptions_ACU {
+  webResearchEnabled?: boolean;
 }
 
 export interface AgentModuleDefinition_ACU {
@@ -70,6 +75,13 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     triggers: ['策划结果之间存在冲突', '本轮触碰长期约束红线', '大阶段转折或伏笔密集轮次'],
     promptKey: 'reviewer',
   },
+  {
+    name: AGENT_WEB_RESEARCHER_NAME_ACU,
+    kind: 'research',
+    description: '从互联网查原作与公开设定：优先萌娘百科、维基百科、百度百科，查不到再用搜索引擎与网页抓取；把有用的页面写成带摘要的百科资料库条目（$WEB_REFS）供其它代理阅读。只登记原作/公开常识，不写本故事剧情',
+    triggers: ['任务启用了开场检索且资料库为空时由运行时自动派工，无需你派', '正文或大纲新登场了原作人物、组织、地点、能力、术语，而百科资料库与世界书都没有对应条目', '需要核对某个原作设定（关系、能力边界、时间线、禁忌）而现有资料无法回答'],
+    promptKey: 'webResearcher',
+  },
 ];
 
 export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] = [
@@ -103,6 +115,12 @@ export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] 
     triggers: ['规划或审查跨夜、数日、数周及更久的时间跳跃', '核对伤势恢复、训练/生产周期、旅行耗时、季节天气与关系熟悉度是否与累计时间相容', '最终指导需要给出可靠的相对时间锚'],
     writableBy: ['hook-cognition-maintainer'],
   },
+  {
+    token: '$WEB_REFS',
+    description: '百科资料库：web-researcher 从萌娘百科、维基百科、百度百科或网页查到的原作/公开设定，按实体（人物、法术、物品、组织、事件…）分条，每条固定有名称与一句话简介，另有自由格式详情与来源链接。目录与全量读只给「名称 + 简介」预览，详情按 ID 精读；网页原文不保存。它是外部参考，不是本故事已发生的事实；与世界书或正文冲突时以世界书和正文为准',
+    triggers: ['同人写作需要核对原作人物关系、能力边界、组织与地点设定', '大纲或策划涉及原作术语而世界书没有覆盖', '审查候选指导是否违背原作常识'],
+    writableBy: [AGENT_WEB_RESEARCHER_NAME_ACU],
+  },
 ];
 
 /** 子代理目录里的类型中文名。 */
@@ -111,6 +129,7 @@ const KIND_DISPLAY_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
   maintain: '结算维护',
   plan: '策划',
   review: '审查',
+  research: '网页检索',
 };
 
 /** 按职责固定的写入说明，进子代理目录的「写入」行。 */
@@ -119,7 +138,13 @@ const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
   maintain: '$HOOKS_LEDGER、$INFO_GAP、$CHRONOLOGY（职责固定；约束只能提议，由主 Agent 裁决登记）',
   plan: '无（只返回建议）',
   review: '无（只返回判词）',
+  research: '$WEB_REFS（职责固定；只写外部参考资料，不碰叙事模块）',
 };
+
+function isDefinitionVisible_ACU(name: AgentSubagentName_ACU, options?: AgentCatalogOptions_ACU): boolean {
+  if (name === AGENT_WEB_RESEARCHER_NAME_ACU) return options?.webResearchEnabled === true;
+  return true;
+}
 
 /**
  * 大纲子代理的目录块。它不走通用子代理运行时：运行时会按任务状态自动推断
@@ -140,29 +165,36 @@ const OUTLINE_AGENT_CATALOG_BLOCK_ACU = [
  * 渲染子代理能力目录。
  * @returns 主 Agent 可见的摘要文本，不含子代理内部提示词
  */
-export function renderAgentSubagentCatalog_ACU(): string {
-  const blocks = AGENT_SUBAGENT_DEFINITIONS_ACU.map(definition => [
-    `- name: ${definition.name}`,
-    `  类型: ${KIND_DISPLAY_LABELS_ACU[definition.kind]}`,
-    `  职责: ${definition.description}`,
-    `  适用时机: ${definition.triggers.join('；')}`,
-    '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
-    `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
-  ].join('\n'));
+export function renderAgentSubagentCatalog_ACU(options?: AgentCatalogOptions_ACU): string {
+  const blocks = AGENT_SUBAGENT_DEFINITIONS_ACU
+    .filter(definition => isDefinitionVisible_ACU(definition.name, options))
+    .map(definition => [
+      `- name: ${definition.name}`,
+      `  类型: ${KIND_DISPLAY_LABELS_ACU[definition.kind]}`,
+      `  职责: ${definition.description}`,
+      `  适用时机: ${definition.triggers.join('；')}`,
+      definition.kind === 'research'
+        ? '  读取: 除本地资料外还能出网（百科 API、搜索引擎、网页抓取）；派工 prompt 写清要查的作品、人物或设定名，reads 可留空'
+        : '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
+      `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
+    ].join('\n'));
   return [OUTLINE_AGENT_CATALOG_BLOCK_ACU, ...blocks].join('\n');
 }
 
 /**
  * 渲染资料模块目录。
+ * @param options 网页检索关闭且资料库为空时不列 $WEB_REFS，避免主 Agent 去读一个不存在的库
  * @returns 主 Agent 可见的模块摘要文本，只说模块是什么、何时用、谁能写
  */
-export function renderAgentModuleCatalog_ACU(): string {
-  const blocks = AGENT_MODULE_DEFINITIONS_ACU.map(definition => [
-    `- 占位符: ${definition.token}`,
-    `  内容: ${definition.description}`,
-    `  适用时机: ${definition.triggers.join('；')}`,
-    `  可写代理: ${definition.writableBy.length ? definition.writableBy.join('、') : '仅主 Agent 裁决后登记'}`,
-  ].join('\n'));
+export function renderAgentModuleCatalog_ACU(options?: AgentCatalogOptions_ACU & { webRefsPresent?: boolean }): string {
+  const blocks = AGENT_MODULE_DEFINITIONS_ACU
+    .filter(definition => definition.token !== '$WEB_REFS' || options?.webResearchEnabled === true || options?.webRefsPresent === true)
+    .map(definition => [
+      `- 占位符: ${definition.token}`,
+      `  内容: ${definition.description}`,
+      `  适用时机: ${definition.triggers.join('；')}`,
+      `  可写代理: ${definition.writableBy.length ? definition.writableBy.join('、') : '仅主 Agent 裁决后登记'}`,
+    ].join('\n'));
   return blocks.join('\n');
 }
 
@@ -182,6 +214,7 @@ export function renderAgentReadCatalog_ACU(): string {
     '- $INFO_GAP / $INFO_GAP:ID,ID：认知与信息差时间线全部活跃条目，或按 ID 精读。',
     '- $ACTIVE_CONSTRAINTS / $ACTIVE_CONSTRAINTS:ID,ID：长期约束全部条目，或按 ID 精读。',
     '- $CHRONOLOGY / $CHRONOLOGY:ID,ID：故事年代学账本（已发生正文结算出的时间锚、累计经过时间与转换证据），或按 ID 精读（含已作废条目）。',
+    '- $WEB_REFS / $WEB_REFS:ID,ID：百科资料库——全量只给每条「名称 + 一句话简介」预览；按 ID 精读才有自由格式详情与来源链接，不保存网页原文。它是原作/公开设定的外部参考，不是本故事事实。',
     '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
     '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
     '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
@@ -197,4 +230,20 @@ export function renderAgentReadCatalog_ACU(): string {
  */
 export function findAgentSubagentDefinition_ACU(name: string): AgentSubagentDefinition_ACU | null {
   return AGENT_SUBAGENT_DEFINITIONS_ACU.find(definition => definition.name === name) ?? null;
+}
+
+/**
+ * 渲染 web-researcher 的出网工具说明：按设置列出启用的百科来源、搜索提供方与页数上限。
+ * 只注入该子代理，主 Agent 与其它子代理看不到这些动作名。
+ */
+export function renderAgentWebToolCatalog_ACU(input: { sources: string[]; provider: string; maxPages: number; pageCharLimit: number; pagesUsed: number }): string {
+  const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
+  return [
+    '出网工具（与本地 read/search 一样以 JSON 对象表达，可同批并发；结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
+    `- {"action":"encyclopedia_search","query":"角色名 或 作品名","sources":["moegirl","wikipedia_zh"]}：在百科里找候选词条。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
+    '- {"action":"encyclopedia_read","source":"moegirl","title":"候选里的准确标题"}：精读词条正文，返回带句柄的页面。',
+    `- {"action":"web_search","query":"关键词"}：通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
+    '- {"action":"web_read","url":"https://…"}：抓取任意网页正文。内网、酒馆自身与黑名单域名会被拒绝。',
+    `每次精读/抓取算一页，本次派工最多 ${input.maxPages} 页（已用 ${input.pagesUsed}），每页原文截断到 ${input.pageCharLimit} 字。同一页面不要重复抓取。`,
+  ].join('\n');
 }

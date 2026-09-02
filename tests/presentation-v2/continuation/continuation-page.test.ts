@@ -182,6 +182,7 @@ function setSettings(): void {
     storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
     finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
+    webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false, baidu: true }, searchProvider: 'duckduckgo', searxngBaseUrl: '', maxToolRounds: 8, maxPages: 8, pageCharLimit: 4000, blockedDomains: '' },
     agentRunBudget: { maxIterations: 8, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxReads: 8, maxExtraReads: 3 },
     contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '', promptCacheEnabled: false,
@@ -194,6 +195,7 @@ function setSettings(): void {
       beatPlanner: { mode: 'inherit', presetName: '' },
       reviewer: { mode: 'inherit', presetName: '' },
       finalReviewer: { mode: 'inherit', presetName: '' },
+      webResearcher: { mode: 'inherit', presetName: '' },
     },
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
     agentPrompts: {
@@ -204,6 +206,7 @@ function setSettings(): void {
       beatPlanner: [{ role: 'system', content: '节拍', enabled: true, deletable: true }],
       reviewer: [{ role: 'system', content: '审查', enabled: true, deletable: true }],
       finalReviewer: [{ role: 'system', content: '终审', enabled: true, deletable: true }],
+      webResearcher: [{ role: 'system', content: '检索', enabled: true, deletable: true }],
     },
   };
 }
@@ -564,10 +567,10 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('伪 Role 提示词');
       expect(el.textContent).toContain('正文可读窗口楼数');
       expect(el.textContent).toContain('会话自动总结阈值');
-      expect(el.textContent).toContain('读取预算');
-      expect(el.textContent).toContain('精读兜底额度');
+      expect(el.textContent).toContain('单批次读取上限');
+      expect(el.textContent).toContain('临近总结时的精读额度');
       expect(el.textContent).toContain('连续高压轮上限');
-      expect(el.textContent).toContain('终审读取预算');
+      expect(el.textContent).toContain('终审单批次读取上限');
       expect(el.textContent).toContain('关闭时不装配终审证据');
       expect(el.textContent).toContain('不会发起终审调用');
       expect(el.textContent).toContain('发送前终审子代理提示词');

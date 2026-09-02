@@ -142,10 +142,10 @@ export const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
 /** 骨架里固定注入全文的末尾 AI 楼层数默认值（承接锚点）。 */
 export const AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU = 2;
 
-/** read/search 累计 token 预算默认值：按 agentHistoryTokenBudget 的百分比折算。 */
-export const AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU = '30%';
+/** 单个 read/search 工具批次 token 上限：按 agentHistoryTokenBudget 的百分比折算。 */
+export const AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU = '20%';
 
-/** 临近历史预算阈值时仍放行的精读兜底额度默认值（token）。 */
+/** 临近总结阈值时仍放行的精读兜底额度默认值（token）。 */
 export const AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU = 6000;
 
 /**
@@ -299,6 +299,35 @@ export interface AgentModuleRevisions_ACU {
   constraints: number;
   storyArc: number;
   chronology: number;
+  webRefs: number;
+}
+
+/** 百科资料库条目的来源渠道。baidu 走酒馆服务器同源转发，其余为浏览器直连 MediaWiki API。 */
+export const AGENT_WEB_REF_SOURCES_ACU = ['moegirl', 'wikipedia_zh', 'wikipedia_en', 'baidu', 'web'] as const;
+export type AgentWebRefSource_ACU = typeof AGENT_WEB_REF_SOURCES_ACU[number];
+
+/** 抓取状态：ok 正常；unavailable 来源不可达或无词条；blocked 被域名策略或内容类型拒绝。 */
+export const AGENT_WEB_REF_STATUSES_ACU = ['ok', 'unavailable', 'blocked'] as const;
+export type AgentWebRefStatus_ACU = typeof AGENT_WEB_REF_STATUSES_ACU[number];
+
+/**
+ * 一条外部资料，以角色 / 物品 / 法术 / 组织 / 事件等实体分份。由 web-researcher 子代理写入，其它代理只读。
+ * 固定内容只有 title（名称）和 brief（一句话简介）；summary 是按实体类型自由组织的详情。
+ * 目录与全量读只给 title + brief；详情必须按 ID 精读。网页原文只在检索子代理当次上下文使用，绝不落库。
+ */
+export interface AgentWebRefEntry_ACU {
+  id: string;
+  title: string;
+  source: AgentWebRefSource_ACU;
+  url: string;
+  query: string;
+  tags: string[];
+  brief: string;
+  summary: string;
+  sourceStatus: AgentWebRefStatus_ACU;
+  fetchedAt: number;
+  retired: boolean;
+  retiredReason: string;
 }
 
 /** 楼层锚定的全量快照。读取=从尾向前找最近的合法快照，删楼即自动回退。 */
@@ -312,15 +341,18 @@ export interface AgentModuleSnapshot_ACU {
   constraints: AgentConstraintEntry_ACU[];
   storyArc: AgentStoryArcEntry_ACU[];
   chronology: AgentChronologyEntry_ACU[];
+  webRefs: AgentWebRefEntry_ACU[];
 }
 
-export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology'] as const;
+export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs'] as const;
 export type AgentWritableModule_ACU = typeof AGENT_WRITABLE_MODULES_ACU[number];
 
-export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer'] as const;
+export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher'] as const;
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
-export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review';
+export const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';
+
+export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review' | 'research';
 
 /** 最终审查是 finalize 前由运行时受控触发的内部代理，不进入主 Agent 可委派名称集合。 */
 export const AGENT_FINAL_REVIEWER_NAME_ACU = 'final-reviewer';
@@ -369,6 +401,41 @@ export interface AgentSearchCall_ACU {
 }
 
 export type AgentToolCall_ACU = AgentReadCall_ACU | AgentSearchCall_ACU;
+
+/** 百科检索：按关键词在勾选的百科来源里找候选词条。 */
+export interface AgentEncyclopediaSearchCall_ACU {
+  kind: 'encyclopedia_search';
+  query: string;
+  sources: Exclude<AgentWebRefSource_ACU, 'web'>[];
+}
+
+/** 百科精读：按来源 + 词条标题拉取正文，供本次检索子代理归纳。 */
+export interface AgentEncyclopediaReadCall_ACU {
+  kind: 'encyclopedia_read';
+  source: Exclude<AgentWebRefSource_ACU, 'web'>;
+  title: string;
+}
+
+/** 通用网页搜索：走设置里的搜索引擎提供方。 */
+export interface AgentWebSearchCall_ACU {
+  kind: 'web_search';
+  query: string;
+}
+
+/** 任意网页抓取：经酒馆服务器同源转发抓 HTML 并抽纯文本。 */
+export interface AgentWebReadCall_ACU {
+  kind: 'web_read';
+  url: string;
+}
+
+/** 只有 web-researcher 能用的出网工具。 */
+export type AgentWebToolCall_ACU =
+  | AgentEncyclopediaSearchCall_ACU
+  | AgentEncyclopediaReadCall_ACU
+  | AgentWebSearchCall_ACU
+  | AgentWebReadCall_ACU;
+
+export const AGENT_WEB_TOOL_ACTIONS_ACU = ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] as const;
 
 /** 主/子代理一次输出里的工具并发批次。多个 read/search JSON 对象组成一批同时执行。 */
 export interface AgentToolsAction_ACU {
@@ -471,6 +538,43 @@ export interface AgentModuleDelta_ACU {
   storyArcPatches: AgentStoryArcPatch_ACU[];
   chronology: AgentChronologyDeltaItem_ACU[];
   constraintProposals: string[];
+}
+
+/**
+ * 百科资料库条目的写集。URL、来源与检索词通过 pageRef 从本次工具结果回填；
+ * 网页原文仅供 web-researcher 当前轮归纳，不会随条目保存。
+ */
+export interface AgentWebRefDeltaItem_ACU {
+  action: 'upsert' | 'retire';
+  id: string;
+  pageRef: string;
+  title: string;
+  tags: string[];
+  brief: string;
+  summary: string;
+  reason: string;
+}
+
+/** 运行时从 pageRef 回填后的完整条目输入。 */
+export interface AgentWebRefResolvedItem_ACU {
+  action: 'upsert' | 'retire';
+  id: string;
+  title: string;
+  source: AgentWebRefSource_ACU;
+  url: string;
+  query: string;
+  tags: string[];
+  brief: string;
+  summary: string;
+  sourceStatus: AgentWebRefStatus_ACU;
+  reason: string;
+}
+
+/** web-researcher 的完整输出。 */
+export interface AgentResearcherOutput_ACU {
+  summary: string;
+  expectedRevision: number | undefined;
+  items: AgentWebRefResolvedItem_ACU[];
 }
 
 /** 总纲条目的句级修补：只有显式出现的字段会被修改。阶段进度回写通常只需 patch stageNumbers + status。 */

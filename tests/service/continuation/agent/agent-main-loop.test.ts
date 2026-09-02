@@ -528,11 +528,12 @@ describe('预算渲染', () => {
     expect(renderAgentBudget_ACU(budget_ACU, 1, ledger as any, 3)).toContain('预算充足');
   });
 
-  it('传入工具用量时同步报出批次与累计放行 token', () => {
+  it('传入工具用量时同步报出批次、单批次上限与累计遥测', () => {
     const ledger = { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
     const text = renderAgentBudget_ACU(budget_ACU, 1, ledger as any, 3, { batchesUsed: 2, grantedTokens: 1200, maxReadTokens: 36000 });
     expect(text).toContain('已用 2 / 8 个工具批次');
-    expect(text).toContain('1200 / 36000 tokens');
+    expect(text).toContain('单批次上限约 36000 tokens');
+    expect(text).toContain('本次累计已读取约 1200 tokens');
   });
 });
 
@@ -730,7 +731,7 @@ describe('主 Agent 循环收敛', () => {
     expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('发送前终审反馈');
     expect(h.conversation().messages.some(message => message.digest === '发送前终审反馈' && message.text.includes('晶屑不能带离铁门。'))).toBe(true);
     const telemetry = readAgentSessionLog_ACU().find(entry => entry.title.includes('发送前终审遥测'));
-    expect(telemetry?.detail).toContain('初始世界书命中：1 条（设定集:7）');
+    expect(telemetry?.detail).toContain('初始世界书：仅目录与命中预览，不自动精读全文');
     expect(telemetry?.detail).toContain('独立读取：');
     expect(telemetry?.detail).toContain('工具轮：0');
     expect(telemetry?.detail).not.toContain('晶屑不能带离铁门。');

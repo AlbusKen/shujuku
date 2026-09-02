@@ -118,14 +118,15 @@ export interface ContinuationAgentPrompts_ACU {
   beatPlanner: ContinuationPromptSegment_ACU[];
   reviewer: ContinuationPromptSegment_ACU[];
   finalReviewer: ContinuationPromptSegment_ACU[];
+  webResearcher: ContinuationPromptSegment_ACU[];
 }
 
-export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer'] as const;
+export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher'] as const;
 
 export type ContinuationAgentPromptKey_ACU = typeof CONTINUATION_AGENT_PROMPT_KEYS_ACU[number];
 
-/** 可独立配置 AI 渠道的八个角色：主 Agent、大纲子代理、五个派工子代理与最终审查。 */
-export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer'] as const;
+/** 可独立配置 AI 渠道的九个角色：主 Agent、大纲子代理、六个派工子代理与最终审查。 */
+export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher'] as const;
 
 export type ContinuationAgentApiPresetRole_ACU = typeof CONTINUATION_AGENT_API_PRESET_ROLES_ACU[number];
 
@@ -142,6 +143,38 @@ export interface ContinuationFinalReviewSettings_ACU {
   enabled: boolean;
   readTokenBudget: number | string;
   maxExtraReads: number;
+}
+
+/** 通用网页搜索的提供方。duckduckgo 免 key 经酒馆转发抓 HTML；其余复用酒馆自身「网页搜索」已配置的 key 或实例。 */
+export const CONTINUATION_WEB_SEARCH_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'] as const;
+export type ContinuationWebSearchProvider_ACU = typeof CONTINUATION_WEB_SEARCH_PROVIDERS_ACU[number];
+
+/** 百科来源开关。 */
+export interface ContinuationWebResearchSources_ACU {
+  moegirl: boolean;
+  wikipediaZh: boolean;
+  wikipediaEn: boolean;
+  baidu: boolean;
+}
+
+/**
+ * 开场百科/网页检索的设置。启用后新任务首次规划前自动派工 web-researcher 建资料库；
+ * 之后主 Agent 也可在目录里看到它并按需再派。所有出网只由该子代理执行。
+ */
+export interface ContinuationWebResearchSettings_ACU {
+  enabled: boolean;
+  sources: ContinuationWebResearchSources_ACU;
+  searchProvider: ContinuationWebSearchProvider_ACU;
+  /** searchProvider=searxng 时的实例地址。 */
+  searxngBaseUrl: string;
+  /** 单次派工里出网/本地工具轮次上限。 */
+  maxToolRounds: number;
+  /** 单次派工最多抓取（精读）的页面数。 */
+  maxPages: number;
+  /** 单页存入资料库的原文字数上限。 */
+  pageCharLimit: number;
+  /** 追加的域名黑名单，逗号或换行分隔；内网与酒馆自身始终被拦。 */
+  blockedDomains: string;
 }
 
 export interface ContinuationTurnRange_ACU {
@@ -283,12 +316,14 @@ export interface ContinuationSettings_ACU {
   agentHistoryTokenBudget: number;
   /** 骨架里固定注入全文的末尾 AI 楼层数（承接锚点），其余窗口内楼层只进目录。 */
   storyTailFloors: number;
-  /** 一次规划运行内 read/search 结果的累计 token 预算；正整数为固定值，"30%" 形式按历史预算折算。 */
+  /** 单个 read/search 工具批次的 token 上限；正整数为固定值，"20%" 形式按历史预算折算。 */
   agentReadTokenBudget: number | string;
-  /** 临近历史预算阈值时仍放行的精读兜底额度（token）；有效值为 min(该值, 读取预算)。 */
+  /** 临近总结阈值时仍放行的精读兜底额度；单批次不超过此值才放行并触发总结。 */
   agentReadFallbackTokens: number;
   /** 发送前人物情绪与合理性终审的独立设置。 */
   finalReview: ContinuationFinalReviewSettings_ACU;
+  /** 开场百科/网页检索子代理的设置。 */
+  webResearch: ContinuationWebResearchSettings_ACU;
   contextExtractRules: ContinuationRulePair_ACU[];
   contextExcludeRules: ContinuationRulePair_ACU[];
   /** 主 Agent 规划循环的运行预算，六项全部可在 UI 调整。 */

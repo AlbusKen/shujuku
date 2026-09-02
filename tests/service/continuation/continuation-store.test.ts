@@ -196,6 +196,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
       beatPlanner: { mode: 'inherit', presetName: '' },
       reviewer: { mode: 'inherit', presetName: '' },
       finalReviewer: { mode: 'inherit', presetName: '' },
+      webResearcher: { mode: 'inherit', presetName: '' },
     });
     expect(loaded.settings).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: 'p1' });
   });
@@ -667,7 +668,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
     expect(loaded.settings.agentPrompts.main[0].content).toBe('保留的用户主控提示词');
     expect(loaded.settings.agentPrompts.finalReviewer).toEqual(buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer);
-    expect(loaded.settings.finalReview).toEqual({ enabled: false, readTokenBudget: '50%', maxExtraReads: 6 });
+    expect(loaded.settings.finalReview).toEqual({ enabled: false, readTokenBudget: '20%', maxExtraReads: 6 });
     expect(loaded.settings.agentApiPresets.finalReviewer).toEqual({ mode: 'inherit', presetName: '' });
   });
 

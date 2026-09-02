@@ -23,7 +23,7 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
-import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
+import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { hasActiveStoryArc_ACU } from './agent-module-store';
 import {
   compactAgentProtocolError_ACU,
@@ -33,11 +33,20 @@ import {
   parseAgentJsonPayloadDraft_ACU,
   parseAgentMaintainerOutputDraft_ACU,
   parseAgentPlannerOutput_ACU,
+  parseAgentResearcherOutput_ACU,
+  parseAgentResearcherToolCalls_ACU,
+  parseAgentResearcherWorkingNotes_ACU,
   parseAgentReviewerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
   renderAgentContractContinuationRequest_ACU,
   type AgentContractRejection_ACU,
 } from './agent-protocol';
+import {
+  AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU,
+  AgentWebClient_ACU,
+  enabledEncyclopediaSources_ACU,
+  type AgentFetchedPage_ACU,
+} from './agent-web-client';
 import { buildAgentFinalReviewEvidence_ACU, type AgentFinalReviewEvidence_ACU } from './agent-final-review-context';
 import {
   buildAgentWorldbookScanText_ACU,
@@ -66,10 +75,13 @@ import type {
   AgentMaintainerOutput_ACU,
   AgentModuleRevisions_ACU,
   AgentPlannerOutput_ACU,
+  AgentResearcherOutput_ACU,
   AgentReviewerOutput_ACU,
   AgentRunBudget_ACU,
   AgentSubagentKind_ACU,
   AgentToolCall_ACU,
+  AgentWebRefResolvedItem_ACU,
+  AgentWebToolCall_ACU,
   AgentWritableModule_ACU,
 } from './agent-model';
 
@@ -101,6 +113,8 @@ export interface AgentSubagentRunResult_ACU {
   maintainer: AgentMaintainerOutput_ACU | null;
   planner: AgentPlannerOutput_ACU | null;
   reviewer: AgentReviewerOutput_ACU | null;
+  /** web-researcher 的输出：pageRef 已回填成完整条目，主循环用 applyAgentWebRefsDelta_ACU 落库。 */
+  researcher: AgentResearcherOutput_ACU | null;
   /** 有效轮次数：1（首轮）+ 实际用掉的工具轮次。 */
   iterations: number;
   attempts: number;
@@ -160,12 +174,17 @@ export interface AgentSubagentRuntimeDependencies_ACU {
   ) => Promise<string | null>;
   resolveApiPreset: typeof resolveContinuationApiPreset_ACU;
   resolveAgentApiPreset?: typeof resolveContinuationAgentApiPreset_ACU;
+  /** web-researcher 的出网客户端；测试注入假客户端以摆脱网络。 */
+  webClient?: AgentWebClient_ACU;
+  /** 酒馆自身 origin，用于拒绝 web_read 抓自己；缺省取 location.origin。 */
+  hostOrigin?: () => string;
 }
 
 const defaultDependencies_ACU: AgentSubagentRuntimeDependencies_ACU = {
   callInternalAi: callContinuationInternalAi_ACU,
   resolveApiPreset: resolveContinuationApiPreset_ACU,
   resolveAgentApiPreset: resolveContinuationAgentApiPreset_ACU,
+  hostOrigin: () => (typeof location !== 'undefined' ? location.origin : ''),
 };
 
 const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], string> = {
@@ -174,6 +193,7 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
   mainlinePlanner: AGENT_PREFILLS_ACU.planner,
   beatPlanner: AGENT_PREFILLS_ACU.planner,
   reviewer: AGENT_PREFILLS_ACU.reviewer,
+  webResearcher: AGENT_PREFILLS_ACU.researcher,
 };
 
 /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
@@ -182,7 +202,16 @@ const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = 
   maintain: ['delta', 'summary'],
   plan: ['recommendation', 'summary'],
   review: ['verdict'],
+  research: ['delta', 'summary'],
 };
+
+/** 一次派工内已抓取页面的句柄缓存：网页正文只在本次派工用于归纳，契约仅回填来源元数据。 */
+interface ResearcherPageCache_ACU {
+  pages: Map<string, AgentFetchedPage_ACU & { query: string }>;
+  /** 已抓取过的 URL → 句柄，同页重抓直接返回旧句柄不计页数。 */
+  byUrl: Map<string, string>;
+  pagesUsed: number;
+}
 
 /**
  * 契约类子代理（总纲/维护）在一次派工里最多追加的续写/修补轮数。
@@ -196,6 +225,7 @@ const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritabl
   maintain: ['hooks', 'infoGap', 'chronology'],
   plan: [],
   review: [],
+  research: ['webRefs'],
 };
 
 function rejectDelegation_ACU(message: string, details?: Record<string, unknown>): never {
@@ -222,7 +252,7 @@ export function renderStoryArcVolumePlanInstruction_ACU(settings: ContinuationSe
 
 function describeWriteScope_ACU(writes: readonly AgentWritableModule_ACU[]): string {
   if (!writes.length) return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
-  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本' };
+  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本', webRefs: '$WEB_REFS 百科资料库' };
   return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
 }
 
@@ -250,6 +280,45 @@ export function insertBeforeTrailingPrefill_ACU(
   const last = messages[messages.length - 1];
   if (last && last.role === 'assistant') return [...messages.slice(0, -1), extra, last];
   return [...messages, extra];
+}
+
+function researcherProtocolError_ACU(message: string): never {
+  throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', message, true));
+}
+
+/**
+ * 用页面缓存回填 web-researcher 契约里的 pageRef。句柄不存在按协议错误处理并回灌可用句柄清单，
+ * 让模型改正而不是让运行时猜；pageRef 指向抓取失败的页面同样拒绝——没有可靠来源就不能入库。
+ */
+function resolveResearcherDraft_ACU(draft: ReturnType<typeof parseAgentResearcherOutput_ACU>, cache: ResearcherPageCache_ACU): AgentResearcherOutput_ACU {
+  const available = [...cache.pages.keys()];
+  const items = draft.items.map((item): AgentWebRefResolvedItem_ACU => {
+    if (item.action === 'retire') {
+      return { action: 'retire', id: item.id, title: '', source: 'web', url: '', query: '', tags: [], brief: '', summary: '', sourceStatus: 'ok', reason: item.reason };
+    }
+    const key = item.pageRef.trim().toUpperCase();
+    const page = cache.pages.get(key);
+    if (!page) {
+      researcherProtocolError_ACU(`pageRef「${item.pageRef}」不在本次派工的工具结果里。可用句柄：${available.length ? available.join('、') : '（尚未抓取任何页面，先用 encyclopedia_read / web_read 抓取）'}`);
+    }
+    if (page.status !== 'ok' || !page.text) {
+      researcherProtocolError_ACU(`pageRef「${item.pageRef}」对应的页面抓取失败（${page.note || page.status}），不能入库；换来源或换词重抓，或从契约里去掉这一条`);
+    }
+    return {
+      action: 'upsert',
+      id: item.id,
+      title: item.title || page.title,
+      source: page.source,
+      url: page.url,
+      query: page.query,
+      tags: item.tags,
+      brief: item.brief,
+      summary: item.summary,
+      sourceStatus: page.status,
+      reason: '',
+    };
+  });
+  return { summary: draft.summary, expectedRevision: draft.expectedRevision, items };
 }
 
 /** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
@@ -306,6 +375,9 @@ export class AgentSubagentRuntime_ACU {
     const overviewMaxRows = definition.promptKey === 'mainlinePlanner'
       ? AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.mainlinePlanner
       : AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.default;
+    const isResearch = definition.kind === 'research';
+    const webSettings = input.settings.webResearch;
+    const pageCache: ResearcherPageCache_ACU = { pages: new Map(), byUrl: new Map(), pagesUsed: 0 };
     const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
       $AGENT_READ_MATERIALS: () => materials,
       $AGENT_TASK: () => input.delegation.prompt,
@@ -326,6 +398,14 @@ export class AgentSubagentRuntime_ACU {
       $ACTIVE_CONSTRAINTS: () => resolveAgentReadToken_ACU('$ACTIVE_CONSTRAINTS', input.resolveContext).text,
       $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
       $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,
+      $WEB_REFS: () => resolveAgentReadToken_ACU('$WEB_REFS', input.resolveContext).text,
+      $WEB_TOOL_CATALOG: () => renderAgentWebToolCatalog_ACU({
+        sources: enabledEncyclopediaSources_ACU(webSettings).map(source => `${source}（${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]}）`),
+        provider: webSettings.searchProvider,
+        maxPages: webSettings.maxPages,
+        pageCharLimit: webSettings.pageCharLimit,
+        pagesUsed: pageCache.pagesUsed,
+      }),
     }, 'agent_delegate');
 
     const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
@@ -335,9 +415,15 @@ export class AgentSubagentRuntime_ACU {
       ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
       : rendered.messages;
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-    const maxToolRounds = Math.max(0, input.budget.maxExtraReads);
+    // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads。
+    const maxToolRounds = Math.max(0, isResearch ? webSettings.maxToolRounds : input.budget.maxExtraReads);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
     const transcript: Array<{ role: string; content: string }> = [];
+    /**
+     * 待消费的网页正文：只临时附在下一次模型调用里，绝不能写入 transcript。
+     * 模型借本次输出里的 notes 将有用事实压进历史后，这块正文即被释放。
+     */
+    let pendingResearchEvidence = '';
     const expandedReads: string[] = [];
     let toolRoundsUsed = 0;
     let protocolRejections = 0;
@@ -392,6 +478,7 @@ export class AgentSubagentRuntime_ACU {
       maintainer: definition.kind === 'maintain' ? output : null,
       planner: null,
       reviewer: null,
+      researcher: null,
       iterations: 1 + toolRoundsUsed,
       attempts: attempt,
       expandedReads: [...expandedReads],
@@ -407,7 +494,15 @@ export class AgentSubagentRuntime_ACU {
       }
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const raw = await callContinuationInternalAiWithRetry_ACU(
-        () => this.dependencies.callInternalAi([...baseMessages, ...transcript], input.preset, identity, input.signal, callOptions),
+        () => this.dependencies.callInternalAi(
+          pendingResearchEvidence
+            ? insertBeforeTrailingPrefill_ACU([...baseMessages, ...transcript], { role: 'user', content: pendingResearchEvidence })
+            : [...baseMessages, ...transcript],
+          input.preset,
+          identity,
+          input.signal,
+          callOptions,
+        ),
         {
           transportRetries: retries,
           retryDelaySeconds: input.settings.retryDelaySeconds,
@@ -420,19 +515,62 @@ export class AgentSubagentRuntime_ACU {
       const rawText = String(raw ?? '').trim();
 
       // 工具批次优先于契约解析：输出里出现任意 read/search 对象即视为继续调阅。
-      const toolCalls = parseAgentSubagentToolCalls_ACU(raw, prefill);
+      const toolCalls = isResearch ? parseAgentResearcherToolCalls_ACU(raw, prefill) : parseAgentSubagentToolCalls_ACU(raw, prefill);
       if (toolCalls) {
+        // 当前输出正是对上一批临时网页正文的归纳机会。只持久保留模型显式给出的短笔记。
+        if (isResearch && pendingResearchEvidence) {
+          const notes = parseAgentResearcherWorkingNotes_ACU(raw, prefill);
+          if (notes.length) {
+            transcript.push({
+              role: 'user',
+              content: `【已归纳的网页检索笔记】\n${notes.map((note, index) => `${index + 1}. ${note}`).join('\n')}\n以上是此前网页的压缩笔记；原网页正文已释放，不能再凭记忆补细节。`,
+            });
+          } else {
+            transcript.push({
+              role: 'user',
+              content: '你刚读过的网页正文已经释放，但你没有写 notes。后续只能基于已保留的资料与新页面工作；若该网页的事实仍重要，请重新抓取并在下一次工具动作里用 notes 写下精炼要点。',
+            });
+          }
+          pendingResearchEvidence = '';
+        }
         transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
         if (toolRoundsUsed >= maxToolRounds) {
-          transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
+          transcript.push({ role: 'user', content: isResearch
+            ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。`
+            : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
           continue;
         }
         toolRoundsUsed += 1;
-        transcript.push({ role: 'user', content: await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads) });
+        const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+        if (isResearch) {
+          pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${toolResult}`;
+        } else {
+          transcript.push({ role: 'user', content: toolResult });
+        }
         continue;
       }
 
       try {
+        if (isResearch) {
+          const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU.research);
+          const draft = parseAgentResearcherOutput_ACU(payload);
+          const researcher = resolveResearcherDraft_ACU(draft, pageCache);
+          return {
+            agentName: definition.name,
+            kind: definition.kind,
+            writes,
+            arc: null,
+            maintainer: null,
+            planner: null,
+            reviewer: null,
+            researcher,
+            iterations: 1 + toolRoundsUsed,
+            attempts: attempt,
+            expandedReads: [...expandedReads],
+            readRevisions,
+            usage: usageTotal,
+          };
+        }
         if (contractKind) {
           const draft = parseAgentJsonPayloadDraft_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
@@ -473,6 +611,7 @@ export class AgentSubagentRuntime_ACU {
           maintainer: null,
           planner: definition.kind === 'plan' ? parseAgentPlannerOutput_ACU(payload) : null,
           reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
+          researcher: null,
           iterations: 1 + toolRoundsUsed,
           attempts: attempt,
           expandedReads: [...expandedReads],
@@ -622,15 +761,26 @@ export class AgentSubagentRuntime_ACU {
    * 与主循环同一门禁语义：批内去重与已放行地址拆分、整批过门禁、打回报告直接作为结果回灌。
    */
   private async executeToolCalls_ACU(
-    calls: readonly AgentToolCall_ACU[],
+    calls: ReadonlyArray<AgentToolCall_ACU | AgentWebToolCall_ACU>,
     context: AgentResolveContext_ACU,
     gate: SubagentGate_ACU,
     expandedReads: string[],
+    research?: { settings: ContinuationSettings_ACU; cache: ResearcherPageCache_ACU },
   ): Promise<string> {
     const fresh: SubagentMaterial_ACU[] = [];
     const duplicated: string[] = [];
     const seenInBatch = new Set<string>();
+    // 出网工具不过读取门禁：它们的成本由页数与字数上限约束，结果直接回灌。
+    const webSections: string[] = [];
     for (const call of calls) {
+      if (call.kind === 'encyclopedia_search' || call.kind === 'encyclopedia_read' || call.kind === 'web_search' || call.kind === 'web_read') {
+        if (!research) {
+          webSections.push(`出网工具 ${call.kind} 只有 web-researcher 可用，本次未执行。`);
+          continue;
+        }
+        webSections.push(await this.executeWebToolCall_ACU(call, research.settings, research.cache, expandedReads));
+        continue;
+      }
       if (call.kind === 'read') {
         for (const raw of call.reads) {
           const key = String(raw ?? '').trim();
@@ -649,7 +799,7 @@ export class AgentSubagentRuntime_ACU {
       fresh.push({ key, label, text: `### 搜索「${call.query}」\n${runAgentSearch_ACU(call, context)}` });
     }
 
-    const sections: string[] = [];
+    const sections: string[] = [...webSections];
     if (duplicated.length) {
       sections.push(`以下调阅本次派工已放行，完整内容见上文，不再重注：${duplicated.join('、')}。`);
     }
@@ -666,9 +816,86 @@ export class AgentSubagentRuntime_ACU {
       } else {
         sections.push(decision.report);
       }
-    } else if (!duplicated.length) {
+    } else if (!duplicated.length && !webSections.length) {
       sections.push('本次工具批次没有任何有效的读取地址或搜索请求。请检查 read 的 reads 数组与 search 的 query。');
     }
     return `【工具结果】\n${sections.join('\n\n')}`;
+  }
+
+  /**
+   * 执行一个出网工具调用并渲染结果。每个抓到的页面登记进句柄缓存（P1、P2…），
+   * 结果文本带句柄，契约里的 pageRef 据此回填。同一 URL 重抓复用旧句柄、不计页数。
+   */
+  private async executeWebToolCall_ACU(
+    call: AgentWebToolCall_ACU,
+    settings: ContinuationSettings_ACU,
+    cache: ResearcherPageCache_ACU,
+    expandedReads: string[],
+  ): Promise<string> {
+    const client = this.dependencies.webClient ?? (this.dependencies.webClient = new AgentWebClient_ACU());
+    const webSettings = settings.webResearch;
+    const registerPage = (page: AgentFetchedPage_ACU, query: string): string => {
+      const existing = cache.byUrl.get(page.url);
+      if (existing) return existing;
+      const handle = `P${cache.pages.size + 1}`;
+      cache.pages.set(handle, { ...page, query });
+      cache.byUrl.set(page.url, handle);
+      if (page.status === 'ok') cache.pagesUsed += 1;
+      return handle;
+    };
+    const renderPage = (handle: string, page: AgentFetchedPage_ACU, reused: boolean): string => {
+      const head = `### [页面句柄 ${handle}]「${page.title || '（无标题）'}」来源=${page.source === 'web' ? '网页' : AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[page.source]}｜${page.url}`;
+      if (page.status !== 'ok') return `${head}\n抓取失败（${page.status}）：${page.note}`;
+      if (reused) return `${head}\n（该页面本次派工已抓取过，原文见上文，不再重注）`;
+      return `${head}\n${page.text}`;
+    };
+    const pagesExhausted = (): string | null => (cache.pagesUsed >= webSettings.maxPages
+      ? `本次派工的页面配额已用尽（${webSettings.maxPages} 页）。请基于已抓到的页面交付契约 JSON。`
+      : null);
+
+    if (call.kind === 'encyclopedia_search') {
+      const sources = call.sources.length ? call.sources : enabledEncyclopediaSources_ACU(webSettings);
+      if (!sources.length) return `### 百科检索「${call.query}」\n没有可用的百科来源（设置里全部关闭）。请改用 web_search。`;
+      const disabled = call.sources.filter(source => !enabledEncyclopediaSources_ACU(webSettings).includes(source));
+      const results = await Promise.all(sources.filter(source => !disabled.includes(source)).map(async source => ({ source, ...(await client.searchEncyclopedia(source, call.query)) })));
+      expandedReads.push(`encyclopedia_search "${call.query}"`);
+      const lines: string[] = [];
+      for (const result of results) {
+        const label = AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[result.source];
+        if (!result.candidates.length) { lines.push(`- ${label}：无候选${result.note ? `（${result.note}）` : ''}`); continue; }
+        lines.push(`- ${label}：`);
+        for (const candidate of result.candidates) {
+          lines.push(`  · 「${candidate.title}」${candidate.snippet ? `：${candidate.snippet.slice(0, 120)}` : ''}｜精读：{"action":"encyclopedia_read","source":"${candidate.source}","title":"${candidate.title.replace(/"/g, '\\"')}"}`);
+        }
+      }
+      if (disabled.length) lines.push(`- 以下来源在设置里已关闭，未检索：${disabled.map(source => AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]).join('、')}`);
+      return `### 百科检索「${call.query}」\n${lines.join('\n')}`;
+    }
+    if (call.kind === 'encyclopedia_read') {
+      if (!enabledEncyclopediaSources_ACU(webSettings).includes(call.source)) {
+        return `### 百科精读「${call.title}」\n来源 ${AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[call.source]} 在设置里已关闭，未执行。`;
+      }
+      const exhausted = pagesExhausted();
+      if (exhausted) return `### 百科精读「${call.title}」\n${exhausted}`;
+      const page = await client.readEncyclopedia(call.source, call.title, webSettings.pageCharLimit);
+      const reused = cache.byUrl.has(page.url);
+      const handle = registerPage(page, call.title);
+      expandedReads.push(`encyclopedia_read ${call.source}:${call.title}`);
+      return renderPage(handle, page, reused);
+    }
+    if (call.kind === 'web_search') {
+      const result = await client.webSearch(call.query, webSettings);
+      expandedReads.push(`web_search "${call.query}"`);
+      if (!result.hits.length) return `### 网页搜索「${call.query}」\n无结果${result.note ? `：${result.note}` : ''}。换更短的关键词、加上作品名，或改用 encyclopedia_search。`;
+      const lines = result.hits.map((hit, index) => `${index + 1}. 「${hit.title || '（无标题）'}」${hit.url ? `｜${hit.url}` : ''}${hit.snippet ? `\n   ${hit.snippet.slice(0, 200)}` : ''}${hit.url ? `\n   抓取：{"action":"web_read","url":"${hit.url}"}` : ''}`);
+      return `### 网页搜索「${call.query}」（提供方：${webSettings.searchProvider}）\n${lines.join('\n')}`;
+    }
+    const exhausted = pagesExhausted();
+    if (exhausted) return `### 网页抓取 ${call.url}\n${exhausted}`;
+    const page = await client.webRead(call.url, webSettings, this.dependencies.hostOrigin?.());
+    const reused = cache.byUrl.has(page.url);
+    const handle = registerPage(page, call.url);
+    expandedReads.push(`web_read ${call.url}`);
+    return renderPage(handle, page, reused);
   }
 }

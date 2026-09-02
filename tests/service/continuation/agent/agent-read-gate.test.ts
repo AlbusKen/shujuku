@@ -27,10 +27,10 @@ describe('读取预算解析', () => {
     expect(resolved.effectiveMaxReadTokens).toBe(Math.floor(AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU * 0.1));
   });
 
-  it('损坏配置回退默认 30%，兜底额度不超过总预算', () => {
+  it('损坏配置回退默认 20%，兜底额度不超过单批次上限', () => {
     const broken = resolveAgentReadBudget_ACU(config_ACU({ readTokenBudget: '瞎写', historyTokenBudget: 1000, fallbackTokens: 6000 }));
-    expect(broken.effectiveMaxReadTokens).toBe(300);
-    expect(broken.effectiveFallbackTokens).toBe(300);
+    expect(broken.effectiveMaxReadTokens).toBe(200);
+    expect(broken.effectiveFallbackTokens).toBe(200);
 
     const capped = resolveAgentReadBudget_ACU(config_ACU({ readTokenBudget: 100, fallbackTokens: 500 }));
     expect(capped.effectiveFallbackTokens).toBe(100);
@@ -49,15 +49,14 @@ describe('读取门禁状态机', () => {
     expect(decision).toMatchObject({ allowed: true, batchTokens: 150, itemTokens: [100, 50], report: '' });
   });
 
-  it('P + B 超过累计预算 M 时整批打回，报告含剩余额度与逐条大小', async () => {
+  it('单批次 B 超过上限 M 时整批打回，已读取额度不影响判定', async () => {
     const state = createAgentReadGateState_ACU();
     state.grantedTokens = 250;
-    const decision = await gateAgentReadBatch_ACU([{ label: '$BIG', text: 'x'.repeat(100) }], state, config_ACU(), 0, countByLength_ACU);
+    const decision = await gateAgentReadBatch_ACU([{ label: '$BIG', text: 'x'.repeat(301) }], state, config_ACU(), 0, countByLength_ACU);
     expect(decision.allowed).toBe(false);
-    expect(decision.reason).toBe('read-budget-exceeded');
-    expect(decision.report).toContain('累计预算即将耗尽');
-    expect(decision.report).toContain('剩余额度 50 tokens');
-    expect(decision.report).toContain('$BIG：实测 100 tokens');
+    expect(decision.reason).toBe('read-batch-too-large');
+    expect(decision.report).toContain('超过单批次上限 300 tokens');
+    expect(decision.report).toContain('$BIG：实测 301 tokens');
     expect(decision.report).toContain('修正协议');
   });
 
@@ -66,7 +65,7 @@ describe('读取门禁状态机', () => {
     // H=980，任何批次都会把上下文推过 S=1000。
     const big = await gateAgentReadBatch_ACU([{ label: '$BIG', text: 'x'.repeat(80) }], createAgentReadGateState_ACU(), nearThreshold, 980, countByLength_ACU);
     expect(big).toMatchObject({ allowed: false, reason: 'near-compaction-overflow' });
-    expect(big.report).toContain('临近压缩阈值');
+    expect(big.report).toContain('临近总结阈值');
     expect(big.report).toContain('精读兜底额度 50 tokens');
 
     // B <= F：已经精细到最小读取，放行，随后越阈交给压缩机制。
@@ -74,7 +73,7 @@ describe('读取门禁状态机', () => {
     expect(small.allowed).toBe(true);
   });
 
-  it('账本跨批次累计，同批拆开发也一样会被拦', async () => {
+  it('不同批次不累计：每批次都低于上限时，即使遥测账本已很大仍放行', async () => {
     const state = createAgentReadGateState_ACU();
     const config = config_ACU({ readTokenBudget: 100 });
     const first = await gateAgentReadBatch_ACU([{ label: '$A', text: 'x'.repeat(60) }], state, config, 0, countByLength_ACU);
@@ -82,10 +81,10 @@ describe('读取门禁状态机', () => {
     state.grantedTokens += first.batchTokens;
 
     const second = await gateAgentReadBatch_ACU([{ label: '$B', text: 'x'.repeat(60) }], state, config, 0, countByLength_ACU);
-    expect(second).toMatchObject({ allowed: false, reason: 'read-budget-exceeded' });
+    expect(second).toMatchObject({ allowed: true, batchTokens: 60 });
   });
 
-  it('H 不可用（<=0）或 S 不限时跳过阈值判定，只看累计预算', async () => {
+  it('H 不可用（<=0）或 S 不限时跳过临近总结阈值判定，只看单批次上限', async () => {
     const decision = await gateAgentReadBatch_ACU(
       [{ label: '$A', text: 'x'.repeat(80) }],
       createAgentReadGateState_ACU(),
