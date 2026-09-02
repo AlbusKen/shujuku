@@ -34,6 +34,7 @@ const clearData = vi.fn(async () => true);
 const acceptOutline = vi.fn(async () => true);
 const saveSettings = vi.fn(async () => 'saved' as const);
 const restorePromptDefault = vi.fn((draft: any) => draft);
+const materialsReload = vi.fn();
 
 vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () => ({
   useContinuationRuntime: () => ({
@@ -50,7 +51,7 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationMaterials', () 
     snapshot: materialsSnapshot,
     loadError: ref(''),
     modules: {},
-    reload: vi.fn(),
+    reload: materialsReload,
     save: vi.fn(),
     discard: vi.fn(),
     updateDraft: vi.fn(),
@@ -419,6 +420,34 @@ describe('ContinuationPage', () => {
     } finally {
       app.unmount();
       sessionLog.resetAgentSessionLogForTests_ACU();
+    }
+  });
+
+  it('Agent 运行中每追加一条会话记录都会自动重读资料面板，且保留用户未保存的草稿', async () => {
+    const sessionLog = await import('../../../src/service/continuation/agent/agent-session-log');
+    vi.useFakeTimers();
+    setTask('running');
+    const { app } = await mountPage();
+    try {
+      materialsReload.mockClear();
+      // 子代理结算后领域层直接把快照写进末楼，面板必须跟着会话流的推进重读，否则一直显示运行前的空库。
+      sessionLog.beginAgentSessionRun_ACU('第 1 阶段 · 第 1/6 轮');
+      sessionLog.logAgentSession_ACU({ kind: 'thought', title: '资料快照已写入楼层 2', detail: '伏笔 2 条' });
+      await nextTick();
+      expect(materialsReload).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(materialsReload).toHaveBeenCalledTimes(1);
+      expect(materialsReload).toHaveBeenLastCalledWith({ preserveDirty: true });
+
+      // 运行结束再兜底刷一次。
+      sessionLog.logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成' });
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(materialsReload).toHaveBeenCalledTimes(2);
+    } finally {
+      app.unmount();
+      sessionLog.resetAgentSessionLogForTests_ACU();
+      vi.useRealTimers();
     }
   });
 

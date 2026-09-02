@@ -101,9 +101,22 @@ const KIND_LABELS: Record<AgentSessionEntry_ACU['kind'], string> = {
   run_completed: '完成',
 };
 
+/** 会话流展示沿用「各 Agent 渠道」里的中文角色名，内部 agentName 不直接暴露给用户。 */
+const AGENT_DISPLAY_LABELS: Record<string, string> = {
+  'outline-architect': '大纲子代理',
+  'arc-architect': '故事总纲',
+  'hook-cognition-maintainer': '伏笔与认知维护',
+  'mainline-planner': '主线推进策划',
+  'beat-planner': '伏笔与节拍策划',
+  'continuity-reviewer': '连续性审查',
+  'final-reviewer': '发送前终审',
+  'web-researcher': '网页检索',
+};
+
 function kindLabel(entry: AgentSessionEntry_ACU): string {
-  if (entry.kind === 'delegation' && entry.agentName) return entry.agentName;
-  if (entry.kind === 'outline_op' && entry.agentName) return entry.agentName;
+  if ((entry.kind === 'delegation' || entry.kind === 'outline_op') && entry.agentName) {
+    return AGENT_DISPLAY_LABELS[entry.agentName] ?? entry.agentName;
+  }
   return KIND_LABELS[entry.kind];
 }
 

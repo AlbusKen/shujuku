@@ -123,4 +123,15 @@ describe('ContinuationSessionFeed', () => {
     expect(card!.querySelector('.acu-v2-session-feed__badge')!.textContent).toBe('交接');
     expect(card!.textContent).toContain('早期会话交接报告（此前内容对当前 AI 不可见）');
   });
+
+  it('子代理状态标签使用与渠道设置一致的中文角色名', () => {
+    const { el } = mountFeed([
+      entry_ACU(1, { kind: 'delegation', agentName: 'web-researcher', title: 'web-researcher 执行中', status: 'running' }),
+      entry_ACU(2, { kind: 'delegation', agentName: 'arc-architect', title: 'arc-architect 执行中', status: 'running' }),
+      entry_ACU(3, { kind: 'outline_op', agentName: 'outline-architect', title: 'outline-architect 执行中', status: 'running' }),
+      entry_ACU(4, { kind: 'delegation', agentName: 'unknown-agent', title: 'unknown-agent 执行中', status: 'running' }),
+    ]);
+    const labels = [...el.querySelectorAll('.acu-v2-session-feed__badge')].map(node => node.textContent);
+    expect(labels).toEqual(['网页检索', '故事总纲', '大纲子代理', 'unknown-agent']);
+  });
 });

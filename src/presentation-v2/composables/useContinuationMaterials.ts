@@ -71,12 +71,20 @@ export function useContinuationMaterials() {
     modules[module] = { draft: moduleDraftText_ACU(current, module), dirty: false, error: '', saving: false };
   }
 
-  function reload(): void {
+  /**
+   * 重读楼层锚定的资料快照。
+   * @param options.preserveDirty 为 true 时跳过用户正在编辑（dirty）的模块草稿——Agent 运行中每写一次
+   *   快照都会触发自动刷新，不能把用户没保存的 JSON 冲掉；手动点「刷新」则全量重置。
+   */
+  function reload(options: { preserveDirty?: boolean } = {}): void {
     try {
       const current = readAgentModuleSnapshot_ACU();
       snapshot.value = current;
       diagnostics.value = readAgentModuleSnapshotDiagnostics_ACU();
-      for (const module of CONTINUATION_MATERIAL_MODULES_ACU) resetModule(module, current);
+      for (const module of CONTINUATION_MATERIAL_MODULES_ACU) {
+        if (options.preserveDirty && modules[module].dirty) continue;
+        resetModule(module, current);
+      }
       loadError.value = '';
     } catch (caught) {
       snapshot.value = null;

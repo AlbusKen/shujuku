@@ -10,7 +10,7 @@
         @click="activeTab = tab.id"
       >{{ tab.label }}</button>
       <div class="acu-v2-continuation-materials__tab-actions">
-        <AcuButton :loading="busy" @click="reload">刷新</AcuButton>
+        <AcuButton :loading="busy" @click="reload()">刷新</AcuButton>
         <AcuButton variant="danger" :loading="busy" @click="requestClear">一键清空</AcuButton>
       </div>
     </div>
@@ -481,9 +481,13 @@ function saveOutline(): void {
   emit('save-outline', parsed as StageOutline_ACU);
 }
 
-function reload(): void {
-  materials.reload();
-  syncOutlineDraft();
+/**
+ * 重读资料快照与大纲草稿。
+ * @param options.preserveDirty Agent 运行中的自动刷新传 true：只刷新未编辑的模块，用户手里的草稿保留。
+ */
+function reload(options: { preserveDirty?: boolean } = {}): void {
+  materials.reload(options);
+  if (!options.preserveDirty || !outlineDirty.value) syncOutlineDraft();
 }
 
 function requestClear(): void {
@@ -495,7 +499,7 @@ function confirmClear(): void {
   emit('clear');
 }
 
-onMounted(reload);
+onMounted(() => reload());
 
 /** 权威大纲变更（Agent 改写、保存成功）后重置草稿；用户正在编辑时不覆盖他的输入。 */
 watch(() => `${props.activeStage?.stageId ?? ''}:${props.activeRevision?.revision ?? ''}`, () => {

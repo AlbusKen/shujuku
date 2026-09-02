@@ -907,6 +907,22 @@ function refreshAfterChatMutation(): void {
   materialsPanel.value?.reload();
 }
 
+/**
+ * Agent 运行中每次结算 / 立总纲 / 百科入库都会把新快照写到末楼，但那是领域层直接落盘，
+ * 不经过任何 Vue 状态——面板若只在挂载与切聊天时读一次，用户看到的就一直是运行前的空库。
+ * 会话流每追加一条记录就说明运行又推进了一步，按它去重读快照；运行结束再兜底刷一次。
+ * 自动刷新只覆盖用户没在编辑的模块，手里的 JSON 草稿不会被冲掉。
+ */
+let materialsAutoRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+const MATERIALS_AUTO_REFRESH_DEBOUNCE_MS = 400;
+function scheduleMaterialsAutoRefresh(): void {
+  if (materialsAutoRefreshTimer !== undefined) clearTimeout(materialsAutoRefreshTimer);
+  materialsAutoRefreshTimer = setTimeout(() => {
+    materialsAutoRefreshTimer = undefined;
+    materialsPanel.value?.reload({ preserveDirty: true });
+  }, MATERIALS_AUTO_REFRESH_DEBOUNCE_MS);
+}
+
 onMounted(() => {
   apiStore.refreshFromSettings();
   void runtime.initialize();
@@ -914,6 +930,10 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   if (countdownTimer !== undefined) clearInterval(countdownTimer);
+  if (materialsAutoRefreshTimer !== undefined) {
+    clearTimeout(materialsAutoRefreshTimer);
+    materialsAutoRefreshTimer = undefined;
+  }
   // 防抖窗口内离开页面时冲刷一次未落盘的改动，避免"改了像改了、重进没了"。
   if (settingsSaveTimer !== undefined) {
     clearTimeout(settingsSaveTimer);
@@ -923,6 +943,10 @@ onBeforeUnmount(() => {
 });
 watch(useChatChangedTick(), refreshAll);
 watch(useChatMutationTick(), refreshAfterChatMutation);
+watch(() => [session.entries.value.length, session.running.value] as const, ([length, running], previous) => {
+  // 条数增加 = 运行推进（可能刚写了快照）；running 由真变假 = 本轮收尾，兜底再读一次。
+  if (!previous || length > previous[0] || (previous[1] && !running)) scheduleMaterialsAutoRefresh();
+});
 watch(runtime.settings, settings => {
   // 每次刷新信封都会产生新的 settings 引用；只有持久化内容真的变了（保存成功、切换聊天）
   // 才重建草稿。否则运行期间的每次状态刷新都会把用户尚未保存的改动悄悄冲掉。
