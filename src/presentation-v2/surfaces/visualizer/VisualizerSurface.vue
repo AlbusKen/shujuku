@@ -380,8 +380,9 @@
                         tabindex="0"
                         title="点击编辑该字段"
                         @pointerdown.stop="
-                          startDataCellEditing(row.index, field.columnIndex)
+                          setActiveFieldActions(row.index, field.columnIndex)
                         "
+                        @mousedown.prevent
                         @click="
                           startDataCellEditing(row.index, field.columnIndex)
                         "
@@ -1046,6 +1047,9 @@ async function startDataCellEditing(
   columnIndex: number,
 ): Promise<void> {
   setActiveFieldActions(rowIndex, columnIndex);
+  // The textarea re-enters here via its own focus event; avoid re-assigning
+  // the active cell (which would rebuild the card layout mid-edit).
+  if (isDataCellEditing(rowIndex, columnIndex)) return;
   activeDataCell.value = {
     rowIndex: Math.trunc(Number(rowIndex)),
     columnIndex: Math.trunc(Number(columnIndex)),
@@ -1054,7 +1058,7 @@ async function startDataCellEditing(
   await nextTick();
   const textarea = activeDataTextareaRef.value;
   if (!textarea) return;
-  textarea.focus();
+  if (textarea.ownerDocument.activeElement !== textarea) textarea.focus();
   textarea.setSelectionRange(textarea.value.length, textarea.value.length);
 }
 

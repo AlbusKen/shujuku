@@ -544,6 +544,68 @@ describe('openVisualizerSurface_ACU', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('字段预览在 pointerdown 阶段保持不变，click 后才切换为聚焦的编辑框', async () => {
+    persistAdvancedMode();
+    const state = await import('../../../src/service/runtime/state-manager');
+    state._set_currentJsonTableData_ACU({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: {
+        uid: 'sheet_a',
+        name: '编辑验证表',
+        orderNo: 0,
+        content: [[null, '姓名', '状态'], [null, '甲', '正常']],
+      },
+    });
+    const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+    const mount = await import('../../../src/presentation-v2/bootstrap/mount');
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+
+    await bridge.openVisualizerSurface_ACU({ source: 'external-api' });
+    await new Promise(r => setTimeout(r, 0));
+
+    const surface = document.querySelector('[data-acu-visualizer-surface]') as HTMLElement;
+    const preview = Array.from(surface.querySelectorAll<HTMLElement>('.acu-visualizer-surface__field-preview'))
+      .find(item => item.textContent?.trim() === '正常')!;
+
+    // 浏览器会在 pointerdown 之后向同一目标派发 mousedown；若此时预览节点已被替换，
+    // 默认焦点处理会清空焦点导致编辑框立即 blur。这里断言 pointerdown 不改动 DOM。
+    preview.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+    await new Promise(r => setTimeout(r, 0));
+    expect(preview.isConnected).toBe(true);
+    expect(surface.querySelectorAll('textarea')).toHaveLength(0);
+
+    const mousedown = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    preview.dispatchEvent(mousedown);
+    expect(mousedown.defaultPrevented).toBe(true);
+
+    preview.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    const textarea = surface.querySelector<HTMLTextAreaElement>('textarea')!;
+    expect(textarea).not.toBeNull();
+    expect(textarea.value).toBe('正常');
+    expect(document.activeElement).toBe(textarea);
+
+    // 编辑框自身的 focus 事件会再次进入 startDataCellEditing，不能把编辑框重建掉
+    textarea.dispatchEvent(new FocusEvent('focus'));
+    await new Promise(r => setTimeout(r, 0));
+    expect(surface.querySelector('textarea')).toBe(textarea);
+    expect(document.activeElement).toBe(textarea);
+
+    textarea.value = '受伤';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await Promise.resolve();
+
+    const visualizer = useVisualizerStore(mount.getAcuV2PiniaForBridge()!);
+    expect(visualizer.currentSheet.content[1][2]).toBe('受伤');
+
+    textarea.dispatchEvent(new FocusEvent('blur'));
+    await new Promise(r => setTimeout(r, 0));
+    expect(surface.querySelectorAll('textarea')).toHaveLength(0);
+    expect(surface.textContent).toContain('受伤');
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('可进入结构参数和数据库管理面板', async () => {
     persistAdvancedMode();
     const state = await import('../../../src/service/runtime/state-manager');
