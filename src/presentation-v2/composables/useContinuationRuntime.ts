@@ -89,7 +89,14 @@ export function useContinuationRuntime() {
     return initialization;
   }
 
-  function run_ACU(action: () => Promise<ContinuationRuntimeActionResult_ACU>, replaceActive = false, suppressErrorToast = false): Promise<boolean> {
+  /**
+   * 执行一次续写动作并把结果同步到信封。
+   * @param action 编排器动作
+   * @param replaceActive 为 true 时允许顶替正在执行的动作（用户插话打断）
+   * @param suppressErrorToast 为 true 时失败不弹吐司，由调用方决定如何呈现
+   * @param onError 失败回调，把原始异常交给调用方（用于拼出更具体的提示）
+   */
+  function run_ACU(action: () => Promise<ContinuationRuntimeActionResult_ACU>, replaceActive = false, suppressErrorToast = false, onError?: (error: unknown) => void): Promise<boolean> {
     if (busy.value && !replaceActive) return Promise.resolve(false);
     busy.value = true;
     const completion = Promise.resolve()
@@ -112,6 +119,7 @@ export function useContinuationRuntime() {
       return true;
       })
       .catch(error => {
+      onError?.(error);
       if (suppressErrorToast) {
         refresh();
         return false;
@@ -202,8 +210,13 @@ export function useContinuationRuntime() {
         return false;
       }
       if (stopEpoch !== epochAtStart) return true;
-      const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true);
-      if (!started) toast.error('消息已保存，但启动续写失败。', { muteable: false });
+      let startFailure = '';
+      const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true, error => { startFailure = errorMessage_ACU(error); });
+      if (!started) {
+        // 启动失败的原因已由编排器落成 lastError（或就是被拒的异常本身）；只说「失败」用户没法判断下一步。
+        const reason = startFailure || task.value?.lastError?.message || (busy.value ? '另一项续写操作正在执行' : '');
+        toast.error(reason ? `消息已保存，但启动续写失败：${reason}` : '消息已保存，但启动续写失败。', { muteable: false });
+      }
       return true;
     } catch (error) {
       toast.error(errorMessage_ACU(error), { muteable: false });

@@ -24,9 +24,23 @@ import { useImportFlowStore } from '../stores/import-flow-store';
 /** 模块级响应式计数器，每次 CHAT_CHANGED 延迟刷新完成后 +1。 */
 const chatChangedTick = ref(0);
 
+/**
+ * 当前聊天内楼层被删除 / 重新生成（swipe）后 +1。
+ * 与聊天切换分开计数：切聊天要重建整套 store，楼层变动只需要按楼层锚定的数据重读一遍。
+ */
+const chatMutationTick = ref(0);
+
+/** 楼层删除会连发事件（批量删除、regenerate 先删后生成），短窗口聚合成一次刷新。 */
+const CHAT_MUTATION_DEBOUNCE_MS = 300;
+
 /** 页面级 composable 可 watch 此 ref 来响应聊天切换。 */
 export function useChatChangedTick(): Ref<number> {
   return chatChangedTick;
+}
+
+/** 页面级 composable 可 watch 此 ref 来响应当前聊天内的楼层删除 / swipe。 */
+export function useChatMutationTick(): Ref<number> {
+  return chatMutationTick;
 }
 
 export function useChatChangedListener(): void {
@@ -39,6 +53,19 @@ export function useChatChangedListener(): void {
   }
 
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+  let mutationTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function onChatMutated(): void {
+    if (mutationTimer) clearTimeout(mutationTimer);
+    mutationTimer = setTimeout(() => {
+      mutationTimer = null;
+      chatMutationTick.value++;
+    }, CHAT_MUTATION_DEBOUNCE_MS);
+  }
+
+  const mutationEventNames = (['MESSAGE_DELETED', 'MESSAGE_SWIPED'] as const)
+    .map(name => (eventTypes as Record<string, string | undefined>)[name])
+    .filter((name): name is string => typeof name === 'string' && name.length > 0);
 
   function onChatChanged(chatFileName: string): void {
     logDebug_ACU(`[ACU-V2] CHAT_CHANGED 收到: "${chatFileName}"，将延迟刷新 v2 store`);
@@ -60,11 +87,14 @@ export function useChatChangedListener(): void {
   }
 
   eventSource.on(eventTypes.CHAT_CHANGED, onChatChanged);
+  for (const eventName of mutationEventNames) eventSource.on(eventName, onChatMutated);
 
   onBeforeUnmount(() => {
     if (pendingTimer) clearTimeout(pendingTimer);
+    if (mutationTimer) clearTimeout(mutationTimer);
     try {
       eventSource.removeListener(eventTypes.CHAT_CHANGED, onChatChanged);
+      for (const eventName of mutationEventNames) eventSource.removeListener(eventName, onChatMutated);
     } catch { /* ignore */ }
   });
 }

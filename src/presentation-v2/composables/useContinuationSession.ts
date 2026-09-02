@@ -4,6 +4,7 @@ import {
   hasAgentSessionEntries_ACU,
   hydrateAgentSessionLog_ACU,
   isAgentSessionRunning_ACU,
+  logAgentSession_ACU,
   readAgentSessionLog_ACU,
   subscribeAgentSessionLog_ACU,
   type AgentSessionEntry_ACU,
@@ -69,6 +70,25 @@ export function useContinuationSession() {
     hydrate();
   }
 
+  /**
+   * 当前聊天内楼层被删除 / swipe 后调用。持久会话按楼层分段存储，删楼即回退；
+   * 但会话流是内存日志，不重灌就会一直显示已被删掉那几楼上的记录，看起来像"没有跟着回退"。
+   * 与 rehydrate 的区别：运行标记保留——楼层变动时 Agent 循环可能仍在跑，不能把「停止」切回「发送」。
+   * 回灌后追加一条说明，让用户知道界面是按现存楼层重新加载的，而不是记录凭空消失。
+   */
+  function resyncAfterChatMutation(): void {
+    clearAgentSessionLog_ACU({ keepRunning: true });
+    hydrate();
+    if (hasAgentSessionEntries_ACU()) {
+      logAgentSession_ACU({
+        kind: 'thought',
+        title: '楼层已变化，会话已按现存楼层重新加载',
+        detail: '被删除或重新生成的楼层上的 Agent 记录已随楼层一起回退；阶段进度也按仍存在的正文楼层重算。',
+      });
+    }
+    sync();
+  }
+
   onMounted(() => {
     unsubscribe = subscribeAgentSessionLog_ACU(sync);
     hydrate();
@@ -79,5 +99,5 @@ export function useContinuationSession() {
     unsubscribe = null;
   });
 
-  return { entries, running, hydrate, rehydrate };
+  return { entries, running, hydrate, rehydrate, resyncAfterChatMutation };
 }

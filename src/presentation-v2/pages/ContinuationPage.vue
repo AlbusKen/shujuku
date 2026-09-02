@@ -312,7 +312,7 @@ import AcuTextarea from '../components/_lib/AcuTextarea.vue';
 import ContinuationChat from '../components/ContinuationChat.vue';
 import ContinuationMaterialsPanel from '../components/ContinuationMaterialsPanel.vue';
 import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
-import { useChatChangedTick } from '../composables/useChatChangedListener';
+import { useChatChangedTick, useChatMutationTick } from '../composables/useChatChangedListener';
 import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU, useContinuationRuntime } from '../composables/useContinuationRuntime';
 import { useContinuationSession } from '../composables/useContinuationSession';
 import { useDialogStore } from '../stores/dialog-store';
@@ -826,6 +826,16 @@ function refreshAll(): void {
   session.rehydrate();
 }
 
+/**
+ * 当前聊天内楼层被删除 / swipe 后：任务游标、Agent 会话与资料快照都锚定在楼层上，
+ * 存储层已随楼层回退，页面必须重读一遍，否则进度、会话流、资料仍停在删楼前。
+ */
+function refreshAfterChatMutation(): void {
+  runtime.refresh();
+  session.resyncAfterChatMutation();
+  materialsPanel.value?.reload();
+}
+
 onMounted(() => {
   apiStore.refreshFromSettings();
   void runtime.initialize();
@@ -841,6 +851,7 @@ onBeforeUnmount(() => {
   }
 });
 watch(useChatChangedTick(), refreshAll);
+watch(useChatMutationTick(), refreshAfterChatMutation);
 watch(runtime.settings, settings => {
   // 每次刷新信封都会产生新的 settings 引用；只有持久化内容真的变了（保存成功、切换聊天）
   // 才重建草稿。否则运行期间的每次状态刷新都会把用户尚未保存的改动悄悄冲掉。

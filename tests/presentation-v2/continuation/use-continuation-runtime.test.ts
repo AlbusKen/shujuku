@@ -330,7 +330,8 @@ describe('useContinuationRuntime', () => {
     expect(await continuation.sendAgentMessage('保存后继续')).toBe(true);
     expect(harness.sendAgentMessage).toHaveBeenCalledOnce();
     expect(harness.continueTask).toHaveBeenCalledOnce();
-    expect(harness.toastError).toHaveBeenCalledWith('消息已保存，但启动续写失败。', { muteable: false });
+    // 失败原因必须带出来：只说「启动续写失败」用户无法判断是楼层、宿主还是状态问题。
+    expect(harness.toastError).toHaveBeenCalledWith('消息已保存，但启动续写失败：续跑失败', { muteable: false });
   });
 
   it('会话发送失败时不触发续跑', async () => {

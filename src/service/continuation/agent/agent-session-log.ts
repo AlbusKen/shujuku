@@ -177,10 +177,12 @@ export function hydrateAgentSessionLog_ACU(items: readonly AgentSessionEventInpu
 /**
  * 清空会话流。用于「一键清空」：订阅者保留，清空后立即收到通知刷新为空界面。
  * 与 resetAgentSessionLogForTests_ACU 的区别是不解绑订阅者，因此可以在运行期调用。
+ * @param options.keepRunning 为 true 时只清条目、不动运行标记——楼层被删后按持久会话重灌时，
+ *   Agent 循环可能仍在跑，把标记清掉会让界面误把「停止」切回「发送」
  */
-export function clearAgentSessionLog_ACU(): void {
+export function clearAgentSessionLog_ACU(options: { keepRunning?: boolean } = {}): void {
   entries_ACU = [];
-  running_ACU = false;
+  if (!options.keepRunning) running_ACU = false;
   notify_ACU();
 }
 

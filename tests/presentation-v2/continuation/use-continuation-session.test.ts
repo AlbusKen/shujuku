@@ -11,7 +11,7 @@ vi.mock('../../../src/service/continuation/agent/agent-conversation-store', () =
 }));
 
 import { useContinuationSession } from '../../../src/presentation-v2/composables/useContinuationSession';
-import { logAgentSession_ACU, resetAgentSessionLogForTests_ACU } from '../../../src/service/continuation/agent/agent-session-log';
+import { beginAgentSessionRun_ACU, logAgentSession_ACU, resetAgentSessionLogForTests_ACU } from '../../../src/service/continuation/agent/agent-session-log';
 
 
 /** 组件里挂载 composable：onMounted 回灌与卸载退订都要在真实组件生命周期里跑。 */
@@ -92,6 +92,33 @@ describe('useContinuationSession', () => {
     session.rehydrate();
 
     expect(session.entries.value.map(entry => [entry.kind, entry.detail])).toEqual([['user_message', '新聊天的历史消息']]);
+  });
+
+  it('resyncAfterChatMutation 按现存楼层重灌、保留运行标记并留下说明（删楼 / swipe 用）', () => {
+    harness.readTimeline.mockReturnValue([
+      { id: 'm1', kind: 'agent', text: '第一轮的规划', digest: '', createdAt: 1, turnKey: 'k1' },
+      { id: 'm2', kind: 'agent', text: '被删楼层上的规划', digest: '', createdAt: 2, turnKey: 'k2' },
+    ]);
+    const { session } = mountSession_ACU();
+    beginAgentSessionRun_ACU('第 1 阶段 · 第 3 轮');
+    logAgentSession_ACU({ kind: 'thought', title: '只存在于内存里的思考' });
+    expect(session.running.value).toBe(true);
+
+    harness.readTimeline.mockReturnValue([
+      { id: 'm1', kind: 'agent', text: '第一轮的规划', digest: '', createdAt: 1, turnKey: 'k1' },
+    ]);
+    session.resyncAfterChatMutation();
+
+    expect(session.entries.value.map(entry => [entry.kind, entry.kind === 'thought' ? entry.title : entry.detail])).toEqual([
+      ['main_action', '第一轮的规划'],
+      ['thought', '楼层已变化，会话已按现存楼层重新加载'],
+    ]);
+    expect(session.running.value).toBe(true);
+
+    // 楼层上已没有任何会话记录时只清空，不追加说明——空会话流有自己的引导文案。
+    harness.readTimeline.mockReturnValue([]);
+    session.resyncAfterChatMutation();
+    expect(session.entries.value).toEqual([]);
   });
 
   it('卸载后实时事件不再写进已销毁组件的会话流', () => {

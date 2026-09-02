@@ -1,7 +1,8 @@
-import { countAiMessages_ACU, isAiMessage_ACU, resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../runtime/message-handler';
+import { countAiMessages_ACU, resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../runtime/message-handler';
 import { validateLoopTags_ACU } from '../loop/loop-evaluator';
 import { countAgentTokens_ACU } from './agent/agent-token-budget';
 import { logAgentSession_ACU } from './agent/agent-session-log';
+import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import type { ContinuationPreparedTurnInstruction_ACU } from './stage-execution-engine';
 import type { ContinuationHostGenerationCapture_ACU, TurnAttemptIdentity_ACU } from './model';
 import type { ContinuationHostTurnAdapter_ACU } from './host-turn-adapter';
@@ -341,7 +342,9 @@ export class ContinuationHostGenerationBridge_ACU {
 
   /**
    * 用酒馆自己的重新生成/生成链路重试当前轮，不再让 Agent 另造一条请求。
-   * 末楼是 AI 时走 regenerate（酒馆会删掉该楼）；末楼不是 AI 时走 generate。
+   * 本轮正文已在末楼时走 regenerate（酒馆会删掉该楼）；正文尚未产出时对指令楼 generate。
+   * 楼层形状与发送时的捕获快照对不上（用户删掉了指令楼或更早的正文）就放弃：
+   * 此时 regenerate 会误删上一轮正文，应由调用方回到 Agent 重新规划。
    */
   async retryHostGeneration(): Promise<boolean> {
     const runtime = this.dependencies.runtime;
@@ -349,16 +352,19 @@ export class ContinuationHostGenerationBridge_ACU {
     if (!snapshot || snapshot.pending.status !== 'retry_ready') return false;
     if (snapshot.pending.identity.chatIdentity !== runtime.getChatIdentity()) return false;
     const chat = runtime.getChat();
-    const lastIsAi = Array.isArray(chat) && chat.length > 0 && isAiMessage_ACU(chat[chat.length - 1]);
-    const aiCount = countAiMessages_ACU(Array.isArray(chat) ? chat : []);
+    const mode = resolveHostRetryMode_ACU(chat, snapshot.pending.capture);
+    if (!mode) {
+      logAgentSession_ACU({ kind: 'run_failed', title: '放弃宿主重发', detail: '楼层已与发送时不一致（承载指令的用户楼或上一轮正文已被删除），直接重发会落错位置。请发送一条消息让主 Agent 按现存楼层重新规划。', ok: false });
+      return false;
+    }
+    const aiCount = countAiMessages_ACU(chat);
     const capture: ContinuationHostGenerationCapture_ACU = {
       capturedAt: this.dependencies.now(),
-      capturedChatLength: lastIsAi ? Math.max(0, chat.length - 1) : (Array.isArray(chat) ? chat.length : 0),
-      capturedAiFloorCount: lastIsAi ? Math.max(0, aiCount - 1) : aiCount,
+      capturedChatLength: mode === 'regenerate' ? Math.max(0, chat.length - 1) : chat.length,
+      capturedAiFloorCount: mode === 'regenerate' ? Math.max(0, aiCount - 1) : aiCount,
       generationSeq: null,
     };
     await runtime.recordHostTurn({ identity: snapshot.pending.identity, capture });
-    const mode = lastIsAi ? 'regenerate' : 'generate';
     this.localRetryClaim = { identity: snapshot.pending.identity, mode, createdAt: this.dependencies.now(), sequence: null, consumed: false };
     this.sendingIdentity = snapshot.pending.identity;
     this.notifyStateChanges_ACU();

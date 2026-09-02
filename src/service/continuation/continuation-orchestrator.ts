@@ -2,6 +2,7 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import { reconcileTaskCursorFromChat_ACU } from './stage-cursor';
+import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
 import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveStageOutlinePacingContext_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
@@ -342,10 +343,13 @@ export class ContinuationOrchestrator_ACU {
           fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
         }
         const pending = task.pendingHostTurn;
-        const promoteHostRetry = pending?.status === 'retry_ready'
-          || (pending?.status === 'exhausted' && task.stopReason === 'generation_retry_exhausted');
+        // 重试轮只在楼层仍是发送时的形状时才提升为宿主重发：用户删掉了指令楼或上一轮正文后，
+        // regenerate 会落错位置甚至误删正文，此时丢弃等待轮、回到 Agent 按现存楼层重新规划。
+        const retryFloorsIntact = !!pending && resolveHostRetryMode_ACU(getChatArray_ACU(), pending.capture) !== null;
+        const promoteHostRetry = retryFloorsIntact && (pending.status === 'retry_ready'
+          || (pending.status === 'exhausted' && task.stopReason === 'generation_retry_exhausted'));
         // 归属失败/输入不可用留下的 exhausted 仍清掉：那些场景不能安全 regenerate。
-        const discardPending = staleAwaitingTurn || (pending?.status === 'exhausted' && !promoteHostRetry);
+        const discardPending = staleAwaitingTurn || (!!pending && pending.status !== 'awaiting_generation' && !promoteHostRetry);
         // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
         const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
         if (stage && stage.status !== 'completed' && (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen)) {
@@ -1133,18 +1137,20 @@ export class ContinuationOrchestrator_ACU {
     try {
       const persisted = await append([{ kind: 'user', text, digest }]);
       if (!persisted) {
-        throw new Error('用户消息未写入持久会话记录');
+        throw new Error('用户消息未写入持久会话记录（当前聊天没有可承载会话记录的楼层）');
       }
       logAgentSession_ACU({ kind: 'user_message', title: digest, detail: text });
     } catch (error) {
+      const reason = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
       logAgentSession_ACU({
         kind: 'run_failed',
         title: '这条消息未能写入持久会话记录',
-        detail: `${error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error)}\n本条消息只存在于当前界面，页面重载后会消失。`,
+        detail: `${reason}\n本条消息只存在于当前界面，页面重载后会消失。`,
         ok: false,
       });
       if (requirePersistence) {
-        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_PERSIST_FAILED', 'agent_persist', '用户消息保存失败', false));
+        // 把底层原因带进提示：只说「保存失败」用户无从判断是楼层、宿主还是数据问题。
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_PERSIST_FAILED', 'agent_persist', `用户消息保存失败：${reason}`, false));
       }
     }
   }

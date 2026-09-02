@@ -383,6 +383,36 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(recoveredResult.retryHostGeneration).toBe(true);
   });
 
+  it('drops a retry-ready host turn and re-plans with the agent when the user deleted the floors it was sent against', async () => {
+    // 首楼之外再放一层用户楼：等待轮是对着它发出的（capture 记录发送前只有首楼一层 AI）。
+    const chat: any[] = [{ mes: '开场' }, { mes: '主 Agent 的指令', is_user: true }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    const { orchestrator, store, executionEngine } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
+    await orchestrator.recordHostTurn({ identity, capture: { capturedAt: 1_000, capturedChatLength: 1, capturedAiFloorCount: 1, generationSeq: 1 } });
+    await orchestrator.failHostTurnForStoppedGeneration(identity);
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ status: 'retry_ready' });
+
+    // 指令楼还在：继续走宿主 generate，不重跑 Agent。
+    executionEngine.prepareCurrentTurnInstruction.mockClear();
+    expect((await orchestrator.continueTask()).retryHostGeneration).toBe(true);
+    expect(executionEngine.prepareCurrentTurnInstruction).not.toHaveBeenCalled();
+    await orchestrator.stopTask();
+
+    // 用户把承载指令的用户楼删掉：末楼变成上一轮正文，regenerate 会误删它——等待轮必须作废，回到 Agent 重新规划。
+    chat.splice(1, 1);
+    const replanned = await orchestrator.continueTask();
+    expect(replanned.retryHostGeneration).toBeUndefined();
+    expect(replanned.preparedTurn).toBeDefined();
+    expect(executionEngine.prepareCurrentTurnInstruction).toHaveBeenCalledOnce();
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn).toBeNull();
+  });
+
   it('recovers from a host attribution failure (state_invalid) through an explicit continue', async () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });

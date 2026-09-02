@@ -10,6 +10,7 @@ import { useDialogStore } from '../../../src/presentation-v2/stores/dialog-store
 
 const mountedApps = new Set<{ unmount: () => void }>();
 const chatTick = ref(0);
+const chatMutationTick = ref(0);
 const task = ref<any>(null);
 const activeStage = ref<any>(null);
 const activeRevision = ref<any>(null);
@@ -57,6 +58,7 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationMaterials', () 
 }));
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
   useChatChangedTick: () => chatTick,
+  useChatMutationTick: () => chatMutationTick,
 }));
 
 function setTask(status = 'paused', pending = false): void {
@@ -166,6 +168,7 @@ beforeEach(() => {
   originInstruction.value = '';
   statusText.value = '尚未创建任务';
   chatTick.value = 0;
+  chatMutationTick.value = 0;
   vi.clearAllMocks();
   sendAgentMessage.mockResolvedValue(true);
 });
@@ -435,6 +438,54 @@ describe('ContinuationPage', () => {
     await nextTick();
     expect(refresh).toHaveBeenCalledOnce();
     app.unmount();
+  });
+
+  it('楼层被删除后会话流按现存楼层重灌、任务状态刷新，且不丢运行标记', async () => {
+    const sessionLog = await import('../../../src/service/continuation/agent/agent-session-log');
+    const hostApi = await import('../../../src/shared/host-api');
+    const { AGENT_CONVERSATION_FIELD_ACU, AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU } = await import('../../../src/service/continuation/agent/agent-model');
+    const segment = (id: number, kind: string, text: string) => ({
+      schemaVersion: AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU, updatedAt: 0,
+      segment: [{ id, kind, text, digest: '', turnKey: `k${id}`, at: 0 }],
+    });
+    // 第 2 楼承载第 1 轮的规划，第 4 楼承载第 2 轮的规划；用户随后删掉第 3、4 楼。
+    const chat: any[] = [
+      { mes: '开场' },
+      { mes: '指令一', is_user: true },
+      { mes: '正文一', [AGENT_CONVERSATION_FIELD_ACU]: segment(1, 'agent', '第一轮的规划') },
+      { mes: '指令二', is_user: true },
+      { mes: '正文二', [AGENT_CONVERSATION_FIELD_ACU]: segment(2, 'agent', '被删楼层上的规划') },
+    ];
+    hostApi._set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a' } as any);
+    setTask();
+    const { app, el } = await mountPage();
+    try {
+      // 挂载时从楼层回灌：两轮规划都在；随后 Agent 开始跑并实时追加记录。
+      expect(el.textContent).toContain('第一轮的规划');
+      expect(el.textContent).toContain('被删楼层上的规划');
+      sessionLog.beginAgentSessionRun_ACU('第 1 阶段 · 第 3 轮');
+      sessionLog.logAgentSession_ACU({ kind: 'thought', title: '只存在于内存里的思考' });
+      await nextTick();
+      expect(buttonByText(el, '停止')).not.toBeUndefined();
+
+      chat.splice(3, 2);
+      chatMutationTick.value += 1;
+      await nextTick();
+
+      // 会话流跟着楼层回退：被删楼层上的记录消失，内存里的记录也被现存楼层的持久记录取代，并给出说明。
+      expect(el.textContent).toContain('第一轮的规划');
+      expect(el.textContent).not.toContain('被删楼层上的规划');
+      expect(el.textContent).not.toContain('只存在于内存里的思考');
+      expect(el.textContent).toContain('楼层已变化，会话已按现存楼层重新加载');
+      // 任务进度按现存楼层重读；运行标记保留，停止按钮不能因为重灌而消失。
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(sessionLog.isAgentSessionRunning_ACU()).toBe(true);
+      expect(buttonByText(el, '停止')).not.toBeUndefined();
+    } finally {
+      app.unmount();
+      sessionLog.resetAgentSessionLogForTests_ACU();
+      hostApi._set_SillyTavern_API_ACU(undefined);
+    }
   });
 
   it('资料面板结构化展示当前大纲，保留 JSON 草稿保护、保存与清空确认', async () => {

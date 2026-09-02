@@ -119227,6 +119227,31 @@ $CONTENT
     }
 
     /**
+     * 依据发送时捕获的快照判断「让酒馆重试当前轮」是否仍然安全，以及该用哪条原语。
+     *
+     * 捕获快照里的 AI 楼数是本轮正文产生之前的基数（regenerate 重试时已预减掉将被删的那楼），
+     * 因此只看 AI 楼数与末楼类型就能判定楼层是否还是发送时的形状：
+     * - AI 楼数比基数多一：本轮正文已存在于末楼，走 regenerate（酒馆会删掉它再生成）；
+     * - AI 楼数等于基数且末楼是用户楼：正文还没产出（生成报错/被中止后已被删），对承载指令的用户楼 generate；
+     * - 其余形状（用户手动删掉了指令楼、连带删了更早的正文……）：重试原语找不到正确的落点，
+     *   regenerate 会误删上一轮正文，必须放弃重试、回到 Agent 重新规划。
+     * @param chat 当前聊天数组
+     * @param capture 等待轮记录的捕获快照
+     * @returns 可安全执行的重试模式；楼层已不匹配时为 null
+     */
+    function resolveHostRetryMode_ACU(chat, capture) {
+        if (!Array.isArray(chat) || !chat.length)
+            return null;
+        const aiCount = countAiMessages_ACU(chat);
+        const last = chat[chat.length - 1];
+        if (aiCount === capture.capturedAiFloorCount + 1 && isAiMessage_ACU(last))
+            return 'regenerate';
+        if (aiCount === capture.capturedAiFloorCount && !isAiMessage_ACU(last))
+            return 'generate';
+        return null;
+    }
+
+    /**
      * 各角色单次输出的 token 下限。总纲一次要写十几卷的完整契约、大纲一次要写整阶段的逐轮标记、
      * 维护代理一次要结算多楼正文的三本账，这三类输出随任务体量增长，4096 的通用默认经常在
      * JSON/标签中间被切断。策划与审查输出短，保持通用默认即可。
@@ -121895,10 +121920,13 @@ $CONTENT
     /**
      * 清空会话流。用于「一键清空」：订阅者保留，清空后立即收到通知刷新为空界面。
      * 与 resetAgentSessionLogForTests_ACU 的区别是不解绑订阅者，因此可以在运行期调用。
+     * @param options.keepRunning 为 true 时只清条目、不动运行标记——楼层被删后按持久会话重灌时，
+     *   Agent 循环可能仍在跑，把标记清掉会让界面误把「停止」切回「发送」
      */
-    function clearAgentSessionLog_ACU() {
+    function clearAgentSessionLog_ACU(options = {}) {
         entries_ACU = [];
-        running_ACU = false;
+        if (!options.keepRunning)
+            running_ACU = false;
         notify_ACU();
     }
     /**
@@ -122202,10 +122230,13 @@ $CONTENT
                         fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
                     }
                     const pending = task.pendingHostTurn;
-                    const promoteHostRetry = pending?.status === 'retry_ready'
-                        || (pending?.status === 'exhausted' && task.stopReason === 'generation_retry_exhausted');
+                    // 重试轮只在楼层仍是发送时的形状时才提升为宿主重发：用户删掉了指令楼或上一轮正文后，
+                    // regenerate 会落错位置甚至误删正文，此时丢弃等待轮、回到 Agent 按现存楼层重新规划。
+                    const retryFloorsIntact = !!pending && resolveHostRetryMode_ACU(getChatArray_ACU(), pending.capture) !== null;
+                    const promoteHostRetry = retryFloorsIntact && (pending.status === 'retry_ready'
+                        || (pending.status === 'exhausted' && task.stopReason === 'generation_retry_exhausted'));
                     // 归属失败/输入不可用留下的 exhausted 仍清掉：那些场景不能安全 regenerate。
-                    const discardPending = staleAwaitingTurn || (pending?.status === 'exhausted' && !promoteHostRetry);
+                    const discardPending = staleAwaitingTurn || (!!pending && pending.status !== 'awaiting_generation' && !promoteHostRetry);
                     // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
                     const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
                     if (stage && stage.status !== 'completed' && (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen)) {
@@ -122959,19 +122990,21 @@ $CONTENT
             try {
                 const persisted = await append([{ kind: 'user', text, digest }]);
                 if (!persisted) {
-                    throw new Error('用户消息未写入持久会话记录');
+                    throw new Error('用户消息未写入持久会话记录（当前聊天没有可承载会话记录的楼层）');
                 }
                 logAgentSession_ACU({ kind: 'user_message', title: digest, detail: text });
             }
             catch (error) {
+                const reason = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
                 logAgentSession_ACU({
                     kind: 'run_failed',
                     title: '这条消息未能写入持久会话记录',
-                    detail: `${error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error)}\n本条消息只存在于当前界面，页面重载后会消失。`,
+                    detail: `${reason}\n本条消息只存在于当前界面，页面重载后会消失。`,
                     ok: false,
                 });
                 if (requirePersistence) {
-                    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_PERSIST_FAILED', 'agent_persist', '用户消息保存失败', false));
+                    // 把底层原因带进提示：只说「保存失败」用户无从判断是楼层、宿主还是数据问题。
+                    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_PERSIST_FAILED', 'agent_persist', `用户消息保存失败：${reason}`, false));
                 }
             }
         }
@@ -128899,7 +128932,9 @@ $CONTENT
         }
         /**
          * 用酒馆自己的重新生成/生成链路重试当前轮，不再让 Agent 另造一条请求。
-         * 末楼是 AI 时走 regenerate（酒馆会删掉该楼）；末楼不是 AI 时走 generate。
+         * 本轮正文已在末楼时走 regenerate（酒馆会删掉该楼）；正文尚未产出时对指令楼 generate。
+         * 楼层形状与发送时的捕获快照对不上（用户删掉了指令楼或更早的正文）就放弃：
+         * 此时 regenerate 会误删上一轮正文，应由调用方回到 Agent 重新规划。
          */
         async retryHostGeneration() {
             const runtime = this.dependencies.runtime;
@@ -128909,16 +128944,19 @@ $CONTENT
             if (snapshot.pending.identity.chatIdentity !== runtime.getChatIdentity())
                 return false;
             const chat = runtime.getChat();
-            const lastIsAi = Array.isArray(chat) && chat.length > 0 && isAiMessage_ACU(chat[chat.length - 1]);
-            const aiCount = countAiMessages_ACU(Array.isArray(chat) ? chat : []);
+            const mode = resolveHostRetryMode_ACU(chat, snapshot.pending.capture);
+            if (!mode) {
+                logAgentSession_ACU({ kind: 'run_failed', title: '放弃宿主重发', detail: '楼层已与发送时不一致（承载指令的用户楼或上一轮正文已被删除），直接重发会落错位置。请发送一条消息让主 Agent 按现存楼层重新规划。', ok: false });
+                return false;
+            }
+            const aiCount = countAiMessages_ACU(chat);
             const capture = {
                 capturedAt: this.dependencies.now(),
-                capturedChatLength: lastIsAi ? Math.max(0, chat.length - 1) : (Array.isArray(chat) ? chat.length : 0),
-                capturedAiFloorCount: lastIsAi ? Math.max(0, aiCount - 1) : aiCount,
+                capturedChatLength: mode === 'regenerate' ? Math.max(0, chat.length - 1) : chat.length,
+                capturedAiFloorCount: mode === 'regenerate' ? Math.max(0, aiCount - 1) : aiCount,
                 generationSeq: null,
             };
             await runtime.recordHostTurn({ identity: snapshot.pending.identity, capture });
-            const mode = lastIsAi ? 'regenerate' : 'generate';
             this.localRetryClaim = { identity: snapshot.pending.identity, mode, createdAt: this.dependencies.now(), sequence: null, consumed: false };
             this.sendingIdentity = snapshot.pending.identity;
             this.notifyStateChanges_ACU();
@@ -156850,9 +156888,20 @@ Expected function or array of functions, received type ${typeof value}.`
      */
     /** 模块级响应式计数器，每次 CHAT_CHANGED 延迟刷新完成后 +1。 */
     const chatChangedTick = ref(0);
+    /**
+     * 当前聊天内楼层被删除 / 重新生成（swipe）后 +1。
+     * 与聊天切换分开计数：切聊天要重建整套 store，楼层变动只需要按楼层锚定的数据重读一遍。
+     */
+    const chatMutationTick = ref(0);
+    /** 楼层删除会连发事件（批量删除、regenerate 先删后生成），短窗口聚合成一次刷新。 */
+    const CHAT_MUTATION_DEBOUNCE_MS = 300;
     /** 页面级 composable 可 watch 此 ref 来响应聊天切换。 */
     function useChatChangedTick() {
         return chatChangedTick;
+    }
+    /** 页面级 composable 可 watch 此 ref 来响应当前聊天内的楼层删除 / swipe。 */
+    function useChatMutationTick() {
+        return chatMutationTick;
     }
     function useChatChangedListener() {
         const eventSource = SillyTavern_API_ACU?.eventSource;
@@ -156862,6 +156911,18 @@ Expected function or array of functions, received type ${typeof value}.`
             return;
         }
         let pendingTimer = null;
+        let mutationTimer = null;
+        function onChatMutated() {
+            if (mutationTimer)
+                clearTimeout(mutationTimer);
+            mutationTimer = setTimeout(() => {
+                mutationTimer = null;
+                chatMutationTick.value++;
+            }, CHAT_MUTATION_DEBOUNCE_MS);
+        }
+        const mutationEventNames = ['MESSAGE_DELETED', 'MESSAGE_SWIPED']
+            .map(name => eventTypes[name])
+            .filter((name) => typeof name === 'string' && name.length > 0);
         function onChatChanged(chatFileName) {
             logDebug_ACU(`[ACU-V2] CHAT_CHANGED 收到: "${chatFileName}"，将延迟刷新 v2 store`);
             if (pendingTimer)
@@ -156881,11 +156942,17 @@ Expected function or array of functions, received type ${typeof value}.`
             }, 1500);
         }
         eventSource.on(eventTypes.CHAT_CHANGED, onChatChanged);
+        for (const eventName of mutationEventNames)
+            eventSource.on(eventName, onChatMutated);
         onBeforeUnmount(() => {
             if (pendingTimer)
                 clearTimeout(pendingTimer);
+            if (mutationTimer)
+                clearTimeout(mutationTimer);
             try {
                 eventSource.removeListener(eventTypes.CHAT_CHANGED, onChatChanged);
+                for (const eventName of mutationEventNames)
+                    eventSource.removeListener(eventName, onChatMutated);
             }
             catch { /* ignore */ }
         });
@@ -172155,7 +172222,14 @@ Expected function or array of functions, received type ${typeof value}.`
             initialization = currentInitialization;
             return initialization;
         }
-        function run_ACU(action, replaceActive = false, suppressErrorToast = false) {
+        /**
+         * 执行一次续写动作并把结果同步到信封。
+         * @param action 编排器动作
+         * @param replaceActive 为 true 时允许顶替正在执行的动作（用户插话打断）
+         * @param suppressErrorToast 为 true 时失败不弹吐司，由调用方决定如何呈现
+         * @param onError 失败回调，把原始异常交给调用方（用于拼出更具体的提示）
+         */
+        function run_ACU(action, replaceActive = false, suppressErrorToast = false, onError) {
             if (busy.value && !replaceActive)
                 return Promise.resolve(false);
             busy.value = true;
@@ -172182,6 +172256,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 return true;
             })
                 .catch(error => {
+                onError?.(error);
                 if (suppressErrorToast) {
                     refresh();
                     return false;
@@ -172276,9 +172351,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 if (stopEpoch !== epochAtStart)
                     return true;
-                const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true);
-                if (!started)
-                    toast.error('消息已保存，但启动续写失败。', { muteable: false });
+                let startFailure = '';
+                const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true, error => { startFailure = errorMessage_ACU(error); });
+                if (!started) {
+                    // 启动失败的原因已由编排器落成 lastError（或就是被拒的异常本身）；只说「失败」用户没法判断下一步。
+                    const reason = startFailure || task.value?.lastError?.message || (busy.value ? '另一项续写操作正在执行' : '');
+                    toast.error(reason ? `消息已保存，但启动续写失败：${reason}` : '消息已保存，但启动续写失败。', { muteable: false });
+                }
                 return true;
             }
             catch (error) {
@@ -172534,6 +172613,24 @@ Expected function or array of functions, received type ${typeof value}.`
             clearAgentSessionLog_ACU();
             hydrate();
         }
+        /**
+         * 当前聊天内楼层被删除 / swipe 后调用。持久会话按楼层分段存储，删楼即回退；
+         * 但会话流是内存日志，不重灌就会一直显示已被删掉那几楼上的记录，看起来像"没有跟着回退"。
+         * 与 rehydrate 的区别：运行标记保留——楼层变动时 Agent 循环可能仍在跑，不能把「停止」切回「发送」。
+         * 回灌后追加一条说明，让用户知道界面是按现存楼层重新加载的，而不是记录凭空消失。
+         */
+        function resyncAfterChatMutation() {
+            clearAgentSessionLog_ACU({ keepRunning: true });
+            hydrate();
+            if (hasAgentSessionEntries_ACU()) {
+                logAgentSession_ACU({
+                    kind: 'thought',
+                    title: '楼层已变化，会话已按现存楼层重新加载',
+                    detail: '被删除或重新生成的楼层上的 Agent 记录已随楼层一起回退；阶段进度也按仍存在的正文楼层重算。',
+                });
+            }
+            sync();
+        }
         onMounted(() => {
             unsubscribe = subscribeAgentSessionLog_ACU(sync);
             hydrate();
@@ -172543,7 +172640,7 @@ Expected function or array of functions, received type ${typeof value}.`
             unsubscribe?.();
             unsubscribe = null;
         });
-        return { entries, running, hydrate, rehydrate };
+        return { entries, running, hydrate, rehydrate, resyncAfterChatMutation };
     }
 
     const INHERIT_CHANNEL_VALUE = '__inherit__';
@@ -173049,6 +173146,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 会话流是全局内存：切聊天必须清空并从新聊天的持久会话回灌，否则显示的是上一个聊天的记录。
                 session.rehydrate();
             }
+            /**
+             * 当前聊天内楼层被删除 / swipe 后：任务游标、Agent 会话与资料快照都锚定在楼层上，
+             * 存储层已随楼层回退，页面必须重读一遍，否则进度、会话流、资料仍停在删楼前。
+             */
+            function refreshAfterChatMutation() {
+                runtime.refresh();
+                session.resyncAfterChatMutation();
+                materialsPanel.value?.reload();
+            }
             onMounted(() => {
                 apiStore.refreshFromSettings();
                 void runtime.initialize();
@@ -173065,6 +173171,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
             });
             watch(useChatChangedTick(), refreshAll);
+            watch(useChatMutationTick(), refreshAfterChatMutation);
             watch(runtime.settings, settings => {
                 // 每次刷新信封都会产生新的 settings 引用；只有持久化内容真的变了（保存成功、切换聊天）
                 // 才重建草稿。否则运行期间的每次状态刷新都会把用户尚未保存的改动悄悄冲掉。
@@ -173082,14 +173189,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-cdd12109] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-cdd12109] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-cdd12109] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-cdd12109] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-cdd12109] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-cdd12109] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-cdd12109] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-cdd12109] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-cdd12109] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-cdd12109] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-cdd12109] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-cdd12109] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-cdd12109] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-cdd12109] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-cdd12109]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-cdd12109] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-cdd12109] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-cdd12109] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-cdd12109] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-cdd12109");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_cdd12109_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-259a95a4] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-259a95a4] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-259a95a4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-259a95a4] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-259a95a4] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-259a95a4] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-259a95a4] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-259a95a4] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-259a95a4] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-259a95a4] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-259a95a4] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-259a95a4] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-259a95a4] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-259a95a4] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-259a95a4]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-259a95a4] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-259a95a4] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-259a95a4] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-259a95a4] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-259a95a4] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-259a95a4");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_259a95a4_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-continuation-page" };
     const _hoisted_2$k = {
@@ -173968,7 +174075,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-cdd12109"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-259a95a4"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

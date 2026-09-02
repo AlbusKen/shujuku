@@ -291,6 +291,30 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.readPendingHostTurn()!.pending.status).toBe('retry_ready');
   });
 
+  it('refuses to regenerate when the user deleted the floors the retry was sent against', async () => {
+    // 发送前聊天是 [AI 开场, 用户指令]：正文基数 1 层 AI。
+    const h = createHarness({ chat: [{ is_user: false, mes: '开场' }, { is_user: true, mes: '主 Agent 的指令' }] });
+    await h.bridge.send(prepared);
+    await h.bridge.onGenerationStopped(undefined);
+    expect(h.runtime.readPendingHostTurn()!.pending.status).toBe('retry_ready');
+    h.runtime.recordHostTurn.mockClear();
+
+    // 用户删掉了承载指令的用户楼：末楼变成上一轮正文，regenerate 会把它删掉。
+    h.setChat([{ is_user: false, mes: '开场' }]);
+    await expect(h.bridge.retryHostGeneration()).resolves.toBe(false);
+    expect(h.hostInput.retryGeneration).not.toHaveBeenCalled();
+    expect(h.runtime.recordHostTurn).not.toHaveBeenCalled();
+
+    // 指令楼仍在（只是没有正文）：对它 generate，容量快照按无正文记录。
+    h.setChat([{ is_user: false, mes: '开场' }, { is_user: true, mes: '主 Agent 的指令' }]);
+    await expect(h.bridge.retryHostGeneration()).resolves.toBe(true);
+    expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('generate');
+    expect(h.runtime.recordHostTurn).toHaveBeenLastCalledWith({
+      identity,
+      capture: { capturedAt: 100, capturedChatLength: 2, capturedAiFloorCount: 1, generationSeq: null },
+    });
+  });
+
   it('ignores a stopped generation whose sequence belongs to another generation', async () => {
     const h = createHarness();
     h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
