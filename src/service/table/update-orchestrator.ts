@@ -9,6 +9,7 @@ import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-da
 import { callCustomOpenAI_ACU, RetryableAiResponseError_ACU } from '../ai/prompt-builder';
 import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, establishManualRefillTemplateRoot_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
+import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU } from './manual-update-settings';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
@@ -3436,7 +3437,8 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
             sheetKey,
             lastCompletedAiFloor: history.lastTrackedUpdateAiFloor,
             groupId,
-            batchSize: Math.max(1, Math.trunc(Number(settings_ACU.updateBatchSize) || 1)),
+            // 追平的分批粒度跟手动面板的「每 N 层合并为一次填表」走，不读自动填表的 updateBatchSize。
+            batchSize: resolveManualUpdateBatchSize_ACU(),
             requestOptions: preset ? { tableApiPreset: preset } : null,
             updateMode: 'manual_independent',
             executionKind: isSqliteMode() ? 'sql' as const : 'standard' as const,
@@ -4356,8 +4358,9 @@ export async function orchestrateManualUpdate_ACU(
             }
         }
 
-        const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
-        const uiBatchSize = settings_ACU.updateBatchSize || 3;
+        // 手动更新读手动面板自己的层数与分批参数；自动填表的阈值/批大小不进入手动路径。
+        const uiThreshold = resolveManualUpdateContextDepth_ACU();
+        const uiBatchSize = resolveManualUpdateBatchSize_ACU();
         const uiSkip = settings_ACU.skipUpdateFloors || 0;
 
         const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();

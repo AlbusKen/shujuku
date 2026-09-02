@@ -25,6 +25,7 @@ import {
   type BatchUpdateProgressContext,
   type CardUpdateProgressEvent,
 } from '../../service/table/update-orchestrator';
+import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU } from '../../service/table/manual-update-settings';
 import { refreshMergedDataAndNotify_ACU } from '../../service/worldbook/pipeline';
 import { topLevelWindow_ACU } from '../../shared/env';
 import { useDialogStore } from '../stores/dialog-store';
@@ -127,51 +128,10 @@ function normalizePositiveInteger(value: unknown, fallback: number): number {
   return Math.floor(n);
 }
 
-function resolveManualContextDepth(): number {
-  const fallback = normalizeNonNegativeInteger(settings_ACU.autoUpdateThreshold, 3);
-  return settings_ACU.manualUpdateContextDepth == null
-    ? fallback
-    : normalizeNonNegativeInteger(settings_ACU.manualUpdateContextDepth, fallback);
-}
-
-function resolveManualBatchSize(): number {
-  const fallback = 3;
-  return settings_ACU.manualUpdateBatchSize == null
-    ? fallback
-    : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
-}
-
-function applyManualSettingsForOrchestrator(): () => void {
-  const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
-  const previousUpdateBatchSize = settings_ACU.updateBatchSize;
-
-  // orchestrateManualUpdate_ACU still reads the legacy automatic settings.
-  // Keep the temporary bridge local to this UI action so the independent
-  // manual fields do not persist back into automatic update configuration.
-  settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(
-    settings_ACU.manualUpdateContextDepth,
-    previousAutoUpdateThreshold,
-  );
-  settings_ACU.updateBatchSize = normalizePositiveInteger(
-    settings_ACU.manualUpdateBatchSize,
-    normalizePositiveInteger(previousUpdateBatchSize, 3),
-  );
-
-  return () => {
-    settings_ACU.autoUpdateThreshold = previousAutoUpdateThreshold;
-    settings_ACU.updateBatchSize = previousUpdateBatchSize;
-  };
-}
-
-function manualDepthForOrchestrator_ACU(
-  manualDepth: unknown,
-  fallbackDepth: unknown,
-): number {
-  const fallback = normalizeNonNegativeInteger(fallbackDepth, 3);
-  return manualDepth == null
-    ? fallback
-    : normalizeNonNegativeInteger(manualDepth, fallback);
-}
+// 手动面板的层数/分批参数由 service 层统一解析：手动更新与一键追平都读同一处，
+// 不再在 UI 侧临时改写自动填表的全局设置来“桥接”。
+const resolveManualContextDepth = resolveManualUpdateContextDepth_ACU;
+const resolveManualBatchSize = resolveManualUpdateBatchSize_ACU;
 
 interface ManualRefillRangeSummary {
   indices: number[];
@@ -526,23 +486,17 @@ export function useManualUpdate(): ManualUpdateState {
           handleProgress,
         ));
 
-      const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-      let result: Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>>;
-      try {
-        result = await orchestrateManualUpdate_ACU(
-          targetManualTableKeys,
-          runProcessBatch,
-          async () => { await refreshMergedDataAndNotify_ACU(); },
-          {
-            clearBeforeUpdate,
-            onProgress: handleProgress,
-            // 把确认前快照传给 service 层：orchestrator 在破坏性清理前会再次校验 runtime。
-            executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
-          },
-        );
-      } finally {
-        restoreAutoUpdateSettings();
-      }
+      const result = await orchestrateManualUpdate_ACU(
+        targetManualTableKeys,
+        runProcessBatch,
+        async () => { await refreshMergedDataAndNotify_ACU(); },
+        {
+          clearBeforeUpdate,
+          onProgress: handleProgress,
+          // 把确认前快照传给 service 层：orchestrator 在破坏性清理前会再次校验 runtime。
+          executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
+        },
+      );
       finishToast(
         result.success ? (result.checkpointWarning ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
         result.success

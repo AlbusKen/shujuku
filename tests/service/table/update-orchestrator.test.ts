@@ -1713,7 +1713,9 @@ describe('orchestrateManualUpdate_ACU', () => {
       apiMode: 'custom',
       apiConfig: { useMainApi: true, url: '', model: '' },
       autoUpdateThreshold: 3,
+      manualUpdateContextDepth: 3,
       updateBatchSize: 3,
+      manualUpdateBatchSize: 3,
       skipUpdateFloors: 0,
     };
     mockWasStopped = false;
@@ -1878,7 +1880,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     vi.mocked(getChatArray_ACU).mockReturnValue(chat as any);
     mockCurrentJsonTableData = { sheet_0: { name: '测试表', updateConfig: {}, content: [['row_id', 'v2']] } };
     // 收敛后保留的回放根在末位 AI 楼层（#3），重填范围限定为该楼层（写目标不得早于根）
-    mockSettings.autoUpdateThreshold = 1;
+    mockSettings.manualUpdateContextDepth = 1;
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockPrepareV2Recovery.mockResolvedValueOnce({
       planId: 'plan-converge',
@@ -2331,8 +2333,8 @@ describe('orchestrateManualUpdate_ACU', () => {
         };
       }
     });
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     // 让首 chunk 的真实 grouped 逻辑成功（零提交也可），才能继续到第二个 chunk 前的复检
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
@@ -2431,7 +2433,7 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: false, mes: 'AI回复5' },
     ];
     vi.mocked(getChatArray_ACU).mockReturnValue(chat as any);
-    mockSettings.autoUpdateThreshold = 2;
+    mockSettings.manualUpdateContextDepth = 2;
     mockCurrentJsonTableData = {
       sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
     };
@@ -2509,8 +2511,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: false, mes: 'AI回复3' },
     ]);
     mockSettings.maxConcurrentGroups = 1;
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCurrentJsonTableData = {
       sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
     };
@@ -2587,8 +2589,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       return 1;
     });
     mockSettings.maxConcurrentGroups = 1;
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] } };
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
@@ -2644,8 +2646,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     ];
     vi.mocked(getChatArray_ACU).mockReturnValue(chat);
     mockSettings.maxConcurrentGroups = 1;
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] } };
     // pre 段（index 0）AI 调用直接失败：stage_only 提交失败 → 该组整体失败。
     mockCallCustomOpenAI.mockRejectedValue(new Error('AI 调用失败'));
@@ -2692,8 +2694,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     ];
     vi.mocked(getChatArray_ACU).mockReturnValue(chat);
     mockSettings.maxConcurrentGroups = 1;
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A']] } };
     mockCallCustomOpenAI.mockClear();
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
@@ -2730,8 +2732,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       templateObj: initialTemplate,
       templateStr: JSON.stringify(initialTemplate),
     } as any);
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCurrentJsonTableData = {
       sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值'], ['1', '旧值']] },
     };
@@ -2773,8 +2775,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: false },
     ]);
     vi.mocked(commitManualRefillSheetSnapshotInRangeAtomic_ACU).mockResolvedValue({ success: false, changed: false, clearedCount: 0, checkpointCount: 0, error: 'strict save failed' });
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
     mockParseAndApplyTableEditsToData.mockImplementation(() => ({
@@ -2809,8 +2811,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockPersistTablesToChatMessage.mockImplementationOnce(async () => {
       mockWasStopped = true;
       return { saved: true, messageIndex: 2 };
@@ -2846,8 +2848,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    mockSettings.autoUpdateThreshold = 0;
-    mockSettings.updateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
 
@@ -3642,7 +3644,9 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
       apiMode: 'custom',
       apiConfig: { useMainApi: true, url: '', model: '' },
       autoUpdateThreshold: 3,
+      manualUpdateContextDepth: 3,
       updateBatchSize: 3,
+      manualUpdateBatchSize: 3,
       skipUpdateFloors: 0,
       tableApiPresetOverridesByName: {},
     };
@@ -6478,6 +6482,7 @@ describe('orchestrateManualCatchUp_ACU', () => {
       apiConfig: { useMainApi: true, url: '', model: '' },
       skipUpdateFloors: 0,
       updateBatchSize: 1,
+      manualUpdateBatchSize: 1,
       tableMaxRetries: 1,
       tableApiPresetOverridesByName: {},
     };
@@ -6504,6 +6509,24 @@ describe('orchestrateManualCatchUp_ACU', () => {
       };
     });
     mockPersistTablesToChatMessage.mockReset().mockResolvedValue({ saved: true, messageIndex: 5 });
+  });
+
+  it('追平计划的 batchSize 只跟手动面板的「每 N 层合并为一次填表」走，不读自动填表的 updateBatchSize', async () => {
+    mockGetChatArray_ACU.mockReturnValue(createCatchUpChat(1, 2) as any);
+    mockSettings.updateBatchSize = 5;
+    mockSettings.manualUpdateBatchSize = 2;
+
+    const result = await prepareManualCatchUpPlan_ACU(['sheet_a', 'sheet_b']);
+
+    expect(result.success).toBe(true);
+    const batchSizes = result.plan!.waves.flatMap(wave => wave.groups.map(group => group.batchSize));
+    expect(batchSizes.length).toBeGreaterThan(0);
+    expect(new Set(batchSizes)).toEqual(new Set([2]));
+
+    // 手动面板未设置时回落手动默认 3，而不是自动填表的 5。
+    delete mockSettings.manualUpdateBatchSize;
+    const fallback = await prepareManualCatchUpPlan_ACU(['sheet_a', 'sheet_b']);
+    expect(new Set(fallback.plan!.waves.flatMap(wave => wave.groups.map(group => group.batchSize)))).toEqual(new Set([3]));
   });
 
   it('模板存在但 runtime 缺失时，prepareManualCatchUpPlan_ACU 拒绝（模板不作资格兜底）', async () => {

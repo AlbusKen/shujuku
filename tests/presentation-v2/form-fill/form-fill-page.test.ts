@@ -773,18 +773,20 @@ describe('FormFillPage · 手动填表面板', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('执行手动填表时临时把独立参数桥接给 service，结束后恢复自动更新设置', async () => {
+  it('执行手动填表不再改写自动更新设置：手动参数由 service 层独立解析', async () => {
     const settings = createSettings();
     settings.autoUpdateThreshold = 3;
     settings.updateBatchSize = 2;
     settings.manualUpdateContextDepth = 100;
     settings.manualUpdateBatchSize = 4;
     const { mount, orchestrate } = await mountFormFillPage(settings);
-    const observedSettings: Array<{ threshold: number; batchSize: number }> = [];
+    const observedSettings: Array<{ threshold: number; batchSize: number; manualDepth: number; manualBatch: number }> = [];
     orchestrate.mockImplementation(async () => {
       observedSettings.push({
         threshold: settings.autoUpdateThreshold,
         batchSize: settings.updateBatchSize,
+        manualDepth: settings.manualUpdateContextDepth,
+        manualBatch: settings.manualUpdateBatchSize,
       });
       return { success: true };
     });
@@ -795,7 +797,8 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认并继续');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(observedSettings).toEqual([{ threshold: 100, batchSize: 4 }]);
+    // 自动填表设置在整个执行期间保持原值；service 层通过 manual-update-settings 读取手动参数。
+    expect(observedSettings).toEqual([{ threshold: 3, batchSize: 2, manualDepth: 100, manualBatch: 4 }]);
     expect(settings.autoUpdateThreshold).toBe(3);
     expect(settings.updateBatchSize).toBe(2);
 

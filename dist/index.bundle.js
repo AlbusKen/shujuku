@@ -2440,7 +2440,7 @@ $CONTENT
     /**
      * 非负整数归一化（fallback 默认 0）
      */
-    function normalizeNonNegativeInteger_ACU$1(value, fallbackValue = 0) {
+    function normalizeNonNegativeInteger_ACU$2(value, fallbackValue = 0) {
         const num = Number(value);
         if (Number.isFinite(num) && num >= 0)
             return Math.floor(num);
@@ -2450,7 +2450,7 @@ $CONTENT
     /**
      * 正整数归一化（fallback 默认 1）
      */
-    function normalizePositiveInteger_ACU$1(value, fallbackValue = 1) {
+    function normalizePositiveInteger_ACU$2(value, fallbackValue = 1) {
         const num = Number(value);
         if (Number.isFinite(num) && num > 0)
             return Math.floor(num);
@@ -75799,13 +75799,13 @@ $CONTENT
             extractTags: typeof cloned.extractTags === 'string' ? cloned.extractTags : (fallback?.extractTags || ''),
             extractInjectTags: typeof cloned.extractInjectTags === 'string' ? cloned.extractInjectTags : (fallback?.extractInjectTags || ''),
             finalDirectiveTemplate: typeof cloned.finalDirectiveTemplate === 'string' ? cloned.finalDirectiveTemplate : (fallback?.finalDirectiveTemplate || ''),
-            minLength: normalizeNonNegativeInteger_ACU$1(cloned.minLength, fallback?.minLength ?? 0),
-            maxRetries: normalizePositiveInteger_ACU$1(cloned.maxRetries ?? cloned.loopSettings?.maxRetries, fallback?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3),
+            minLength: normalizeNonNegativeInteger_ACU$2(cloned.minLength, fallback?.minLength ?? 0),
+            maxRetries: normalizePositiveInteger_ACU$2(cloned.maxRetries ?? cloned.loopSettings?.maxRetries, fallback?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3),
             mergeStrategy: typeof cloned.mergeStrategy === 'string' && cloned.mergeStrategy.trim()
                 ? cloned.mergeStrategy.trim()
                 : (fallback?.mergeStrategy || 'append'),
-            stage: normalizePositiveInteger_ACU$1(cloned.stage, fallback?.stage ?? 1),
-            order: normalizeNonNegativeInteger_ACU$1(cloned.order, fallback?.order ?? index),
+            stage: normalizePositiveInteger_ACU$2(cloned.stage, fallback?.stage ?? 1),
+            order: normalizeNonNegativeInteger_ACU$2(cloned.order, fallback?.order ?? index),
             description: normalizeOptionalString_ACU(cloned.description, fallback?.description),
             triggerWhen: normalizeOptionalString_ACU(cloned.triggerWhen, fallback?.triggerWhen),
             agentControl: normalizePlotTaskAgentControl_ACU(cloned.agentControl, fallback?.agentControl),
@@ -75849,7 +75849,7 @@ $CONTENT
         const normalizedPromptGroup = getPlotPromptGroupFromSource_ACU(task);
         plotSettings.promptGroup = JSON.parse(JSON.stringify(normalizedPromptGroup));
         plotSettings.extractTags = typeof task.extractTags === 'string' ? task.extractTags : '';
-        plotSettings.minLength = normalizeNonNegativeInteger_ACU$1(task.minLength, 0);
+        plotSettings.minLength = normalizeNonNegativeInteger_ACU$2(task.minLength, 0);
         const legacyPromptTexts = getLegacyPromptTextsFromPromptGroup_ACU(normalizedPromptGroup);
         setPlotPromptContentByIdForSettings_ACU(plotSettings, 'mainPrompt', legacyPromptTexts.mainPrompt || '');
         setPlotPromptContentByIdForSettings_ACU(plotSettings, 'systemPrompt', legacyPromptTexts.systemPrompt || '');
@@ -77703,7 +77703,7 @@ $CONTENT
     function sortPlotTaskResults_ACU(results) {
         return (Array.isArray(results) ? [...results] : [])
             .filter(Boolean)
-            .sort((a, b) => (normalizePositiveInteger_ACU$1(a?.stage, 1) - normalizePositiveInteger_ACU$1(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
+            .sort((a, b) => (normalizePositiveInteger_ACU$2(a?.stage, 1) - normalizePositiveInteger_ACU$2(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
     }
     function aggregatePlotTaskTags_ACU(taskResults) {
         const aggregated = new Map();
@@ -77940,7 +77940,7 @@ $CONTENT
         }
     }
     function collectRecentAiLayerPairs_ACU(messages, layerLimit) {
-        const limit = normalizePositiveInteger_ACU$1(layerLimit, 1);
+        const limit = normalizePositiveInteger_ACU$2(layerLimit, 1);
         const pairs = [];
         for (let i = messages.length - 1; i >= 0 && pairs.length < limit; i--) {
             const ai = messages[i];
@@ -78175,7 +78175,7 @@ $CONTENT
         return refs;
     }
     function applyGreenlightTkBudget_ACU(refs, summaries, maxBudget, maxEntries) {
-        const entryLimit = normalizePositiveInteger_ACU$1(maxEntries, refs.length || 1);
+        const entryLimit = normalizePositiveInteger_ACU$2(maxEntries, refs.length || 1);
         const tkLimit = normalizeTkBudgetNumber_ACU(maxBudget, 0);
         const tkByRef = new Map(summaries.map(summary => [refKey_ACU(summary.bookName, summary.uid), summary.tk]));
         const selected = [];
@@ -78225,12 +78225,12 @@ $CONTENT
         return tasks
             .map((task, index) => ({ task, index }))
             .sort((left, right) => {
-            const leftStage = normalizePositiveInteger_ACU$1(left.task?.stage, 1);
-            const rightStage = normalizePositiveInteger_ACU$1(right.task?.stage, 1);
+            const leftStage = normalizePositiveInteger_ACU$2(left.task?.stage, 1);
+            const rightStage = normalizePositiveInteger_ACU$2(right.task?.stage, 1);
             if (leftStage !== rightStage)
                 return leftStage - rightStage;
-            const leftOrder = normalizeNonNegativeInteger_ACU$1(left.task?.order, 0);
-            const rightOrder = normalizeNonNegativeInteger_ACU$1(right.task?.order, 0);
+            const leftOrder = normalizeNonNegativeInteger_ACU$2(left.task?.order, 0);
+            const rightOrder = normalizeNonNegativeInteger_ACU$2(right.task?.order, 0);
             if (leftOrder !== rightOrder)
                 return leftOrder - rightOrder;
             return left.index - right.index;
@@ -78262,8 +78262,8 @@ $CONTENT
                 continue;
             }
             const run = item?.run !== false;
-            const effectiveStage = normalizePositiveInteger_ACU$1(item?.effectiveStage, sourceTask.stage || 1);
-            const effectiveOrder = normalizeNonNegativeInteger_ACU$1(item?.effectiveOrder, sourceTask.order || 0);
+            const effectiveStage = normalizePositiveInteger_ACU$2(item?.effectiveStage, sourceTask.stage || 1);
+            const effectiveOrder = normalizeNonNegativeInteger_ACU$2(item?.effectiveOrder, sourceTask.order || 0);
             plan.push({ taskId, run, effectiveStage, effectiveOrder, mode: String(item?.mode || '').trim(), reason: String(item?.reason || '').trim() });
             if (run) {
                 selectedIds.add(taskId);
@@ -78290,7 +78290,7 @@ $CONTENT
         return { plan, effectiveTasks: sortEffectiveTasks_ACU(effectiveTasks) };
     }
     function createAgentDecisionShards_ACU(summaries, candidateLimit, configuredConcurrency, minTkBudget, maxTkBudget) {
-        const candidates = summaries.slice(0, normalizePositiveInteger_ACU$1(candidateLimit, summaries.length || 1));
+        const candidates = summaries.slice(0, normalizePositiveInteger_ACU$2(candidateLimit, summaries.length || 1));
         if (candidates.length === 0)
             return [];
         const shardCount = Math.min(candidates.length, Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(configuredConcurrency) || 1))));
@@ -78618,12 +78618,12 @@ $CONTENT
     function sortPlotTasksForRuntime_ACU(tasks) {
         return (Array.isArray(tasks) ? [...tasks] : [])
             .filter(Boolean)
-            .sort((a, b) => (normalizePositiveInteger_ACU$1(a?.stage, 1) - normalizePositiveInteger_ACU$1(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
+            .sort((a, b) => (normalizePositiveInteger_ACU$2(a?.stage, 1) - normalizePositiveInteger_ACU$2(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
     }
     function groupPlotTasksByStage_ACU(tasks) {
         const stageGroups = [];
         sortPlotTasksForRuntime_ACU(tasks).forEach((task) => {
-            const stageNo = normalizePositiveInteger_ACU$1(task?.stage, 1);
+            const stageNo = normalizePositiveInteger_ACU$2(task?.stage, 1);
             let currentGroup = stageGroups[stageGroups.length - 1];
             if (!currentGroup || currentGroup.stage !== stageNo) {
                 currentGroup = { stage: stageNo, tasks: [] };
@@ -78968,9 +78968,9 @@ $CONTENT
     async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {}) {
         const normalizedTask = normalizePlotTask_ACU(task, { index: task?.order ?? 0, fallbackTask: task || null });
         const taskLabel = normalizedTask.name || normalizedTask.id || '未命名任务';
-        const taskStage = normalizePositiveInteger_ACU$1(normalizedTask.stage, 1);
-        const maxRetries = normalizePositiveInteger_ACU$1(normalizedTask.maxRetries, sharedContext?.plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
-        const minLength = normalizeNonNegativeInteger_ACU$1(normalizedTask.minLength, 0);
+        const taskStage = normalizePositiveInteger_ACU$2(normalizedTask.stage, 1);
+        const maxRetries = normalizePositiveInteger_ACU$2(normalizedTask.maxRetries, sharedContext?.plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
+        const minLength = normalizeNonNegativeInteger_ACU$2(normalizedTask.minLength, 0);
         // 任务级世界书计算：基于当前任务实际使用的 {{tag}} 注入内容 + 本轮上下文触发，
         // 而不是固定使用整段上一轮剧情内容。
         // 标签来源与 renderPlotTaskMessages_ACU 一致：
@@ -94507,7 +94507,7 @@ $CONTENT
         return { ok: true };
     }
     function normalizeArchiveTriggerCount_ACU(value, fallbackValue) {
-        const normalized = normalizePositiveInteger_ACU$1(value, fallbackValue);
+        const normalized = normalizePositiveInteger_ACU$2(value, fallbackValue);
         return Math.max(1, normalized);
     }
     function cloneDefaultVectorMemoryConfig_ACU() {
@@ -94580,16 +94580,16 @@ $CONTENT
         const source = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)
             ? rawConfig
             : {};
-        const archiveBatchSize = normalizePositiveInteger_ACU$1(source.archiveBatchSize, defaults.archiveBatchSize);
+        const archiveBatchSize = normalizePositiveInteger_ACU$2(source.archiveBatchSize, defaults.archiveBatchSize);
         const archiveTriggerCount = normalizeArchiveTriggerCount_ACU(source.archiveTriggerCount, defaults.archiveTriggerCount ?? archiveBatchSize);
-        const archiveMaxConcurrency = normalizePositiveInteger_ACU$1(source.archiveMaxConcurrency, defaults.archiveMaxConcurrency ?? 3);
+        const archiveMaxConcurrency = normalizePositiveInteger_ACU$2(source.archiveMaxConcurrency, defaults.archiveMaxConcurrency ?? 3);
         return {
             enabled: source.enabled === true,
-            threshold: normalizePositiveInteger_ACU$1(source.threshold, defaults.threshold),
+            threshold: normalizePositiveInteger_ACU$2(source.threshold, defaults.threshold),
             archiveTriggerCount,
             archiveBatchSize,
             archiveMaxConcurrency,
-            topK: normalizePositiveInteger_ACU$1(source.topK, defaults.topK),
+            topK: normalizePositiveInteger_ACU$2(source.topK, defaults.topK),
             minScore: normalizeMinScore_ACU(source.minScore, defaults.minScore),
             embeddingEndpoint: normalizeTextField_ACU(source.embeddingEndpoint, defaults.embeddingEndpoint),
             embeddingApiKey: normalizeTextField_ACU(source.embeddingApiKey, defaults.embeddingApiKey),
@@ -94603,25 +94603,25 @@ $CONTENT
             entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
             entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
             hybridRetrievalEnabled: source.hybridRetrievalEnabled !== false,
-            bm25CandidateLimit: normalizePositiveInteger_ACU$1(source.bm25CandidateLimit, Number(defaults.bm25CandidateLimit) || Number(source.recallCandidateLimit) || defaults.recallCandidateLimit),
-            rrfK: normalizePositiveInteger_ACU$1(source.rrfK, Number(defaults.rrfK) || 60),
-            summaryIndexKeywordMinRows: normalizePositiveInteger_ACU$1(source.summaryIndexKeywordMinRows, defaults.summaryIndexKeywordMinRows || 100),
-            summaryChunkSentenceCount: normalizePositiveInteger_ACU$1(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
+            bm25CandidateLimit: normalizePositiveInteger_ACU$2(source.bm25CandidateLimit, Number(defaults.bm25CandidateLimit) || Number(source.recallCandidateLimit) || defaults.recallCandidateLimit),
+            rrfK: normalizePositiveInteger_ACU$2(source.rrfK, Number(defaults.rrfK) || 60),
+            summaryIndexKeywordMinRows: normalizePositiveInteger_ACU$2(source.summaryIndexKeywordMinRows, defaults.summaryIndexKeywordMinRows || 100),
+            summaryChunkSentenceCount: normalizePositiveInteger_ACU$2(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
             summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
             archiveWithoutSummary: source.archiveWithoutSummary === true,
             summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, defaults.summaryPromptGroup || []),
             keywordApiPreset: normalizeTextField_ACU(source.keywordApiPreset, defaults.keywordApiPreset),
-            keywordContextPairCount: normalizePositiveInteger_ACU$1(source.keywordContextPairCount, defaults.keywordContextPairCount),
-            keywordGenerationMaxAttempts: normalizePositiveInteger_ACU$1(source.keywordGenerationMaxAttempts, defaults.keywordGenerationMaxAttempts || 3),
+            keywordContextPairCount: normalizePositiveInteger_ACU$2(source.keywordContextPairCount, defaults.keywordContextPairCount),
+            keywordGenerationMaxAttempts: normalizePositiveInteger_ACU$2(source.keywordGenerationMaxAttempts, defaults.keywordGenerationMaxAttempts || 3),
             keywordPromptGroup: normalizeKeywordPromptGroup_ACU(source.keywordPromptGroup, defaults.keywordPromptGroup),
-            recallCandidateLimit: normalizePositiveInteger_ACU$1(source.recallCandidateLimit, defaults.recallCandidateLimit),
-            recentFixedInjectCount: normalizePositiveInteger_ACU$1(source.recentFixedInjectCount, defaults.recentFixedInjectCount || 50),
+            recallCandidateLimit: normalizePositiveInteger_ACU$2(source.recallCandidateLimit, defaults.recallCandidateLimit),
+            recentFixedInjectCount: normalizePositiveInteger_ACU$2(source.recentFixedInjectCount, defaults.recentFixedInjectCount || 50),
             summaryIndexV2WriteEnabled: typeof source.summaryIndexV2WriteEnabled === 'boolean'
                 ? source.summaryIndexV2WriteEnabled
                 : defaults.summaryIndexV2WriteEnabled !== false,
             summaryIndexV2WriteScopeAllowlist: normalizeSummaryIndexV2WriteScopeAllowlist_ACU(source.summaryIndexV2WriteScopeAllowlist),
             summaryIndexRollingDeltaEnabled: source.summaryIndexRollingDeltaEnabled === true,
-            summaryIndexRollingDeltaFoldThreshold: normalizePositiveInteger_ACU$1(source.summaryIndexRollingDeltaFoldThreshold, defaults.summaryIndexRollingDeltaFoldThreshold || 15),
+            summaryIndexRollingDeltaFoldThreshold: normalizePositiveInteger_ACU$2(source.summaryIndexRollingDeltaFoldThreshold, defaults.summaryIndexRollingDeltaFoldThreshold || 15),
             summaryIndexContentPackWriteEnabled: typeof source.summaryIndexContentPackWriteEnabled === 'boolean'
                 ? source.summaryIndexContentPackWriteEnabled
                 : defaults.summaryIndexContentPackWriteEnabled === true,
@@ -94757,18 +94757,18 @@ $CONTENT
     function getEffectiveSummaryVectorIndexConfig_ACU(configInput) {
         const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
         const defaults = defaultEffectiveConfigFallback_ACU;
-        const topK = normalizePositiveInteger_ACU$1(config.topK, defaults.topK);
+        const topK = normalizePositiveInteger_ACU$2(config.topK, defaults.topK);
         const minScore = normalizeMinScore_ACU(config.minScore, defaults.minScore);
-        const recallCandidateLimit = Math.max(topK, normalizePositiveInteger_ACU$1(config.recallCandidateLimit, defaults.recallCandidateLimit || topK));
-        const summaryChunkSentenceCount = normalizePositiveInteger_ACU$1(config.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount || 2);
-        const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU$1(config.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30);
+        const recallCandidateLimit = Math.max(topK, normalizePositiveInteger_ACU$2(config.recallCandidateLimit, defaults.recallCandidateLimit || topK));
+        const summaryChunkSentenceCount = normalizePositiveInteger_ACU$2(config.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount || 2);
+        const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30);
         // T9：归档 embedding 批次的有界并发度（同时进行中的批次上限）。独立于 summaryIndexArchiveMaxConcurrency（批大小）。
-        const summaryIndexArchiveEmbeddingConcurrency = normalizePositiveInteger_ACU$1(config.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3);
-        const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU$1(config.summaryIndexKeywordMinRows, Number(defaults.summaryIndexKeywordMinRows) || 100);
-        const recentFixedInjectCount = normalizePositiveInteger_ACU$1(config.recentFixedInjectCount, Number(defaults.recentFixedInjectCount) || 50);
-        const bm25CandidateLimit = Math.max(1, normalizePositiveInteger_ACU$1(config.bm25CandidateLimit, Number(defaults.bm25CandidateLimit) || recallCandidateLimit));
-        const rrfK = normalizePositiveInteger_ACU$1(config.rrfK, Number(defaults.rrfK) || 60);
-        const summaryIndexRollingDeltaFoldThreshold = normalizePositiveInteger_ACU$1(config.summaryIndexRollingDeltaFoldThreshold, Number(defaults.summaryIndexRollingDeltaFoldThreshold) || 15);
+        const summaryIndexArchiveEmbeddingConcurrency = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3);
+        const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU$2(config.summaryIndexKeywordMinRows, Number(defaults.summaryIndexKeywordMinRows) || 100);
+        const recentFixedInjectCount = normalizePositiveInteger_ACU$2(config.recentFixedInjectCount, Number(defaults.recentFixedInjectCount) || 50);
+        const bm25CandidateLimit = Math.max(1, normalizePositiveInteger_ACU$2(config.bm25CandidateLimit, Number(defaults.bm25CandidateLimit) || recallCandidateLimit));
+        const rrfK = normalizePositiveInteger_ACU$2(config.rrfK, Number(defaults.rrfK) || 60);
+        const summaryIndexRollingDeltaFoldThreshold = normalizePositiveInteger_ACU$2(config.summaryIndexRollingDeltaFoldThreshold, Number(defaults.summaryIndexRollingDeltaFoldThreshold) || 15);
         return {
             ...config,
             enabled: true,
@@ -97202,7 +97202,7 @@ $CONTENT
             const isSelected = selectedTask?.id === task.id;
             const enabledText = task.enabled !== false ? '启用' : '停用';
             const enabledColor = task.enabled !== false ? 'var(--green)' : 'var(--red)';
-            const stageNo = normalizePositiveInteger_ACU$1(task?.stage, 1);
+            const stageNo = normalizePositiveInteger_ACU$2(task?.stage, 1);
             const itemHtml = `
               <button type="button" class="button acu-plot-task-item ${isSelected ? 'acu-plot-task-item--active' : ''}" data-task-id="${escapeHtml_ACU$1(task.id)}" style="display:flex; width:100%; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; padding:10px 12px; text-align:left; border:${isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--border_color_light)'}; background:${isSelected ? 'color-mix(in srgb, var(--accent-primary) 12%, var(--background_default))' : 'var(--background_default)'}; border-radius:8px;">
                   <span style="display:flex; flex-direction:column; gap:4px; min-width:0;">
@@ -97237,7 +97237,7 @@ $CONTENT
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(selectedTask.extractTags || '');
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags`).val(selectedTask.extractInjectTags || '');
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(selectedTask.minLength ?? 0);
-        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(normalizePositiveInteger_ACU$1(selectedTask.stage, 1));
+        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(normalizePositiveInteger_ACU$2(selectedTask.stage, 1));
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`).val(selectedTask.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
         setPlotTaskApiPresetSelectValue_ACU(selectedTask);
     }
@@ -97328,7 +97328,7 @@ $CONTENT
     }
     function buildNewPlotTaskForUI_ACU(plotSettings = getActivePlotEditorSettings_ACU()) {
         const tasks = Array.isArray(plotSettings?.plotTasks) ? plotSettings.plotTasks : [];
-        const defaultStage = normalizePositiveInteger_ACU$1(tasks[tasks.length - 1]?.stage, 1);
+        const defaultStage = normalizePositiveInteger_ACU$2(tasks[tasks.length - 1]?.stage, 1);
         let serial = tasks.length + 1;
         let taskId = `plotTask${serial}`;
         while (tasks.some((task) => task && task.id === taskId)) {
@@ -99013,8 +99013,8 @@ $CONTENT
             ? 100
             : (key === 'autoUpdateThreshold' || key === 'autoUpdateTokenThreshold' || key === 'skipUpdateFloors' || key === 'retainRecentLayers' ? 0 : 1);
         const normalized = min > 0
-            ? normalizePositiveInteger_ACU$1(value, fallback)
-            : normalizeNonNegativeInteger_ACU$1(value, fallback);
+            ? normalizePositiveInteger_ACU$2(value, fallback)
+            : normalizeNonNegativeInteger_ACU$2(value, fallback);
         return Math.max(min, normalized);
     }
     /** 更新自动更新数值字段（批量原子写） */
@@ -101011,6 +101011,47 @@ $CONTENT
             setLastTotalAiMessages(totalAiMessages);
         }
         return undefined; // 不需要更新
+    }
+
+    /**
+     * service/table/manual-update-settings.ts — 手动填表 / 一键追平的独立参数解析
+     *
+     * 手动面板上的「手动处理最近 N 层」与「每 N 层合并为一次填表」是手动路径自己的设置，
+     * 与自动填表的 autoUpdateThreshold / updateBatchSize 独立。手动更新与追平都只从这里取值，
+     * 不再由 UI 层临时改写自动填表的全局设置来“桥接”。
+     */
+    function normalizePositiveInteger_ACU$1(value, fallback) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 1)
+            return fallback;
+        return Math.floor(n);
+    }
+    function normalizeNonNegativeInteger_ACU$1(value, fallback) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0)
+            return fallback;
+        return Math.floor(n);
+    }
+    /** 手动面板的显示默认；未设置过时用它，而不是自动填表的批大小。 */
+    const MANUAL_UPDATE_BATCH_SIZE_DEFAULT_ACU = 3;
+    /**
+     * 「每 N 层合并为一次填表」：手动更新与一键追平共用。
+     * 未设置时回落 3，不回落到自动填表的 updateBatchSize。
+     */
+    function resolveManualUpdateBatchSize_ACU() {
+        return settings_ACU.manualUpdateBatchSize == null
+            ? MANUAL_UPDATE_BATCH_SIZE_DEFAULT_ACU
+            : normalizePositiveInteger_ACU$1(settings_ACU.manualUpdateBatchSize, MANUAL_UPDATE_BATCH_SIZE_DEFAULT_ACU);
+    }
+    /**
+     * 「手动处理最近 N 层」。未设置过时沿用自动填表阈值作为初始默认（历史行为）；
+     * 用户在手动面板设置过之后只认手动值。
+     */
+    function resolveManualUpdateContextDepth_ACU() {
+        const fallback = normalizeNonNegativeInteger_ACU$1(settings_ACU.autoUpdateThreshold, 3);
+        return settings_ACU.manualUpdateContextDepth == null
+            ? fallback
+            : normalizeNonNegativeInteger_ACU$1(settings_ACU.manualUpdateContextDepth, fallback);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -107583,7 +107624,8 @@ $CONTENT
                 sheetKey,
                 lastCompletedAiFloor: history.lastTrackedUpdateAiFloor,
                 groupId,
-                batchSize: Math.max(1, Math.trunc(Number(settings_ACU.updateBatchSize) || 1)),
+                // 追平的分批粒度跟手动面板的「每 N 层合并为一次填表」走，不读自动填表的 updateBatchSize。
+                batchSize: resolveManualUpdateBatchSize_ACU(),
                 requestOptions: preset ? { tableApiPreset: preset } : null,
                 updateMode: 'manual_independent',
                 executionKind: isSqliteMode() ? 'sql' : 'standard',
@@ -108443,8 +108485,9 @@ $CONTENT
                     return { success: false, error: '锚点自动收敛后数据库未能重新加载。' };
                 }
             }
-            const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
-            const uiBatchSize = settings_ACU.updateBatchSize || 3;
+            // 手动更新读手动面板自己的层数与分批参数；自动填表的阈值/批大小不进入手动路径。
+            const uiThreshold = resolveManualUpdateContextDepth_ACU();
+            const uiBatchSize = resolveManualUpdateBatchSize_ACU();
             const uiSkip = settings_ACU.skipUpdateFloors || 0;
             const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
             const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
@@ -156331,8 +156374,8 @@ Expected function or array of functions, received type ${typeof value}.`
         const meta = NUMBER_FIELD_META.find((item) => item.key === key);
         const fallback = FALLBACKS[key];
         const normalized = (meta?.min ?? 0) > 0
-            ? normalizePositiveInteger_ACU$1(value, fallback)
-            : normalizeNonNegativeInteger_ACU$1(value, fallback);
+            ? normalizePositiveInteger_ACU$2(value, fallback)
+            : normalizeNonNegativeInteger_ACU$2(value, fallback);
         return Math.max(meta?.min ?? 0, normalized);
     }
     function normalizeRules(rules, legacy = "", kind) {
@@ -163914,8 +163957,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 return [];
             const chat = getChatArray_ACU();
             const totalAi = chat.filter((msg) => msg && !msg.is_user).length;
-            const globalFrequency = normalizePositiveInteger_ACU$1(settings_ACU.autoUpdateFrequency, 1);
-            const globalSkip = normalizeNonNegativeInteger_ACU$1(settings_ACU.skipUpdateFloors, 0);
+            const globalFrequency = normalizePositiveInteger_ACU$2(settings_ACU.autoUpdateFrequency, 1);
+            const globalSkip = normalizeNonNegativeInteger_ACU$2(settings_ACU.skipUpdateFloors, 0);
             const currentIsolationKey = getCurrentIsolationKey_ACU();
             return sheetKeys.value.map((key) => {
                 const table = displayData[key] || {};
@@ -164709,37 +164752,10 @@ Expected function or array of functions, received type ${typeof value}.`
             return fallback;
         return Math.floor(n);
     }
-    function resolveManualContextDepth() {
-        const fallback = normalizeNonNegativeInteger(settings_ACU.autoUpdateThreshold, 3);
-        return settings_ACU.manualUpdateContextDepth == null
-            ? fallback
-            : normalizeNonNegativeInteger(settings_ACU.manualUpdateContextDepth, fallback);
-    }
-    function resolveManualBatchSize() {
-        const fallback = 3;
-        return settings_ACU.manualUpdateBatchSize == null
-            ? fallback
-            : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
-    }
-    function applyManualSettingsForOrchestrator() {
-        const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
-        const previousUpdateBatchSize = settings_ACU.updateBatchSize;
-        // orchestrateManualUpdate_ACU still reads the legacy automatic settings.
-        // Keep the temporary bridge local to this UI action so the independent
-        // manual fields do not persist back into automatic update configuration.
-        settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(settings_ACU.manualUpdateContextDepth, previousAutoUpdateThreshold);
-        settings_ACU.updateBatchSize = normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, normalizePositiveInteger(previousUpdateBatchSize, 3));
-        return () => {
-            settings_ACU.autoUpdateThreshold = previousAutoUpdateThreshold;
-            settings_ACU.updateBatchSize = previousUpdateBatchSize;
-        };
-    }
-    function manualDepthForOrchestrator_ACU(manualDepth, fallbackDepth) {
-        const fallback = normalizeNonNegativeInteger(fallbackDepth, 3);
-        return manualDepth == null
-            ? fallback
-            : normalizeNonNegativeInteger(manualDepth, fallback);
-    }
+    // 手动面板的层数/分批参数由 service 层统一解析：手动更新与一键追平都读同一处，
+    // 不再在 UI 侧临时改写自动填表的全局设置来“桥接”。
+    const resolveManualContextDepth = resolveManualUpdateContextDepth_ACU;
+    const resolveManualBatchSize = resolveManualUpdateBatchSize_ACU;
     function resolveManualRefillRangeSummary_ACU(manualDepth) {
         const chat = getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0)
@@ -165054,19 +165070,12 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                 };
                 const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
-                const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-                let result;
-                try {
-                    result = await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, {
-                        clearBeforeUpdate,
-                        onProgress: handleProgress,
-                        // 把确认前快照传给 service 层：orchestrator 在破坏性清理前会再次校验 runtime。
-                        executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
-                    });
-                }
-                finally {
-                    restoreAutoUpdateSettings();
-                }
+                const result = await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, {
+                    clearBeforeUpdate,
+                    onProgress: handleProgress,
+                    // 把确认前快照传给 service 层：orchestrator 在破坏性清理前会再次校验 runtime。
+                    executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
+                });
                 finishToast(result.success ? (result.checkpointWarning ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'), result.success
                     ? `${result.autoMergeTriggered
                     ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
