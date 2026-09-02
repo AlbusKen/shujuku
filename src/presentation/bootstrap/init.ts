@@ -16,6 +16,7 @@ import { auditDormantDataIntegrity_ACU } from '../../service/template/dormant-da
 import { reloadStorageProvider, disposeStorageProvider, getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from '../../service/table/table-storage-strategy';
 import { createCanonicalSnapshotEnvelope_ACU } from '../../service/table/canonical-snapshot-envelope';
 import { isSqliteMode } from '../../service/table/storage-mode';
+import { flushRuntimeOnlyPendingChanges_ACU } from '../../service/table/runtime-only-pending-flush';
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../service/table/manual-catch-up-provisional-bridge';
 import { loadAllChatMessages_ACU } from '../../service/worldbook/pipeline';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
@@ -42,6 +43,13 @@ import { getContinuationRuntime_ACU } from '../../service/continuation/continuat
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
   try {
+    // 开局脚本可能只把行写进了运行时（skipChatSave/isImportMode）。seed checkpoint 建立后会
+    // 从聊天重载运行时，这些行会被直接丢弃；先写回聊天，聊天有数据时 seed 自然跳过。
+    try {
+      await flushRuntimeOnlyPendingChanges_ACU(reason);
+    } catch (flushError) {
+      logWarn_ACU(`[InitialSeed] ${reason} 写回运行时未落盘变更失败，继续初始化 checkpoint:`, flushError);
+    }
     const result = await ensureInitialSeedCheckpoint_ACU({ reason, allowPendingFirstUserMessage });
     if ((result as any)?.success && isSqliteMode()) {
       await reloadStorageProvider();

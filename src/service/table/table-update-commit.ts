@@ -9,6 +9,11 @@ import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from './manual-cat
 import type { ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationIdentifiers_ACU } from './sql-table-service';
+import {
+  extractPendingSheetKeysFromWriteSet_ACU,
+  markRuntimeOnlyPendingSheets_ACU,
+  runRegisteredRuntimeOnlyPendingFlush_ACU,
+} from './runtime-only-pending-state';
 
 export interface TableUpdateCommitApplyContext_ACU {
   transactionContext: TableWriteTransactionContext_ACU;
@@ -71,8 +76,14 @@ export interface RunTableUpdateCommitOptions_ACU {
   manualCatchUpRunId?: string;
   performanceRunId?: string;
   performanceParentSpanId?: string;
-  /** 旧契约：跳过聊天 V2 frame 写入（sql-api/table-crud-api 的 skipChatSave）。仍走 bridge gate 与 legacy 迁移。 */
+  /**
+   * 旧契约：跳过聊天 V2 frame 写入（sql-api/table-crud-api 的 skipChatSave）。仍走 bridge gate 与 legacy 迁移。
+   * 外部来源（manual_crud / raw_sql_*）的 skipChatSave 提交会登记为「运行时未落盘变更」，
+   * 由下一次普通持久化提交或填表开始前统一写回聊天。
+   */
   skipChatSave?: boolean;
+  /** 仅供 runtime-only flush 自身使用：flush 提交不得再触发一次 flush。 */
+  skipRuntimeOnlyPendingFlush?: boolean;
   /**
    * 提交语义判别联合（计划 5.3）。
    *
@@ -162,6 +173,44 @@ const EXTERNAL_MUTATION_SOURCES_ACU: ReadonlySet<TableMutationSourceV2_ACU> = ne
   'raw_sql_mutation',
   'raw_sql_batch',
 ]);
+
+function resolvePendingScope_ACU(options: RunTableUpdateCommitOptions_ACU): { chatKey: string; isolationKey: string } {
+  return {
+    chatKey: String(options.chatKey ?? currentChatFileIdentifier_ACU ?? ''),
+    isolationKey: String(options.isolationKey ?? getCurrentIsolationKey_ACU() ?? ''),
+  };
+}
+
+/**
+ * skipChatSave 的外部写入只改了 live runtime：登记受影响的表，等下一次普通持久化写入
+ * 或填表开始前统一物化进聊天，否则这些行永远不会进入楼层帧与填表基底。
+ */
+function markRuntimeOnlyPendingAfterSkipChatSave_ACU(
+  options: RunTableUpdateCommitOptions_ACU,
+  revisionWriteSet: TableWriteConflictUnitV2_ACU[] | undefined,
+  tableData: TableDataObject_ACU,
+): void {
+  if (!EXTERNAL_MUTATION_SOURCES_ACU.has(options.source)) return;
+  const candidate = extractPendingSheetKeysFromWriteSet_ACU(revisionWriteSet ?? options.writeSet);
+  const pending = candidate.all
+    ? { all: false, sheetKeys: Object.keys(tableData || {}).filter(key => key.startsWith('sheet_')) }
+    : candidate;
+  if (!pending.all && pending.sheetKeys.length === 0) return;
+  markRuntimeOnlyPendingSheets_ACU(resolvePendingScope_ACU(options), pending);
+}
+
+/**
+ * 普通持久化提交前先把已登记的 runtime-only 变更写回聊天；失败只记 warn，
+ * 不阻断本次提交（登记保留，下一次机会再试）。
+ */
+async function flushRuntimeOnlyPendingBeforeCommit_ACU(options: RunTableUpdateCommitOptions_ACU): Promise<void> {
+  if (options.skipChatSave || options.skipRuntimeOnlyPendingFlush) return;
+  try {
+    await runRegisteredRuntimeOnlyPendingFlush_ACU(resolvePendingScope_ACU(options), options.reason);
+  } catch (error) {
+    logWarn_ACU(`[TableUpdateCommit] ${options.reason}: 运行时未落盘变更写回聊天失败，继续本次提交。`, error);
+  }
+}
 
 function assertNoActiveFillForExternalMutation_ACU(options: RunTableUpdateCommitOptions_ACU): void {
   if (!EXTERNAL_MUTATION_SOURCES_ACU.has(options.source)) return;
@@ -255,6 +304,8 @@ export async function runTableUpdateCommit_ACU<T>(
       await reloadStorageProvider();
     }
     assertExpectedCommitScope_ACU(options, '迁移后');
+    await flushRuntimeOnlyPendingBeforeCommit_ACU(options);
+    assertExpectedCommitScope_ACU(options, '未落盘变更写回后');
 
     return await runTableWriteTransaction_ACU({
       source: options.source,
@@ -320,6 +371,8 @@ export async function runTableUpdateCommit_ACU<T>(
               requiresRuntimeReload = true;
               throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
             }
+          } else {
+            markRuntimeOnlyPendingAfterSkipChatSave_ACU(options, revisionWriteSet, applied.tableData);
           }
 
           _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));

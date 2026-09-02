@@ -308,7 +308,7 @@ await window.AutoCardUpdaterAPI.updateCell({
 - 只更新data中指定的列，其他列保持不变
 - 支持对象参数形式：`updateRow({ tableName, rowIndex, data, skipNotify })`
 - `skipNotify: true` 或 `silent: true` 会跳过外部表格更新回调通知，适合批量写入时避免前端回调风暴；不会跳过数据写入
-- `data.isImportMode: true` 或对象参数 `isImportMode: true` 会跳过聊天保存和纪要向量同步，保留旧版导入模式兼容
+- `data.isImportMode: true` 或对象参数 `isImportMode: true` 会跳过聊天保存和纪要向量同步，保留旧版导入模式兼容。这类只写运行时的改动会被登记为「未落盘变更」，在下一次不带该选项的写入、任何一次填表开始前、以及首楼初始基线建立前自动写回聊天楼层；重开聊天前若没有发生这些动作，改动仍会丢失
 - **表的最新楼层保存**：更新后会自动查找该表数据最后一次出现的楼层，并保存到该楼层
 - **世界书刷新**：保存后会自动触发世界书重新写入，确保前端能读取到最新数据
 - 如果找不到该表的楼层（新表格），会保存到最新AI楼层

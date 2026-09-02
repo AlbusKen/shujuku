@@ -80,6 +80,7 @@ import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers
 import { isSameSheetHeader_ACU } from '../template/guide-metadata-overlay';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
 import { runTableUpdateCommit_ACU, type TableUpdateCommitErrorCategory_ACU } from './table-update-commit';
+import { flushRuntimeOnlyPendingChanges_ACU } from './runtime-only-pending-flush';
 import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU } from './table-v2-recovery-service';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import { getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU } from '../flight-mode/flight-mode-hidden-rows';
@@ -742,6 +743,24 @@ function shouldDiscardUnauthorizedTableEdits_ACU(): boolean {
     return settings_ACU.discardUnauthorizedTableEditsEnabled !== false;
 }
 
+/**
+ * 填表基底来自聊天回放，而 SQL 却在 live runtime 上执行。外部脚本用 skipChatSave /
+ * isImportMode 写入的行只存在于 runtime，必须在构建任何基底前先写回聊天，
+ * 否则 AI 会把这些行当作不存在重新 INSERT。失败只记 warn，不阻断填表。
+ */
+async function flushRuntimeOnlyChangesBeforeFill_ACU(reason: string): Promise<void> {
+    try {
+        const result = await flushRuntimeOnlyPendingChanges_ACU(reason);
+        if (result.flushed) {
+            logDebug_ACU(`[${reason}] 已在填表前写回运行时未落盘变更：${result.sheetKeys.join('、')}（messageIndex=${result.messageIndex}）。`);
+        } else if (result.error) {
+            logWarn_ACU(`[${reason}] 填表前写回运行时未落盘变更失败，基底可能缺少前端写入的行：${result.error}`);
+        }
+    } catch (error) {
+        logWarn_ACU(`[${reason}] 填表前写回运行时未落盘变更异常，基底可能缺少前端写入的行。`, error);
+    }
+}
+
 function formatAllowedSheetKeys_ACU(sheetKeys: readonly string[]): string {
     const normalized = [...new Set(sheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_')))].sort();
     return normalized.length > 0 ? normalized.join(', ') : '无（当前任务未授权任何目标表）';
@@ -924,15 +943,50 @@ export function resolveBucketMergeBaseMaxMessageIndex_ACU(params: {
     return saveTargetIndex;
 }
 
+/**
+ * SQLite 持久化提交的 SQL 直接在 live runtime 上执行，因此 prompt 基底必须就是 live runtime
+ * 的当前快照——8.9.2 的 SQL 模式 prompt 一直如此读取，前端 CRUD 写入的行天然在基底里，
+ * AI 不会重复 INSERT。9.1 起 prompt 改用本批 tableData，若这里仍用「≤ 首楼-1 的聊天回放」，
+ * 目标楼层帧 / 尚未进入回放的运行时行会从 prompt 消失，AI 对已存在的行重新 INSERT，
+ * 撞 live SQLite 的 UNIQUE 约束或把行数翻倍。逐 bucket 现取快照，多批重填第二桶起
+ * 也能看到前一桶结果（不再是请求前冻结的空表）。
+ *
+ * 只对写 live runtime 的持久化 bucket 生效；stage_only 走隔离 detached provider，
+ * 仍以聊天回放为基底。runtime 不可用时回落到回放链路。
+ */
+async function readLiveSqliteRuntimeMergeBase_ACU(batchNumber: number): Promise<Record<string, any> | null> {
+    if (!isSqliteMode()) return null;
+    try {
+        const provider = await ensureStorageProviderReady_ACU();
+        if (provider.mode !== 'sqlite') return null;
+        const snapshot = cloneTableDataSnapshot_ACU(provider.getCurrentData() as any);
+        if (!hasUsableRuntimeTableData_ACU(snapshot)) return null;
+        logDebug_ACU(`[Batch ${batchNumber}] Using live SQLite runtime snapshot as merge base (SQL executes against it).`);
+        return mergeGuideStructureIntoBaseData_ACU(snapshot as Record<string, any>);
+    } catch (error) {
+        logWarn_ACU(`[Batch ${batchNumber}] live SQLite runtime 快照不可用，回落到聊天回放基底。`, error);
+        return null;
+    }
+}
+
 export async function buildBatchMergeBase_ACU(
     batchNumber: number,
-    options: { maxMessageIndex?: number } = {},
+    options: {
+        maxMessageIndex?: number;
+        /** 本批 SQL 将在 live runtime 上执行（非 stage_only）：SQLite 模式下以 live runtime 快照为基底。 */
+        liveRuntimeAuthoritative?: boolean;
+    } = {},
     replayEvidence?: import('./v2-replay-session').V2ReplayEvidence_ACU | null,
 ): Promise<{ data: Record<string, any> | null; error: string | null }> {
     try {
         const hasBoundedScope = Number.isInteger(options.maxMessageIndex);
+        const replayOptions = hasBoundedScope ? { maxMessageIndex: options.maxMessageIndex } : {};
+        if (options.liveRuntimeAuthoritative) {
+            const liveRuntimeBase = await readLiveSqliteRuntimeMergeBase_ACU(batchNumber);
+            if (liveRuntimeBase) return { data: liveRuntimeBase, error: null };
+        }
         if (hasBoundedScope) {
-            const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options, replayEvidence);
+            const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, replayOptions, replayEvidence);
             if (v2ReplayResult.data) return { data: v2ReplayResult.data, error: null };
             if (v2ReplayResult.failed) {
                 // 回放坏了：绝不能退化为空基底去填表，否则 AI 会按空表生成 INSERT，
@@ -958,7 +1012,7 @@ export async function buildBatchMergeBase_ACU(
             return { data: mergeGuideStructureIntoBaseData_ACU(runtimeData), error: null };
         }
 
-        const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options, replayEvidence);
+        const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, replayOptions, replayEvidence);
         if (v2ReplayResult.data) return { data: v2ReplayResult.data, error: null };
         if (v2ReplayResult.failed) {
             return {
@@ -2043,6 +2097,10 @@ async function processGroupedRuntimeChunkCore_ACU(
         }
         await reloadStorageProvider();
     }
+    // stage_only 只写 run 级隔离 staging，不触碰聊天；普通提交路径才需要先让聊天追上 runtime。
+    if (options.commitMode !== 'stage_only') {
+        await flushRuntimeOnlyChangesBeforeFill_ACU('processGroupedRuntimeChunk');
+    }
 
     const executionScope = await captureFillExecutionScope_ACU({
         runId: options.performanceRunId,
@@ -2196,7 +2254,12 @@ async function processGroupedRuntimeChunkCore_ACU(
                 logDebug_ACU(`[Batch ${bucket.batchNumber}] 基底边界提升至目标楼层既有帧：${mergeBaseLowerBound} -> ${mergeBaseMaxMessageIndex}（saveTarget=${bucket.saveTargetIndex}）。`);
             }
             const baseResult: { data: Record<string, any> | null; error: string | null } =
-                await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex }, replayEvidence);
+                await buildBatchMergeBase_ACU(bucket.batchNumber, {
+                    maxMessageIndex: mergeBaseMaxMessageIndex,
+                    // stage_only 在 detached provider 上执行，基底必须来自聊天回放；
+                    // 其余 bucket 的 SQL 直接写 live runtime，基底以 live runtime 为准。
+                    liveRuntimeAuthoritative: options.commitMode !== 'stage_only',
+                }, replayEvidence);
             if (!baseResult.data) {
                 bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
                 firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
@@ -3272,6 +3335,7 @@ export async function processUpdatesBatch_ACU(
     if (migration.migrated) {
         await reloadStorageProvider();
     }
+    await flushRuntimeOnlyChangesBeforeFill_ACU('processUpdatesBatch');
 
     _set_wasStoppedByUser_ACU(false);
     _set_isAutoUpdatingCard_ACU(true);
@@ -3310,7 +3374,10 @@ export async function processUpdatesBatch_ACU(
                 chat: chatHistory,
                 isolationKey: getCurrentIsolationKey_ACU(),
             });
-            const baseResult = await buildBatchMergeBase_ACU(batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
+            const baseResult = await buildBatchMergeBase_ACU(batchNumber, {
+                maxMessageIndex: mergeBaseMaxMessageIndex,
+                liveRuntimeAuthoritative: true,
+            });
             if (!baseResult.data) {
                 return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
             }

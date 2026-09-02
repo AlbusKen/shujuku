@@ -1881,13 +1881,15 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
     mockShouldRotateBoundaryCheckpoint.mockReturnValue(false);
     mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
+    // 与真实填表一致地分配新 row_id：连续 bucket 的基底是 live runtime，会看到前一 bucket 刚写入的行。
+    const nextRowId = (content: any[][]) => String(Math.max(0, ...content.slice(1).map(row => Number(row?.[0]) || 0)) + 1);
     mockParseAndApplyTableEditsToData.mockImplementation((aiResponse: string, tableData: any) => {
       if (aiResponse.includes('sheet_0')) {
-        if (tableData.sheet_0) tableData.sheet_0.content.push(['2', '来自A']);
+        if (tableData.sheet_0) tableData.sheet_0.content.push([nextRowId(tableData.sheet_0.content), '来自A']);
         return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
       }
       if (aiResponse.includes('sheet_1')) {
-        if (tableData.sheet_1) tableData.sheet_1.content.push(['2', '来自B']);
+        if (tableData.sheet_1) tableData.sheet_1.content.push([nextRowId(tableData.sheet_1.content), '来自B']);
         return { success: true, modifiedKeys: ['sheet_1'], appliedEdits: 1 };
       }
       return { success: false, modifiedKeys: [], appliedEdits: 0 };
@@ -5738,6 +5740,43 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       ['2', '开局写入-b'],
       ['3', '来自A'],
     ]);
+  });
+
+  it('SQLite 模式：AI 基底就是 live runtime 快照（含前端只写入运行时的行），而不是回放到首楼-1 的空基底（8.9.2 语义回归）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { showUiSurfaceToast_ACU } = await import('../../../src/shared/ui-surface-registry');
+    const inventoryDDL = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);';
+    const template = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: inventoryDDL }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(showUiSurfaceToast_ACU).mockClear();
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(template);
+      // 聊天首楼没有任何帧（前端脚本用 skipChatSave 写入，或帧已丢失），但 live runtime 里已有前端写入的行。
+      vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true, mes: '选择开局' }, { is_user: false, mes: '开局正文' }]);
+      mockCurrentJsonTableData = structuredClone(template);
+      mockCurrentJsonTableData.sheet_0.content = [['row_id', 'value'], ['1', '黑泽刹那']];
+      mockCallCustomOpenAI.mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('星野桃');</tableEdit>");
+
+      const result = await processGroupedRuntimeChunk_ACU([
+        { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+      ], 'manual_independent');
+
+      expect(result.success).toBe(true);
+      const promptBase = mockPrepareAIInput.mock.calls[0][3].tableData;
+      expect(promptBase.sheet_0.content).toEqual([['row_id', 'value'], ['1', '黑泽刹那']]);
+      expect(showUiSurfaceToast_ACU).not.toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining('空白模板结构'),
+      }));
+      const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+      expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', '黑泽刹那'], ['2', '星野桃']]);
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
   });
 
   it('根在更早楼层、目标楼层自身带前端 CRUD 增量时，AI 基底同样包含该增量', async () => {

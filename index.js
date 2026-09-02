@@ -40132,8 +40132,8 @@ $CONTENT
     }
     function getRuntimeScopeKey_ACU(parts) {
         return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            normalizeScopePart_ACU$2(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$2(parts.isolationKey, 'default'),
             'runtime',
         ].join('::');
     }
@@ -40218,8 +40218,8 @@ $CONTENT
         return `runtime:${revision}`;
     }
     function invalidateTableRuntimeRevision_ACU(parts = {}) {
-        const chatKey = normalizeScopePart_ACU$1(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
-        const isolationKey = normalizeScopePart_ACU$1(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+        const chatKey = normalizeScopePart_ACU$2(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+        const isolationKey = normalizeScopePart_ACU$2(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
         const scopeKey = getRuntimeScopeKey_ACU({ chatKey, isolationKey });
         return bumpRuntimeRevision_ACU(scopeKey, [{ kind: 'all' }]);
     }
@@ -40237,7 +40237,7 @@ $CONTENT
     async function acquireWrite_ACU(scopeKey) {
         return getLock_ACU(scopeKey).acquireWrite();
     }
-    function normalizeScopePart_ACU$1(value, fallback) {
+    function normalizeScopePart_ACU$2(value, fallback) {
         const normalized = String(value || fallback).trim();
         return normalized || fallback;
     }
@@ -40246,29 +40246,29 @@ $CONTENT
     }
     function buildTableMaintenanceScopeKey_ACU(parts) {
         return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            normalizeScopePart_ACU$2(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$2(parts.isolationKey, 'default'),
             'maintenance',
         ].join('::');
     }
     function buildTableSheetMutationScopeKey_ACU(parts) {
         return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            normalizeScopePart_ACU$2(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$2(parts.isolationKey, 'default'),
             'sheet',
             parts.sheetKey || '*',
         ].join('::');
     }
     function buildTableCommitScopeKey_ACU(parts) {
         return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            normalizeScopePart_ACU$2(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$2(parts.isolationKey, 'default'),
             'commit',
         ].join('::');
     }
     function captureTableRuntimeRevisionForWriteSet_ACU(writeSet, parts = {}) {
-        const chatKey = normalizeScopePart_ACU$1(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
-        const isolationKey = normalizeScopePart_ACU$1(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+        const chatKey = normalizeScopePart_ACU$2(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+        const isolationKey = normalizeScopePart_ACU$2(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
         return captureRuntimeRevisionSnapshotForScope_ACU(getRuntimeScopeKey_ACU({ chatKey, isolationKey }), normalizeTableWriteSet_ACU(writeSet));
     }
     function resolveTableWriteTargetMessageIndex_ACU(chat, requestedTargetMessageIndex) {
@@ -40394,8 +40394,8 @@ $CONTENT
         }
     }
     async function runTableWriteTransaction_ACU(options, task) {
-        const chatKey = normalizeScopePart_ACU$1(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
-        const isolationKey = normalizeScopePart_ACU$1(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+        const chatKey = normalizeScopePart_ACU$2(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+        const isolationKey = normalizeScopePart_ACU$2(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
         const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
         const maintenanceMode = options.maintenanceMode || 'shared';
         const releases = await acquireTransactionLocks_ACU({ chatKey, isolationKey, writeSet, maintenanceMode });
@@ -82331,7 +82331,7 @@ $CONTENT
         }
     }
 
-    function normalizeScopePart_ACU(value, fallback) {
+    function normalizeScopePart_ACU$1(value, fallback) {
         const normalized = String(value ?? '').trim();
         return normalized || fallback;
     }
@@ -82340,13 +82340,13 @@ $CONTENT
      * Empty runtime isolation is the canonical default vector scope.
      */
     function normalizeSummaryVectorIsolationKey_ACU(value) {
-        return normalizeScopePart_ACU(value, 'default');
+        return normalizeScopePart_ACU$1(value, 'default');
     }
     function normalizeSummaryVectorIndexScope_ACU(parts) {
         return {
-            chatKey: normalizeScopePart_ACU(parts.chatKey, 'current-chat'),
+            chatKey: normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
             isolationKey: normalizeSummaryVectorIsolationKey_ACU(parts.isolationKey),
-            sourceTableKey: normalizeScopePart_ACU(parts.sourceTableKey, 'summary'),
+            sourceTableKey: normalizeScopePart_ACU$1(parts.sourceTableKey, 'summary'),
         };
     }
     function serializeSummaryVectorIndexScope_ACU(parts) {
@@ -87662,6 +87662,91 @@ $CONTENT
         return report;
     }
 
+    /**
+     * service/table/runtime-only-pending-state.ts — 运行时未落盘变更登记。
+     *
+     * 开放 API 的 CRUD/SQL 写入允许 skipChatSave（skipSave / isImportMode）：只改 live runtime，
+     * 不写聊天 V2 帧。V2 是 operation log 语义，后续任何普通写入只追加自己的 operation，
+     * 不会像旧版那样把整份运行时快照带回聊天。于是这些行只存在于 runtime：
+     * 楼层帧里没有对应数据、表格状态显示未初始、填表基底（聊天回放）看不到它们，
+     * AI 把已存在的行重新 INSERT，提交时撞 live SQLite 的 UNIQUE 约束或把行数翻倍。
+     *
+     * 本模块按 (chatKey, isolationKey) 登记「哪些表有未落盘的运行时变更」；
+     * 真正的落盘由 runtime-only-pending-flush 在下一次普通持久化写入 / 填表开始前完成。
+     * 这里刻意不依赖任何 service 模块，避免与提交模型形成循环导入。
+     */
+    const pendingByScope_ACU = new Map();
+    let registeredFlusher_ACU = null;
+    function normalizeScopePart_ACU(value, fallback) {
+        const normalized = String(value || fallback).trim();
+        return normalized || fallback;
+    }
+    function buildRuntimeOnlyPendingScopeKey_ACU(scope) {
+        return [
+            normalizeScopePart_ACU(scope.chatKey, 'current-chat'),
+            normalizeScopePart_ACU(scope.isolationKey, 'default'),
+        ].join('::');
+    }
+    /**
+     * 从写集提取受影响的表。任何 kind:'all' 或缺少 sheetKey 的单元都视为「全部表」，
+     * 宁可多登记也不能漏掉 runtime-only 变更。
+     */
+    function extractPendingSheetKeysFromWriteSet_ACU(writeSet) {
+        if (!Array.isArray(writeSet) || writeSet.length === 0)
+            return { all: true, sheetKeys: [] };
+        const sheetKeys = new Set();
+        for (const unit of writeSet) {
+            if (!unit || unit.kind === 'all')
+                return { all: true, sheetKeys: [] };
+            const sheetKey = String(unit.sheetKey || '').trim();
+            if (!sheetKey.startsWith('sheet_'))
+                return { all: true, sheetKeys: [] };
+            sheetKeys.add(sheetKey);
+        }
+        return { all: false, sheetKeys: [...sheetKeys].sort() };
+    }
+    function markRuntimeOnlyPendingSheets_ACU(scope, pending) {
+        const scopeKey = buildRuntimeOnlyPendingScopeKey_ACU(scope);
+        const state = pendingByScope_ACU.get(scopeKey) || { all: false, sheetKeys: new Set() };
+        if (pending.all)
+            state.all = true;
+        for (const sheetKey of pending.sheetKeys) {
+            if (typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))
+                state.sheetKeys.add(sheetKey);
+        }
+        pendingByScope_ACU.set(scopeKey, state);
+    }
+    function readRuntimeOnlyPendingSheets_ACU(scope) {
+        const state = pendingByScope_ACU.get(buildRuntimeOnlyPendingScopeKey_ACU(scope));
+        if (!state || (!state.all && state.sheetKeys.size === 0))
+            return null;
+        return { all: state.all, sheetKeys: [...state.sheetKeys].sort() };
+    }
+    function hasRuntimeOnlyPendingSheets_ACU(scope) {
+        return readRuntimeOnlyPendingSheets_ACU(scope) !== null;
+    }
+    /** 不传 scope 时清空全部登记（测试/聊天切换收尾用）。 */
+    function clearRuntimeOnlyPendingSheets_ACU(scope) {
+        if (!scope) {
+            pendingByScope_ACU.clear();
+            return;
+        }
+        pendingByScope_ACU.delete(buildRuntimeOnlyPendingScopeKey_ACU(scope));
+    }
+    /**
+     * 落盘器由 runtime-only-pending-flush 注册；提交模型通过本入口触发，
+     * 避免 table-update-commit ↔ flush 之间的直接循环导入。未注册时静默跳过。
+     */
+    function registerRuntimeOnlyPendingFlusher_ACU(flusher) {
+        registeredFlusher_ACU = flusher;
+    }
+    async function runRegisteredRuntimeOnlyPendingFlush_ACU(scope, reason) {
+        if (!registeredFlusher_ACU || !hasRuntimeOnlyPendingSheets_ACU(scope)) {
+            return { flushed: false, sheetKeys: [] };
+        }
+        return registeredFlusher_ACU(reason);
+    }
+
     class TableUpdateCommitError_ACU extends Error {
         constructor(message, category) {
             super(message);
@@ -87721,6 +87806,41 @@ $CONTENT
         'raw_sql_mutation',
         'raw_sql_batch',
     ]);
+    function resolvePendingScope_ACU(options) {
+        return {
+            chatKey: String(options.chatKey ?? currentChatFileIdentifier_ACU ?? ''),
+            isolationKey: String(options.isolationKey ?? getCurrentIsolationKey_ACU() ?? ''),
+        };
+    }
+    /**
+     * skipChatSave 的外部写入只改了 live runtime：登记受影响的表，等下一次普通持久化写入
+     * 或填表开始前统一物化进聊天，否则这些行永远不会进入楼层帧与填表基底。
+     */
+    function markRuntimeOnlyPendingAfterSkipChatSave_ACU(options, revisionWriteSet, tableData) {
+        if (!EXTERNAL_MUTATION_SOURCES_ACU.has(options.source))
+            return;
+        const candidate = extractPendingSheetKeysFromWriteSet_ACU(revisionWriteSet ?? options.writeSet);
+        const pending = candidate.all
+            ? { all: false, sheetKeys: Object.keys(tableData || {}).filter(key => key.startsWith('sheet_')) }
+            : candidate;
+        if (!pending.all && pending.sheetKeys.length === 0)
+            return;
+        markRuntimeOnlyPendingSheets_ACU(resolvePendingScope_ACU(options), pending);
+    }
+    /**
+     * 普通持久化提交前先把已登记的 runtime-only 变更写回聊天；失败只记 warn，
+     * 不阻断本次提交（登记保留，下一次机会再试）。
+     */
+    async function flushRuntimeOnlyPendingBeforeCommit_ACU(options) {
+        if (options.skipChatSave || options.skipRuntimeOnlyPendingFlush)
+            return;
+        try {
+            await runRegisteredRuntimeOnlyPendingFlush_ACU(resolvePendingScope_ACU(options), options.reason);
+        }
+        catch (error) {
+            logWarn_ACU(`[TableUpdateCommit] ${options.reason}: 运行时未落盘变更写回聊天失败，继续本次提交。`, error);
+        }
+    }
     function assertNoActiveFillForExternalMutation_ACU(options) {
         if (!EXTERNAL_MUTATION_SOURCES_ACU.has(options.source))
             return;
@@ -87805,6 +87925,8 @@ $CONTENT
                 await reloadStorageProvider();
             }
             assertExpectedCommitScope_ACU(options, '迁移后');
+            await flushRuntimeOnlyPendingBeforeCommit_ACU(options);
+            assertExpectedCommitScope_ACU(options, '未落盘变更写回后');
             return await runTableWriteTransaction_ACU({
                 source: options.source,
                 reason: options.reason,
@@ -87868,6 +87990,9 @@ $CONTENT
                                 requiresRuntimeReload = true;
                                 throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
                             }
+                        }
+                        else {
+                            markRuntimeOnlyPendingAfterSkipChatSave_ACU(options, revisionWriteSet, applied.tableData);
                         }
                         _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
                         return {
@@ -91001,7 +91126,7 @@ $CONTENT
         return purgeSheetKeysFromMessage_ACU(msg, targetSheetKeys);
     }
 
-    function cloneJson_ACU$1(value) {
+    function cloneJson_ACU$2(value) {
         if (value == null)
             return value;
         try {
@@ -91068,7 +91193,7 @@ $CONTENT
         const rows = normalizeRows_ACU(state.rows);
         const chunks = normalizeChunks_ACU(state.chunks);
         const manifest = state.manifest && typeof state.manifest === 'object'
-            ? cloneJson_ACU$1(state.manifest)
+            ? cloneJson_ACU$2(state.manifest)
             : undefined;
         if (rows.length === 0 && !manifest)
             return null;
@@ -91102,14 +91227,14 @@ $CONTENT
             nextState.backend = 'st-files';
             nextState.status = manifest.status;
             nextState.indexId = manifest.indexId;
-            nextState.manifest = cloneJson_ACU$1(manifest);
+            nextState.manifest = cloneJson_ACU$2(manifest);
             delete nextState.chunks;
-            tagData.summaryVectorIndexManifest = cloneJson_ACU$1(manifest);
+            tagData.summaryVectorIndexManifest = cloneJson_ACU$2(manifest);
         }
         else if (nextState.manifest) {
             nextState.backend = 'st-files';
             delete nextState.chunks;
-            tagData.summaryVectorIndexManifest = cloneJson_ACU$1(nextState.manifest);
+            tagData.summaryVectorIndexManifest = cloneJson_ACU$2(nextState.manifest);
         }
         else {
             tagData.summaryVectorIndexManifest = null;
@@ -91122,7 +91247,7 @@ $CONTENT
         const state = cloneSummaryVectorIndexState_ACU$1(tagData.summaryVectorIndexState);
         const manifest = tagData.summaryVectorIndexManifest;
         if (state && manifest && !state.manifest) {
-            state.manifest = cloneJson_ACU$1(manifest);
+            state.manifest = cloneJson_ACU$2(manifest);
             state.backend = 'st-files';
             state.status = manifest.status;
             state.indexId = manifest.indexId;
@@ -91141,7 +91266,7 @@ $CONTENT
                 chunkCount: manifest.chunkCount,
                 skippedRowCount: manifest.skippedRowCount,
                 rows: [],
-                manifest: cloneJson_ACU$1(manifest),
+                manifest: cloneJson_ACU$2(manifest),
             };
         }
         return state;
@@ -104193,6 +104318,137 @@ $CONTENT
         registeredUiSurface_ACU = null;
     }
 
+    /**
+     * service/table/runtime-only-pending-flush.ts — 把 runtime-only 变更物化进聊天 V2 帧。
+     *
+     * 触发时机（见 runtime-only-pending-state 的问题描述）：
+     * - 任何普通（非 skipChatSave）持久化提交之前——兑现文档承诺「随后一次落盘写入即持久化」；
+     * - 任何填表构建基底之前——填表基底来自聊天回放，必须先让聊天追上 live runtime，
+     *   否则 AI 会把 runtime 里已有的行当作不存在重新 INSERT；
+     * - 首楼 seed checkpoint 建立之前——seed 会重载运行时，未落盘的行会被直接丢弃。
+     *
+     * 做法：对登记的表，以当前运行时内容写一条 source:'system' 的 sheet_replace 增量到
+     * 最新可追加的 AI 楼层；与聊天回放内容完全一致的表跳过（避免无意义的日志条目）。
+     * 不推进 runtime revision（runtime 本身没有变化），不作为填表记录（不推进调度）。
+     */
+    function cloneJson_ACU$1(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function currentScope_ACU() {
+        return {
+            chatKey: String(currentChatFileIdentifier_ACU || ''),
+            isolationKey: String(getCurrentIsolationKey_ACU() || ''),
+        };
+    }
+    async function readRuntimeSnapshot_ACU() {
+        if (isSqliteMode()) {
+            const provider = await ensureStorageProviderReady_ACU();
+            const data = provider.getCurrentData();
+            return data ? cloneJson_ACU$1(data) : null;
+        }
+        return currentJsonTableData_ACU ? cloneJson_ACU$1(currentJsonTableData_ACU) : null;
+    }
+    function serializeSheetContent_ACU(sheet) {
+        const content = sheet?.content;
+        return JSON.stringify(Array.isArray(content) ? content : null);
+    }
+    /**
+     * 回放到目标楼层，找出运行时内容与聊天不一致的表。回放失败时保守地返回全部候选表：
+     * 多写一条与既有状态相同的 sheet_replace 是幂等的，漏写才会丢数据。
+     */
+    async function resolveDivergedSheetKeys_ACU(chat, isolationKey, targetMessageIndex, runtimeData, candidateSheetKeys) {
+        try {
+            const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                maxMessageIndex: targetMessageIndex,
+                updateRuntimeState: false,
+                allowTemporaryTemplateBaseline: true,
+            });
+            const replayed = replay?.data;
+            if (!replayed)
+                return candidateSheetKeys;
+            return candidateSheetKeys.filter(sheetKey => (serializeSheetContent_ACU(replayed[sheetKey]) !== serializeSheetContent_ACU(runtimeData[sheetKey])));
+        }
+        catch (error) {
+            logWarn_ACU('[RuntimeOnlyFlush] 回放比对失败，按全部登记表落盘。', error);
+            return candidateSheetKeys;
+        }
+    }
+    async function flushRuntimeOnlyPendingChanges_ACU(reason) {
+        const scope = currentScope_ACU();
+        const pending = readRuntimeOnlyPendingSheets_ACU(scope);
+        if (!pending)
+            return { flushed: false, sheetKeys: [] };
+        let runtimeData;
+        try {
+            runtimeData = await readRuntimeSnapshot_ACU();
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logWarn_ACU(`[RuntimeOnlyFlush] ${reason}: 无法读取运行时快照，保留待落盘登记。`, error);
+            return { flushed: false, sheetKeys: [], error: message };
+        }
+        if (!runtimeData)
+            return { flushed: false, sheetKeys: [], error: 'runtime snapshot unavailable' };
+        const runtimeSheetKeys = Object.keys(runtimeData).filter(key => key.startsWith('sheet_'));
+        const candidateSheetKeys = pending.all
+            ? runtimeSheetKeys
+            : pending.sheetKeys.filter(sheetKey => runtimeSheetKeys.includes(sheetKey));
+        if (candidateSheetKeys.length === 0) {
+            // 登记的表已不在运行时（被删除/重载），没有可落盘的内容。
+            clearRuntimeOnlyPendingSheets_ACU(scope);
+            return { flushed: false, sheetKeys: [] };
+        }
+        const chat = getChatArray_ACU();
+        const targetMessageIndex = getLatestTableAppendMessageIndexFromChat_ACU(chat, scope.isolationKey, settings_ACU);
+        if (targetMessageIndex < 0) {
+            return { flushed: false, sheetKeys: [], error: 'no AI message to persist runtime-only changes' };
+        }
+        const divergedSheetKeys = await resolveDivergedSheetKeys_ACU(chat, scope.isolationKey, targetMessageIndex, runtimeData, candidateSheetKeys);
+        if (divergedSheetKeys.length === 0) {
+            clearRuntimeOnlyPendingSheets_ACU(scope);
+            logDebug_ACU(`[RuntimeOnlyFlush] ${reason}: 运行时与聊天回放一致，无需落盘（${candidateSheetKeys.join('、')}）。`);
+            return { flushed: false, sheetKeys: [] };
+        }
+        const operations = divergedSheetKeys.map(sheetKey => ({
+            kind: 'sheet_replace',
+            sheetKey,
+            sheet: cloneJson_ACU$1(runtimeData[sheetKey]),
+            reason: 'system',
+        }));
+        const writeSet = divergedSheetKeys.map(sheetKey => ({ kind: 'sheet', sheetKey }));
+        const commitResult = await runTableUpdateCommit_ACU({
+            source: 'system',
+            reason: `runtime_only_flush:${reason}`,
+            isolationKey: scope.isolationKey,
+            writeSet,
+            // 运行时本身没有变化，只是把它写回聊天：不推进 runtime revision，
+            // 否则会让并发填表已捕获的 baseRevision 误判为冲突。
+            revisionWriteSet: [],
+            workingDataMode: 'none',
+            initialData: runtimeData,
+            targetMessageIndex,
+            targetSheetKeys: divergedSheetKeys,
+            updateGroupKeys: null,
+            trackingSheetKeys: [],
+            trackAsUpdate: false,
+            operations,
+            skipRuntimeOnlyPendingFlush: true,
+        }, () => ({
+            success: true,
+            value: null,
+            tableData: runtimeData,
+            persist: { operations, revisionWriteSet: [] },
+        }));
+        if (!commitResult.success) {
+            logWarn_ACU(`[RuntimeOnlyFlush] ${reason}: 运行时未落盘变更写回聊天失败，保留登记待下次重试：${commitResult.error || 'unknown error'}`);
+            return { flushed: false, sheetKeys: divergedSheetKeys, error: commitResult.error };
+        }
+        clearRuntimeOnlyPendingSheets_ACU(scope);
+        logDebug_ACU(`[RuntimeOnlyFlush] ${reason}: 已把运行时未落盘变更写回 AI 楼层 #${commitResult.messageIndex ?? targetMessageIndex}：${divergedSheetKeys.join('、')}。`);
+        return { flushed: true, sheetKeys: divergedSheetKeys, messageIndex: commitResult.messageIndex ?? targetMessageIndex };
+    }
+    registerRuntimeOnlyPendingFlusher_ACU(flushRuntimeOnlyPendingChanges_ACU);
+
     const plans_ACU = new Map();
     function clone_ACU$3(value) { return JSON.parse(JSON.stringify(value)); }
     function buildPlanId_ACU$1() { return `v2_recovery_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
@@ -105235,6 +105491,25 @@ $CONTENT
     function shouldDiscardUnauthorizedTableEdits_ACU() {
         return settings_ACU.discardUnauthorizedTableEditsEnabled !== false;
     }
+    /**
+     * 填表基底来自聊天回放，而 SQL 却在 live runtime 上执行。外部脚本用 skipChatSave /
+     * isImportMode 写入的行只存在于 runtime，必须在构建任何基底前先写回聊天，
+     * 否则 AI 会把这些行当作不存在重新 INSERT。失败只记 warn，不阻断填表。
+     */
+    async function flushRuntimeOnlyChangesBeforeFill_ACU(reason) {
+        try {
+            const result = await flushRuntimeOnlyPendingChanges_ACU(reason);
+            if (result.flushed) {
+                logDebug_ACU(`[${reason}] 已在填表前写回运行时未落盘变更：${result.sheetKeys.join('、')}（messageIndex=${result.messageIndex}）。`);
+            }
+            else if (result.error) {
+                logWarn_ACU(`[${reason}] 填表前写回运行时未落盘变更失败，基底可能缺少前端写入的行：${result.error}`);
+            }
+        }
+        catch (error) {
+            logWarn_ACU(`[${reason}] 填表前写回运行时未落盘变更异常，基底可能缺少前端写入的行。`, error);
+        }
+    }
     function formatAllowedSheetKeys_ACU(sheetKeys) {
         const normalized = [...new Set(sheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_')))].sort();
         return normalized.length > 0 ? normalized.join(', ') : '无（当前任务未授权任何目标表）';
@@ -105404,11 +105679,46 @@ $CONTENT
         }
         return saveTargetIndex;
     }
+    /**
+     * SQLite 持久化提交的 SQL 直接在 live runtime 上执行，因此 prompt 基底必须就是 live runtime
+     * 的当前快照——8.9.2 的 SQL 模式 prompt 一直如此读取，前端 CRUD 写入的行天然在基底里，
+     * AI 不会重复 INSERT。9.1 起 prompt 改用本批 tableData，若这里仍用「≤ 首楼-1 的聊天回放」，
+     * 目标楼层帧 / 尚未进入回放的运行时行会从 prompt 消失，AI 对已存在的行重新 INSERT，
+     * 撞 live SQLite 的 UNIQUE 约束或把行数翻倍。逐 bucket 现取快照，多批重填第二桶起
+     * 也能看到前一桶结果（不再是请求前冻结的空表）。
+     *
+     * 只对写 live runtime 的持久化 bucket 生效；stage_only 走隔离 detached provider，
+     * 仍以聊天回放为基底。runtime 不可用时回落到回放链路。
+     */
+    async function readLiveSqliteRuntimeMergeBase_ACU(batchNumber) {
+        if (!isSqliteMode())
+            return null;
+        try {
+            const provider = await ensureStorageProviderReady_ACU();
+            if (provider.mode !== 'sqlite')
+                return null;
+            const snapshot = cloneTableDataSnapshot_ACU(provider.getCurrentData());
+            if (!hasUsableRuntimeTableData_ACU(snapshot))
+                return null;
+            logDebug_ACU(`[Batch ${batchNumber}] Using live SQLite runtime snapshot as merge base (SQL executes against it).`);
+            return mergeGuideStructureIntoBaseData_ACU(snapshot);
+        }
+        catch (error) {
+            logWarn_ACU(`[Batch ${batchNumber}] live SQLite runtime 快照不可用，回落到聊天回放基底。`, error);
+            return null;
+        }
+    }
     async function buildBatchMergeBase_ACU(batchNumber, options = {}, replayEvidence) {
         try {
             const hasBoundedScope = Number.isInteger(options.maxMessageIndex);
+            const replayOptions = hasBoundedScope ? { maxMessageIndex: options.maxMessageIndex } : {};
+            if (options.liveRuntimeAuthoritative) {
+                const liveRuntimeBase = await readLiveSqliteRuntimeMergeBase_ACU(batchNumber);
+                if (liveRuntimeBase)
+                    return { data: liveRuntimeBase, error: null };
+            }
             if (hasBoundedScope) {
-                const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options, replayEvidence);
+                const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, replayOptions, replayEvidence);
                 if (v2ReplayResult.data)
                     return { data: v2ReplayResult.data, error: null };
                 if (v2ReplayResult.failed) {
@@ -105433,7 +105743,7 @@ $CONTENT
                 logDebug_ACU(`[Batch ${batchNumber}] Using SQLite runtime storage snapshot as merge base.`);
                 return { data: mergeGuideStructureIntoBaseData_ACU(runtimeData), error: null };
             }
-            const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options, replayEvidence);
+            const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, replayOptions, replayEvidence);
             if (v2ReplayResult.data)
                 return { data: v2ReplayResult.data, error: null };
             if (v2ReplayResult.failed) {
@@ -106405,6 +106715,10 @@ $CONTENT
             }
             await reloadStorageProvider();
         }
+        // stage_only 只写 run 级隔离 staging，不触碰聊天；普通提交路径才需要先让聊天追上 runtime。
+        if (options.commitMode !== 'stage_only') {
+            await flushRuntimeOnlyChangesBeforeFill_ACU('processGroupedRuntimeChunk');
+        }
         const executionScope = await captureFillExecutionScope_ACU({
             runId: options.performanceRunId,
             parentSpanId: options.performanceParentSpanId,
@@ -106542,7 +106856,12 @@ $CONTENT
                 if (mergeBaseMaxMessageIndex !== mergeBaseLowerBound) {
                     logDebug_ACU(`[Batch ${bucket.batchNumber}] 基底边界提升至目标楼层既有帧：${mergeBaseLowerBound} -> ${mergeBaseMaxMessageIndex}（saveTarget=${bucket.saveTargetIndex}）。`);
                 }
-                const baseResult = await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex }, replayEvidence);
+                const baseResult = await buildBatchMergeBase_ACU(bucket.batchNumber, {
+                    maxMessageIndex: mergeBaseMaxMessageIndex,
+                    // stage_only 在 detached provider 上执行，基底必须来自聊天回放；
+                    // 其余 bucket 的 SQL 直接写 live runtime，基底以 live runtime 为准。
+                    liveRuntimeAuthoritative: options.commitMode !== 'stage_only',
+                }, replayEvidence);
                 if (!baseResult.data) {
                     bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
                     firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
@@ -107485,6 +107804,7 @@ $CONTENT
         if (migration.migrated) {
             await reloadStorageProvider();
         }
+        await flushRuntimeOnlyChangesBeforeFill_ACU('processUpdatesBatch');
         _set_wasStoppedByUser_ACU(false);
         _set_isAutoUpdatingCard_ACU(true);
         try {
@@ -107516,7 +107836,10 @@ $CONTENT
                     chat: chatHistory,
                     isolationKey: getCurrentIsolationKey_ACU(),
                 });
-                const baseResult = await buildBatchMergeBase_ACU(batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
+                const baseResult = await buildBatchMergeBase_ACU(batchNumber, {
+                    maxMessageIndex: mergeBaseMaxMessageIndex,
+                    liveRuntimeAuthoritative: true,
+                });
                 if (!baseResult.data) {
                     return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
                 }
@@ -127561,65 +127884,33 @@ $CONTENT
                 }
             };
             const budgetTokens = request.settings.agentHistoryTokenBudget;
+            const compact = async (emergency) => {
+                if (budgetTokens <= 0 || !snapshot.messages.length)
+                    return false;
+                // 压缩成功后会话视图以持久层回读为准，未落盘的消息必须先写进去，否则会在回读时丢失。
+                await flush();
+                const next = await this.compactConversation_ACU(chat, snapshot, budgetTokens, await measureOverhead(), counter, semanticAdapter, emergency);
+                if (!next)
+                    return false;
+                snapshot = next;
+                return true;
+            };
             // 本次运行是否仍在会话里最后通告的那一轮内。中断恢复、同一游标重跑都算「同一轮内」。
             const continuingSameTurn = !!turnKey && lastAnnouncedTurnKey_ACU(snapshot) === turnKey;
             // 会话为空时压缩无意义，开销也就不必测——省一次完整的提示词渲染与逐条分词。
             const overheadTokens = budgetTokens > 0 && snapshot.messages.length ? await measureOverhead() : 0;
             const timing = await resolveAgentCompactionTiming_ACU(snapshot, budgetTokens, continuingSameTurn, counter, overheadTokens);
+            let overBudgetNotified = false;
             if (timing.action === 'defer') {
+                overBudgetNotified = true;
                 logAgentSession_ACU({
                     kind: 'thought',
                     title: `上下文已到 token 阈值（约 ${timing.totalTokens} tokens）`,
-                    detail: `实际读取的完整上下文（提示词骨架约 ${overheadTokens} tokens + 会话历史）超出阈值 ${budgetTokens}，但本轮规划还没结束。总结留到本轮完成、下一轮开始前再做，避免在一轮进行中换掉上下文。`,
+                    detail: `实际读取的完整上下文（提示词骨架约 ${overheadTokens} tokens + 会话历史）超出阈值 ${budgetTokens}，但本轮规划还没结束。总结留到本轮完成、下一轮开始前再做，避免在一轮进行中换掉上下文；本轮内请求照常发送，超过阈值 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍才会提前压缩。`,
                 });
             }
             if (timing.action === 'compact') {
-                const compaction = await planAgentHistoryCompaction_ACU({
-                    snapshot,
-                    activeMark: this.dependencies.readCompactionMark(chat),
-                    triggerTokens: budgetTokens,
-                    fixedPromptTokens: overheadTokens,
-                    countTokens: counter,
-                    semanticAdapter,
-                });
-                if (compaction.mark) {
-                    const candidate = compaction.mark;
-                    let committed = false;
-                    try {
-                        if (await this.dependencies.writeCompactionMark(chat, candidate)) {
-                            const persisted = this.dependencies.readCompactionMark(chat);
-                            const reread = this.dependencies.readConversation(chat);
-                            committed = !!persisted
-                                && 'summaryState' in persisted
-                                && persisted.compactedThroughId === candidate.compactedThroughId
-                                && persisted.report === candidate.report
-                                && JSON.stringify(persisted.summaryState) === JSON.stringify(candidate.summaryState)
-                                && JSON.stringify(persisted.metrics) === JSON.stringify(candidate.metrics);
-                            if (committed)
-                                snapshot = reread;
-                        }
-                    }
-                    catch (error) {
-                        logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
-                    }
-                    if (committed) {
-                        logAgentSession_ACU({
-                            kind: 'thought',
-                            title: `会话历史已压缩（压缩后上下文约 ${compaction.afterTokens} tokens）`,
-                            detail: [
-                                `实际读取的完整上下文超出阈值 ${budgetTokens}（其中提示词骨架约 ${overheadTokens} tokens），已把最早的 ${compaction.droppedTurns} 个轮次（${compaction.droppedMessages} 条消息）浓缩成交接报告。`,
-                                timing.emergency ? `本轮尚未结束，但上下文已达阈值的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍，再不压缩这次请求会因超长直接失败，因此提前压缩。` : '',
-                                compaction.status === 'compacted_above_target' ? '压缩后仍高于内部低水位：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。' : '',
-                            ].filter(Boolean).join(''),
-                        });
-                        // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
-                        // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
-                        logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: compaction.mark.report });
-                    }
-                    else {
-                        logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩未提交', detail: '压缩候选未通过持久化回读一致性确认，已保留本次运行的旧会话投影。' });
-                    }
-                }
+                await compact(timing.emergency);
             }
             return {
                 snapshot: () => snapshot,
@@ -127631,8 +127922,62 @@ $CONTENT
                     snapshot = next;
                 },
                 flush,
+                compact,
+                overBudgetNotified,
                 turnKey,
             };
+        }
+        /**
+         * 执行一次非破坏压缩并持久化标记。压缩结果以持久层回读为准：写入后回读不一致视为未提交，
+         * 保留旧会话投影而不是拿一份没落盘的视图继续跑。
+         * @returns 提交成功时返回回读后的会话视图；无可压缩、写入失败或回读不一致时返回 null
+         */
+        async compactConversation_ACU(chat, snapshot, budgetTokens, overheadTokens, counter, semanticAdapter, emergency) {
+            const compaction = await planAgentHistoryCompaction_ACU({
+                snapshot,
+                activeMark: this.dependencies.readCompactionMark(chat),
+                triggerTokens: budgetTokens,
+                fixedPromptTokens: overheadTokens,
+                countTokens: counter,
+                semanticAdapter,
+            });
+            if (!compaction.mark)
+                return null;
+            const candidate = compaction.mark;
+            let reread = null;
+            try {
+                if (await this.dependencies.writeCompactionMark(chat, candidate)) {
+                    const persisted = this.dependencies.readCompactionMark(chat);
+                    const committed = !!persisted
+                        && 'summaryState' in persisted
+                        && persisted.compactedThroughId === candidate.compactedThroughId
+                        && persisted.report === candidate.report
+                        && JSON.stringify(persisted.summaryState) === JSON.stringify(candidate.summaryState)
+                        && JSON.stringify(persisted.metrics) === JSON.stringify(candidate.metrics);
+                    if (committed)
+                        reread = this.dependencies.readConversation(chat);
+                }
+            }
+            catch (error) {
+                logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
+            }
+            if (!reread) {
+                logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩未提交', detail: '压缩候选未通过持久化回读一致性确认，已保留本次运行的旧会话投影。' });
+                return null;
+            }
+            logAgentSession_ACU({
+                kind: 'thought',
+                title: `会话历史已压缩（压缩后上下文约 ${compaction.afterTokens} tokens）`,
+                detail: [
+                    `实际读取的完整上下文超出阈值 ${budgetTokens}（其中提示词骨架约 ${overheadTokens} tokens），已把最早的 ${compaction.droppedTurns} 个轮次（${compaction.droppedMessages} 条消息）浓缩成交接报告。`,
+                    emergency ? `本轮尚未结束，但上下文已达阈值的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍，再不压缩这次请求会因超长直接失败，因此提前压缩。` : '',
+                    compaction.status === 'compacted_above_target' ? '压缩后仍高于内部低水位：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。' : '',
+                ].filter(Boolean).join(''),
+            });
+            // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
+            // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
+            logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: candidate.report });
+            return reread;
         }
         async callMainAgent(request, preset, session, counter, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle) {
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
@@ -127652,9 +127997,32 @@ $CONTENT
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 请求已失效', false));
                 }
                 const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
-                const messages = this.spliceHistory_ACU(rendered, session.history());
-                if (request.settings.agentHistoryTokenBudget > 0 && await measureAgentPromptTokens_ACU(messages, counter) > request.settings.agentHistoryTokenBudget) {
-                    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', '主 Agent 最终请求超过会话 token 阈值，拒绝发送未经确认的上下文', false));
+                let messages = this.spliceHistory_ACU(rendered, session.history());
+                // 发送前预检与压缩时机规则同一口径：阈值只是压缩触发线，一轮进行中允许超出到越界线
+                // （阈值 × AGENT_HISTORY_EMERGENCY_FACTOR_ACU）。轮内追加的工具结果、派工报告、迭代输出
+                // 把上下文顶过越界线时先做一次轮内压缩，压不下去才拒绝——否则同一轮里会陷入
+                // 「登记等下一轮 → 预检拒绝 → 永远到不了下一轮」的死锁。
+                const budgetTokens = request.settings.agentHistoryTokenBudget;
+                if (budgetTokens > 0) {
+                    const ceilingTokens = budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
+                    let promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
+                    if (promptTokens > ceilingTokens) {
+                        if (await session.compact(true)) {
+                            messages = this.spliceHistory_ACU(rendered, session.history());
+                            promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
+                        }
+                        if (promptTokens > ceilingTokens) {
+                            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', `主 Agent 最终请求约 ${promptTokens} tokens，超过会话 token 阈值 ${budgetTokens} 的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍且已无法再压缩，拒绝发送必然超长的请求。可在设置里提高「会话自动总结阈值」，或清空 Agent 会话历史后重试`, false));
+                        }
+                    }
+                    else if (promptTokens > budgetTokens && !session.overBudgetNotified) {
+                        session.overBudgetNotified = true;
+                        logAgentSession_ACU({
+                            kind: 'thought',
+                            title: `上下文已超过 token 阈值（约 ${promptTokens} tokens）`,
+                            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。本轮规划进行中不重塑历史，请求照常发送；总结留到本轮完成、下一轮开始前再做，超过越界线才会提前压缩。`,
+                        });
+                    }
                 }
                 // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
                 // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
@@ -128889,6 +129257,14 @@ $CONTENT
     // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
     async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason, { allowPendingFirstUserMessage = true } = {}) {
         try {
+            // 开局脚本可能只把行写进了运行时（skipChatSave/isImportMode）。seed checkpoint 建立后会
+            // 从聊天重载运行时，这些行会被直接丢弃；先写回聊天，聊天有数据时 seed 自然跳过。
+            try {
+                await flushRuntimeOnlyPendingChanges_ACU(reason);
+            }
+            catch (flushError) {
+                logWarn_ACU(`[InitialSeed] ${reason} 写回运行时未落盘变更失败，继续初始化 checkpoint:`, flushError);
+            }
             const result = await ensureInitialSeedCheckpoint_ACU({ reason, allowPendingFirstUserMessage });
             if (result?.success && isSqliteMode()) {
                 await reloadStorageProvider();
