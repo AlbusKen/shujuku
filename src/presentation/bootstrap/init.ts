@@ -26,7 +26,7 @@ import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU,
 import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
+import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import {
@@ -398,6 +398,11 @@ export   function mainInitialize_ACU() {
                 } catch (rebuildError) {
                     logWarn_ACU('[交火向量索引] 失效索引已删除，但普通重建路径执行失败:', rebuildError);
                 }
+            } else if (vectorCacheResult.success && !vectorCacheResult.skipped) {
+                // spv9.2 源文本升级：旧格式索引在后台静默重建，不阻塞 CHAT_CHANGED 后续步骤。
+                void rebuildOutdatedSummaryVectorIndexInBackground_ACU().catch((error: any) => {
+                    logWarn_ACU('[交火向量索引] 旧源文本索引后台重建异常:', error);
+                });
             }
             const shouldRestoreFlushQueue = !String(vectorCacheResult.reason || '').startsWith('external_files_missing_state_clear');
             if (!shouldRestoreFlushQueue) {

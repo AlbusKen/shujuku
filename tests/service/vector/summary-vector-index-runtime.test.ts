@@ -359,6 +359,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
   it('rerank 失败时回退到原候选排序并继续写入世界书，结果标明 rerank 未应用', async () => {
     h.config.rerankEndpoint = 'https://rerank.test';
     h.config.rerankModel = 'rerank-model';
+    h.config.topK = 2;
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('rerank down'); }));
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'rerank-fallback' });
@@ -374,6 +375,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.config.rerankEndpoint = 'https://rerank.test/v1/rerank';
     h.config.rerankModel = 'rerank-model';
     h.config.rerankApiKey = 'sk-rerank';
+    h.config.topK = 1;
     const fetchMock = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -391,6 +393,120 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     const headers = init.headers as Record<string, string>;
     expect(headers).toEqual({ 'Content-Type': 'application/json', Authorization: 'Bearer sk-rerank' });
     expect(Object.keys(headers).some(key => /csrf/i.test(key))).toBe(false);
+  });
+
+  it('候选行不多于 topK 时跳过 rerank，不发请求（rerank 改变不了谁进目录）', async () => {
+    h.config.rerankEndpoint = 'https://rerank.test';
+    h.config.rerankModel = 'rerank-model';
+    h.config.topK = 10;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 'rerank-skip' });
+
+    expect(result.success).toBe(true);
+    expect(result.rerankStatus).toBe('skipped_within_topk');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(createdContent_ACU()).toContain('dense summary');
+  });
+
+  it('rerank 的 document 用实时纪要表的"概览 + 纪要正文"而不是 chunk 文本，且按行去重', async () => {
+    h.config.rerankEndpoint = 'https://rerank.test';
+    h.config.rerankModel = 'rerank-model';
+    h.config.topK = 1;
+    h.config.rerankBatchSize = 300;
+    // 同一行两个 chunk 都命中：rerank 只应为该行发一条 document。
+    h.chunks = [
+      ...h.chunks,
+      { ...chunk_ACU(h.rows[0], 'secret relic second chunk of old row', [1, 0]), chunkId: 'chunk-old-2', textHash: 'hash-old-2' },
+    ];
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = h.rows.map((row: any) => ({
+      rowKey: row.rowKey,
+      summary: row.summary,
+      chronicleText: `【正文】${row.rowKey} 的三百字纪要正文`,
+    }));
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ results: body.documents.map((_doc: string, index: number) => ({ index, relevance_score: 1 - index * 0.1 })) }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 'rerank-doc' });
+
+    expect(result.rerankStatus).toBe('applied');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+    const documents: string[] = body.documents;
+    expect(documents.length).toBe(result.rerankDocumentCount);
+    expect(new Set(documents).size).toBe(documents.length);
+    documents.forEach((doc) => {
+      expect(doc).toContain('【正文】');
+      expect(doc).not.toContain('second chunk');
+    });
+  });
+
+  it('候选超过每批条数时分批并行请求并按全局 index 合并分数', async () => {
+    h.config.rerankEndpoint = 'https://rerank.test';
+    h.config.rerankModel = 'rerank-model';
+    h.config.rerankBatchSize = 10;
+    h.config.topK = 5;
+    h.config.summaryIndexCandidateLimit = 50;
+    h.config.summaryIndexBm25CandidateLimit = 50;
+    h.config.summaryIndexMinScore = 0;
+    const rows = Array.from({ length: 25 }, (_, index) => row_ACU(`row-${index}`, index + 1, `summary ${index}`));
+    h.rows = rows;
+    h.chunks = rows.map((row, index) => chunk_ACU(row, `relic candidate ${index}`, [1, 0]));
+    // 分数与全局 index 反向：只有跨批合并正确时，最后一批的行才会成为 top。
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ results: body.documents.map((doc: string, index: number) => ({ index, relevance_score: Number(doc.match(/(\d+)$/)?.[1] || 0) })) }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'relic candidate', source: 'rerank-batches' });
+
+    expect(result.rerankStatus).toBe('applied');
+    expect(result.rerankDocumentCount).toBe(25);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const batchSizes = fetchMock.mock.calls.map((call: any) => JSON.parse(String(call[1].body)).documents.length);
+    expect(batchSizes).toEqual([10, 10, 5]);
+    const content = createdContent_ACU();
+    expect(content).toContain('summary 24');
+    expect(content).toContain('summary 20');
+    expect(content).not.toContain('| summary 0 |');
+  });
+
+  it('关闭 AI 补充关键词后不调用关键词 AI，query 只用用户输入', async () => {
+    h.config.keywordPromptGroup = [{ role: 'user', content: '$USER_INPUT' }];
+    h.config.keywordGenerationEnabled = false;
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 'keyword-off' });
+
+    expect(result.success).toBe(true);
+    expect(result.keywordCount).toBe(0);
+    expect(result.keywordGenerationEnabled).toBe(false);
+    expect(h.callAI).not.toHaveBeenCalled();
+    expect(h.createEmbeddings).toHaveBeenCalledWith(expect.objectContaining({ input: ['find secret relic'] }));
+  });
+
+  it('关键词开关缺省视为开启（与升级前行为一致）', async () => {
+    h.config.keywordPromptGroup = [{ role: 'user', content: '$USER_INPUT' }];
+    delete h.config.keywordGenerationEnabled;
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 'keyword-default' });
+
+    expect(result.keywordGenerationEnabled).toBe(true);
+    expect(h.callAI).toHaveBeenCalledTimes(1);
+    expect(result.keywordCount).toBeGreaterThan(0);
   });
 
   it('未配置 rerank 时不发请求，结果标明 not_configured', async () => {

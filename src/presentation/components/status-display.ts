@@ -168,6 +168,8 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       setVal('worldbook-vector-memory-rerank-model', (vectorMemoryConfig as any).rerankModel || '');
       setVal('worldbook-vector-memory-rerank-api-key', (vectorMemoryConfig as any).rerankApiKey || '');
       setVal('worldbook-vector-memory-rerank-instruction', vectorMemoryConfig.rerankInstruction || '');
+      setVal('worldbook-vector-memory-rerank-batch-size', (vectorMemoryConfig as any).rerankBatchSize || 300);
+      setChecked('worldbook-vector-memory-chunk-chronicle-by-sentence', (vectorMemoryConfig as any).summaryIndexChunkChronicleBySentence === true);
       setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
       setChecked('worldbook-vector-memory-archive-without-summary', (vectorMemoryConfig as any).archiveWithoutSummary === true);
       setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
@@ -176,6 +178,7 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       setVal('worldbook-vector-memory-rolling-delta-fold-threshold', (vectorMemoryConfig as any).summaryIndexRollingDeltaFoldThreshold || 15);
       setVal('worldbook-vector-memory-entry-comment', vectorMemoryConfig.entryComment);
       setVal('worldbook-vector-memory-entry-key', vectorMemoryConfig.entryKey);
+      setChecked('worldbook-vector-memory-keyword-generation-enabled', (vectorMemoryConfig as any).keywordGenerationEnabled !== false);
       setVal('worldbook-vector-memory-keyword-api-preset', vectorMemoryConfig.keywordApiPreset);
       setVal('worldbook-vector-memory-keyword-context-pair-count', (vectorMemoryConfig as any).keywordContextPairCount || 1);
       setVal('worldbook-vector-memory-keyword-generation-max-attempts', (vectorMemoryConfig as any).keywordGenerationMaxAttempts || 3);

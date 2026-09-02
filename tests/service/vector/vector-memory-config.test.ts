@@ -19,6 +19,41 @@ import {
   normalizeVectorMemoryConfig_ACU,
 } from '../../../src/service/vector/vector-memory-config';
 
+describe('vector-memory-config spv9.2 新增字段', () => {
+  it('关键词 AI 开关缺省为开启，显式 false 才关闭', () => {
+    expect(normalizeVectorMemoryConfig_ACU({}).keywordGenerationEnabled).toBe(true);
+    expect(normalizeVectorMemoryConfig_ACU({ keywordGenerationEnabled: 'no' }).keywordGenerationEnabled).toBe(true);
+    expect(normalizeVectorMemoryConfig_ACU({ keywordGenerationEnabled: false }).keywordGenerationEnabled).toBe(false);
+  });
+
+  it('rerank 每批条数缺省 300，夹在 [10, 500]', () => {
+    expect(normalizeVectorMemoryConfig_ACU({}).rerankBatchSize).toBe(300);
+    expect(normalizeVectorMemoryConfig_ACU({ rerankBatchSize: 5 }).rerankBatchSize).toBe(10);
+    expect(normalizeVectorMemoryConfig_ACU({ rerankBatchSize: 2000 }).rerankBatchSize).toBe(500);
+    expect(normalizeVectorMemoryConfig_ACU({ rerankBatchSize: 120 }).rerankBatchSize).toBe(120);
+  });
+
+  it('按句切分纪要正文默认关闭；minScore 新默认 0.35', () => {
+    const config = normalizeVectorMemoryConfig_ACU({});
+    expect(config.summaryIndexChunkChronicleBySentence).toBe(false);
+    expect(config.minScore).toBe(0.35);
+    expect(normalizeVectorMemoryConfig_ACU({ summaryIndexChunkChronicleBySentence: true }).summaryIndexChunkChronicleBySentence).toBe(true);
+  });
+
+  it('effective config 透传新增字段供运行时读取', () => {
+    const config = getEffectiveSummaryVectorIndexConfig_ACU({
+      embeddingEndpoint: 'https://embedding.test',
+      embeddingModel: 'model',
+      keywordGenerationEnabled: false,
+      rerankBatchSize: 200,
+      summaryIndexChunkChronicleBySentence: true,
+    });
+    expect(config.keywordGenerationEnabled).toBe(false);
+    expect(config.rerankBatchSize).toBe(200);
+    expect(config.summaryIndexChunkChronicleBySentence).toBe(true);
+  });
+});
+
 describe('vector-memory-config hybrid retrieval fields', () => {
   it('normalize 默认启用 hybrid，并补齐 BM25/RRF 默认值', () => {
     const config = normalizeVectorMemoryConfig_ACU({ recallCandidateLimit: 321 });

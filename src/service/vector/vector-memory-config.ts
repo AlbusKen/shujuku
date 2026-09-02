@@ -1,5 +1,6 @@
 import { defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { cleanChatName_ACU, normalizePositiveInteger_ACU } from '../../shared/utils';
+import { normalizeRerankBatchSize_ACU, VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU } from '../../data/gateways/vector-rerank-gateway';
 import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 import { currentChatFileIdentifier_ACU, settings_ACU } from '../runtime/state-manager';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
@@ -48,6 +49,7 @@ export interface VectorMemoryConfig_ACU {
     rerankApiKey: string;
     rerankModel: string;
     rerankInstruction: string;
+    rerankBatchSize: number;
     vectorNamespace: string;
     entryComment: string;
     entryKey: string;
@@ -56,10 +58,12 @@ export interface VectorMemoryConfig_ACU {
     rrfK: number;
     summaryIndexKeywordMinRows: number;
     summaryChunkSentenceCount: number;
+    summaryIndexChunkChronicleBySentence: boolean;
     summaryPromptGroupId: string;
     archiveWithoutSummary: boolean;
     summaryPromptGroup: VectorMemoryKeywordPromptSegment_ACU[];
     keywordApiPreset: string;
+    keywordGenerationEnabled: boolean;
     keywordContextPairCount: number;
     keywordGenerationMaxAttempts: number;
     keywordPromptGroup: VectorMemoryKeywordPromptSegment_ACU[];
@@ -183,6 +187,7 @@ export function normalizeVectorMemoryConfig_ACU(rawConfig: any): VectorMemoryCon
         rerankModel: normalizeTextField_ACU((source as any).rerankModel, (defaults as any).rerankModel),
         rerankInstruction: typeof (source as any).rerankInstruction === 'string'
             ? (source as any).rerankInstruction.trim() : (defaults as any).rerankInstruction,
+        rerankBatchSize: normalizeRerankBatchSize_ACU((source as any).rerankBatchSize, Number((defaults as any).rerankBatchSize) || VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU),
         vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
         entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
         entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
@@ -197,10 +202,13 @@ export function normalizeVectorMemoryConfig_ACU(rawConfig: any): VectorMemoryCon
             (defaults as any).summaryIndexKeywordMinRows || 100,
         ),
         summaryChunkSentenceCount: normalizePositiveInteger_ACU(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
+        summaryIndexChunkChronicleBySentence: (source as any).summaryIndexChunkChronicleBySentence === true,
         summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
         archiveWithoutSummary: source.archiveWithoutSummary === true,
         summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, (defaults as any).summaryPromptGroup || []),
         keywordApiPreset: normalizeTextField_ACU(source.keywordApiPreset, defaults.keywordApiPreset),
+        // 缺省视为开启：老配置没有这个字段，行为必须与升级前一致。
+        keywordGenerationEnabled: (source as any).keywordGenerationEnabled !== false,
         keywordContextPairCount: normalizePositiveInteger_ACU(source.keywordContextPairCount, defaults.keywordContextPairCount),
         keywordGenerationMaxAttempts: normalizePositiveInteger_ACU((source as any).keywordGenerationMaxAttempts, (defaults as any).keywordGenerationMaxAttempts || 3),
         keywordPromptGroup: normalizeKeywordPromptGroup_ACU(source.keywordPromptGroup, defaults.keywordPromptGroup),

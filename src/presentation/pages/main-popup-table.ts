@@ -238,6 +238,11 @@ export function generateTableTabHTML(): string {
                                             <textarea id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction" rows="3" placeholder="可选：传递给 Rerank API 的 instruction / query 参数，用于引导重排方向。留空则不附带。" style="width: 100%; resize: vertical;"></textarea>
                                             <small class="notes">部分 Rerank 模型支持 instruction 参数（如 bge-reranker-v2-m3）；填写后会作为 query/instruction 字段发送。</small>
                                         </div>
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-batch-size">Rerank 每批条数</label>
+                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-batch-size" min="10" max="500" step="10" placeholder="300">
+                                            <small class="notes">候选超过该数时分批并行请求再合并分数；服务商单请求通常限 500 条以内。Rerank 的 document 为纪要正文，候选行不多于 TopK 时自动跳过。</small>
+                                        </div>
 
                                     </div>
                                     <small class="notes" style="display: block; margin-top: 8px;">启用真实 Rerank 后，Embedding 仍负责召回预筛，TopK 仍控制最终注入数量；这三者不是互相替代关系。</small>
@@ -246,9 +251,16 @@ export function generateTableTabHTML(): string {
                                     <div class="acu-section-title">外置索引写入参数</div>
                                     <div class="acu-grid-auto">
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit">概要列分块句数</label>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-chunk-chronicle-by-sentence" style="display: flex; align-items: center; gap: 6px;">
+                                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-chunk-chronicle-by-sentence">
+                                                按句切分纪要正文
+                                            </label>
+                                            <small class="notes">默认关闭：每行一个向量（概览 + 纪要正文整体）。开启后按下方句数切分正文，召回更细但分片成倍增加；改动后需重建索引。</small>
+                                        </div>
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit">分块句数</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit" min="1" step="1" placeholder="2">
-                                            <small class="notes">仅对纪要表概要列文本分块。数值越小召回越精细，但外置分片数量会增加。</small>
+                                            <small class="notes">仅在开启按句切分时生效。数值越小召回越精细，但外置分片数量会增加。</small>
                                         </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency">每批归档行数</label>
@@ -262,6 +274,13 @@ export function generateTableTabHTML(): string {
                                 <div class="acu-section" style="margin-bottom: 0;">
                                     <div class="acu-section-title">关键词生成</div>
                                     <div class="acu-grid-auto">
+                                        <div class="acu-col-sm" style="grid-column: 1 / -1;">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-enabled" style="display: flex; align-items: center; gap: 6px;">
+                                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-enabled" checked>
+                                                发送前用 AI 补充检索关键词
+                                            </label>
+                                            <small class="notes">默认开启。关闭后不再调用关键词 AI，只用用户输入本身做召回，省一次 LLM 往返。</small>
+                                        </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-api-preset">关键词 API 预设</label>
                                             <select id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-api-preset" class="text_pole" style="width: 100%;">
@@ -294,7 +313,7 @@ export function generateTableTabHTML(): string {
                                 </div>
                                 <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-prompt-group" style="display: none;"></div>
                                 <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
-                                    <small class="notes">交火模式发送前会依次执行：关键词生成 → 用户输入与关键词合并 embedding → 概要列 chunk 预筛 → 可选 Rerank 重排序 → 按纪要表原顺序覆盖原概要索引条目。</small>
+                                    <small class="notes">交火模式发送前会依次执行：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → "概览 + 纪要正文"向量与 BM25 混合召回 → 可选 Rerank（按纪要正文分批精排）→ 按纪要表原顺序覆盖原概要索引条目。</small>
                                     <small class="notes">IndexedDB 只作为可丢弃缓存；权威向量分片保存在 /user/files，聊天记录只保存 manifest，不再把完整向量塞进聊天记录。</small>
                                 </div>
                             </div>

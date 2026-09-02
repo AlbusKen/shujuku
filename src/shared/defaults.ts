@@ -175,6 +175,14 @@ export const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
 
 // --- 一次性默认值刷新版本标记 ---
 export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prompt-content-based-refresh';
+/**
+ * 交火向量源文本升级（spv9.2）：embedding/BM25 源文本从"概览"改为"概览 + 纪要正文"。
+ * 正文更长时余弦分布整体下移，旧默认 minScore 0.45 会过滤掉大量相关行；
+ * 该版本号标记一次性把"仍等于旧默认值"的 minScore 迁到新默认值，用户自定义过的值不动。
+ */
+export const VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU = 'spv9.2-chronicle-source-text';
+/** 源文本升级前的 minScore 默认值；仅用于识别"用户从未改过"的配置。 */
+export const VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU = [0.45];
 // note 列号改 0 基（与 $0 序列化对齐）+ 失效硬约束措辞改为写作规范；仍用默认模板的用户一次性刷新。
 export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8.5-table-note-zero-based-columns';
 // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
@@ -199,7 +207,8 @@ export const defaultVectorMemoryConfig_ACU = {
   summaryIndexArchiveMaxConcurrency: 30,
   summaryIndexArchiveEmbeddingConcurrency: 3,
   topK: 200,
-  minScore: 0.45,
+  // 源文本为"概览 + 纪要正文"时的余弦门槛；比只用 30 字概览时的 0.45 略低（长文本相似度整体偏低）。
+  minScore: 0.35,
   embeddingEndpoint: '',
   embeddingApiKey: '',
   embeddingModel: '',
@@ -207,6 +216,8 @@ export const defaultVectorMemoryConfig_ACU = {
   rerankApiKey: '',
   rerankModel: '',
   rerankInstruction: '请根据当前用户输入及关键词，判断每个候选纪要条目的相关性，并将最相关的条目按相关性从高到低降序排列。优先选择能够直接回答、延续或补全当前用户输入意图的条目。',
+  // 每批送往 rerank 的 documents 条数；服务商单请求通常限 500 条以内，300 条 × 纪要正文仍在 token 限额内。
+  rerankBatchSize: 300,
   vectorNamespace: 'chat',
   entryComment: 'TavernDB-ACU-VectorMemory',
   entryKey: 'TavernDB-ACU-VectorMemory-Key',
@@ -215,6 +226,8 @@ export const defaultVectorMemoryConfig_ACU = {
   rrfK: 60,
   summaryIndexKeywordMinRows: 200,
   summaryChunkSentenceCount: 2,
+  // 默认每行一个向量（概览 + 纪要正文整体 embedding），索引体积与行数线性；开启后按 summaryChunkSentenceCount 切纪要正文。
+  summaryIndexChunkChronicleBySentence: false,
   summaryPromptGroupId: 'remote-memory-archive-default',
   archiveWithoutSummary: false,
   recentFixedInjectCount: 50,
@@ -248,6 +261,8 @@ export const defaultVectorMemoryConfig_ACU = {
     },
   ],
   keywordApiPreset: '',
+  // 关闭后发送前不再调用关键词 AI，query 只用用户输入本身（省一次 LLM 往返）。
+  keywordGenerationEnabled: true,
   keywordContextPairCount: 1,
   keywordGenerationMaxAttempts: 3,
   keywordPromptGroup: [

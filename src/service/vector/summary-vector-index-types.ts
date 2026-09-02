@@ -145,7 +145,13 @@ export interface ChatSummaryVectorIndexRow_ACU {
     location: string;
     summary: string;
     indexCode: string;
+    /**
+     * 参与 embedding 的源文本。spv9.2 起源文本含纪要正文，行落盘时只保留 vectorSourceHash，
+     * 该字段写空串以免几百字正文随聊天元数据重复存储；旧索引仍带 30 字概览原文。
+     */
     vectorSourceText: string;
+    /** 源文本哈希（spv9.2+）。缺失即旧格式索引，需要重建。 */
+    vectorSourceHash?: string;
     chunkIds: string[];
     sourceFingerprint?: string;
     shardIds?: string[];

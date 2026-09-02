@@ -4,6 +4,12 @@ import {
   getCurrentVectorMemoryConfig_ACU,
   validateSummaryVectorIndexConfig_ACU,
 } from "../../service/vector/vector-memory-config";
+import {
+  normalizeRerankBatchSize_ACU,
+  VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU,
+  VECTOR_RERANK_MAX_BATCH_SIZE_ACU,
+  VECTOR_RERANK_MIN_BATCH_SIZE_ACU,
+} from "../../data/gateways/vector-rerank-gateway";
 import { useToastStore } from "../stores/toast-store";
 
 export interface VectorApiForm {
@@ -14,7 +20,14 @@ export interface VectorApiForm {
   rerankModel: string;
   rerankApiKey: string;
   rerankInstruction: string;
+  rerankBatchSize: number;
 }
+
+export const RERANK_BATCH_SIZE_LIMITS = {
+  min: VECTOR_RERANK_MIN_BATCH_SIZE_ACU,
+  max: VECTOR_RERANK_MAX_BATCH_SIZE_ACU,
+  default: VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU,
+} as const;
 
 function createEmptyForm(): VectorApiForm {
   return {
@@ -25,6 +38,7 @@ function createEmptyForm(): VectorApiForm {
     rerankModel: "",
     rerankApiKey: "",
     rerankInstruction: "",
+    rerankBatchSize: VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU,
   };
 }
 
@@ -43,6 +57,7 @@ export function useVectorApiConfig() {
     form.rerankModel = config.rerankModel || "";
     form.rerankApiKey = config.rerankApiKey || "";
     form.rerankInstruction = config.rerankInstruction ?? "";
+    form.rerankBatchSize = normalizeRerankBatchSize_ACU(config.rerankBatchSize);
     errors.value = [];
   }
 
@@ -55,6 +70,9 @@ export function useVectorApiConfig() {
     config.rerankModel = form.rerankModel.trim();
     config.rerankApiKey = form.rerankApiKey;
     config.rerankInstruction = form.rerankInstruction.trim();
+    const batchSize = normalizeRerankBatchSize_ACU(form.rerankBatchSize);
+    form.rerankBatchSize = batchSize;
+    config.rerankBatchSize = batchSize;
 
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {

@@ -251,6 +251,16 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
       bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('rerankInstruction', String($input.val() ?? ''));
       });
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-batch-size`, 'input change', ($input) => {
+          const defaults = getDefaultVectorMemoryConfig_ACU();
+          updateVectorMemoryField_ACU('rerankBatchSize', parseIntegerField_ACU($input.val(), (defaults as any).rerankBatchSize || 300));
+      });
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-chunk-chronicle-by-sentence`, 'change', ($input) => {
+          updateVectorMemoryField_ACU('summaryIndexChunkChronicleBySentence', $input.is(':checked'));
+      });
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-enabled`, 'change', ($input) => {
+          updateVectorMemoryField_ACU('keywordGenerationEnabled', $input.is(':checked'));
+      });
 
       bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();

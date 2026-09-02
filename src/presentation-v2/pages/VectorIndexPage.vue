@@ -18,8 +18,9 @@
           <AcuStatsList :items="vector.statusStatsItems.value" />
 
           <p class="acu-v2-vector-index-page__hint">
-            发送前流程：关键词生成 → 用户输入与关键词合并 embedding → 概要列
-            chunk 预筛 → 可选 Rerank → 按纪要表原顺序覆盖原概要索引条目。
+            发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding →
+            "概览 + 纪要正文"向量与 BM25 混合召回 → 可选 Rerank（按纪要正文分批精排，候选不多于
+            TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。
           </p>
 
           <div
@@ -65,6 +66,18 @@
           :title="vectorIndexCopy.panels.keyword.title"
           :description="vectorIndexCopy.panels.keyword.description"
         >
+          <AcuFormRow
+            label="AI 补充关键词"
+            hint="开启时每次发送前多调用一次 AI 生成检索关键词；关闭后只用用户输入本身做召回，省一次往返。"
+          >
+            <AcuToggle
+              :model-value="vector.form.keywordGenerationEnabled"
+              label="发送前用 AI 补充检索关键词"
+              @update:model-value="
+                vector.setBooleanField('keywordGenerationEnabled', $event)
+              "
+            />
+          </AcuFormRow>
           <AcuFormRow
             label="关键词 API 预设"
             hint="默认使用当前的API，仅用于发送前关键词生成。"
@@ -180,6 +193,19 @@
                   placeholder="留空则不发送 instruction"
                 ></textarea>
               </AcuFormRow>
+              <AcuFormRow
+                label="每批条数"
+                :hint="`候选超过该数时分批并行请求再合并分数。服务商单请求通常限 500 条以内，范围 ${RERANK_BATCH_SIZE_LIMITS.min}–${RERANK_BATCH_SIZE_LIMITS.max}，默认 ${RERANK_BATCH_SIZE_LIMITS.default}。`"
+              >
+                <AcuInput
+                  :model-value="vectorApiConfig.form.rerankBatchSize"
+                  type="number"
+                  :min="RERANK_BATCH_SIZE_LIMITS.min"
+                  :max="RERANK_BATCH_SIZE_LIMITS.max"
+                  :step="10"
+                  @change="onRerankBatchSizeChange($event)"
+                />
+              </AcuFormRow>
             </fieldset>
 
             <AcuMessage v-if="vectorApiConfig.errors.value.length" kind="error">
@@ -243,7 +269,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="TopK"
-            hint="Rerank 后选中的纪要数量上限，写入时恢复原顺序。"
+            hint="进入纪要索引目录的排序行数上限（最近固定注入的行另计）；候选行不多于此数时跳过 Rerank，写入时恢复原顺序。"
           >
             <AcuInput
               :model-value="vector.form.topK"
@@ -255,7 +281,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="预筛最低分"
-            hint="Embedding 预筛分数门槛，低于此分不参与 Rerank。"
+            hint="Embedding 余弦分门槛，低于此分不进入候选池。源文本含纪要正文后分布整体偏低，默认 0.35。"
           >
             <AcuInput
               :model-value="vector.form.minScore"
@@ -268,7 +294,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="候选上限"
-            hint="预筛保留的候选数，也是 Rerank 最大输入，不能小于 TopK。"
+            hint="dense/BM25 各自保留的候选分片数，融合后的候选池上限；Rerank 会按每批条数自动分批处理。不能小于 TopK。"
           >
             <AcuInput
               :model-value="vector.form.recallCandidateLimit"
@@ -312,14 +338,27 @@
       >
         <div class="acu-v2-vector-index-page__number-grid">
           <AcuFormRow
+            label="按句切分纪要正文"
+            hint="默认关闭：每行一个向量（概览 + 纪要正文整体），索引体积只随行数增长。开启后按下方句数切分正文，召回更细但分片成倍增加；改动后需重建索引。"
+          >
+            <AcuToggle
+              :model-value="vector.form.summaryIndexChunkChronicleBySentence"
+              label="切分纪要正文为多个分片"
+              @update:model-value="
+                vector.setBooleanField('summaryIndexChunkChronicleBySentence', $event)
+              "
+            />
+          </AcuFormRow>
+          <AcuFormRow
             label="分块句数"
-            hint="纪要概要列每段句数。越小越精细，分片越多。"
+            hint="仅在开启按句切分时生效：每个分片包含的句数，越小越精细，分片越多。"
           >
             <AcuInput
               :model-value="vector.form.summaryChunkSentenceCount"
               type="number"
               :min="1"
               :step="1"
+              :disabled="!vector.form.summaryIndexChunkChronicleBySentence"
               @change="
                 vector.setNumberField('summaryChunkSentenceCount', $event)
               "
@@ -429,7 +468,7 @@ import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOpti
 import { useChatChangedTick } from "../composables/useChatChangedListener";
 import { useDevOptions } from "../composables/useDevOptions";
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
-import { useVectorApiConfig } from "../composables/useVectorApiConfig";
+import { RERANK_BATCH_SIZE_LIMITS, useVectorApiConfig } from "../composables/useVectorApiConfig";
 import { useVectorIndexConfig } from "../composables/useVectorIndexConfig";
 import { vectorIndexCopy } from "../copy/vector-index-copy";
 import { useDialogStore } from "../stores/dialog-store";
@@ -523,6 +562,13 @@ function refreshAll(): void {
 
 function saveVectorApiConfig(): void {
   if (vectorApiConfig.save()) vector.refresh();
+}
+
+function onRerankBatchSizeChange(raw: string | number): void {
+  const value = Math.floor(Number(raw));
+  vectorApiConfig.form.rerankBatchSize = Number.isFinite(value) && value > 0
+    ? Math.min(RERANK_BATCH_SIZE_LIMITS.max, Math.max(RERANK_BATCH_SIZE_LIMITS.min, value))
+    : RERANK_BATCH_SIZE_LIMITS.default;
 }
 
 async function onDeleteCurrentIndex(): Promise<void> {

@@ -8,7 +8,7 @@
 
 import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
 import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
-import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -598,6 +598,22 @@ export   function loadSettings_ACU() {
               vectorConfig.defaultsRefreshVersion = VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU;
               shouldPersistSettingsAfterLoad_ACU = true;
               logDebug_ACU(`[交火模式配置] 已补齐缺失默认参数并记录版本: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
+          }
+          // [spv9.2] 源文本升级：embedding/BM25 改用"概览 + 纪要正文"。独立 marker，
+          // 不复用 defaultsRefreshVersion——那条分支会无条件覆盖关键词提示词，不能因 minScore 迁移误触发。
+          fillMissing_ACU('keywordGenerationEnabled', (defaultVectorMemoryConfig_ACU as any).keywordGenerationEnabled !== false);
+          fillMissing_ACU('rerankBatchSize', (defaultVectorMemoryConfig_ACU as any).rerankBatchSize || 300);
+          fillMissing_ACU('summaryIndexChunkChronicleBySentence', (defaultVectorMemoryConfig_ACU as any).summaryIndexChunkChronicleBySentence === true);
+          if (vectorConfig.sourceTextUpgradeVersion !== VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU) {
+              const currentMinScore = Number(vectorConfig.minScore);
+              const isLegacyDefault = !Number.isFinite(currentMinScore)
+                  || VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU.some((legacy) => Math.abs(currentMinScore - legacy) < 1e-9);
+              if (isLegacyDefault) {
+                  vectorConfig.minScore = defaultVectorMemoryConfig_ACU.minScore;
+                  logDebug_ACU(`[交火模式配置] 源文本升级：minScore 从旧默认值迁移为 ${defaultVectorMemoryConfig_ACU.minScore}`);
+              }
+              vectorConfig.sourceTextUpgradeVersion = VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU;
+              shouldPersistSettingsAfterLoad_ACU = true;
           }
       }
 

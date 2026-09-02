@@ -79,6 +79,7 @@ export interface VectorIndexForm {
   vectorNamespace: string;
   // 归档分块
   summaryChunkSentenceCount: number;
+  summaryIndexChunkChronicleBySentence: boolean;
   summaryIndexArchiveMaxConcurrency: number;
   summaryIndexRollingDeltaEnabled: boolean;
   summaryIndexRollingDeltaFoldThreshold: number;
@@ -87,6 +88,7 @@ export interface VectorIndexForm {
   summaryIndexContentPackWriteEnabled: boolean;
   summaryIndexContentPackWriteScopeAllowlistText: string;
   // 关键词生成
+  keywordGenerationEnabled: boolean;
   keywordApiPreset: string;
   keywordContextPairCount: number;
   keywordGenerationMaxAttempts: number;
@@ -144,6 +146,7 @@ function createEmptyForm(): VectorIndexForm {
     recentFixedInjectCount: defaults.recentFixedInjectCount,
     vectorNamespace: defaults.vectorNamespace || 'chat',
     summaryChunkSentenceCount: defaults.summaryChunkSentenceCount,
+    summaryIndexChunkChronicleBySentence: (defaults as any).summaryIndexChunkChronicleBySentence === true,
     summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
     summaryIndexRollingDeltaEnabled: defaults.summaryIndexRollingDeltaEnabled === true,
     summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
@@ -151,6 +154,7 @@ function createEmptyForm(): VectorIndexForm {
     summaryIndexV2WriteScopeAllowlistText: Array.isArray(defaults.summaryIndexV2WriteScopeAllowlist) ? defaults.summaryIndexV2WriteScopeAllowlist.join('\n') : '',
     summaryIndexContentPackWriteEnabled: defaults.summaryIndexContentPackWriteEnabled === true,
     summaryIndexContentPackWriteScopeAllowlistText: Array.isArray(defaults.summaryIndexContentPackWriteScopeAllowlist) ? defaults.summaryIndexContentPackWriteScopeAllowlist.join('\n') : '',
+    keywordGenerationEnabled: (defaults as any).keywordGenerationEnabled !== false,
     keywordApiPreset: defaults.keywordApiPreset || '',
     keywordContextPairCount: defaults.keywordContextPairCount,
     keywordGenerationMaxAttempts: defaults.keywordGenerationMaxAttempts,
@@ -242,6 +246,7 @@ export function useVectorIndexConfig() {
     form.recentFixedInjectCount = config.recentFixedInjectCount;
     form.vectorNamespace = config.vectorNamespace || 'chat';
     form.summaryChunkSentenceCount = config.summaryChunkSentenceCount;
+    form.summaryIndexChunkChronicleBySentence = config.summaryIndexChunkChronicleBySentence === true;
     form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
     form.summaryIndexRollingDeltaEnabled = config.summaryIndexRollingDeltaEnabled === true;
     form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
@@ -249,6 +254,7 @@ export function useVectorIndexConfig() {
     form.summaryIndexV2WriteScopeAllowlistText = Array.isArray(config.summaryIndexV2WriteScopeAllowlist) ? config.summaryIndexV2WriteScopeAllowlist.join('\n') : '';
     form.summaryIndexContentPackWriteEnabled = config.summaryIndexContentPackWriteEnabled === true;
     form.summaryIndexContentPackWriteScopeAllowlistText = Array.isArray(config.summaryIndexContentPackWriteScopeAllowlist) ? config.summaryIndexContentPackWriteScopeAllowlist.join('\n') : '';
+    form.keywordGenerationEnabled = config.keywordGenerationEnabled !== false;
     form.keywordApiPreset = config.keywordApiPreset || '';
     form.keywordContextPairCount = config.keywordContextPairCount;
     form.keywordGenerationMaxAttempts = config.keywordGenerationMaxAttempts;
@@ -344,7 +350,8 @@ export function useVectorIndexConfig() {
   }
 
   function setBooleanField<
-    K extends 'summaryIndexRollingDeltaEnabled' | 'summaryIndexV2WriteEnabled' | 'summaryIndexContentPackWriteEnabled',
+    K extends 'summaryIndexRollingDeltaEnabled' | 'summaryIndexV2WriteEnabled' | 'summaryIndexContentPackWriteEnabled'
+      | 'keywordGenerationEnabled' | 'summaryIndexChunkChronicleBySentence',
   >(key: K, value: boolean): void {
     const next = value === true;
     (form as any)[key] = next;

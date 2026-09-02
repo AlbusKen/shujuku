@@ -42,7 +42,7 @@ import {
 } from './summary-vector-index-storage-service';
 import { hashUserInput_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, serializeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
-import { buildSummaryRowFingerprint_ACU } from './summary-vector-row-fingerprint';
+import { buildSummaryRowFingerprint_ACU, hashSummaryVectorSourceText_ACU } from './summary-vector-row-fingerprint';
 
 type SummaryVectorIndexArchiveMode_ACU = 'append' | 'sync';
 
@@ -106,8 +106,31 @@ export interface SummaryVectorArchivePreparedRow_ACU {
     location: string;
     summary: string;
     indexCode: string;
+    /** 纪要正文列原文（可为空：模板没有该列时）。发送前 rerank 用它作 document。 */
+    chronicleText: string;
+    /** 参与 embedding/BM25 的源文本：概览 + 纪要正文（截断到上限）。 */
     vectorSourceText: string;
+    vectorSourceHash: string;
     sourceFingerprint: string;
+}
+
+/**
+ * 源文本字符上限。默认模板纪要 300–400 字，自定义模板可能更长；主流 embedding 模型 8k token
+ * 窗口远够，这里的上限只是防止极端长文本把单行 embedding/rerank 成本拉爆。
+ */
+export const SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU = 1600;
+
+const SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU = ['纪要', '纪要内容', '纪要正文', '事件纪要', '详细纪要', '正文'];
+
+/**
+ * 概览在前保住高密度摘要信号，纪要正文补充实体与细节；两者都为空的行由调用方跳过。
+ */
+export function buildSummaryVectorSourceText_ACU(summary: string, chronicleText: string): string {
+    const parts = [normalizeText_ACU(summary), normalizeText_ACU(chronicleText)].filter(Boolean);
+    const combined = parts.join('\n');
+    return combined.length > SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU
+        ? combined.slice(0, SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU)
+        : combined;
 }
 
 const summaryVectorIndexArchiveLocks_ACU = new Map<string, Promise<void>>();
@@ -360,6 +383,21 @@ function chunkTextBySentenceCount_ACU(text: string, sentenceCount: number): stri
     return chunks;
 }
 
+/**
+ * 一行源文本 → 待 embedding 的 chunk 文本。
+ * 默认整行一个 chunk（向量数 = 行数，索引体积不随正文长度膨胀）；
+ * 只有显式开启按句切分时才用 sentenceCount 切纪要正文。
+ */
+export function buildRowChunkTexts_ACU(
+    vectorSourceText: string,
+    options: { sentenceCount: number; chunkBySentence: boolean },
+): string[] {
+    const normalized = normalizeText_ACU(vectorSourceText);
+    if (!normalized) return [];
+    if (!options.chunkBySentence) return [normalized];
+    return chunkTextBySentenceCount_ACU(normalized, options.sentenceCount);
+}
+
 export function buildPreparedRows_ACU(table: any, summaryKey: string): {
     rows: SummaryVectorArchivePreparedRow_ACU[];
     skippedRowCount: number;
@@ -371,6 +409,7 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
     const locationColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['地点', '位置', '场景', '场所'], 1);
     const summaryColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['概要', '概览', '概述', '摘要']);
     const indexColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['编码索引']);
+    const chronicleColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU);
     if (summaryColIdx < 0) {
         return { rows: [], skippedRowCount: 0, error: '纪要表缺少概要列，无法构建纪要向量索引。' };
     }
@@ -387,7 +426,8 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
         const location = locationColIdx >= 0 ? normalizeText_ACU(row?.[locationColIdx]) : '';
         const summary = normalizeText_ACU(row?.[summaryColIdx]);
         const indexCode = normalizeText_ACU(row?.[indexColIdx]);
-        const vectorSourceText = summary;
+        const chronicleText = chronicleColIdx >= 0 && chronicleColIdx !== summaryColIdx ? normalizeText_ACU(row?.[chronicleColIdx]) : '';
+        const vectorSourceText = buildSummaryVectorSourceText_ACU(summary, chronicleText);
         if (!summary || !indexCode || !vectorSourceText) {
             skippedRowCount += 1;
             return;
@@ -400,7 +440,9 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
             location,
             summary,
             indexCode,
+            chronicleText,
             vectorSourceText,
+            vectorSourceHash: hashSummaryVectorSourceText_ACU(vectorSourceText),
             sourceFingerprint: '',
         };
         preparedRow.sourceFingerprint = buildPreparedRowFingerprint_ACU(preparedRow);
@@ -445,7 +487,19 @@ function getSummaryRowFingerprintFromStateRow_ACU(row: ChatSummaryVectorIndexRow
         summary: row.summary,
         indexCode: row.indexCode,
         vectorSourceText: row.vectorSourceText,
+        vectorSourceHash: row.vectorSourceHash,
     });
+}
+
+/**
+ * 判断已落盘索引是否仍是 spv9.2 之前的源文本格式（只用概览、行内无 vectorSourceHash）。
+ * 旧格式索引在下一次发送/填表时会因指纹全量 mismatch 自动重建；聊天加载时提前发现可以后台先建。
+ */
+export function isSummaryVectorIndexSourceTextOutdated_ACU(state: ChatSummaryVectorIndexState_ACU | null | undefined): boolean {
+    if (!state || !Array.isArray(state.rows)) return false;
+    const activeRows = state.rows.filter((row) => row && row.status !== 'removed');
+    if (activeRows.length === 0) return false;
+    return activeRows.some((row) => !row.vectorSourceHash);
 }
 
 function buildLayerStateWithRows_ACU(
@@ -538,14 +592,7 @@ function buildExistingReusableRows_ACU(
     existingRows.forEach((existingRow) => {
         const prepared = preparedByKey.get(existingRow.rowKey);
         const chunks = existingChunksByRowKey.get(existingRow.rowKey) || [];
-        const existingFingerprint = buildSummaryRowFingerprint_ACU({
-            rowId: existingRow.rowId,
-            timeSpan: existingRow.timeSpan,
-            location: existingRow.location,
-            summary: existingRow.summary,
-            indexCode: existingRow.indexCode,
-            vectorSourceText: existingRow.vectorSourceText,
-        });
+        const existingFingerprint = getSummaryRowFingerprintFromStateRow_ACU(existingRow);
         if (!prepared || chunks.length === 0 || existingFingerprint !== prepared.sourceFingerprint) {
             return;
         }
@@ -559,7 +606,9 @@ function buildExistingReusableRows_ACU(
             location: prepared.location,
             summary: prepared.summary,
             indexCode: prepared.indexCode,
-            vectorSourceText: prepared.vectorSourceText,
+            // 行只落哈希不落原文：源文本含纪要正文，原文随 chunk 进外置文件即可。
+            vectorSourceText: '',
+            vectorSourceHash: prepared.vectorSourceHash,
             // 复用前提是现存内容重算指纹 === prepared.sourceFingerprint（上方判等），
             // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）。
             sourceFingerprint: prepared.sourceFingerprint,
@@ -578,6 +627,7 @@ async function buildChunksWithEmbeddings_ACU(
     options: {
         snapshotMessageId: string;
         sentenceCount: number;
+        chunkBySentence: boolean;
         embeddingEndpoint: string;
         embeddingApiKey: string;
         embeddingModel: string;
@@ -587,7 +637,7 @@ async function buildChunksWithEmbeddings_ACU(
     const sequenceBase = Math.max(0, Math.floor(Number(options.existingSequenceBase) || 0));
     const chunkSources: Array<{ chunkId: string; rowKey: string; rowIndex: number; text: string; sequence: number }> = [];
     rows.forEach((row, rowIndex) => {
-        const rowChunkTexts = chunkTextBySentenceCount_ACU(row.vectorSourceText, options.sentenceCount);
+        const rowChunkTexts = buildRowChunkTexts_ACU(row.vectorSourceText, { sentenceCount: options.sentenceCount, chunkBySentence: options.chunkBySentence });
         rowChunkTexts.forEach((text, chunkIndex) => {
             chunkSources.push({
                 chunkId: `${row.rowKey}:chunk:${chunkIndex}`,
@@ -683,7 +733,8 @@ async function buildChunksWithEmbeddings_ACU(
             location: row.location,
             summary: row.summary,
             indexCode: row.indexCode,
-            vectorSourceText: row.vectorSourceText,
+            vectorSourceText: '',
+            vectorSourceHash: row.vectorSourceHash,
             // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）；
             // 缺失时对账退化为纯 rowKey 比对，"只改概要文本"的编辑会注入旧文本。
             sourceFingerprint: row.sourceFingerprint,
@@ -1380,6 +1431,10 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
         // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
         const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
+        const chunkOptions = {
+            sentenceCount: config.summaryIndexChunkSentenceCount,
+            chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
+        };
         const batchChunkCounts: number[] = [];
         const batchRowGroups: SummaryVectorArchivePreparedRow_ACU[][] = [];
         for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
@@ -1388,7 +1443,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
             batchRowGroups.push(rowBatch);
             let chunkCount = 0;
             for (const row of rowBatch) {
-                chunkCount += chunkTextBySentenceCount_ACU(row.vectorSourceText, config.summaryIndexChunkSentenceCount).length;
+                chunkCount += buildRowChunkTexts_ACU(row.vectorSourceText, chunkOptions).length;
             }
             batchChunkCounts.push(chunkCount);
         }
@@ -1408,7 +1463,8 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 sequenceBase += batchChunkCounts[batchIndex];
                 const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
                     snapshotMessageId,
-                    sentenceCount: config.summaryIndexChunkSentenceCount,
+                    sentenceCount: chunkOptions.sentenceCount,
+                    chunkBySentence: chunkOptions.chunkBySentence,
                     embeddingEndpoint: config.embeddingEndpoint,
                     embeddingApiKey: config.embeddingApiKey,
                     embeddingModel: config.embeddingModel,

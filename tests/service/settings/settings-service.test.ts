@@ -149,6 +149,8 @@ vi.mock('../../../src/shared/defaults', () => ({
   TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-template-assistant-prompt-force-default',
   STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU: 'test-strict-json-force-disable',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
+  VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU: 'spv9.2-chronicle-source-text',
+  VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU: [0.45],
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,
@@ -161,13 +163,16 @@ vi.mock('../../../src/shared/defaults', () => ({
     archiveMaxConcurrency: 3,
     summaryIndexArchiveMaxConcurrency: 30,
     topK: 200,
-    minScore: 0.45,
+    minScore: 0.35,
     recallCandidateLimit: 100,
     summaryIndexKeywordMinRows: 200,
     recentFixedInjectCount: 50,
     summaryIndexV2WriteEnabled: true,
     summaryIndexV2WriteScopeAllowlist: [],
-    summaryPromptGroup: []
+    summaryPromptGroup: [],
+    keywordGenerationEnabled: true,
+    rerankBatchSize: 300,
+    summaryIndexChunkChronicleBySentence: false,
   },
   buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [], enabledEntries: {} }),
   buildDefaultAgentWorldbookPromptTemplates_ACU: () => ({
@@ -692,6 +697,46 @@ describe('loadSettings_ACU', () => {
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual([]);
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.keywordPromptGroup).toEqual([{ content: '用户自定义关键词提示词' }]);
     expect(mockSaveGlobalMeta).toHaveBeenCalled();
+  });
+
+  it('spv9.2 源文本升级：minScore 仍是旧默认 0.45 时迁到新默认，并写入 marker', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      minScore: 0.45,
+      keywordPromptGroup: [{ content: '用户自定义关键词提示词' }],
+    };
+
+    loadSettings_ACU();
+
+    const config = mockGlobalMeta.vectorMemoryConfigGlobal;
+    expect(config.minScore).toBe(0.35);
+    expect(config.sourceTextUpgradeVersion).toBe('spv9.2-chronicle-source-text');
+    expect(config.keywordGenerationEnabled).toBe(true);
+    expect(config.rerankBatchSize).toBe(300);
+    expect(config.summaryIndexChunkChronicleBySentence).toBe(false);
+    // 独立 marker 不得触发关键词提示词覆盖。
+    expect(config.keywordPromptGroup).toEqual([{ content: '用户自定义关键词提示词' }]);
+    expect(mockSaveGlobalMeta).toHaveBeenCalled();
+  });
+
+  it('spv9.2 源文本升级：用户自定义过的 minScore 不动；已写 marker 后不再迁移', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      minScore: 0.6,
+    };
+    loadSettings_ACU();
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.minScore).toBe(0.6);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.sourceTextUpgradeVersion).toBe('spv9.2-chronicle-source-text');
+
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      sourceTextUpgradeVersion: 'spv9.2-chronicle-source-text',
+      minScore: 0.45,
+      keywordGenerationEnabled: false,
+    };
+    loadSettings_ACU();
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.minScore).toBe(0.45);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.keywordGenerationEnabled).toBe(false);
   });
 
   it('一次性强制开启 V2 writer：未标记 marker 的显式 false 会被反转为 true 并写入 marker', () => {

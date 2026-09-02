@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      9.1.6
+// @version      9.2
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -4026,6 +4026,14 @@ $CONTENT
     const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
     // --- 一次性默认值刷新版本标记 ---
     const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prompt-content-based-refresh';
+    /**
+     * 交火向量源文本升级（spv9.2）：embedding/BM25 源文本从"概览"改为"概览 + 纪要正文"。
+     * 正文更长时余弦分布整体下移，旧默认 minScore 0.45 会过滤掉大量相关行；
+     * 该版本号标记一次性把"仍等于旧默认值"的 minScore 迁到新默认值，用户自定义过的值不动。
+     */
+    const VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU = 'spv9.2-chronicle-source-text';
+    /** 源文本升级前的 minScore 默认值；仅用于识别"用户从未改过"的配置。 */
+    const VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU = [0.45];
     // note 列号改 0 基（与 $0 序列化对齐）+ 失效硬约束措辞改为写作规范；仍用默认模板的用户一次性刷新。
     const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8.5-table-note-zero-based-columns';
     // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
@@ -4048,7 +4056,8 @@ $CONTENT
         summaryIndexArchiveMaxConcurrency: 30,
         summaryIndexArchiveEmbeddingConcurrency: 3,
         topK: 200,
-        minScore: 0.45,
+        // 源文本为"概览 + 纪要正文"时的余弦门槛；比只用 30 字概览时的 0.45 略低（长文本相似度整体偏低）。
+        minScore: 0.35,
         embeddingEndpoint: '',
         embeddingApiKey: '',
         embeddingModel: '',
@@ -4056,6 +4065,8 @@ $CONTENT
         rerankApiKey: '',
         rerankModel: '',
         rerankInstruction: '请根据当前用户输入及关键词，判断每个候选纪要条目的相关性，并将最相关的条目按相关性从高到低降序排列。优先选择能够直接回答、延续或补全当前用户输入意图的条目。',
+        // 每批送往 rerank 的 documents 条数；服务商单请求通常限 500 条以内，300 条 × 纪要正文仍在 token 限额内。
+        rerankBatchSize: 300,
         vectorNamespace: 'chat',
         entryComment: 'TavernDB-ACU-VectorMemory',
         entryKey: 'TavernDB-ACU-VectorMemory-Key',
@@ -4064,6 +4075,8 @@ $CONTENT
         rrfK: 60,
         summaryIndexKeywordMinRows: 200,
         summaryChunkSentenceCount: 2,
+        // 默认每行一个向量（概览 + 纪要正文整体 embedding），索引体积与行数线性；开启后按 summaryChunkSentenceCount 切纪要正文。
+        summaryIndexChunkChronicleBySentence: false,
         summaryPromptGroupId: 'remote-memory-archive-default',
         archiveWithoutSummary: false,
         recentFixedInjectCount: 50,
@@ -4097,6 +4110,8 @@ $CONTENT
             },
         ],
         keywordApiPreset: '',
+        // 关闭后发送前不再调用关键词 AI，query 只用用户输入本身（省一次 LLM 往返）。
+        keywordGenerationEnabled: true,
         keywordContextPairCount: 1,
         keywordGenerationMaxAttempts: 3,
         keywordPromptGroup: [
@@ -4439,6 +4454,168 @@ $CONTENT
         const s = String(name || '').trim();
         const out = s.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim();
         return out.length > 80 ? out.slice(0, 80).trim() : out;
+    }
+
+    /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
+    const VECTOR_RERANK_TIMEOUT_MS_ACU = 30000;
+    /**
+     * 单次 rerank 请求的 documents 条数默认上限。
+     * 主流 Qwen3/gte 系列服务商单请求最多 500 条、总量 120k token；300 条 × 纪要正文（≈200 token）
+     * 加上 query 复制项仍在限额内。交叉编码器逐对打分，分数与同批其他文档无关，跨批合并等价于一次请求。
+     */
+    const VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU = 300;
+    const VECTOR_RERANK_MIN_BATCH_SIZE_ACU = 10;
+    const VECTOR_RERANK_MAX_BATCH_SIZE_ACU = 500;
+    /** 单条 document 的字符上限：服务商按 4k token 截断，这里提前截断以控制请求体积。 */
+    const VECTOR_RERANK_DOCUMENT_MAX_CHARS_ACU = 2000;
+    /** 分批并行的并发上限：候选池 ≤1000 时最多 4 批，同时发出即可；更大的池子分轮发送避免触发限流。 */
+    const VECTOR_RERANK_BATCH_CONCURRENCY_ACU = 4;
+    function normalizeRerankBatchSize_ACU(value, fallback = VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU) {
+        const num = Math.floor(Number(value));
+        if (!Number.isFinite(num) || num <= 0)
+            return fallback;
+        return Math.min(VECTOR_RERANK_MAX_BATCH_SIZE_ACU, Math.max(VECTOR_RERANK_MIN_BATCH_SIZE_ACU, num));
+    }
+    /** 把 documents 切成等长批次，返回每批的起始偏移与内容；调用方按偏移把批内 index 还原为全局 index。 */
+    function splitRerankDocumentsIntoBatches_ACU(documents, batchSize) {
+        const size = normalizeRerankBatchSize_ACU(batchSize);
+        const batches = [];
+        for (let offset = 0; offset < documents.length; offset += size) {
+            batches.push({ offset, documents: documents.slice(offset, offset + size) });
+        }
+        return batches;
+    }
+    function normalizeEndpoint_ACU(endpoint) {
+        return String(endpoint || '').trim().replace(/\/+$/, '');
+    }
+    /**
+     * Rerank 是浏览器直连第三方服务商的跨域请求，与 embedding 网关同一口径：只带 Content-Type 与 Authorization。
+     * 绝不能混入酒馆宿主请求头（X-CSRF-Token 等）——自定义头会触发 CORS 预检，服务商的
+     * Access-Control-Allow-Headers 不放行它就整条请求被浏览器拦下，rerank 静默退化成 embedding 排序，
+     * 同时还把酒馆的 CSRF 令牌泄露给第三方。
+     */
+    function buildRerankHeaders_ACU(apiKey) {
+        const headers = { 'Content-Type': 'application/json' };
+        if (apiKey) {
+            headers.Authorization = `Bearer ${apiKey}`;
+        }
+        return headers;
+    }
+    function normalizeRerankItem_ACU(item, fallbackIndex) {
+        if (!item || typeof item !== 'object') {
+            return null;
+        }
+        const rawIndex = item.index ?? item.document_index ?? item.documentIndex;
+        const rawScore = item.relevance_score ?? item.relevanceScore ?? item.score ?? item.rerank_score;
+        const index = Number.isFinite(Number(rawIndex)) ? Math.floor(Number(rawIndex)) : fallbackIndex;
+        const relevanceScore = Number(rawScore);
+        if (!Number.isFinite(index) || index < 0 || !Number.isFinite(relevanceScore)) {
+            return null;
+        }
+        return {
+            index,
+            relevanceScore,
+        };
+    }
+    function extractRerankResults_ACU(payload) {
+        const rawResults = Array.isArray(payload?.results)
+            ? payload.results
+            : Array.isArray(payload?.data?.results)
+                ? payload.data.results
+                : Array.isArray(payload?.data)
+                    ? payload.data
+                    : [];
+        return rawResults
+            .map((item, index) => normalizeRerankItem_ACU(item, index))
+            .filter((item) => !!item);
+    }
+    async function requestRerankBatch_ACU(request) {
+        const payload = { model: request.model, query: request.query, documents: request.documents };
+        if (request.instruction)
+            payload.instruction = request.instruction;
+        // 超时可中断：rerank 在发送前同步链路上，挂起的上游不允许无限阻塞生成。
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), VECTOR_RERANK_TIMEOUT_MS_ACU);
+        let response;
+        try {
+            response = await fetch(request.endpoint, {
+                method: 'POST',
+                headers: buildRerankHeaders_ACU(request.apiKey),
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+        }
+        catch (error) {
+            throw new Error(error?.name === 'AbortError'
+                ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms，${request.batchLabel}），已中断。`
+                : `Rerank 请求网络失败（${request.batchLabel}）：${error?.message || String(error || '未知错误')}`);
+        }
+        finally {
+            clearTimeout(timer);
+        }
+        if (!response.ok) {
+            const detail = await response.text().catch(() => response.statusText);
+            throw new Error(`Rerank 请求失败（${request.batchLabel}）: ${response.status} ${detail}`);
+        }
+        const rawBody = await response.text().catch(() => '');
+        let responsePayload;
+        try {
+            responsePayload = JSON.parse(rawBody);
+        }
+        catch (_error) {
+            throw new Error(`Rerank 响应不是合法 JSON（${request.batchLabel}，前 200 字符：${rawBody.slice(0, 200)}）。`);
+        }
+        return extractRerankResults_ACU(responsePayload);
+    }
+    /**
+     * 对 documents 做 rerank，返回全局 index 上的评分。
+     * documents 超过 batchSize 时自动分批并行请求并把批内 index 还原为全局 index；
+     * 任一批失败整体抛错，由调用方回退到 embedding 排序（不接受"半批有分、半批无分"的混合排序）。
+     */
+    async function createRerankScores_ACU(request) {
+        const endpoint = normalizeEndpoint_ACU(request.endpoint);
+        const model = String(request.model || '').trim();
+        const query = String(request.query || '').trim();
+        const documents = Array.isArray(request.documents)
+            ? request.documents.map((item) => String(item ?? '').trim().slice(0, VECTOR_RERANK_DOCUMENT_MAX_CHARS_ACU))
+            : [];
+        if (!endpoint) {
+            throw new Error('Rerank endpoint 为空。');
+        }
+        if (!model) {
+            throw new Error('Rerank model 为空。');
+        }
+        if (!query) {
+            return [];
+        }
+        if (documents.length === 0 || documents.every((item) => !item)) {
+            return [];
+        }
+        const instruction = String(request.instruction ?? '').trim();
+        const batches = splitRerankDocumentsIntoBatches_ACU(documents, normalizeRerankBatchSize_ACU(request.batchSize));
+        const merged = [];
+        for (let round = 0; round < batches.length; round += VECTOR_RERANK_BATCH_CONCURRENCY_ACU) {
+            const wave = batches.slice(round, round + VECTOR_RERANK_BATCH_CONCURRENCY_ACU);
+            const waveResults = await Promise.all(wave.map((batch, waveIndex) => requestRerankBatch_ACU({
+                endpoint,
+                apiKey: request.apiKey,
+                model,
+                query,
+                instruction,
+                documents: batch.documents,
+                batchLabel: `第 ${round + waveIndex + 1}/${batches.length} 批，${batch.documents.length} 条`,
+            })));
+            waveResults.forEach((results, waveIndex) => {
+                const offset = wave[waveIndex].offset;
+                const batchLength = wave[waveIndex].documents.length;
+                results.forEach((item) => {
+                    if (item.index < 0 || item.index >= batchLength)
+                        return;
+                    merged.push({ index: offset + item.index, relevanceScore: item.relevanceScore });
+                });
+            });
+        }
+        return merged;
     }
 
     /**
@@ -79858,7 +80035,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.1.6" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -84138,17 +84315,28 @@ $CONTENT
      * 与查询时的实时纪要表对账，公式漂移会导致全量行 mismatch（检索被永久 fail-closed）
      * 或复用判定失效（改行不重新 embedding）。
      *
+     * 源文本进入指纹的方式是它的哈希（vectorSourceHash），而不是原文：
+     * spv9.2 起源文本包含几百字纪要正文，行落盘时不再保存原文，只保存哈希。
+     * 调用方可以只给 vectorSourceText（现算哈希）或只给 vectorSourceHash（已落盘的行）。
+     *
      * 独立成模块的原因：archive-service 与 storage-service 都需要此公式，
      * 而两者已存在 archive → storage 的单向依赖，公式放任一侧都会成环。
      */
+    /** 源文本格式版本，参与指纹：版本变化即全部旧行 mismatch → 自动全量重建。 */
+    const SUMMARY_VECTOR_SOURCE_TEXT_VERSION_ACU = 2;
+    function hashSummaryVectorSourceText_ACU(vectorSourceText) {
+        return hashUserInput_ACU(String(vectorSourceText ?? ''));
+    }
     function buildSummaryRowFingerprint_ACU(source) {
+        const sourceHash = source.vectorSourceHash || hashSummaryVectorSourceText_ACU(source.vectorSourceText ?? '');
         return hashUserInput_ACU([
             source.rowId,
             source.timeSpan,
             source.location,
             source.summary,
             source.indexCode,
-            source.vectorSourceText,
+            `v${SUMMARY_VECTOR_SOURCE_TEXT_VERSION_ACU}`,
+            sourceHash,
         ].join('\n'));
     }
 
@@ -91149,6 +91337,7 @@ $CONTENT
             summary: String(row.summary || ''),
             indexCode: String(row.indexCode || ''),
             vectorSourceText: String(row.vectorSourceText || ''),
+            ...(typeof row.vectorSourceHash === 'string' && row.vectorSourceHash ? { vectorSourceHash: row.vectorSourceHash } : {}),
             chunkIds: Array.isArray(row.chunkIds) ? row.chunkIds.map((item) => String(item)) : [],
             sourceFingerprint: typeof row.sourceFingerprint === 'string' ? row.sourceFingerprint : undefined,
             shardIds: Array.isArray(row.shardIds) ? row.shardIds.map((item) => String(item)) : undefined,
@@ -94724,6 +94913,7 @@ $CONTENT
             rerankModel: normalizeTextField_ACU(source.rerankModel, defaults.rerankModel),
             rerankInstruction: typeof source.rerankInstruction === 'string'
                 ? source.rerankInstruction.trim() : defaults.rerankInstruction,
+            rerankBatchSize: normalizeRerankBatchSize_ACU(source.rerankBatchSize, Number(defaults.rerankBatchSize) || VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU),
             vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
             entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
             entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
@@ -94732,10 +94922,13 @@ $CONTENT
             rrfK: normalizePositiveInteger_ACU$2(source.rrfK, Number(defaults.rrfK) || 60),
             summaryIndexKeywordMinRows: normalizePositiveInteger_ACU$2(source.summaryIndexKeywordMinRows, defaults.summaryIndexKeywordMinRows || 100),
             summaryChunkSentenceCount: normalizePositiveInteger_ACU$2(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
+            summaryIndexChunkChronicleBySentence: source.summaryIndexChunkChronicleBySentence === true,
             summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
             archiveWithoutSummary: source.archiveWithoutSummary === true,
             summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, defaults.summaryPromptGroup || []),
             keywordApiPreset: normalizeTextField_ACU(source.keywordApiPreset, defaults.keywordApiPreset),
+            // 缺省视为开启：老配置没有这个字段，行为必须与升级前一致。
+            keywordGenerationEnabled: source.keywordGenerationEnabled !== false,
             keywordContextPairCount: normalizePositiveInteger_ACU$2(source.keywordContextPairCount, defaults.keywordContextPairCount),
             keywordGenerationMaxAttempts: normalizePositiveInteger_ACU$2(source.keywordGenerationMaxAttempts, defaults.keywordGenerationMaxAttempts || 3),
             keywordPromptGroup: normalizeKeywordPromptGroup_ACU(source.keywordPromptGroup, defaults.keywordPromptGroup),
@@ -95529,6 +95722,22 @@ $CONTENT
                 vectorConfig.defaultsRefreshVersion = VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU;
                 shouldPersistSettingsAfterLoad_ACU = true;
                 logDebug_ACU(`[交火模式配置] 已补齐缺失默认参数并记录版本: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
+            }
+            // [spv9.2] 源文本升级：embedding/BM25 改用"概览 + 纪要正文"。独立 marker，
+            // 不复用 defaultsRefreshVersion——那条分支会无条件覆盖关键词提示词，不能因 minScore 迁移误触发。
+            fillMissing_ACU('keywordGenerationEnabled', defaultVectorMemoryConfig_ACU.keywordGenerationEnabled !== false);
+            fillMissing_ACU('rerankBatchSize', defaultVectorMemoryConfig_ACU.rerankBatchSize || 300);
+            fillMissing_ACU('summaryIndexChunkChronicleBySentence', defaultVectorMemoryConfig_ACU.summaryIndexChunkChronicleBySentence === true);
+            if (vectorConfig.sourceTextUpgradeVersion !== VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU) {
+                const currentMinScore = Number(vectorConfig.minScore);
+                const isLegacyDefault = !Number.isFinite(currentMinScore)
+                    || VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU.some((legacy) => Math.abs(currentMinScore - legacy) < 1e-9);
+                if (isLegacyDefault) {
+                    vectorConfig.minScore = defaultVectorMemoryConfig_ACU.minScore;
+                    logDebug_ACU(`[交火模式配置] 源文本升级：minScore 从旧默认值迁移为 ${defaultVectorMemoryConfig_ACU.minScore}`);
+                }
+                vectorConfig.sourceTextUpgradeVersion = VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU;
+                shouldPersistSettingsAfterLoad_ACU = true;
             }
         }
         settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
@@ -98453,6 +98662,16 @@ $CONTENT
         });
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction`, 'input change', ($input) => {
             updateVectorMemoryField_ACU('rerankInstruction', String($input.val() ?? ''));
+        });
+        bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-batch-size`, 'input change', ($input) => {
+            const defaults = getDefaultVectorMemoryConfig_ACU();
+            updateVectorMemoryField_ACU('rerankBatchSize', parseIntegerField_ACU($input.val(), defaults.rerankBatchSize || 300));
+        });
+        bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-chunk-chronicle-by-sentence`, 'change', ($input) => {
+            updateVectorMemoryField_ACU('summaryIndexChunkChronicleBySentence', $input.is(':checked'));
+        });
+        bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-enabled`, 'change', ($input) => {
+            updateVectorMemoryField_ACU('keywordGenerationEnabled', $input.is(':checked'));
         });
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'input change', ($input) => {
             const defaults = getDefaultVectorMemoryConfig_ACU();
@@ -101561,6 +101780,22 @@ $CONTENT
         };
     }
 
+    /**
+     * 源文本字符上限。默认模板纪要 300–400 字，自定义模板可能更长；主流 embedding 模型 8k token
+     * 窗口远够，这里的上限只是防止极端长文本把单行 embedding/rerank 成本拉爆。
+     */
+    const SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU = 1600;
+    const SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU = ['纪要', '纪要内容', '纪要正文', '事件纪要', '详细纪要', '正文'];
+    /**
+     * 概览在前保住高密度摘要信号，纪要正文补充实体与细节；两者都为空的行由调用方跳过。
+     */
+    function buildSummaryVectorSourceText_ACU(summary, chronicleText) {
+        const parts = [normalizeText_ACU$1(summary), normalizeText_ACU$1(chronicleText)].filter(Boolean);
+        const combined = parts.join('\n');
+        return combined.length > SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU
+            ? combined.slice(0, SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU)
+            : combined;
+    }
     const summaryVectorIndexArchiveLocks_ACU = new Map();
     // ============================================================
     // 向量化→防抖归档 pipeline（参考 Engram 数据层 hook 触发模式）
@@ -101763,6 +101998,19 @@ $CONTENT
         }
         return chunks;
     }
+    /**
+     * 一行源文本 → 待 embedding 的 chunk 文本。
+     * 默认整行一个 chunk（向量数 = 行数，索引体积不随正文长度膨胀）；
+     * 只有显式开启按句切分时才用 sentenceCount 切纪要正文。
+     */
+    function buildRowChunkTexts_ACU(vectorSourceText, options) {
+        const normalized = normalizeText_ACU$1(vectorSourceText);
+        if (!normalized)
+            return [];
+        if (!options.chunkBySentence)
+            return [normalized];
+        return chunkTextBySentenceCount_ACU(normalized, options.sentenceCount);
+    }
     function buildPreparedRows_ACU(table, summaryKey) {
         const content = Array.isArray(table?.content) ? table.content : [];
         const headerRow = Array.isArray(content[0]) ? content[0] : [];
@@ -101770,6 +102018,7 @@ $CONTENT
         const locationColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['地点', '位置', '场景', '场所'], 1);
         const summaryColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['概要', '概览', '概述', '摘要']);
         const indexColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['编码索引']);
+        const chronicleColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU);
         if (summaryColIdx < 0) {
             return { rows: [], skippedRowCount: 0, error: '纪要表缺少概要列，无法构建纪要向量索引。' };
         }
@@ -101785,7 +102034,8 @@ $CONTENT
             const location = locationColIdx >= 0 ? normalizeText_ACU$1(row?.[locationColIdx]) : '';
             const summary = normalizeText_ACU$1(row?.[summaryColIdx]);
             const indexCode = normalizeText_ACU$1(row?.[indexColIdx]);
-            const vectorSourceText = summary;
+            const chronicleText = chronicleColIdx >= 0 && chronicleColIdx !== summaryColIdx ? normalizeText_ACU$1(row?.[chronicleColIdx]) : '';
+            const vectorSourceText = buildSummaryVectorSourceText_ACU(summary, chronicleText);
             if (!summary || !indexCode || !vectorSourceText) {
                 skippedRowCount += 1;
                 return;
@@ -101798,7 +102048,9 @@ $CONTENT
                 location,
                 summary,
                 indexCode,
+                chronicleText,
                 vectorSourceText,
+                vectorSourceHash: hashSummaryVectorSourceText_ACU(vectorSourceText),
                 sourceFingerprint: '',
             };
             preparedRow.sourceFingerprint = buildPreparedRowFingerprint_ACU(preparedRow);
@@ -101839,7 +102091,20 @@ $CONTENT
             summary: row.summary,
             indexCode: row.indexCode,
             vectorSourceText: row.vectorSourceText,
+            vectorSourceHash: row.vectorSourceHash,
         });
+    }
+    /**
+     * 判断已落盘索引是否仍是 spv9.2 之前的源文本格式（只用概览、行内无 vectorSourceHash）。
+     * 旧格式索引在下一次发送/填表时会因指纹全量 mismatch 自动重建；聊天加载时提前发现可以后台先建。
+     */
+    function isSummaryVectorIndexSourceTextOutdated_ACU(state) {
+        if (!state || !Array.isArray(state.rows))
+            return false;
+        const activeRows = state.rows.filter((row) => row && row.status !== 'removed');
+        if (activeRows.length === 0)
+            return false;
+        return activeRows.some((row) => !row.vectorSourceHash);
     }
     function buildLayerStateWithRows_ACU(baseState, rows, chunks, options) {
         const normalizedRows = (Array.isArray(rows) ? rows : [])
@@ -101914,14 +102179,7 @@ $CONTENT
         existingRows.forEach((existingRow) => {
             const prepared = preparedByKey.get(existingRow.rowKey);
             const chunks = existingChunksByRowKey.get(existingRow.rowKey) || [];
-            const existingFingerprint = buildSummaryRowFingerprint_ACU({
-                rowId: existingRow.rowId,
-                timeSpan: existingRow.timeSpan,
-                location: existingRow.location,
-                summary: existingRow.summary,
-                indexCode: existingRow.indexCode,
-                vectorSourceText: existingRow.vectorSourceText,
-            });
+            const existingFingerprint = getSummaryRowFingerprintFromStateRow_ACU(existingRow);
             if (!prepared || chunks.length === 0 || existingFingerprint !== prepared.sourceFingerprint) {
                 return;
             }
@@ -101936,7 +102194,9 @@ $CONTENT
                 location: prepared.location,
                 summary: prepared.summary,
                 indexCode: prepared.indexCode,
-                vectorSourceText: prepared.vectorSourceText,
+                // 行只落哈希不落原文：源文本含纪要正文，原文随 chunk 进外置文件即可。
+                vectorSourceText: '',
+                vectorSourceHash: prepared.vectorSourceHash,
                 // 复用前提是现存内容重算指纹 === prepared.sourceFingerprint（上方判等），
                 // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）。
                 sourceFingerprint: prepared.sourceFingerprint,
@@ -101952,7 +102212,7 @@ $CONTENT
         const sequenceBase = Math.max(0, Math.floor(Number(options.existingSequenceBase) || 0));
         const chunkSources = [];
         rows.forEach((row, rowIndex) => {
-            const rowChunkTexts = chunkTextBySentenceCount_ACU(row.vectorSourceText, options.sentenceCount);
+            const rowChunkTexts = buildRowChunkTexts_ACU(row.vectorSourceText, { sentenceCount: options.sentenceCount, chunkBySentence: options.chunkBySentence });
             rowChunkTexts.forEach((text, chunkIndex) => {
                 chunkSources.push({
                     chunkId: `${row.rowKey}:chunk:${chunkIndex}`,
@@ -102042,7 +102302,8 @@ $CONTENT
             location: row.location,
             summary: row.summary,
             indexCode: row.indexCode,
-            vectorSourceText: row.vectorSourceText,
+            vectorSourceText: '',
+            vectorSourceHash: row.vectorSourceHash,
             // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）；
             // 缺失时对账退化为纯 rowKey 比对，"只改概要文本"的编辑会注入旧文本。
             sourceFingerprint: row.sourceFingerprint,
@@ -102687,6 +102948,10 @@ $CONTENT
             // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
             // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
             const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
+            const chunkOptions = {
+                sentenceCount: config.summaryIndexChunkSentenceCount,
+                chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
+            };
             const batchChunkCounts = [];
             const batchRowGroups = [];
             for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
@@ -102696,7 +102961,7 @@ $CONTENT
                 batchRowGroups.push(rowBatch);
                 let chunkCount = 0;
                 for (const row of rowBatch) {
-                    chunkCount += chunkTextBySentenceCount_ACU(row.vectorSourceText, config.summaryIndexChunkSentenceCount).length;
+                    chunkCount += buildRowChunkTexts_ACU(row.vectorSourceText, chunkOptions).length;
                 }
                 batchChunkCounts.push(chunkCount);
             }
@@ -102716,7 +102981,8 @@ $CONTENT
                     sequenceBase += batchChunkCounts[batchIndex];
                     const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
                         snapshotMessageId,
-                        sentenceCount: config.summaryIndexChunkSentenceCount,
+                        sentenceCount: chunkOptions.sentenceCount,
+                        chunkBySentence: chunkOptions.chunkBySentence,
                         embeddingEndpoint: config.embeddingEndpoint,
                         embeddingApiKey: config.embeddingApiKey,
                         embeddingModel: config.embeddingModel,
@@ -111487,6 +111753,8 @@ $CONTENT
         setVal('worldbook-vector-memory-rerank-model', vectorMemoryConfig.rerankModel || '');
         setVal('worldbook-vector-memory-rerank-api-key', vectorMemoryConfig.rerankApiKey || '');
         setVal('worldbook-vector-memory-rerank-instruction', vectorMemoryConfig.rerankInstruction || '');
+        setVal('worldbook-vector-memory-rerank-batch-size', vectorMemoryConfig.rerankBatchSize || 300);
+        setChecked('worldbook-vector-memory-chunk-chronicle-by-sentence', vectorMemoryConfig.summaryIndexChunkChronicleBySentence === true);
         setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
         setChecked('worldbook-vector-memory-archive-without-summary', vectorMemoryConfig.archiveWithoutSummary === true);
         setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
@@ -111495,6 +111763,7 @@ $CONTENT
         setVal('worldbook-vector-memory-rolling-delta-fold-threshold', vectorMemoryConfig.summaryIndexRollingDeltaFoldThreshold || 15);
         setVal('worldbook-vector-memory-entry-comment', vectorMemoryConfig.entryComment);
         setVal('worldbook-vector-memory-entry-key', vectorMemoryConfig.entryKey);
+        setChecked('worldbook-vector-memory-keyword-generation-enabled', vectorMemoryConfig.keywordGenerationEnabled !== false);
         setVal('worldbook-vector-memory-keyword-api-preset', vectorMemoryConfig.keywordApiPreset);
         setVal('worldbook-vector-memory-keyword-context-pair-count', vectorMemoryConfig.keywordContextPairCount || 1);
         setVal('worldbook-vector-memory-keyword-generation-max-attempts', vectorMemoryConfig.keywordGenerationMaxAttempts || 3);
@@ -114642,110 +114911,6 @@ $CONTENT
         return result.finalMessage;
     }
 
-    /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
-    const VECTOR_RERANK_TIMEOUT_MS_ACU = 30000;
-    function normalizeEndpoint_ACU(endpoint) {
-        return String(endpoint || '').trim().replace(/\/+$/, '');
-    }
-    /**
-     * Rerank 是浏览器直连第三方服务商的跨域请求，与 embedding 网关同一口径：只带 Content-Type 与 Authorization。
-     * 绝不能混入酒馆宿主请求头（X-CSRF-Token 等）——自定义头会触发 CORS 预检，服务商的
-     * Access-Control-Allow-Headers 不放行它就整条请求被浏览器拦下，rerank 静默退化成 embedding 排序，
-     * 同时还把酒馆的 CSRF 令牌泄露给第三方。
-     */
-    function buildRerankHeaders_ACU(apiKey) {
-        const headers = { 'Content-Type': 'application/json' };
-        if (apiKey) {
-            headers.Authorization = `Bearer ${apiKey}`;
-        }
-        return headers;
-    }
-    function normalizeRerankItem_ACU(item, fallbackIndex) {
-        if (!item || typeof item !== 'object') {
-            return null;
-        }
-        const rawIndex = item.index ?? item.document_index ?? item.documentIndex;
-        const rawScore = item.relevance_score ?? item.relevanceScore ?? item.score ?? item.rerank_score;
-        const index = Number.isFinite(Number(rawIndex)) ? Math.floor(Number(rawIndex)) : fallbackIndex;
-        const relevanceScore = Number(rawScore);
-        if (!Number.isFinite(index) || index < 0 || !Number.isFinite(relevanceScore)) {
-            return null;
-        }
-        return {
-            index,
-            relevanceScore,
-        };
-    }
-    function extractRerankResults_ACU(payload) {
-        const rawResults = Array.isArray(payload?.results)
-            ? payload.results
-            : Array.isArray(payload?.data?.results)
-                ? payload.data.results
-                : Array.isArray(payload?.data)
-                    ? payload.data
-                    : [];
-        return rawResults
-            .map((item, index) => normalizeRerankItem_ACU(item, index))
-            .filter((item) => !!item);
-    }
-    async function createRerankScores_ACU(request) {
-        const endpoint = normalizeEndpoint_ACU(request.endpoint);
-        const model = String(request.model || '').trim();
-        const query = String(request.query || '').trim();
-        const documents = Array.isArray(request.documents)
-            ? request.documents.map((item) => String(item ?? '').trim())
-            : [];
-        if (!endpoint) {
-            throw new Error('Rerank endpoint 为空。');
-        }
-        if (!model) {
-            throw new Error('Rerank model 为空。');
-        }
-        if (!query) {
-            return [];
-        }
-        if (documents.length === 0 || documents.every((item) => !item)) {
-            return [];
-        }
-        const instruction = String(request.instruction ?? '').trim();
-        const payload = { model, query, documents };
-        if (instruction)
-            payload.instruction = instruction;
-        // 超时可中断：rerank 在发送前同步链路上，挂起的上游不允许无限阻塞生成。
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), VECTOR_RERANK_TIMEOUT_MS_ACU);
-        let response;
-        try {
-            response = await fetch(endpoint, {
-                method: 'POST',
-                headers: buildRerankHeaders_ACU(request.apiKey),
-                body: JSON.stringify(payload),
-                signal: controller.signal,
-            });
-        }
-        catch (error) {
-            throw new Error(error?.name === 'AbortError'
-                ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms），已中断。`
-                : `Rerank 请求网络失败：${error?.message || String(error || '未知错误')}`);
-        }
-        finally {
-            clearTimeout(timer);
-        }
-        if (!response.ok) {
-            const detail = await response.text().catch(() => response.statusText);
-            throw new Error(`Rerank 请求失败: ${response.status} ${detail}`);
-        }
-        const rawBody = await response.text().catch(() => '');
-        let responsePayload;
-        try {
-            responsePayload = JSON.parse(rawBody);
-        }
-        catch (_error) {
-            throw new Error(`Rerank 响应不是合法 JSON（前 200 字符：${rawBody.slice(0, 200)}）。`);
-        }
-        return extractRerankResults_ACU(responsePayload);
-    }
-
     function getCurrentSummaryVectorIndexSourceTableKey_ACU() {
         const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
             ? currentJsonTableData_ACU
@@ -115365,6 +115530,9 @@ $CONTENT
             .slice(0, 24)));
     }
     async function generateKeywords_ACU(config, userInput) {
+        // 用户可关闭关键词 AI：query 只用输入本身，省一次 LLM 往返。缺省（老配置无字段）视为开启。
+        if (config.keywordGenerationEnabled === false)
+            return [];
         const recentContext = buildRecentContext_ACU(config.keywordContextPairCount || 1);
         const messages = renderKeywordPromptMessages_ACU(config.keywordPromptGroup || [], { recentContext, userInput });
         if (messages.length === 0)
@@ -115416,37 +115584,75 @@ $CONTENT
             return 0;
         return dot / (leftNorm * Math.sqrt(rightNorm));
     }
+    /**
+     * 融合候选按行去重：一行可能有多个 chunk 命中，选取与注入都以行为单位，
+     * rerank 也只需要给每行打一次分。保留每行融合分最高（首次出现）的候选。
+     */
+    function dedupeCandidatesByRow_ACU(candidates) {
+        const seen = new Set();
+        const result = [];
+        for (const candidate of candidates) {
+            const rowKey = candidate.row.rowKey;
+            if (seen.has(rowKey))
+                continue;
+            seen.add(rowKey);
+            result.push(candidate);
+        }
+        return result;
+    }
+    /**
+     * Rerank 的 document 用实时纪要表的正文（概览 + 纪要）而不是 chunk 文本：
+     * 交叉编码器的优势在长文本细粒度匹配，喂它 30 字概览等于把它当 embedding 用。
+     * 读不到实时正文（模板无纪要列 / 表未加载）时回退到 chunk 文本。
+     */
+    function buildRerankDocument_ACU(candidate, live) {
+        const liveRow = live?.byRowKey.get(candidate.row.rowKey);
+        const summary = normalizeText_ACU(liveRow?.summary || candidate.row.summary);
+        const chronicle = normalizeText_ACU(liveRow?.chronicleText);
+        const combined = [summary, chronicle].filter(Boolean).join('\n');
+        return combined || normalizeText_ACU(candidate.chunk.text);
+    }
     // P4：统一走 vector-rerank-gateway 网关（超时可中断、安全 JSON 解析），消除此前内联 fetch 与网关的双实现漂移。
     // 失败时保留既有语义：回退 embedding 排序——但用户明确配置了 rerank 却每次都失败，必须以 error 级别透出，
     // warn 级别默认关闭时会让「rerank 从未生效」完全不可见。
-    async function rerankCandidates_ACU(config, query, candidates) {
+    async function rerankCandidates_ACU(config, query, candidates, live) {
         const endpoint = normalizeText_ACU(config.rerankEndpoint);
         const model = normalizeText_ACU(config.rerankModel);
         if (!endpoint || !model)
             return { candidates, status: 'not_configured' };
         if (candidates.length === 0)
             return { candidates, status: 'no_candidates' };
+        const rowCandidates = dedupeCandidatesByRow_ACU(candidates);
+        const topK = Math.max(1, Math.floor(Number(config.topK) || 1));
+        // 池子不比 topK 大，rerank 改变不了"谁进目录"，只是白花一次请求。
+        if (rowCandidates.length <= topK) {
+            logDebug_ACU(`[交火模式纪要索引] 候选行 ${rowCandidates.length} ≤ topK ${topK}，跳过 rerank。`);
+            return { candidates: rowCandidates, status: 'skipped_within_topk', documentCount: 0 };
+        }
         try {
+            const documents = rowCandidates.map((candidate) => buildRerankDocument_ACU(candidate, live));
             const results = await createRerankScores_ACU({
                 endpoint,
                 model,
                 apiKey: normalizeText_ACU(config.rerankApiKey) || undefined,
                 query,
-                documents: candidates.map((candidate) => candidate.chunk.text),
+                documents,
                 instruction: normalizeText_ACU(config.rerankInstruction) || undefined,
+                batchSize: config.rerankBatchSize,
             });
             const byIndex = new Map();
             results.forEach((item) => {
-                if (item.index >= 0 && item.index < candidates.length)
+                if (item.index >= 0 && item.index < rowCandidates.length)
                     byIndex.set(item.index, item.relevanceScore);
             });
             if (byIndex.size === 0) {
                 logError_ACU(`[交火模式纪要索引] Rerank 响应没有任何可用的评分（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序。请检查服务商返回格式是否为 results[].index / relevance_score。`);
-                return { candidates, status: 'empty_response', error: 'rerank 响应中没有可用评分' };
+                return { candidates: rowCandidates, status: 'empty_response', error: 'rerank 响应中没有可用评分', documentCount: documents.length };
             }
             return {
                 status: 'applied',
-                candidates: candidates
+                documentCount: documents.length,
+                candidates: rowCandidates
                     .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
                     .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score)),
             };
@@ -115454,7 +115660,7 @@ $CONTENT
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             logError_ACU(`[交火模式纪要索引] Rerank 调用失败（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序：${message}`);
-            return { candidates, status: 'failed', error: message };
+            return { candidates: rowCandidates, status: 'failed', error: message };
         }
     }
     function escapeMarkdownTableCell_ACU(value) {
@@ -115819,7 +116025,7 @@ $CONTENT
         // 完整链路（关键词 AI + embedding + rerank + 世界书写回）跑两遍。
         // 加入 chatKey 防止切换聊天后相同文本被跨聊天误去重。
         const signature = `${String(currentChatFileIdentifier_ACU || '')}:${userInput}`;
-        if (signature === lastRuntimeSignature_ACU && Date.now() - lastRuntimeAt_ACU <= SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU) {
+        if (!options.bypassDedupe && signature === lastRuntimeSignature_ACU && Date.now() - lastRuntimeAt_ACU <= SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU) {
             logDebug_ACU(`[交火模式纪要索引] 8s 窗口内重复触发已去重：source=${options.source || 'unknown'}`);
             return { success: true, skipped: true, reason: 'deduped' };
         }
@@ -116027,8 +116233,8 @@ $CONTENT
         if (candidates.length === 0 && recentFixedRows.length === 0) {
             return { success: false, skipped: true, reason: 'no_candidates', keywordCount: keywords.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
         }
-        // Rerank 只处理较早行的候选
-        const rerank = await rerankCandidates_ACU(config, queryText, candidates);
+        // Rerank 只处理较早行的候选；document 取实时纪要正文，候选行不多于 topK 时跳过。
+        const rerank = await rerankCandidates_ACU(config, queryText, candidates, liveRows);
         const selectedByRow = new Map();
         for (const candidate of rerank.candidates) {
             if (!selectedByRow.has(candidate.row.rowKey))
@@ -116044,13 +116250,14 @@ $CONTENT
         }
         const selected = Array.from(selectedByRow.values())
             .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
+        const keywordGenerationEnabled = config.keywordGenerationEnabled !== false;
         if (selected.length === 0) {
-            return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error };
+            return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error, rerankDocumentCount: rerank.documentCount, keywordGenerationEnabled };
         }
         const content = buildSummaryIndexOverwriteContent_ACU(selected);
         await upsertOriginalSummaryIndexEntry_ACU(content);
-        logDebug_ACU(`[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个，rerank=${rerank.status}，输出顺序按纪要表原 rowOrder。`);
-        return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error };
+        logDebug_ACU(`[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个（关键词 AI ${keywordGenerationEnabled ? '开' : '关'}），rerank=${rerank.status}${rerank.documentCount ? `（${rerank.documentCount} 条 documents）` : ''}，输出顺序按纪要表原 rowOrder。`);
+        return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error, rerankDocumentCount: rerank.documentCount, keywordGenerationEnabled };
     }
 
     /**
@@ -116173,6 +116380,55 @@ $CONTENT
             clearToastElement_ACU($toast);
         }
     }
+    let backgroundSourceTextRebuildInFlight_ACU = false;
+    /**
+     * 聊天加载时检查当前索引是否还是旧源文本格式（spv9.2 之前只 embedding 概览）。
+     * 是则在后台静默重建，避免用户更新后第一次发送被全量 embedding 阻塞几十秒。
+     * 发送时的自愈重建仍保留作为兜底（用户在重建完成前就发送时会走那条路径）。
+     *
+     * @returns 是否触发了后台重建
+     */
+    async function rebuildOutdatedSummaryVectorIndexInBackground_ACU() {
+        if (backgroundSourceTextRebuildInFlight_ACU)
+            return false;
+        if (globalMeta_ACU?.summaryVectorIndexModeGlobal !== true)
+            return false;
+        const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
+        const state = snapshot?.summaryVectorIndexState || null;
+        if (!state || !isSummaryVectorIndexSourceTextOutdated_ACU(state))
+            return false;
+        if (!validateSummaryVectorIndexConfig_ACU().valid) {
+            logDebug_ACU('[交火模式纪要索引] 发现旧源文本格式索引，但向量配置无效，跳过后台重建。');
+            return false;
+        }
+        backgroundSourceTextRebuildInFlight_ACU = true;
+        const rowCount = Array.isArray(state.rows) ? state.rows.filter(row => row?.status !== 'removed').length : 0;
+        const $toast = showToastr_ACU('info', `交火索引源文本已升级为"概览 + 纪要正文"，正在后台重建当前聊天的索引（${rowCount} 行）…`, {
+            timeOut: 8000,
+            acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
+        });
+        try {
+            const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
+            if (result.success && !result.skipped) {
+                showToastr_ACU('success', `交火索引已按新源文本重建：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。`, '交火索引升级完成', {
+                    acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK,
+                });
+            }
+            else {
+                const reason = result.errors?.length ? result.errors.join('；') : (result.reason || '无可重建内容');
+                logDebug_ACU(`[交火模式纪要索引] 旧源文本索引后台重建未完成：${reason}`);
+            }
+            return true;
+        }
+        catch (error) {
+            logDebug_ACU(`[交火模式纪要索引] 旧源文本索引后台重建失败，发送时将走自愈重建兜底：${error instanceof Error ? error.message : String(error)}`);
+            return true;
+        }
+        finally {
+            clearToastElement_ACU($toast);
+            backgroundSourceTextRebuildInFlight_ACU = false;
+        }
+    }
     /**
      * 包装交火发送前处理，显示“正在召回记忆”进度提示。
      */
@@ -116206,11 +116462,27 @@ $CONTENT
             clearToastElement_ACU($toast);
         }
         if (shouldRebuildSummaryVectorIndexWithUI_ACU(result.reason)) {
+            let rebuilt = false;
             try {
-                await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+                const rebuildResult = await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+                rebuilt = rebuildResult.success && !rebuildResult.skipped;
             }
             catch (error) {
                 logDebug_ACU(`[交火模式纪要索引] 失效索引已删除，但普通重建路径执行失败；继续原始生成：${error instanceof Error ? error.message : String(error)}`);
+            }
+            // 重建成功后在同一次发送里补跑一次召回，否则这一轮目录沿用上一轮的内容。
+            if (rebuilt) {
+                try {
+                    const retried = await processSummaryVectorIndexBeforeGeneration_ACU({ ...options, bypassDedupe: true });
+                    logDebug_ACU(`[交火模式纪要索引] 自愈重建后补跑召回：success=${retried.success}, skipped=${retried.skipped === true}, reason=${retried.reason || 'none'}, injected=${retried.injectedCount ?? 0}`);
+                    if (shouldShowSummaryVectorResultToast_ACU(retried)) {
+                        showToastr_ACU('success', `交火索引已重建并完成召回，已覆盖纪要索引 ${retried.injectedCount || 0} 条。`, '交火召回完成', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK });
+                    }
+                    return retried;
+                }
+                catch (error) {
+                    logDebug_ACU(`[交火模式纪要索引] 自愈重建后补跑召回失败；继续原始生成：${error instanceof Error ? error.message : String(error)}`);
+                }
             }
         }
         return result;
@@ -129628,6 +129900,12 @@ $CONTENT
                                 catch (rebuildError) {
                                     logWarn_ACU('[交火向量索引] 失效索引已删除，但普通重建路径执行失败:', rebuildError);
                                 }
+                            }
+                            else if (vectorCacheResult.success && !vectorCacheResult.skipped) {
+                                // spv9.2 源文本升级：旧格式索引在后台静默重建，不阻塞 CHAT_CHANGED 后续步骤。
+                                void rebuildOutdatedSummaryVectorIndexInBackground_ACU().catch((error) => {
+                                    logWarn_ACU('[交火向量索引] 旧源文本索引后台重建异常:', error);
+                                });
                             }
                             const shouldRestoreFlushQueue = !String(vectorCacheResult.reason || '').startsWith('external_files_missing_state_clear');
                             if (!shouldRestoreFlushQueue) {
@@ -174847,6 +175125,11 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$j, [["render", _sfc_render$j], ["__scopeId", "data-v-75f9cd80"]]);
 
+    const RERANK_BATCH_SIZE_LIMITS = {
+        min: VECTOR_RERANK_MIN_BATCH_SIZE_ACU,
+        max: VECTOR_RERANK_MAX_BATCH_SIZE_ACU,
+        default: VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU,
+    };
     function createEmptyForm$1() {
         return {
             embeddingEndpoint: "",
@@ -174856,6 +175139,7 @@ Expected function or array of functions, received type ${typeof value}.`
             rerankModel: "",
             rerankApiKey: "",
             rerankInstruction: "",
+            rerankBatchSize: VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU,
         };
     }
     function useVectorApiConfig() {
@@ -174872,6 +175156,7 @@ Expected function or array of functions, received type ${typeof value}.`
             form.rerankModel = config.rerankModel || "";
             form.rerankApiKey = config.rerankApiKey || "";
             form.rerankInstruction = config.rerankInstruction ?? "";
+            form.rerankBatchSize = normalizeRerankBatchSize_ACU(config.rerankBatchSize);
             errors.value = [];
         }
         function save() {
@@ -174883,6 +175168,9 @@ Expected function or array of functions, received type ${typeof value}.`
             config.rerankModel = form.rerankModel.trim();
             config.rerankApiKey = form.rerankApiKey;
             config.rerankInstruction = form.rerankInstruction.trim();
+            const batchSize = normalizeRerankBatchSize_ACU(form.rerankBatchSize);
+            form.rerankBatchSize = batchSize;
+            config.rerankBatchSize = batchSize;
             const validation = validateSummaryVectorIndexConfig_ACU(config);
             if (!validation.valid) {
                 errors.value = formatVectorApiErrors(validation.errors);
@@ -174982,6 +175270,7 @@ Expected function or array of functions, received type ${typeof value}.`
             recentFixedInjectCount: defaults.recentFixedInjectCount,
             vectorNamespace: defaults.vectorNamespace || 'chat',
             summaryChunkSentenceCount: defaults.summaryChunkSentenceCount,
+            summaryIndexChunkChronicleBySentence: defaults.summaryIndexChunkChronicleBySentence === true,
             summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
             summaryIndexRollingDeltaEnabled: defaults.summaryIndexRollingDeltaEnabled === true,
             summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
@@ -174989,6 +175278,7 @@ Expected function or array of functions, received type ${typeof value}.`
             summaryIndexV2WriteScopeAllowlistText: Array.isArray(defaults.summaryIndexV2WriteScopeAllowlist) ? defaults.summaryIndexV2WriteScopeAllowlist.join('\n') : '',
             summaryIndexContentPackWriteEnabled: defaults.summaryIndexContentPackWriteEnabled === true,
             summaryIndexContentPackWriteScopeAllowlistText: Array.isArray(defaults.summaryIndexContentPackWriteScopeAllowlist) ? defaults.summaryIndexContentPackWriteScopeAllowlist.join('\n') : '',
+            keywordGenerationEnabled: defaults.keywordGenerationEnabled !== false,
             keywordApiPreset: defaults.keywordApiPreset || '',
             keywordContextPairCount: defaults.keywordContextPairCount,
             keywordGenerationMaxAttempts: defaults.keywordGenerationMaxAttempts,
@@ -175068,6 +175358,7 @@ Expected function or array of functions, received type ${typeof value}.`
             form.recentFixedInjectCount = config.recentFixedInjectCount;
             form.vectorNamespace = config.vectorNamespace || 'chat';
             form.summaryChunkSentenceCount = config.summaryChunkSentenceCount;
+            form.summaryIndexChunkChronicleBySentence = config.summaryIndexChunkChronicleBySentence === true;
             form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
             form.summaryIndexRollingDeltaEnabled = config.summaryIndexRollingDeltaEnabled === true;
             form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
@@ -175075,6 +175366,7 @@ Expected function or array of functions, received type ${typeof value}.`
             form.summaryIndexV2WriteScopeAllowlistText = Array.isArray(config.summaryIndexV2WriteScopeAllowlist) ? config.summaryIndexV2WriteScopeAllowlist.join('\n') : '';
             form.summaryIndexContentPackWriteEnabled = config.summaryIndexContentPackWriteEnabled === true;
             form.summaryIndexContentPackWriteScopeAllowlistText = Array.isArray(config.summaryIndexContentPackWriteScopeAllowlist) ? config.summaryIndexContentPackWriteScopeAllowlist.join('\n') : '';
+            form.keywordGenerationEnabled = config.keywordGenerationEnabled !== false;
             form.keywordApiPreset = config.keywordApiPreset || '';
             form.keywordContextPairCount = config.keywordContextPairCount;
             form.keywordGenerationMaxAttempts = config.keywordGenerationMaxAttempts;
@@ -175568,6 +175860,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (vectorApiConfig.save())
                     vector.refresh();
             }
+            function onRerankBatchSizeChange(raw) {
+                const value = Math.floor(Number(raw));
+                vectorApiConfig.form.rerankBatchSize = Number.isFinite(value) && value > 0
+                    ? Math.min(RERANK_BATCH_SIZE_LIMITS.max, Math.max(RERANK_BATCH_SIZE_LIMITS.min, value))
+                    : RERANK_BATCH_SIZE_LIMITS.default;
+            }
             async function onDeleteCurrentIndex() {
                 const confirmed = await dialogStore.confirm({
                     title: "删除当前索引",
@@ -175586,14 +175884,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 refreshAll();
             });
             useUiCloseGuard(confirmPromptClose);
-            const __returned__ = { SHOW_LEGACY_VECTOR_MAINTENANCE_UI, dialogStore, vector, vectorApiConfig, devOptions, apiStore, followActiveApiLabel, keywordApiOptions, promptDrawerOpen, panelNavItems, ROLE_OPTIONS, promptSegmentsForView, keywordPromptEmpty, promptTemplateBadgeLabel, promptTemplateBadgeVariant, confirmPromptClose, onPromptUpdate, refreshAll, saveVectorApiConfig, onDeleteCurrentIndex, AcuBadge, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuSelect, AcuStatsList, AcuToggle, VectorIndexPromptDrawer, get vectorIndexCopy() { return vectorIndexCopy; } };
+            const __returned__ = { SHOW_LEGACY_VECTOR_MAINTENANCE_UI, dialogStore, vector, vectorApiConfig, devOptions, apiStore, followActiveApiLabel, keywordApiOptions, promptDrawerOpen, panelNavItems, ROLE_OPTIONS, promptSegmentsForView, keywordPromptEmpty, promptTemplateBadgeLabel, promptTemplateBadgeVariant, confirmPromptClose, onPromptUpdate, refreshAll, saveVectorApiConfig, onRerankBatchSizeChange, onDeleteCurrentIndex, AcuBadge, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuSelect, AcuStatsList, AcuToggle, VectorIndexPromptDrawer, get RERANK_BATCH_SIZE_LIMITS() { return RERANK_BATCH_SIZE_LIMITS; }, get vectorIndexCopy() { return vectorIndexCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-faa352f4] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-faa352f4] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-faa352f4] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-faa352f4] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-faa352f4] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-faa352f4]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-faa352f4] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-faa352f4] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-faa352f4] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-faa352f4] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-faa352f4] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-faa352f4] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-faa352f4] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-faa352f4] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-faa352f4] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-faa352f4] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-faa352f4");
-    var VectorIndexPage_vue_vue_type_style_index_0_scoped_faa352f4_lang = null;
+    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-50a31e89] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-50a31e89] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-50a31e89] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-50a31e89] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-50a31e89] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-50a31e89]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-50a31e89] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-50a31e89] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-50a31e89] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-50a31e89] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-50a31e89] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-50a31e89] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-50a31e89] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-50a31e89] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-50a31e89] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-50a31e89] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-50a31e89");
+    var VectorIndexPage_vue_vue_type_style_index_0_scoped_50a31e89_lang = null;
 
     const _hoisted_1$i = { class: "acu-v2-vector-index-page" };
     const _hoisted_2$h = { class: "acu-v2-vector-index-page__panel-stack" };
@@ -175626,14 +175924,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["variant"])]),
 				default: withCtx(() => [
 					createVNode($setup["AcuStatsList"], { items: $setup.vector.statusStatsItems.value }, null, 8, ["items"]),
-					_cache[29] || (_cache[29] = createBaseVNode(
+					_cache[32] || (_cache[32] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-vector-index-page__hint" },
-						" 发送前流程：关键词生成 → 用户输入与关键词合并 embedding → 概要列 chunk 预筛 → 可选 Rerank → 按纪要表原顺序覆盖原概要索引条目。 ",
+						" 发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → \"概览 + 纪要正文\"向量与 BM25 混合召回 → 可选 Rerank（按纪要正文分批精排，候选不多于 TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。 ",
 						-1
 						/* CACHED */
 					)),
-					_cache[30] || (_cache[30] = createBaseVNode(
+					_cache[33] || (_cache[33] = createBaseVNode(
 						"div",
 						{
 							class: "acu-v2-vector-index-page__maintenance-spacer",
@@ -175649,7 +175947,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
 							onClick: $setup.vector.buildNow
 						}, {
-							default: withCtx(() => [_cache[25] || (_cache[25] = createBaseVNode(
+							default: withCtx(() => [_cache[28] || (_cache[28] = createBaseVNode(
 								"i",
 								{ class: "fa-solid fa-brain" },
 								null,
@@ -175667,7 +175965,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.vector.migrateLegacyIndex
 						}, {
-							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
+							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
 								" 非破坏迁移旧索引 ",
 								-1
 								/* CACHED */
@@ -175678,7 +175976,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.vector.clearIndexCache
 						}, {
-							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
 								" 清空临时缓存 ",
 								-1
 								/* CACHED */
@@ -175690,7 +175988,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.onDeleteCurrentIndex
 						}, {
-							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
+							default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
 								" 删除当前索引 ",
 								-1
 								/* CACHED */
@@ -175705,46 +176003,60 @@ Expected function or array of functions, received type ${typeof value}.`
 				title: $setup.vectorIndexCopy.panels.keyword.title,
 				description: $setup.vectorIndexCopy.panels.keyword.description
 			}, {
-				default: withCtx(() => [createVNode($setup["AcuFormRow"], {
-					label: "关键词 API 预设",
-					hint: "默认使用当前的API，仅用于发送前关键词生成。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuSelect"], {
-						options: $setup.keywordApiOptions,
-						"model-value": $setup.vector.form.keywordApiPreset,
-						placeholder: $setup.followActiveApiLabel,
-						"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.vector.setApiField("keywordApiPreset", $event))
-					}, null, 8, [
-						"options",
-						"model-value",
-						"placeholder"
-					])]),
-					_: 1
-				}), createBaseVNode("div", _hoisted_4$d, [createVNode($setup["AcuFormRow"], {
-					label: "上下文读取层数",
-					hint: "关键词生成时读取的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						"model-value": $setup.vector.form.keywordContextPairCount,
-						type: "number",
-						min: 1,
-						step: 1,
-						onChange: _cache[1] || (_cache[1] = ($event) => $setup.vector.setNumberField("keywordContextPairCount", $event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}), createVNode($setup["AcuFormRow"], {
-					label: "最大尝试次数",
-					hint: "关键词生成失败时会回退到用户输入本身参与召回，不阻断原始发送。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						"model-value": $setup.vector.form.keywordGenerationMaxAttempts,
-						type: "number",
-						min: 1,
-						step: 1,
-						onChange: _cache[2] || (_cache[2] = ($event) => $setup.vector.setNumberField("keywordGenerationMaxAttempts", $event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				})])]),
+				default: withCtx(() => [
+					createVNode($setup["AcuFormRow"], {
+						label: "AI 补充关键词",
+						hint: "开启时每次发送前多调用一次 AI 生成检索关键词；关闭后只用用户输入本身做召回，省一次往返。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuToggle"], {
+							"model-value": $setup.vector.form.keywordGenerationEnabled,
+							label: "发送前用 AI 补充检索关键词",
+							"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.vector.setBooleanField("keywordGenerationEnabled", $event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], {
+						label: "关键词 API 预设",
+						hint: "默认使用当前的API，仅用于发送前关键词生成。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuSelect"], {
+							options: $setup.keywordApiOptions,
+							"model-value": $setup.vector.form.keywordApiPreset,
+							placeholder: $setup.followActiveApiLabel,
+							"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => $setup.vector.setApiField("keywordApiPreset", $event))
+						}, null, 8, [
+							"options",
+							"model-value",
+							"placeholder"
+						])]),
+						_: 1
+					}),
+					createBaseVNode("div", _hoisted_4$d, [createVNode($setup["AcuFormRow"], {
+						label: "上下文读取层数",
+						hint: "关键词生成时读取的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							"model-value": $setup.vector.form.keywordContextPairCount,
+							type: "number",
+							min: 1,
+							step: 1,
+							onChange: _cache[2] || (_cache[2] = ($event) => $setup.vector.setNumberField("keywordContextPairCount", $event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}), createVNode($setup["AcuFormRow"], {
+						label: "最大尝试次数",
+						hint: "关键词生成失败时会回退到用户输入本身参与召回，不阻断原始发送。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							"model-value": $setup.vector.form.keywordGenerationMaxAttempts,
+							type: "number",
+							min: 1,
+							step: 1,
+							onChange: _cache[3] || (_cache[3] = ($event) => $setup.vector.setNumberField("keywordGenerationMaxAttempts", $event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					})])
+				]),
 				_: 1
 			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_5$c, [createVNode($setup["AcuPanel"], {
 				id: "vector-index-api-panel",
@@ -175759,7 +176071,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					},
 					[
 						createBaseVNode("fieldset", _hoisted_6$b, [
-							_cache[31] || (_cache[31] = createBaseVNode(
+							_cache[34] || (_cache[34] = createBaseVNode(
 								"legend",
 								null,
 								"Embedding",
@@ -175769,7 +176081,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createVNode($setup["AcuFormRow"], { label: "URL" }, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.vectorApiConfig.form.embeddingEndpoint,
-									"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.vectorApiConfig.form.embeddingEndpoint = $event),
+									"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.vectorApiConfig.form.embeddingEndpoint = $event),
 									type: "text",
 									placeholder: "https://example.com/embeddings"
 								}, null, 8, ["modelValue"])]),
@@ -175778,7 +176090,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createVNode($setup["AcuFormRow"], { label: "模型名" }, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.vectorApiConfig.form.embeddingModel,
-									"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.vectorApiConfig.form.embeddingModel = $event),
+									"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.vectorApiConfig.form.embeddingModel = $event),
 									type: "text",
 									placeholder: "text-embedding-3-large"
 								}, null, 8, ["modelValue"])]),
@@ -175787,7 +176099,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createVNode($setup["AcuFormRow"], { label: "API 密钥" }, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.vectorApiConfig.form.embeddingApiKey,
-									"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.vectorApiConfig.form.embeddingApiKey = $event),
+									"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.vectorApiConfig.form.embeddingApiKey = $event),
 									type: "password",
 									autocomplete: "off"
 								}, null, 8, ["modelValue"])]),
@@ -175795,7 +176107,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							})
 						]),
 						createBaseVNode("fieldset", _hoisted_7$9, [
-							_cache[32] || (_cache[32] = createBaseVNode(
+							_cache[35] || (_cache[35] = createBaseVNode(
 								"legend",
 								null,
 								"Rerank",
@@ -175805,7 +176117,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createVNode($setup["AcuFormRow"], { label: "URL" }, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.vectorApiConfig.form.rerankEndpoint,
-									"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.vectorApiConfig.form.rerankEndpoint = $event),
+									"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.vectorApiConfig.form.rerankEndpoint = $event),
 									type: "text",
 									placeholder: "https://example.com/rerank"
 								}, null, 8, ["modelValue"])]),
@@ -175814,7 +176126,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createVNode($setup["AcuFormRow"], { label: "模型名" }, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.vectorApiConfig.form.rerankModel,
-									"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.vectorApiConfig.form.rerankModel = $event),
+									"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.vectorApiConfig.form.rerankModel = $event),
 									type: "text",
 									placeholder: "bge-reranker-v2-m3"
 								}, null, 8, ["modelValue"])]),
@@ -175823,7 +176135,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createVNode($setup["AcuFormRow"], { label: "API 密钥" }, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.vectorApiConfig.form.rerankApiKey,
-									"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.vectorApiConfig.form.rerankApiKey = $event),
+									"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.vectorApiConfig.form.rerankApiKey = $event),
 									type: "password",
 									autocomplete: "off"
 								}, null, 8, ["modelValue"])]),
@@ -175836,7 +176148,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								default: withCtx(() => [withDirectives(createBaseVNode(
 									"textarea",
 									{
-										"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.vectorApiConfig.form.rerankInstruction = $event),
+										"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.vectorApiConfig.form.rerankInstruction = $event),
 										class: "acu-v2-vector-api-form__instruction-textarea",
 										rows: "3",
 										placeholder: "留空则不发送 instruction"
@@ -175846,7 +176158,25 @@ Expected function or array of functions, received type ${typeof value}.`
 									/* NEED_PATCH */
 								), [[vModelText, $setup.vectorApiConfig.form.rerankInstruction]])]),
 								_: 1
-							})
+							}),
+							createVNode($setup["AcuFormRow"], {
+								label: "每批条数",
+								hint: `候选超过该数时分批并行请求再合并分数。服务商单请求通常限 500 条以内，范围 ${$setup.RERANK_BATCH_SIZE_LIMITS.min}–${$setup.RERANK_BATCH_SIZE_LIMITS.max}，默认 ${$setup.RERANK_BATCH_SIZE_LIMITS.default}。`
+							}, {
+								default: withCtx(() => [createVNode($setup["AcuInput"], {
+									"model-value": $setup.vectorApiConfig.form.rerankBatchSize,
+									type: "number",
+									min: $setup.RERANK_BATCH_SIZE_LIMITS.min,
+									max: $setup.RERANK_BATCH_SIZE_LIMITS.max,
+									step: 10,
+									onChange: _cache[11] || (_cache[11] = ($event) => $setup.onRerankBatchSizeChange($event))
+								}, null, 8, [
+									"model-value",
+									"min",
+									"max"
+								])]),
+								_: 1
+							}, 8, ["hint"])
 						]),
 						$setup.vectorApiConfig.errors.value.length ? (openBlock(), createBlock($setup["AcuMessage"], {
 							key: 0,
@@ -175873,7 +176203,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							variant: "primary",
 							"native-type": "submit"
 						}, {
-							default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
+							default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
 								"保存",
 								-1
 								/* CACHED */
@@ -175902,7 +176232,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: 0,
 					kind: "warning"
 				}, {
-					default: withCtx(() => [..._cache[34] || (_cache[34] = [createTextVNode(
+					default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
 						" 关键词生成提示词为空，发送前会直接用用户输入参与召回；建议载入默认提示词后保存。 ",
 						-1
 						/* CACHED */
@@ -175910,9 +176240,9 @@ Expected function or array of functions, received type ${typeof value}.`
 					_: 1
 				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_9$8, [createVNode($setup["AcuButton"], {
 					variant: "primary",
-					onClick: _cache[10] || (_cache[10] = ($event) => $setup.promptDrawerOpen = true)
+					onClick: _cache[12] || (_cache[12] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
-					default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
+					default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
 						"编辑提示词",
 						-1
 						/* CACHED */
@@ -175942,26 +176272,26 @@ Expected function or array of functions, received type ${typeof value}.`
 							type: "number",
 							min: 1,
 							step: 1,
-							onChange: _cache[11] || (_cache[11] = ($event) => $setup.vector.setNumberField("summaryIndexKeywordMinRows", $event))
+							onChange: _cache[13] || (_cache[13] = ($event) => $setup.vector.setNumberField("summaryIndexKeywordMinRows", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					}),
 					createVNode($setup["AcuFormRow"], {
 						label: "TopK",
-						hint: "Rerank 后选中的纪要数量上限，写入时恢复原顺序。"
+						hint: "进入纪要索引目录的排序行数上限（最近固定注入的行另计）；候选行不多于此数时跳过 Rerank，写入时恢复原顺序。"
 					}, {
 						default: withCtx(() => [createVNode($setup["AcuInput"], {
 							"model-value": $setup.vector.form.topK,
 							type: "number",
 							min: 1,
 							step: 1,
-							onChange: _cache[12] || (_cache[12] = ($event) => $setup.vector.setNumberField("topK", $event))
+							onChange: _cache[14] || (_cache[14] = ($event) => $setup.vector.setNumberField("topK", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					}),
 					createVNode($setup["AcuFormRow"], {
 						label: "预筛最低分",
-						hint: "Embedding 预筛分数门槛，低于此分不参与 Rerank。"
+						hint: "Embedding 余弦分门槛，低于此分不进入候选池。源文本含纪要正文后分布整体偏低，默认 0.35。"
 					}, {
 						default: withCtx(() => [createVNode($setup["AcuInput"], {
 							"model-value": $setup.vector.form.minScore,
@@ -175969,20 +176299,20 @@ Expected function or array of functions, received type ${typeof value}.`
 							min: 0,
 							max: 1,
 							step: .01,
-							onChange: _cache[13] || (_cache[13] = ($event) => $setup.vector.setMinScore($event))
+							onChange: _cache[15] || (_cache[15] = ($event) => $setup.vector.setMinScore($event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					}),
 					createVNode($setup["AcuFormRow"], {
 						label: "候选上限",
-						hint: "预筛保留的候选数，也是 Rerank 最大输入，不能小于 TopK。"
+						hint: "dense/BM25 各自保留的候选分片数，融合后的候选池上限；Rerank 会按每批条数自动分批处理。不能小于 TopK。"
 					}, {
 						default: withCtx(() => [createVNode($setup["AcuInput"], {
 							"model-value": $setup.vector.form.recallCandidateLimit,
 							type: "number",
 							min: 1,
 							step: 1,
-							onChange: _cache[14] || (_cache[14] = ($event) => $setup.vector.setNumberField("recallCandidateLimit", $event))
+							onChange: _cache[16] || (_cache[16] = ($event) => $setup.vector.setNumberField("recallCandidateLimit", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					}),
@@ -175995,8 +176325,8 @@ Expected function or array of functions, received type ${typeof value}.`
 							type: "number",
 							min: 1,
 							step: 1,
-							"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.vector.previewRecentFixedInjectCount($event)),
-							onChange: _cache[16] || (_cache[16] = ($event) => $setup.vector.setNumberField("recentFixedInjectCount", $event))
+							"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.vector.previewRecentFixedInjectCount($event)),
+							onChange: _cache[18] || (_cache[18] = ($event) => $setup.vector.setNumberField("recentFixedInjectCount", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					}),
@@ -176008,7 +176338,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							"model-value": $setup.vector.form.vectorNamespace,
 							type: "text",
 							placeholder: "chat",
-							onChange: _cache[17] || (_cache[17] = ($event) => $setup.vector.setApiField("vectorNamespace", $event))
+							onChange: _cache[19] || (_cache[19] = ($event) => $setup.vector.setApiField("vectorNamespace", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})
@@ -176022,16 +176352,28 @@ Expected function or array of functions, received type ${typeof value}.`
 				default: withCtx(() => [
 					createBaseVNode("div", _hoisted_11$8, [
 						createVNode($setup["AcuFormRow"], {
+							label: "按句切分纪要正文",
+							hint: "默认关闭：每行一个向量（概览 + 纪要正文整体），索引体积只随行数增长。开启后按下方句数切分正文，召回更细但分片成倍增加；改动后需重建索引。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuToggle"], {
+								"model-value": $setup.vector.form.summaryIndexChunkChronicleBySentence,
+								label: "切分纪要正文为多个分片",
+								"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.vector.setBooleanField("summaryIndexChunkChronicleBySentence", $event))
+							}, null, 8, ["model-value"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
 							label: "分块句数",
-							hint: "纪要概要列每段句数。越小越精细，分片越多。"
+							hint: "仅在开启按句切分时生效：每个分片包含的句数，越小越精细，分片越多。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								"model-value": $setup.vector.form.summaryChunkSentenceCount,
 								type: "number",
 								min: 1,
 								step: 1,
-								onChange: _cache[18] || (_cache[18] = ($event) => $setup.vector.setNumberField("summaryChunkSentenceCount", $event))
-							}, null, 8, ["model-value"])]),
+								disabled: !$setup.vector.form.summaryIndexChunkChronicleBySentence,
+								onChange: _cache[21] || (_cache[21] = ($event) => $setup.vector.setNumberField("summaryChunkSentenceCount", $event))
+							}, null, 8, ["model-value", "disabled"])]),
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], {
@@ -176043,7 +176385,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								type: "number",
 								min: 1,
 								step: 1,
-								onChange: _cache[19] || (_cache[19] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxConcurrency", $event))
+								onChange: _cache[22] || (_cache[22] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxConcurrency", $event))
 							}, null, 8, ["model-value"])]),
 							_: 1
 						}),
@@ -176082,7 +176424,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						default: withCtx(() => [createVNode($setup["AcuToggle"], {
 							"model-value": $setup.vector.form.summaryIndexV2WriteEnabled,
 							label: "允许 V2 快照写入",
-							"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.vector.setBooleanField("summaryIndexV2WriteEnabled", $event))
+							"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.vector.setBooleanField("summaryIndexV2WriteEnabled", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
@@ -176097,7 +176439,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							rows: "4",
 							spellcheck: "false",
 							placeholder: "每行一个 scope fingerprint",
-							onChange: _cache[21] || (_cache[21] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
+							onChange: _cache[24] || (_cache[24] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
 						}, null, 40, _hoisted_12$8)]),
 						_: 1
 					})) : createCommentVNode("v-if", true)
@@ -176112,11 +176454,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			dirty: $setup.vector.promptDirty.value,
 			message: $setup.vector.message.value,
 			"role-options": $setup.ROLE_OPTIONS,
-			onClose: _cache[22] || (_cache[22] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[25] || (_cache[25] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.vector.savePromptGroup,
 			onReset: $setup.vector.resetPromptGroup,
-			onAdd: _cache[23] || (_cache[23] = ($event) => $setup.vector.addPromptSegment($event)),
-			onDelete: _cache[24] || (_cache[24] = ($event) => $setup.vector.deletePromptSegment($event)),
+			onAdd: _cache[26] || (_cache[26] = ($event) => $setup.vector.addPromptSegment($event)),
+			onDelete: _cache[27] || (_cache[27] = ($event) => $setup.vector.deletePromptSegment($event)),
 			onUpdate: $setup.onPromptUpdate
 		}, null, 8, [
 			"is-open",
@@ -176128,7 +176470,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$i, [["render", _sfc_render$i], ["__scopeId", "data-v-faa352f4"]]);
+    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$i, [["render", _sfc_render$i], ["__scopeId", "data-v-50a31e89"]]);
 
     /**
      * useDormantData — 休眠数据可见性与唤醒（S3-4）的 UI 编排。

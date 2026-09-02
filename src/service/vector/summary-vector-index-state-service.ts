@@ -32,6 +32,7 @@ function normalizeRows_ACU(rows: any): ChatSummaryVectorIndexRow_ACU[] {
             summary: String(row.summary || ''),
             indexCode: String(row.indexCode || ''),
             vectorSourceText: String(row.vectorSourceText || ''),
+            ...(typeof row.vectorSourceHash === 'string' && row.vectorSourceHash ? { vectorSourceHash: row.vectorSourceHash } : {}),
             chunkIds: Array.isArray(row.chunkIds) ? row.chunkIds.map((item: any) => String(item)) : [],
             sourceFingerprint: typeof row.sourceFingerprint === 'string' ? row.sourceFingerprint : undefined,
             shardIds: Array.isArray(row.shardIds) ? row.shardIds.map((item: any) => String(item)) : undefined,

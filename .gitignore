@@ -2,6 +2,14 @@
 .codebuddy/
 .specify/
 .limcode/
+.kilo/plans/
+
+# 本地文档、设计稿与计划（保留工作区，不提交仓库）
+docs/
+plans/
+specs/
+/*.md
+/*.txt
 
 # Node.js
 node_modules/
