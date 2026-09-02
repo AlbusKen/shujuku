@@ -1,12 +1,12 @@
 {
-    "display_name": "SP·数据库 9.1.5",
+    "display_name": "SP·数据库 9.1.6",
     "loading_order": 200,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "",
     "author": "Cline (AI Assisted)",
-    "version": "9.1.5",
+    "version": "9.1.6",
     "homePage": "",
     "auto_update": false
 }

@@ -152,6 +152,13 @@ interface AgentConversationHandle_ACU {
   record: (appends: readonly AgentConversationAppend_ACU[]) => void;
   /** 有未落盘变更时写入末楼；无楼层可承载时保持内存态。 */
   flush: () => Promise<void>;
+  /**
+   * 运行中途按 token 阈值压缩历史（越界压缩）。先落盘未持久化的消息再压，成功则替换本运行的会话视图。
+   * @returns 是否真的压缩并提交了
+   */
+  compact: (emergency: boolean) => Promise<boolean>;
+  /** 本次运行是否已经向用户通告过「上下文超过阈值但本轮内继续」，避免每次迭代重复刷屏。 */
+  overBudgetNotified: boolean;
   turnKey: string;
 }
 
@@ -834,62 +841,32 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
 
     const budgetTokens = request.settings.agentHistoryTokenBudget;
+    const compact = async (emergency: boolean): Promise<boolean> => {
+      if (budgetTokens <= 0 || !snapshot.messages.length) return false;
+      // 压缩成功后会话视图以持久层回读为准，未落盘的消息必须先写进去，否则会在回读时丢失。
+      await flush();
+      const next = await this.compactConversation_ACU(chat, snapshot, budgetTokens, await measureOverhead(), counter, semanticAdapter, emergency);
+      if (!next) return false;
+      snapshot = next;
+      return true;
+    };
+
     // 本次运行是否仍在会话里最后通告的那一轮内。中断恢复、同一游标重跑都算「同一轮内」。
     const continuingSameTurn = !!turnKey && lastAnnouncedTurnKey_ACU(snapshot) === turnKey;
     // 会话为空时压缩无意义，开销也就不必测——省一次完整的提示词渲染与逐条分词。
     const overheadTokens = budgetTokens > 0 && snapshot.messages.length ? await measureOverhead() : 0;
     const timing = await resolveAgentCompactionTiming_ACU(snapshot, budgetTokens, continuingSameTurn, counter, overheadTokens);
+    let overBudgetNotified = false;
     if (timing.action === 'defer') {
+      overBudgetNotified = true;
       logAgentSession_ACU({
         kind: 'thought',
         title: `上下文已到 token 阈值（约 ${timing.totalTokens} tokens）`,
-        detail: `实际读取的完整上下文（提示词骨架约 ${overheadTokens} tokens + 会话历史）超出阈值 ${budgetTokens}，但本轮规划还没结束。总结留到本轮完成、下一轮开始前再做，避免在一轮进行中换掉上下文。`,
+        detail: `实际读取的完整上下文（提示词骨架约 ${overheadTokens} tokens + 会话历史）超出阈值 ${budgetTokens}，但本轮规划还没结束。总结留到本轮完成、下一轮开始前再做，避免在一轮进行中换掉上下文；本轮内请求照常发送，超过阈值 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍才会提前压缩。`,
       });
     }
     if (timing.action === 'compact') {
-      const compaction = await planAgentHistoryCompaction_ACU({
-        snapshot,
-        activeMark: this.dependencies.readCompactionMark(chat),
-        triggerTokens: budgetTokens,
-        fixedPromptTokens: overheadTokens,
-        countTokens: counter,
-        semanticAdapter,
-      });
-      if (compaction.mark) {
-        const candidate = compaction.mark;
-        let committed = false;
-        try {
-          if (await this.dependencies.writeCompactionMark(chat, candidate)) {
-            const persisted = this.dependencies.readCompactionMark(chat);
-            const reread = this.dependencies.readConversation(chat);
-            committed = !!persisted
-              && 'summaryState' in persisted
-              && persisted.compactedThroughId === candidate.compactedThroughId
-              && persisted.report === candidate.report
-              && JSON.stringify(persisted.summaryState) === JSON.stringify(candidate.summaryState)
-              && JSON.stringify(persisted.metrics) === JSON.stringify(candidate.metrics);
-            if (committed) snapshot = reread;
-          }
-        } catch (error) {
-          logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
-        }
-        if (committed) {
-        logAgentSession_ACU({
-          kind: 'thought',
-          title: `会话历史已压缩（压缩后上下文约 ${compaction.afterTokens} tokens）`,
-          detail: [
-            `实际读取的完整上下文超出阈值 ${budgetTokens}（其中提示词骨架约 ${overheadTokens} tokens），已把最早的 ${compaction.droppedTurns} 个轮次（${compaction.droppedMessages} 条消息）浓缩成交接报告。`,
-            timing.emergency ? `本轮尚未结束，但上下文已达阈值的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍，再不压缩这次请求会因超长直接失败，因此提前压缩。` : '',
-            compaction.status === 'compacted_above_target' ? '压缩后仍高于内部低水位：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。' : '',
-          ].filter(Boolean).join(''),
-        });
-        // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
-        // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
-        logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: compaction.mark.report });
-        } else {
-          logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩未提交', detail: '压缩候选未通过持久化回读一致性确认，已保留本次运行的旧会话投影。' });
-        }
-      }
+      await compact(timing.emergency);
     }
 
     return {
@@ -901,8 +878,68 @@ export class ContinuationAgentTurnPlanner_ACU {
         snapshot = next;
       },
       flush,
+      compact,
+      overBudgetNotified,
       turnKey,
     };
+  }
+
+  /**
+   * 执行一次非破坏压缩并持久化标记。压缩结果以持久层回读为准：写入后回读不一致视为未提交，
+   * 保留旧会话投影而不是拿一份没落盘的视图继续跑。
+   * @returns 提交成功时返回回读后的会话视图；无可压缩、写入失败或回读不一致时返回 null
+   */
+  private async compactConversation_ACU(
+    chat: any[],
+    snapshot: AgentConversationSnapshot_ACU,
+    budgetTokens: number,
+    overheadTokens: number,
+    counter: TokenCounter_ACU,
+    semanticAdapter: AgentHandoffSemanticSummaryAdapter_ACU,
+    emergency: boolean,
+  ): Promise<AgentConversationSnapshot_ACU | null> {
+    const compaction = await planAgentHistoryCompaction_ACU({
+      snapshot,
+      activeMark: this.dependencies.readCompactionMark(chat),
+      triggerTokens: budgetTokens,
+      fixedPromptTokens: overheadTokens,
+      countTokens: counter,
+      semanticAdapter,
+    });
+    if (!compaction.mark) return null;
+    const candidate = compaction.mark;
+    let reread: AgentConversationSnapshot_ACU | null = null;
+    try {
+      if (await this.dependencies.writeCompactionMark(chat, candidate)) {
+        const persisted = this.dependencies.readCompactionMark(chat);
+        const committed = !!persisted
+          && 'summaryState' in persisted
+          && persisted.compactedThroughId === candidate.compactedThroughId
+          && persisted.report === candidate.report
+          && JSON.stringify(persisted.summaryState) === JSON.stringify(candidate.summaryState)
+          && JSON.stringify(persisted.metrics) === JSON.stringify(candidate.metrics);
+        if (committed) reread = this.dependencies.readConversation(chat);
+      }
+    } catch (error) {
+      logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
+    }
+    if (!reread) {
+      logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩未提交', detail: '压缩候选未通过持久化回读一致性确认，已保留本次运行的旧会话投影。' });
+      return null;
+    }
+    logAgentSession_ACU({
+      kind: 'thought',
+      title: `会话历史已压缩（压缩后上下文约 ${compaction.afterTokens} tokens）`,
+      detail: [
+        `实际读取的完整上下文超出阈值 ${budgetTokens}（其中提示词骨架约 ${overheadTokens} tokens），已把最早的 ${compaction.droppedTurns} 个轮次（${compaction.droppedMessages} 条消息）浓缩成交接报告。`,
+        emergency ? `本轮尚未结束，但上下文已达阈值的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍，再不压缩这次请求会因超长直接失败，因此提前压缩。` : '',
+        compaction.status === 'compacted_above_target' ? '压缩后仍高于内部低水位：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。' : '',
+      ].filter(Boolean).join(''),
+    });
+    // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
+    // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
+    logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: candidate.report });
+    return reread;
   }
 
   private async callMainAgent(
@@ -937,9 +974,36 @@ export class ContinuationAgentTurnPlanner_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 请求已失效', false));
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
-      const messages = this.spliceHistory_ACU(rendered, session.history());
-      if (request.settings.agentHistoryTokenBudget > 0 && await measureAgentPromptTokens_ACU(messages, counter) > request.settings.agentHistoryTokenBudget) {
-        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', '主 Agent 最终请求超过会话 token 阈值，拒绝发送未经确认的上下文', false));
+      let messages = this.spliceHistory_ACU(rendered, session.history());
+      // 发送前预检与压缩时机规则同一口径：阈值只是压缩触发线，一轮进行中允许超出到越界线
+      // （阈值 × AGENT_HISTORY_EMERGENCY_FACTOR_ACU）。轮内追加的工具结果、派工报告、迭代输出
+      // 把上下文顶过越界线时先做一次轮内压缩，压不下去才拒绝——否则同一轮里会陷入
+      // 「登记等下一轮 → 预检拒绝 → 永远到不了下一轮」的死锁。
+      const budgetTokens = request.settings.agentHistoryTokenBudget;
+      if (budgetTokens > 0) {
+        const ceilingTokens = budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
+        let promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
+        if (promptTokens > ceilingTokens) {
+          if (await session.compact(true)) {
+            messages = this.spliceHistory_ACU(rendered, session.history());
+            promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
+          }
+          if (promptTokens > ceilingTokens) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+              'CONTINUATION_AGENT_SNAPSHOT_INVALID',
+              'agent_loop',
+              `主 Agent 最终请求约 ${promptTokens} tokens，超过会话 token 阈值 ${budgetTokens} 的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍且已无法再压缩，拒绝发送必然超长的请求。可在设置里提高「会话自动总结阈值」，或清空 Agent 会话历史后重试`,
+              false,
+            ));
+          }
+        } else if (promptTokens > budgetTokens && !session.overBudgetNotified) {
+          session.overBudgetNotified = true;
+          logAgentSession_ACU({
+            kind: 'thought',
+            title: `上下文已超过 token 阈值（约 ${promptTokens} tokens）`,
+            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。本轮规划进行中不重塑历史，请求照常发送；总结留到本轮完成、下一轮开始前再做，超过越界线才会提前压缩。`,
+          });
+        }
       }
       // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
       // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。

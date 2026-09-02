@@ -319,28 +319,30 @@ describe('主 Agent 会话记录', () => {
     expect(h.handoffCalls).toHaveLength(2);
   });
 
-  it('同一轮内到达阈值只登记不压缩，留到下一轮开始时再做', async () => {
+  it('同一轮内到达阈值只登记不压缩，请求照常发送，留到下一轮开始时再做', async () => {
     const filler = '守门人'.repeat(400);
     // 最后通告的就是本次运行的游标 turn-2：这一轮还没走完（中断恢复或同游标重跑）。
     // 填充词计数下总量约 800 tokens（加上正文里的零星出现），预算取 600：超出但没到两倍，
-    // 因此走登记而非越界压缩。
+    // 因此走登记而非越界压缩。登记不等于拒发：否则同一轮永远走不到「下一轮开始」，死锁。
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU(filler),
       historyTokenBudget: 600,
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
-    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
-    expect(h.mainCalls).toHaveLength(0);
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
+    expect(h.mainCalls).toHaveLength(1);
 
     const messages = h.conversation().messages;
-    // 历史没有被重塑：既没有交接报告，早期消息也仍在原处。
+    // 历史没有被重塑：既没有交接报告，早期消息也仍在原处，模型看到的也是完整历史。
     expect(messages.some(message => message.kind === 'handoff')).toBe(false);
     expect(messages.some(message => message.text === filler)).toBe(true);
+    expect(h.mainCalls[0].some(message => message.content.includes(filler))).toBe(true);
     expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
-    // 阈值到了要如实告诉用户，只是执行时机推迟。
-    const deferred = readAgentSessionLog_ACU().find(entry => entry.title.includes('已到 token 阈值'));
-    expect(deferred?.detail).toContain('下一轮开始前');
+    // 阈值到了要如实告诉用户，只是执行时机推迟；同一次运行只通告一次。
+    const deferred = readAgentSessionLog_ACU().filter(entry => entry.title.includes('token 阈值'));
+    expect(deferred).toHaveLength(1);
+    expect(deferred[0].detail).toContain('下一轮开始前');
 
     // 同一份会话在游标推进到 turn-3 后再跑，这时才真正压缩。
     const next = harness_ACU({
@@ -371,6 +373,34 @@ describe('主 Agent 会话记录', () => {
     const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
     // 越界压缩必须自报原因，不能让用户以为轮次边界规则失效了。
     expect(compacted?.detail).toContain('本轮尚未结束');
+  });
+
+  it('运行中途工具结果把上下文顶过越界线时先轮内压缩再发送，而不是中止整轮', async () => {
+    // 打开会话时约 500 tokens，预算 600 内；派工结果回灌 800 tokens 后到 1300 以上（越界线 = 600 × 2），
+    // 下一次主请求前必须先把旧轮次压掉，然后照常发送。旧实现在这里直接抛错，自动续写链就此停摆。
+    const oldTurnFiller = '守门人旧'.repeat(250);
+    const bulkyReport = '守门人新'.repeat(400);
+    const h = harness_ACU({
+      conversation: overBudgetConversation_ACU(oldTurnFiller),
+      historyTokenBudget: 600,
+      countTokens: fillerTokens_ACU,
+      mainReplies: [
+        '{"action":"delegate","thought":"先要主线","delegations":[{"agentName":"mainline-planner","prompt":"主线"}]}',
+        '{"action":"finalize","instruction":"按主线要点写"}',
+      ],
+      subReplies: [`{"summary":"${bulkyReport}","recommendation":"先试探"}`],
+    });
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '按主线要点写' });
+    expect(h.mainCalls).toHaveLength(2);
+
+    // 第一次主请求还看得到旧轮次原文；第二次请求前旧轮次已被浓缩，派工结果作为当前轮内容完整保留。
+    expect(h.mainCalls[0].some(message => message.content.includes(oldTurnFiller))).toBe(true);
+    expect(h.mainCalls[1].some(message => message.content.includes(oldTurnFiller))).toBe(false);
+    expect(h.mainCalls[1].some(message => message.content.includes(bulkyReport))).toBe(true);
+    expect(h.conversation().messages[0].kind).toBe('handoff');
+    const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
+    expect(compacted?.detail).toContain('本轮尚未结束');
+    expect(readAgentSessionLog_ACU().some(entry => entry.kind === 'run_failed')).toBe(false);
   });
 
   it('阈值统计的是实际读取的完整上下文：提示词骨架也计入，会话很小时同样触发压缩', async () => {
