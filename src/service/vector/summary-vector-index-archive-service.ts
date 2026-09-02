@@ -297,6 +297,10 @@ function buildResult_ACU(partial: Partial<SummaryVectorIndexArchiveResult_ACU> =
  *   - writeGeneration：T0a 后最大长度 24（时间戳 base36 8 + 7 + 7 = 22，留 2 字符余量）
  * preflight 通过 ⇒ 真实构造必通过（不允许 preflight 放过、persist 再抛）。
  * 返回 { ok: true } 或 { ok: false, error }，不 throw。
+ *
+ * 注：scope token 已改为定长 SHA-256 指纹，路径长度不再随聊天名/隔离码变化，
+ * 正常情况下本 preflight 不会再拦截用户数据；保留它是为了在有人放宽 indexId /
+ * writeGeneration 上界时仍能在烧 embedding 之前失败。
  */
 function preflightVectorIndexSnapshotPath_ACU(parts: {
     chatKey: string;

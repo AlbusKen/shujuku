@@ -21,8 +21,8 @@ import {
     deleteSummaryVectorHotCacheByScope_ACU,
 } from '../../data/storage/vector-index-hot-cache';
 import {
-    decodeVectorIndexScopeFromPath_ACU,
     loadVectorIndexRegistry_ACU,
+    resolveVectorIndexRegistryFileScope_ACU,
 } from '../../data/storage/vector-index-st-files-storage';
 import { currentChatFileIdentifier_ACU } from '../runtime/state-manager';
 import { cleanChatName_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
@@ -52,9 +52,9 @@ function getCurrentChatKey_ACU(): string {
 }
 
 /**
- * 从 registry 反解出属于指定 chatKey 集合的全部唯一 scope。
- * 只识别 V2 快照 / v2pack 路径（token 可逆）；legacy 路径没有可验证身份，
- * 维持 Safe GC 的 quarantine 策略，不参与删除。
+ * 从 registry 收集属于指定 chatKey 集合的全部唯一 scope。
+ * 身份来源：新条目自带的 `scope` 字段；升级前旧条目退回到无损路径 token 反解。
+ * 两者都没有的 legacy 分片路径没有可验证身份，维持 Safe GC 的 quarantine 策略，不参与删除。
  */
 async function collectRegistryScopesByChatKeys_ACU(
     matchChatKey: (chatKey: string) => boolean,
@@ -62,11 +62,10 @@ async function collectRegistryScopesByChatKeys_ACU(
     const registry = await loadVectorIndexRegistry_ACU();
     const byToken = new Map<string, SummaryVectorIndexCanonicalScope_ACU>();
     for (const file of registry.files) {
-        const path = String(file?.path || '').trim();
-        if (!path) continue;
-        const decoded = decodeVectorIndexScopeFromPath_ACU(path);
-        if (!decoded || !matchChatKey(decoded.chatKey)) continue;
-        const scope = normalizeSummaryVectorIndexScope_ACU(decoded);
+        if (!String(file?.path || '').trim()) continue;
+        const resolved = resolveVectorIndexRegistryFileScope_ACU(file);
+        if (!resolved || !matchChatKey(resolved.chatKey)) continue;
+        const scope = normalizeSummaryVectorIndexScope_ACU(resolved);
         byToken.set(serializeSummaryVectorIndexScope_ACU(scope), scope);
     }
     return Array.from(byToken.values());

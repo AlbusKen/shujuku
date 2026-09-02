@@ -82532,6 +82532,111 @@ $CONTENT
     }
 
     /**
+     * 同步 SHA-256（FIPS 180-4），供“必须在同步调用链里得到稠密指纹”的场景使用。
+     * Web Crypto 的 subtle.digest 只有异步接口，而向量索引的 scope 指纹在十余处同步代码里被当作
+     * 路径段 / 比对键使用，把整条调用链改成 async 的收益远低于内置一份 60 行的纯实现。
+     * 输入按 UTF-8 编码；输出与 crypto.subtle.digest('SHA-256') 逐字节一致。
+     */
+    const SHA256_K_ACU = new Uint32Array([
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ]);
+    function rotr_ACU(value, bits) {
+        return (value >>> bits) | (value << (32 - bits));
+    }
+    function sha256BytesSync_ACU(input) {
+        const bitLength = input.length * 8;
+        // 填充：1 字节 0x80 + 若干 0x00 + 8 字节大端比特长度，总长为 64 的整数倍。
+        const paddedLength = (((input.length + 9) + 63) >> 6) << 6;
+        const padded = new Uint8Array(paddedLength);
+        padded.set(input);
+        padded[input.length] = 0x80;
+        const view = new DataView(padded.buffer);
+        // JS 位运算只到 32 位，长度高位单独用除法写入。
+        view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+        view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+        const state = new Uint32Array([
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        ]);
+        const w = new Uint32Array(64);
+        for (let offset = 0; offset < paddedLength; offset += 64) {
+            for (let index = 0; index < 16; index += 1) {
+                w[index] = view.getUint32(offset + index * 4, false);
+            }
+            for (let index = 16; index < 64; index += 1) {
+                const w15 = w[index - 15];
+                const w2 = w[index - 2];
+                const s0 = rotr_ACU(w15, 7) ^ rotr_ACU(w15, 18) ^ (w15 >>> 3);
+                const s1 = rotr_ACU(w2, 17) ^ rotr_ACU(w2, 19) ^ (w2 >>> 10);
+                w[index] = (w[index - 16] + s0 + w[index - 7] + s1) >>> 0;
+            }
+            let a = state[0];
+            let b = state[1];
+            let c = state[2];
+            let d = state[3];
+            let e = state[4];
+            let f = state[5];
+            let g = state[6];
+            let h = state[7];
+            for (let index = 0; index < 64; index += 1) {
+                const bigSigma1 = rotr_ACU(e, 6) ^ rotr_ACU(e, 11) ^ rotr_ACU(e, 25);
+                const choose = (e & f) ^ (~e & g);
+                const temp1 = (h + bigSigma1 + choose + SHA256_K_ACU[index] + w[index]) >>> 0;
+                const bigSigma0 = rotr_ACU(a, 2) ^ rotr_ACU(a, 13) ^ rotr_ACU(a, 22);
+                const majority = (a & b) ^ (a & c) ^ (b & c);
+                const temp2 = (bigSigma0 + majority) >>> 0;
+                h = g;
+                g = f;
+                f = e;
+                e = (d + temp1) >>> 0;
+                d = c;
+                c = b;
+                b = a;
+                a = (temp1 + temp2) >>> 0;
+            }
+            state[0] = (state[0] + a) >>> 0;
+            state[1] = (state[1] + b) >>> 0;
+            state[2] = (state[2] + c) >>> 0;
+            state[3] = (state[3] + d) >>> 0;
+            state[4] = (state[4] + e) >>> 0;
+            state[5] = (state[5] + f) >>> 0;
+            state[6] = (state[6] + g) >>> 0;
+            state[7] = (state[7] + h) >>> 0;
+        }
+        const digest = new Uint8Array(32);
+        const digestView = new DataView(digest.buffer);
+        for (let index = 0; index < 8; index += 1) {
+            digestView.setUint32(index * 4, state[index], false);
+        }
+        return digest;
+    }
+    function sha256TextSync_ACU(text) {
+        return sha256BytesSync_ACU(new TextEncoder().encode(String(text ?? '')));
+    }
+    function sha256HexSync_ACU(text) {
+        return Array.from(sha256TextSync_ACU(text)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    }
+    /** base64url（无 padding），32 字节摘要恒为 43 字符，字母表 [A-Za-z0-9_-]。 */
+    function sha256Base64UrlSync_ACU(text) {
+        const bytes = sha256TextSync_ACU(text);
+        let binary = '';
+        bytes.forEach((byte) => {
+            binary += String.fromCharCode(byte);
+        });
+        return btoa(binary)
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/g, '');
+    }
+
+    /**
      * P4 内容寻址 pack 协议（T8+）。
      * 设计约束：pack 内容必须与 indexId/revision/时间戳无关，才能跨 revision 复用；
      * chunk 排序与行序由读取端从 manifest.snapshot.activeChunkIds 与 snapshot rows 复原。
@@ -82614,15 +82719,36 @@ $CONTENT
         }
         return `${scope}_${indexId}_${role}`;
     }
+    const VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2_';
+    const VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2pack_';
+    /** SHA-256 base64url（无 padding）恒为 43 字符；路径解析与预算断言都依赖这个定长。 */
+    const VECTOR_INDEX_SCOPE_FINGERPRINT_LENGTH_ACU = 43;
+    const scopeFingerprintMemo_ACU = new Map();
     /**
      * V2 单文件快照必须是 immutable object path。角色名只是展示信息，绝不能参与寻址；
-     * 否则改名会把同一逻辑 scope 分裂成不同文件。scope token 是完整 JSON tuple 的 UTF-8
-     * base64url 编码，而不是短哈希；不能拿 32 位散列充当生产级唯一标识，碰撞后仍会覆盖对象。
+     * 否则改名会把同一逻辑 scope 分裂成不同文件。
+     *
+     * scope token 是 canonical 三元组 JSON 的 SHA-256（base64url，定长 43 字符）。
+     * 它只是定位器：完整三元组同时保存在 registry 条目（`scope`）与 blob 内部
+     * （`chatKey / isolationKey / sourceTableKey`），读取与 GC 都以这两处为身份依据，
+     * 路径不再需要可逆。之前把三元组无损 base64 进文件名，导致路径长度随聊天名线性增长，
+     * 中文聊天名稍长就撞上宿主文件名上限而无法建索引。
      */
     function buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts) {
-        const scope = normalizeSummaryVectorIndexScope_ACU(parts);
-        const scopeJson = JSON.stringify([scope.chatKey, scope.isolationKey, scope.sourceTableKey]);
-        const bytes = new TextEncoder().encode(scopeJson);
+        const serialized = serializeSummaryVectorIndexScope_ACU(parts);
+        const cached = scopeFingerprintMemo_ACU.get(serialized);
+        if (cached)
+            return cached;
+        const fingerprint = sha256Base64UrlSync_ACU(serialized);
+        scopeFingerprintMemo_ACU.set(serialized, fingerprint);
+        return fingerprint;
+    }
+    /**
+     * 旧版（无损）scope token：三元组 JSON 的 UTF-8 base64url。
+     * 仅用于识别 / 回收升级前写出的对象，新写入一律走 SHA-256 指纹。
+     */
+    function buildLegacyVectorIndexLosslessScopeTokenV2_ACU(parts) {
+        const bytes = new TextEncoder().encode(serializeSummaryVectorIndexScope_ACU(parts));
         let binary = '';
         bytes.forEach((byte) => {
             binary += String.fromCharCode(byte);
@@ -82636,51 +82762,41 @@ $CONTENT
         const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts);
         const indexId = normalizePathSegment_ACU(parts.indexId || 'snapshot');
         const writeGeneration = normalizePathSegment_ACU(parts.writeGeneration || 'write');
-        const path = `TavernDB_ACU_vector_v2_${scopeToken}_${indexId}_${writeGeneration}_snapshot`;
+        const path = `${VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU}${scopeToken}_${indexId}_${writeGeneration}_snapshot`;
         if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
-            const excess = path.length - VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU;
-            // 每个中文 UTF-8 编码占 3 字节，经 base64 后约 4 字符；ASCII 每字符 1 字节 → base64 约 1.33 字符。
-            const chineseCharsToShorten = Math.ceil(excess / 4);
+            // scopeToken 已定长，只有 indexId / writeGeneration 被放宽才可能触发；这是编程错误而非用户数据问题。
             throw new Error(`[纪要向量索引] V2 快照对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}，`
-                + `超出 ${excess} 字符。其中 scopeToken 占用 ${scopeToken.length} 字符，`
-                + `indexId 占用 ${indexId.length} 字符，writeGeneration 占用 ${writeGeneration.length} 字符，其余固定前缀/后缀共 ${path.length - scopeToken.length - indexId.length - writeGeneration.length} 字符。`
-                + `请缩短当前聊天名约 ${chineseCharsToShorten} 个中文字（或缩短数据隔离码），使路径回到上限内。`
-                + '仅在当前没有任何已建成的纪要向量索引时，重命名聊天才不会使旧索引失联；'
-                + '若已有索引，请勿直接改名，否则旧索引将无法再被寻址。'
-                + '禁止截断 canonical scope 后继续写入。');
+                + `scopeToken 占用 ${scopeToken.length} 字符，indexId 占用 ${indexId.length} 字符，writeGeneration 占用 ${writeGeneration.length} 字符。`
+                + '禁止截断任何路径段后继续写入。');
         }
         return path;
     }
     /**
      * P4 内容寻址 pack 路径（T10）。
-     * 用 V2 scope token（完整 JSON tuple base64url 编码）替代 buildVectorPackPath_ACU 走的
-     * buildVectorIndexStableDirectory_ACU —— 后者会把中文 chatKey 清成 default，导致不同聊天共享路径。
+     * 用 V2 scope 指纹替代 buildVectorPackPath_ACU 走的 buildVectorIndexStableDirectory_ACU
+     * —— 后者会把中文 chatKey 清成 default，导致不同聊天共享路径。
      * 路径刻意不含 indexId/revision，这是跨 revision 复用 pack 的前提。
      * 前缀用 v2pack_ 而非 v2_，避免与 snapshot 前缀 TavernDB_ACU_vector_v2_ 互相误判。
      */
     function buildVectorIndexContentPackPathV2_ACU(parts) {
         const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts);
         const packKey = normalizePathSegment_ACU(parts.packKey || 'pack_unknown');
-        const path = `TavernDB_ACU_vector_v2pack_${scopeToken}_${packKey}`;
+        const path = `${VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU}${scopeToken}_${packKey}`;
         if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
-            const excess = path.length - VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU;
-            const chineseCharsToShorten = Math.ceil(excess / 4);
             throw new Error(`[纪要向量索引] 内容寻址 pack 对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}，`
-                + `超出 ${excess} 字符。其中 scopeToken 占用 ${scopeToken.length} 字符，`
-                + `packKey 占用 ${packKey.length} 字符，其余固定前缀共 ${path.length - scopeToken.length - packKey.length} 字符。`
-                + `请缩短当前聊天名约 ${chineseCharsToShorten} 个中文字（或缩短数据隔离码），使路径回到上限内。`
-                + 'pack 路径不含 indexId/revision，跨 revision 复用；若仍超长，请检查 scope 是否过大。');
+                + `scopeToken 占用 ${scopeToken.length} 字符，packKey 占用 ${packKey.length} 字符。`
+                + '禁止截断任何路径段后继续写入。');
         }
         return path;
     }
-    const VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2pack_';
     /** 判断路径是否为 P4 内容寻址 pack 路径（前缀判断，不解析内容）。 */
     function isVectorIndexContentPackPathV2_ACU(path) {
         return String(path || '').startsWith(VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU);
     }
     /**
-     * 尝试把 base64url token 解码回 [chatKey, isolationKey, sourceTableKey] 三元组。
+     * 尝试把旧版无损 base64url token 解码回 [chatKey, isolationKey, sourceTableKey] 三元组。
      * 解码失败或形状不符（非长度 3 的字符串数组）返回 null。
+     * SHA-256 指纹的 32 个随机字节不可能解析成 JSON 字符串三元组，因此对新 token 恒为 null。
      */
     function tryDecodeVectorIndexScopeToken_ACU(token) {
         if (!token || /[^A-Za-z0-9_-]/.test(token))
@@ -82701,41 +82817,83 @@ $CONTENT
         }
         return null;
     }
+    function stripVectorIndexV2PathPrefix_ACU(path) {
+        const normalized = String(path || '');
+        // pack 前缀是 snapshot 前缀的超集（v2pack_ 以 v2 开头），必须先判 pack。
+        for (const prefix of [VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU, VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU]) {
+            if (normalized.startsWith(prefix))
+                return normalized.slice(prefix.length);
+        }
+        return null;
+    }
     /**
      * 从 V2 快照 / v2pack 对象路径反解 canonical scope。
-     * 注意：scopeToken 的 base64url 字母表包含 `_`（来自 base64 的 `/` 替换），
-     * 不能用"首个下划线"切分；这里逐个 `_` 候选分割点（含全串）尝试解码，
-     * 只有 JSON 三元组解析成功才算命中。截断的 base64 无法解析出完整 JSON
-     * 数组，因此不存在提前误命中的可能。
+     * 只对升级前写出的旧版无损 token 有效；新路径里的 SHA-256 指纹不可逆，恒返回 null，
+     * 调用方应改用 resolveVectorIndexRegistryFileScope_ACU 从 registry 条目取身份。
+     * 注意：base64url 字母表包含 `_`，不能用"首个下划线"切分；这里逐个 `_` 候选分割点
+     * （含全串）尝试解码，只有 JSON 三元组解析成功才算命中。
      */
     function decodeVectorIndexScopeFromPath_ACU(path) {
-        const normalized = String(path || '');
-        const prefixes = [VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU, 'TavernDB_ACU_vector_v2_'];
-        for (const prefix of prefixes) {
-            if (!normalized.startsWith(prefix))
-                continue;
-            const remainder = normalized.slice(prefix.length);
-            for (let index = 0; index <= remainder.length; index += 1) {
-                if (index < remainder.length && remainder[index] !== '_')
-                    continue;
-                const decoded = tryDecodeVectorIndexScopeToken_ACU(remainder.slice(0, index));
-                if (decoded)
-                    return decoded;
-            }
+        const remainder = stripVectorIndexV2PathPrefix_ACU(path);
+        if (remainder === null)
             return null;
+        for (let index = 0; index <= remainder.length; index += 1) {
+            if (index < remainder.length && remainder[index] !== '_')
+                continue;
+            const decoded = tryDecodeVectorIndexScopeToken_ACU(remainder.slice(0, index));
+            if (decoded)
+                return decoded;
+        }
+        return null;
+    }
+    /** 路径是否携带升级前的无损 base64 scope token（可反解出三元组）。 */
+    function isLegacyLosslessVectorIndexV2Path_ACU(path) {
+        return decodeVectorIndexScopeFromPath_ACU(path) !== null;
+    }
+    /**
+     * 从 V2 快照 / v2pack 路径提取 scope token（不解码）。
+     * 新格式 token 定长 43 且紧跟 `_`；旧格式退回到"能解码出三元组的最短前缀"。
+     */
+    function extractVectorIndexV2ScopeTokenFromPath_ACU(path) {
+        const remainder = stripVectorIndexV2PathPrefix_ACU(path);
+        if (remainder === null)
+            return null;
+        const fixed = remainder.slice(0, VECTOR_INDEX_SCOPE_FINGERPRINT_LENGTH_ACU);
+        if (fixed.length === VECTOR_INDEX_SCOPE_FINGERPRINT_LENGTH_ACU
+            && remainder[VECTOR_INDEX_SCOPE_FINGERPRINT_LENGTH_ACU] === '_'
+            && !/[^A-Za-z0-9_-]/.test(fixed)
+            && tryDecodeVectorIndexScopeToken_ACU(fixed) === null) {
+            return fixed;
+        }
+        for (let index = 0; index <= remainder.length; index += 1) {
+            if (index < remainder.length && remainder[index] !== '_')
+                continue;
+            const candidate = remainder.slice(0, index);
+            if (tryDecodeVectorIndexScopeToken_ACU(candidate))
+                return candidate;
         }
         return null;
     }
     function extractVectorIndexContentPackScopeTokenFromPath_ACU(path) {
-        const normalized = String(path || '');
-        if (!isVectorIndexContentPackPathV2_ACU(normalized))
+        if (!isVectorIndexContentPackPathV2_ACU(path))
             return null;
-        const remainder = normalized.slice(VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU.length);
-        const separatorIndex = remainder.indexOf('_');
-        if (separatorIndex < 0)
-            return null;
-        const scopeToken = remainder.slice(0, separatorIndex);
-        return scopeToken || null;
+        return extractVectorIndexV2ScopeTokenFromPath_ACU(path);
+    }
+    /**
+     * 解析 registry 条目所属的 canonical scope。
+     * 新条目直接携带 `scope`；升级前的旧条目退回到从无损路径 token 反解。
+     * 两者都没有（legacy 分片布局等）返回 null，调用方按"身份不可验证"处理。
+     */
+    function resolveVectorIndexRegistryFileScope_ACU(file) {
+        const scope = file?.scope;
+        if (scope && typeof scope === 'object'
+            && String(scope.chatKey || '').trim()
+            && String(scope.isolationKey || '').trim()
+            && String(scope.sourceTableKey || '').trim()) {
+            return normalizeSummaryVectorIndexScope_ACU(scope);
+        }
+        const decoded = decodeVectorIndexScopeFromPath_ACU(String(file?.path || ''));
+        return decoded ? normalizeSummaryVectorIndexScope_ACU(decoded) : null;
     }
     function buildVectorIndexSingleSnapshotFilePath_ACU(parts) {
         const chatKey = normalizePathSegment_ACU(parts.chatKey);
@@ -82956,7 +83114,13 @@ $CONTENT
             return;
         const registry = await loadVectorIndexRegistry_ACU();
         const byPath = new Map(registry.files.map((file) => [file.path, file]));
-        files.forEach((file) => byPath.set(file.path, file));
+        files.forEach((file) => {
+            // 路径不可逆后 registry 里的 scope 是 GC 唯一的身份来源；
+            // 后续 prepared → published 等状态更新若未带 scope，不能把已有的擦掉。
+            const existing = byPath.get(file.path);
+            const scope = file.scope ?? existing?.scope;
+            byPath.set(file.path, scope ? { ...file, scope } : file);
+        });
         registry.files = Array.from(byPath.values());
         await saveVectorIndexRegistry_ACU(registry);
     }
@@ -84974,6 +85138,47 @@ $CONTENT
             manifestCount,
         };
     }
+    /**
+     * 升级前写出的 V2 对象把三元组无损 base64 进了路径。它们的 token 与现行 SHA-256 指纹
+     * 永远不相等，若不单独处理会被 quarantine 永久占盘。此处从路径反解 scope，
+     * 要求与某个 eligible scope 精确相等、超过 grace、且 blob 内身份与路径一致，三者齐备才判删。
+     */
+    async function judgeLegacyLosslessV2Orphan_ACU(file, eligibleScopes) {
+        const path = String(file?.path || '').trim();
+        const decoded = decodeVectorIndexScopeFromPath_ACU(path);
+        if (!decoded)
+            return 'not_legacy';
+        const scope = normalizeSummaryVectorIndexScope_ACU(decoded);
+        const matched = eligibleScopes.some((candidate) => candidate.chatKey === scope.chatKey
+            && candidate.isolationKey === scope.isolationKey
+            && candidate.sourceTableKey === scope.sourceTableKey);
+        if (!matched)
+            return 'retain';
+        if (String(file.publicationState || '') === 'prepared')
+            return 'retain';
+        const registeredAt = Date.parse(String(file.createdAt || file.updatedAt || ''));
+        if (!Number.isFinite(registeredAt) || Date.now() - registeredAt < SUMMARY_VECTOR_INDEX_SAFE_GC_GRACE_PERIOD_MS_ACU) {
+            return 'retain';
+        }
+        const legacyToken = buildLegacyVectorIndexLosslessScopeTokenV2_ACU(scope);
+        if (isVectorIndexContentPackPathV2_ACU(path)) {
+            const loaded = await readVectorIndexJsonFile_ACU(path);
+            const pack = loaded.ok ? loaded.data : null;
+            const verified = !!pack
+                && pack.schema === SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU
+                && String(pack.packScope || '') === legacyToken;
+            return verified ? 'delete' : 'retain';
+        }
+        const loaded = await readVectorIndexJsonFile_ACU(path);
+        const blob = loaded.ok ? loaded.data : null;
+        const verified = !!blob
+            && blob.schema === 'single_file_snapshot'
+            && String(blob.chatKey || '') === scope.chatKey
+            && String(blob.isolationKey || '') === scope.isolationKey
+            && String(blob.sourceTableKey || '') === scope.sourceTableKey
+            && String(blob.storageIdentity?.scopeFingerprint || '') === legacyToken;
+        return verified ? 'delete' : 'retain';
+    }
     async function cleanupUnreachableSummaryVectorIndexFiles_ACU(options = {}) {
         const reachability = await collectSummaryVectorIndexReachability_ACU();
         const registry = await loadVectorIndexRegistry_ACU();
@@ -85026,6 +85231,27 @@ $CONTENT
                 reachableFileCount += 1;
                 retainedPaths.push(path);
                 blockedByReachability.push(path);
+                continue;
+            }
+            // 升级前的无损 token 路径：现行指纹前缀永远匹配不上，必须先于 pack / snapshot 分支处理。
+            const legacyVerdict = eligibleScopes.length > 0
+                ? await judgeLegacyLosslessV2Orphan_ACU(file, eligibleScopes)
+                : 'not_legacy';
+            if (legacyVerdict !== 'not_legacy') {
+                if (legacyVerdict === 'retain') {
+                    retainedPaths.push(path);
+                    blockedByReachability.push(path);
+                    continue;
+                }
+                const legacyDelete = await deleteVectorIndexFile_ACU(path);
+                if (legacyDelete.ok) {
+                    logSummaryVectorIndexIdentityEvent_ACU('debug', 'gc', 'deleted_verified_orphan', { path });
+                    pendingSummaryVectorIndexPublicationPaths_ACU.delete(path);
+                    deletedPaths.push(legacyDelete.path || path);
+                }
+                else {
+                    failedDeletes.push({ path, error: legacyDelete.error || '删除失败' });
+                }
                 continue;
             }
             // T14：P4 内容寻址 pack 独立 GC 流程。
@@ -85941,6 +86167,8 @@ $CONTENT
                     if (!uploadResult.ok || !uploadResult.ref) {
                         throw new Error(uploadResult.error || `内容寻址 pack 上传失败: ${packPath}`);
                     }
+                    // 路径里的 scope token 不可逆，registry 条目必须自带 scope 才能被 GC 归属到聊天。
+                    uploadResult.ref.scope = { chatKey, isolationKey, sourceTableKey };
                     // 先登记再校验：若 checksum 不一致需回滚本对象，必须已进入 newlyUploadedFiles，
                     // 否则物理写入的对象不在回滚集合内会泄漏为孤儿（计划 §T12.4）。
                     newlyUploadedFiles.push(uploadResult.ref);
@@ -86024,6 +86252,7 @@ $CONTENT
         });
         if (!written.ok || !written.ref)
             throw new Error(written.error || '单文件交火向量快照写入失败');
+        written.ref.scope = { chatKey, isolationKey, sourceTableKey };
         const verified = await readVectorIndexJsonFile_ACU(snapshotPath);
         let verificationError = null;
         try {
@@ -103183,21 +103412,20 @@ $CONTENT
         return String(currentChatFileIdentifier_ACU || '').trim();
     }
     /**
-     * 从 registry 反解出属于指定 chatKey 集合的全部唯一 scope。
-     * 只识别 V2 快照 / v2pack 路径（token 可逆）；legacy 路径没有可验证身份，
-     * 维持 Safe GC 的 quarantine 策略，不参与删除。
+     * 从 registry 收集属于指定 chatKey 集合的全部唯一 scope。
+     * 身份来源：新条目自带的 `scope` 字段；升级前旧条目退回到无损路径 token 反解。
+     * 两者都没有的 legacy 分片路径没有可验证身份，维持 Safe GC 的 quarantine 策略，不参与删除。
      */
     async function collectRegistryScopesByChatKeys_ACU(matchChatKey) {
         const registry = await loadVectorIndexRegistry_ACU();
         const byToken = new Map();
         for (const file of registry.files) {
-            const path = String(file?.path || '').trim();
-            if (!path)
+            if (!String(file?.path || '').trim())
                 continue;
-            const decoded = decodeVectorIndexScopeFromPath_ACU(path);
-            if (!decoded || !matchChatKey(decoded.chatKey))
+            const resolved = resolveVectorIndexRegistryFileScope_ACU(file);
+            if (!resolved || !matchChatKey(resolved.chatKey))
                 continue;
-            const scope = normalizeSummaryVectorIndexScope_ACU(decoded);
+            const scope = normalizeSummaryVectorIndexScope_ACU(resolved);
             byToken.set(serializeSummaryVectorIndexScope_ACU(scope), scope);
         }
         return Array.from(byToken.values());

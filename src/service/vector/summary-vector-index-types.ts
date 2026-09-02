@@ -1,4 +1,5 @@
 import type { IsolationTagData_ACU } from '../../data/models/chat-message-data';
+import type { SummaryVectorIndexCanonicalScope_ACU } from '../../shared/summary-vector-index-scope';
 
 export type SummaryVectorIndexBackend_ACU = 'embedded' | 'st-files';
 
@@ -185,6 +186,12 @@ export interface SummaryVectorIndexExternalFileRef_ACU {
     path: string;
     /** V2 registry publication lifecycle; missing means historical entry with unknown legacy semantics. */
     publicationState?: 'prepared' | 'published';
+    /**
+     * 对象所属的 canonical scope。V2 路径里的 scope token 是 SHA-256 指纹、不可逆，
+     * registry 条目因此成为 GC 反查"哪些文件属于哪个聊天"的唯一持久化依据。
+     * 升级前的旧条目没有此字段，只能从旧版无损路径 token 反解。
+     */
+    scope?: SummaryVectorIndexCanonicalScope_ACU;
     shardId?: string;
     byteSize: number;
     checksum: string;

@@ -151,6 +151,8 @@ vi.mock('../../../src/shared/defaults', () => ({
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
   VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU: 'spv9.2-chronicle-source-text',
   VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU: [0.45],
+  VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU: 'spv9.2-recall-params-force-override',
+  VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU: ['summaryIndexKeywordMinRows', 'topK', 'minScore', 'recallCandidateLimit', 'bm25CandidateLimit', 'recentFixedInjectCount', 'rerankBatchSize'],
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,
@@ -164,7 +166,8 @@ vi.mock('../../../src/shared/defaults', () => ({
     summaryIndexArchiveMaxConcurrency: 30,
     topK: 200,
     minScore: 0.35,
-    recallCandidateLimit: 100,
+    recallCandidateLimit: 1000,
+    bm25CandidateLimit: 1000,
     summaryIndexKeywordMinRows: 200,
     recentFixedInjectCount: 50,
     summaryIndexV2WriteEnabled: true,
@@ -720,8 +723,10 @@ describe('loadSettings_ACU', () => {
   });
 
   it('spv9.2 源文本升级：用户自定义过的 minScore 不动；已写 marker 后不再迁移', () => {
+    // 召回参数强制覆盖 marker 已写入，单独验证源文本迁移只碰旧默认值。
     mockGlobalMeta.vectorMemoryConfigGlobal = {
       defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      recallParamsForceOverrideVersion: 'spv9.2-recall-params-force-override',
       minScore: 0.6,
     };
     loadSettings_ACU();
@@ -731,12 +736,75 @@ describe('loadSettings_ACU', () => {
     mockGlobalMeta.vectorMemoryConfigGlobal = {
       defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
       sourceTextUpgradeVersion: 'spv9.2-chronicle-source-text',
+      recallParamsForceOverrideVersion: 'spv9.2-recall-params-force-override',
       minScore: 0.45,
       keywordGenerationEnabled: false,
     };
     loadSettings_ACU();
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.minScore).toBe(0.45);
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.keywordGenerationEnabled).toBe(false);
+  });
+
+  it('spv9.2 召回参数一次性强制覆盖：只刷召回参数，不动 API/密钥/模型/提示词/命名空间', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      sourceTextUpgradeVersion: 'spv9.2-chronicle-source-text',
+      summaryIndexKeywordMinRows: 100,
+      topK: 60,
+      minScore: 0.6,
+      recallCandidateLimit: 300,
+      bm25CandidateLimit: 300,
+      recentFixedInjectCount: 1,
+      rerankBatchSize: 50,
+      embeddingEndpoint: 'https://user-embedding.test',
+      embeddingApiKey: 'sk-user',
+      embeddingModel: 'user-model',
+      rerankEndpoint: 'https://user-rerank.test',
+      rerankModel: 'user-rerank',
+      vectorNamespace: 'my-space',
+      keywordApiPreset: 'kw-preset',
+      keywordGenerationEnabled: false,
+      keywordPromptGroup: [{ content: '用户自定义关键词提示词' }],
+    };
+
+    loadSettings_ACU();
+
+    const config = mockGlobalMeta.vectorMemoryConfigGlobal;
+    expect(config.summaryIndexKeywordMinRows).toBe(200);
+    expect(config.topK).toBe(200);
+    expect(config.minScore).toBe(0.35);
+    expect(config.recallCandidateLimit).toBe(1000);
+    expect(config.bm25CandidateLimit).toBe(1000);
+    expect(config.recentFixedInjectCount).toBe(50);
+    expect(config.rerankBatchSize).toBe(300);
+    expect(config.recallParamsForceOverrideVersion).toBe('spv9.2-recall-params-force-override');
+    expect(config.embeddingEndpoint).toBe('https://user-embedding.test');
+    expect(config.embeddingApiKey).toBe('sk-user');
+    expect(config.embeddingModel).toBe('user-model');
+    expect(config.rerankEndpoint).toBe('https://user-rerank.test');
+    expect(config.rerankModel).toBe('user-rerank');
+    expect(config.vectorNamespace).toBe('my-space');
+    expect(config.keywordApiPreset).toBe('kw-preset');
+    expect(config.keywordGenerationEnabled).toBe(false);
+    expect(config.keywordPromptGroup).toEqual([{ content: '用户自定义关键词提示词' }]);
+    expect(mockSaveGlobalMeta).toHaveBeenCalled();
+  });
+
+  it('spv9.2 召回参数 marker 已写入后，保留用户之后自行修改的召回参数', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      sourceTextUpgradeVersion: 'spv9.2-chronicle-source-text',
+      recallParamsForceOverrideVersion: 'spv9.2-recall-params-force-override',
+      topK: 80,
+      minScore: 0.5,
+      recentFixedInjectCount: 20,
+    };
+
+    loadSettings_ACU();
+
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.topK).toBe(80);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.minScore).toBe(0.5);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.recentFixedInjectCount).toBe(20);
   });
 
   it('一次性强制开启 V2 writer：未标记 marker 的显式 false 会被反转为 true 并写入 marker', () => {

@@ -24,7 +24,8 @@ vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
 }));
 vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   loadVectorIndexRegistry_ACU: async () => ({ version: 1, updatedAt: '', files: h.registryFiles }),
-  decodeVectorIndexScopeFromPath_ACU: (...args: any[]) => h.decodeScope(...args),
+  // 与真实实现同语义：新条目自带 scope 优先，旧条目退回路径反解。
+  resolveVectorIndexRegistryFileScope_ACU: (file: any) => file?.scope ?? h.decodeScope(String(file?.path || '')),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   cleanupUnreachableSummaryVectorIndexFiles_ACU: (...args: any[]) => h.safeGc(...args),
@@ -43,8 +44,8 @@ import {
   sweepOrphanSummaryVectorIndexFiles_ACU,
 } from '../../../src/service/vector/summary-vector-index-chat-deletion-gc';
 
-function registryFile(path: string): any {
-  return { path, role: 'snapshot', publicationState: 'published' };
+function registryFile(path: string, scope?: { chatKey: string; isolationKey: string; sourceTableKey: string }): any {
+  return { path, role: 'snapshot', publicationState: 'published', ...(scope ? { scope } : {}) };
 }
 
 describe('cleanupSummaryVectorIndexForDeletedChat_ACU 安全边界', () => {
@@ -82,9 +83,12 @@ describe('cleanupSummaryVectorIndexForDeletedChat_ACU 安全边界', () => {
     expect(h.deleteHotCacheByScope).not.toHaveBeenCalled();
   });
 
-  it('确认无同名存活后：解码 registry 收集 scope，清 IDB 并以 scopeHints 调 Safe GC', async () => {
+  it('确认无同名存活后：从 registry（新条目 scope 字段 + 旧条目路径反解）收集 scope，清 IDB 并以 scopeHints 调 Safe GC', async () => {
     h.registryFiles = [
-      registryFile('TavernDB_ACU_vector_v2_tokenA_snap_x_wg_snapshot'),
+      // 新格式：路径 token 是不可逆指纹，身份来自 registry 自带的 scope 字段。
+      registryFile('TavernDB_ACU_vector_v2_fingerprintA_snap_x_wg_snapshot', { chatKey: 'deleted-chat', isolationKey: 'default', sourceTableKey: 'summary' }),
+      // 旧格式：无 scope 字段，靠无损路径 token 反解；与上面同 scope，应去重成 1 个。
+      registryFile('TavernDB_ACU_vector_v2_tokenA_snap_old_wg_snapshot'),
       registryFile('TavernDB_ACU_vector_v2_tokenB_snap_y_wg_snapshot'),
       registryFile('legacy_path_without_token'),
     ];
@@ -93,7 +97,7 @@ describe('cleanupSummaryVectorIndexForDeletedChat_ACU 安全边界', () => {
       if (path.includes('tokenB')) return { chatKey: 'other-chat', isolationKey: 'default', sourceTableKey: 'summary' };
       return null;
     });
-    h.safeGc.mockResolvedValue({ deletedPaths: ['TavernDB_ACU_vector_v2_tokenA_snap_x_wg_snapshot'], retainedPaths: [] });
+    h.safeGc.mockResolvedValue({ deletedPaths: ['TavernDB_ACU_vector_v2_fingerprintA_snap_x_wg_snapshot'], retainedPaths: [] });
 
     const result = await cleanupSummaryVectorIndexForDeletedChat_ACU('deleted-chat.jsonl');
 

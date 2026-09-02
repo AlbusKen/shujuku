@@ -183,6 +183,20 @@ export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prom
 export const VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU = 'spv9.2-chronicle-source-text';
 /** 源文本升级前的 minScore 默认值；仅用于识别"用户从未改过"的配置。 */
 export const VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU = [0.45];
+/**
+ * 召回参数一次性强制覆盖（spv9.2）：把"召回参数"面板里的阈值/TopK/最低分/候选上限/固定写入
+ * 以及 rerank 每批条数统一刷成新默认值。API 地址、密钥、模型、提示词、命名空间不在覆盖范围内。
+ */
+export const VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU = 'spv9.2-recall-params-force-override';
+export const VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU = [
+  'summaryIndexKeywordMinRows',
+  'topK',
+  'minScore',
+  'recallCandidateLimit',
+  'bm25CandidateLimit',
+  'recentFixedInjectCount',
+  'rerankBatchSize',
+] as const;
 // note 列号改 0 基（与 $0 序列化对齐）+ 失效硬约束措辞改为写作规范；仍用默认模板的用户一次性刷新。
 export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8.5-table-note-zero-based-columns';
 // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，

@@ -2,12 +2,14 @@ import { getCurrentIsolationKey_ACU, currentChatFileIdentifier_ACU } from '../ru
 import { hashUserInput_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import {
+    buildLegacyVectorIndexLosslessScopeTokenV2_ACU,
     buildVectorIndexFileName_ACU,
     buildVectorIndexContentPackPathV2_ACU,
     buildVectorIndexSingleSnapshotV2ScopeToken_ACU,
     buildVectorIndexSingleSnapshotV2FilePath_ACU,
     buildVectorIndexStableDirectory_ACU,
     buildVectorIndexSnapshotFilePath_ACU,
+    decodeVectorIndexScopeFromPath_ACU,
     deleteVectorIndexFile_ACU,
     isVectorIndexContentPackPathV2_ACU,
     loadVectorIndexRegistry_ACU,
@@ -881,6 +883,50 @@ export async function collectSummaryVectorIndexReachability_ACU(): Promise<Summa
     };
 }
 
+type LegacyLosslessV2GcVerdict_ACU = 'not_legacy' | 'retain' | 'delete';
+
+/**
+ * 升级前写出的 V2 对象把三元组无损 base64 进了路径。它们的 token 与现行 SHA-256 指纹
+ * 永远不相等，若不单独处理会被 quarantine 永久占盘。此处从路径反解 scope，
+ * 要求与某个 eligible scope 精确相等、超过 grace、且 blob 内身份与路径一致，三者齐备才判删。
+ */
+async function judgeLegacyLosslessV2Orphan_ACU(
+    file: SummaryVectorIndexExternalFileRef_ACU,
+    eligibleScopes: Array<{ chatKey: string; isolationKey: string; sourceTableKey: string }>,
+): Promise<LegacyLosslessV2GcVerdict_ACU> {
+    const path = String(file?.path || '').trim();
+    const decoded = decodeVectorIndexScopeFromPath_ACU(path);
+    if (!decoded) return 'not_legacy';
+    const scope = normalizeSummaryVectorIndexScope_ACU(decoded);
+    const matched = eligibleScopes.some((candidate) => candidate.chatKey === scope.chatKey
+        && candidate.isolationKey === scope.isolationKey
+        && candidate.sourceTableKey === scope.sourceTableKey);
+    if (!matched) return 'retain';
+    if (String(file.publicationState || '') === 'prepared') return 'retain';
+    const registeredAt = Date.parse(String(file.createdAt || file.updatedAt || ''));
+    if (!Number.isFinite(registeredAt) || Date.now() - registeredAt < SUMMARY_VECTOR_INDEX_SAFE_GC_GRACE_PERIOD_MS_ACU) {
+        return 'retain';
+    }
+    const legacyToken = buildLegacyVectorIndexLosslessScopeTokenV2_ACU(scope);
+    if (isVectorIndexContentPackPathV2_ACU(path)) {
+        const loaded = await readVectorIndexJsonFile_ACU<SummaryVectorIndexContentPackBlob_ACU>(path);
+        const pack = loaded.ok ? loaded.data : null;
+        const verified = !!pack
+            && pack.schema === SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU
+            && String(pack.packScope || '') === legacyToken;
+        return verified ? 'delete' : 'retain';
+    }
+    const loaded = await readVectorIndexJsonFile_ACU<VectorIndexSingleSnapshotBlob_ACU>(path);
+    const blob = loaded.ok ? loaded.data : null;
+    const verified = !!blob
+        && blob.schema === 'single_file_snapshot'
+        && String(blob.chatKey || '') === scope.chatKey
+        && String(blob.isolationKey || '') === scope.isolationKey
+        && String(blob.sourceTableKey || '') === scope.sourceTableKey
+        && String(blob.storageIdentity?.scopeFingerprint || '') === legacyToken;
+    return verified ? 'delete' : 'retain';
+}
+
 export async function cleanupUnreachableSummaryVectorIndexFiles_ACU(options: SummaryVectorIndexSafeGcOptions_ACU = {}): Promise<SummaryVectorIndexSafeGcResult_ACU> {
     const reachability = await collectSummaryVectorIndexReachability_ACU();
     const registry = await loadVectorIndexRegistry_ACU();
@@ -931,6 +977,26 @@ export async function cleanupUnreachableSummaryVectorIndexFiles_ACU(options: Sum
             reachableFileCount += 1;
             retainedPaths.push(path);
             blockedByReachability.push(path);
+            continue;
+        }
+        // 升级前的无损 token 路径：现行指纹前缀永远匹配不上，必须先于 pack / snapshot 分支处理。
+        const legacyVerdict = eligibleScopes.length > 0
+            ? await judgeLegacyLosslessV2Orphan_ACU(file, eligibleScopes)
+            : 'not_legacy';
+        if (legacyVerdict !== 'not_legacy') {
+            if (legacyVerdict === 'retain') {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            const legacyDelete = await deleteVectorIndexFile_ACU(path);
+            if (legacyDelete.ok) {
+                logSummaryVectorIndexIdentityEvent_ACU('debug', 'gc', 'deleted_verified_orphan', { path });
+                pendingSummaryVectorIndexPublicationPaths_ACU.delete(path);
+                deletedPaths.push(legacyDelete.path || path);
+            } else {
+                failedDeletes.push({ path, error: legacyDelete.error || '删除失败' });
+            }
             continue;
         }
         // T14：P4 内容寻址 pack 独立 GC 流程。
@@ -1905,6 +1971,8 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
             if (!uploadResult.ok || !uploadResult.ref) {
                 throw new Error(uploadResult.error || `内容寻址 pack 上传失败: ${packPath}`);
             }
+            // 路径里的 scope token 不可逆，registry 条目必须自带 scope 才能被 GC 归属到聊天。
+            uploadResult.ref.scope = { chatKey, isolationKey, sourceTableKey };
             // 先登记再校验：若 checksum 不一致需回滚本对象，必须已进入 newlyUploadedFiles，
             // 否则物理写入的对象不在回滚集合内会泄漏为孤儿（计划 §T12.4）。
             newlyUploadedFiles.push(uploadResult.ref);
@@ -1991,6 +2059,7 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         status: 'ready',
     });
     if (!written.ok || !written.ref) throw new Error(written.error || '单文件交火向量快照写入失败');
+    written.ref.scope = { chatKey, isolationKey, sourceTableKey };
 
     const verified = await readVectorIndexJsonFile_ACU<VectorIndexSingleSnapshotBlob_ACU>(snapshotPath);
     let verificationError: unknown = null;

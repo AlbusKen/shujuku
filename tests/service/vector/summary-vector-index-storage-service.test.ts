@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   flush: vi.fn(),
   logDebug: vi.fn(),
   logWarn: vi.fn(),
+  decodeScope: vi.fn(),
   config: { value: { summaryIndexRollingDeltaEnabled: false } as any },
   snapshot: { value: null as any },
   isolationKey: 'iso-a',
@@ -36,8 +37,11 @@ vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   deleteVectorIndexFile_ACU: (...args: any[]) => h.remove(...args),
   unregisterVectorIndexFiles_ACU: (...args: any[]) => h.unregister(...args),
   buildVectorIndexSingleSnapshotV2ScopeToken_ACU: (parts: any) => `scope:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}`,
+  buildLegacyVectorIndexLosslessScopeTokenV2_ACU: (parts: any) => `legacy:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}`,
   buildVectorIndexSingleSnapshotV2FilePath_ACU: (parts: any) => `TavernDB_ACU_vector_v2_scope:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}_${parts.indexId}_${parts.writeGeneration}_snapshot`,
+  decodeVectorIndexScopeFromPath_ACU: (...args: any[]) => h.decodeScope(...args),
   isVectorIndexContentPackPathV2_ACU: (path: any) => String(path || '').startsWith('TavernDB_ACU_vector_v2pack_'),
+  VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU: 'TavernDB_ACU_vector_v2_',
   buildVectorIndexFileName_ACU: vi.fn(), buildVectorIndexSnapshotFilePath_ACU: vi.fn(),
   buildVectorIndexStableDirectory_ACU: vi.fn(), buildVectorIndexStableFilePath_ACU: vi.fn(),
   deleteRegisteredVectorIndexFilesWhere_ACU: vi.fn(), loadVectorIndexRegistry_ACU: (...args: any[]) => h.registry(...args),
@@ -427,6 +431,108 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
     expect(result.deletedPaths).toEqual([]);
     expect(result.blockedByReachability).toContain(legacyPath);
     expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  describe('升级前无损 token 路径（scope 指纹永远不匹配，需单独识别回收）', () => {
+    const scope = { chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' };
+    const legacyToken = 'legacy:chat-a|iso-a|summary';
+    const snapshotPath = `TavernDB_ACU_vector_v2_${legacyToken}_old-index_old-write_snapshot`;
+    const packPath = `TavernDB_ACU_vector_v2pack_${legacyToken}_pack_old`;
+    const old = '2020-01-01T00:00:00.000Z';
+
+    beforeEach(() => {
+      h.decodeScope.mockImplementation((path: string) => (String(path).includes(legacyToken) ? { ...scope } : null));
+    });
+
+    it('snapshot：scope 命中、超过 grace、blob 身份与路径一致 -> 删除', async () => {
+      h.registry.mockResolvedValue({ files: [{ path: snapshotPath, createdAt: old, publicationState: 'published' }] });
+      h.read.mockResolvedValue({ ok: true, data: {
+        schema: 'single_file_snapshot', ...scope,
+        storageIdentity: { layoutVersion: 2, scopeFingerprint: legacyToken, writeGeneration: 'old-write', revision: 1 },
+      } });
+
+      const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] });
+
+      expect(result.deletedPaths).toEqual([snapshotPath]);
+      expect(h.remove).toHaveBeenCalledWith(snapshotPath);
+      expect(h.unregister).toHaveBeenCalledWith([snapshotPath]);
+    });
+
+    it('pack：packScope 等于旧 token -> 删除；不等 -> quarantine', async () => {
+      h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: old, publicationState: 'published' }] });
+      h.read.mockResolvedValue({ ok: true, data: { schema: 'content_addressed_vector_pack', version: 1, packScope: legacyToken, packKey: 'pack_old' } });
+      const deleted = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] });
+      expect(deleted.deletedPaths).toEqual([packPath]);
+
+      h.remove.mockClear();
+      h.read.mockResolvedValue({ ok: true, data: { schema: 'content_addressed_vector_pack', version: 1, packScope: 'legacy:someone-else', packKey: 'pack_old' } });
+      const retained = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] });
+      expect(retained.deletedPaths).toEqual([]);
+      expect(retained.blockedByReachability).toContain(packPath);
+      expect(h.remove).not.toHaveBeenCalled();
+    });
+
+    it('路径反解出的 scope 不在 scopeHints 内 -> quarantine，不读 blob', async () => {
+      h.registry.mockResolvedValue({ files: [{ path: snapshotPath, createdAt: old }] });
+      const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+        scopeHints: [{ chatKey: 'chat-b', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+      });
+      expect(result.deletedPaths).toEqual([]);
+      expect(result.blockedByReachability).toContain(snapshotPath);
+      expect(h.read).not.toHaveBeenCalled();
+    });
+
+    it('grace 未到 / prepared / blob 身份不符 -> quarantine', async () => {
+      h.registry.mockResolvedValue({ files: [{ path: snapshotPath, createdAt: new Date().toISOString() }] });
+      expect((await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] })).deletedPaths).toEqual([]);
+
+      h.registry.mockResolvedValue({ files: [{ path: snapshotPath, createdAt: old, publicationState: 'prepared' }] });
+      expect((await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] })).deletedPaths).toEqual([]);
+
+      h.registry.mockResolvedValue({ files: [{ path: snapshotPath, createdAt: old }] });
+      h.read.mockResolvedValue({ ok: true, data: {
+        schema: 'single_file_snapshot', ...scope, sourceTableKey: 'other',
+        storageIdentity: { layoutVersion: 2, scopeFingerprint: legacyToken, writeGeneration: 'old-write', revision: 1 },
+      } });
+      expect((await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] })).deletedPaths).toEqual([]);
+      expect(h.remove).not.toHaveBeenCalled();
+    });
+
+    it('可达的旧路径仍受 pointer 保护，不进入回收', async () => {
+      const manifest = { ...manifest_ACU(), manifestFile: snapshotPath, rowsFile: snapshotPath, tombstoneFile: snapshotPath };
+      h.snapshot.value = { layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }] };
+      h.registry.mockResolvedValue({ files: [{ path: snapshotPath, createdAt: old }] });
+      const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [scope] });
+      expect(result.deletedPaths).toEqual([]);
+      expect(result.blockedByReachability).toContain(snapshotPath);
+      expect(h.read).not.toHaveBeenCalled();
+    });
+  });
+
+  it('persist 写出的 registry 条目携带 canonical scope（路径指纹不可逆，GC 需据此归属）', async () => {
+    const blobs = new Map<string, any>();
+    h.upload.mockImplementation(async (params: any) => {
+      blobs.set(params.path, params.data);
+      return {
+        ok: true,
+        ref: {
+          role: params.role, path: params.path, byteSize: 1, checksum: `sha:${JSON.stringify(params.data).length}`,
+          createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z', status: 'ready',
+        },
+      };
+    });
+    h.read.mockImplementation(async (path: string) => ({ ok: true, data: blobs.get(path) }));
+    const persisted = await persistSummaryVectorIndexSnapshot_ACU({
+      chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary', sourceTableName: '纪要表',
+      snapshotMessageId: 'message-a', indexedAt: '2025-01-01T00:00:00.000Z', embeddingModel: 'model-a',
+      rows: [{ rowKey: 'row-a', rowId: '1', rowOrder: 0, timeSpan: '', location: '', summary: 'summary', indexCode: 'A', vectorSourceText: 'summary', chunkIds: ['chunk-a'] }],
+      chunks: [{ chunkId: 'chunk-a', rowKey: 'row-a', rowOrder: 0, sequence: 0, text: 'summary', vector: [1, 2] }],
+      snapshotRevision: 0,
+    } as any);
+    const expectedScope = { chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' };
+    expect(persisted.uploadedFiles).toHaveLength(1);
+    expect(persisted.uploadedFiles[0].scope).toEqual(expectedScope);
+    expect(h.register).toHaveBeenCalledWith([expect.objectContaining({ publicationState: 'prepared', scope: expectedScope })]);
   });
 
   it('durable pointer 可达时幂等修复 registry 中的 prepared 快照为 published', async () => {

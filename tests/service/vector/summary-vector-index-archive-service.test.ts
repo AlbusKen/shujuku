@@ -764,18 +764,17 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
   });
 
-  it('T0b：scope 超长时在 embedding 之前被 preflight 拦截，createEmbeddings_ACU 调用次数为 0', async () => {
-    // 超长 isolationKey：normalizeSummaryVectorIndexScope_ACU 不做长度截断，
-    // scopeToken = base64url(JSON([chatKey, isolationKey, sourceTableKey])) 必然膨胀超 240。
+  it('T0b：超长 isolationKey 不再触发路径 preflight 拦截（scope token 已是定长指纹），归档照常', async () => {
+    // 升级前 scopeToken 是三元组的无损 base64，200 字符 isolationKey 必然把路径顶过 240 而被 preflight 拦下；
+    // 现在 token 定长 43，路径长度与 scope 内容无关，超长 scope 也能正常建索引。
     mockIsolationKeyRef.value = 'x'.repeat(200);
 
     const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
 
-    expect(result.success).toBe(false);
-    expect(result.reason).toBe('vector_index_path_too_long');
-    expect(mockCreateEmbeddings).not.toHaveBeenCalled();
-    expect(mockPersistSummaryVectorIndexSnapshot).not.toHaveBeenCalled();
-    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.reason).not.toBe('vector_index_path_too_long');
+    expect(mockCreateEmbeddings).toHaveBeenCalled();
+    expect(mockPersistSummaryVectorIndexSnapshot).toHaveBeenCalled();
   });
 
   it('T0b：正常 scope 的归档仍正常完成（preflight 不误伤），embedding 照常执行', async () => {
