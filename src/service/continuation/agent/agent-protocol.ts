@@ -172,21 +172,33 @@ export interface AgentJsonPayloadDraft_ACU {
  */
 export function parseAgentJsonPayloadDraft_ACU(raw: string | null | undefined, prefill = '', requiredKeys: readonly string[] = []): AgentJsonPayloadDraft_ACU {
   const text = normalizeModelText_ACU(raw);
-  if (text.trim()) {
-    // 先判截断：外层对象没配平时，花括号扫描会把内部条目当成独立对象抓出来（条目也有 summary 键），
-    // 必须在严格解析之前抢救外层，否则会把一条伏笔当成整份契约。已配平时 salvage 返回 null，走严格路径。
-    const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
-    const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
-    for (const candidate of candidates) {
-      const salvaged = salvageTruncatedJson_ACU(stripMarkdownFences_ACU(candidate));
-      if (!salvaged) continue;
-      const parsed = parseJsonLenient_ACU(salvaged.json);
-      if (isRecord_ACU(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
-        return { payload: parsed, truncated: true };
+  if (!text.trim()) failProtocol_ACU('内部 AI 返回为空');
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  let firstParsed: Record<string, unknown> | null = null;
+  for (const candidate of candidates) {
+    const stripped = stripMarkdownFences_ACU(candidate);
+    const start = stripped.indexOf('{');
+    if (start < 0) continue;
+    // 逐个候选判定：首个 { 能配平就按完整对象解析；配不平才视为截断去抢救。
+    // 决不能对已经完整的原文再去试“预填充 + 原文”的拼接——预填充以未闭合引号结尾，拼上完整 JSON
+    // 后必然配不平，会被当成截断抢救出一份没有 delta 的假载荷，让子代理“成功”却什么都没写。
+    if (balancedObjectFrom_ACU(stripped, start)) {
+      for (const parsed of parseObjectsFrom_ACU(stripped)) {
+        if (!requiredKeys.length || requiredKeys.some(key => key in parsed)) return { payload: parsed, truncated: false };
+        if (!firstParsed) firstParsed = parsed;
       }
+      continue;
+    }
+    const salvaged = salvageTruncatedJson_ACU(stripped);
+    if (!salvaged) continue;
+    const parsed = parseJsonLenient_ACU(salvaged.json);
+    if (isRecord_ACU(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
+      return { payload: parsed, truncated: true };
     }
   }
-  return { payload: parseAgentJsonPayload_ACU(raw, prefill, requiredKeys), truncated: false };
+  if (firstParsed) return { payload: firstParsed, truncated: false };
+  failProtocol_ACU(`返回内容不包含可解析的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
 }
 
 function parseDelegations_ACU(value: unknown): AgentDelegation_ACU[] {

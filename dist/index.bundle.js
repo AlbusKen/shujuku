@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      9.1.1
+// @version      9.1.2
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -79858,7 +79858,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.1.1" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.1.2" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -124046,22 +124046,39 @@ $CONTENT
      */
     function parseAgentJsonPayloadDraft_ACU(raw, prefill = '', requiredKeys = []) {
         const text = normalizeModelText_ACU(raw);
-        if (text.trim()) {
-            // 先判截断：外层对象没配平时，花括号扫描会把内部条目当成独立对象抓出来（条目也有 summary 键），
-            // 必须在严格解析之前抢救外层，否则会把一条伏笔当成整份契约。已配平时 salvage 返回 null，走严格路径。
-            const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
-            const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
-            for (const candidate of candidates) {
-                const salvaged = salvageTruncatedJson_ACU(stripMarkdownFences_ACU(candidate));
-                if (!salvaged)
-                    continue;
-                const parsed = parseJsonLenient_ACU(salvaged.json);
-                if (isRecord_ACU$3(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
-                    return { payload: parsed, truncated: true };
+        if (!text.trim())
+            failProtocol_ACU('内部 AI 返回为空');
+        const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+        const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        let firstParsed = null;
+        for (const candidate of candidates) {
+            const stripped = stripMarkdownFences_ACU(candidate);
+            const start = stripped.indexOf('{');
+            if (start < 0)
+                continue;
+            // 逐个候选判定：首个 { 能配平就按完整对象解析；配不平才视为截断去抢救。
+            // 决不能对已经完整的原文再去试“预填充 + 原文”的拼接——预填充以未闭合引号结尾，拼上完整 JSON
+            // 后必然配不平，会被当成截断抢救出一份没有 delta 的假载荷，让子代理“成功”却什么都没写。
+            if (balancedObjectFrom_ACU(stripped, start)) {
+                for (const parsed of parseObjectsFrom_ACU(stripped)) {
+                    if (!requiredKeys.length || requiredKeys.some(key => key in parsed))
+                        return { payload: parsed, truncated: false };
+                    if (!firstParsed)
+                        firstParsed = parsed;
                 }
+                continue;
+            }
+            const salvaged = salvageTruncatedJson_ACU(stripped);
+            if (!salvaged)
+                continue;
+            const parsed = parseJsonLenient_ACU(salvaged.json);
+            if (isRecord_ACU$3(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
+                return { payload: parsed, truncated: true };
             }
         }
-        return { payload: parseAgentJsonPayload_ACU(raw, prefill, requiredKeys), truncated: false };
+        if (firstParsed)
+            return { payload: firstParsed, truncated: false };
+        failProtocol_ACU(`返回内容不包含可解析的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
     }
     function parseDelegations_ACU(value) {
         if (!Array.isArray(value) || !value.length)

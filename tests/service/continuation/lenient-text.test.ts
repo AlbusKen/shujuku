@@ -48,6 +48,21 @@ describe('agent-protocol 宽容解析', () => {
     expect(draft.payload).toEqual({ summary: '结算完成', delta: { hooks: [{ action: 'upsert', id: 'H1', summary: '晶屑' }] } });
     const complete = parseAgentJsonPayloadDraft_ACU('{"summary":"x","delta":{}}', '', ['delta', 'summary']);
     expect(complete).toEqual({ truncated: false, payload: { summary: 'x', delta: {} } });
+
+    // 回归：完整 JSON 配上以未闭合引号结尾的预填充，绝不能被“预填充 + 原文”的拼接候选误判为截断，
+    // 否则子代理返回的整份 delta 会被抢救成一份空载荷——表现为“完成”但一条都没写进账本。
+    const prefill = '{\n  "summary": "';
+    const full = '{"summary":"结算完成","delta":{"hooks":[{"action":"upsert","id":"H1","summary":"晶屑"}],"storyArc":[{"action":"upsert","id":"ARC-STORY","scope":"story","title":"全书","direction":"谁追求什么"}]}}';
+    for (const raw of [full, `<think>先想想</think>\n${full}`, `思路说明。\n\`\`\`json\n${full}\n\`\`\``]) {
+      const parsed = parseAgentJsonPayloadDraft_ACU(raw, prefill, ['delta', 'summary']);
+      expect(parsed.truncated).toBe(false);
+      expect((parsed.payload.delta as any).hooks).toHaveLength(1);
+      expect((parsed.payload.delta as any).storyArc).toHaveLength(1);
+    }
+    // 只续写预填充之后部分的形态也要完整解析。
+    const continued = parseAgentJsonPayloadDraft_ACU('结算完成","delta":{"hooks":[{"action":"upsert","id":"H1","summary":"晶屑"}]}}', prefill, ['delta', 'summary']);
+    expect(continued.truncated).toBe(false);
+    expect((continued.payload.delta as any).hooks).toHaveLength(1);
     expect(() => parseAgentJsonPayload_ACU('<think>只有思考</think>', '', ['delta'])).toThrow();
   });
 });

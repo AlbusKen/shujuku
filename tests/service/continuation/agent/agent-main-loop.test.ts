@@ -1471,6 +1471,27 @@ describe('子代理运行时', () => {
     expect(repair).toContain('upsert / patch / retire');
   });
 
+  it('完整契约一次交付：不触发续写轮，条目全部进入写集', async () => {
+    replies = ['{"summary":"结算完成","delta":{"hooks":[{"action":"upsert","id":"H1","summary":"晶屑"},{"action":"upsert","id":"H2","summary":"信物"}],"infoGap":[{"action":"upsert","id":"E1","topic":"守门人"}],"chronology":[{"action":"upsert","id":"T1","anchor":"入城第三日","elapsed":"三日","precision":"exact","transition":"过了两天","evidenceIndexes":[3]}]}}'];
+    const result = await runtime.run(input_ACU());
+    expect(calls).toHaveLength(1);
+    expect(result.maintainer?.delta.hooks.map(item => item.id)).toEqual(['H1', 'H2']);
+    expect(result.maintainer?.delta.infoGap.map(item => item.id)).toEqual(['E1']);
+    expect(result.maintainer?.delta.chronology.map(item => item.id)).toEqual(['T1']);
+  });
+
+  it('总纲为空时 arc-architect 交回空 delta 不算完成，先索要真正的条目', async () => {
+    const volume = '{"action":"upsert","id":"VOL-01","scope":"volume","title":"第一卷","direction":"主角入城","escalation":"入城→受挫→立足","withheld":"身世","status":"active","narrativeRole":"setup","targetStageRange":{"min":3,"max":5},"targetTimeSpan":"两月","progressCeiling":"拿到商行第一份契约","sustainingThreads":["与守门人的交易"],"payoffTargets":["站稳脚跟"]}';
+    replies = [
+      '{"summary":"已确认长线 20 卷架构与卷级容量","delta":{"storyArc":[]}}',
+      `{"delta":{"storyArc":[{"action":"upsert","id":"ARC-STORY","scope":"story","title":"全书","direction":"谁追求什么","escalation":"","withheld":"","status":"active"},${volume}]}}`,
+    ];
+    const result = await runtime.run(input_ACU({ delegation: { agentName: 'arc-architect', prompt: '立总纲', reads: [] } } as any));
+    expect(calls).toHaveLength(2);
+    expect(calls[1].map(message => message.content).join('\n')).toContain('summary 里的文字不会写入任何东西');
+    expect(result.arc?.delta.storyArc.map(item => item.id)).toEqual(['ARC-STORY', 'VOL-01']);
+  });
+
   it('输出被截断时抢救完整条目并只索要剩余条目，按 id 合并后一次交付', async () => {
     const truncated = '{"summary":"结算完成","delta":{"hooks":[{"action":"upsert","id":"H1","summary":"晶屑"},{"action":"upsert","id":"H2","summary":"信物"},{"action":"upsert","id":"H3","summ';
     const rest = '{"delta":{"hooks":[{"action":"upsert","id":"H3","summary":"残图"}],"infoGap":[{"action":"upsert","id":"E1","topic":"守门人身份"}]}}';
