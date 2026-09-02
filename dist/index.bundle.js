@@ -105360,7 +105360,7 @@ $CONTENT
             lastEmptyBaseFallbackToastAt_ACU = now;
             showUiSurfaceToast_ACU({
                 kind: 'info',
-                text: `目标楼层之前没有可用的表格历史基底，本次填表（批次 ${batchNumber} 起）将从空白模板结构开始，不包含任何历史表格数据。`,
+                text: `目标楼层及其之前没有可用的表格历史基底，本次填表（批次 ${batchNumber} 起）将从空白模板结构开始，不包含任何历史表格数据。`,
             });
         }
         catch (_) { }
@@ -105376,6 +105376,33 @@ $CONTENT
         const data = parseTableTemplateJson_ACU({ stripSeedRows: true });
         logDebug_ACU(`[Batch ${batchNumber}] No chat sheet guide found, using template as merge base.`);
         return { data, error: null };
+    }
+    /**
+     * 解析有界填表 bucket 的基底回放边界（消息索引，含）。
+     *
+     * persist 把本 bucket 的 operations 追加到 saveTargetIndex 帧的既有内容之后，回放时它们
+     * 叠加在「≤ saveTargetIndex 的全部既有帧」之上。基底若只回放到 bucket 首楼 - 1，目标楼层上
+     * 已经存在的内容——典型是前端开局脚本通过 CRUD API 写入、落成 init full checkpoint 的行——
+     * 不会进入 prompt：AI 把这些表当成空表重新 INSERT，提交时撞 live SQLite 的 UNIQUE 约束，
+     * 或在回放中把同一批行翻倍。基底边界必须与 persist 前 replayBeforeAppend 的 boundary 一致。
+     *
+     * - 追加模式（普通自动/手动填表）：边界提升到 saveTargetIndex；
+     * - 增量替换模式（追平、跨根 post 段）：目标楼层内旧增量会被裁剪、full checkpoint 保留，
+     *   因此只把边界提升到落在 (lowerBound, saveTargetIndex] 内的 replay root；
+     * - preserveLowerBound（stage_only 与手动重填）：前者刻意从根之前起算，后者依赖临时基线
+     *   逐 bucket 累积并在末尾原子重建根，保持 lowerBound 不变。
+     */
+    function resolveBucketMergeBaseMaxMessageIndex_ACU(params) {
+        const { lowerBound, saveTargetIndex } = params;
+        if (params.preserveLowerBound)
+            return lowerBound;
+        if (!Number.isInteger(saveTargetIndex) || saveTargetIndex <= lowerBound)
+            return lowerBound;
+        if (params.replaceExistingIncremental) {
+            const rootIndex = getLatestV2FullCheckpointMessageIndex_ACU(params.chat || [], params.isolationKey);
+            return rootIndex > lowerBound && rootIndex <= saveTargetIndex ? rootIndex : lowerBound;
+        }
+        return saveTargetIndex;
     }
     async function buildBatchMergeBase_ACU(batchNumber, options = {}, replayEvidence) {
         try {
@@ -106501,7 +106528,20 @@ $CONTENT
                 }
                 // 基底边界必须随 bucket 推进：显式边界只作为下界，保证本 bucket 之前刚提交的
                 // 增量进入 prompt 基底，同时不把本 bucket 之后尚未处理的楼层带进来。
-                const mergeBaseMaxMessageIndex = Math.max(explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : Number.NEGATIVE_INFINITY, bucketFirstMessageIndex - 1);
+                // 目标楼层自身已存在的帧（外部 CRUD/init checkpoint）是本次增量的回放基底，
+                // 必须纳入，否则 AI 会对已存在的行重复 INSERT。
+                const mergeBaseLowerBound = Math.max(explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : Number.NEGATIVE_INFINITY, bucketFirstMessageIndex - 1);
+                const mergeBaseMaxMessageIndex = resolveBucketMergeBaseMaxMessageIndex_ACU({
+                    lowerBound: mergeBaseLowerBound,
+                    saveTargetIndex: bucket.saveTargetIndex,
+                    chat: getChatArray_ACU(),
+                    isolationKey: executionScope.isolationKey,
+                    replaceExistingIncremental: options.replaceExistingIncremental === true,
+                    preserveLowerBound: options.commitMode === 'stage_only' || options.skipWriteTargetAdmission === true,
+                });
+                if (mergeBaseMaxMessageIndex !== mergeBaseLowerBound) {
+                    logDebug_ACU(`[Batch ${bucket.batchNumber}] 基底边界提升至目标楼层既有帧：${mergeBaseLowerBound} -> ${mergeBaseMaxMessageIndex}（saveTarget=${bucket.saveTargetIndex}）。`);
+                }
                 const baseResult = await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex }, replayEvidence);
                 if (!baseResult.data) {
                     bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
@@ -107458,7 +107498,7 @@ $CONTENT
             const chatHistory = getChatArray_ACU();
             const isAutoUpdateMode = mode && mode.startsWith('auto');
             const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
-            // 此处刻意不接 replayEvidence：本循环每批 maxMessageIndex = firstMessageIndexOfBatch - 1
+            // 此处刻意不接 replayEvidence：本循环每批 maxMessageIndex = 本批 saveTarget
             // 严格递增，evidence 复用要求 boundary 完全相同（v2-replay-session.ts），命中率恒为 0，
             // 而 replay 仍会为写回 evidence 多付一次全表深克隆 —— 纯亏。跨批复用属阶段 G2
             // run-scoped session 语义（需从已提交 snapshot 增量前进），不能用同 boundary evidence 冒充。
@@ -107468,8 +107508,15 @@ $CONTENT
                 const firstMessageIndexOfBatch = batchIndices[0];
                 const lastMessageIndexOfBatch = batchIndices[batchIndices.length - 1];
                 const finalSaveTargetIndex = lastMessageIndexOfBatch;
-                // 构建合并基底
-                const baseResult = await buildBatchMergeBase_ACU(batchNumber, { maxMessageIndex: firstMessageIndexOfBatch - 1 });
+                // 构建合并基底：本路径始终追加写入 finalSaveTargetIndex，基底须覆盖到该楼层既有帧
+                // （例如前端开局脚本写入的 init checkpoint），与 persist 回放叠加顺序一致。
+                const mergeBaseMaxMessageIndex = resolveBucketMergeBaseMaxMessageIndex_ACU({
+                    lowerBound: firstMessageIndexOfBatch - 1,
+                    saveTargetIndex: finalSaveTargetIndex,
+                    chat: chatHistory,
+                    isolationKey: getCurrentIsolationKey_ACU(),
+                });
+                const baseResult = await buildBatchMergeBase_ACU(batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
                 if (!baseResult.data) {
                     return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
                 }

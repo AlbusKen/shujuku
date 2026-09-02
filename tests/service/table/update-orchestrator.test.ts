@@ -344,6 +344,7 @@ import {
   resolveUpdateMode_ACU,
   loadBatchBaseData_ACU,
   buildBatchMergeBase_ACU,
+  resolveBucketMergeBaseMaxMessageIndex_ACU,
   processUpdatesBatch_ACU,
   executeCardUpdateCore_ACU,
   orchestrateManualUpdate_ACU,
@@ -1047,6 +1048,86 @@ describe('buildBatchMergeBase_ACU', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// resolveBucketMergeBaseMaxMessageIndex_ACU
+// ═══════════════════════════════════════════════════════════════
+describe('resolveBucketMergeBaseMaxMessageIndex_ACU', () => {
+  const buildChatWithRootAt = (rootIndex: number, length: number) => Array.from({ length }, (_, index) => ({
+    is_user: false,
+    mes: `AI${index}`,
+    ...(index === rootIndex ? {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' } } },
+            logEntries: [],
+          },
+        },
+      },
+    } : {}),
+  }));
+
+  it('追加模式：边界提升到 saveTargetIndex，覆盖目标楼层自身既有帧', () => {
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: 4,
+      saveTargetIndex: 6,
+      chat: buildChatWithRootAt(0, 8),
+      isolationKey: '',
+    })).toBe(6);
+  });
+
+  it('saveTargetIndex 不晚于下界时保持下界', () => {
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: 6,
+      saveTargetIndex: 6,
+      chat: buildChatWithRootAt(0, 8),
+      isolationKey: '',
+    })).toBe(6);
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: 6,
+      saveTargetIndex: Number.NaN,
+      chat: buildChatWithRootAt(0, 8),
+      isolationKey: '',
+    })).toBe(6);
+  });
+
+  it('preserveLowerBound（stage_only / 手动重填）不调整边界', () => {
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: -1,
+      saveTargetIndex: 3,
+      chat: buildChatWithRootAt(0, 8),
+      isolationKey: '',
+      preserveLowerBound: true,
+    })).toBe(-1);
+  });
+
+  it('增量替换模式：replay root 落在 (下界, saveTarget] 内时提升到 root，否则保持下界', () => {
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: 2,
+      saveTargetIndex: 5,
+      chat: buildChatWithRootAt(3, 8),
+      isolationKey: '',
+      replaceExistingIncremental: true,
+    })).toBe(3);
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: 2,
+      saveTargetIndex: 5,
+      chat: buildChatWithRootAt(0, 8),
+      isolationKey: '',
+      replaceExistingIncremental: true,
+    })).toBe(2);
+    expect(resolveBucketMergeBaseMaxMessageIndex_ACU({
+      lowerBound: 2,
+      saveTargetIndex: 5,
+      chat: buildChatWithRootAt(7, 8),
+      isolationKey: '',
+      replaceExistingIncremental: true,
+    })).toBe(2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
 // processUpdatesBatch_ACU（适配新返回值类型）
 // ═══════════════════════════════════════════════════════════════
 describe('processUpdatesBatch_ACU', () => {
@@ -1240,6 +1321,78 @@ describe('processUpdatesBatch_ACU', () => {
     expect(executeUpdate).toHaveBeenCalledTimes(1);
     expect(executeUpdate.mock.calls[0][4]).toEqual(['sheet_bei_bao_wu_pin_biao']);
     expect(executeUpdate.mock.calls[0][6].batchBaseSnapshot.sheet_bei_bao_wu_pin_biao).toBeDefined();
+  });
+
+  it('目标楼层自身已有前端 CRUD 写入的 init checkpoint 时，基底必须包含这些既有行（回归：开局写入后填表重复 INSERT）', async () => {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { showUiSurfaceToast_ACU } = await import('../../../src/shared/ui-surface-registry');
+    const template = {
+      mate: { type: 'acu' },
+      sheet_tong_shi: {
+        uid: 'sheet_tong_shi',
+        name: '同事状态表',
+        sourceData: { ddl: 'CREATE TABLE tongshizhuangtaibiao (row_id INTEGER PRIMARY KEY, name TEXT UNIQUE, affection TEXT);' },
+        content: [['row_id', 'name', 'affection']],
+      },
+    } as any;
+    const openingCheckpointData = structuredClone(template);
+    openingCheckpointData.sheet_tong_shi.content = [
+      ['row_id', 'name', 'affection'],
+      ['1', '星野桃', '20'],
+      ['2', '黑泽刹那', '15'],
+    ];
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(template);
+      mockCurrentJsonTableData = structuredClone(openingCheckpointData);
+      vi.mocked(showUiSurfaceToast_ACU).mockClear();
+      vi.mocked(getChatArray_ACU).mockReturnValue([
+        { is_user: true, mes: '选择开局' },
+        {
+          is_user: false,
+          mes: '开局正文：星野桃与黑泽刹那登场……（足够长）',
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: {
+                version: 2,
+                checkpoint: {
+                  kind: 'full',
+                  reason: 'init',
+                  createdAt: 1,
+                  data: structuredClone(openingCheckpointData),
+                },
+                logEntries: [],
+              },
+            },
+          },
+        },
+      ]);
+      const executeUpdate = vi.fn().mockResolvedValue({ success: true, modifiedKeys: [] } as CardUpdateResult);
+
+      const result = await processUpdatesBatch_ACU([1], 'manual_standard', { targetSheetKeys: ['sheet_tong_shi'] }, executeUpdate);
+
+      expect(result.success).toBe(true);
+      expect(executeUpdate).toHaveBeenCalledTimes(1);
+      const baseSnapshot = executeUpdate.mock.calls[0][6].batchBaseSnapshot;
+      expect(baseSnapshot.sheet_tong_shi.content).toEqual([
+        ['row_id', 'name', 'affection'],
+        ['1', '星野桃', '20'],
+        ['2', '黑泽刹那', '15'],
+      ]);
+      expect(showUiSurfaceToast_ACU).not.toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining('空白模板结构'),
+      }));
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+        mate: { type: 'acu' },
+        sheet_0: { name: '测试表', updateConfig: { groupId: 0 } },
+      } as any);
+      mockCurrentJsonTableData = null;
+    }
   });
 });
 
@@ -5539,6 +5692,119 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockGetChatArray_ACU.mock.results[0].value[0].mes).toBe('问题');
   });
 
+  it('目标楼层自身已有前端 CRUD 写入的 init checkpoint 时，AI 基底包含既有行而不是空模板', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const template = {
+      mate: { type: 'acu' },
+      sheet_0: { uid: 'sheet_0', name: '表A', content: [['row_id', '值']] },
+    } as any;
+    const openingData = structuredClone(template);
+    openingData.sheet_0.content = [['row_id', '值'], ['1', '开局写入-a'], ['2', '开局写入-b']];
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(template);
+    mockCurrentJsonTableData = structuredClone(openingData);
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '选择开局' },
+      {
+        is_user: false,
+        mes: '开局正文',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: structuredClone(openingData) },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    ]);
+    mockCallCustomOpenAI.mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(true);
+    expect(mockPrepareAIInput).toHaveBeenCalledTimes(1);
+    const promptBase = mockPrepareAIInput.mock.calls[0][3].tableData;
+    expect(promptBase.sheet_0.content).toEqual([['row_id', '值'], ['1', '开局写入-a'], ['2', '开局写入-b']]);
+    // 提交结果建立在既有行之上：既有两行保留，AI 只追加一行
+    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+    expect(savePayload.tableData.sheet_0.content).toEqual([
+      ['row_id', '值'],
+      ['1', '开局写入-a'],
+      ['2', '开局写入-b'],
+      ['3', '来自A'],
+    ]);
+  });
+
+  it('根在更早楼层、目标楼层自身带前端 CRUD 增量时，AI 基底同样包含该增量', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const template = {
+      mate: { type: 'acu' },
+      sheet_0: { uid: 'sheet_0', name: '表A', content: [['row_id', '值']] },
+    } as any;
+    const rootData = structuredClone(template);
+    rootData.sheet_0.content = [['row_id', '值'], ['1', '根行']];
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(template);
+    mockCurrentJsonTableData = structuredClone(rootData);
+    mockCurrentJsonTableData.sheet_0.content.push(['2', '前端在目标楼写入']);
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      {
+        is_user: false,
+        mes: '第一层',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: structuredClone(rootData) },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: '用户' },
+      {
+        is_user: false,
+        mes: '第二层：前端脚本刚写入一行',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [{
+                seq: 1,
+                entryId: 'crud-2',
+                createdAt: 2,
+                source: 'manual_crud',
+                targetMessageIndex: 2,
+                aiFloor: 2,
+                filledSheetKeys: [],
+                changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '前端在目标楼写入'] }],
+                writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+              }],
+            },
+          },
+        },
+      },
+    ]);
+    mockCallCustomOpenAI.mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [2], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(true);
+    const promptBase = mockPrepareAIInput.mock.calls[0][3].tableData;
+    expect(promptBase.sheet_0.content).toEqual([['row_id', '值'], ['1', '根行'], ['2', '前端在目标楼写入']]);
+  });
+
   it('同一 bucket 的多组只统一提交一次', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
@@ -6004,9 +6270,11 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       return { saved: true, messageIndex: options.targetMessageIndex };
     });
 
+    // 与 orchestrateManualUpdate_ACU 重填路径的真实调用形态一致：重填专用豁免同时声明
+    // 基底边界保持「bucket 首楼 - 1」（目标楼层上的旧增量已被预清理/待重建，不得纳入基底）。
     const result = await processGroupedRuntimeChunk_ACU([
       { key: 'manual_refill', groupId: 0, indices: [27, 28, 29, 30], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null, mergeBaseMaxMessageIndex: 26 },
-    ], 'manual_independent');
+    ], 'manual_independent', { skipWriteTargetAdmission: true });
 
     expect(result.success).toBe(true);
     expect(promptBaseRows).toHaveLength(2);
