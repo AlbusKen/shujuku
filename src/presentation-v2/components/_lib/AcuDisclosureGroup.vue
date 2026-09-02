@@ -88,15 +88,19 @@ defineEmits<{
   (e: 'toggle'): void;
 }>();
 
+// 裁切只在高度动画进行中需要（useAcuHeightTransition 会在 beforeEnter/beforeLeave 临时设 hidden）。
+// 静止状态必须放开 overflow，否则 body 里的浮层（AcuSelect 下拉菜单等）会被折叠容器切掉。
+// 指定了 bodyMaxHeight 的组是滚动容器，保持 overflow-y: auto。
 const bodyStyle = computed(() => ({
   maxHeight: props.bodyMaxHeight || undefined,
-  overflowY: props.bodyMaxHeight ? 'auto' as const : 'hidden' as const,
+  overflowY: props.bodyMaxHeight ? 'auto' as const : 'visible' as const,
+  overflowX: props.bodyMaxHeight ? 'hidden' as const : 'visible' as const,
 }));
 
 const heightTransition = useAcuHeightTransition({
   restoreOverflow(el: HTMLElement) {
-    el.style.overflowY = props.bodyMaxHeight ? 'auto' : 'hidden';
-    el.style.overflowX = 'hidden';
+    el.style.overflowY = props.bodyMaxHeight ? 'auto' : 'visible';
+    el.style.overflowX = props.bodyMaxHeight ? 'hidden' : 'visible';
   },
 });
 
@@ -140,7 +144,8 @@ function cleanupTransition(el: Element): void {
   display: flex;
   flex-direction: column;
   gap: 0;
-  overflow: hidden;
+  /* 根节点不裁切：折叠动画的裁切由 body 的内联 overflow 承担，静止时下拉菜单等浮层需要溢出到组外。 */
+  overflow: visible;
   border-radius: var(--acu-radius-md);
   background: transparent;
 }
@@ -153,7 +158,8 @@ function cleanupTransition(el: Element): void {
   min-height: 34px;
   appearance: none;
   border: 0;
-  border-radius: 0;
+  /* 头部自己收圆角：根节点已不再用 overflow: hidden 帮它裁掉悬停底色。 */
+  border-radius: var(--acu-radius-md);
   padding: 7px 10px;
   background: transparent;
   color: var(--acu-text-2);
@@ -168,6 +174,11 @@ function cleanupTransition(el: Element): void {
 
 .acu-disclosure-group__header:hover {
   background: var(--acu-hover-overlay);
+}
+
+.acu-disclosure-group--expanded .acu-disclosure-group__header {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .acu-disclosure-group__header:focus-visible {
@@ -215,6 +226,5 @@ function cleanupTransition(el: Element): void {
   padding: 8px;
   opacity: 1;
   transform: translateY(0);
-  overflow-x: hidden;
 }
 </style>

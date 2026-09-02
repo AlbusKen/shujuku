@@ -104,6 +104,19 @@ const RULES: HintRule[] = [
       '确认对应功能（填表 / 剧情推进 / 续写）选择的是这个已补全的预设。',
     ],
   },
+  // 交火 rerank 回退：runtime 会把网关的具体原因（HTTP 状态 / 网络失败）包在这条消息里，
+  // 必须排在 HTTP / 网络通用规则之前，否则用户只会看到泛泛的「网络问题」而不知道是 rerank 被跳过了。
+  {
+    id: 'vector-rerank-fallback',
+    test: /rerank 调用失败|rerank 响应没有任何可用的评分/,
+    summary: 'Rerank 重排序没有生效，本轮交火已回退为仅按 Embedding 相似度排序。',
+    steps: [
+      '到「交火模式」页核对 Rerank 的接口地址（要填到 /rerank 这一级的完整地址）、API Key 与模型名。',
+      '报错含「网络失败 / Failed to fetch」时多半是服务商不允许浏览器跨域直连，换用支持 CORS 的 rerank 服务或反向代理地址。',
+      '报错含「没有任何可用的评分」时说明返回格式不是 results[].index / relevance_score，换一个兼容 Jina / Cohere 格式的服务商。',
+      '不想用重排序就把 Rerank 地址与模型都清空，日志就不会再出现这条报错。',
+    ],
+  },
 
   // ─── HTTP 状态码 ───
   {

@@ -1,5 +1,3 @@
-import { getHostRequestHeaders_ACU } from './ai-gateway';
-
 /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
 const VECTOR_RERANK_TIMEOUT_MS_ACU = 30_000;
 
@@ -21,11 +19,14 @@ function normalizeEndpoint_ACU(endpoint: string): string {
     return String(endpoint || '').trim().replace(/\/+$/, '');
 }
 
-function buildRerankHeaders_ACU(apiKey?: string): Record<string, string> {
-    const headers: Record<string, string> = {
-        ...getHostRequestHeaders_ACU(),
-        'Content-Type': 'application/json',
-    };
+/**
+ * Rerank 是浏览器直连第三方服务商的跨域请求，与 embedding 网关同一口径：只带 Content-Type 与 Authorization。
+ * 绝不能混入酒馆宿主请求头（X-CSRF-Token 等）——自定义头会触发 CORS 预检，服务商的
+ * Access-Control-Allow-Headers 不放行它就整条请求被浏览器拦下，rerank 静默退化成 embedding 排序，
+ * 同时还把酒馆的 CSRF 令牌泄露给第三方。
+ */
+export function buildRerankHeaders_ACU(apiKey?: string): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (apiKey) {
         headers.Authorization = `Bearer ${apiKey}`;
     }

@@ -186,6 +186,14 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU = 'spv3.4-continu
  * chronology and long-term constraints; V23-era outline protocol segments are migrated precisely.
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU = 'spv3.5-continuation-outline-ledgers-v27';
+/**
+ * Default-lineage repair version. Earlier targeted migrations matched stale segments against
+ * "the current default" (by index or by text), so every later default rewrite silently left older
+ * installs with stale rule segments — and the V20 arc-architect task segment was overwritten by the
+ * V25 capacity contract, leaving that sub-agent with no material or task injection at all.
+ * V28 maps every known historical default segment to its current slot and restores missing task segments.
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU = 'spv3.6-continuation-default-lineage-v28';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -252,7 +260,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU,
   };
 }
 

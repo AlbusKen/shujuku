@@ -29,6 +29,8 @@ describe('resolveLogErrorHint', () => {
     ['[正文优化] API调用失败 (尝试 1/3): Error: API请求失败: 403 Forbidden', 'http-403'],
     ['API请求失败: 404 {"error":"model gpt-99 does not exist"}', 'http-404'],
     ['Rerank 请求失败: 429 rate limit exceeded', 'http-429'],
+    ['[交火模式纪要索引] Rerank 调用失败（endpoint=https://x/rerank, model=m），本轮回退到 Embedding 排序：Rerank 请求网络失败：Failed to fetch', 'vector-rerank-fallback'],
+    ['[交火模式纪要索引] Rerank 响应没有任何可用的评分（endpoint=https://x/rerank, model=m），本轮回退到 Embedding 排序。', 'vector-rerank-fallback'],
     ['[剧情推进] 执行失败: Error: API请求失败: 503 Service Unavailable', 'http-5xx'],
     ["API请求失败: 400 This model's maximum context length is 128000 tokens", 'context-length'],
     ['API请求失败: 400 {"error":{"type":"invalid_request_error","message":"Unsupported parameter: top_k"}}', 'http-400'],

@@ -145,6 +145,35 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(rendered).toContain('根据本轮任务校准总纲');
   });
 
+  it('keeps the arc-architect volume plan ahead of the trailing prefill so the prefill stays the last message', async () => {
+    const input = input_ACU();
+    input.delegation = { agentName: 'arc-architect', prompt: '立总纲', reads: [] };
+    input.resolveContext.moduleSnapshot = {
+      ...input.resolveContext.moduleSnapshot,
+      storyArc: [{ id: 'ARC-STORY', scope: 'story', title: '全书', direction: '追查真相', escalation: '', withheld: '', status: 'active', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' }],
+    } as any;
+    const calls: Array<Array<{ role: string; content: string }>> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => {
+        calls.push(messages);
+        return finalReply_ACU;
+      },
+    });
+
+    await runtime.run(input);
+
+    const messages = calls[0];
+    const last = messages[messages.length - 1];
+    expect(last.role).toBe('assistant');
+    expect(last.content).toBe('{\n  "summary": "');
+    expect(messages[messages.length - 2].role).toBe('user');
+    expect(messages[messages.length - 2].content).toContain('【总纲卷数计划】');
+    // 任务段（含全部固定资料注入）必须在卷数计划之前、预填充之前完整送达。
+    expect(messages[messages.length - 3].content).toContain('【本次任务】\n立总纲');
+    expect(messages[messages.length - 3].content).toContain('【故事总纲现状】');
+  });
+
   it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {
     const base = input_ACU();
     base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxExtraReads: 1 };

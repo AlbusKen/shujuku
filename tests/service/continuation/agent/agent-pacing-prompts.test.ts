@@ -13,7 +13,7 @@ import {
 import { renderAgentTurnGuidance_ACU, renderAgentTurnPacingGuidance_ACU } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
 import {
   buildDefaultContinuationSettings_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU,
   V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU,
 } from '../../../../src/service/continuation/defaults';
 
@@ -25,7 +25,7 @@ describe('continuation P0 pacing prompt contracts', () => {
   it('assembles the V24 outline contract under the current default version', () => {
     const settings = buildDefaultContinuationSettings_ACU();
 
-    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU);
+    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU);
     expect(settings.outlinePrompt.some(segment => segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)).toBe(true);
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('setup 与 cooldown 允许主线保持不动');
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('隔夜、数日后还是更久');

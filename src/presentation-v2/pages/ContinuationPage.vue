@@ -876,6 +876,7 @@ watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevisio
   background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);
 }
 .acu-v2-continuation-page__group :deep(.acu-disclosure-group__header) { border-radius: var(--acu-radius-sm); }
+.acu-v2-continuation-page__group :deep(.acu-disclosure-group--expanded .acu-disclosure-group__header) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .acu-v2-continuation-page__group :deep(.acu-disclosure-group__body) { gap: 12px; padding: 12px; }
 .acu-v2-continuation-page__group :deep(.acu-disclosure-group__meta) { max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
 .acu-v2-continuation-page__group .acu-v2-continuation-page__actions { margin-top: 0; }

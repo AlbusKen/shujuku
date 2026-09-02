@@ -239,6 +239,19 @@ interface SubagentMaterial_ACU {
   text: string;
 }
 
+/**
+ * 把一条运行时消息插到尾部预填充之前。渲染后的消息序列若以 assistant 预填充收尾，
+ * 追加内容必须放在它前面，否则预填充不再是最后一条消息、失去续写引导作用。
+ */
+export function insertBeforeTrailingPrefill_ACU(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+  extra: { role: string; content: string },
+): Array<{ role: string; content: string }> {
+  const last = messages[messages.length - 1];
+  if (last && last.role === 'assistant') return [...messages.slice(0, -1), extra, last];
+  return [...messages, extra];
+}
+
 /** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
 function resolveMaterial_ACU(token: string, context: AgentResolveContext_ACU): SubagentMaterial_ACU {
   const resolved = resolveAgentReadToken_ACU(token, context);
@@ -316,6 +329,11 @@ export class AgentSubagentRuntime_ACU {
     }, 'agent_delegate');
 
     const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
+    // 总纲卷数计划是随设置变化的运行时指令，不进提示词模板；但它必须落在尾部预填充之前——
+    // 追加在预填充之后会让对话以一条 user 消息收尾，预填充失效，模型会另起一段回复而不是续写 JSON。
+    const baseMessages = definition.promptKey === 'arcArchitect'
+      ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
+      : rendered.messages;
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     const maxToolRounds = Math.max(0, input.budget.maxExtraReads);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
@@ -389,11 +407,7 @@ export class AgentSubagentRuntime_ACU {
       }
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const raw = await callContinuationInternalAiWithRetry_ACU(
-        () => this.dependencies.callInternalAi([
-          ...rendered.messages,
-          ...(definition.promptKey === 'arcArchitect' ? [{ role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) }] : []),
-          ...transcript,
-        ], input.preset, identity, input.signal, callOptions),
+        () => this.dependencies.callInternalAi([...baseMessages, ...transcript], input.preset, identity, input.signal, callOptions),
         {
           transportRetries: retries,
           retryDelaySeconds: input.settings.retryDelaySeconds,

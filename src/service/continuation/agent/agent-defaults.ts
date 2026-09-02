@@ -570,6 +570,101 @@ export function currentDefaultMainAgentLayoutAnswer_ACU(): string {
   return segment?.content ?? V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU;
 }
 
+/**
+ * fnv-1a 32 位哈希（十六进制）。谱系表只需要稳定、低碰撞地识别「这段正文就是某个历史默认段」，
+ * 配合正文长度双重校验后，用户自写的段被误判成历史默认段的概率可以忽略。
+ */
+export function hashAgentPromptContent_ACU(content: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < content.length; index += 1) {
+    hash ^= content.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * 默认组里的语义槽位。迁移必须按槽位定位当前默认段，绝不能按数组下标——
+ * 下标会随着后续版本在中间插段而漂移（V25 在总纲契约后插入卷级容量段，就让「按 current[7] 取任务段」
+ * 拿到了容量段，把 V20 用户的总纲任务段整段覆盖掉，导致 arc-architect 收不到任何资料与任务）。
+ */
+export type AgentPromptSlotKey_ACU =
+  | 'system'
+  | 'arcPurpose'
+  | 'arcEpistemology'
+  | 'capabilityAnswer'
+  | 'actionRules'
+  | 'textProtocol'
+  | 'subagentRules'
+  | 'outputContract'
+  | 'task';
+
+const AGENT_PROMPT_SLOT_LOCATORS_ACU: Record<AgentPromptSlotKey_ACU, (segment: ContinuationPromptSegment_ACU) => boolean> = {
+  system: segment => segment.role === 'system',
+  arcPurpose: segment => segment.role === 'assistant' && segment.content.startsWith('因为阶段大纲一次只看'),
+  arcEpistemology: segment => segment.role === 'assistant' && segment.content.startsWith('我的边界有'),
+  capabilityAnswer: segment => segment.role === 'assistant' && segment.content.startsWith('我能做的：'),
+  actionRules: segment => segment.role === 'assistant' && segment.content.startsWith('我的行动规则：'),
+  textProtocol: segment => segment.content.startsWith('【文本协议规范】'),
+  subagentRules: segment => segment.content.startsWith('【子代理使用规则】'),
+  outputContract: segment => segment.role === 'assistant' && segment.content.startsWith('我的最终交付是一个 JSON 对象'),
+  task: segment => segment.content.includes('$AGENT_TASK'),
+};
+
+/**
+ * 在一组提示词段里按语义槽位定位段。
+ * @param segments 提示词段（通常是当前默认组）
+ * @param slot 槽位键
+ * @returns 命中的段；该组没有此槽位时返回 undefined
+ */
+export function findAgentPromptSlot_ACU(segments: readonly ContinuationPromptSegment_ACU[], slot: AgentPromptSlotKey_ACU): ContinuationPromptSegment_ACU | undefined {
+  return segments.find(AGENT_PROMPT_SLOT_LOCATORS_ACU[slot]);
+}
+
+export interface AgentPromptLineageEntry_ACU {
+  /** 历史默认段正文的 hashAgentPromptContent_ACU 值。 */
+  hash: string;
+  /** 历史默认段正文长度，与哈希双重校验。 */
+  length: number;
+  /** 该历史段在当前默认组里对应的槽位。 */
+  slot: AgentPromptSlotKey_ACU;
+  /** 来源版本与段落说明，只作维护备注。 */
+  note: string;
+}
+
+/**
+ * 历史默认段谱系：V17–V26 各版默认提示词里、经现有迁移链之后仍与当前默认不同的那些段。
+ * 用户从未改写过的默认段会精确命中这里的哈希，被换成当前默认；用户改写过的段不会命中，原样保留。
+ *
+ * 维护约定：任何一次改写默认段正文，都要把旧正文的哈希与长度追加到对应角色下，
+ * 并把改写前的默认组追加进 tests/service/continuation/fixtures/continuation-prompt-history.json；
+ * 谱系回归测试会验证每一份历史默认组都能迁移成当前默认组。
+ */
+export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPrompts_ACU, readonly AgentPromptLineageEntry_ACU[]> = {
+  main: [
+    { hash: '7c50c9ea', length: 257, slot: 'capabilityAnswer', note: 'V17–V22 模式边界答（无「卷级台阶由 arc-architect 维护」）' },
+    { hash: 'b5eaeca2', length: 960, slot: 'actionRules', note: 'V17–V22 行动规则（无第 9 条节奏规则）' },
+    { hash: 'be6e00a6', length: 2646, slot: 'textProtocol', note: 'V17–V22 文本协议规范（旧 finalize 骨架；V17/V18 为 system 角色）' },
+    { hash: '0b9166c2', length: 1703, slot: 'subagentRules', note: 'V17–V22 子代理使用规则（无 pacing 派工约束；V17/V18 为 system 角色）' },
+  ],
+  arcArchitect: [
+    { hash: '23b29f8b', length: 1866, slot: 'outputContract', note: 'V22/V23 总纲输出契约（无 direction/escalation 微型弧要求）' },
+    { hash: 'fcf65a8c', length: 688, slot: 'task', note: 'V22 总纲任务段（无用户初始要求与完整阶段大纲注入）' },
+    { hash: 'bddf4a96', length: 828, slot: 'task', note: 'V23 总纲任务段（自检清单未含卷级容量项）' },
+  ],
+  maintainer: [],
+  mainlinePlanner: [
+    { hash: '11188ac7', length: 559, slot: 'task', note: 'V17–V22 主线策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
+  ],
+  beatPlanner: [
+    { hash: '4fd1fd54', length: 452, slot: 'task', note: 'V17–V22 节拍策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
+  ],
+  reviewer: [
+    { hash: '338b41a7', length: 452, slot: 'task', note: 'V17–V22 连续性审查任务段（无用户初始要求与完整阶段大纲注入）' },
+  ],
+  finalReviewer: [],
+};
+
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
 }

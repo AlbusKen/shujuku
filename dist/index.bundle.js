@@ -114277,11 +114277,14 @@ $CONTENT
     function normalizeEndpoint_ACU(endpoint) {
         return String(endpoint || '').trim().replace(/\/+$/, '');
     }
+    /**
+     * Rerank 是浏览器直连第三方服务商的跨域请求，与 embedding 网关同一口径：只带 Content-Type 与 Authorization。
+     * 绝不能混入酒馆宿主请求头（X-CSRF-Token 等）——自定义头会触发 CORS 预检，服务商的
+     * Access-Control-Allow-Headers 不放行它就整条请求被浏览器拦下，rerank 静默退化成 embedding 排序，
+     * 同时还把酒馆的 CSRF 令牌泄露给第三方。
+     */
     function buildRerankHeaders_ACU(apiKey) {
-        const headers = {
-            ...getHostRequestHeaders_ACU(),
-            'Content-Type': 'application/json',
-        };
+        const headers = { 'Content-Type': 'application/json' };
         if (apiKey) {
             headers.Authorization = `Bearer ${apiKey}`;
         }
@@ -115043,13 +115046,16 @@ $CONTENT
             return 0;
         return dot / (leftNorm * Math.sqrt(rightNorm));
     }
-    // P4：统一走 vector-rerank-gateway 网关（超时可中断、宿主请求头、安全 JSON 解析），
-    // 消除此前内联 fetch 与网关的双实现漂移。失败时保留既有语义：回退 embedding 排序。
+    // P4：统一走 vector-rerank-gateway 网关（超时可中断、安全 JSON 解析），消除此前内联 fetch 与网关的双实现漂移。
+    // 失败时保留既有语义：回退 embedding 排序——但用户明确配置了 rerank 却每次都失败，必须以 error 级别透出，
+    // warn 级别默认关闭时会让「rerank 从未生效」完全不可见。
     async function rerankCandidates_ACU(config, query, candidates) {
         const endpoint = normalizeText_ACU(config.rerankEndpoint);
         const model = normalizeText_ACU(config.rerankModel);
-        if (!endpoint || !model || candidates.length === 0)
-            return candidates;
+        if (!endpoint || !model)
+            return { candidates, status: 'not_configured' };
+        if (candidates.length === 0)
+            return { candidates, status: 'no_candidates' };
         try {
             const results = await createRerankScores_ACU({
                 endpoint,
@@ -115064,13 +115070,21 @@ $CONTENT
                 if (item.index >= 0 && item.index < candidates.length)
                     byIndex.set(item.index, item.relevanceScore);
             });
-            return candidates
-                .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
-                .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score));
+            if (byIndex.size === 0) {
+                logError_ACU(`[交火模式纪要索引] Rerank 响应没有任何可用的评分（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序。请检查服务商返回格式是否为 results[].index / relevance_score。`);
+                return { candidates, status: 'empty_response', error: 'rerank 响应中没有可用评分' };
+            }
+            return {
+                status: 'applied',
+                candidates: candidates
+                    .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
+                    .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score)),
+            };
         }
         catch (error) {
-            logWarn_ACU('[交火模式纪要索引] Rerank 失败，回退到 Embedding 排序:', error);
-            return candidates;
+            const message = error instanceof Error ? error.message : String(error);
+            logError_ACU(`[交火模式纪要索引] Rerank 调用失败（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序：${message}`);
+            return { candidates, status: 'failed', error: message };
         }
     }
     function escapeMarkdownTableCell_ACU(value) {
@@ -115644,11 +115658,9 @@ $CONTENT
             return { success: false, skipped: true, reason: 'no_candidates', keywordCount: keywords.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
         }
         // Rerank 只处理较早行的候选
-        const reranked = candidates.length > 0
-            ? await rerankCandidates_ACU(config, queryText, candidates)
-            : [];
+        const rerank = await rerankCandidates_ACU(config, queryText, candidates);
         const selectedByRow = new Map();
-        for (const candidate of reranked) {
+        for (const candidate of rerank.candidates) {
             if (!selectedByRow.has(candidate.row.rowKey))
                 selectedByRow.set(candidate.row.rowKey, { kind: 'ranked', chunk: candidate.chunk, row: candidate.row, score: candidate.score, rerankScore: candidate.rerankScore });
             if (selectedByRow.size >= config.topK)
@@ -115663,12 +115675,12 @@ $CONTENT
         const selected = Array.from(selectedByRow.values())
             .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
         if (selected.length === 0) {
-            return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
+            return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error };
         }
         const content = buildSummaryIndexOverwriteContent_ACU(selected);
         await upsertOriginalSummaryIndexEntry_ACU(content);
-        logDebug_ACU(`[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个，输出顺序按纪要表原 rowOrder。`);
-        return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
+        logDebug_ACU(`[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个，rerank=${rerank.status}，输出顺序按纪要表原 rowOrder。`);
+        return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error };
     }
 
     /**
@@ -116610,6 +116622,70 @@ $CONTENT
         const segment = MAIN_AGENT_PROMPT_ACU.find(item => item.content.startsWith('我收到的上下文分三层：'));
         return segment?.content ?? V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU;
     }
+    /**
+     * fnv-1a 32 位哈希（十六进制）。谱系表只需要稳定、低碰撞地识别「这段正文就是某个历史默认段」，
+     * 配合正文长度双重校验后，用户自写的段被误判成历史默认段的概率可以忽略。
+     */
+    function hashAgentPromptContent_ACU(content) {
+        let hash = 0x811c9dc5;
+        for (let index = 0; index < content.length; index += 1) {
+            hash ^= content.charCodeAt(index);
+            hash = Math.imul(hash, 0x01000193);
+        }
+        return (hash >>> 0).toString(16).padStart(8, '0');
+    }
+    const AGENT_PROMPT_SLOT_LOCATORS_ACU = {
+        system: segment => segment.role === 'system',
+        arcPurpose: segment => segment.role === 'assistant' && segment.content.startsWith('因为阶段大纲一次只看'),
+        arcEpistemology: segment => segment.role === 'assistant' && segment.content.startsWith('我的边界有'),
+        capabilityAnswer: segment => segment.role === 'assistant' && segment.content.startsWith('我能做的：'),
+        actionRules: segment => segment.role === 'assistant' && segment.content.startsWith('我的行动规则：'),
+        textProtocol: segment => segment.content.startsWith('【文本协议规范】'),
+        subagentRules: segment => segment.content.startsWith('【子代理使用规则】'),
+        outputContract: segment => segment.role === 'assistant' && segment.content.startsWith('我的最终交付是一个 JSON 对象'),
+        task: segment => segment.content.includes('$AGENT_TASK'),
+    };
+    /**
+     * 在一组提示词段里按语义槽位定位段。
+     * @param segments 提示词段（通常是当前默认组）
+     * @param slot 槽位键
+     * @returns 命中的段；该组没有此槽位时返回 undefined
+     */
+    function findAgentPromptSlot_ACU(segments, slot) {
+        return segments.find(AGENT_PROMPT_SLOT_LOCATORS_ACU[slot]);
+    }
+    /**
+     * 历史默认段谱系：V17–V26 各版默认提示词里、经现有迁移链之后仍与当前默认不同的那些段。
+     * 用户从未改写过的默认段会精确命中这里的哈希，被换成当前默认；用户改写过的段不会命中，原样保留。
+     *
+     * 维护约定：任何一次改写默认段正文，都要把旧正文的哈希与长度追加到对应角色下，
+     * 并把改写前的默认组追加进 tests/service/continuation/fixtures/continuation-prompt-history.json；
+     * 谱系回归测试会验证每一份历史默认组都能迁移成当前默认组。
+     */
+    const AGENT_PROMPT_DEFAULT_LINEAGE_ACU = {
+        main: [
+            { hash: '7c50c9ea', length: 257, slot: 'capabilityAnswer', note: 'V17–V22 模式边界答（无「卷级台阶由 arc-architect 维护」）' },
+            { hash: 'b5eaeca2', length: 960, slot: 'actionRules', note: 'V17–V22 行动规则（无第 9 条节奏规则）' },
+            { hash: 'be6e00a6', length: 2646, slot: 'textProtocol', note: 'V17–V22 文本协议规范（旧 finalize 骨架；V17/V18 为 system 角色）' },
+            { hash: '0b9166c2', length: 1703, slot: 'subagentRules', note: 'V17–V22 子代理使用规则（无 pacing 派工约束；V17/V18 为 system 角色）' },
+        ],
+        arcArchitect: [
+            { hash: '23b29f8b', length: 1866, slot: 'outputContract', note: 'V22/V23 总纲输出契约（无 direction/escalation 微型弧要求）' },
+            { hash: 'fcf65a8c', length: 688, slot: 'task', note: 'V22 总纲任务段（无用户初始要求与完整阶段大纲注入）' },
+            { hash: 'bddf4a96', length: 828, slot: 'task', note: 'V23 总纲任务段（自检清单未含卷级容量项）' },
+        ],
+        maintainer: [],
+        mainlinePlanner: [
+            { hash: '11188ac7', length: 559, slot: 'task', note: 'V17–V22 主线策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
+        ],
+        beatPlanner: [
+            { hash: '4fd1fd54', length: 452, slot: 'task', note: 'V17–V22 节拍策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
+        ],
+        reviewer: [
+            { hash: '338b41a7', length: 452, slot: 'task', note: 'V17–V22 连续性审查任务段（无用户初始要求与完整阶段大纲注入）' },
+        ],
+        finalReviewer: [],
+    };
     function buildDefaultAgentMainPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
     }
@@ -116817,6 +116893,14 @@ $CONTENT
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU = 'spv3.5-continuation-outline-ledgers-v27';
     /**
+     * Default-lineage repair version. Earlier targeted migrations matched stale segments against
+     * "the current default" (by index or by text), so every later default rewrite silently left older
+     * installs with stale rule segments — and the V20 arc-architect task segment was overwritten by the
+     * V25 capacity contract, leaving that sub-agent with no material or task injection at all.
+     * V28 maps every known historical default segment to its current slot and restores missing task segments.
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU = 'spv3.6-continuation-default-lineage-v28';
+    /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
      */
@@ -116875,7 +116959,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -117775,12 +117859,15 @@ $CONTENT
         if (!isRecord_ACU$6(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
         const current = buildDefaultAgentArcArchitectPrompt_ACU();
+        // 目标段一律按语义槽位定位。V25 在契约段之后插入了卷级容量段，若仍按下标取 current[7]，
+        // 拿到的是容量段而不是任务段——V20 用户的总纲任务段会被整段覆盖成没有任何占位符的契约文字。
+        const slotContent = (slot) => findAgentPromptSlot_ACU(current, slot)?.content;
         const replacements = new Map([
-            [V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, current[0].content],
-            [V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, current[2].content],
-            [V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, current[4].content],
-            [V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, current[6].content],
-            [V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, current[7].content],
+            [V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, slotContent('system')],
+            [V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, slotContent('arcPurpose')],
+            [V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, slotContent('arcEpistemology')],
+            [V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, slotContent('outputContract')],
+            [V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, slotContent('task')],
         ]);
         let changed = false;
         const arcArchitect = raw.arcArchitect.map(segment => {
@@ -118059,6 +118146,91 @@ $CONTENT
         }
         return changed ? next : raw;
     }
+    /**
+     * V27 → V28 第一步：按历史默认段谱系把仍是旧默认原文的段换成当前默认。
+     * 逐段比对哈希与长度，命中即替换正文并对齐当前默认的角色（V17/V18 的规则段还是 system）；
+     * enabled / deletable / pinned 沿用用户持久化的值。任何不在谱系里的段（含用户改写）原样保留。
+     */
+    function replaceAgentPromptsByLineage_ACU(raw) {
+        const defaults = buildDefaultContinuationAgentPrompts_ACU();
+        const next = { ...raw };
+        let changed = false;
+        for (const key of Object.keys(AGENT_PROMPT_DEFAULT_LINEAGE_ACU)) {
+            const entries = AGENT_PROMPT_DEFAULT_LINEAGE_ACU[key];
+            const segments = raw[key];
+            if (!entries.length || !Array.isArray(segments))
+                continue;
+            const migrated = segments.map(segment => {
+                if (!isRecord_ACU$6(segment) || typeof segment.content !== 'string')
+                    return segment;
+                const content = segment.content;
+                const entry = entries.find(item => item.length === content.length && item.hash === hashAgentPromptContent_ACU(content));
+                if (!entry)
+                    return segment;
+                const target = findAgentPromptSlot_ACU(defaults[key], entry.slot);
+                if (!target || (target.content === content && target.role === segment.role))
+                    return segment;
+                changed = true;
+                return { ...segment, role: target.role, content: target.content };
+            });
+            next[key] = migrated;
+        }
+        return { next, changed };
+    }
+    /**
+     * V27 → V28 第二步：修复已知的结构性损坏。
+     * 子代理的任务段（pinned、不可删）是运行时的数据注入契约（$AGENT_TASK / $AGENT_READ_MATERIALS / 各固定资料）。
+     * V20→V21 曾按下标误迁，把总纲任务段的正文覆盖成 V25 卷级容量契约，但保留了它 pinned / 不可删的元数据——
+     * 于是持久化里出现「不可删的槽位上写着容量契约、整组再无 $AGENT_TASK」这一无法由用户操作产生的形态
+     * （UI 不允许删除该槽位，容量契约又是可删的普通段）。只修这一签名，整组自定义的提示词一律不动。
+     */
+    function repairAgentPromptTaskSegments_ACU(raw) {
+        const defaults = buildDefaultContinuationAgentPrompts_ACU();
+        const next = { ...raw };
+        let changed = false;
+        const roles = ['arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer'];
+        for (const key of roles) {
+            const segments = raw[key];
+            if (!Array.isArray(segments))
+                continue;
+            if (segments.some(segment => isRecord_ACU$6(segment) && typeof segment.content === 'string' && segment.content.includes('$AGENT_TASK')))
+                continue;
+            const defaultTask = findAgentPromptSlot_ACU(defaults[key], 'task');
+            if (!defaultTask)
+                continue;
+            const corruptedIndex = segments.findIndex(segment => isRecord_ACU$6(segment)
+                && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU
+                && segment.deletable === false);
+            if (corruptedIndex < 0)
+                continue;
+            const repaired = [...segments];
+            const corrupted = repaired[corruptedIndex];
+            repaired[corruptedIndex] = { ...corrupted, role: defaultTask.role, content: defaultTask.content };
+            // 容量契约本身随误迁一起丢了，按默认形态补回到任务段之前。
+            const capacityElsewhere = repaired.some((segment, index) => index !== corruptedIndex
+                && isRecord_ACU$6(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+            const defaultCapacity = defaults[key].find(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+            if (!capacityElsewhere && defaultCapacity)
+                repaired.splice(corruptedIndex, 0, { ...defaultCapacity });
+            next[key] = repaired;
+            changed = true;
+        }
+        return { next, changed };
+    }
+    /**
+     * V27 → V28：谱系替换 + 结构修复，再重跑 V25/V26 的幂等插段——
+     * 谱系替换把锚段对齐到当前默认后，此前因锚段不匹配而没插进去的卷级容量段与年代学段才能补上。
+     */
+    function migrateV27AgentPromptsToV28_ACU(raw) {
+        if (!isRecord_ACU$6(raw))
+            return raw;
+        const lineage = replaceAgentPromptsByLineage_ACU(raw);
+        const repaired = repairAgentPromptTaskSegments_ACU(lineage.next);
+        let next = repaired.next;
+        next = migrateV24AgentPromptsToV25_ACU(next);
+        next = migrateV25AgentPromptsToV26_ACU(next);
+        return lineage.changed || repaired.changed || next !== repaired.next ? next : raw;
+    }
     /** V26 → V27：只在上下文注入段未改写时换成带账本注入的新段。 */
     function migrateV26OutlinePromptToV27_ACU(raw) {
         if (!Array.isArray(raw))
@@ -118286,10 +118458,11 @@ $CONTENT
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU
-            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU) {
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
         }
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU) {
             agentPrompts = migrateV23AgentPromptsToV24_ACU(agentPrompts);
@@ -118309,6 +118482,12 @@ $CONTENT
             outlinePrompt = migrateV23OutlinePromptToV24_ACU(outlinePrompt);
             outlinePrompt = migrateV26OutlinePromptToV27_ACU(outlinePrompt);
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
+        }
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU) {
+            // 已经带着 V27 标记的信封里可能存着被误迁的总纲提示词（任务段被覆盖成容量契约），
+            // 谱系替换与结构修复都是幂等的，对健康的 V27 默认组不产生任何改动。
+            agentPrompts = migrateV27AgentPromptsToV28_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -126138,6 +126317,16 @@ $CONTENT
         const labels = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本' };
         return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
     }
+    /**
+     * 把一条运行时消息插到尾部预填充之前。渲染后的消息序列若以 assistant 预填充收尾，
+     * 追加内容必须放在它前面，否则预填充不再是最后一条消息、失去续写引导作用。
+     */
+    function insertBeforeTrailingPrefill_ACU(messages, extra) {
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'assistant')
+            return [...messages.slice(0, -1), extra, last];
+        return [...messages, extra];
+    }
     /** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
     function resolveMaterial_ACU(token, context) {
         const resolved = resolveAgentReadToken_ACU(token, context);
@@ -126210,6 +126399,11 @@ $CONTENT
                 $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,
             }, 'agent_delegate');
             const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
+            // 总纲卷数计划是随设置变化的运行时指令，不进提示词模板；但它必须落在尾部预填充之前——
+            // 追加在预填充之后会让对话以一条 user 消息收尾，预填充失效，模型会另起一段回复而不是续写 JSON。
+            const baseMessages = definition.promptKey === 'arcArchitect'
+                ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
+                : rendered.messages;
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
             const maxToolRounds = Math.max(0, input.budget.maxExtraReads);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
@@ -126279,11 +126473,7 @@ $CONTENT
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
                 }
                 // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([
-                    ...rendered.messages,
-                    ...(definition.promptKey === 'arcArchitect' ? [{ role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) }] : []),
-                    ...transcript,
-                ], input.preset, identity, input.signal, callOptions), {
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([...baseMessages, ...transcript], input.preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -156830,14 +157020,18 @@ Expected function or array of functions, received type ${typeof value}.`
         setup(__props, { expose: __expose }) {
             __expose();
             const props = __props;
+            // 裁切只在高度动画进行中需要（useAcuHeightTransition 会在 beforeEnter/beforeLeave 临时设 hidden）。
+            // 静止状态必须放开 overflow，否则 body 里的浮层（AcuSelect 下拉菜单等）会被折叠容器切掉。
+            // 指定了 bodyMaxHeight 的组是滚动容器，保持 overflow-y: auto。
             const bodyStyle = computed(() => ({
                 maxHeight: props.bodyMaxHeight || undefined,
-                overflowY: props.bodyMaxHeight ? 'auto' : 'hidden',
+                overflowY: props.bodyMaxHeight ? 'auto' : 'visible',
+                overflowX: props.bodyMaxHeight ? 'hidden' : 'visible',
             }));
             const heightTransition = useAcuHeightTransition({
                 restoreOverflow(el) {
-                    el.style.overflowY = props.bodyMaxHeight ? 'auto' : 'hidden';
-                    el.style.overflowX = 'hidden';
+                    el.style.overflowY = props.bodyMaxHeight ? 'auto' : 'visible';
+                    el.style.overflowX = props.bodyMaxHeight ? 'hidden' : 'visible';
                 },
             });
             function beforeEnter(el) {
@@ -156873,8 +157067,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-disclosure-group[data-v-621985bb] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  overflow: hidden;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-621985bb] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  border-radius: 0;\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-621985bb]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group__header[data-v-621985bb]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-621985bb] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-621985bb] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-621985bb] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-621985bb] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-621985bb] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\r\n  overflow-x: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-621985bb");
-    var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_621985bb_lang = null;
+    injectSfcStyle("\n.acu-disclosure-group[data-v-0601fc03] {\n  display: flex;\n  flex-direction: column;\n  gap: 0;\n  /* 根节点不裁切：折叠动画的裁切由 body 的内联 overflow 承担，静止时下拉菜单等浮层需要溢出到组外。 */\n  overflow: visible;\n  border-radius: var(--acu-radius-md);\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-0601fc03] {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  width: 100%;\n  min-height: 34px;\n  appearance: none;\n  border: 0;\n  /* 头部自己收圆角：根节点已不再用 overflow: hidden 帮它裁掉悬停底色。 */\n  border-radius: var(--acu-radius-md);\n  padding: 7px 10px;\n  background: transparent;\n  color: var(--acu-text-2);\n  font: inherit;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.35;\n  text-align: left;\n  cursor: pointer;\n  user-select: none;\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-0601fc03]:hover {\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group--expanded .acu-disclosure-group__header[data-v-0601fc03] {\n  border-bottom-left-radius: 0;\n  border-bottom-right-radius: 0;\n}\n.acu-disclosure-group__header[data-v-0601fc03]:focus-visible {\n  outline: none;\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-0601fc03] {\n  flex: 0 0 10px;\n  width: 10px;\n  font-size: var(--acu-font-size-micro, 10px);\n  --acu-icon-color: var(--acu-text-3);\n  color: var(--acu-text-3);\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-0601fc03] {\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-0601fc03] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-weight: 500;\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-0601fc03] {\n  flex-shrink: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n  font-variant-numeric: tabular-nums;\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-0601fc03] {\n  box-sizing: border-box;\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n  padding: 8px;\n  opacity: 1;\n  transform: translateY(0);\n}\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-0601fc03");
+    var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_0601fc03_lang = null;
 
     const _hoisted_1$U = ["aria-expanded", "aria-controls"];
     const _hoisted_2$N = [
@@ -156956,7 +157150,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-621985bb"]]);
+    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-0601fc03"]]);
 
     var _sfc_main$V = /*@__PURE__*/ defineComponent({
         ...{ inheritAttrs: false },
@@ -172471,8 +172665,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-9fb8f746] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-9fb8f746] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-9fb8f746] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-9fb8f746] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-9fb8f746] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-9fb8f746] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-9fb8f746] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-9fb8f746] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-9fb8f746] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-9fb8f746] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-9fb8f746] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-9fb8f746] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-9fb8f746] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-9fb8f746] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-9fb8f746]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-9fb8f746] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-9fb8f746] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-9fb8f746] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-9fb8f746] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-9fb8f746] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-9fb8f746");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_9fb8f746_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-cdd12109] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-cdd12109] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-cdd12109] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-cdd12109] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-cdd12109] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-cdd12109] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-cdd12109] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-cdd12109] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-cdd12109] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-cdd12109] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-cdd12109] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-cdd12109] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-cdd12109] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-cdd12109] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-cdd12109]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-cdd12109] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-cdd12109] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-cdd12109] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-cdd12109] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-cdd12109] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-cdd12109");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_cdd12109_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-continuation-page" };
     const _hoisted_2$k = {
@@ -173351,7 +173545,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-9fb8f746"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-cdd12109"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
@@ -179953,6 +180147,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 '到「API」页补全该预设的接口地址、API Key 和模型名，然后保存预设。',
                 '向量相关报错请到「交火模式」页检查 Embedding / Rerank 的地址与模型。',
                 '确认对应功能（填表 / 剧情推进 / 续写）选择的是这个已补全的预设。',
+            ],
+        },
+        // 交火 rerank 回退：runtime 会把网关的具体原因（HTTP 状态 / 网络失败）包在这条消息里，
+        // 必须排在 HTTP / 网络通用规则之前，否则用户只会看到泛泛的「网络问题」而不知道是 rerank 被跳过了。
+        {
+            id: 'vector-rerank-fallback',
+            test: /rerank 调用失败|rerank 响应没有任何可用的评分/,
+            summary: 'Rerank 重排序没有生效，本轮交火已回退为仅按 Embedding 相似度排序。',
+            steps: [
+                '到「交火模式」页核对 Rerank 的接口地址（要填到 /rerank 这一级的完整地址）、API Key 与模型名。',
+                '报错含「网络失败 / Failed to fetch」时多半是服务商不允许浏览器跨域直连，换用支持 CORS 的 rerank 服务或反向代理地址。',
+                '报错含「没有任何可用的评分」时说明返回格式不是 results[].index / relevance_score，换一个兼容 Jina / Cohere 格式的服务商。',
+                '不想用重排序就把 Rerank 地址与模型都清空，日志就不会再出现这条报错。',
             ],
         },
         // ─── HTTP 状态码 ───

@@ -1,8 +1,8 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
-import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU } from './agent/agent-defaults';
+import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, AGENT_PROMPT_DEFAULT_LINEAGE_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, findAgentPromptSlot_ACU, hashAgentPromptContent_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU, type AgentPromptSlotKey_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -195,12 +195,15 @@ function migrateV19AgentPromptsToV20_ACU(raw: unknown): unknown {
 function migrateV20AgentPromptsToV21_ACU(raw: unknown): unknown {
   if (!isRecord_ACU(raw) || !Array.isArray(raw.arcArchitect)) return raw;
   const current = buildDefaultAgentArcArchitectPrompt_ACU();
-  const replacements = new Map<string, string>([
-    [V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, current[0].content],
-    [V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, current[2].content],
-    [V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, current[4].content],
-    [V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, current[6].content],
-    [V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, current[7].content],
+  // 目标段一律按语义槽位定位。V25 在契约段之后插入了卷级容量段，若仍按下标取 current[7]，
+  // 拿到的是容量段而不是任务段——V20 用户的总纲任务段会被整段覆盖成没有任何占位符的契约文字。
+  const slotContent = (slot: AgentPromptSlotKey_ACU): string | undefined => findAgentPromptSlot_ACU(current, slot)?.content;
+  const replacements = new Map<string, string | undefined>([
+    [V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, slotContent('system')],
+    [V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, slotContent('arcPurpose')],
+    [V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, slotContent('arcEpistemology')],
+    [V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, slotContent('outputContract')],
+    [V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, slotContent('task')],
   ]);
   let changed = false;
   const arcArchitect = raw.arcArchitect.map(segment => {
@@ -462,6 +465,84 @@ function migrateV23OutlinePromptToV24_ACU(raw: unknown): unknown {
   return changed ? next : raw;
 }
 
+/**
+ * V27 → V28 第一步：按历史默认段谱系把仍是旧默认原文的段换成当前默认。
+ * 逐段比对哈希与长度，命中即替换正文并对齐当前默认的角色（V17/V18 的规则段还是 system）；
+ * enabled / deletable / pinned 沿用用户持久化的值。任何不在谱系里的段（含用户改写）原样保留。
+ */
+function replaceAgentPromptsByLineage_ACU(raw: Record<string, unknown>): { next: Record<string, unknown>; changed: boolean } {
+  const defaults = buildDefaultContinuationAgentPrompts_ACU();
+  const next = { ...raw };
+  let changed = false;
+  for (const key of Object.keys(AGENT_PROMPT_DEFAULT_LINEAGE_ACU) as (keyof typeof AGENT_PROMPT_DEFAULT_LINEAGE_ACU)[]) {
+    const entries = AGENT_PROMPT_DEFAULT_LINEAGE_ACU[key];
+    const segments = raw[key];
+    if (!entries.length || !Array.isArray(segments)) continue;
+    const migrated = segments.map(segment => {
+      if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
+      const content = segment.content;
+      const entry = entries.find(item => item.length === content.length && item.hash === hashAgentPromptContent_ACU(content));
+      if (!entry) return segment;
+      const target = findAgentPromptSlot_ACU(defaults[key], entry.slot);
+      if (!target || (target.content === content && target.role === segment.role)) return segment;
+      changed = true;
+      return { ...segment, role: target.role, content: target.content };
+    });
+    next[key] = migrated;
+  }
+  return { next, changed };
+}
+
+/**
+ * V27 → V28 第二步：修复已知的结构性损坏。
+ * 子代理的任务段（pinned、不可删）是运行时的数据注入契约（$AGENT_TASK / $AGENT_READ_MATERIALS / 各固定资料）。
+ * V20→V21 曾按下标误迁，把总纲任务段的正文覆盖成 V25 卷级容量契约，但保留了它 pinned / 不可删的元数据——
+ * 于是持久化里出现「不可删的槽位上写着容量契约、整组再无 $AGENT_TASK」这一无法由用户操作产生的形态
+ * （UI 不允许删除该槽位，容量契约又是可删的普通段）。只修这一签名，整组自定义的提示词一律不动。
+ */
+function repairAgentPromptTaskSegments_ACU(raw: Record<string, unknown>): { next: Record<string, unknown>; changed: boolean } {
+  const defaults = buildDefaultContinuationAgentPrompts_ACU();
+  const next = { ...raw };
+  let changed = false;
+  const roles: (keyof typeof defaults)[] = ['arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer'];
+  for (const key of roles) {
+    const segments = raw[key];
+    if (!Array.isArray(segments)) continue;
+    if (segments.some(segment => isRecord_ACU(segment) && typeof segment.content === 'string' && segment.content.includes('$AGENT_TASK'))) continue;
+    const defaultTask = findAgentPromptSlot_ACU(defaults[key], 'task');
+    if (!defaultTask) continue;
+    const corruptedIndex = segments.findIndex(segment => isRecord_ACU(segment)
+      && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU
+      && segment.deletable === false);
+    if (corruptedIndex < 0) continue;
+    const repaired = [...segments];
+    const corrupted = repaired[corruptedIndex] as Record<string, unknown>;
+    repaired[corruptedIndex] = { ...corrupted, role: defaultTask.role, content: defaultTask.content };
+    // 容量契约本身随误迁一起丢了，按默认形态补回到任务段之前。
+    const capacityElsewhere = repaired.some((segment, index) => index !== corruptedIndex
+      && isRecord_ACU(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+    const defaultCapacity = defaults[key].find(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+    if (!capacityElsewhere && defaultCapacity) repaired.splice(corruptedIndex, 0, { ...defaultCapacity });
+    next[key] = repaired;
+    changed = true;
+  }
+  return { next, changed };
+}
+
+/**
+ * V27 → V28：谱系替换 + 结构修复，再重跑 V25/V26 的幂等插段——
+ * 谱系替换把锚段对齐到当前默认后，此前因锚段不匹配而没插进去的卷级容量段与年代学段才能补上。
+ */
+function migrateV27AgentPromptsToV28_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const lineage = replaceAgentPromptsByLineage_ACU(raw);
+  const repaired = repairAgentPromptTaskSegments_ACU(lineage.next);
+  let next: unknown = repaired.next;
+  next = migrateV24AgentPromptsToV25_ACU(next);
+  next = migrateV25AgentPromptsToV26_ACU(next);
+  return lineage.changed || repaired.changed || next !== repaired.next ? next : raw;
+}
+
 /** V26 → V27：只在上下文注入段未改写时换成带账本注入的新段。 */
 function migrateV26OutlinePromptToV27_ACU(raw: unknown): unknown {
   if (!Array.isArray(raw)) return raw;
@@ -656,10 +737,11 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU) {
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
   }
   if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU) {
     agentPrompts = migrateV23AgentPromptsToV24_ACU(agentPrompts);
@@ -679,6 +761,12 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     outlinePrompt = migrateV23OutlinePromptToV24_ACU(outlinePrompt);
     outlinePrompt = migrateV26OutlinePromptToV27_ACU(outlinePrompt);
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
+  }
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU) {
+    // 已经带着 V27 标记的信封里可能存着被误迁的总纲提示词（任务段被覆盖成容量契约），
+    // 谱系替换与结构修复都是幂等的，对健康的 V27 默认组不产生任何改动。
+    agentPrompts = migrateV27AgentPromptsToV28_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
   }
 
   return {

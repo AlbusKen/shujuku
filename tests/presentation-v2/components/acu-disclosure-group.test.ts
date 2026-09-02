@@ -82,6 +82,23 @@ describe('AcuDisclosureGroup', () => {
     await new Promise(resolve => setTimeout(resolve, 180));
   });
 
+  it('展开动画结束后 body 不再裁切溢出内容（下拉菜单等浮层要能越出折叠组）', async () => {
+    const { el } = mountGroup();
+    const header = el.querySelector('.acu-disclosure-group__header') as HTMLButtonElement;
+
+    header.click();
+    await Promise.resolve();
+    // 动画进行中允许临时裁切。
+    const body = el.querySelector('.acu-disclosure-group__body') as HTMLElement;
+    expect(body.style.overflowY).toBe('hidden');
+
+    await new Promise(resolve => setTimeout(resolve, 320));
+
+    expect(body.style.overflowY).toBe('visible');
+    expect(body.style.overflowX).toBe('visible');
+    expect(body.style.height).toBe('');
+  });
+
   it('bodyMode=if 时只在展开态挂载 body', async () => {
     const { el } = mountGroup({ bodyMode: 'if' });
 

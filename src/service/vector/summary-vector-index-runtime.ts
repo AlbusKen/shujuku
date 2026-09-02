@@ -4,7 +4,7 @@ import { currentChatFileIdentifier_ACU } from '../runtime/state-manager';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { commitVectorMetadataPatch_ACU } from './summary-vector-index-chat-commit';
 import { loadVectorIndexRegistry_ACU, readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
-import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { callAIWithPreset_ACU } from '../ai/api-call';
@@ -66,6 +66,9 @@ export interface SummaryVectorIndexRuntimeResult_ACU {
     denseCandidateCount?: number;
     sparseCandidateCount?: number;
     fusionCandidateCount?: number;
+    /** rerank 阶段的实际结果：applied 才代表重排序真正参与了本轮选取。 */
+    rerankStatus?: 'applied' | 'not_configured' | 'no_candidates' | 'empty_response' | 'failed';
+    rerankError?: string;
 }
 
 interface RankedSummaryCandidate_ACU extends SummaryHybridCandidate_ACU {
@@ -211,12 +214,21 @@ function cosineSimilarity_ACU(left: number[] | Float32Array, right: number[] | F
     return dot / (leftNorm * Math.sqrt(rightNorm));
 }
 
-// P4：统一走 vector-rerank-gateway 网关（超时可中断、宿主请求头、安全 JSON 解析），
-// 消除此前内联 fetch 与网关的双实现漂移。失败时保留既有语义：回退 embedding 排序。
-async function rerankCandidates_ACU(config: any, query: string, candidates: RankedSummaryCandidate_ACU[]): Promise<RankedSummaryCandidate_ACU[]> {
+/** Rerank 阶段的结果：candidates 始终可用；未应用时 status 说明原因，供结果对象与日志透出。 */
+interface SummaryRerankOutcome_ACU {
+    candidates: RankedSummaryCandidate_ACU[];
+    status: 'applied' | 'not_configured' | 'no_candidates' | 'empty_response' | 'failed';
+    error?: string;
+}
+
+// P4：统一走 vector-rerank-gateway 网关（超时可中断、安全 JSON 解析），消除此前内联 fetch 与网关的双实现漂移。
+// 失败时保留既有语义：回退 embedding 排序——但用户明确配置了 rerank 却每次都失败，必须以 error 级别透出，
+// warn 级别默认关闭时会让「rerank 从未生效」完全不可见。
+async function rerankCandidates_ACU(config: any, query: string, candidates: RankedSummaryCandidate_ACU[]): Promise<SummaryRerankOutcome_ACU> {
     const endpoint = normalizeText_ACU(config.rerankEndpoint);
     const model = normalizeText_ACU(config.rerankModel);
-    if (!endpoint || !model || candidates.length === 0) return candidates;
+    if (!endpoint || !model) return { candidates, status: 'not_configured' };
+    if (candidates.length === 0) return { candidates, status: 'no_candidates' };
     try {
         const results = await createRerankScores_ACU({
             endpoint,
@@ -230,12 +242,20 @@ async function rerankCandidates_ACU(config: any, query: string, candidates: Rank
         results.forEach((item) => {
             if (item.index >= 0 && item.index < candidates.length) byIndex.set(item.index, item.relevanceScore);
         });
-        return candidates
-            .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
-            .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score));
+        if (byIndex.size === 0) {
+            logError_ACU(`[交火模式纪要索引] Rerank 响应没有任何可用的评分（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序。请检查服务商返回格式是否为 results[].index / relevance_score。`);
+            return { candidates, status: 'empty_response', error: 'rerank 响应中没有可用评分' };
+        }
+        return {
+            status: 'applied',
+            candidates: candidates
+                .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
+                .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score)),
+        };
     } catch (error) {
-        logWarn_ACU('[交火模式纪要索引] Rerank 失败，回退到 Embedding 排序:', error);
-        return candidates;
+        const message = error instanceof Error ? error.message : String(error);
+        logError_ACU(`[交火模式纪要索引] Rerank 调用失败（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序：${message}`);
+        return { candidates, status: 'failed', error: message };
     }
 }
 
@@ -834,11 +854,9 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
 
     // Rerank 只处理较早行的候选
-    const reranked = candidates.length > 0
-        ? await rerankCandidates_ACU(config, queryText, candidates)
-        : [];
+    const rerank = await rerankCandidates_ACU(config, queryText, candidates);
     const selectedByRow = new Map<string, SummaryIndexSelectedCandidate_ACU>();
-    for (const candidate of reranked) {
+    for (const candidate of rerank.candidates) {
         if (!selectedByRow.has(candidate.row.rowKey)) selectedByRow.set(candidate.row.rowKey, { kind: 'ranked', chunk: candidate.chunk, row: candidate.row, score: candidate.score, rerankScore: candidate.rerankScore });
         if (selectedByRow.size >= config.topK) break;
     }
@@ -852,13 +870,13 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const selected = Array.from(selectedByRow.values())
         .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
     if (selected.length === 0) {
-        return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
+        return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error };
     }
 
     const content = buildSummaryIndexOverwriteContent_ACU(selected);
     await upsertOriginalSummaryIndexEntry_ACU(content);
     logDebug_ACU(
-        `[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个，输出顺序按纪要表原 rowOrder。`,
+        `[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个，rerank=${rerank.status}，输出顺序按纪要表原 rowOrder。`,
     );
-    return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
+    return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error };
 }
