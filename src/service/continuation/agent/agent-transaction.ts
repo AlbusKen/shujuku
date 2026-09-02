@@ -393,21 +393,28 @@ function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: Agent
       byId.set(item.id, { ...current!, retired: true, retiredReason: item.reason.trim() });
       continue;
     }
-    if (!item.title.trim()) reject_ACU(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
+    const previous = byId.get(item.id);
+    // 对既有条目重复 upsert 时，省略或留空的字段沿用原值：主 Agent 常按惯性每轮派总纲“更新”，
+    // 若把省略当成清空，几轮下来 escalation / withheld 会被抹掉、active 卷会被打回 planned。
+    const title = item.title.trim() || previous?.title || '';
+    const direction = item.direction.trim() || previous?.direction || '';
+    const escalation = item.escalation.trim() || previous?.escalation || '';
+    const withheld = item.withheld.trim() || previous?.withheld || '';
+    const status = item.statusProvided || !previous ? item.status : previous.status;
+    if (!title) reject_ACU(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
     // direction 是这个模块存在的意义：没有方向的条目只是一个标题，对大纲毫无约束力。
-    if (!item.direction.trim()) reject_ACU(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
-    if (item.scope === 'volume' && !item.escalation.trim()) {
+    if (!direction) reject_ACU(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
+    if (item.scope === 'volume' && !escalation) {
       reject_ACU(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
     }
-    const previous = byId.get(item.id);
     byId.set(item.id, {
       id: item.id,
       scope: item.scope,
-      title: item.title.trim(),
-      direction: item.direction.trim(),
-      escalation: item.escalation,
-      withheld: item.withheld,
-      status: item.status,
+      title,
+      direction,
+      escalation,
+      withheld,
+      status,
       // 进度锚只增不减：upsert 不携带 stageNumbers 时保留既有记录，避免改一次方向就把承载历史抹平。
       stageNumbers: item.stageNumbers.length ? normalizeStageNumbers_ACU(item.stageNumbers) : (previous ? previous.stageNumbers : []),
       completionStageNumber: item.completionStageNumber ?? (previous?.completionStageNumber ?? null),

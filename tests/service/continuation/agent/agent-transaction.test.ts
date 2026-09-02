@@ -75,6 +75,21 @@ describe('Agent 总纲写集事务', () => {
     expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), noEscalation, ['storyArc'], 6)).toThrowError(/escalation/);
   });
 
+  it('对既有卷重复 upsert 时，省略或留空的字段沿用原值，status 未明确写出时不回落成 planned', () => {
+    const first = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU()] }), ['storyArc'], 6);
+    // 模型按惯性“更新总纲”：只带了 title 与 direction，其余留空、status 省略。
+    const habitual = delta_ACU({ storyArc: [storyArcItem_ACU({ direction: '主角夺回商行控制权（措辞微调）', escalation: '', withheld: '', status: 'planned', statusProvided: false })] });
+    const second = applyAgentModuleDelta_ACU(first, habitual, ['storyArc'], 7);
+    const volume = second.storyArc.find(entry => entry.id === 'VOL-01')!;
+    expect(volume.direction).toBe('主角夺回商行控制权（措辞微调）');
+    expect(volume.escalation).toBe('从账目纠纷抬到人身威胁，收在主角拿回印信但发现账本上有第三方签名');
+    expect(volume.withheld).toBe('第三方就是主角生父的旧部');
+    expect(volume.status).toBe('active');
+    // 明确写了 status 才会进入状态校验：active → planned 是倒退，被生命周期规则拒绝。
+    const explicit = delta_ACU({ storyArc: [storyArcItem_ACU({ status: 'planned', statusProvided: true })] });
+    expect(() => applyAgentModuleDelta_ACU(second, explicit, ['storyArc'], 8)).toThrowError(/单向推进/);
+  });
+
   it('新卷的 P2 契约必须完整、范围合法，story 条目不得携带卷级字段', () => {
     expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
       storyArc: [storyArcItem_ACU({ payoffTargets: undefined })],

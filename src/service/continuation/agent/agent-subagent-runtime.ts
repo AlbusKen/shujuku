@@ -24,6 +24,7 @@ import {
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
 import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
+import { hasActiveStoryArc_ACU } from './agent-module-store';
 import {
   compactAgentProtocolError_ACU,
   mergeAgentMaintainerOutputs_ACU,
@@ -427,6 +428,15 @@ export class AgentSubagentRuntime_ACU {
           outstanding = outstanding.filter(item => item.id && !nowAccepted.has(`${item.module}:${item.id}`));
           const pending: AgentContractRejection_ACU[] = [...outstanding, ...parsed.rejected];
           outstanding = pending;
+          // 总纲尚未建立时，一份没有任何 storyArc 写入的“成功”输出等于什么都没做——模型常把卷台阶写进 summary。
+          // 这种空写入不能交回主 Agent 白耗它的派工上限，先在这里索要真正的条目。
+          const emptyArcBootstrap = definition.kind === 'arc'
+            && !hasActiveStoryArc_ACU(input.resolveContext.moduleSnapshot)
+            && !accumulated.delta.storyArc.length
+            && !accumulated.delta.storyArcPatches.length;
+          if (emptyArcBootstrap && !pending.length && !draft.truncated) {
+            pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 id / title / direction / escalation / withheld / status 与卷级契约字段' });
+          }
           if (!draft.truncated && !pending.length) return deliverContract(accumulated);
           if (continuationsUsed >= maxContinuations) {
             if (pending.length) {

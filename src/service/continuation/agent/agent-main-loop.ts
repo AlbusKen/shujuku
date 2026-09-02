@@ -182,6 +182,30 @@ function failLoop_ACU(
   throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'agent_loop', message, false, details));
 }
 
+const ARC_MAINTENANCE_TRIGGER_PATTERN_ACU = /(偏离|越出|偏差|脱节|底牌|提前(翻|释放|揭)|收束|完结|收尾|done|续卷|扩充|新卷|追加.*卷|切卷|台阶|patch|回写|登记|进度)/i;
+const ARC_EVIDENCE_PATTERN_ACU = /(楼层\s*\d+|第\s*\d+\s*楼|\$STORY_RANGE:\d+|第\s*\d+\s*阶段|阶段\s*\d+|stage\s*\d+|VOL-\d+)/i;
+
+/**
+ * arc-architect 派工门禁。总纲一旦建立，每轮都派它“更新总纲”只会让卷台阶被反复重写、派工额度被白白吃掉。
+ * 结构性事件（总纲为空、没有 active 卷、已完成阶段未登记、当前阶段刚完成）直接放行；
+ * 其余维护必须在 prompt 里写明触发事由并引用依据（楼层 / 阶段 / 卷号），否则拒绝且不消耗派工额度。
+ * @param context 解析上下文
+ * @param prompt 主 Agent 给 arc-architect 的任务描述
+ */
+export function evaluateArcArchitectDispatch_ACU(context: AgentResolveContext_ACU, prompt: string): { allowed: boolean; reason: string } {
+  if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) return { allowed: true, reason: '' };
+  if (!hasActiveStoryArcVolume_ACU(context.moduleSnapshot)) return { allowed: true, reason: '' };
+  const completed = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
+  if (findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed).length) return { allowed: true, reason: '' };
+  if (context.execution.stage?.status === 'completed') return { allowed: true, reason: '' };
+  const text = String(prompt ?? '');
+  if (ARC_MAINTENANCE_TRIGGER_PATTERN_ACU.test(text) && ARC_EVIDENCE_PATTERN_ACU.test(text)) return { allowed: true, reason: '' };
+  return {
+    allowed: false,
+    reason: '总纲已建立、没有待登记的已完成阶段、当前阶段仍在进行，本轮没有需要维护总纲的结构事件，arc-architect 未执行（不消耗派工额度）。只有剧情越出台阶、底牌被正文提前翻开、当前卷已可判定收束或需要追加新卷时才派它，并在 prompt 里写明事由与依据（如「楼层 12-14 主角提前翻出身世，VOL-01 的 withheld 需要更新」）。常规轮次请直接进入结算与策划。',
+  };
+}
+
 /**
  * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 按当前状态给出的最可能合法动作样例。
  * 快速模型对“照这个样子写”远比对“请修正”服从；样例按状态选择，避免把不合时宜的动作推给它。
@@ -1167,7 +1191,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const completed = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
     const unregistered = findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed);
     const head = `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}），完整内容用 read $STORY_ARC 调阅。`;
-    if (!unregistered.length) return `${head}已完成阶段的进度均已登记。`;
+    if (!unregistered.length) return `${head}已完成阶段的进度均已登记，本轮不需要派工 arc-architect；只有剧情越出台阶、底牌被提前翻开或当前卷可判定收束时才派，并写明依据楼层。`;
     return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。请派工 arc-architect 仅向当前 active 卷回写这些阶段；只有真实正文达到 escalation 的可判定收束状态时，才以完成阶段编号和卷末状态把该卷 patch 成 done 并激活下一卷。所有既有卷都完成而用户继续写时，先根据最后一卷的后果追加带续卷依据的 active 新卷。`;
   }
 
@@ -1295,6 +1319,13 @@ export class ContinuationAgentTurnPlanner_ACU {
           : `同一波次并发上限为 ${waveLimit} 个`;
         rejectImmediately(delegation.agentName, `${why}，本次未执行，可在下一次迭代重派`);
         continue;
+      }
+      if (delegation.agentName === 'arc-architect') {
+        const gate = evaluateArcArchitectDispatch_ACU(context, delegation.prompt);
+        if (!gate.allowed) {
+          rejectImmediately(delegation.agentName, gate.reason);
+          continue;
+        }
       }
       accepted.push(delegation);
     }
@@ -1439,5 +1470,14 @@ export class ContinuationAgentTurnPlanner_ACU {
       throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', '当前聊天没有可承载资料快照的楼层', false));
     }
     await this.dependencies.writeModuleSnapshot(chat, targetIndex, snapshot);
+    // 快照跟着楼层走：该楼被删除、重新生成或 swipe 时资料会随之回退。写到哪一楼必须让用户看得见，
+    // 否则“资料突然清零”只能靠猜。
+    const active = (list: ReadonlyArray<{ retired: boolean }>) => list.filter(item => !item.retired).length;
+    logAgentSession_ACU({
+      kind: 'thought',
+      title: `资料快照已写入楼层 ${targetIndex}`,
+      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
+      ok: true,
+    });
   }
 }

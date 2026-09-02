@@ -503,6 +503,8 @@ export interface AgentStoryArcDeltaItem_ACU {
   escalation: string;
   withheld: string;
   status: AgentStoryArcStatus_ACU;
+  /** upsert 时模型是否明确写了 status；省略时对既有条目保留原状态，而不是回落成 planned。 */
+  statusProvided?: boolean;
   stageNumbers: number[];
   completionStageNumber: number | null;
   completionState: string;

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildEmptyAgentModuleSnapshot_ACU,
   readAgentModuleSnapshot_ACU,
+  readAgentModuleSnapshotDiagnostics_ACU,
   renderAgentActiveVolumePlanningContext_ACU,
   renderAgentChronology_ACU,
   renderAgentChronologyByIds_ACU,
@@ -127,6 +128,37 @@ describe('Agent 资料快照存储', () => {
     ];
     expect(readAgentModuleSnapshot_ACU(chat).revisions.chronology).toBe(2);
     expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(0);
+  });
+
+  it('全程没有合法快照但存在损坏快照时，按宽容模式抢救而不是静默返回空，并留下诊断', () => {
+    const entry = { id: 'T1', anchor: '入城后的第七天', elapsed: '自开篇约十七日', precision: 'approximate', transition: '休整七日', evidenceIndexes: [1], updatedIndex: 1, retired: false, retiredReason: '' };
+    const broken = {
+      schemaVersion: 1, settledThroughIndex: 1, updatedAt: 1,
+      revisions: { hooks: 1, infoGap: 0, constraints: 0, storyArc: 1, chronology: 1 },
+      hooks: [hook_ACU('H1')], infoGap: [], constraints: [],
+      storyArc: [{ id: 'VOL-01', scope: 'volume', title: '卷一', direction: 'd', escalation: 'e', withheld: '', status: 'active', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '', targetStageRange: { min: 6, max: 4 } }],
+      chronology: [entry, { ...entry, id: 'T2', precision: '大概' }],
+    };
+    const chat: any[] = [{ mes: 'a' }, { mes: 'b', [AGENT_MODULE_FIELD_ACU]: broken }];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const snapshot = readAgentModuleSnapshot_ACU(chat);
+    warn.mockRestore();
+    // 合法条目保住，坏条目丢弃。
+    expect(snapshot.hooks).toHaveLength(1);
+    expect(snapshot.chronology.map(item => item.id)).toEqual(['T1']);
+    expect(snapshot.storyArc).toEqual([]);
+    expect(snapshot.settledThroughIndex).toBe(1);
+    const diagnostics = readAgentModuleSnapshotDiagnostics_ACU();
+    expect(diagnostics).toMatchObject({ adoptedIndex: 1, salvaged: true });
+    expect(diagnostics.candidates[0].problems.join('；')).toContain('storyArc[0]');
+    expect(diagnostics.candidates[0].problems.join('；')).toContain('chronology[1]');
+
+    // 有合法快照时诊断记录采用楼层且不标记抢救。
+    const chatOk: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: snapshotAt_ACU(0) }];
+    readAgentModuleSnapshot_ACU(chatOk);
+    expect(readAgentModuleSnapshotDiagnostics_ACU()).toEqual({ candidates: [{ index: 0, valid: true, problems: [] }], adoptedIndex: 0, salvaged: false });
+    readAgentModuleSnapshot_ACU([{ mes: 'a' }]);
+    expect(readAgentModuleSnapshotDiagnostics_ACU().adoptedIndex).toBeNull();
   });
 
   it('写盘保留快照自带的水位（钳制在 0 与目标楼层之间），不再自动顶到目标楼层', async () => {

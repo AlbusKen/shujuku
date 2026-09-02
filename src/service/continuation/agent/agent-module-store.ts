@@ -271,22 +271,102 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
 }
 
 /**
+ * 宽容解析一份损坏的快照：丢掉单条非法记录、修正非法水位，尽量保住其余数据。
+ * 只在严格路径全程无命中时作为兜底使用——静默回退成空快照会让用户误以为数据从未写入。
+ */
+function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSnapshot_ACU; problems: string[] } | null {
+  if (!isRecord_ACU(raw)) return null;
+  const problems: string[] = [];
+  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
+  const revisions = isRecord_ACU(raw.revisions) ? raw.revisions : {};
+  const pick = <T>(list: unknown, validate: (item: unknown) => T | null, label: string): T[] => {
+    if (!Array.isArray(list)) { if (list !== undefined) problems.push(`${label} 不是数组`); return []; }
+    const kept: T[] = [];
+    list.forEach((item, index) => { const entry = validate(item); if (entry) kept.push(entry); else problems.push(`${label}[${index}] 结构非法，已丢弃`); });
+    return kept;
+  };
+  const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
+  if (settledThroughIndex < 0) problems.push(`settledThroughIndex=${String(raw.settledThroughIndex)} 非法，按 0 处理`);
+  const snapshot: AgentModuleSnapshot_ACU = {
+    schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+    settledThroughIndex: Math.max(0, settledThroughIndex),
+    updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+    revisions: {
+      hooks: Math.max(0, readIndex_ACU(revisions.hooks)),
+      infoGap: Math.max(0, readIndex_ACU(revisions.infoGap)),
+      constraints: Math.max(0, readIndex_ACU(revisions.constraints)),
+      storyArc: Math.max(0, readIndex_ACU(revisions.storyArc)),
+      chronology: Math.max(0, readIndex_ACU(revisions.chronology)),
+    },
+    hooks: pick(raw.hooks, validateHookEntry_ACU, 'hooks'),
+    infoGap: pick(raw.infoGap, validateInfoGapEntry_ACU, 'infoGap'),
+    constraints: pick(raw.constraints, validateConstraintEntry_ACU, 'constraints'),
+    storyArc: pick(raw.storyArc, validateStoryArcEntry_ACU, 'storyArc'),
+    chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
+  };
+  return { snapshot, problems };
+}
+
+/** 一次读取的诊断：哪些楼层带有快照字段、是否通过严格校验、最终采用了哪一楼。 */
+export interface AgentModuleSnapshotReadDiagnostics_ACU {
+  /** 带快照字段的楼层（从末楼往前）。 */
+  candidates: Array<{ index: number; valid: boolean; problems: string[] }>;
+  /** 最终采用的楼层；无任何快照时为 null。 */
+  adoptedIndex: number | null;
+  /** 采用的是否为宽容抢救结果。 */
+  salvaged: boolean;
+}
+
+let lastReadDiagnostics_ACU: AgentModuleSnapshotReadDiagnostics_ACU = { candidates: [], adoptedIndex: null, salvaged: false };
+
+/** 最近一次 readAgentModuleSnapshot_ACU 的诊断信息，供面板解释“为什么资料是空的/是旧的”。 */
+export function readAgentModuleSnapshotDiagnostics_ACU(): AgentModuleSnapshotReadDiagnostics_ACU {
+  return lastReadDiagnostics_ACU;
+}
+
+/**
  * 读取当前生效的资料快照。
+ * 严格路径：从尾向前找第一个完全合法的快照。全程无命中但存在损坏快照时，不再静默返回空，
+ * 而是对最近一份做宽容抢救（丢单条坏记录）并记录诊断——数据消失必须可解释。
  * @param chat 聊天数组，缺省取当前聊天
  * @returns 最近的合法快照；全程无命中时返回 settledThroughIndex = -1 的空快照
  */
 export function readAgentModuleSnapshot_ACU(chat?: any[]): AgentModuleSnapshot_ACU {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
+  const highestIndex = messages.length - 1;
+  const clamp = (snapshot: AgentModuleSnapshot_ACU): AgentModuleSnapshot_ACU => (
+    // 删楼后残留快照记录的水位可能指向已不存在的楼层，必须钳制，否则未结算区间会算成负数。
+    snapshot.settledThroughIndex > highestIndex ? { ...snapshot, settledThroughIndex: highestIndex } : snapshot
+  );
+  const diagnostics: AgentModuleSnapshotReadDiagnostics_ACU = { candidates: [], adoptedIndex: null, salvaged: false };
+  let firstBroken: { index: number; raw: unknown } | null = null;
+  for (let index = highestIndex; index >= 0; index -= 1) {
     const message = messages[index];
     if (!message || typeof message !== 'object') continue;
     if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU)) continue;
-    const snapshot = validateAgentModuleSnapshot_ACU((message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]);
-    if (!snapshot) continue;
-    // 删楼后残留快照记录的水位可能指向已不存在的楼层，必须钳制，否则未结算区间会算成负数。
-    const highestIndex = messages.length - 1;
-    return snapshot.settledThroughIndex > highestIndex ? { ...snapshot, settledThroughIndex: highestIndex } : snapshot;
+    const raw = (message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU];
+    const snapshot = validateAgentModuleSnapshot_ACU(raw);
+    if (snapshot) {
+      diagnostics.candidates.push({ index, valid: true, problems: [] });
+      diagnostics.adoptedIndex = index;
+      lastReadDiagnostics_ACU = diagnostics;
+      return clamp(snapshot);
+    }
+    const salvaged = salvageAgentModuleSnapshot_ACU(raw);
+    diagnostics.candidates.push({ index, valid: false, problems: salvaged?.problems ?? ['快照不是对象'] });
+    if (!firstBroken) firstBroken = { index, raw };
   }
+  if (firstBroken) {
+    const salvaged = salvageAgentModuleSnapshot_ACU(firstBroken.raw);
+    if (salvaged) {
+      diagnostics.adoptedIndex = firstBroken.index;
+      diagnostics.salvaged = true;
+      lastReadDiagnostics_ACU = diagnostics;
+      console.warn(`[SP·数据库][续写资料] 楼层 ${firstBroken.index} 的资料快照未通过严格校验，已按宽容模式读取：${salvaged.problems.join('；')}`);
+      return clamp(salvaged.snapshot);
+    }
+  }
+  lastReadDiagnostics_ACU = diagnostics;
   return buildEmptyAgentModuleSnapshot_ACU();
 }
 

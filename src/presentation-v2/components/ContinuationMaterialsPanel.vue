@@ -127,6 +127,18 @@
         故事时间 {{ materials.snapshot.value.chronology.length }} 条 ·
         修订号 {{ materials.snapshot.value.revisions.hooks }}/{{ materials.snapshot.value.revisions.infoGap }}/{{ materials.snapshot.value.revisions.constraints }}/{{ materials.snapshot.value.revisions.chronology }}
       </p>
+      <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
+        <template v-if="materials.diagnostics.value.adoptedIndex === null">
+          当前聊天没有任何楼层带有资料快照。快照由子代理结算后写到当时的末楼，并跟着该楼层走：该楼被删除、重新生成或 swipe 时，资料会回退到更早楼层的快照；若此前只写过一次，就会回到空。
+        </template>
+        <template v-else>
+          资料来源：楼层 {{ materials.diagnostics.value.adoptedIndex }}<template v-if="materials.diagnostics.value.salvaged">（该楼快照未通过严格校验，已按宽容模式读取，损坏记录已丢弃）</template>。
+          <template v-if="materials.diagnostics.value.candidates.some(item => !item.valid)">
+            另有 {{ materials.diagnostics.value.candidates.filter(item => !item.valid).length }} 个楼层的快照结构损坏被跳过：
+            <span v-for="item in materials.diagnostics.value.candidates.filter(entry => !entry.valid)" :key="item.index">楼层 {{ item.index }}（{{ item.problems.slice(0, 3).join('；') }}）；</span>
+          </template>
+        </template>
+      </p>
       <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
 
       <!-- 伏笔账本 -->

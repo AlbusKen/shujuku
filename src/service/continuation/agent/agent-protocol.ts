@@ -574,6 +574,7 @@ function parseStoryArcItems_ACU(value: unknown, rejected?: RejectionSink_ACU): {
       escalation: readText_ACU(raw.escalation),
       withheld: readText_ACU(raw.withheld),
       status: (status || 'planned') as AgentStoryArcDeltaItem_ACU['status'],
+      statusProvided: !!status,
       stageNumbers: raw.stageNumbers === undefined ? [] : parseStageNumbers_ACU(raw.stageNumbers, `delta.storyArc[${index}].stageNumbers`),
       completionStageNumber: raw.completionStageNumber === undefined || raw.completionStageNumber === null ? null : (typeof raw.completionStageNumber === 'number' && Number.isInteger(raw.completionStageNumber) && raw.completionStageNumber >= 1 ? raw.completionStageNumber : failProtocol_ACU(`delta.storyArc[${index}].completionStageNumber 必须是从 1 起的整数或 null`)),
       completionState: readText_ACU(raw.completionState),
@@ -686,12 +687,34 @@ export interface AgentMaintainerOutputDraft_ACU {
  * 让运行时只向模型索要需要修正的那几条。数组结构本身非法仍然抛出。
  * @param payload 已解析的 JSON 载荷
  */
+/**
+ * 把模型常写的错位形状归一化到 delta.storyArc：顶层 storyArc / volumes、delta.volumes、
+ * 以 id 为键的对象。这些以前会被静默忽略成“0 条写入”，让一份写满卷台阶的输出白白作废。
+ */
+function normalizeStoryArcShape_ACU(payload: Record<string, unknown>, rawDelta: Record<string, unknown>): unknown {
+  const candidates = [rawDelta.storyArc, rawDelta.volumes, rawDelta.story_arc, payload.storyArc, payload.volumes, payload.story_arc];
+  const merged: unknown[] = [];
+  let sawAlternative = false;
+  candidates.forEach((candidate, index) => {
+    if (Array.isArray(candidate)) {
+      if (index > 0 && candidate.length) sawAlternative = true;
+      merged.push(...candidate);
+    } else if (isRecord_ACU(candidate) && Object.keys(candidate).length) {
+      sawAlternative = true;
+      merged.push(...Object.entries(candidate).map(([id, value]) => (isRecord_ACU(value) ? { id, action: 'upsert', ...value } : value)));
+    }
+  });
+  // 只有标准位置且为空/缺失时保持原值，让“未提供”与“提供了空数组”的语义与其他模块一致。
+  if (!sawAlternative && !merged.length) return rawDelta.storyArc;
+  return merged;
+}
+
 export function parseAgentMaintainerOutputDraft_ACU(payload: Record<string, unknown>): AgentMaintainerOutputDraft_ACU {
   const rawDelta = isRecord_ACU(payload.delta) ? payload.delta : {};
   const rejected: AgentContractRejection_ACU[] = [];
   const hooks = parseHookItems_ACU(rawDelta.hooks, rejected);
   const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap, rejected);
-  const storyArc = parseStoryArcItems_ACU(rawDelta.storyArc, rejected);
+  const storyArc = parseStoryArcItems_ACU(normalizeStoryArcShape_ACU(payload, rawDelta), rejected);
   const chronology = parseChronologyItems_ACU(rawDelta.chronology, rejected);
   return {
     output: {

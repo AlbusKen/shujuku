@@ -98,6 +98,11 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
   it('renders fixed user intent and the complete current-stage outline from one resolve context', async () => {
     const input = input_ACU();
     input.delegation = { agentName: 'arc-architect', prompt: '根据本轮任务校准总纲', reads: [] };
+    // 总纲已建立：本用例只验证渲染，不触发“总纲为空时空写入需补条目”的门禁。
+    input.resolveContext.moduleSnapshot = {
+      ...input.resolveContext.moduleSnapshot,
+      storyArc: [{ id: 'ARC-STORY', scope: 'story', title: '全书', direction: '追查真相', escalation: '', withheld: '', status: 'active', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' }],
+    } as any;
     input.settings.agentPrompts.arcArchitect = [{
       role: 'user',
       content: '【初始要求】\n$USER_INTENT\n【完整大纲】\n$OUTLINE_WINDOW\n【任务】\n$AGENT_TASK',

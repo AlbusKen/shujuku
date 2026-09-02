@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ContinuationAgentTurnPlanner_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
+import { ContinuationAgentTurnPlanner_ACU, evaluateArcArchitectDispatch_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { appendAgentConversation_ACU, buildEmptyAgentConversation_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
@@ -924,6 +924,33 @@ describe('主 Agent 循环收敛', () => {
     expect(settledChanged.subCalls).toHaveLength(2);
   });
 
+  it('总纲已建立且无结构事件时，惯性派工 arc-architect 被门禁拒绝且不消耗额度；写明事由与依据才放行', async () => {
+    const context = { moduleSnapshot: snapshotWithArc_ACU(), execution: execution_ACU() } as any;
+    const habitual = evaluateArcArchitectDispatch_ACU(context, '更新故事总纲');
+    expect(habitual.allowed).toBe(false);
+    expect(habitual.reason).toContain('不消耗派工额度');
+    expect(evaluateArcArchitectDispatch_ACU(context, '楼层 12-14 主角提前翻出身世，VOL-01 的 withheld 底牌需要更新').allowed).toBe(true);
+    // 结构性事件直接放行：总纲为空 / 有已完成但未登记的阶段 / 当前阶段刚完成。
+    expect(evaluateArcArchitectDispatch_ACU({ moduleSnapshot: buildEmptyAgentModuleSnapshot_ACU(), execution: execution_ACU() } as any, '立总纲').allowed).toBe(true);
+    const completedContext = { moduleSnapshot: snapshotWithArc_ACU(), execution: { ...execution_ACU(), task: { taskId: 'task-1', originInstruction: '', stages: [{ stageId: 'stage-1', stageNumber: 3, status: 'completed' }] } } } as any;
+    expect(evaluateArcArchitectDispatch_ACU(completedContext, '回写').allowed).toBe(true);
+
+    // 走完整主循环：被拒的派工不占派工总数，主 Agent 在下一次迭代仍能正常派工并交付。
+    const h = harness_ACU({
+      snapshot: snapshotWithArc_ACU(),
+      budget: { maxDelegations: 1 },
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"更新故事总纲"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"策划本轮"}]}',
+        '{"action":"finalize","instruction":"按策划推进"}',
+      ],
+      subReplies: [JSON.stringify({ summary: '主线建议', recommendation: '先验证晶屑来源', mustPreserve: [], risks: [] })],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('按策划推进');
+    expect(h.subCalls).toHaveLength(1);
+  });
+
   it('block 以专用错误码终止，并带上未解决项', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"block","reason":"角色表缺失","unresolved":["林瑶当前状态未知"]}'] });
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({
@@ -1456,6 +1483,20 @@ describe('子代理运行时', () => {
     expect(result.maintainer?.summary).toBe('结算完成');
     expect(result.maintainer?.delta.hooks.map(item => item.id)).toEqual(['H1', 'H2', 'H3']);
     expect(result.maintainer?.delta.infoGap.map(item => item.id)).toEqual(['E1']);
+  });
+
+  it('总纲为空时 arc-architect 交回空 delta 不算完成：先索要真正的条目；卷写在 delta.volumes 或以 id 为键的对象里也能收下', async () => {
+    const story = { action: 'upsert', id: 'ARC-STORY', scope: 'story', title: '全书', direction: '主角追查禁区真相，对抗守门人体系', escalation: '', withheld: '兄长身份', status: 'active' };
+    const volume = { scope: 'volume', title: '第一卷', direction: '摸清门禁规则', escalation: '收在第一次被识破', withheld: '晶屑来源', status: 'active', narrativeRole: 'setup', targetStageRange: { min: 2, max: 4 }, targetTimeSpan: '一月', progressCeiling: '不揭示幕后', sustainingThreads: ['与账房建立信任'], payoffTargets: ['拿回印信'] };
+    replies = [
+      '{"summary":"已确认长线 20 卷架构与卷级容量，总纲无需变更","delta":{"storyArc":[]}}',
+      JSON.stringify({ summary: '立总纲', delta: { volumes: { 'VOL-01': volume }, storyArc: [story] } }),
+    ];
+    const result = await runtime.run(input_ACU({ delegation: { agentName: 'arc-architect', prompt: '立总纲', reads: [] } } as any));
+    expect(calls).toHaveLength(2);
+    expect(calls[1].map(message => message.content).join('\n')).toContain('summary 里的文字不会写入任何东西');
+    expect(result.arc?.delta.storyArc.map(item => item.id)).toEqual(['ARC-STORY', 'VOL-01']);
+    expect(result.arc?.delta.storyArc[1]).toMatchObject({ action: 'upsert', scope: 'volume', narrativeRole: 'setup' });
   });
 
   it('个别条目非法时收下其余条目，只让模型重发修正版并按 id 覆盖', async () => {
