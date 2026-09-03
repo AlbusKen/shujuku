@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      9.2.3
+// @version      9.2.4
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -34375,7 +34375,7 @@ $CONTENT
                 .join('；');
             const hasIdentityMergeFailure = collisions.some(collision => collision.reason === 'identity_merge_failed');
             super(hasIdentityMergeFailure
-                ? `SQLite 物理表名冲突：相同规范表名被保留为多个 key，说明身份归并未完成；请检查历史数据与指导表的 key 对齐。冲突：${detail}`
+                ? `SQLite 物理表名冲突：相同规范表名被保留为多个 key，说明身份归并未完成；请检查历史数据与指导表的 key 对齐，并核对完整 sheetKey（大写 I、小写 l、数字 1 等字符在普通字体下极易混淆）。冲突：${detail}`
                 : `SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
             this.name = 'PhysicalTableNameCollisionError_ACU';
             this.collisions = collisions;
@@ -40169,27 +40169,133 @@ $CONTENT
         }
         return ids;
     }
+    function readExplicitTableAliases_ACU(sheet) {
+        const raw = sheet.sourceData?.tableAliases;
+        if (!Array.isArray(raw))
+            return [];
+        return raw.map(value => String(value ?? '').trim()).filter(Boolean);
+    }
     /**
-     * 从同 canonical 名的候选 key 中选出保留者（确定性）：
+     * 表的显式身份集合（canonical）：显示名 + 显式 tableAliases，去空、去重。
+     * 与 chat-template-reconciler 的别名匹配口径一致：任何一侧声明过的名字都是身份。
+     */
+    function collectSheetIdentityCanonicals_ACU(sheet) {
+        const identities = new Set();
+        const name = canonicalizeDisplayName_ACU(sheet.name);
+        if (name)
+            identities.add(name);
+        for (const alias of readExplicitTableAliases_ACU(sheet)) {
+            const canonical = canonicalizeDisplayName_ACU(alias);
+            if (canonical)
+                identities.add(canonical);
+        }
+        return [...identities];
+    }
+    /**
+     * 按身份交集把 sheetKey 分组（并查集）：两张表只要有一个身份相同就属于同一组，
+     * 身份关系可传递（A~B 同名、B~C 同别名 → A、B、C 一组）。
+     * 返回值只包含至少两个 key 的组，组内 key 保持字典序（确定性）。
+     */
+    function groupSheetKeysByIdentity_ACU(sheets) {
+        const parent = new Map();
+        const find = (key) => {
+            let root = key;
+            while (parent.get(root) !== root)
+                root = parent.get(root);
+            let cursor = key;
+            while (parent.get(cursor) !== root) {
+                const next = parent.get(cursor);
+                parent.set(cursor, root);
+                cursor = next;
+            }
+            return root;
+        };
+        const union = (left, right) => {
+            const leftRoot = find(left);
+            const rightRoot = find(right);
+            if (leftRoot === rightRoot)
+                return;
+            // 以字典序较小者为根，保证分组结果与输入顺序无关。
+            if (leftRoot < rightRoot)
+                parent.set(rightRoot, leftRoot);
+            else
+                parent.set(leftRoot, rightRoot);
+        };
+        const ownerByIdentity = new Map();
+        for (const sheetKey of [...sheets.keys()].sort()) {
+            parent.set(sheetKey, sheetKey);
+            for (const identity of collectSheetIdentityCanonicals_ACU(sheets.get(sheetKey))) {
+                const owner = ownerByIdentity.get(identity);
+                if (owner === undefined)
+                    ownerByIdentity.set(identity, sheetKey);
+                else
+                    union(owner, sheetKey);
+            }
+        }
+        const groups = new Map();
+        for (const sheetKey of sheets.keys()) {
+            const root = find(sheetKey);
+            const group = groups.get(root) || [];
+            group.push(sheetKey);
+            groups.set(root, group);
+        }
+        return [...groups.values()]
+            .filter(group => group.length >= 2)
+            .map(group => [...group].sort())
+            .sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
+    }
+    /**
+     * 从同一身份组的候选 key 中选出保留者（确定性）：
      * 1. preferredKeys（当前模板/指导表侧 key）命中者优先；
-     * 2. 等于按显示名生成的新版稳定 key 候选者次之；
+     * 2. 等于按自身显示名生成的新版稳定 key 候选者次之；
      * 3. 否则按 key 字典序取首位。
      */
-    function pickWinnerKey_ACU(keys, canonicalName, sheets, preferredKeys) {
+    function pickWinnerKey_ACU(keys, sheets, preferredKeys) {
         const sorted = [...keys].sort();
         const preferred = sorted.find(key => preferredKeys.has(key));
         if (preferred)
             return preferred;
-        const stableCandidate = sorted.find(key => {
-            const sheet = sheets.get(key);
-            return buildStableSheetKeyCandidate_ACU(sheet?.name ?? canonicalName) === key;
-        });
+        const stableCandidate = sorted.find(key => buildStableSheetKeyCandidate_ACU(sheets.get(key)?.name) === key);
         if (stableCandidate)
             return stableCandidate;
         return sorted[0];
     }
     /**
-     * 归并 state 中 canonical 显示名相同但 sheetKey 不同的表。
+     * 把 loser 的显示名与显式别名累积进 winner.sourceData.tableAliases：
+     * 归并后 loser key 消失，但它声明过的名字仍是这张表的身份，后续模板协调 /
+     * SQL 别名解析要能顺着这些名字认回 winner。排除 winner 当前显示名，按 canonical 去重。
+     */
+    function accumulateMergedTableAliases_ACU(winner, loser) {
+        const winnerName = canonicalizeDisplayName_ACU(winner.name);
+        const seen = new Set();
+        const merged = [];
+        const push = (alias) => {
+            const trimmed = String(alias ?? '').trim();
+            const canonical = canonicalizeDisplayName_ACU(trimmed);
+            if (!canonical || canonical === winnerName || seen.has(canonical))
+                return;
+            seen.add(canonical);
+            merged.push(trimmed);
+        };
+        readExplicitTableAliases_ACU(winner).forEach(push);
+        push(loser.name);
+        readExplicitTableAliases_ACU(loser).forEach(push);
+        const existing = readExplicitTableAliases_ACU(winner);
+        const unchanged = existing.length === merged.length && existing.every((alias, index) => alias === merged[index]);
+        if (unchanged)
+            return;
+        if (!winner.sourceData || typeof winner.sourceData !== 'object') {
+            winner.sourceData = {};
+        }
+        if (merged.length > 0) {
+            winner.sourceData.tableAliases = merged;
+        }
+        else {
+            delete winner.sourceData.tableAliases;
+        }
+    }
+    /**
+     * 归并 state 中身份集合有交集（显示名或显式别名相同）但 sheetKey 不同的表。
      *
      * 原地修改 state（回放路径持有的都是内存副本），返回 remap 记录。
      * 对没有冲突的数据是纯 no-op（changed=false），可在回放的任意状态
@@ -40199,26 +40305,20 @@ $CONTENT
         const remaps = [];
         const preferredKeys = new Set(preferredKeysArg || []);
         const sheets = new Map();
-        const groups = new Map();
         for (const sheetKey of Object.keys(state)) {
             if (!sheetKey.startsWith('sheet_'))
                 continue;
             const sheet = state[sheetKey];
             if (!isSheetLike_ACU(sheet))
                 continue;
-            const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
-            if (!canonicalName)
+            if (collectSheetIdentityCanonicals_ACU(sheet).length === 0)
                 continue;
             sheets.set(sheetKey, sheet);
-            const group = groups.get(canonicalName) || [];
-            group.push(sheetKey);
-            groups.set(canonicalName, group);
         }
-        for (const [canonicalName, keys] of groups) {
-            if (keys.length < 2)
-                continue;
-            const winnerKey = pickWinnerKey_ACU(keys, canonicalName, sheets, preferredKeys);
+        for (const keys of groupSheetKeysByIdentity_ACU(sheets)) {
+            const winnerKey = pickWinnerKey_ACU(keys, sheets, preferredKeys);
             const winner = sheets.get(winnerKey);
+            const canonicalName = canonicalizeDisplayName_ACU(winner.name);
             for (const loserKey of keys) {
                 if (loserKey === winnerKey)
                     continue;
@@ -40259,6 +40359,7 @@ $CONTENT
                 if (winner.sourceData === undefined && loser.sourceData !== undefined) {
                     winner.sourceData = loser.sourceData;
                 }
+                accumulateMergedTableAliases_ACU(winner, loser);
                 delete state[loserKey];
                 sheets.delete(loserKey);
                 remaps.push({ fromKey: loserKey, toKey: winnerKey, canonicalName, overriddenRows, appendedRows });
@@ -44696,9 +44797,14 @@ $CONTENT
                 blockers.push(`当前聊天表「${sheet.name || key}」历史数据无效：${error?.message || String(error)}`);
             }
         }
-        const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers);
+        // 旧随机 key 迁移到稳定 key 后，历史 checkpoint 里可能残留零数据行的旧身份
+        // （与被模板认领的新 key 同名或互为别名）。它们不是「两张不同的表」，而是同一逻辑表
+        // 未收敛的旧 identity：不作为重复身份 blocker，而是排除出身份索引，让下方
+        // 「目标模板缺失的既有表」循环按既有 hide 语义把它们隐藏收敛。
+        const staleLegacyBaselineKeys = resolveStaleLegacyBaselineSheetKeys_ACU(baselineData, templateData);
+        const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers, staleLegacyBaselineKeys);
         const templateByName = indexSheetsByName_ACU(templateData, '导入模板', blockers);
-        validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers);
+        validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers, staleLegacyBaselineKeys);
         validateTableAliasDeclarations_ACU(templateData, '导入模板', blockers);
         if (blockers.length > 0)
             return emptyPlan_ACU(baselineData, audit, blockers);
@@ -44707,7 +44813,8 @@ $CONTENT
         const revealKeys = new Set();
         // 被任一模板表按当前名精确匹配占用的 baseline key：别名认回必须跳过这些表，
         // 否则「模板同时含新旧两个名字」会因迭代顺序产生歧义匹配或误报重复。
-        const nameClaimedBaselineKeys = new Set();
+        // 陈旧旧 identity 同样不参与别名认回（它们的身份已由被认领的新 key 持有）。
+        const nameClaimedBaselineKeys = new Set(staleLegacyBaselineKeys);
         for (const [canonicalName] of templateByName) {
             const claimed = baselineByName.get(canonicalName);
             if (claimed)
@@ -44915,9 +45022,15 @@ $CONTENT
             .map(key => [key, data[key]])
             .filter(([, sheet]) => !!sheet && typeof sheet === 'object' && !Array.isArray(sheet));
     }
-    function indexSheetsByName_ACU(data, label, blockers) {
+    const SHEET_KEY_CONFUSABLE_HINT_ACU = '请核对完整 sheetKey（大写 I、小写 l、数字 1 等字符在普通字体下极易混淆）';
+    function describeSheetForDiagnostic_ACU(entry) {
+        return `「${entry.sheet.name || entry.key}」(${entry.key}, ${sheetDataRowCount_ACU(entry.sheet)} 行)`;
+    }
+    function indexSheetsByName_ACU(data, label, blockers, excludedKeys = new Set()) {
         const entries = new Map();
         for (const [key, sheet] of listSheets_ACU(data)) {
+            if (excludedKeys.has(key))
+                continue;
             const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
             if (!canonicalName) {
                 blockers.push(`${label}存在空表名：${key}。`);
@@ -44925,7 +45038,7 @@ $CONTENT
             }
             const existing = entries.get(canonicalName);
             if (existing) {
-                blockers.push(`${label}表名规范化重复：「${existing.sheet.name}」与「${sheet.name}」。`);
+                blockers.push(`${label}表名规范化重复：${describeSheetForDiagnostic_ACU(existing)}与${describeSheetForDiagnostic_ACU({ key, sheet })}规范化后同名「${canonicalName}」，同一逻辑表被两个 sheetKey 同时持有。${SHEET_KEY_CONFUSABLE_HINT_ACU}。`);
                 continue;
             }
             entries.set(canonicalName, { key, sheet });
@@ -44936,9 +45049,11 @@ $CONTENT
      * tableAliases 是显式身份声明。它可以和同表的当前名称重合，但不能被另一张
      * 表的当前名称或历史别名占用；否则后续 SQL/AI 路由会扩大写入目标。
      */
-    function validateTableAliasDeclarations_ACU(data, label, blockers) {
+    function validateTableAliasDeclarations_ACU(data, label, blockers, excludedKeys = new Set()) {
         const ownerByIdentity = new Map();
         for (const entry of listSheets_ACU(data).map(([key, sheet]) => ({ key, sheet }))) {
+            if (excludedKeys.has(entry.key))
+                continue;
             const identities = [entry.sheet.name, ...getExplicitTableAliases_ACU(entry.sheet)];
             for (const identity of identities) {
                 const canonical = canonicalizeDisplayName_ACU(identity);
@@ -44950,7 +45065,7 @@ $CONTENT
                     continue;
                 }
                 if (owner.key !== entry.key) {
-                    blockers.push(`${label}表别名规范化重复：「${owner.sheet.name || owner.key}」与「${entry.sheet.name || entry.key}」都声明了「${String(identity).trim()}」。`);
+                    blockers.push(`${label}表别名规范化重复：${describeSheetForDiagnostic_ACU(owner)}与${describeSheetForDiagnostic_ACU(entry)}都声明了「${String(identity).trim()}」。${SHEET_KEY_CONFUSABLE_HINT_ACU}。`);
                 }
             }
         }
@@ -44960,6 +45075,79 @@ $CONTENT
         if (!Array.isArray(raw))
             return [];
         return raw.map(value => String(value ?? '').trim()).filter(Boolean);
+    }
+    function sheetDataRowCount_ACU(sheet) {
+        return Array.isArray(sheet?.content) ? Math.max(0, sheet.content.length - 1) : 0;
+    }
+    function sheetIdentityCanonicals_ACU(sheet) {
+        return new Set([sheet.name, ...getExplicitTableAliases_ACU(sheet)]
+            .map(canonicalizeDisplayName_ACU)
+            .filter(Boolean));
+    }
+    function identitySetsIntersect_ACU(left, right) {
+        for (const identity of left)
+            if (right.has(identity))
+                return true;
+        return false;
+    }
+    /**
+     * 识别 baseline 中可证明陈旧的旧 identity（旧随机 key → 稳定 key 迁移未收敛的残留）。
+     *
+     * 判定必须同时满足，任何歧义都不判定（保留原有 blocker，fail-closed）：
+     * - 与另一张 baseline 表身份重合（显示名或显式别名的 canonical 有交集）；
+     * - 自身零数据行（合法的空新表也可能零行，所以零行本身不是充分条件）；
+     * - 幸存者唯一可判，按优先级逐级比较，恰有一方满足即判定：
+     *   1. key 被模板直接持有；2. 当前显示名被模板认领（同名双方会并列，落到下一级）；
+     *   3. key 等于自身显示名派生的稳定 key（旧随机 key 永远不满足）；
+     * - 幸存者不能同时也被判为陈旧（多张表互相指认 → 歧义，整体回退为 blocker）。
+     */
+    function resolveStaleLegacyBaselineSheetKeys_ACU(baselineData, templateData) {
+        const baselineEntries = listSheets_ACU(baselineData).map(([key, sheet]) => ({
+            key,
+            sheet,
+            identities: sheetIdentityCanonicals_ACU(sheet),
+            rowCount: sheetDataRowCount_ACU(sheet),
+        }));
+        const templateKeys = new Set(listSheets_ACU(templateData).map(([key]) => key));
+        const templateNames = new Set(listSheets_ACU(templateData).map(([, sheet]) => canonicalizeDisplayName_ACU(sheet.name)).filter(Boolean));
+        const survivorCriteria = [
+            entry => templateKeys.has(entry.key),
+            entry => templateNames.has(canonicalizeDisplayName_ACU(entry.sheet.name)),
+            entry => buildStableSheetKeyCandidate_ACU(entry.sheet.name) === entry.key,
+        ];
+        const pickSurvivor = (a, b) => {
+            for (const criterion of survivorCriteria) {
+                const aMatches = criterion(a);
+                const bMatches = criterion(b);
+                if (aMatches === bMatches)
+                    continue;
+                return aMatches ? { survivor: a, candidate: b } : { survivor: b, candidate: a };
+            }
+            return null;
+        };
+        const stale = new Set();
+        const survivors = new Set();
+        for (let left = 0; left < baselineEntries.length; left += 1) {
+            for (let right = left + 1; right < baselineEntries.length; right += 1) {
+                const a = baselineEntries[left];
+                const b = baselineEntries[right];
+                if (!identitySetsIntersect_ACU(a.identities, b.identities))
+                    continue;
+                const decision = pickSurvivor(a, b);
+                if (!decision)
+                    continue;
+                if (decision.candidate.rowCount > 0)
+                    continue;
+                stale.add(decision.candidate.key);
+                survivors.add(decision.survivor.key);
+            }
+        }
+        for (const key of survivors) {
+            // 同一 key 既是幸存者又被判陈旧 → 身份关系有歧义，全部回退为 blocker。
+            if (stale.has(key))
+                return new Set();
+        }
+        return stale;
     }
     /**
      * 双向显式身份交集匹配（S1-5）：模板身份集（当前名 + 声明别名）与 baseline 身份集
@@ -74198,6 +74386,21 @@ $CONTENT
                             if (content) {
                                 fullContent += content;
                             }
+                            // Anthropic SSE 分支（接口协议=claude_messages 时后端原样透传 Anthropic 流，不归一化）：
+                            // content_block_delta(text_delta).delta.text 拼内容；message_stop 视为流结束（等价 [DONE]）。
+                            if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json?.delta?.text === 'string') {
+                                fullContent += json.delta.text;
+                            }
+                            // Gemini SSE 分支（接口协议=gemini_interactions 时后端原样透传 generateContent 流）：
+                            // candidates[0].content.parts[].text 拼接（跳过 thought 段）；流结束由连接关闭界定。
+                            const geminiParts = json?.candidates?.[0]?.content?.parts;
+                            if (Array.isArray(geminiParts)) {
+                                for (const part of geminiParts) {
+                                    if (part && typeof part.text === 'string' && part.thought !== true) {
+                                        fullContent += part.text;
+                                    }
+                                }
+                            }
                             const usage = extractResponseUsageMetadata_ACU(json);
                             capturedUsage = mergeAiUsageMetadata_ACU(capturedUsage, usage);
                         }
@@ -74262,6 +74465,23 @@ $CONTENT
      */
     // AI 输入准备
 
+    /**
+     * shared/host-detect.ts — 宿主后端形态检测
+     *
+     * 区分 TauriTavern（Rust 后端，支持 custom_api_format 契约）与原版 SillyTavern
+     * （Node 后端，按 chat_completion_source 内置原生协议转换）。
+     * 每次调用时判定（不缓存），与 TT ABI 检测惯例一致（window.__TAURITAVERN__，
+     * 兼容脚本沙箱中宿主 API 挂在顶层窗口的场景）。
+     */
+    function isTauriTavernHost_ACU() {
+        try {
+            return Boolean(globalThis.__TAURITAVERN__ || globalThis.window?.__TAURITAVERN__);
+        }
+        catch {
+            return false;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════
     // service/settings/api-preset-service.ts — API 预设单一权威
     //
@@ -74269,6 +74489,34 @@ $CONTENT
     // V1 presentation 不得直接修改这些字段；V2 必须通过本 service 操作。
     // 写操作流程：校验 → 快照 → 改内存 → saveSettings_ACU → 失败回滚。
     // ═══════════════════════════════════════════════════════════════
+    const API_PROMPT_POST_PROCESSING_VALUES_ACU = [
+        '',
+        'merge',
+        'semi',
+        'strict',
+        'single',
+        'merge_tools',
+        'semi_tools',
+        'strict_tools',
+    ];
+    const API_PROMPT_POST_PROCESSING_DEFAULT_ACU = 'strict';
+    function normalizePromptPostProcessing_ACU(value) {
+        // 显式空串 = 用户选择「未选择」，保留；缺失/非字符串/非法值 → 默认严格。
+        if (typeof value !== 'string')
+            return API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
+        const normalized = value.trim();
+        if (normalized === '')
+            return '';
+        return API_PROMPT_POST_PROCESSING_VALUES_ACU.includes(normalized)
+            ? normalized
+            : API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
+    }
+    const CUSTOM_API_FORMAT_VALUES_ACU = ['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'];
+    const CUSTOM_API_FORMAT_DEFAULT_ACU = 'openai_compat';
+    function normalizeCustomApiFormat_ACU(value) {
+        const raw = String(value ?? '').trim();
+        return CUSTOM_API_FORMAT_VALUES_ACU.includes(raw) ? raw : CUSTOM_API_FORMAT_DEFAULT_ACU;
+    }
     // ═══ 归一化 ═══
     function normalizeApiMode_ACU(value) {
         return value === 'tavern' ? 'tavern' : 'custom';
@@ -74290,7 +74538,9 @@ $CONTENT
             bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
             excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
             requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
-            ...Object.fromEntries(Object.entries(source).filter(([key]) => !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders'].includes(key))),
+            promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
+            customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
+            ...Object.fromEntries(Object.entries(source).filter(([key]) => !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key))),
         };
     }
     function normalizePreset_ACU(value) {
@@ -74806,6 +75056,45 @@ $CONTENT
         return keys.map((key) => `- ${key}`).join('\n');
     }
     /**
+     * 原版 ST 原生协议源的 reverse_proxy 基址归一化（对齐 ST 自身的 URL 拼接语义）：
+     * - claude 源 fetch(apiUrl + '/messages')：基址须含 /v1（ST 官方常量即 https://api.anthropic.com/v1）；
+     * - makersuite 源 fetch(`${apiUrl}/${apiVersion}/models/...`)：基址不得带版本段（服务端自补 /v1beta）。
+     * 仅剥显式协议路径段（/messages、/v1beta 等防重复），并按 ST 惯例补 /v1，
+     * 不改写用户自建代理的其他子路径段（如 https://gw.example.com/claude 视为用户有意为之）。
+     */
+    function normalizeSTNativeProxyBase_ACU(rawUrl, nativeSource) {
+        let base = String(rawUrl || '').trim().replace(/\/+$/, '');
+        if (!base)
+            return '';
+        for (const suffix of ['/chat/completions', '/messages', '/responses', '/interactions']) {
+            if (base.endsWith(suffix)) {
+                base = base.slice(0, -suffix.length).replace(/\/+$/, '');
+                break;
+            }
+        }
+        if (nativeSource === 'claude') {
+            if (base.endsWith('/v1beta'))
+                base = base.slice(0, -'/v1beta'.length).replace(/\/+$/, '');
+            let path = '';
+            try {
+                path = new URL(base).pathname.replace(/\/+$/, '');
+            }
+            catch { /* 非法 URL 原样透传，交由后端报错 */ }
+            if (path === '' || path === '/')
+                return `${base}/v1`;
+            if (!base.endsWith('/v1'))
+                return `${base}/v1`;
+            return base;
+        }
+        for (const suffix of ['/v1beta', '/v1']) {
+            if (base.endsWith(suffix)) {
+                base = base.slice(0, -suffix.length).replace(/\/+$/, '');
+                break;
+            }
+        }
+        return base;
+    }
+    /**
      * 构建 Chat Completions 自定义 API 请求体（支持 bodyParams / excludeBodyParams / requestHeaders）
      */
     function buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, overrides) {
@@ -74846,6 +75135,35 @@ $CONTENT
         else if (composedIncludeBody.diagnostic.reason === 'stream_options_replaced') {
             logWarn_ACU('[buildCustomApiRequestBody] 用户 stream_options 不是对象，已由插件对象替换', composedIncludeBody.diagnostic);
         }
+        // 提示词后处理（custom_prompt_post_processing）改为 API 预设可配置。
+        // 背景：此前写死 'strict'，酒馆后端会把提示词中部的 system 消息强制改成 user
+        // （prompt-converters.js mergeMessages strict 模式），导致剧情推进等自定义
+        // 提示词组里用户指定的 SYSTEM 段在发送时丢失角色。
+        // 现在：默认 'strict'（与历史行为兼容）；预设选择具体值则透传；
+        // 显式选择「未选择」（''）时不携带该字段，后端原样透传消息，
+        // 完整保留用户配置的 system/user/assistant 结构。
+        const promptPostProcessing = normalizePromptPostProcessing_ACU(effectiveApiConfig?.promptPostProcessing);
+        // 接口协议按宿主后端形态分流（同一预设字段 customApiFormat，两种落地方式）：
+        // - TauriTavern（Rust 后端）：透传 custom_api_format 契约，按其分流上游端点与请求/响应变形
+        //   （openai_compat→/chat/completions、openai_responses→/responses、claude_messages→/messages、
+        //   gemini_interactions→/interactions）；非流式响应归一化为 OpenAI 形态，流式 Claude 为原样 Anthropic SSE。
+        // - 原版 SillyTavern（Node 后端）：不识别 custom_api_format，改为映射到其内置的原生协议源
+        //   （claude_messages→chat_completion_source:'claude'，服务端做 Anthropic 变形并透传原生 SSE，
+        //   gemini_interactions→'makersuite'）；openai_compat 维持 custom；
+        //   openai_responses 在 ST 无对应后端，回退 custom（/chat/completions）。
+        // 调用点可能传未归一化的 config：统一经 api-preset-service 的四值白名单归一化（非法值回退 openai_compat）。
+        const customApiFormat = normalizeCustomApiFormat_ACU(effectiveApiConfig?.customApiFormat);
+        const isTauriTavern_ACU = isTauriTavernHost_ACU();
+        const ST_NATIVE_SOURCE_BY_FORMAT = { claude_messages: 'claude', gemini_interactions: 'makersuite' };
+        const chatCompletionSource = isTauriTavern_ACU || !ST_NATIVE_SOURCE_BY_FORMAT[customApiFormat]
+            ? 'custom'
+            : ST_NATIVE_SOURCE_BY_FORMAT[customApiFormat];
+        const stNativeSource = (!isTauriTavern_ACU && chatCompletionSource !== 'custom')
+            ? chatCompletionSource
+            : null;
+        const reverseProxy = stNativeSource
+            ? normalizeSTNativeProxyBase_ACU(effectiveApiConfig.url, stNativeSource)
+            : effectiveApiConfig.url;
         const body = {
             // 统一将 messages 的 role 归一为小写（system / user / assistant）。
             //
@@ -74872,20 +75190,30 @@ $CONTENT
             temperature,
             top_p: topP,
             stream: streaming,
-            chat_completion_source: 'custom',
+            chat_completion_source: chatCompletionSource,
+            // custom_api_format 为 TT 契约字段，仅在 TT 宿主下携带（ST 后端不识别，由上方映射到原生源）。
+            ...(isTauriTavern_ACU ? { custom_api_format: customApiFormat } : {}),
             group_names: [],
             include_reasoning: false,
             reasoning_effort: 'medium',
             enable_web_search: false,
             request_images: false,
-            custom_prompt_post_processing: 'strict',
-            reverse_proxy: effectiveApiConfig.url,
-            proxy_password: '',
+            reverse_proxy: reverseProxy,
+            // 原版 ST 原生协议源（claude/makersuite）从 reverse_proxy+proxy_password 取预设地址与密钥；
+            // reverse_proxy 已按 ST 拼接语义归一化（claude 补 /v1、makersuite 剥版本段）。
+            // custom 源与 TT 不使用该字段，proxy_password 保持空串。
+            proxy_password: stNativeSource
+                ? String(effectiveApiConfig.apiKey || '')
+                : '',
             custom_url: effectiveApiConfig.url,
             custom_include_headers: headers,
             custom_include_body: composedIncludeBody.value,
             custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
         };
+        if (promptPostProcessing) {
+            // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。
+            body.custom_prompt_post_processing = promptPostProcessing;
+        }
         return body;
     }
     /**
@@ -80094,7 +80422,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2.3" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2.4" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -94998,7 +95326,7 @@ $CONTENT
     let currentJsonTableData_ACU = null;
     let independentTableStates_ACU = {};
     let settings_ACU = {
-        apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+        apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict', customApiFormat: 'openai_compat' },
         apiMode: 'custom',
         streamingEnabled: false,
         tavernProfile: '',
@@ -96409,7 +96737,7 @@ $CONTENT
     }
     function buildDefaultSettings_ACU() {
         return {
-            apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+            apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict', customApiFormat: 'openai_compat' },
             apiMode: 'custom',
             tavernProfile: '',
             streamingEnabled: false, // [新增] 流式传输开关（默认关闭）
@@ -108644,6 +108972,36 @@ $CONTENT
         const snapshotSet = new Set(normalizedSnapshotKeys);
         return liveSheetKeys.every(key => snapshotSet.has(key));
     }
+    /**
+     * chunk 成功提交后把快照重新对齐到 live runtime（task-owned change ≠ 外部修改）。
+     *
+     * 本任务自身的 merge-base / commit 会合法改写 currentJsonTableData_ACU 的 sheet 键集合
+     * （历史 key 迁移、guide 结构注入），若后续 chunk 仍拿确认前快照复检，会把自己刚提交的
+     * 结果当成外部修改而 fail-closed。这里在 chunk 提交完成的同步点重新冻结快照，使后续
+     * 复检只覆盖 chunk 之间的异步窗口（loadAllChatMessages / boundary checkpoint）。
+     * 目标表必须全部仍在 live runtime 中，否则说明任务已无法继续作用于既定目标，必须失败。
+     */
+    function rebaselineManualUpdateSnapshotAfterTaskCommit_ACU(previousSnapshotKeys, targetKeys, chunkIndex) {
+        const liveRuntimeTable = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+            ? currentJsonTableData_ACU
+            : null;
+        if (!liveRuntimeTable) {
+            return { ok: false, error: `第 ${chunkIndex} 批提交后表格运行时缺失，无法继续后续批次。` };
+        }
+        const liveSheetKeys = Object.keys(liveRuntimeTable).filter(key => key.startsWith('sheet_')).sort();
+        const liveSet = new Set(liveSheetKeys);
+        const missingTargets = targetKeys.filter(key => !liveSet.has(key));
+        if (missingTargets.length > 0) {
+            return { ok: false, error: `第 ${chunkIndex} 批提交后表格运行时缺少本次目标表：${missingTargets.join('、')}，已停止后续批次。` };
+        }
+        const previousSet = new Set(previousSnapshotKeys || []);
+        const added = liveSheetKeys.filter(key => !previousSet.has(key));
+        const removed = [...previousSet].filter(key => !liveSet.has(key));
+        if (added.length > 0 || removed.length > 0) {
+            logDebug_ACU(`[Manual Update] 第 ${chunkIndex} 批提交后 runtime 表集合由本任务自身变更，已重新对齐快照：新增 [${added.join('、')}]，移除 [${removed.join('、')}]。`);
+        }
+        return { ok: true, sheetKeys: liveSheetKeys };
+    }
     function createManualCatchUpRunId_ACU() {
         return `manual-catch-up-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     }
@@ -109611,7 +109969,9 @@ $CONTENT
             // 核对当前 runtime 与确认前快照，防止对确认后已失效的目标执行更新。
             // 契约：executionSnapshot 未提供（undefined）→ legacy 路径不启用保护；
             // 显式提供（即使 sheetKeys 为空/非法）→ 必须 fail-closed，禁止静默降级。
-            const manualUpdateSnapshotKeys = options.executionSnapshot?.sheetKeys;
+            // 快照在每个 chunk 成功提交后由 rebaselineManualUpdateSnapshotAfterTaskCommit_ACU
+            // 重新对齐（本任务自身的 commit 不是外部修改），其余时刻只读。
+            let manualUpdateSnapshotKeys = options.executionSnapshot?.sheetKeys;
             if (options.executionSnapshot !== undefined) {
                 if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
                     logWarn_ACU('[Manual Update] runtime 在确认期间变化，已阻止手动更新（快照未匹配）。');
@@ -109651,13 +110011,14 @@ $CONTENT
                 let requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
                 if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
                     // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
-                    // sheet 键集合是否被 targetKeys 全量覆盖）。
+                    // sheet 键集合是否被 targetKeys 全量覆盖）。空 data 的 full 同样会被
+                    // purgeSheetKeysFromStorageFrameV2_ACU 整体删除，必须一并视为「将被清理」。
                     const originalTag = readIsolatedTagData_ACU(liveChat[originalFullIndex], currentIsolationKey);
                     const originalCheckpointData = originalTag?.storageFrame?.checkpoint?.data;
                     if (originalCheckpointData && typeof originalCheckpointData === 'object' && !Array.isArray(originalCheckpointData)) {
                         const checkpointSheetKeys = Object.keys(originalCheckpointData).filter(key => key.startsWith('sheet_'));
                         const targetKeySet = new Set(targetKeys);
-                        const fullyCoversCheckpoint = checkpointSheetKeys.length > 0 && checkpointSheetKeys.every(key => targetKeySet.has(key));
+                        const fullyCoversCheckpoint = checkpointSheetKeys.every(key => targetKeySet.has(key));
                         if (fullyCoversCheckpoint) {
                             logDebug_ACU(`[Manual Refill] 原 full checkpoint 位于重填范围内（#${originalFullIndex}）且目标表覆盖其全部数据表，清理将删除该 checkpoint；已禁用跨根 staging，改用清理后临时根前置。`);
                             requiresBoundaryStaging = false;
@@ -109676,17 +110037,12 @@ $CONTENT
                         messageIndices: contextScopeIndices,
                         fullCheckpointIndices: [originalFullIndex],
                     });
-                    stagingRun = createTableFillStagingRunContext_ACU({
-                        runId: boundaryPlan.scope.runId,
-                        chatKey: boundaryPlan.scope.chatKey,
-                        isolationKey: boundaryPlan.scope.isolationKey,
-                        targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
-                        originalFullIndex: boundaryPlan.scope.originalFullIndex,
-                        originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(getChatArray_ACU(), currentIsolationKey, originalFullIndex),
-                        templateFingerprint,
-                    });
-                    stagingSession = createTableFillStagingSession_ACU(stagingRun);
-                    logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging。`);
+                    // stagingRun（含原 full 根指纹）在破坏性清理与 runtime 重载之后才创建：
+                    // 清理会改写原 full 楼层 frame 的 scheduleSummary / perSheetCheckpoints / logEntries
+                    // （原 full 落在重填范围内时），若在此处就冻结指纹，边界汇合必然以
+                    // full_checkpoint_fingerprint_mismatch 失败，且失败点在 pre 段全部 AI 调用之后。
+                    // 指纹只应检测 staging 期间的外部改写，不应把本任务自身的清理当作外部修改。
+                    logDebug_ACU(`[Manual Refill] 跨根 staging 已规划：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging；原 full 根指纹将在清理后冻结。`);
                 }
                 // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
                 // native 路径没有 SQLite 后置条件，保持既有行为。
@@ -109751,6 +110107,34 @@ $CONTENT
                     logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                     const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                     return { success: false, error: failureError };
+                }
+                // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）
+                // 之后建立：此时冻结的原 full 根指纹才等于边界汇合时 live frame 应有的指纹，
+                // 后续任何不匹配都只能来自外部改写。清理后原 full 根若已消失或位移，
+                // 边界汇合必然失败，必须在任何 AI 调用前 fail-closed（清理已发生，按已提交事实对齐运行时）。
+                if (boundaryPlan) {
+                    const liveChatAfterCleanup = getChatArray_ACU();
+                    const fullIndexAfterCleanup = getLatestV2FullCheckpointMessageIndex_ACU(liveChatAfterCleanup, currentIsolationKey);
+                    if (fullIndexAfterCleanup !== originalFullIndex) {
+                        logError_ACU(`[Manual Refill] 清理后原 full checkpoint 位置变化：清理前 #${originalFullIndex}，清理后 #${fullIndexAfterCleanup}；跨根 staging 失去汇合目标。`);
+                        return await failManualRefillSession(`手动重填清理后原 full checkpoint 位置发生变化（清理前 #${originalFullIndex}，清理后 #${fullIndexAfterCleanup}），无法建立跨根 staging 汇合目标；已在 AI 调用前停止。已清理的数据不可恢复，请检查该聊天的 checkpoint 布局后重试。`);
+                    }
+                    const fingerprintAfterCleanup = readOriginalFullFrameFingerprint_ACU(liveChatAfterCleanup, currentIsolationKey, originalFullIndex);
+                    if (!fingerprintAfterCleanup) {
+                        logError_ACU(`[Manual Refill] 清理后原 full checkpoint #${originalFullIndex} 不再是正式 full 根，无法读取指纹。`);
+                        return await failManualRefillSession(`手动重填清理后原 full checkpoint（#${originalFullIndex}）已不存在或不再是正式 full 根，无法建立跨根 staging；已在 AI 调用前停止。已清理的数据不可恢复，请检查该聊天的 checkpoint 布局后重试。`);
+                    }
+                    stagingRun = createTableFillStagingRunContext_ACU({
+                        runId: boundaryPlan.scope.runId,
+                        chatKey: boundaryPlan.scope.chatKey,
+                        isolationKey: boundaryPlan.scope.isolationKey,
+                        targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                        originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                        originalFullFingerprint: fingerprintAfterCleanup,
+                        templateFingerprint: boundaryPlan.scope.templateFingerprint,
+                    });
+                    stagingSession = createTableFillStagingSession_ACU(stagingRun);
+                    logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}，原 full 根指纹已在清理后冻结（${fingerprintAfterCleanup}）。`);
                 }
             }
             // 最终准入（复检）：重填分支内已跨过 ensureStorageProviderReady_ACU / reloadStorageProvider
@@ -109869,6 +110253,7 @@ $CONTENT
                     }
                 }
                 try {
+                    const failedGroupCountBeforeChunk = failedGroups.length;
                     // 非跨根或未启用 staging：普通逐组执行（与旧路径完全一致）。
                     if (!manualRefillEnabled || !boundaryPlan || !stagingRun) {
                         const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
@@ -109948,6 +110333,20 @@ $CONTENT
                             if (failedGroups.length > 0)
                                 break;
                         }
+                    }
+                    // 本 chunk 成功提交后，把确认前快照重新对齐到本任务自身写出的 runtime：
+                    // 下一 chunk 前的复检只应拦截 chunk 之间异步窗口内的外部修改，
+                    // 不能把本任务刚完成的合法 commit（历史 key 迁移 / guide 表注入）当成外部变化。
+                    if (options.executionSnapshot !== undefined && failedGroups.length === failedGroupCountBeforeChunk) {
+                        const rebaselined = rebaselineManualUpdateSnapshotAfterTaskCommit_ACU(manualUpdateSnapshotKeys, targetKeys, chunkIndex);
+                        if (rebaselined.ok === false) {
+                            logWarn_ACU(`[Manual Update] ${rebaselined.error}`);
+                            if (manualRefillEnabled) {
+                                return await failManualRefillSession(`${rebaselined.error}已清理的数据不可恢复，已提交的批次已保留。`);
+                            }
+                            return { success: false, error: rebaselined.error };
+                        }
+                        manualUpdateSnapshotKeys = rebaselined.sheetKeys;
                     }
                     // 并发组内禁止每组单独刷新；填表保存后 currentJsonTableData_ACU 已由本轮 workingTableData 更新。
                     // 这里只同步聊天数组，避免刚保存完又通过 refreshData 触发历史回放/重建。
@@ -155729,7 +156128,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-dialog__field"
     };
-    const _hoisted_5$x = {
+    const _hoisted_5$y = {
 	key: 2,
 	class: "acu-dialog__checklist"
     };
@@ -155802,7 +156201,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				placeholder: $setup.renderedDialog.placeholder,
 				onKeyup: _cache[1] || (_cache[1] = withKeys(($event) => $setup.dialog.submitActive(), ["enter"]))
 			}, null, 8, ["modelValue", "placeholder"])])) : createCommentVNode("v-if", true),
-			$setup.renderedDialog.kind === "multiselect" ? (openBlock(), createElementBlock("div", _hoisted_5$x, [(openBlock(true), createElementBlock(
+			$setup.renderedDialog.kind === "multiselect" ? (openBlock(), createElementBlock("div", _hoisted_5$y, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.renderedDialog.checkboxOptions || [], (option) => {
@@ -156367,7 +156766,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-toast__icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_5$w = { class: "acu-v2-toast__text" };
+    const _hoisted_5$x = { class: "acu-v2-toast__text" };
     function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
 		key: 0,
@@ -156394,7 +156793,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				createBaseVNode(
 					"p",
-					_hoisted_5$w,
+					_hoisted_5$x,
 					toDisplayString(entry.item.text),
 					1
 					/* TEXT */
@@ -156720,6 +157119,8 @@ Expected function or array of functions, received type ${typeof value}.`
             bodyParams: '',
             excludeBodyParams: '',
             requestHeaders: '',
+            promptPostProcessing: API_PROMPT_POST_PROCESSING_DEFAULT_ACU,
+            customApiFormat: CUSTOM_API_FORMAT_DEFAULT_ACU,
         };
     }
     function apiPresetDraftFromPreset(preset) {
@@ -156736,6 +157137,10 @@ Expected function or array of functions, received type ${typeof value}.`
             bodyParams: preset.apiConfig.bodyParams || '',
             excludeBodyParams: preset.apiConfig.excludeBodyParams || '',
             requestHeaders: preset.apiConfig.requestHeaders || '',
+            // 草稿与请求体必须用同一套归一化：旧预设缺失该字段时运行时按 strict 发送，
+            // 草稿若显示为「未选择」，用户直接保存就会把行为静默改成 none。
+            promptPostProcessing: normalizePromptPostProcessing_ACU(preset.apiConfig.promptPostProcessing),
+            customApiFormat: normalizeCustomApiFormat_ACU(preset.apiConfig.customApiFormat),
         };
     }
     function apiPresetFromDraft(draft) {
@@ -156753,6 +157158,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 bodyParams: draft.bodyParams || '',
                 excludeBodyParams: draft.excludeBodyParams || '',
                 requestHeaders: draft.requestHeaders || '',
+                promptPostProcessing: normalizePromptPostProcessing_ACU(draft.promptPostProcessing),
+                customApiFormat: normalizeCustomApiFormat_ACU(draft.customApiFormat),
             },
         };
     }
@@ -156824,7 +157231,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 preset.apiConfig.temperature === current.apiConfig.temperature &&
                 preset.apiConfig.bodyParams === current.apiConfig.bodyParams &&
                 preset.apiConfig.excludeBodyParams === current.apiConfig.excludeBodyParams &&
-                preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders);
+                preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders &&
+                preset.apiConfig.promptPostProcessing === current.apiConfig.promptPostProcessing &&
+                preset.apiConfig.customApiFormat === current.apiConfig.customApiFormat);
         }) ?? null;
     }
     function resolveCurrentConfigStatus() {
@@ -157273,7 +157682,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-panel__actions"
     };
-    const _hoisted_5$v = ["id", "aria-hidden"];
+    const _hoisted_5$w = ["id", "aria-hidden"];
     const _hoisted_6$u = { class: "acu-panel__description-region-inner" };
     const _hoisted_7$r = { class: "acu-panel__body" };
     function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
@@ -157333,7 +157742,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* TEXT */
 				)], true)]),
 				_: 3
-			}, 8, ["tone"])])], 8, _hoisted_5$v)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
+			}, 8, ["tone"])])], 8, _hoisted_5$w)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
 			_: 3
 		}),
 		createBaseVNode("div", _hoisted_7$r, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
@@ -157569,7 +157978,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-preset-dd__menu"
     };
     const _hoisted_4$B = ["onClick"];
-    const _hoisted_5$u = { class: "acu-preset-dd__item-name" };
+    const _hoisted_5$v = { class: "acu-preset-dd__item-name" };
     const _hoisted_6$t = {
 	key: 0,
 	class: "acu-preset-dd__item-meta"
@@ -157618,7 +158027,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, [
 					createBaseVNode(
 						"span",
-						_hoisted_5$u,
+						_hoisted_5$v,
 						toDisplayString($setup.itemLabel(item)),
 						1
 						/* TEXT */
@@ -157686,6 +158095,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 const item = props.options.find(o => o.value === props.modelValue);
                 return item ? item.label : props.placeholder;
             });
+            const groupedOptions = computed(() => {
+                const groupOf = (opt) => typeof opt.group === 'string' && opt.group ? opt.group : null;
+                return props.options.map((opt, index) => {
+                    const group = groupOf(opt);
+                    const prevGroup = index > 0 ? groupOf(props.options[index - 1]) : null;
+                    return {
+                        key: `${index}:${opt.value}`,
+                        opt,
+                        group,
+                        showGroupLabel: group !== null && group !== prevGroup,
+                    };
+                });
+            });
             function select(value) {
                 emit('update:modelValue', value);
                 open.value = false;
@@ -157703,22 +158125,26 @@ Expected function or array of functions, received type ${typeof value}.`
             onBeforeUnmount(() => {
                 hostDoc?.removeEventListener('mousedown', onClickOutside);
             });
-            const __returned__ = { props, emit, open, rootRef, rootClasses, hasSelection, selectedLabel, select, onClickOutside, get hostDoc() { return hostDoc; }, set hostDoc(v) { hostDoc = v; } };
+            const __returned__ = { props, emit, open, rootRef, rootClasses, hasSelection, selectedLabel, groupedOptions, select, onClickOutside, get hostDoc() { return hostDoc; }, set hostDoc(v) { hostDoc = v; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-select[data-v-da549440] {\n  position: relative;\n  display: block;\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n  margin: 0 !important;\n  padding: 0 !important;\n  border: 0 !important;\n  outline: 0 !important;\n  background: transparent !important;\n  box-shadow: none !important;\n}\n.acu-select__trigger[data-v-da549440] {\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\n  min-width: 0; max-width: 100%; box-sizing: border-box;\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\n  margin: 0 !important;\n  background: var(--acu-bg-2) !important; border: 0 !important;\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n  box-shadow: none;\n}\n.acu-select__trigger[data-v-da549440]:hover {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-select__trigger[data-v-da549440]:focus { outline: none !important;\n}\n.acu-select__trigger[data-v-da549440]:focus:not(:focus-visible) { box-shadow: none !important;\n}\n.acu-select__trigger[data-v-da549440]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-select__trigger[data-v-da549440]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-select__label[data-v-da549440] {\n  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-select__label--placeholder[data-v-da549440] { color: var(--acu-text-3);\n}\n.acu-select__caret[data-v-da549440] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease; flex-shrink: 0;\n}\n.acu-select__caret--open[data-v-da549440] { transform: rotate(180deg);\n}\n.acu-select__menu[data-v-da549440] {\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\n  min-width: 0; max-width: 100%; box-sizing: border-box;\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-select__item[data-v-da549440] {\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2); transition: background 0.1s ease;\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-select__item[data-v-da549440]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-select__item--active[data-v-da549440] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-select__empty[data-v-da549440] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* ── sm variant ── */\n.acu-select--sm .acu-select__trigger[data-v-da549440] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-select--sm .acu-select__item[data-v-da549440] { padding: var(--acu-space-150, 6px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-select--disabled[data-v-da549440] { pointer-events: none; opacity: 0.5;\n}\n", "src/presentation-v2/components/_lib/AcuSelect.vue#style-0-da549440");
-    var AcuSelect_vue_vue_type_style_index_0_scoped_da549440_lang = null;
+    injectSfcStyle("\n.acu-select[data-v-9a5ee02f] {\r\n  position: relative;\r\n  display: block;\r\n  width: 100%;\r\n  min-width: 0;\r\n  max-width: 100%;\r\n  box-sizing: border-box;\r\n  margin: 0 !important;\r\n  padding: 0 !important;\r\n  border: 0 !important;\r\n  outline: 0 !important;\r\n  background: transparent !important;\r\n  box-shadow: none !important;\n}\n.acu-select__trigger[data-v-9a5ee02f] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-width: 0; max-width: 100%; box-sizing: border-box;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  margin: 0 !important;\r\n  background: var(--acu-bg-2) !important; border: 0 !important;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\r\n  box-shadow: none;\n}\n.acu-select__trigger[data-v-9a5ee02f]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-select__trigger[data-v-9a5ee02f]:focus { outline: none !important;\n}\n.acu-select__trigger[data-v-9a5ee02f]:focus:not(:focus-visible) { box-shadow: none !important;\n}\n.acu-select__trigger[data-v-9a5ee02f]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-select__trigger[data-v-9a5ee02f]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-select__label[data-v-9a5ee02f] {\r\n  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-select__label--placeholder[data-v-9a5ee02f] { color: var(--acu-text-3);\n}\n.acu-select__caret[data-v-9a5ee02f] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease; flex-shrink: 0;\n}\n.acu-select__caret--open[data-v-9a5ee02f] { transform: rotate(180deg);\n}\n.acu-select__menu[data-v-9a5ee02f] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  min-width: 0; max-width: 100%; box-sizing: border-box;\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-select__group[data-v-9a5ee02f] {\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px) var(--acu-space-1, 4px);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.04em;\r\n  color: var(--acu-text-3);\r\n  user-select: none;\r\n  pointer-events: none;\n}\n.acu-select__item[data-v-9a5ee02f] {\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-select__item[data-v-9a5ee02f]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-select__item--active[data-v-9a5ee02f] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-select__empty[data-v-9a5ee02f] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* ── sm variant ── */\n.acu-select--sm .acu-select__trigger[data-v-9a5ee02f] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-select--sm .acu-select__item[data-v-9a5ee02f] { padding: var(--acu-space-150, 6px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-select--disabled[data-v-9a5ee02f] { pointer-events: none; opacity: 0.5;\n}\r\n", "src/presentation-v2/components/_lib/AcuSelect.vue#style-0-9a5ee02f");
+    var AcuSelect_vue_vue_type_style_index_0_scoped_9a5ee02f_lang = null;
 
     const _hoisted_1$W = ["disabled"];
     const _hoisted_2$P = {
 	key: 0,
 	class: "acu-select__menu"
     };
-    const _hoisted_3$G = ["onClick"];
-    const _hoisted_4$A = {
+    const _hoisted_3$G = {
+	key: 0,
+	class: "acu-select__group"
+    };
+    const _hoisted_4$A = ["onClick"];
+    const _hoisted_5$u = {
 	key: 0,
 	class: "acu-select__empty"
     };
@@ -157749,21 +158175,32 @@ Expected function or array of functions, received type ${typeof value}.`
 		)], 8, _hoisted_1$W), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$P, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
-			renderList($props.options, (opt) => {
-				return openBlock(), createElementBlock("li", {
-					key: opt.value,
-					class: normalizeClass(["acu-select__item", { "acu-select__item--active": opt.value === $props.modelValue }]),
-					onClick: ($event) => $setup.select(opt.value)
-				}, toDisplayString(opt.label), 11, _hoisted_3$G);
+			renderList($setup.groupedOptions, (entry) => {
+				return openBlock(), createElementBlock(
+					Fragment,
+					{ key: entry.key },
+					[entry.group !== null ? (openBlock(), createElementBlock(
+						"li",
+						_hoisted_3$G,
+						toDisplayString(entry.group),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true), createBaseVNode("li", {
+						class: normalizeClass(["acu-select__item", { "acu-select__item--active": entry.opt.value === $props.modelValue }]),
+						onClick: ($event) => $setup.select(entry.opt.value)
+					}, toDisplayString(entry.opt.label), 11, _hoisted_4$A)],
+					64
+					/* STABLE_FRAGMENT */
+				);
 			}),
 			128
 			/* KEYED_FRAGMENT */
-		)), !$props.options.length ? (openBlock(), createElementBlock("li", _hoisted_4$A, "无可选项")) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
+		)), !$props.options.length ? (openBlock(), createElementBlock("li", _hoisted_5$u, "无可选项")) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
 		2
 		/* CLASS */
 	);
     }
-    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-da549440"]]);
+    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-9a5ee02f"]]);
 
     var _sfc_main$X = /*@__PURE__*/ defineComponent({
         __name: 'ApiConfigPanel',
@@ -157789,6 +158226,41 @@ Expected function or array of functions, received type ${typeof value}.`
                 { value: "main", label: "酒馆主 API" },
                 { value: "custom", label: "自定义" },
                 { value: "tavern", label: "酒馆预设" },
+            ];
+            // 选项与 SillyTavern「提示词后处理」下拉一致；'' 为「未选择」，默认 'strict'。
+            const promptPostProcessingOptions = [
+                { value: "", label: "未选择" },
+                {
+                    value: "merge_tools",
+                    label: "合并相同角色连续的发言（含工具）",
+                    group: "With Tools",
+                },
+                {
+                    value: "semi_tools",
+                    label: "半严格（强制对话角色交替）（含工具）",
+                    group: "With Tools",
+                },
+                {
+                    value: "strict_tools",
+                    label: "严格（强制对话角色交替、用户最先）（含工具）",
+                    group: "With Tools",
+                },
+                { value: "merge", label: "合并相同角色连续的发言", group: "No Tools" },
+                { value: "semi", label: "半严格（强制对话角色交替）", group: "No Tools" },
+                {
+                    value: "strict",
+                    label: "严格（强制对话角色交替、用户最先）",
+                    group: "No Tools",
+                },
+                { value: "single", label: "单一用户消息（无工具）" },
+            ];
+            // 接口协议选项（对齐 TT 主 API 四个「自定义」选项，custom_api_format 契约）；值集合以
+            // api-preset-service 的 CUSTOM_API_FORMAT_VALUES_ACU 为唯一来源，此处只补人类可读标签。
+            const customApiFormatOptions = [
+                { value: "openai_compat", label: "兼容 OpenAI" },
+                { value: "openai_responses", label: "兼容 OpenAI Responses" },
+                { value: "claude_messages", label: "兼容 Claude Messages" },
+                { value: "gemini_interactions", label: "兼容 Gemini Interactions" },
             ];
             const modelSelectOptions = computed(() => store.modelOptions.map((m) => ({ value: m, label: m })));
             const tavernProfileOptions = computed(() => store.tavernProfiles.map((p) => ({ value: p.id, label: p.name })));
@@ -157906,6 +158378,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 applyConnectionMode(activeDraft, value);
                 activeDraftSavedAt.value = null;
             }
+            function setPromptPostProcessing(value) {
+                activeDraft.promptPostProcessing =
+                    normalizePromptPostProcessing_ACU(value);
+                activeDraftSavedAt.value = null;
+            }
+            function setCustomApiFormat(value) {
+                activeDraft.customApiFormat = normalizeCustomApiFormat_ACU(value);
+                activeDraftSavedAt.value = null;
+            }
             async function loadModelsForActive() {
                 await store.loadModelsForConfig({
                     url: activeDraft.url,
@@ -157913,14 +158394,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 });
             }
             watch(() => store.activePresetName, () => syncActiveDraft(), { flush: "sync" });
-            const __returned__ = { store, dialogStore, toast, formMode, activeDraft, activeDraftOriginalName, activeDraftSnapshot, activeDraftError, activeDraftSavedAt, activeConnectionMode, activeDraftDirty, connectionModeOptions, modelSelectOptions, tavernProfileOptions, presetDropdownItems, refreshAll, syncActiveDraft, startCreateDraft, selectPreset, deletePreset, presetMeta, validateActiveDraft, saveActiveDraft, setActiveConnectionMode, loadModelsForActive, get apiCopy() { return apiCopy; }, AcuButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuTextarea, AcuPresetDropdown, AcuSegmentedControl, AcuSelect };
+            const __returned__ = { store, dialogStore, toast, formMode, activeDraft, activeDraftOriginalName, activeDraftSnapshot, activeDraftError, activeDraftSavedAt, activeConnectionMode, activeDraftDirty, connectionModeOptions, promptPostProcessingOptions, customApiFormatOptions, modelSelectOptions, tavernProfileOptions, presetDropdownItems, refreshAll, syncActiveDraft, startCreateDraft, selectPreset, deletePreset, presetMeta, validateActiveDraft, saveActiveDraft, setActiveConnectionMode, setPromptPostProcessing, setCustomApiFormat, loadModelsForActive, get apiCopy() { return apiCopy; }, AcuButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuTextarea, AcuPresetDropdown, AcuSegmentedControl, AcuSelect };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-c3462564] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\n  gap: 6px;\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-c3462564] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-c3462564] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-c3462564] {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-c3462564] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-c3462564] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-c3462564] {\n  color: var(--acu-danger);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-c3462564] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n}\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-c3462564");
-    var ApiConfigPanel_vue_vue_type_style_index_0_scoped_c3462564_lang = null;
+    injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-154ad041] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\r\n  gap: 6px;\r\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-154ad041] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-154ad041] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-154ad041] {\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-154ad041] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-154ad041] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-154ad041] {\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-154ad041] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\n}\r\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-154ad041");
+    var ApiConfigPanel_vue_vue_type_style_index_0_scoped_154ad041_lang = null;
 
     const _hoisted_1$V = { class: "acu-api-config-panel__select-row" };
     const _hoisted_2$O = { class: "acu-api-config-panel__editor-section" };
@@ -158025,6 +158506,17 @@ Expected function or array of functions, received type ${typeof value}.`
 							Fragment,
 							{ key: 0 },
 							[
+								createVNode($setup["AcuFormRow"], {
+									label: "接口协议",
+									hint: "决定上游端点与请求/响应变形，默认兼容 OpenAI。TauriTavern 按 custom_api_format 分流到 /chat/completions、/responses、/messages、/interactions；原版 SillyTavern 把 Claude/Gemini 映射到服务端原生协议源（端点填协议根即可，插件自动补 /v1 或剥版本段），OpenAI Responses 在原版 ST 下回退兼容 OpenAI。纯原生端点下「加载模型」可能失败，可手填模型名。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuSelect"], {
+										options: $setup.customApiFormatOptions,
+										"model-value": $setup.activeDraft.customApiFormat,
+										"onUpdate:modelValue": $setup.setCustomApiFormat
+									}, null, 8, ["model-value"])]),
+									_: 1
+								}),
 								createVNode($setup["AcuFormRow"], { label: "端点(基础URL)" }, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.activeDraft.url,
@@ -158150,6 +158642,18 @@ Expected function or array of functions, received type ${typeof value}.`
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], {
+							label: "提示词后处理",
+							hint: "SillyTavern custom_prompt_post_processing，默认严格（与旧版本行为一致）。未选择=不带该字段原样透传消息，可保留提示词组中 system 段的角色；严格等模式会把提示词中部的 system 消息强制改为 user。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuSelect"], {
+								options: $setup.promptPostProcessingOptions,
+								"model-value": $setup.activeDraft.promptPostProcessing,
+								placeholder: "未选择",
+								"onUpdate:modelValue": $setup.setPromptPostProcessing
+							}, null, 8, ["model-value"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
 							label: "附加请求标头",
 							hint: "每行一个 Header: Value，追加到请求头中。"
 						}, {
@@ -158213,7 +158717,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-c3462564"]]);
+    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-154ad041"]]);
 
     // ═══════════════════════════════════════════════════════════
     // service/settings/feature-preset-reference-service.ts — 功能级 API 预设引用
@@ -167374,6 +167878,38 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-b306689c"]]);
 
+    /** 宿主世界书 API 挂起时确认弹窗不能被无限期拖住，超过该时长即降级为提示文案。 */
+    const INJECTION_TARGET_RESOLVE_TIMEOUT_MS = 1500;
+    const RESOLVE_TIMEOUT = Symbol('injection-target-resolve-timeout');
+    /**
+     * 确认弹窗用的世界书注入目标描述：大规模历史回填会一次生成上百条 TavernDB 条目，
+     * 用户必须在确认前看到它们将写入哪本世界书（默认是角色卡绑定的主世界书，而不是
+     * 用户新建的外挂数据库世界书）。解析失败或超时不阻断确认流程，只降级为提示文案。
+     */
+    async function describeInjectionTargetForConfirm() {
+        const target = String(getCurrentWorldbookConfig_ACU()?.injectionTarget || '').trim() || 'character';
+        if (target !== 'character')
+            return target;
+        let timeoutHandle = null;
+        try {
+            const primary = await Promise.race([
+                getCurrentCharPrimaryLorebook_ACU(),
+                new Promise(resolve => {
+                    timeoutHandle = setTimeout(() => resolve(RESOLVE_TIMEOUT), INJECTION_TARGET_RESOLVE_TIMEOUT_MS);
+                }),
+            ]);
+            if (primary === RESOLVE_TIMEOUT)
+                return '角色卡绑定世界书（主世界书解析超时）';
+            return primary ? `角色卡绑定世界书 · ${primary}` : '角色卡绑定世界书（未解析到主世界书）';
+        }
+        catch {
+            return '角色卡绑定世界书（未解析到主世界书）';
+        }
+        finally {
+            if (timeoutHandle !== null)
+                clearTimeout(timeoutHandle);
+        }
+    }
     function currentSheetKeys() {
         try {
             return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
@@ -167727,9 +168263,10 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             manualUpdateBusy.value = true;
             try {
+                const injectionTargetLabel = await describeInjectionTargetForConfirm();
                 const confirmed = await dialogStore.confirm({
                     title: '执行手动填表',
-                    message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
+                    message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n世界书注入目标：${injectionTargetLabel}（填表结果会写入该世界书的 TavernDB 条目）\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或中途终止时不会回滚：已清理的旧数据不会恢复，已成功提交的批次会保留，运行时会按聊天记录中的已提交结果重新对齐。`,
                     dangerMessage: checkpointRiskMessage.value || undefined,
                     confirmLabel: '确认并继续',
                     cancelLabel: '取消',
