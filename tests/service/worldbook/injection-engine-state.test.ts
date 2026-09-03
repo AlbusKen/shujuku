@@ -13,7 +13,7 @@ const {
   mockGetLorebookEntries, mockDeleteLorebookEntries, mockGwGetCurrentCharPrimaryLorebook, mockGetCurrentCharacterWorldbookBinding,
   mockGetChatArray, mockSaveChatToHost,
   mockApplyTemplateScopeForCurrentChat, mockLoadSettings, mockSaveSettings,
-  mockResetPlotWorldbookSelectionForChatChange,
+  mockApplyPlotWorldbookSelectionForCurrentCharacter,
   mockGetSortedSheetKeys,
   mockLoadAllChatMessages,
   mockCleanChatName, mockGetChatFirstLayerMessage, mockLogDebug, mockLogError, mockLogWarn,
@@ -62,7 +62,7 @@ const {
   mockApplyTemplateScopeForCurrentChat: vi.fn(),
   mockLoadSettings: vi.fn(),
   mockSaveSettings: vi.fn(),
-  mockResetPlotWorldbookSelectionForChatChange: vi.fn(),
+  mockApplyPlotWorldbookSelectionForCurrentCharacter: vi.fn(() => ({ scopeKey: 'char:test.png', outcome: 'restored' })),
   mockGetSortedSheetKeys: vi.fn(() => []),
   mockLoadAllChatMessages: vi.fn(async () => {}),
   mockCleanChatName: vi.fn((name: string) => name),
@@ -130,7 +130,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 vi.mock('../../../src/service/settings/settings-service', () => ({
   applyTemplateScopeForCurrentChat_ACU: mockApplyTemplateScopeForCurrentChat,
   loadSettings_ACU: mockLoadSettings,
-  resetPlotWorldbookSelectionForChatChange_ACU: mockResetPlotWorldbookSelectionForChatChange,
+  applyPlotWorldbookSelectionForCurrentCharacter_ACU: mockApplyPlotWorldbookSelectionForCurrentCharacter,
   saveSettings_ACU: mockSaveSettings,
 }));
 
@@ -284,20 +284,20 @@ describe('resetScriptStateForNewChat_ACU', () => {
     expect(mockLoadOrCreateJsonTableFromChatHistory).not.toHaveBeenCalled();
   });
 
-  it('真实 CHAT_CHANGED 在加载设置后重置剧情世界书选择', async () => {
+  it('真实 CHAT_CHANGED 在加载设置后投影当前角色卡的剧情世界书选择（不再强制重置）', async () => {
     await resetScriptStateForNewChat_ACU('new-chat.jsonl', { reason: 'chat_changed' });
 
     expect(mockLoadSettings).toHaveBeenCalledTimes(1);
-    expect(mockResetPlotWorldbookSelectionForChatChange).toHaveBeenCalledTimes(1);
+    expect(mockApplyPlotWorldbookSelectionForCurrentCharacter).toHaveBeenCalledTimes(1);
     expect(mockLoadSettings.mock.invocationCallOrder[0]).toBeLessThan(
-      mockResetPlotWorldbookSelectionForChatChange.mock.invocationCallOrder[0],
+      mockApplyPlotWorldbookSelectionForCurrentCharacter.mock.invocationCallOrder[0],
     );
   });
 
-  it('启动恢复不清空剧情世界书选择', async () => {
+  it('启动恢复同样按角色卡投影剧情世界书选择', async () => {
     await resetScriptStateForNewChat_ACU('new-chat.jsonl', { reason: 'startup_restore' });
 
-    expect(mockResetPlotWorldbookSelectionForChatChange).not.toHaveBeenCalled();
+    expect(mockApplyPlotWorldbookSelectionForCurrentCharacter).toHaveBeenCalledTimes(1);
   });
 
   it('重置 generationGate 状态', async () => {

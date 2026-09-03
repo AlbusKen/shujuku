@@ -259,6 +259,14 @@ vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: mockGetCurrentWorldbookConfig,
 }));
 
+const mockCharacterScope = vi.hoisted(() => ({ key: 'char:alice.png', reliable: true }));
+vi.mock('../../../src/service/settings/character-scope', () => ({
+  CHARACTER_SCOPE_DEFAULT_KEY_ACU: 'default',
+  getLegacyChatScopeKey_ACU: () => 'test-char',
+  resolveCurrentCharacterScope_ACU: () => ({ ...mockCharacterScope }),
+  getCurrentCharacterScopeKey_ACU: () => mockCharacterScope.key,
+}));
+
 vi.mock('../../../src/service/template/chat-scope', () => ({
   getCurrentChatTemplateScopeState_ACU: mockGetCurrentChatTemplateScopeState,
   getGlobalTemplateSnapshotForCurrentProfile_ACU: mockGetGlobalTemplateSnapshotForCurrentProfile,
@@ -284,7 +292,9 @@ vi.mock('../../../src/shared/utils', () => ({
 
 import {
   saveSettings_ACU,
-  resetPlotWorldbookSelectionForChatChange_ACU,
+  applyPlotWorldbookSelectionForCurrentCharacter_ACU,
+  syncPlotWorldbookSelectionToCharacterStore_ACU,
+  _reset_projectedPlotWorldbookScopeKey_ACU,
   loadSettings_ACU,
   buildDefaultSettings_ACU,
   applyTemplateScopeForCurrentChat_ACU,
@@ -332,47 +342,129 @@ beforeEach(() => {
   mockGlobalMeta.migratedLegacySingleStore = true;
   mockGlobalMeta.zeroTkOccupyModeGlobal = false;
   mockGlobalMeta.vectorMemoryConfigGlobal = null;
+  delete mockSettings.plotWorldbookConfigByCharacter;
+  mockCharacterScope.key = 'char:alice.png';
+  mockCharacterScope.reliable = true;
+  _reset_projectedPlotWorldbookScopeKey_ACU();
   _set_settingsStorageReadyForSave_ACU(true);
 });
 
-// ═══ resetPlotWorldbookSelectionForChatChange_ACU ═══
-describe('resetPlotWorldbookSelectionForChatChange_ACU', () => {
-  it('仅重置剧情世界书选择并保存一次', () => {
-    mockGetConfigStorage.mockReturnValue({ _isTavern: true, getItem: vi.fn(), setItem: vi.fn() });
-    const previousSelection = {
-      source: 'manual',
-      manualSelection: ['旧世界书'],
-      enabledEntries: { '旧世界书': [1, 2] },
+// ═══ 剧情世界书选择：以角色卡为单位 ═══
+describe('applyPlotWorldbookSelectionForCurrentCharacter_ACU', () => {
+  const manualSelection = () => ({
+    source: 'manual',
+    manualSelection: ['旧世界书'],
+    enabledEntries: { '旧世界书': [1, 2] },
+  });
+
+  it('升级后首次遇到可靠角色卡键：把现有全局选择归入该角色卡（不丢失手动选择）', () => {
+    mockSettings.plotSettings = {
+      plotWorldbookConfig: manualSelection(),
+      promptTemplate: '保留的剧情提示词',
     };
+
+    const result = applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+
+    expect(result).toEqual({ scopeKey: 'char:alice.png', outcome: 'migrated' });
+    expect(mockSettings.plotSettings.promptTemplate).toBe('保留的剧情提示词');
+    expect(mockSettings.plotSettings.plotWorldbookConfig).toEqual(manualSelection());
+    expect(mockSettings.plotWorldbookConfigByCharacter['char:alice.png']).toEqual(manualSelection());
+  });
+
+  it('宿主角色状态未就绪且尚无按卡存储时延后迁移，保持当前全局选择', () => {
+    mockCharacterScope.key = 'test-char';
+    mockCharacterScope.reliable = false;
+    mockSettings.plotSettings = { plotWorldbookConfig: manualSelection() };
+
+    const result = applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+
+    expect(result).toEqual({ scopeKey: '', outcome: 'deferred' });
+    expect(mockSettings.plotSettings.plotWorldbookConfig).toEqual(manualSelection());
+    expect(mockSettings.plotWorldbookConfigByCharacter).toBeUndefined();
+    // 延后期间保存设置不得把全局选择写进错误的键
+    expect(syncPlotWorldbookSelectionToCharacterStore_ACU()).toBe('');
+    expect(mockSettings.plotWorldbookConfigByCharacter).toBeUndefined();
+  });
+
+  it('已有该角色卡记录时恢复它，即使运行时字段已被打回默认', () => {
+    mockSettings.plotWorldbookConfigByCharacter = { 'char:alice.png': manualSelection() };
+    mockSettings.plotSettings = {
+      plotWorldbookConfig: { source: 'character', manualSelection: [], enabledEntries: {} },
+    };
+
+    const result = applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+
+    expect(result).toEqual({ scopeKey: 'char:alice.png', outcome: 'restored' });
+    expect(mockSettings.plotSettings.plotWorldbookConfig).toEqual(manualSelection());
+    expect(mockSettings.plotSettings.plotWorldbookConfig).not.toBe(mockSettings.plotWorldbookConfigByCharacter['char:alice.png']);
+  });
+
+  it('按卡存储已存在时，新角色卡从默认值开始，不继承上一张卡的选择', () => {
+    mockSettings.plotWorldbookConfigByCharacter = { 'char:alice.png': manualSelection() };
+    mockSettings.plotSettings = { plotWorldbookConfig: manualSelection() };
+    mockCharacterScope.key = 'char:bob.png';
+
+    const result = applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+
+    expect(result).toEqual({ scopeKey: 'char:bob.png', outcome: 'default' });
+    expect(mockSettings.plotSettings.plotWorldbookConfig).toEqual({ source: 'character', manualSelection: [], enabledEntries: {} });
+    expect(mockSettings.plotWorldbookConfigByCharacter['char:alice.png']).toEqual(manualSelection());
+    expect(mockSettings.plotWorldbookConfigByCharacter['char:bob.png']).toEqual({ source: 'character', manualSelection: [], enabledEntries: {} });
+  });
+
+  it('同一张卡切换聊天：A 卡手动选择 → 切到 B 卡 → 切回 A 卡仍是手动选择', () => {
+    mockGetConfigStorage.mockReturnValue({ _isTavern: true, getItem: vi.fn(), setItem: vi.fn() });
+    mockSettings.plotWorldbookConfigByCharacter = {};
+    mockSettings.plotSettings = { plotWorldbookConfig: { source: 'character', manualSelection: [], enabledEntries: {} } };
+
+    applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+    mockSettings.plotSettings.plotWorldbookConfig.source = 'manual';
+    mockSettings.plotSettings.plotWorldbookConfig.manualSelection = ['A 专用书'];
+    expect(saveSettings_ACU().saved).toBe(true);
+
+    mockCharacterScope.key = 'char:bob.png';
+    expect(applyPlotWorldbookSelectionForCurrentCharacter_ACU().outcome).toBe('default');
+    expect(mockSettings.plotSettings.plotWorldbookConfig.source).toBe('character');
+    saveSettings_ACU();
+
+    mockCharacterScope.key = 'char:alice.png';
+    expect(applyPlotWorldbookSelectionForCurrentCharacter_ACU().outcome).toBe('restored');
+    expect(mockSettings.plotSettings.plotWorldbookConfig).toEqual({
+      source: 'manual',
+      manualSelection: ['A 专用书'],
+      enabledEntries: {},
+    });
+  });
+
+  it('保存时回写到投影所属的角色卡槽位，而不是当前宿主解析出的键', () => {
+    mockSettings.plotWorldbookConfigByCharacter = { 'char:alice.png': manualSelection() };
+    mockSettings.plotSettings = { plotWorldbookConfig: { source: 'character', manualSelection: [], enabledEntries: {} } };
+    applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+    mockSettings.plotSettings.plotWorldbookConfig.manualSelection.push('新增书');
+
+    // 模拟宿主已切卡但 CHAT_CHANGED 尚未处理时触发的保存
+    mockCharacterScope.key = 'char:bob.png';
+    expect(syncPlotWorldbookSelectionToCharacterStore_ACU()).toBe('char:alice.png');
+    expect(mockSettings.plotWorldbookConfigByCharacter['char:bob.png']).toBeUndefined();
+    expect(mockSettings.plotWorldbookConfigByCharacter['char:alice.png']).toEqual({
+      source: 'manual',
+      manualSelection: ['旧世界书', '新增书'],
+      enabledEntries: { '旧世界书': [1, 2] },
+    });
+  });
+
+  it('不改动填表世界书配置（characterSettings）', () => {
     const formFillWorldbookConfig = {
       source: 'manual',
       manualSelection: ['填表世界书'],
       enabledEntries: { '填表世界书': [7] },
     };
-    mockSettings.plotSettings = {
-      plotWorldbookConfig: previousSelection,
-      promptTemplate: '保留的剧情提示词',
-      loopDelaySeconds: 3,
-    };
-    mockSettings.characterSettings = {
-      'chat-a': { worldbookConfig: formFillWorldbookConfig },
-    };
+    mockSettings.characterSettings = { 'char:alice.png': { worldbookConfig: formFillWorldbookConfig } };
+    mockSettings.plotSettings = { plotWorldbookConfig: manualSelection() };
 
-    const result = resetPlotWorldbookSelectionForChatChange_ACU();
+    applyPlotWorldbookSelectionForCurrentCharacter_ACU();
 
-    expect(result).toEqual({ saved: true, storageType: 'tavern' });
-    expect(mockSettings.plotSettings).toMatchObject({
-      promptTemplate: '保留的剧情提示词',
-      loopDelaySeconds: 3,
-      plotWorldbookConfig: {
-        source: 'character',
-        manualSelection: [],
-        enabledEntries: {},
-      },
-    });
-    expect(mockSettings.plotSettings.plotWorldbookConfig).not.toBe(previousSelection);
-    expect(mockSettings.characterSettings['chat-a'].worldbookConfig).toBe(formFillWorldbookConfig);
-    expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(1);
+    expect(mockSettings.characterSettings['char:alice.png'].worldbookConfig).toBe(formFillWorldbookConfig);
   });
 });
 

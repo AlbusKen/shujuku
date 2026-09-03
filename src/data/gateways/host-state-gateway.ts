@@ -54,6 +54,36 @@ export function getCurrentCharacterId_ACU(win?: any): string | null {
 }
 
 /**
+ * 获取当前角色卡的稳定作用域键（用于"以角色卡为单位"持久化配置）。
+ *
+ * 优先级：
+ *   1. 群聊：`group:<groupId>`
+ *   2. 角色卡：`char:<avatar 文件名>`（avatar 是酒馆内角色卡的唯一稳定标识，改名/排序不受影响；
+ *      this_chid 只是列表索引，增删角色后会漂移，不能用作持久化键）
+ *   3. 无 avatar 时退回 `charname:<角色名>`
+ *
+ * 无法识别当前角色/群组时返回 null，调用方需自行回退到聊天级键。
+ */
+export function getCurrentCharacterCardKey_ACU(win?: any): string | null {
+    try {
+        const w = win || topLevelWindow_ACU || window;
+        const stContext = (w as any)?.SillyTavern?.getContext?.();
+        const groupId = normalizeCharacterId_ACU((SillyTavern_API_ACU as any)?.groupId ?? stContext?.groupId);
+        if (groupId !== null) return `group:${groupId}`;
+
+        const character = getCurrentCharacterFallback_ACU(win);
+        const avatar = String(character?.avatar || '').trim();
+        if (avatar) return `char:${avatar}`;
+
+        const name = String(character?.name || character?.data?.name || '').trim();
+        if (name) return `charname:${name}`;
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * 获取用户人设描述 (persona_description)
  * 按优先级尝试多个来源：
  *   1. SillyTavern.getContext().powerUserSettings.persona_description

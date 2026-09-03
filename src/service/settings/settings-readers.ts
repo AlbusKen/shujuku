@@ -5,19 +5,35 @@
  * 不执行保存操作。其他子模块应优先从此文件 import，而非 settings-service.ts。
  */
 
-import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, settings_ACU } from '../runtime/state-manager';
+import { currentJsonTableData_ACU, settings_ACU } from '../runtime/state-manager';
 import { globalMeta_ACU } from '../../data/repositories/profile-repo';
 import { defaultWorldbookConfig_ACU } from '../../shared/defaults';
 import { deepMerge_ACU, logDebug_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
+import { CHARACTER_SCOPE_DEFAULT_KEY_ACU, getCurrentCharacterScopeKey_ACU, getLegacyChatScopeKey_ACU } from './character-scope';
 
 /**
- * 获取当前角色的专属设置。
+ * 旧版 characterSettings 以聊天文件名为键；升级后首次访问某张角色卡时，
+ * 把当前聊天对应的旧条目搬到角色卡键下，避免用户已有的填表世界书选择丢失。
+ */
+function migrateLegacyChatScopedCharSettings_ACU(charId: string): boolean {
+    const legacyKey = getLegacyChatScopeKey_ACU();
+    if (legacyKey === charId || legacyKey === CHARACTER_SCOPE_DEFAULT_KEY_ACU) return false;
+    const legacy = settings_ACU.characterSettings[legacyKey];
+    if (!legacy || typeof legacy !== 'object' || !legacy.worldbookConfig || typeof legacy.worldbookConfig !== 'object') return false;
+    settings_ACU.characterSettings[charId] = JSON.parse(JSON.stringify(legacy));
+    delete settings_ACU.characterSettings[legacyKey];
+    logDebug_ACU(`Migrated chat-scoped character settings "${legacyKey}" -> "${charId}"`);
+    return true;
+}
+
+/**
+ * 获取当前角色的专属设置（以角色卡为单位；同一张卡切换聊天配置不变）。
  * 业务逻辑：读 settings → deep merge 默认值 → 写回（确保字段完整）。
  * 注意：此函数有"规范化写回"的副作用（补全缺失字段），但不触发持久化。
  */
 export function getCurrentCharSettings_ACU() {
-    const charId = currentChatFileIdentifier_ACU || 'default';
+    const charId = getCurrentCharacterScopeKey_ACU();
     if (!settings_ACU.characterSettings) {
         settings_ACU.characterSettings = {};
     }
@@ -25,6 +41,9 @@ export function getCurrentCharSettings_ACU() {
         (typeof globalMeta_ACU?.zeroTkOccupyModeGlobal === 'boolean')
             ? (globalMeta_ACU.zeroTkOccupyModeGlobal === true)
             : (settings_ACU?.zeroTkOccupyModeDefault === true);
+    if (!settings_ACU.characterSettings[charId]) {
+        migrateLegacyChatScopedCharSettings_ACU(charId);
+    }
     if (!settings_ACU.characterSettings[charId]) {
         const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
         worldbookConfigForNewChat.zeroTkOccupyMode = globalZeroTkDefault;

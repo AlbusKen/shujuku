@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      9.2.2
+// @version      9.2.3
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -61839,6 +61839,37 @@ $CONTENT
         }
     }
     /**
+     * 获取当前角色卡的稳定作用域键（用于"以角色卡为单位"持久化配置）。
+     *
+     * 优先级：
+     *   1. 群聊：`group:<groupId>`
+     *   2. 角色卡：`char:<avatar 文件名>`（avatar 是酒馆内角色卡的唯一稳定标识，改名/排序不受影响；
+     *      this_chid 只是列表索引，增删角色后会漂移，不能用作持久化键）
+     *   3. 无 avatar 时退回 `charname:<角色名>`
+     *
+     * 无法识别当前角色/群组时返回 null，调用方需自行回退到聊天级键。
+     */
+    function getCurrentCharacterCardKey_ACU(win) {
+        try {
+            const w = win || topLevelWindow_ACU || window;
+            const stContext = w?.SillyTavern?.getContext?.();
+            const groupId = normalizeCharacterId_ACU(SillyTavern_API_ACU?.groupId ?? stContext?.groupId);
+            if (groupId !== null)
+                return `group:${groupId}`;
+            const character = getCurrentCharacterFallback_ACU(win);
+            const avatar = String(character?.avatar || '').trim();
+            if (avatar)
+                return `char:${avatar}`;
+            const name = String(character?.name || character?.data?.name || '').trim();
+            if (name)
+                return `charname:${name}`;
+            return null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
      * 获取用户人设描述 (persona_description)
      * 按优先级尝试多个来源：
      *   1. SillyTavern.getContext().powerUserSettings.persona_description
@@ -76276,6 +76307,14 @@ $CONTENT
             finalDirective: getPlotPromptContentByIdFromSettings_ACU(plotSettings, 'finalSystemDirective') || '',
         };
     }
+    /**
+     * 剧情世界书选择（plotWorldbookConfig）以角色卡为单位持久化，不属于预设/聊天快照的一部分；
+     * 预设重置/快照替换时必须原样保留，否则切聊天走"继承默认预设"路径会把用户的手动选择打回默认。
+     */
+    function preservePlotWorldbookConfig_ACU(plotSettings) {
+        const cfg = plotSettings?.plotWorldbookConfig;
+        return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? JSON.parse(JSON.stringify(cfg)) : null;
+    }
     function resetPlotSettingsToDefault_ACU(plotSettings) {
         if (!plotSettings || typeof plotSettings !== 'object')
             return null;
@@ -76287,6 +76326,7 @@ $CONTENT
         const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
             ? Math.max(0, Math.trunc(plotSettings.globalRevision))
             : 0;
+        const preservedPlotWorldbookConfig = preservePlotWorldbookConfig_ACU(plotSettings);
         const defaults = cloneDefaultPlotSettingsForPreset_ACU();
         Object.keys(plotSettings).forEach((key) => { delete plotSettings[key]; });
         Object.assign(plotSettings, defaults);
@@ -76294,6 +76334,8 @@ $CONTENT
         plotSettings.promptPresets = preservedPromptPresets;
         plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
         plotSettings.globalRevision = preservedGlobalRevision;
+        if (preservedPlotWorldbookConfig)
+            plotSettings.plotWorldbookConfig = preservedPlotWorldbookConfig;
         ensurePlotPromptsArray_ACU(plotSettings);
         ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
         return plotSettings;
@@ -76312,6 +76354,7 @@ $CONTENT
         const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
             ? Math.max(0, Math.trunc(plotSettings.globalRevision))
             : 0;
+        const preservedPlotWorldbookConfig = preservePlotWorldbookConfig_ACU(plotSettings);
         const defaults = cloneDefaultPlotSettingsForPreset_ACU();
         Object.keys(plotSettings).forEach((key) => { delete plotSettings[key]; });
         Object.assign(plotSettings, defaults, normalizedSnapshot);
@@ -76319,6 +76362,8 @@ $CONTENT
         plotSettings.promptPresets = preservedPromptPresets;
         plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
         plotSettings.globalRevision = preservedGlobalRevision;
+        if (preservedPlotWorldbookConfig)
+            plotSettings.plotWorldbookConfig = preservedPlotWorldbookConfig;
         ensurePlotPromptsArray_ACU(plotSettings);
         ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
         plotSettings.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(plotSettings);
@@ -80049,7 +80094,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2.2" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2.3" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -81861,9 +81906,10 @@ $CONTENT
         // [FIX] Reload all settings to ensure template is not stale for new chats.
         // MUST be called AFTER setting currentChatFileIdentifier_ACU so it loads the correct character settings.
         loadSettings_ACU();
-        if (reason === 'chat_changed') {
-            resetPlotWorldbookSelectionForChatChange_ACU();
-        }
+        // 填表 / 剧情推进的世界书选择均以角色卡为单位持久化：这里只把当前角色卡的记录
+        // 投影到运行时字段，不再在切换聊天时把剧情世界书强制重置为"角色卡绑定世界书"。
+        const plotSelection = applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+        logDebug_ACU(`ACU: Plot worldbook selection for "${plotSelection.scopeKey || '(deferred)'}" -> ${plotSelection.outcome} (reason: ${reason})`);
         // 当前角色卡绑定在后续读取时重新解析；这里只清除上一会话的内存快照。
         // 不得删除或重写旧世界书中的持久 Agent state。
         resetPlotAgentWorldbookSessionSnapshot_ACU();
@@ -92601,6 +92647,8 @@ $CONTENT
         delete snapshot.promptPresets;
         delete snapshot.lastUsedPresetName;
         delete snapshot.enabled;
+        // 剧情世界书选择以角色卡为单位持久化（plotWorldbookConfigByCharacter），不进聊天快照。
+        delete snapshot.plotWorldbookConfig;
         stripLegacyLoopPromptFieldsInPlace_ACU(snapshot);
         ensurePlotPromptsArray_ACU(snapshot);
         ensurePlotTasksCompat_ACU(snapshot, { syncLegacy: true });
@@ -94583,24 +94631,69 @@ $CONTENT
     // 共享基础函数
 
     /**
+     * service/settings/character-scope.ts — 角色卡级配置作用域键
+     *
+     * 填表世界书配置（characterSettings[key].worldbookConfig）与剧情推进世界书配置
+     * （plotWorldbookConfigByCharacter[key]）都以"角色卡"为单位持久化：
+     * 同一张角色卡下切换/新建聊天，世界书来源与手动选择保持不变。
+     *
+     * 键的解析交给 host-state-gateway；取不到角色卡/群组时退回聊天文件名，
+     * 与旧版"按聊天存储"的行为保持一致，避免在宿主状态未就绪时产生错误归属。
+     */
+    const CHARACTER_SCOPE_DEFAULT_KEY_ACU = 'default';
+    /** 旧版按聊天文件名的键（仅用于迁移历史数据 / 不可靠时回退）。 */
+    function getLegacyChatScopeKey_ACU() {
+        return currentChatFileIdentifier_ACU || CHARACTER_SCOPE_DEFAULT_KEY_ACU;
+    }
+    function resolveCurrentCharacterScope_ACU() {
+        const cardKey = getCurrentCharacterCardKey_ACU();
+        if (cardKey)
+            return { key: cardKey, reliable: true };
+        return { key: getLegacyChatScopeKey_ACU(), reliable: false };
+    }
+    /** 当前角色卡作用域键：角色卡/群组优先，取不到时退回聊天级键。 */
+    function getCurrentCharacterScopeKey_ACU() {
+        return resolveCurrentCharacterScope_ACU().key;
+    }
+
+    /**
      * service/settings/settings-readers.ts — 设置读取器（纯读取，无持久化副作用）
      *
      * 从 settings-service.ts 提取。这些函数只读取/规范化 settings 中的数据，
      * 不执行保存操作。其他子模块应优先从此文件 import，而非 settings-service.ts。
      */
     /**
-     * 获取当前角色的专属设置。
+     * 旧版 characterSettings 以聊天文件名为键；升级后首次访问某张角色卡时，
+     * 把当前聊天对应的旧条目搬到角色卡键下，避免用户已有的填表世界书选择丢失。
+     */
+    function migrateLegacyChatScopedCharSettings_ACU(charId) {
+        const legacyKey = getLegacyChatScopeKey_ACU();
+        if (legacyKey === charId || legacyKey === CHARACTER_SCOPE_DEFAULT_KEY_ACU)
+            return false;
+        const legacy = settings_ACU.characterSettings[legacyKey];
+        if (!legacy || typeof legacy !== 'object' || !legacy.worldbookConfig || typeof legacy.worldbookConfig !== 'object')
+            return false;
+        settings_ACU.characterSettings[charId] = JSON.parse(JSON.stringify(legacy));
+        delete settings_ACU.characterSettings[legacyKey];
+        logDebug_ACU(`Migrated chat-scoped character settings "${legacyKey}" -> "${charId}"`);
+        return true;
+    }
+    /**
+     * 获取当前角色的专属设置（以角色卡为单位；同一张卡切换聊天配置不变）。
      * 业务逻辑：读 settings → deep merge 默认值 → 写回（确保字段完整）。
      * 注意：此函数有"规范化写回"的副作用（补全缺失字段），但不触发持久化。
      */
     function getCurrentCharSettings_ACU() {
-        const charId = currentChatFileIdentifier_ACU || 'default';
+        const charId = getCurrentCharacterScopeKey_ACU();
         if (!settings_ACU.characterSettings) {
             settings_ACU.characterSettings = {};
         }
         const globalZeroTkDefault = (typeof globalMeta_ACU?.zeroTkOccupyModeGlobal === 'boolean')
             ? (globalMeta_ACU.zeroTkOccupyModeGlobal === true)
             : (settings_ACU?.zeroTkOccupyModeDefault === true);
+        if (!settings_ACU.characterSettings[charId]) {
+            migrateLegacyChatScopedCharSettings_ACU(charId);
+        }
         if (!settings_ACU.characterSettings[charId]) {
             const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
             worldbookConfigForNewChat.zeroTkOccupyMode = globalZeroTkDefault;
@@ -95599,13 +95692,93 @@ $CONTENT
         });
         return changed;
     }
-    function resetPlotWorldbookSelectionForChatChange_ACU() {
+    /** 当前 plotSettings.plotWorldbookConfig 投影所属的角色卡键；回写时优先使用，避免宿主状态漂移导致写错槽位。 */
+    let projectedPlotWorldbookScopeKey_ACU = '';
+    function ensurePlotSettingsObject_ACU() {
         if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object' || Array.isArray(settings_ACU.plotSettings)) {
             settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
         }
-        settings_ACU.plotSettings.plotWorldbookConfig = buildDefaultPlotWorldbookConfig_ACU();
-        return saveSettings_ACU();
+        return settings_ACU.plotSettings;
     }
+    function normalizePlotWorldbookConfig_ACU(raw) {
+        const normalized = buildDefaultPlotWorldbookConfig_ACU();
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+            return normalized;
+        const source = raw;
+        normalized.source = source.source === 'manual' ? 'manual' : 'character';
+        if (Array.isArray(source.manualSelection)) {
+            for (const name of source.manualSelection) {
+                const trimmed = String(name || '').trim();
+                if (trimmed && !normalized.manualSelection.includes(trimmed))
+                    normalized.manualSelection.push(trimmed);
+            }
+        }
+        if (source.enabledEntries && typeof source.enabledEntries === 'object' && !Array.isArray(source.enabledEntries)) {
+            normalized.enabledEntries = JSON.parse(JSON.stringify(source.enabledEntries));
+        }
+        return normalized;
+    }
+    function getPlotWorldbookConfigStore_ACU() {
+        const store = settings_ACU.plotWorldbookConfigByCharacter;
+        return store && typeof store === 'object' && !Array.isArray(store) ? store : null;
+    }
+    function ensurePlotWorldbookConfigStore_ACU() {
+        const existing = getPlotWorldbookConfigStore_ACU();
+        if (existing)
+            return existing;
+        settings_ACU.plotWorldbookConfigByCharacter = {};
+        return settings_ACU.plotWorldbookConfigByCharacter;
+    }
+    /**
+     * 把当前角色卡保存的剧情世界书选择投影到 plotSettings.plotWorldbookConfig。
+     *
+     * - 已有该角色卡的记录：恢复它（不再像旧逻辑那样强制打回"角色卡绑定世界书"）。
+     * - 升级后首次遇到可靠的角色卡键（按卡存储尚不存在）：把现有全局选择作为该卡的初始值，避免升级后丢失用户选择。
+     *   若此时宿主还取不到角色卡（启动早期），先不建立按卡存储，等 CHAT_CHANGED 再迁移，避免把选择归入错误的键。
+     * - 之后新遇到的角色卡：从默认值（角色卡绑定世界书）开始。
+     */
+    function applyPlotWorldbookSelectionForCurrentCharacter_ACU() {
+        const plotSettings = ensurePlotSettingsObject_ACU();
+        const scope = resolveCurrentCharacterScope_ACU();
+        const existingStore = getPlotWorldbookConfigStore_ACU();
+        if (!existingStore && !scope.reliable) {
+            plotSettings.plotWorldbookConfig = normalizePlotWorldbookConfig_ACU(plotSettings.plotWorldbookConfig);
+            projectedPlotWorldbookScopeKey_ACU = '';
+            return { scopeKey: '', outcome: 'deferred' };
+        }
+        const store = ensurePlotWorldbookConfigStore_ACU();
+        const saved = store[scope.key];
+        if (saved && typeof saved === 'object') {
+            plotSettings.plotWorldbookConfig = normalizePlotWorldbookConfig_ACU(saved);
+            store[scope.key] = normalizePlotWorldbookConfig_ACU(plotSettings.plotWorldbookConfig);
+            projectedPlotWorldbookScopeKey_ACU = scope.key;
+            return { scopeKey: scope.key, outcome: 'restored' };
+        }
+        const outcome = existingStore ? 'default' : 'migrated';
+        plotSettings.plotWorldbookConfig = outcome === 'migrated'
+            ? normalizePlotWorldbookConfig_ACU(plotSettings.plotWorldbookConfig)
+            : buildDefaultPlotWorldbookConfig_ACU();
+        store[scope.key] = normalizePlotWorldbookConfig_ACU(plotSettings.plotWorldbookConfig);
+        projectedPlotWorldbookScopeKey_ACU = scope.key;
+        logDebug_ACU(`[剧情推进] 角色卡 "${scope.key}" 尚无世界书选择记录，已${outcome === 'migrated' ? '沿用现有全局选择' : '使用默认值'}初始化。`);
+        return { scopeKey: scope.key, outcome };
+    }
+    /**
+     * 把运行时投影回写到其所属角色卡槽位（保存设置前调用）。
+     * 尚未完成任何投影（deferred）时不回写，避免把内容归入错误的键。
+     */
+    function syncPlotWorldbookSelectionToCharacterStore_ACU() {
+        if (!projectedPlotWorldbookScopeKey_ACU)
+            return '';
+        const plotSettings = settings_ACU.plotSettings;
+        const cfg = plotSettings && typeof plotSettings === 'object' ? plotSettings.plotWorldbookConfig : null;
+        if (!cfg || typeof cfg !== 'object')
+            return '';
+        ensurePlotWorldbookConfigStore_ACU()[projectedPlotWorldbookScopeKey_ACU] = normalizePlotWorldbookConfig_ACU(cfg);
+        return projectedPlotWorldbookScopeKey_ACU;
+    }
+    /** 仅供测试重置模块级投影状态。 */
+    const _reset_projectedPlotWorldbookScopeKey_ACU = () => { projectedPlotWorldbookScopeKey_ACU = ''; };
     function saveSettings_ACU() {
         if (!settingsStorageReadyForSave_ACU) {
             if (isIndexedDbAvailable_ACU() && !configIdbCacheLoaded_ACU) {
@@ -95622,6 +95795,8 @@ $CONTENT
                 warning: '设置仍在加载中，本次保存已被阻止以避免覆盖原配置。请稍后重试。',
             };
         }
+        // [剧情推进] 运行时世界书选择回写到当前角色卡槽位
+        syncPlotWorldbookSelectionToCharacterStore_ACU();
         // 业务编排：同步隔离码到 globalMeta + 持久化
         const code = normalizeIsolationCode_ACU(settings_ACU?.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || '');
         if (globalMeta_ACU && typeof globalMeta_ACU === 'object') {
@@ -95735,9 +95910,9 @@ $CONTENT
                     if (!savedSettings.characterSettings) {
                         savedSettings.characterSettings = {};
                     }
-                    // 将旧配置迁移到 'default' 或一个通用的键下，以便初次加载时使用
+                    // 将旧配置迁移到当前角色卡键下，以便初次加载时使用
                     // 这里我们假设它应该成为所有未配置角色的基础，但为了简单起见，我们只处理当前角色
-                    const charId = currentChatFileIdentifier_ACU || 'default';
+                    const charId = getCurrentCharacterScopeKey_ACU();
                     if (!savedSettings.characterSettings[charId]) {
                         savedSettings.characterSettings[charId] = { worldbookConfig: savedSettings.worldbookConfig };
                     }
@@ -95837,6 +96012,9 @@ $CONTENT
             settings_ACU.dataIsolationCode = activeCode;
             settings_ACU.dataIsolationEnabled = (activeCode !== '');
         }
+        // [剧情推进] 世界书选择以角色卡为单位：把当前角色卡的记录投影到运行时字段。
+        // 必须在本函数内任何 saveSettings_ACU 调用之前完成，否则会把上一张卡的选择回写进当前卡槽位。
+        applyPlotWorldbookSelectionForCurrentCharacter_ACU();
         if (ensureAgentWorldbookControlDefaults_ACU()) {
             shouldPersistSettingsAfterLoad_ACU = true;
         }

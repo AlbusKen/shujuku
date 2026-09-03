@@ -503,6 +503,15 @@ export function applyPlotPresetToSettings_ACU(plotSettings: Record<string, any>,
     };
 }
 
+/**
+ * 剧情世界书选择（plotWorldbookConfig）以角色卡为单位持久化，不属于预设/聊天快照的一部分；
+ * 预设重置/快照替换时必须原样保留，否则切聊天走"继承默认预设"路径会把用户的手动选择打回默认。
+ */
+function preservePlotWorldbookConfig_ACU(plotSettings: Record<string, any>): Record<string, any> | null {
+    const cfg = plotSettings?.plotWorldbookConfig;
+    return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? JSON.parse(JSON.stringify(cfg)) : null;
+}
+
 export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>) {
     if (!plotSettings || typeof plotSettings !== 'object') return null;
     const preservedEnabled = plotSettings.enabled === true;
@@ -513,6 +522,7 @@ export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>
     const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
       ? Math.max(0, Math.trunc(plotSettings.globalRevision))
       : 0;
+    const preservedPlotWorldbookConfig = preservePlotWorldbookConfig_ACU(plotSettings);
     const defaults = cloneDefaultPlotSettingsForPreset_ACU();
     Object.keys(plotSettings).forEach((key: string) => { delete plotSettings[key]; });
     Object.assign(plotSettings, defaults);
@@ -520,6 +530,7 @@ export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>
     plotSettings.promptPresets = preservedPromptPresets;
     plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
     plotSettings.globalRevision = preservedGlobalRevision;
+    if (preservedPlotWorldbookConfig) plotSettings.plotWorldbookConfig = preservedPlotWorldbookConfig;
     ensurePlotPromptsArray_ACU(plotSettings);
     ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
     return plotSettings;
@@ -537,6 +548,7 @@ export function replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings: Record<
     const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
       ? Math.max(0, Math.trunc(plotSettings.globalRevision))
       : 0;
+    const preservedPlotWorldbookConfig = preservePlotWorldbookConfig_ACU(plotSettings);
     const defaults = cloneDefaultPlotSettingsForPreset_ACU();
     Object.keys(plotSettings).forEach((key: string) => { delete plotSettings[key]; });
     Object.assign(plotSettings, defaults, normalizedSnapshot);
@@ -544,6 +556,7 @@ export function replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings: Record<
     plotSettings.promptPresets = preservedPromptPresets;
     plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
     plotSettings.globalRevision = preservedGlobalRevision;
+    if (preservedPlotWorldbookConfig) plotSettings.plotWorldbookConfig = preservedPlotWorldbookConfig;
     ensurePlotPromptsArray_ACU(plotSettings);
     ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
     plotSettings.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(plotSettings);

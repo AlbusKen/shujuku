@@ -97,6 +97,7 @@ vi.mock('../../../src/data/gateways/character-gateway', () => ({
 
 vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
   getUserName_ACU: vi.fn(() => '用户'),
+  getCurrentCharacterCardKey_ACU: vi.fn(() => null),
 }));
 
 vi.mock('../../../src/service/worldbook/pipeline', () => ({

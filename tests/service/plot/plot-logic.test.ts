@@ -838,6 +838,14 @@ describe('resetPlotSettingsToDefault_ACU', () => {
     const result = resetPlotSettingsToDefault_ACU(plotSettings);
     expect(result!.promptPresets).toEqual([{ name: '保留预设', loopSettings: { maxRetries: 3 } }]);
   });
+  it('重置后保留剧情世界书选择（以角色卡为单位，不属于预设）', () => {
+    const plotSettings: any = {
+      prompts: [],
+      plotWorldbookConfig: { source: 'manual', manualSelection: ['手动书'], enabledEntries: { 手动书: [1] } },
+    };
+    const result = resetPlotSettingsToDefault_ACU(plotSettings);
+    expect(result!.plotWorldbookConfig).toEqual({ source: 'manual', manualSelection: ['手动书'], enabledEntries: { 手动书: [1] } });
+  });
   it('null 输入返回 null', () => {
     expect(resetPlotSettingsToDefault_ACU(null as any)).toBeNull();
   });
@@ -870,6 +878,19 @@ describe('replaceCurrentPlotSettingsWithSnapshot_ACU', () => {
     };
     const result = replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings, { rateMain: 0.9 });
     expect(result!.promptPresets).toEqual([{ name: '保留', loopSettings: { maxRetries: 3 } }]);
+  });
+  it('快照中的旧剧情世界书选择不覆盖当前角色卡的选择', () => {
+    vi.mocked(sanitizePlotSettingsSnapshotForChat_ACU).mockReturnValueOnce({
+      rateMain: 0.9,
+      plotWorldbookConfig: { source: 'character', manualSelection: [] },
+    } as any);
+    const plotSettings: any = {
+      prompts: [],
+      plotWorldbookConfig: { source: 'manual', manualSelection: ['当前卡的书'], enabledEntries: {} },
+    };
+    const result = replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings, { rateMain: 0.9 });
+    expect(result!.rateMain).toBe(0.9);
+    expect(result!.plotWorldbookConfig).toEqual({ source: 'manual', manualSelection: ['当前卡的书'], enabledEntries: {} });
   });
   it('null plotSettings 返回 null', () => {
     expect(replaceCurrentPlotSettingsWithSnapshot_ACU(null as any, {})).toBeNull();

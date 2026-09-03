@@ -7,7 +7,7 @@ import { CHAT_SHEET_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentChatFileIdentifier_ACU, _set_allChatMessages_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU } from '../runtime/state-manager';
 import { getLorebookEntries_ACU, deleteLorebookEntries_ACU, getCurrentCharacterWorldbookBinding_ACU, getCurrentCharPrimaryLorebook_ACU as gwGetCurrentCharPrimaryLorebook_ACU, listLorebooks_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
-import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU, resetPlotWorldbookSelectionForChatChange_ACU, saveSettings_ACU } from '../settings/settings-service';
+import { applyPlotWorldbookSelectionForCurrentCharacter_ACU, applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU, saveSettings_ACU } from '../settings/settings-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU } from './pipeline';
 import { cleanChatName_ACU, getChatFirstLayerMessage_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -84,9 +84,10 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
     // MUST be called AFTER setting currentChatFileIdentifier_ACU so it loads the correct character settings.
     loadSettings_ACU();
 
-    if (reason === 'chat_changed') {
-      resetPlotWorldbookSelectionForChatChange_ACU();
-    }
+    // 填表 / 剧情推进的世界书选择均以角色卡为单位持久化：这里只把当前角色卡的记录
+    // 投影到运行时字段，不再在切换聊天时把剧情世界书强制重置为"角色卡绑定世界书"。
+    const plotSelection = applyPlotWorldbookSelectionForCurrentCharacter_ACU();
+    logDebug_ACU(`ACU: Plot worldbook selection for "${plotSelection.scopeKey || '(deferred)'}" -> ${plotSelection.outcome} (reason: ${reason})`);
 
     // 当前角色卡绑定在后续读取时重新解析；这里只清除上一会话的内存快照。
     // 不得删除或重写旧世界书中的持久 Agent state。

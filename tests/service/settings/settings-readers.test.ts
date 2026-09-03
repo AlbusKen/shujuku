@@ -20,6 +20,13 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return currentTables; },
 }));
 
+// 默认让角色卡键解析失败 → 退回聊天级键 'test-char'，与既有用例保持一致；
+// 迁移用例里再把它切换成可靠的角色卡键。
+const mockScope = vi.hoisted(() => ({ cardKey: null as string | null }));
+vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
+  getCurrentCharacterCardKey_ACU: () => mockScope.cardKey,
+}));
+
 vi.mock('../../../src/data/repositories/profile-repo', () => ({
   globalMeta_ACU: { zeroTkOccupyModeGlobal: false },
 }));
@@ -52,6 +59,7 @@ import {
 } from '../../../src/service/settings/settings-readers';
 
 beforeEach(() => {
+  mockScope.cardKey = null;
   mockSettings.characterSettings = {};
   mockSettings.zeroTkOccupyModeDefault = false;
   mockSettings.manualSelectedTables = [];
@@ -104,6 +112,44 @@ describe('getCurrentCharSettings_ACU', () => {
     // zeroTkOccupyMode 被强制设置为 globalZeroTkDefault
     expect(result.worldbookConfig.zeroTkOccupyMode).toBe(false);
     expect(result.worldbookConfig.outlineEntryEnabled).toBe(true);
+  });
+
+  describe('以角色卡为单位存储', () => {
+    it('能解析到角色卡时以角色卡键存储，而不是聊天文件名', () => {
+      mockScope.cardKey = 'char:alice.png';
+      getCurrentCharSettings_ACU();
+      expect(mockSettings.characterSettings['char:alice.png']).toBeDefined();
+      expect(mockSettings.characterSettings['test-char']).toBeUndefined();
+    });
+
+    it('首次访问角色卡时把当前聊天的旧条目迁移到角色卡键下并删除旧条目', () => {
+      mockScope.cardKey = 'char:alice.png';
+      mockSettings.characterSettings['test-char'] = {
+        worldbookConfig: { enabled: false, source: 'manual', manualSelection: ['填表书'] },
+      };
+      const result = getCurrentCharSettings_ACU();
+      expect(result.worldbookConfig.source).toBe('manual');
+      expect(result.worldbookConfig.manualSelection).toEqual(['填表书']);
+      expect(mockSettings.characterSettings['char:alice.png']).toBe(result);
+      expect(mockSettings.characterSettings['test-char']).toBeUndefined();
+    });
+
+    it('角色卡键已有记录时不再迁移旧的聊天级条目', () => {
+      mockScope.cardKey = 'char:alice.png';
+      mockSettings.characterSettings['char:alice.png'] = { worldbookConfig: { source: 'manual', manualSelection: ['卡的书'] } };
+      mockSettings.characterSettings['test-char'] = { worldbookConfig: { source: 'manual', manualSelection: ['聊天的书'] } };
+      const result = getCurrentCharSettings_ACU();
+      expect(result.worldbookConfig.manualSelection).toEqual(['卡的书']);
+      expect(mockSettings.characterSettings['test-char']).toBeDefined();
+    });
+
+    it('同一张卡不同聊天读到同一份配置', () => {
+      mockScope.cardKey = 'char:alice.png';
+      const first = getCurrentCharSettings_ACU();
+      first.worldbookConfig.source = 'manual';
+      const second = getCurrentCharSettings_ACU();
+      expect(second.worldbookConfig.source).toBe('manual');
+    });
   });
 });
 

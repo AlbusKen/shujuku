@@ -55,6 +55,11 @@ export interface Settings_ACU {
   discardUnauthorizedTableEditsEnabled: boolean;
   worldbookConfig: WorldbookConfig_ACU;
   plotSettings: PlotSettings_ACU;
+  /**
+   * 剧情推进世界书选择的权威副本，按角色卡作用域键（char:<avatar> / group:<id>）存储。
+   * plotSettings.plotWorldbookConfig 只是当前角色卡的运行时投影。
+   */
+  plotWorldbookConfigByCharacter?: Record<string, Pick<WorldbookConfig_ACU, 'source' | 'manualSelection'> & { enabledEntries?: Record<string, unknown> }>;
   mergeSummaryPrompt: string;
   hasImportTableSelection: boolean;
   /** 存储模式：'native' 原生 JSON 模式 | 'sqlite' SQLite 运行时数据库模式 */

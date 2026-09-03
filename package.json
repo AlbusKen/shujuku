@@ -1,9 +1,9 @@
 {
   "name": "acu-star-database-iii",
-  "version": "9.2.2",
+  "version": "9.2.3",
   "private": true,
   "type": "module",
-  "description": "SP·数据库 9.2.2 (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",
+  "description": "SP·数据库 9.2.3 (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",
   "scripts": {
     "build": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
     "build:nocheck": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
