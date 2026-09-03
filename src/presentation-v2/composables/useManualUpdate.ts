@@ -34,19 +34,32 @@ import { useToastStore } from '../stores/toast-store';
 
 type MessageKind = 'info' | 'success' | 'warning' | 'error';
 
+/** 宿主世界书 API 挂起时确认弹窗不能被无限期拖住，超过该时长即降级为提示文案。 */
+const INJECTION_TARGET_RESOLVE_TIMEOUT_MS = 1500;
+const RESOLVE_TIMEOUT: unique symbol = Symbol('injection-target-resolve-timeout');
+
 /**
  * 确认弹窗用的世界书注入目标描述：大规模历史回填会一次生成上百条 TavernDB 条目，
  * 用户必须在确认前看到它们将写入哪本世界书（默认是角色卡绑定的主世界书，而不是
- * 用户新建的外挂数据库世界书）。解析失败不阻断确认流程，只降级为提示文案。
+ * 用户新建的外挂数据库世界书）。解析失败或超时不阻断确认流程，只降级为提示文案。
  */
 async function describeInjectionTargetForConfirm(): Promise<string> {
   const target = String(getCurrentWorldbookConfig_ACU()?.injectionTarget || '').trim() || 'character';
   if (target !== 'character') return target;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   try {
-    const primary = await getCurrentCharPrimaryLorebook_ACU();
+    const primary = await Promise.race<string | null | typeof RESOLVE_TIMEOUT>([
+      getCurrentCharPrimaryLorebook_ACU(),
+      new Promise<typeof RESOLVE_TIMEOUT>(resolve => {
+        timeoutHandle = setTimeout(() => resolve(RESOLVE_TIMEOUT), INJECTION_TARGET_RESOLVE_TIMEOUT_MS);
+      }),
+    ]);
+    if (primary === RESOLVE_TIMEOUT) return '角色卡绑定世界书（主世界书解析超时）';
     return primary ? `角色卡绑定世界书 · ${primary}` : '角色卡绑定世界书（未解析到主世界书）';
   } catch {
     return '角色卡绑定世界书（未解析到主世界书）';
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
   }
 }
 

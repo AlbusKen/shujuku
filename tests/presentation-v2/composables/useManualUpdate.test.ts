@@ -10,6 +10,7 @@ let templateDisplayData: any = null;
 let templateParseThrows = false;
 let worldbookInjectionTarget: string | undefined = undefined;
 let primaryLorebookName: string | null = '主世界书';
+let primaryLorebookNeverResolves = false;
 
 async function waitForCondition(predicate: () => boolean, label: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -57,7 +58,9 @@ async function importManualUpdate() {
     saveSettings_ACU,
   }));
   vi.doMock('../../../src/service/worldbook/worldbook-service', () => ({
-    getCurrentCharPrimaryLorebook_ACU: vi.fn(async () => primaryLorebookName),
+    getCurrentCharPrimaryLorebook_ACU: vi.fn(() => (primaryLorebookNeverResolves
+      ? new Promise<string | null>(() => undefined)
+      : Promise.resolve(primaryLorebookName))),
   }));
   vi.doMock('../../../src/service/settings/settings-readers', () => ({
     getCurrentWorldbookConfig_ACU: vi.fn(() => ({ summaryVectorIndexModeEnabled: false, injectionTarget: worldbookInjectionTarget })),
@@ -120,6 +123,8 @@ beforeEach(() => {
   templateParseThrows = false;
   worldbookInjectionTarget = undefined;
   primaryLorebookName = '主世界书';
+  primaryLorebookNeverResolves = false;
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -202,6 +207,26 @@ describe('useManualUpdate destructive refill confirmation', () => {
     expect(dialog.active?.message).toContain('世界书注入目标：太渊战记外挂数据库');
 
     dialog.cancelActive();
+    await pending;
+    __resetToastStoreForTests();
+  });
+
+  it('角色卡主世界书解析挂起时，确认弹窗在超时后仍然出现并显示超时降级文案', async () => {
+    primaryLorebookNeverResolves = true;
+    vi.useFakeTimers();
+    const { useManualUpdate, dialog, __resetToastStoreForTests } = await importManualUpdate();
+    const manual = useManualUpdate();
+
+    const pending = manual.runManualUpdate();
+    // 挂起期间弹窗不出现；推进到超时阈值后降级弹出。
+    await vi.advanceTimersByTimeAsync(1400);
+    expect(dialog.active?.title).not.toBe('执行手动填表');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(dialog.active?.title).toBe('执行手动填表');
+    expect(dialog.active?.message).toContain('世界书注入目标：角色卡绑定世界书（主世界书解析超时）');
+
+    dialog.cancelActive();
+    vi.useRealTimers();
     await pending;
     __resetToastStoreForTests();
   });

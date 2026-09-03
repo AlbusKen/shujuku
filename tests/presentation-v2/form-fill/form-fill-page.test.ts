@@ -272,9 +272,22 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * 确认弹窗在异步准备（解析世界书注入目标等）之后才出现，不能假设固定的微任务数。
+ * 轮询直到弹窗层出现；超过上限则抛错，避免用例在弹窗缺失时静默通过或死循环。
+ */
+async function waitForDialogLayer(maxTicks = 50): Promise<HTMLElement> {
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    const layer = document.querySelector<HTMLElement>('.acu-dialog-layer');
+    if (layer) return layer;
+    await Promise.resolve();
+    if (tick % 5 === 4) await new Promise(r => setTimeout(r, 0));
+  }
+  throw new Error('等待确认弹窗出现超时');
+}
+
 async function clickDialogButton(label: string): Promise<void> {
-  await Promise.resolve();
-  const layer = document.querySelector<HTMLElement>('.acu-dialog-layer');
+  const layer = await waitForDialogLayer();
   expect(layer).not.toBeNull();
   const button = Array.from(layer!.querySelectorAll<HTMLButtonElement>('button'))
     .find(item => item.textContent?.includes(label));
@@ -812,7 +825,7 @@ describe('FormFillPage · 手动填表面板', () => {
       .find(btn => btn.textContent?.includes('执行手动填表')) as HTMLButtonElement;
     expect(button).not.toBeUndefined();
     button.click();
-    await Promise.resolve();
+    await waitForDialogLayer();
 
     const dialogText = document.querySelector('.acu-dialog-layer')?.textContent || '';
     expect(dialogText).toContain('即将执行手动填表');
@@ -822,7 +835,10 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(dialogText).toContain('会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志');
     expect(dialogText).toContain('此前楼层的表格数据将无法恢复');
     expect(dialogText).toContain('范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除');
-    expect(dialogText).toContain('执行失败或终止时会回滚到本次操作前的状态');
+    // orchestrator 的失败语义是不回滚：文案不得再承诺回滚，且要显示世界书注入目标。
+    expect(dialogText).toContain('执行失败或中途终止时不会回滚');
+    expect(dialogText).not.toContain('会回滚到本次操作前的状态');
+    expect(dialogText).toContain('世界书注入目标：角色卡绑定世界书 · CharBookFF');
     expect(dialogText).not.toContain('第二次破坏性确认');
     expect(dialogText).toContain('确认并继续');
     expect(dialogText).not.toContain('直接填表');
@@ -864,7 +880,7 @@ describe('FormFillPage · 手动填表面板', () => {
     const button = Array.from(panel.querySelectorAll('button'))
       .find(btn => btn.textContent?.includes('执行手动填表')) as HTMLButtonElement;
     button.click();
-    await Promise.resolve();
+    await waitForDialogLayer();
 
     const danger = document.querySelector<HTMLElement>('.acu-dialog__danger-message');
     expect(danger).not.toBeNull();
