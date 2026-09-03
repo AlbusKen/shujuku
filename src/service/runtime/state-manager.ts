@@ -209,7 +209,7 @@ export let currentJsonTableData_ACU: any = null;
 export let independentTableStates_ACU: any = {};
 
 export let settings_ACU: any = {
-    apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict' },
+    apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict', customApiFormat: 'openai_compat' },
     apiMode: 'custom',
     streamingEnabled: false,
     tavernProfile: '',

@@ -980,7 +980,7 @@ function forceDefaultTemplateAssistantPromptOnce_ACU() {
 
 export   function buildDefaultSettings_ACU() {
       return {
-          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict' },
+          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict', customApiFormat: 'openai_compat' },
           apiMode: 'custom',
           tavernProfile: '',
           streamingEnabled: false, // [新增] 流式传输开关（默认关闭）

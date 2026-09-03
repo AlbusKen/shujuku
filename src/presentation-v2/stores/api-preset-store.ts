@@ -79,7 +79,8 @@ function findPresetMatchingCurrentConfig(presets: AcuV2ApiPreset[]): AcuV2ApiPre
       preset.apiConfig.bodyParams === current.apiConfig.bodyParams &&
       preset.apiConfig.excludeBodyParams === current.apiConfig.excludeBodyParams &&
       preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders &&
-      preset.apiConfig.promptPostProcessing === current.apiConfig.promptPostProcessing
+      preset.apiConfig.promptPostProcessing === current.apiConfig.promptPostProcessing &&
+      preset.apiConfig.customApiFormat === current.apiConfig.customApiFormat
     );
   }) ?? null;
 }
