@@ -432,14 +432,25 @@ function resolveStaleLegacyBaselineSheetKeys_ACU(baselineData: TableDataObject_A
     rowCount: sheetDataRowCount_ACU(sheet),
   }));
   type BaselineEntry = typeof baselineEntries[number];
-  const templateKeys = new Set(listSheets_ACU(templateData).map(([key]) => key));
-  const templateNames = new Set(listSheets_ACU(templateData).map(([, sheet]) => canonicalizeDisplayName_ACU(sheet.name)).filter(Boolean));
+  const templateEntries = listSheets_ACU(templateData).map(([key, sheet]) => ({ key, name: canonicalizeDisplayName_ACU(sheet.name) }));
+  const templateKeys = new Set(templateEntries.map(entry => entry.key));
+  const templateNames = new Set(templateEntries.map(entry => entry.name).filter(Boolean));
+  // 认领该 baseline 表的模板表 key 集合（按 key 相等或当前显示名相等）。
+  const templateClaimers = (entry: BaselineEntry): Set<string> => {
+    const name = canonicalizeDisplayName_ACU(entry.sheet.name);
+    return new Set(templateEntries.filter(template => template.key === entry.key || (!!name && template.name === name)).map(template => template.key));
+  };
   const survivorCriteria: Array<(entry: BaselineEntry) => boolean> = [
     entry => templateKeys.has(entry.key),
     entry => templateNames.has(canonicalizeDisplayName_ACU(entry.sheet.name)),
     entry => buildStableSheetKeyCandidate_ACU(entry.sheet.name) === entry.key,
   ];
   const pickSurvivor = (a: BaselineEntry, b: BaselineEntry): { survivor: BaselineEntry; candidate: BaselineEntry } | null => {
+    // 双方分别被不同的模板表认领 → 模板确实想要两张表，身份重合是模板/历史层面的真实冲突，
+    // 不是可收敛的陈旧 identity；保留 blocker。同一模板表认领双方（典型：同名两代 key）才继续判定。
+    const aClaimers = templateClaimers(a);
+    const bClaimers = templateClaimers(b);
+    if (aClaimers.size > 0 && bClaimers.size > 0 && ![...aClaimers].some(key => bClaimers.has(key))) return null;
     for (const criterion of survivorCriteria) {
       const aMatches = criterion(a);
       const bMatches = criterion(b);

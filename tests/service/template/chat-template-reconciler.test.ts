@@ -236,6 +236,26 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.sheetChanges).toEqual([]);
   });
 
+  it('身份重合的双方分别被不同模板表认领时不做陈旧收敛，保留 blocker', async () => {
+    // baseline B 曾改名并累积别名「甲表」，而模板同时想要「甲表」（A）与「乙表」（B）：
+    // 这是模板/历史层面的真实身份冲突，不能把零行的 A 当作陈旧旧 key 静默隐藏。
+    const baseline = state({
+      sheet_jia_biao: sheet('sheet_jia_biao', '甲表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
+      sheet_yi_biao: sheet('sheet_yi_biao', '乙表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', [['1', '有数据']]),
+    });
+    baseline.sheet_yi_biao.sourceData.tableAliases = ['甲表'];
+    const template = state({
+      sheet_jia_biao: sheet('sheet_jia_biao', '甲表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
+      sheet_yi_biao: sheet('sheet_yi_biao', '乙表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
+
+    expect(plan.blockers.join('\n')).toContain('当前聊天表别名规范化重复');
+    expect(plan.hiddenSheetKeys).toEqual([]);
+    expect(plan.sheetChanges).toEqual([]);
+  });
+
   it('同名双方都未被模板认领时，只有恰有一方是稳定 key 才判另一方陈旧，否则保留 blocker', async () => {
     const template = state({
       sheet_other: sheet('sheet_other', '其它表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
