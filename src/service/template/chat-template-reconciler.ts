@@ -105,9 +105,14 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
   for (const [key, sheet] of listSheets_ACU(baselineData)) {
     try { validateBaselineSheetRows_ACU(sheet); } catch (error: any) { blockers.push(`当前聊天表「${sheet.name || key}」历史数据无效：${error?.message || String(error)}`); }
   }
-  const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers);
+  // 旧随机 key 迁移到稳定 key 后，历史 checkpoint 里可能残留零数据行的旧身份
+  // （与被模板认领的新 key 同名或互为别名）。它们不是「两张不同的表」，而是同一逻辑表
+  // 未收敛的旧 identity：不作为重复身份 blocker，而是排除出身份索引，让下方
+  // 「目标模板缺失的既有表」循环按既有 hide 语义把它们隐藏收敛。
+  const staleLegacyBaselineKeys = resolveStaleLegacyBaselineSheetKeys_ACU(baselineData, templateData);
+  const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers, staleLegacyBaselineKeys);
   const templateByName = indexSheetsByName_ACU(templateData, '导入模板', blockers);
-  validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers);
+  validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers, staleLegacyBaselineKeys);
   validateTableAliasDeclarations_ACU(templateData, '导入模板', blockers);
   if (blockers.length > 0) return emptyPlan_ACU(baselineData, audit, blockers);
 
@@ -116,7 +121,8 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
   const revealKeys = new Set<string>();
   // 被任一模板表按当前名精确匹配占用的 baseline key：别名认回必须跳过这些表，
   // 否则「模板同时含新旧两个名字」会因迭代顺序产生歧义匹配或误报重复。
-  const nameClaimedBaselineKeys = new Set<string>();
+  // 陈旧旧 identity 同样不参与别名认回（它们的身份已由被认领的新 key 持有）。
+  const nameClaimedBaselineKeys = new Set<string>(staleLegacyBaselineKeys);
   for (const [canonicalName] of templateByName) {
     const claimed = baselineByName.get(canonicalName);
     if (claimed) nameClaimedBaselineKeys.add(claimed.key);
@@ -325,9 +331,21 @@ function listSheets_ACU(data: TableDataObject_ACU): Array<[string, Sheet_ACU]> {
     .filter(([, sheet]) => !!sheet && typeof sheet === 'object' && !Array.isArray(sheet));
 }
 
-function indexSheetsByName_ACU(data: TableDataObject_ACU, label: string, blockers: string[]): Map<string, SheetEntry_ACU> {
+const SHEET_KEY_CONFUSABLE_HINT_ACU = '请核对完整 sheetKey（大写 I、小写 l、数字 1 等字符在普通字体下极易混淆）';
+
+function describeSheetForDiagnostic_ACU(entry: SheetEntry_ACU): string {
+  return `「${entry.sheet.name || entry.key}」(${entry.key}, ${sheetDataRowCount_ACU(entry.sheet)} 行)`;
+}
+
+function indexSheetsByName_ACU(
+  data: TableDataObject_ACU,
+  label: string,
+  blockers: string[],
+  excludedKeys: ReadonlySet<string> = new Set(),
+): Map<string, SheetEntry_ACU> {
   const entries = new Map<string, SheetEntry_ACU>();
   for (const [key, sheet] of listSheets_ACU(data)) {
+    if (excludedKeys.has(key)) continue;
     const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
     if (!canonicalName) {
       blockers.push(`${label}存在空表名：${key}。`);
@@ -335,7 +353,7 @@ function indexSheetsByName_ACU(data: TableDataObject_ACU, label: string, blocker
     }
     const existing = entries.get(canonicalName);
     if (existing) {
-      blockers.push(`${label}表名规范化重复：「${existing.sheet.name}」与「${sheet.name}」。`);
+      blockers.push(`${label}表名规范化重复：${describeSheetForDiagnostic_ACU(existing)}与${describeSheetForDiagnostic_ACU({ key, sheet })}规范化后同名「${canonicalName}」，同一逻辑表被两个 sheetKey 同时持有。${SHEET_KEY_CONFUSABLE_HINT_ACU}。`);
       continue;
     }
     entries.set(canonicalName, { key, sheet });
@@ -347,9 +365,15 @@ function indexSheetsByName_ACU(data: TableDataObject_ACU, label: string, blocker
  * tableAliases 是显式身份声明。它可以和同表的当前名称重合，但不能被另一张
  * 表的当前名称或历史别名占用；否则后续 SQL/AI 路由会扩大写入目标。
  */
-function validateTableAliasDeclarations_ACU(data: TableDataObject_ACU, label: string, blockers: string[]): void {
+function validateTableAliasDeclarations_ACU(
+  data: TableDataObject_ACU,
+  label: string,
+  blockers: string[],
+  excludedKeys: ReadonlySet<string> = new Set(),
+): void {
   const ownerByIdentity = new Map<string, SheetEntry_ACU>();
   for (const entry of listSheets_ACU(data).map(([key, sheet]) => ({ key, sheet }))) {
+    if (excludedKeys.has(entry.key)) continue;
     const identities = [entry.sheet.name, ...getExplicitTableAliases_ACU(entry.sheet)];
     for (const identity of identities) {
       const canonical = canonicalizeDisplayName_ACU(identity);
@@ -360,7 +384,7 @@ function validateTableAliasDeclarations_ACU(data: TableDataObject_ACU, label: st
         continue;
       }
       if (owner.key !== entry.key) {
-        blockers.push(`${label}表别名规范化重复：「${owner.sheet.name || owner.key}」与「${entry.sheet.name || entry.key}」都声明了「${String(identity).trim()}」。`);
+        blockers.push(`${label}表别名规范化重复：${describeSheetForDiagnostic_ACU(owner)}与${describeSheetForDiagnostic_ACU(entry)}都声明了「${String(identity).trim()}」。${SHEET_KEY_CONFUSABLE_HINT_ACU}。`);
       }
     }
   }
@@ -370,6 +394,80 @@ function getExplicitTableAliases_ACU(sheet: Sheet_ACU): string[] {
   const raw = (sheet.sourceData as unknown as Record<string, unknown> | undefined)?.tableAliases;
   if (!Array.isArray(raw)) return [];
   return raw.map(value => String(value ?? '').trim()).filter(Boolean);
+}
+
+function sheetDataRowCount_ACU(sheet: Sheet_ACU): number {
+  return Array.isArray(sheet?.content) ? Math.max(0, sheet.content.length - 1) : 0;
+}
+
+function sheetIdentityCanonicals_ACU(sheet: Sheet_ACU): Set<string> {
+  return new Set(
+    [sheet.name, ...getExplicitTableAliases_ACU(sheet)]
+      .map(canonicalizeDisplayName_ACU)
+      .filter(Boolean),
+  );
+}
+
+function identitySetsIntersect_ACU(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  for (const identity of left) if (right.has(identity)) return true;
+  return false;
+}
+
+/**
+ * 识别 baseline 中可证明陈旧的旧 identity（旧随机 key → 稳定 key 迁移未收敛的残留）。
+ *
+ * 判定必须同时满足，任何歧义都不判定（保留原有 blocker，fail-closed）：
+ * - 与另一张 baseline 表身份重合（显示名或显式别名的 canonical 有交集）；
+ * - 自身零数据行（合法的空新表也可能零行，所以零行本身不是充分条件）；
+ * - 幸存者唯一可判，按优先级逐级比较，恰有一方满足即判定：
+ *   1. key 被模板直接持有；2. 当前显示名被模板认领（同名双方会并列，落到下一级）；
+ *   3. key 等于自身显示名派生的稳定 key（旧随机 key 永远不满足）；
+ * - 幸存者不能同时也被判为陈旧（多张表互相指认 → 歧义，整体回退为 blocker）。
+ */
+function resolveStaleLegacyBaselineSheetKeys_ACU(baselineData: TableDataObject_ACU, templateData: TableDataObject_ACU): Set<string> {
+  const baselineEntries = listSheets_ACU(baselineData).map(([key, sheet]) => ({
+    key,
+    sheet,
+    identities: sheetIdentityCanonicals_ACU(sheet),
+    rowCount: sheetDataRowCount_ACU(sheet),
+  }));
+  type BaselineEntry = typeof baselineEntries[number];
+  const templateKeys = new Set(listSheets_ACU(templateData).map(([key]) => key));
+  const templateNames = new Set(listSheets_ACU(templateData).map(([, sheet]) => canonicalizeDisplayName_ACU(sheet.name)).filter(Boolean));
+  const survivorCriteria: Array<(entry: BaselineEntry) => boolean> = [
+    entry => templateKeys.has(entry.key),
+    entry => templateNames.has(canonicalizeDisplayName_ACU(entry.sheet.name)),
+    entry => buildStableSheetKeyCandidate_ACU(entry.sheet.name) === entry.key,
+  ];
+  const pickSurvivor = (a: BaselineEntry, b: BaselineEntry): { survivor: BaselineEntry; candidate: BaselineEntry } | null => {
+    for (const criterion of survivorCriteria) {
+      const aMatches = criterion(a);
+      const bMatches = criterion(b);
+      if (aMatches === bMatches) continue;
+      return aMatches ? { survivor: a, candidate: b } : { survivor: b, candidate: a };
+    }
+    return null;
+  };
+
+  const stale = new Set<string>();
+  const survivors = new Set<string>();
+  for (let left = 0; left < baselineEntries.length; left += 1) {
+    for (let right = left + 1; right < baselineEntries.length; right += 1) {
+      const a = baselineEntries[left];
+      const b = baselineEntries[right];
+      if (!identitySetsIntersect_ACU(a.identities, b.identities)) continue;
+      const decision = pickSurvivor(a, b);
+      if (!decision) continue;
+      if (decision.candidate.rowCount > 0) continue;
+      stale.add(decision.candidate.key);
+      survivors.add(decision.survivor.key);
+    }
+  }
+  for (const key of survivors) {
+    // 同一 key 既是幸存者又被判陈旧 → 身份关系有歧义，全部回退为 blocker。
+    if (stale.has(key)) return new Set();
+  }
+  return stale;
 }
 
 /**

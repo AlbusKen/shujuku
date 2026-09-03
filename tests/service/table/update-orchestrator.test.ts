@@ -2818,6 +2818,237 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockCommitManualRefillSheetSnapshot).not.toHaveBeenCalled();
   });
 
+  // Issue #13 Bug 3 回归：原 full 落在重填范围内且只含部分表时，破坏性清理会改写该楼层 frame
+  // （scheduleSummary / perSheetCheckpoints / logEntries）。指纹必须在清理之后冻结，
+  // 否则边界汇合必然 full_checkpoint_fingerprint_mismatch，且失败点在全部 pre 段 AI 调用之后。
+  function buildPartialFullRootChatForRefill(): any[] {
+    return [
+      { is_user: false, mes: 'AI回复1' },
+      { is_user: true, mes: '用户2' },
+      { is_user: false, mes: 'AI回复3' },
+      { is_user: true, mes: '用户4' },
+      {
+        is_user: false,
+        mes: 'AI回复5',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [],
+              checkpoint: {
+                kind: 'full',
+                reason: 'compaction',
+                createdAt: 2,
+                // full 根只含另一张表（用户先单独回填过它），目标表 sheet_0 不在 data 中，
+                // 但 scheduleSummary 仍带 sheet_0 的进度 → 清理会改写该 frame。
+                data: { mate: { type: 'acu' }, sheet_other: { name: '其它表', content: [['row_id', '值'], ['1', '保留']] } },
+                scheduleSummary: { sheet_0: { lastFilledAiFloor: 2 }, sheet_other: { lastFilledAiFloor: 3 } },
+              },
+            },
+          },
+        },
+      },
+    ];
+  }
+
+  it('跨根 staging 的原 full 根指纹在破坏性清理之后冻结：清理改写 full 楼层不再触发指纹不匹配', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { getOriginalFullFrameFingerprint_ACU } = await import('../../../src/service/table/manual-catch-up-provisional-bridge');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+    });
+    const chat = buildPartialFullRootChatForRefill();
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    // 用 frame 内容派生指纹，替代默认常量，才能观察「清理前 / 清理后」两份指纹的差异。
+    const fingerprintOf = (frame: any) => `fp:${JSON.stringify(frame?.checkpoint?.scheduleSummary ?? null)}`;
+    vi.mocked(getOriginalFullFrameFingerprint_ACU).mockImplementation(fingerprintOf as any);
+    const fingerprintBeforeCleanup = fingerprintOf(chat[4].TavernDB_ACU_IsolatedData[''].storageFrame);
+    mockClearManualRefillSheetDataInRange.mockImplementationOnce(async () => {
+      delete chat[4].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.scheduleSummary.sheet_0;
+      return 1;
+    });
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
+      sheet_other: { name: '其它表', updateConfig: {}, content: [['row_id', '值'], ['1', '保留']] },
+    };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockImplementationOnce(async () => ({
+      ok: true,
+      boundaryCommitSummary: { selectedSheetKeys: ['sheet_0'], originalFullCheckpointIndex: 4 },
+      verifiedHeadSnapshot: JSON.parse(JSON.stringify(mockCurrentJsonTableData)),
+    }));
+
+    try {
+      const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, {
+        clearBeforeUpdate: true,
+        executionSnapshot: { sheetKeys: ['sheet_0', 'sheet_other'] },
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([0, 2, 4], ['sheet_0']);
+      expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(1);
+      const commitOptions = mockCommitStagedSheetsAtFullBoundaryAtomic.mock.calls[0][1];
+      const fingerprintAfterCleanup = fingerprintOf(chat[4].TavernDB_ACU_IsolatedData[''].storageFrame);
+      expect(fingerprintAfterCleanup).not.toBe(fingerprintBeforeCleanup);
+      // 汇合携带的是清理后的指纹：本任务自身的清理不再被当作外部改写。
+      expect(commitOptions.originalFullFingerprint).toBe(fingerprintAfterCleanup);
+      expect(commitOptions.originalFullIndex).toBe(4);
+      // pre 段（[0,2]）stage_only 不写帧；post 段（[4]）普通 persist 一次。
+      expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+      expect(mockCommitManualRefillSheetSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(getOriginalFullFrameFingerprint_ACU).mockImplementation(() => 'test-fingerprint');
+    }
+  });
+
+  it('清理后原 full checkpoint 消失时，在任何 AI 调用前 fail-closed 并按已提交事实对齐运行时', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+    });
+    const chat = buildPartialFullRootChatForRefill();
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    // 模拟清理把原 full 根整体删除（预检未能预见的降级形态）。
+    mockClearManualRefillSheetDataInRange.mockImplementationOnce(async () => {
+      delete chat[4].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint;
+      return 1;
+    });
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
+      sheet_other: { name: '其它表', updateConfig: {}, content: [['row_id', '值'], ['1', '保留']] },
+    };
+    mockCallCustomOpenAI.mockClear();
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, {
+      clearBeforeUpdate: true,
+      executionSnapshot: { sheetKeys: ['sheet_0', 'sheet_other'] },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('原 full checkpoint 位置发生变化');
+    expect(result.error).toContain('清理前 #4');
+    // 零 token：在 AI 调用前停止；不进入边界汇合；清理已发生 → 按已提交事实刷新对齐。
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
+  });
+
+  // Issue #13 Bug 2 回归：多 Group 手动重填时，首 chunk 自身 commit 改变 runtime 表集合
+  // 不应被第二个 chunk 前的 Snapshot Guard 当作外部修改而阻断；外部删表仍必须阻断。
+  it('首 chunk 自身提交改变 runtime 表集合（新增表）时，第二个 chunk 不被快照守卫误伤', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+      sheet_1: { name: '测试表B', updateConfig: { groupId: 1 }, content: [['row_id', '值B']] },
+    });
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户0' },
+      { is_user: false, mes: 'AI回复1' },
+    ]);
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+      sheet_1: { name: '测试表B', updateConfig: { groupId: 1 }, content: [['row_id', '值B']] },
+    };
+    mockCallCustomOpenAI.mockClear();
+    mockCallCustomOpenAI.mockImplementation(async (_dynamic: any, _signal: any, options: any) => {
+      const keys: string[] = options?.targetSheetKeys || [];
+      return `<tableEdit>${keys.join(' ')}</tableEdit>`;
+    });
+    // 首 chunk（sheet_0 组）的 AI 结果应用到工作副本时带入一张任务自身产生的表（模拟 guide 注入 / 历史 key 迁移），
+    // 该表随本 chunk 的 commit 进入 runtime，使 live 表集合偏离确认前快照。
+    let injected = false;
+    mockParseAndApplyTableEditsToData.mockImplementation((aiResponse: string, tableData: any) => {
+      if (aiResponse.includes('sheet_0')) {
+        if (!injected) {
+          injected = true;
+          tableData.sheet_task_owned = { name: '任务自身表', updateConfig: {}, content: [['row_id', '值']] };
+        }
+        return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
+      }
+      if (aiResponse.includes('sheet_1')) {
+        return { success: true, modifiedKeys: ['sheet_1'], appliedEdits: 1 };
+      }
+      return { success: false, modifiedKeys: [], appliedEdits: 0 };
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, {
+      executionSnapshot: { sheetKeys: ['sheet_0', 'sheet_1'] },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+    const aiTargetKeys = mockCallCustomOpenAI.mock.calls.map(call => (call[2] as { targetSheetKeys?: string[] } | undefined)?.targetSheetKeys || []);
+    // 两个 chunk 都执行了 AI 调用：第二个 chunk（sheet_1 组）没有被自身提交造成的表集合变化阻断。
+    expect(aiTargetKeys.some(keys => keys.includes('sheet_0'))).toBe(true);
+    expect(aiTargetKeys.some(keys => keys.includes('sheet_1'))).toBe(true);
+    expect(mockCurrentJsonTableData.sheet_task_owned).toBeDefined();
+  });
+
+  it('chunk 提交后 runtime 缺少本次目标表时，快照重对齐 fail-closed 并停止后续 chunk', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+      sheet_1: { name: '测试表B', updateConfig: { groupId: 1 }, content: [['row_id', '值B']] },
+    });
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户0' },
+      { is_user: false, mes: 'AI回复1' },
+    ]);
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+      sheet_1: { name: '测试表B', updateConfig: { groupId: 1 }, content: [['row_id', '值B']] },
+    };
+    mockCallCustomOpenAI.mockClear();
+    mockCallCustomOpenAI.mockImplementation(async (_dynamic: any, _signal: any, options: any) => {
+      const keys: string[] = options?.targetSheetKeys || [];
+      return `<tableEdit>${keys.join(' ')}</tableEdit>`;
+    });
+    // 首 chunk 的工作副本丢失了第二个 chunk 的目标表 sheet_1：提交后 runtime 缺少既定目标，
+    // 快照重对齐必须拒绝继续，而不是把缺表状态当作新基线。
+    mockParseAndApplyTableEditsToData.mockImplementation((aiResponse: string, tableData: any) => {
+      if (aiResponse.includes('sheet_0')) {
+        delete tableData.sheet_1;
+        return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
+      }
+      return { success: true, modifiedKeys: ['sheet_1'], appliedEdits: 1 };
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, {
+      executionSnapshot: { sheetKeys: ['sheet_0', 'sheet_1'] },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('缺少本次目标表');
+    expect(result.error).toContain('sheet_1');
+    const aiTargetKeys = mockCallCustomOpenAI.mock.calls.map(call => (call[2] as { targetSheetKeys?: string[] } | undefined)?.targetSheetKeys || []);
+    expect(aiTargetKeys.length).toBeGreaterThan(0);
+    expect(aiTargetKeys.every(keys => !keys.includes('sheet_1'))).toBe(true);
+  });
+
 
 
 

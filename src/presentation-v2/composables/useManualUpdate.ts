@@ -27,11 +27,28 @@ import {
 } from '../../service/table/update-orchestrator';
 import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU } from '../../service/table/manual-update-settings';
 import { refreshMergedDataAndNotify_ACU } from '../../service/worldbook/pipeline';
+import { getCurrentCharPrimaryLorebook_ACU } from '../../service/worldbook/worldbook-service';
 import { topLevelWindow_ACU } from '../../shared/env';
 import { useDialogStore } from '../stores/dialog-store';
 import { useToastStore } from '../stores/toast-store';
 
 type MessageKind = 'info' | 'success' | 'warning' | 'error';
+
+/**
+ * 确认弹窗用的世界书注入目标描述：大规模历史回填会一次生成上百条 TavernDB 条目，
+ * 用户必须在确认前看到它们将写入哪本世界书（默认是角色卡绑定的主世界书，而不是
+ * 用户新建的外挂数据库世界书）。解析失败不阻断确认流程，只降级为提示文案。
+ */
+async function describeInjectionTargetForConfirm(): Promise<string> {
+  const target = String(getCurrentWorldbookConfig_ACU()?.injectionTarget || '').trim() || 'character';
+  if (target !== 'character') return target;
+  try {
+    const primary = await getCurrentCharPrimaryLorebook_ACU();
+    return primary ? `角色卡绑定世界书 · ${primary}` : '角色卡绑定世界书（未解析到主世界书）';
+  } catch {
+    return '角色卡绑定世界书（未解析到主世界书）';
+  }
+}
 
 export interface ManualUpdateState {
   selectedManualTableKeys: Ref<string[]>;
@@ -430,9 +447,10 @@ export function useManualUpdate(): ManualUpdateState {
 
     manualUpdateBusy.value = true;
     try {
+      const injectionTargetLabel = await describeInjectionTargetForConfirm();
       const confirmed = await dialogStore.confirm({
         title: '执行手动填表',
-        message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
+        message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n世界书注入目标：${injectionTargetLabel}（填表结果会写入该世界书的 TavernDB 条目）\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或中途终止时不会回滚：已清理的旧数据不会恢复，已成功提交的批次会保留，运行时会按聊天记录中的已提交结果重新对齐。`,
         dangerMessage: checkpointRiskMessage.value || undefined,
         confirmLabel: '确认并继续',
         cancelLabel: '取消',

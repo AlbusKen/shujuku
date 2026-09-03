@@ -3494,6 +3494,41 @@ function runtimeSheetKeysMatchSnapshot_ACU(snapshotKeys: string[]): boolean {
     return liveSheetKeys.every(key => snapshotSet.has(key));
 }
 
+/**
+ * chunk 成功提交后把快照重新对齐到 live runtime（task-owned change ≠ 外部修改）。
+ *
+ * 本任务自身的 merge-base / commit 会合法改写 currentJsonTableData_ACU 的 sheet 键集合
+ * （历史 key 迁移、guide 结构注入），若后续 chunk 仍拿确认前快照复检，会把自己刚提交的
+ * 结果当成外部修改而 fail-closed。这里在 chunk 提交完成的同步点重新冻结快照，使后续
+ * 复检只覆盖 chunk 之间的异步窗口（loadAllChatMessages / boundary checkpoint）。
+ * 目标表必须全部仍在 live runtime 中，否则说明任务已无法继续作用于既定目标，必须失败。
+ */
+function rebaselineManualUpdateSnapshotAfterTaskCommit_ACU(
+    previousSnapshotKeys: readonly string[] | undefined,
+    targetKeys: readonly string[],
+    chunkIndex: number,
+): { ok: true; sheetKeys: string[] } | { ok: false; error: string } {
+    const liveRuntimeTable = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+        ? (currentJsonTableData_ACU as Record<string, any>)
+        : null;
+    if (!liveRuntimeTable) {
+        return { ok: false, error: `第 ${chunkIndex} 批提交后表格运行时缺失，无法继续后续批次。` };
+    }
+    const liveSheetKeys = Object.keys(liveRuntimeTable).filter(key => key.startsWith('sheet_')).sort();
+    const liveSet = new Set(liveSheetKeys);
+    const missingTargets = targetKeys.filter(key => !liveSet.has(key));
+    if (missingTargets.length > 0) {
+        return { ok: false, error: `第 ${chunkIndex} 批提交后表格运行时缺少本次目标表：${missingTargets.join('、')}，已停止后续批次。` };
+    }
+    const previousSet = new Set(previousSnapshotKeys || []);
+    const added = liveSheetKeys.filter(key => !previousSet.has(key));
+    const removed = [...previousSet].filter(key => !liveSet.has(key));
+    if (added.length > 0 || removed.length > 0) {
+        logDebug_ACU(`[Manual Update] 第 ${chunkIndex} 批提交后 runtime 表集合由本任务自身变更，已重新对齐快照：新增 [${added.join('、')}]，移除 [${removed.join('、')}]。`);
+    }
+    return { ok: true, sheetKeys: liveSheetKeys };
+}
+
 function createManualCatchUpRunId_ACU(): string {
     return `manual-catch-up-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -4532,7 +4567,9 @@ export async function orchestrateManualUpdate_ACU(
         // 核对当前 runtime 与确认前快照，防止对确认后已失效的目标执行更新。
         // 契约：executionSnapshot 未提供（undefined）→ legacy 路径不启用保护；
         // 显式提供（即使 sheetKeys 为空/非法）→ 必须 fail-closed，禁止静默降级。
-        const manualUpdateSnapshotKeys = options.executionSnapshot?.sheetKeys;
+        // 快照在每个 chunk 成功提交后由 rebaselineManualUpdateSnapshotAfterTaskCommit_ACU
+        // 重新对齐（本任务自身的 commit 不是外部修改），其余时刻只读。
+        let manualUpdateSnapshotKeys: string[] | undefined = options.executionSnapshot?.sheetKeys;
         if (options.executionSnapshot !== undefined) {
             if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
                 logWarn_ACU('[Manual Update] runtime 在确认期间变化，已阻止手动更新（快照未匹配）。');
@@ -4574,13 +4611,14 @@ export async function orchestrateManualUpdate_ACU(
             let requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
             if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
                 // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
-                // sheet 键集合是否被 targetKeys 全量覆盖）。
+                // sheet 键集合是否被 targetKeys 全量覆盖）。空 data 的 full 同样会被
+                // purgeSheetKeysFromStorageFrameV2_ACU 整体删除，必须一并视为「将被清理」。
                 const originalTag = readIsolatedTagData_ACU(liveChat[originalFullIndex], currentIsolationKey) as any;
                 const originalCheckpointData = originalTag?.storageFrame?.checkpoint?.data;
                 if (originalCheckpointData && typeof originalCheckpointData === 'object' && !Array.isArray(originalCheckpointData)) {
                     const checkpointSheetKeys = Object.keys(originalCheckpointData).filter(key => key.startsWith('sheet_'));
                     const targetKeySet = new Set(targetKeys);
-                    const fullyCoversCheckpoint = checkpointSheetKeys.length > 0 && checkpointSheetKeys.every(key => targetKeySet.has(key));
+                    const fullyCoversCheckpoint = checkpointSheetKeys.every(key => targetKeySet.has(key));
                     if (fullyCoversCheckpoint) {
                         logDebug_ACU(`[Manual Refill] 原 full checkpoint 位于重填范围内（#${originalFullIndex}）且目标表覆盖其全部数据表，清理将删除该 checkpoint；已禁用跨根 staging，改用清理后临时根前置。`);
                         requiresBoundaryStaging = false;
@@ -4599,21 +4637,12 @@ export async function orchestrateManualUpdate_ACU(
                     messageIndices: contextScopeIndices,
                     fullCheckpointIndices: [originalFullIndex],
                 });
-                stagingRun = createTableFillStagingRunContext_ACU({
-                    runId: boundaryPlan.scope.runId,
-                    chatKey: boundaryPlan.scope.chatKey,
-                    isolationKey: boundaryPlan.scope.isolationKey,
-                    targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
-                    originalFullIndex: boundaryPlan.scope.originalFullIndex,
-                    originalFullFingerprint: readOriginalFullFrameFingerprint_ACU(
-                        getChatArray_ACU(),
-                        currentIsolationKey,
-                        originalFullIndex,
-                    ),
-                    templateFingerprint,
-                });
-                stagingSession = createTableFillStagingSession_ACU(stagingRun);
-                logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging。`);
+                // stagingRun（含原 full 根指纹）在破坏性清理与 runtime 重载之后才创建：
+                // 清理会改写原 full 楼层 frame 的 scheduleSummary / perSheetCheckpoints / logEntries
+                // （原 full 落在重填范围内时），若在此处就冻结指纹，边界汇合必然以
+                // full_checkpoint_fingerprint_mismatch 失败，且失败点在 pre 段全部 AI 调用之后。
+                // 指纹只应检测 staging 期间的外部改写，不应把本任务自身的清理当作外部修改。
+                logDebug_ACU(`[Manual Refill] 跨根 staging 已规划：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging；原 full 根指纹将在清理后冻结。`);
             }
 
             // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
@@ -4680,6 +4709,35 @@ export async function orchestrateManualUpdate_ACU(
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                 const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                 return { success: false, error: failureError };
+            }
+
+            // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）
+            // 之后建立：此时冻结的原 full 根指纹才等于边界汇合时 live frame 应有的指纹，
+            // 后续任何不匹配都只能来自外部改写。清理后原 full 根若已消失或位移，
+            // 边界汇合必然失败，必须在任何 AI 调用前 fail-closed（清理已发生，按已提交事实对齐运行时）。
+            if (boundaryPlan) {
+                const liveChatAfterCleanup = getChatArray_ACU();
+                const fullIndexAfterCleanup = getLatestV2FullCheckpointMessageIndex_ACU(liveChatAfterCleanup, currentIsolationKey);
+                if (fullIndexAfterCleanup !== originalFullIndex) {
+                    logError_ACU(`[Manual Refill] 清理后原 full checkpoint 位置变化：清理前 #${originalFullIndex}，清理后 #${fullIndexAfterCleanup}；跨根 staging 失去汇合目标。`);
+                    return await failManualRefillSession(`手动重填清理后原 full checkpoint 位置发生变化（清理前 #${originalFullIndex}，清理后 #${fullIndexAfterCleanup}），无法建立跨根 staging 汇合目标；已在 AI 调用前停止。已清理的数据不可恢复，请检查该聊天的 checkpoint 布局后重试。`);
+                }
+                const fingerprintAfterCleanup = readOriginalFullFrameFingerprint_ACU(liveChatAfterCleanup, currentIsolationKey, originalFullIndex);
+                if (!fingerprintAfterCleanup) {
+                    logError_ACU(`[Manual Refill] 清理后原 full checkpoint #${originalFullIndex} 不再是正式 full 根，无法读取指纹。`);
+                    return await failManualRefillSession(`手动重填清理后原 full checkpoint（#${originalFullIndex}）已不存在或不再是正式 full 根，无法建立跨根 staging；已在 AI 调用前停止。已清理的数据不可恢复，请检查该聊天的 checkpoint 布局后重试。`);
+                }
+                stagingRun = createTableFillStagingRunContext_ACU({
+                    runId: boundaryPlan.scope.runId,
+                    chatKey: boundaryPlan.scope.chatKey,
+                    isolationKey: boundaryPlan.scope.isolationKey,
+                    targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                    originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                    originalFullFingerprint: fingerprintAfterCleanup,
+                    templateFingerprint: boundaryPlan.scope.templateFingerprint,
+                });
+                stagingSession = createTableFillStagingSession_ACU(stagingRun);
+                logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}，原 full 根指纹已在清理后冻结（${fingerprintAfterCleanup}）。`);
             }
 
         }
@@ -4802,6 +4860,7 @@ export async function orchestrateManualUpdate_ACU(
                 }
             }
             try {
+                const failedGroupCountBeforeChunk = failedGroups.length;
                 // 非跨根或未启用 staging：普通逐组执行（与旧路径完全一致）。
                 if (!manualRefillEnabled || !boundaryPlan || !stagingRun) {
                     const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
@@ -4882,6 +4941,21 @@ export async function orchestrateManualUpdate_ACU(
                         }
                         if (failedGroups.length > 0) break;
                     }
+                }
+
+                // 本 chunk 成功提交后，把确认前快照重新对齐到本任务自身写出的 runtime：
+                // 下一 chunk 前的复检只应拦截 chunk 之间异步窗口内的外部修改，
+                // 不能把本任务刚完成的合法 commit（历史 key 迁移 / guide 表注入）当成外部变化。
+                if (options.executionSnapshot !== undefined && failedGroups.length === failedGroupCountBeforeChunk) {
+                    const rebaselined = rebaselineManualUpdateSnapshotAfterTaskCommit_ACU(manualUpdateSnapshotKeys, targetKeys, chunkIndex);
+                    if (rebaselined.ok === false) {
+                        logWarn_ACU(`[Manual Update] ${rebaselined.error}`);
+                        if (manualRefillEnabled) {
+                            return await failManualRefillSession(`${rebaselined.error}已清理的数据不可恢复，已提交的批次已保留。`);
+                        }
+                        return { success: false, error: rebaselined.error };
+                    }
+                    manualUpdateSnapshotKeys = rebaselined.sheetKeys;
                 }
 
                 // 并发组内禁止每组单独刷新；填表保存后 currentJsonTableData_ACU 已由本轮 workingTableData 更新。

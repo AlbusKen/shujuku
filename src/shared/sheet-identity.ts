@@ -53,7 +53,7 @@ export class PhysicalTableNameCollisionError_ACU extends Error {
       .join('；');
     const hasIdentityMergeFailure = collisions.some(collision => collision.reason === 'identity_merge_failed');
     super(hasIdentityMergeFailure
-      ? `SQLite 物理表名冲突：相同规范表名被保留为多个 key，说明身份归并未完成；请检查历史数据与指导表的 key 对齐。冲突：${detail}`
+      ? `SQLite 物理表名冲突：相同规范表名被保留为多个 key，说明身份归并未完成；请检查历史数据与指导表的 key 对齐，并核对完整 sheetKey（大写 I、小写 l、数字 1 等字符在普通字体下极易混淆）。冲突：${detail}`
       : `SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
     this.name = 'PhysicalTableNameCollisionError_ACU';
     this.collisions = collisions;
