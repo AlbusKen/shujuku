@@ -53,6 +53,16 @@
         </AcuFormRow>
 
         <template v-if="activeConnectionMode === 'custom'">
+          <AcuFormRow
+            label="接口协议"
+            hint="决定上游端点与请求/响应变形，默认兼容 OpenAI。TauriTavern 按 custom_api_format 分流到 /chat/completions、/responses、/messages、/interactions；原版 SillyTavern 把 Claude/Gemini 映射到服务端原生协议源（端点填协议根即可，插件自动补 /v1 或剥版本段），OpenAI Responses 在原版 ST 下回退兼容 OpenAI。纯原生端点下「加载模型」可能失败，可手填模型名。"
+          >
+            <AcuSelect
+              :options="customApiFormatOptions"
+              :model-value="activeDraft.customApiFormat"
+              @update:model-value="setCustomApiFormat"
+            />
+          </AcuFormRow>
           <AcuFormRow label="端点(基础URL)">
             <AcuInput
               v-model="activeDraft.url"
@@ -204,7 +214,10 @@ import {
   type ApiPresetDraft,
   type ConnectionMode,
 } from "../composables/useApiPresetManagement";
-import type { ApiPromptPostProcessingValue_ACU } from "../../service/settings/api-preset-service";
+import {
+  normalizeCustomApiFormat_ACU,
+  normalizePromptPostProcessing_ACU,
+} from "../../service/settings/api-preset-service";
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
 import { apiCopy } from "../copy/api-copy";
 import {
@@ -278,6 +291,14 @@ const promptPostProcessingOptions: AcuSelectOption[] = [
     group: "No Tools",
   },
   { value: "single", label: "单一用户消息（无工具）" },
+];
+// 接口协议选项（对齐 TT 主 API 四个「自定义」选项，custom_api_format 契约）；值集合以
+// api-preset-service 的 CUSTOM_API_FORMAT_VALUES_ACU 为唯一来源，此处只补人类可读标签。
+const customApiFormatOptions: AcuSelectOption[] = [
+  { value: "openai_compat", label: "兼容 OpenAI" },
+  { value: "openai_responses", label: "兼容 OpenAI Responses" },
+  { value: "claude_messages", label: "兼容 Claude Messages" },
+  { value: "gemini_interactions", label: "兼容 Gemini Interactions" },
 ];
 const modelSelectOptions = computed<AcuSelectOption[]>(() =>
   store.modelOptions.map((m) => ({ value: m, label: m })),
@@ -413,7 +434,12 @@ function setActiveConnectionMode(value: string): void {
 
 function setPromptPostProcessing(value: string): void {
   activeDraft.promptPostProcessing =
-    value as ApiPromptPostProcessingValue_ACU;
+    normalizePromptPostProcessing_ACU(value);
+  activeDraftSavedAt.value = null;
+}
+
+function setCustomApiFormat(value: string): void {
+  activeDraft.customApiFormat = normalizeCustomApiFormat_ACU(value);
   activeDraftSavedAt.value = null;
 }
 

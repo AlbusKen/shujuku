@@ -1,4 +1,11 @@
-import type { ApiPromptPostProcessingValue_ACU } from '../../service/settings/api-preset-service';
+import {
+  API_PROMPT_POST_PROCESSING_DEFAULT_ACU,
+  CUSTOM_API_FORMAT_DEFAULT_ACU,
+  normalizeCustomApiFormat_ACU,
+  normalizePromptPostProcessing_ACU,
+  type ApiPromptPostProcessingValue_ACU,
+  type CustomApiFormat_ACU,
+} from '../../service/settings/api-preset-service';
 import type { AcuV2ApiMode, AcuV2ApiPreset } from '../stores/api-preset-store';
 
 export interface ApiPresetDraft {
@@ -15,6 +22,8 @@ export interface ApiPresetDraft {
   excludeBodyParams: string;
   requestHeaders: string;
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
+  /** 接口协议（预设级）：openai_compat / openai_responses / claude_messages / gemini_interactions */
+  customApiFormat: CustomApiFormat_ACU;
 }
 
 /** Effective connection mode — flattens apiMode + useMainApi into 3 user-visible states. */
@@ -52,7 +61,8 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     bodyParams: '',
     excludeBodyParams: '',
     requestHeaders: '',
-    promptPostProcessing: 'strict',
+    promptPostProcessing: API_PROMPT_POST_PROCESSING_DEFAULT_ACU,
+    customApiFormat: CUSTOM_API_FORMAT_DEFAULT_ACU,
   };
 }
 
@@ -70,7 +80,10 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     bodyParams: preset.apiConfig.bodyParams || '',
     excludeBodyParams: preset.apiConfig.excludeBodyParams || '',
     requestHeaders: preset.apiConfig.requestHeaders || '',
-    promptPostProcessing: preset.apiConfig.promptPostProcessing || '',
+    // 草稿与请求体必须用同一套归一化：旧预设缺失该字段时运行时按 strict 发送，
+    // 草稿若显示为「未选择」，用户直接保存就会把行为静默改成 none。
+    promptPostProcessing: normalizePromptPostProcessing_ACU(preset.apiConfig.promptPostProcessing),
+    customApiFormat: normalizeCustomApiFormat_ACU(preset.apiConfig.customApiFormat),
   };
 }
 
@@ -89,7 +102,8 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       bodyParams: draft.bodyParams || '',
       excludeBodyParams: draft.excludeBodyParams || '',
       requestHeaders: draft.requestHeaders || '',
-      promptPostProcessing: draft.promptPostProcessing || '',
+      promptPostProcessing: normalizePromptPostProcessing_ACU(draft.promptPostProcessing),
+      customApiFormat: normalizeCustomApiFormat_ACU(draft.customApiFormat),
     },
   };
 }

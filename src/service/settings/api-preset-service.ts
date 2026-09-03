@@ -52,6 +52,24 @@ export function normalizePromptPostProcessing_ACU(value: unknown): ApiPromptPost
     : API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
 }
 
+/**
+ * 接口协议（预设级）：对齐 TauriTavern 主 API 的四个「自定义」选项（custom_api_format 四值契约）。
+ * TauriTavern 下随请求体 custom_api_format 透传分流；原版 SillyTavern 下由 api-call 映射为
+ * 原生 chat_completion_source（claude_messages→claude、gemini_interactions→makersuite），
+ * openai_responses 在 ST 无对应后端时回退 custom。缺失/非法值归一为 openai_compat（历史行为）。
+ * 本处是四值白名单的唯一来源：UI 草稿、请求体构建都必须经 normalizeCustomApiFormat_ACU。
+ */
+export type CustomApiFormat_ACU = 'openai_compat' | 'openai_responses' | 'claude_messages' | 'gemini_interactions';
+
+export const CUSTOM_API_FORMAT_VALUES_ACU: readonly CustomApiFormat_ACU[] = ['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'];
+
+export const CUSTOM_API_FORMAT_DEFAULT_ACU: CustomApiFormat_ACU = 'openai_compat';
+
+export function normalizeCustomApiFormat_ACU(value: unknown): CustomApiFormat_ACU {
+  const raw = String(value ?? '').trim();
+  return (CUSTOM_API_FORMAT_VALUES_ACU as readonly string[]).includes(raw) ? (raw as CustomApiFormat_ACU) : CUSTOM_API_FORMAT_DEFAULT_ACU;
+}
+
 export interface ApiPresetApiConfig_ACU {
   url: string;
   apiKey: string;
@@ -64,6 +82,8 @@ export interface ApiPresetApiConfig_ACU {
   excludeBodyParams: string;
   requestHeaders: string;
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
+  /** 接口协议（预设级），见 CustomApiFormat_ACU。 */
+  customApiFormat: CustomApiFormat_ACU;
 }
 
 export interface ApiPreset_ACU {
@@ -112,9 +132,10 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
     promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
+    customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key)
       )
     ),
   };
