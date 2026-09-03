@@ -516,6 +516,49 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body.messages[0]).not.toBe(original[0]);
   });
 
+  it('缺失 promptPostProcessing 时默认 strict（向后兼容旧版写死 strict 的行为）', () => {
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'system', content: '中部 system' }, { role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4' },
+    );
+    expect(body.custom_prompt_post_processing).toBe('strict');
+  });
+
+  it('显式选择未选择（空串）时不携带 custom_prompt_post_processing（后端原样透传消息）', () => {
+    // 未选择 = 不带该字段，酒馆后端按 none 处理，保留提示词组中 system 段的角色。
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'system', content: '中部 system' }, { role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: '' },
+    );
+    expect(body).not.toHaveProperty('custom_prompt_post_processing');
+  });
+
+  it('promptPostProcessing=merge 透传为 custom_prompt_post_processing', () => {
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'merge' },
+    );
+    expect(body.custom_prompt_post_processing).toBe('merge');
+  });
+
+  it('promptPostProcessing=strict 等合法值原样透传', () => {
+    for (const value of ['semi', 'strict', 'single', 'merge_tools', 'semi_tools', 'strict_tools']) {
+      const body = buildCustomApiRequestBody_ACU(
+        [{ role: 'user', content: 'test' }],
+        { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: value },
+      );
+      expect(body.custom_prompt_post_processing).toBe(value);
+    }
+  });
+
+  it('promptPostProcessing 非法值默认 strict', () => {
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'fake-mode' },
+    );
+    expect(body.custom_prompt_post_processing).toBe('strict');
+  });
+
   it('缺失或非字符串 role、数组/原始值等异常消息原样保留，不静默改造成 undefined', () => {
     const input = [
       { content: '缺 role' },

@@ -1,3 +1,4 @@
+import type { ApiPromptPostProcessingValue_ACU } from '../../service/settings/api-preset-service';
 import type { AcuV2ApiMode, AcuV2ApiPreset } from '../stores/api-preset-store';
 
 export interface ApiPresetDraft {
@@ -13,6 +14,7 @@ export interface ApiPresetDraft {
   bodyParams: string;
   excludeBodyParams: string;
   requestHeaders: string;
+  promptPostProcessing: ApiPromptPostProcessingValue_ACU;
 }
 
 /** Effective connection mode — flattens apiMode + useMainApi into 3 user-visible states. */
@@ -50,6 +52,7 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     bodyParams: '',
     excludeBodyParams: '',
     requestHeaders: '',
+    promptPostProcessing: 'strict',
   };
 }
 
@@ -67,6 +70,7 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     bodyParams: preset.apiConfig.bodyParams || '',
     excludeBodyParams: preset.apiConfig.excludeBodyParams || '',
     requestHeaders: preset.apiConfig.requestHeaders || '',
+    promptPostProcessing: preset.apiConfig.promptPostProcessing || '',
   };
 }
 
@@ -85,6 +89,7 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       bodyParams: draft.bodyParams || '',
       excludeBodyParams: draft.excludeBodyParams || '',
       requestHeaders: draft.requestHeaders || '',
+      promptPostProcessing: draft.promptPostProcessing || '',
     },
   };
 }

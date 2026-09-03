@@ -5,15 +5,16 @@
       <i class="fa-solid fa-chevron-down acu-select__caret" :class="{ 'acu-select__caret--open': open }"></i>
     </button>
     <ul v-if="open" class="acu-select__menu">
-      <li
-        v-for="opt in options"
-        :key="opt.value"
-        class="acu-select__item"
-        :class="{ 'acu-select__item--active': opt.value === modelValue }"
-        @click="select(opt.value)"
-      >
-        {{ opt.label }}
-      </li>
+      <template v-for="entry in groupedOptions" :key="entry.key">
+        <li v-if="entry.group !== null" class="acu-select__group">{{ entry.group }}</li>
+        <li
+          class="acu-select__item"
+          :class="{ 'acu-select__item--active': entry.opt.value === modelValue }"
+          @click="select(entry.opt.value)"
+        >
+          {{ entry.opt.label }}
+        </li>
+      </template>
       <li v-if="!options.length" class="acu-select__empty">无可选项</li>
     </ul>
   </div>
@@ -26,6 +27,8 @@ import { getAcuHostDocument } from '../../bootstrap/host-document';
 export interface AcuSelectOption {
   value: string;
   label: string;
+  /** 可选分组名：相邻同名分组的选项会共享一个组标题（不可点击，仅视觉分组）。 */
+  group?: string;
 }
 
 const props = withDefaults(defineProps<{
@@ -57,6 +60,21 @@ const hasSelection = computed(() => props.options.some(o => o.value === props.mo
 const selectedLabel = computed(() => {
   const item = props.options.find(o => o.value === props.modelValue);
   return item ? item.label : props.placeholder;
+});
+
+const groupedOptions = computed(() => {
+  const groupOf = (opt: AcuSelectOption): string | null =>
+    typeof opt.group === 'string' && opt.group ? opt.group : null;
+  return props.options.map((opt, index) => {
+    const group = groupOf(opt);
+    const prevGroup = index > 0 ? groupOf(props.options[index - 1]) : null;
+    return {
+      key: `${index}:${opt.value}`,
+      opt,
+      group,
+      showGroupLabel: group !== null && group !== prevGroup,
+    };
+  });
 });
 
 function select(value: string) {
@@ -130,6 +148,16 @@ onBeforeUnmount(() => {
   border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);
   min-width: 0; max-width: 100%; box-sizing: border-box;
   max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;
+}
+
+.acu-select__group {
+  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px) var(--acu-space-1, 4px);
+  font-size: var(--acu-font-size-micro, 10px);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--acu-text-3);
+  user-select: none;
+  pointer-events: none;
 }
 
 .acu-select__item {

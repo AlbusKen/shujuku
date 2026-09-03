@@ -7,7 +7,7 @@ export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
-import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
+import { resolveApiConfigByPreset_ACU, normalizePromptPostProcessing_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 
 type CustomIncludeBodyRootType_ACU = 'empty' | 'mapping' | 'sequence' | 'scalar' | 'invalid';
 
@@ -183,6 +183,15 @@ export function buildCustomApiRequestBody_ACU(
     logWarn_ACU('[buildCustomApiRequestBody] 用户 stream_options 不是对象，已由插件对象替换', composedIncludeBody.diagnostic);
   }
 
+  // 提示词后处理（custom_prompt_post_processing）改为 API 预设可配置。
+  // 背景：此前写死 'strict'，酒馆后端会把提示词中部的 system 消息强制改成 user
+  // （prompt-converters.js mergeMessages strict 模式），导致剧情推进等自定义
+  // 提示词组里用户指定的 SYSTEM 段在发送时丢失角色。
+  // 现在：默认 'strict'（与历史行为兼容）；预设选择具体值则透传；
+  // 显式选择「未选择」（''）时不携带该字段，后端原样透传消息，
+  // 完整保留用户配置的 system/user/assistant 结构。
+  const promptPostProcessing = normalizePromptPostProcessing_ACU(effectiveApiConfig?.promptPostProcessing);
+
   const body: Record<string, any> = {
     // 统一将 messages 的 role 归一为小写（system / user / assistant）。
     //
@@ -217,7 +226,6 @@ export function buildCustomApiRequestBody_ACU(
     reasoning_effort: 'medium',
     enable_web_search: false,
     request_images: false,
-    custom_prompt_post_processing: 'strict',
     reverse_proxy: effectiveApiConfig.url,
     proxy_password: '',
     custom_url: effectiveApiConfig.url,
@@ -225,6 +233,10 @@ export function buildCustomApiRequestBody_ACU(
     custom_include_body: composedIncludeBody.value,
     custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
   };
+  if (promptPostProcessing) {
+    // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。
+    body.custom_prompt_post_processing = promptPostProcessing;
+  }
 
   return body;
 }
