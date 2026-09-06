@@ -67,8 +67,9 @@ export function parseDDLColumnNames(ddl: string): string[] {
   const lines = splitColumnDefinitions(body);
 
   for (const line of lines) {
-    // 去掉行注释（-- 到行尾），然后取最后一个非注释行的内容
-    const withoutComments = line.replace(/--[^\n]*/g, '').trim();
+    // 去掉行注释和块注释（保留 SQL 字面量），然后取第一个非注释内容；
+    // 不能只替换 --，否则首列前置 /* ... */ 会被误当成列名。
+    const withoutComments = stripSqlLineComments_ACU(line).trim();
     if (!withoutComments) continue;
     // 跳过表级约束（PRIMARY KEY、FOREIGN KEY、UNIQUE、CHECK、CONSTRAINT）
     if (/^(?:PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|CONSTRAINT)\b/i.test(withoutComments)) continue;
@@ -335,9 +336,14 @@ export function downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl: string): string
   if (definitions.length === 0) throw new Error('DDL 缺少可降级的 row_id 列。');
 
   const first = definitions[0];
-  const commentIndex = findSqlLineCommentStart_ACU(first);
-  const definition = (commentIndex < 0 ? first : first.slice(0, commentIndex));
-  const comment = commentIndex < 0 ? '' : first.slice(commentIndex);
+  // 首列可能带前置空白、`--` 行注释或 `/* ... */` 块注释。
+  // 这些 trivia 不能进入列名/类型正则，否则会把注释当成列名开头而误报“缺少 row_id”。
+  const leadingTriviaEnd = skipSqlTrivia_ACU(first, 0);
+  const leadingTrivia = first.slice(0, leadingTriviaEnd);
+  const firstBody = first.slice(leadingTriviaEnd);
+  const commentIndex = findSqlLineCommentStart_ACU(firstBody);
+  const definition = (commentIndex < 0 ? firstBody : firstBody.slice(0, commentIndex));
+  const comment = commentIndex < 0 ? '' : firstBody.slice(commentIndex);
   const match = definition.match(/^(\s*)((?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|[A-Za-z_][A-Za-z0-9_]*))(\s+INTEGER\b)([\s\S]*)$/i);
   if (!match || canonicalSqlIdentifier_ACU(match[2]) !== 'row_id') {
     throw new Error('SPv7.9 旧语义 SQL 回放缺少首列 row_id INTEGER PRIMARY KEY。');
@@ -352,7 +358,7 @@ export function downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl: string): string
   if (/\b(?:PRIMARY\s+KEY|AUTOINCREMENT)\b/i.test(downgradedTail)) {
     throw new Error('SPv7.9 旧语义 SQL 回放无法安全降级 row_id 约束。');
   }
-  definitions[0] = `${match[1]}${match[2]}${match[3]}${downgradedTail}${comment}`;
+  definitions[0] = `${leadingTrivia}${match[1]}${match[2]}${match[3]}${downgradedTail}${comment}`;
   const next = `${value.slice(0, bounds.openingIndex + 1)}${definitions.join(',')}${value.slice(bounds.closingIndex)}`;
   const columns = parseDDLColumnInfos_ACU(next);
   const firstColumn = columns[0];

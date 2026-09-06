@@ -35200,8 +35200,9 @@ $CONTENT
         // 按逗号分割（但要注意括号内和注释内的逗号）
         const lines = splitColumnDefinitions(body);
         for (const line of lines) {
-            // 去掉行注释（-- 到行尾），然后取最后一个非注释行的内容
-            const withoutComments = line.replace(/--[^\n]*/g, '').trim();
+            // 去掉行注释和块注释（保留 SQL 字面量），然后取第一个非注释内容；
+            // 不能只替换 --，否则首列前置 /* ... */ 会被误当成列名。
+            const withoutComments = stripSqlLineComments_ACU(line).trim();
             if (!withoutComments)
                 continue;
             // 跳过表级约束（PRIMARY KEY、FOREIGN KEY、UNIQUE、CHECK、CONSTRAINT）
@@ -35427,9 +35428,14 @@ $CONTENT
         if (definitions.length === 0)
             throw new Error('DDL 缺少可降级的 row_id 列。');
         const first = definitions[0];
-        const commentIndex = findSqlLineCommentStart_ACU(first);
-        const definition = (commentIndex < 0 ? first : first.slice(0, commentIndex));
-        const comment = commentIndex < 0 ? '' : first.slice(commentIndex);
+        // 首列可能带前置空白、`--` 行注释或 `/* ... */` 块注释。
+        // 这些 trivia 不能进入列名/类型正则，否则会把注释当成列名开头而误报“缺少 row_id”。
+        const leadingTriviaEnd = skipSqlTrivia_ACU(first, 0);
+        const leadingTrivia = first.slice(0, leadingTriviaEnd);
+        const firstBody = first.slice(leadingTriviaEnd);
+        const commentIndex = findSqlLineCommentStart_ACU(firstBody);
+        const definition = (commentIndex < 0 ? firstBody : firstBody.slice(0, commentIndex));
+        const comment = commentIndex < 0 ? '' : firstBody.slice(commentIndex);
         const match = definition.match(/^(\s*)((?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|[A-Za-z_][A-Za-z0-9_]*))(\s+INTEGER\b)([\s\S]*)$/i);
         if (!match || canonicalSqlIdentifier_ACU(match[2]) !== 'row_id') {
             throw new Error('SPv7.9 旧语义 SQL 回放缺少首列 row_id INTEGER PRIMARY KEY。');
@@ -35444,7 +35450,7 @@ $CONTENT
         if (/\b(?:PRIMARY\s+KEY|AUTOINCREMENT)\b/i.test(downgradedTail)) {
             throw new Error('SPv7.9 旧语义 SQL 回放无法安全降级 row_id 约束。');
         }
-        definitions[0] = `${match[1]}${match[2]}${match[3]}${downgradedTail}${comment}`;
+        definitions[0] = `${leadingTrivia}${match[1]}${match[2]}${match[3]}${downgradedTail}${comment}`;
         const next = `${value.slice(0, bounds.openingIndex + 1)}${definitions.join(',')}${value.slice(bounds.closingIndex)}`;
         const columns = parseDDLColumnInfos_ACU(next);
         const firstColumn = columns[0];
@@ -37159,6 +37165,10 @@ $CONTENT
             this.engine = engine;
             this.runtimeFallbackDiagnostics = new Map();
             this.runtimeEffectiveSchemas = new Map();
+        }
+        /** 返回 SyncBridge 实际执行到 runtime SQLite 的 schema 快照（窄读取接口）。 */
+        getRuntimeEffectiveSchemas_ACU() {
+            return new Map(this.runtimeEffectiveSchemas);
         }
         getRuntimeFallbackDiagnostics_ACU() {
             return Array.from(this.runtimeFallbackDiagnostics.values());
@@ -40777,6 +40787,17 @@ $CONTENT
     }
 
     /**
+     * 归一化影响回放结果的 options 为轻量指纹。
+     * 与 in-flight key 的 options 段保持一致；evidence 复用必须携带并比对。
+     */
+    function buildReplayOptionsFingerprint_ACU(options) {
+        return [
+            'tpl', options.allowTemporaryTemplateBaseline ? 1 : 0,
+            'compat', options.compatibilityMode ?? 'default',
+            'alias', options.enableAliasContext === false ? 0 : 1,
+        ].join('|');
+    }
+    /**
      * 判定 evidence 是否可复用于「同 chat + 同 isolationKey + 同 boundary」的调用。
      *
      * 全部条件必须满足：
@@ -40791,7 +40812,7 @@ $CONTENT
      *
      * 返回 true 才可复用；false 一律走冷 replay。
      */
-    function validateV2ReplayEvidenceFresh_ACU(evidence, chat, isolationKey, options = {}, currentHeadRevisionDigest) {
+    function validateV2ReplayEvidenceFresh_ACU(evidence, chat, isolationKey, options = {}, currentHeadRevisionDigest, currentStructureMappingDigest, currentReplayOptionsFingerprint) {
         if (!evidence)
             return false;
         if (evidence.chatIdentity !== chat)
@@ -40803,6 +40824,10 @@ $CONTENT
         // 同一 computeReplayHeadRevisionDigest_ACU，chat 未变时必然相等；仅 chat 内容变化
         // （且 headRevision 亦变化）才会产生差异，此时必须失效。
         if (evidence.headRevisionDigest !== currentHeadRevisionDigest)
+            return false;
+        if (evidence.structureMappingDigest !== currentStructureMappingDigest)
+            return false;
+        if (evidence.replayOptionsFingerprint !== currentReplayOptionsFingerprint)
             return false;
         if (evidence.maxMessageIndex !== options.maxMessageIndex)
             return false;
@@ -40842,9 +40867,9 @@ $CONTENT
      * SQLite runtime 并从 checkpoint 全量回放，同一份 canonical 数据被重复计算。
      *
      * key 由「影响 replay 结果的全部 options 字段」构成：chat 引用、isolationKey、
-     * maxMessageIndex、allowTemporaryTemplateBaseline、compatibilityMode、
-     * enableAliasContext。缺任一字段都会导致共享错误结果（例如临时基线 vs null、
-     * 冷/热 alias metrics 不同）。
+     * maxMessageIndex、结构映射指纹、allowTemporaryTemplateBaseline、
+     * compatibilityMode、enableAliasContext。缺任一字段都会导致共享错误结果
+     * （例如临时基线 vs null、冷/热 alias metrics 不同、模板结构变化未失效）。
      *
      * 排除的调用：updateRuntimeState:true（副作用路径改写 schedule，不可共享）、
      * captureBoundaries/captureSink（阶段 H 多边界捕获，各自消费 sink）、
@@ -40855,7 +40880,7 @@ $CONTENT
      * 重复调用，不缓存历史结果（与计划「有界 in-flight」一致，无跨调用泄漏）。
      */
     const inflightV2Replays_ACU = new Map();
-    function buildInflightReplayKey_ACU(chat, isolationKey, options) {
+    function buildInflightReplayKey_ACU(chat, isolationKey, options, structureMappingDigest = '') {
         if (options.updateRuntimeState)
             return null;
         if (Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0)
@@ -40875,6 +40900,7 @@ $CONTENT
             String(chat),
             'iso', isolationKey,
             'max', options.maxMessageIndex ?? 'latest',
+            'struct', structureMappingDigest || '',
             'tpl', options.allowTemporaryTemplateBaseline ? 1 : 0,
             'compat', options.compatibilityMode ?? 'default',
             'alias', options.enableAliasContext === false ? 0 : 1,
@@ -42901,6 +42927,11 @@ $CONTENT
         // 保持纯函数性质）。不满足一律走冷 replay（fail-open）。
         const evidence = options.replayEvidence;
         const currentHeadRevisionDigest = computeReplayHeadRevisionDigest_ACU(chat, isolationKey);
+        const currentStructureMappingDigest = (() => {
+            const structureMapping = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+            return structureMapping ? getTableDataFingerprint_ACU(structureMapping) : '';
+        })();
+        const currentReplayOptionsFingerprint = buildReplayOptionsFingerprint_ACU(options);
         // updateRuntimeState:true 时不得复用（需副作用）；此处证据仅由 false 路径写入，
         // 命中必然为 false，但防御性再确认一次。
         // 阶段 H：captureBoundaries 非空（多 boundary 前向捕获）时禁止 evidence 复用与
@@ -42912,7 +42943,7 @@ $CONTENT
         const evidenceReusable = !!evidence
             && !options.updateRuntimeState
             && !captureMode
-            && validateV2ReplayEvidenceFresh_ACU(evidence, chat, isolationKey, { maxMessageIndex: options.maxMessageIndex }, currentHeadRevisionDigest);
+            && validateV2ReplayEvidenceFresh_ACU(evidence, chat, isolationKey, { maxMessageIndex: options.maxMessageIndex }, currentHeadRevisionDigest, currentStructureMappingDigest, currentReplayOptionsFingerprint);
         if (evidence && evidenceReusable) {
             const data = deepClone_ACU$5(evidence.data);
             // 复用命中同样上报 span：命中路径直接 return，若不上报则「整轮冷回放被跳过」
@@ -42945,7 +42976,7 @@ $CONTENT
         // 后续调用方 await 同一 promise。共享结果深克隆 data（不共享引用，保持纯函数
         // 性质），metrics 标记 replayShareCount=1 以区分 evidence 复用（replayReuseCount）。
         // 仅合并并发窗口内的重复调用：promise settle 后从 Map 删除，不缓存历史。
-        const inflightKey = buildInflightReplayKey_ACU(chat, isolationKey, options);
+        const inflightKey = buildInflightReplayKey_ACU(chat, isolationKey, options, currentStructureMappingDigest);
         if (inflightKey) {
             const existing = inflightV2Replays_ACU.get(inflightKey);
             if (existing) {
@@ -43060,6 +43091,8 @@ $CONTENT
                 evidence.compatibilityRepairs = null;
                 evidence.requiresCheckpointConvergence = false;
                 evidence.headRevisionDigest = currentHeadRevisionDigest;
+                evidence.structureMappingDigest = currentStructureMappingDigest;
+                evidence.replayOptionsFingerprint = currentReplayOptionsFingerprint;
                 evidence.createdAt = Date.now();
             }
             return result;
@@ -44894,6 +44927,14 @@ $CONTENT
             matchedKeys.add(previous.key);
             try {
                 const reconciled = reconcileMatchedSheet_ACU(previous.sheet, templateEntry.sheet, previous.key, templateEntry.key, input.storageMode === 'native' ? 'native' : 'sqlite');
+                // P2 identity contract: a matched sheet keeps the persistent chat sheet key
+                // (previous.key) as its logical identity. The template may use a different
+                // physical table name (e.g. stable pinyin key vs legacy random key), so the
+                // CREATE TABLE identifier must be rebound to the persistent key here, in all
+                // storage modes, before the sheet is published into candidateData/guide.
+                if (typeof reconciled.sheet?.sourceData?.ddl === 'string' && reconciled.sheet.sourceData.ddl.trim()) {
+                    reconciled.sheet.sourceData.ddl = rebindCreateTableName_ACU(reconciled.sheet.sourceData.ddl, previous.key);
+                }
                 candidateData[previous.key] = reconciled.sheet;
                 if (reconciled.changed)
                     rebaseKeys.add(previous.key);
@@ -45602,6 +45643,13 @@ $CONTENT
                 return renamePhysicalColumn_ACU(column, source.physical);
             });
             sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, effectiveTargetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
+            // P2 identity contract: the persistent chat sheet key is authoritative for the
+            // logical sheet; a template may carry a different physical table name (e.g. stable
+            // pinyin key vs legacy random key). Rebind the CREATE TABLE identifier so SQLite
+            // never materializes a second physical table for the same logical sheet.
+            if (typeof sheet.sourceData?.ddl === 'string' && sheet.sourceData.ddl.trim()) {
+                sheet.sourceData.ddl = rebindCreateTableName_ACU(sheet.sourceData.ddl, sheetKey);
+            }
             activePhysicalNames = effectiveTargetColumns.map(column => column.sqlName);
             retainedHiddenPhysicalNames = retainedHiddenColumns.map(column => column.sqlName);
         }
@@ -58743,6 +58791,7 @@ $CONTENT
          */
         _validateRuntimeSchema_ACU(data) {
             const actualTables = new Set(this.engine.getTableNames());
+            const runtimeSchemas = this.syncBridge.getRuntimeEffectiveSchemas_ACU();
             for (const key of Object.keys(data).filter(key => key.startsWith('sheet_'))) {
                 const sheet = data[key];
                 if (!sheet || typeof sheet !== 'object')
@@ -58755,9 +58804,12 @@ $CONTENT
                 if (!actualTables.has(runtimeTableName)) {
                     throw new Error(`schema_missing_table: ${key} (${runtimeTableName}) 未在 SQLite runtime 中创建。`);
                 }
-                const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName);
+                const runtimeSchema = runtimeSchemas.get(key);
+                if (!runtimeSchema) {
+                    throw new Error(`schema_missing_runtime_descriptor: ${key} 缺少 SyncBridge 实际执行 schema。`);
+                }
                 const actualColumns = new Set(this.engine.getTableInfo(runtimeTableName).map(column => column.name));
-                for (const mapping of effectiveDDL.columnMap.mappings) {
+                for (const mapping of runtimeSchema.columnMap.mappings) {
                     if (!actualColumns.has(mapping.sqlName)) {
                         throw new Error(`schema_missing_column: ${key} (${runtimeTableName}).${mapping.sqlName} 未在 SQLite runtime 中创建。`);
                     }
@@ -58773,6 +58825,7 @@ $CONTENT
         _buildNameMapper(data) {
             try {
                 const ddlMap = new Map();
+                const runtimeSchemas = this.syncBridge.getRuntimeEffectiveSchemas_ACU();
                 for (const [key, value] of Object.entries(data)) {
                     if (!key.startsWith('sheet_'))
                         continue;
@@ -58786,7 +58839,12 @@ $CONTENT
                     // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
                     // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
                     const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
-                    const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName).effectiveDDL;
+                    const runtimeSchema = runtimeSchemas.get(key);
+                    if (!runtimeSchema) {
+                        logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${key} 缺少 SyncBridge 实际执行 schema。`);
+                        return false;
+                    }
+                    const effectiveDDL = runtimeSchema.effectiveDDL;
                     ddlMap.set(runtimeTableName, effectiveDDL);
                 }
                 return publishGlobalNameMapperForDDLs_ACU(ddlMap, this.nameMapperOwner_ACU);
@@ -89610,6 +89668,13 @@ $CONTENT
                     || typeof sheetCheckpoint.data !== 'object'
                     || Array.isArray(sheetCheckpoint.data))
                     continue;
+                // P5：timed 单表 checkpoint（sheet_rebase / sheet_hide / sheet_reveal /
+                // sheet_introduction）必须保留在 perSheetCheckpoints 里由回放按
+                // activateAtMessageIndex + afterSeq 调度，不能并入 data_replace 基底，
+                // 否则事件会被提前到帧首生效（例如 hide 的表出现在替换状态、rebase
+                // 的新结构覆盖了该帧更早的操作）。untimed checkpoint 才是帧首事实。
+                if (sheetCheckpoint.timeline !== undefined)
+                    continue;
                 fallbackData[sheetKey] = JSON.parse(JSON.stringify(sheetCheckpoint.data));
             }
         }
@@ -104931,6 +104996,134 @@ $CONTENT
             boundaryCommitted: false,
         };
     }
+    /**
+     * Collects the message indices at which any sheet's schema/visibility timeline
+     * becomes active. The result is sorted by index; only one kind is kept per index.
+     */
+    function collectV2SchemaBoundaryIndices_ACU(chat, isolationKey) {
+        if (!Array.isArray(chat) || chat.length === 0)
+            return [];
+        const knownKinds = new Set([
+            'sheet_introduction',
+            'sheet_rebase',
+            'sheet_reveal',
+            'sheet_hide',
+        ]);
+        const seen = new Map();
+        for (let i = 0; i < chat.length; i += 1) {
+            const container = readIsolatedDataContainer_ACU(chat[i]);
+            const tagData = container?.[isolationKey];
+            if (!isV2TagData_ACU(tagData))
+                continue;
+            const frame = tagData.storageFrame;
+            const checkpoints = frame?.perSheetCheckpoints;
+            if (!checkpoints || typeof checkpoints !== 'object' || Array.isArray(checkpoints))
+                continue;
+            for (const checkpoint of Object.values(checkpoints)) {
+                const timeline = checkpoint?.timeline;
+                if (!timeline)
+                    continue;
+                const kind = timeline.kind;
+                if (typeof kind !== 'string' || !knownKinds.has(kind))
+                    continue;
+                const index = timeline.activateAtMessageIndex;
+                if (!Number.isInteger(index) || index < 0)
+                    continue;
+                if (!seen.has(index)) {
+                    seen.set(index, kind);
+                }
+            }
+        }
+        return [...seen.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([index, kind]) => ({ index, kind }));
+    }
+    /**
+     * P3: split a message-index batch at both the formal full checkpoint root and any
+     * schema timeline boundary. The legacy splitMessageIndicesAtBoundary_ACU is kept
+     * for callers that do not yet supply schema boundaries; this function is the
+     * boundary-aware variant used by catch-up planning.
+     *
+     * Each segment returned by a schema boundary starts at that boundary's index and
+     * carries the boundary kind, so later staging can freeze the active structure.
+     */
+    function splitMessageIndicesAtSchemaBoundaries_ACU(messageIndices, originalFullIndex, schemaBoundaries = [], fullMessageIndexSet = new Set()) {
+        const normalized = normalizeStrictlyIncreasingIndices_ACU(messageIndices, '待拆索引');
+        if (!normalized.length)
+            return [];
+        const normalizedBoundaries = [...schemaBoundaries]
+            .filter(boundary => Number.isInteger(boundary.index) && boundary.index >= 0)
+            .sort((left, right) => left.index - right.index);
+        if (originalFullIndex === null && normalizedBoundaries.length === 0) {
+            const first = normalized[0];
+            const last = normalized[normalized.length - 1];
+            return [{
+                    indices: [...normalized],
+                    saveTargetIndex: last,
+                    mergeBaseMaxMessageIndex: first - 1,
+                }];
+        }
+        const cutPoints = [...new Set((originalFullIndex === null ? [] : [originalFullIndex])
+                .concat(normalizedBoundaries.map(boundary => boundary.index)))].sort((left, right) => left - right);
+        const segments = [];
+        let cursor = 0;
+        for (let cutIndex = 0; cutIndex < cutPoints.length; cutIndex += 1) {
+            const cut = cutPoints[cutIndex];
+            let segmentIndices = [];
+            while (cursor < normalized.length && normalized[cursor] < cut) {
+                segmentIndices.push(normalized[cursor]);
+                cursor += 1;
+            }
+            if (segmentIndices.length > 0) {
+                const first = segmentIndices[0];
+                const last = segmentIndices[segmentIndices.length - 1];
+                segments.push({
+                    indices: segmentIndices,
+                    saveTargetIndex: last,
+                    mergeBaseMaxMessageIndex: first - 1,
+                });
+            }
+            const nextCut = cutIndex + 1 < cutPoints.length ? cutPoints[cutIndex + 1] : Number.POSITIVE_INFINITY;
+            segmentIndices = [];
+            while (cursor < normalized.length && normalized[cursor] < nextCut) {
+                segmentIndices.push(normalized[cursor]);
+                cursor += 1;
+            }
+            if (segmentIndices.length > 0) {
+                const first = segmentIndices[0];
+                const last = segmentIndices[segmentIndices.length - 1];
+                let mergeBaseMax = first - 1;
+                if (originalFullIndex !== null && first === originalFullIndex && fullMessageIndexSet.has(originalFullIndex)) {
+                    mergeBaseMax = Math.max(mergeBaseMax, originalFullIndex);
+                }
+                const boundaryKind = normalizedBoundaries.find(boundary => boundary.index === cut)?.kind;
+                // P3: schema timeline 的生效帧本身就是该段的结构源（introduction/rebase/reveal/hide
+                // 均在对应楼层的 afterSeq 后改写 active state）。若填充段从边界帧开始，基底必须回放到
+                // 该帧，才能带出当时结构，而不是用边界前的旧结构生成增量。
+                if (boundaryKind && first === cut) {
+                    mergeBaseMax = Math.max(mergeBaseMax, cut);
+                }
+                const segment = {
+                    indices: segmentIndices,
+                    saveTargetIndex: last,
+                    mergeBaseMaxMessageIndex: mergeBaseMax,
+                    ...(boundaryKind ? { boundaryKind } : {}),
+                };
+                segments.push(segment);
+            }
+        }
+        if (cursor < normalized.length) {
+            const segmentIndices = normalized.slice(cursor);
+            const first = segmentIndices[0];
+            const last = segmentIndices[segmentIndices.length - 1];
+            segments.push({
+                indices: segmentIndices,
+                saveTargetIndex: last,
+                mergeBaseMaxMessageIndex: first - 1,
+            });
+        }
+        return segments;
+    }
     function splitMessageIndicesAtBoundary_ACU(messageIndices, originalFullIndex, fullMessageIndexSet = new Set()) {
         const normalized = normalizeStrictlyIncreasingIndices_ACU(messageIndices, '待拆索引');
         if (!normalized.length)
@@ -105506,6 +105699,14 @@ $CONTENT
     function getFrameFingerprint_ACU(frame) {
         return JSON.stringify(frame);
     }
+    function countAiFloorInChat_ACU(chat, messageIndex) {
+        let count = 0;
+        for (let i = 0; i <= messageIndex && i < chat.length; i += 1) {
+            if (chat[i] && !chat[i].is_user)
+                count += 1;
+        }
+        return count;
+    }
     function currentScopeMatches_ACU$1(plan) {
         return getChatArray_ACU() === plan.chat
             && String(currentChatFileIdentifier_ACU || '').trim() === plan.chatKey
@@ -105701,22 +105902,29 @@ $CONTENT
                 if (!isV2TagData_ACU(tagData))
                     throw new Error(`降级目标消息不再包含 V2 storage frame：messageIndex=${messageIndex}。`);
                 const originalFrame = clone_ACU$3(tagData.storageFrame);
+                const originalCheckpoint = originalFrame.checkpoint;
+                const originalEntries = originalFrame.logEntries || [];
+                // data_replace 是完整替换语义，必须排在原日志之后且 seq 大于所有原日志，
+                // 否则会被回放当成“替换基底之前的普通日志”而重新应用，破坏替换语义。
+                const fallbackSeq = originalEntries.reduce((max, entry) => Math.max(max, entry.seq || 0), 0) + 1;
                 const fallbackEntry = {
-                    seq: 1,
+                    seq: fallbackSeq,
                     entryId: `redundant-full-fallback-${messageIndex}`,
-                    createdAt: Date.now(),
+                    createdAt: originalCheckpoint?.createdAt ?? Date.now(),
                     source: 'system',
                     targetMessageIndex: messageIndex,
-                    aiFloor: 1,
-                    filledSheetKeys: [],
-                    changedSheetKeys: [],
-                    groupKeys: [],
-                    operations: [{ kind: 'data_replace', data: clone_ACU$3(originalFrame.checkpoint?.data || {}), reason: 'checkpoint_fallback' }],
+                    aiFloor: countAiFloorInChat_ACU(plan.chat, messageIndex),
+                    filledSheetKeys: originalCheckpoint?.event?.filledSheetKeys ?? [],
+                    changedSheetKeys: originalCheckpoint?.event?.changedSheetKeys ?? [],
+                    groupKeys: originalCheckpoint?.event?.groupKeys ?? [],
+                    operations: [{ kind: 'data_replace', data: clone_ACU$3(originalCheckpoint?.data || {}), reason: 'checkpoint_fallback' }],
                 };
                 const downgradedFrame = {
                     version: 2,
                     headRevision: 'redundant-full-downgraded',
-                    logEntries: [fallbackEntry],
+                    logEntries: [...originalEntries, fallbackEntry],
+                    ...(originalFrame.perSheetCheckpoints ? { perSheetCheckpoints: clone_ACU$3(originalFrame.perSheetCheckpoints) } : {}),
+                    ...(originalFrame.manualRefillProgress ? { manualRefillProgress: clone_ACU$3(originalFrame.manualRefillProgress) } : {}),
                 };
                 const isolatedData = cloneIsolatedData_ACU(message);
                 const recoveryBackup = {
@@ -105823,6 +106031,58 @@ $CONTENT
             }
         return candidate;
     }
+    function identityConflictRows_ACU(sheet) {
+        if (!sheet || typeof sheet !== 'object' || !Array.isArray(sheet.content))
+            return [];
+        return sheet.content.slice(1);
+    }
+    function identityConflictHeader_ACU(sheet) {
+        if (!sheet || typeof sheet !== 'object' || !Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]))
+            return [];
+        return sheet.content[0].map(String);
+    }
+    function describeIdentityConflict_ACU(collision, data) {
+        const dataRecord = (data || {});
+        const rowsList = collision.sheetKeys.map(key => identityConflictRows_ACU(dataRecord[key]));
+        const headers = collision.sheetKeys.map(key => identityConflictHeader_ACU(dataRecord[key]));
+        const nonEmptyRows = rowsList.map(rows => rows.filter(row => row && row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== '')));
+        const allEmpty = nonEmptyRows.every(rows => rows.length === 0);
+        const sameHeader = headers.length > 1 && headers.every(header => JSON.stringify(header) === JSON.stringify(headers[0]));
+        const sameStructure = sameHeader && rowsList.every(rows => JSON.stringify(rows) === JSON.stringify(rowsList[0]));
+        const rowCounts = rowsList.map(rows => rows.length).join(' vs ');
+        if (allEmpty)
+            return { category: 'empty_shell', detail: '双方均无数据行（仅表头或空壳）。' };
+        if (sameStructure)
+            return { category: 'duplicate_structure', detail: '列结构相同且数据完全一致，是重复 key 而非新数据。' };
+        if (sameHeader) {
+            const rowIdSets = rowsList.map(rows => new Set(rows.map(row => String(row?.[0] ?? '').trim()).filter(Boolean)));
+            const hasSharedRowId = rowIdSets.length === 2 && [...rowIdSets[0]].some(rowId => rowIdSets[1].has(rowId));
+            if (hasSharedRowId) {
+                return { category: 'ambiguous_conflict', detail: `列结构相同但存在同 row_id 冲突（行数 ${rowCounts}），不能仅凭 row_id 选赢家。` };
+            }
+            return { category: 'heterogeneous_with_data', detail: `列结构相同但数据行不同（行数 ${rowCounts}），可按 row_id 补并但需要确认旧 key 是否同属一张表。` };
+        }
+        return {
+            category: 'heterogeneous_with_data',
+            detail: `列结构不同（${headers.map((header, index) => `${collision.sheetKeys[index]}:[${header.join('、')}]`).join(' vs ')}}）且存在数据。`,
+        };
+    }
+    function buildIdentityConflictSummary_ACU(isolationKey, sourceMessageIndex, conflicts, data) {
+        const detail = conflicts
+            .map(collision => {
+            const described = describeIdentityConflict_ACU(collision, data);
+            return `物理表名「${collision.physicalTableName}」← ${collision.sheetNames.map((name, index) => `「${name}」(${collision.sheetKeys[index]})`).join(' / ')}；原因=${collision.reason}；分类=${described.category}；${described.detail}`;
+        })
+            .join('；');
+        return {
+            status: 'unrecoverable_identity_conflict',
+            isolationKey,
+            sourceMessageIndex,
+            affectedSheetKeys: [...new Set(conflicts.flatMap(collision => collision.sheetKeys))],
+            requiresConfirmation: false,
+            message: `检测到 ${conflicts.length} 组物理表名冲突（双身份）：${detail}同一规范表名被保留为多个 sheetKey 时需先完成身份归并（identity_merge_failed）；不同表拼音同名需用户重命名。已拒绝自动恢复。`,
+        };
+    }
     async function diagnoseV2Recovery_ACU(chat, isolationKey) {
         const frames = getFrames_ACU(chat, isolationKey);
         if (frames.length === 0)
@@ -105840,6 +106100,11 @@ $CONTENT
                 // 末位 full 是回放根；其 data 已含之前全部累计状态（convergence full 由该根之上的 replay 构造）。
                 // 降级多余 full 在数学上不可能改变回放输出 —— 降级前后指纹必须一致，由 P4-6 强校验。
                 const rootReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+                const rootData = rootReplay?.data || latestFull.frame.checkpoint.data;
+                const rootIdentityConflicts = detectPhysicalTableNameCollisions_ACU(rootData);
+                if (rootIdentityConflicts.length > 0) {
+                    return { summary: buildIdentityConflictSummary_ACU(isolationKey, rootIndex, rootIdentityConflicts, rootData) };
+                }
                 const summary = {
                     status: 'recoverable_redundant_full_checkpoint',
                     isolationKey,
@@ -105859,11 +106124,18 @@ $CONTENT
                             messageIndex: item.messageIndex,
                             fingerprint: getFrameFingerprint_ACU(item.frame),
                         })),
-                        candidateData: rootReplay?.data || latestFull.frame.checkpoint.data,
+                        candidateData: rootData,
                     } };
             }
             const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
             if (repair.status === 'clean') {
+                // P5：物理表名冲突（同一规范显示名保留为多个 sheetKey，或不同表拼音同名）
+                // 是双身份的直接证据。JS 回放可能“成功”，因为冲突只发生在 SQLite 物理表名
+                // 维度，不能在 clean 分支直接走到“无需恢复”或 integrity_repair 收敛。
+                const identityConflicts = detectPhysicalTableNameCollisions_ACU(latestFull.frame.checkpoint.data);
+                if (identityConflicts.length > 0) {
+                    return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, identityConflicts, latestFull.frame.checkpoint.data) };
+                }
                 let replay;
                 try {
                     replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
@@ -106603,14 +106875,6 @@ $CONTENT
             return base;
         }
         const guideBase = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideForBatch);
-        const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(base, guideBase);
-        for (const [sourceKey, targetKey] of historicalKeyMigrations) {
-            base[targetKey] = base[sourceKey];
-            if (base[targetKey] && typeof base[targetKey] === 'object')
-                base[targetKey].uid = targetKey;
-            delete base[sourceKey];
-            logDebug_ACU(`[MergeBase] 已按规范表名将历史 Sheet key 对齐：${sourceKey} -> ${targetKey}`);
-        }
         if (!base.mate && guideBase?.mate)
             base.mate = JSON.parse(JSON.stringify(guideBase.mate));
         Object.keys(guideBase || {}).forEach(sheetKey => {
@@ -107058,18 +107322,6 @@ $CONTENT
         }
         catch (error) {
             logWarn_ACU('[SQL Init] getChatSheetGuideDataForIsolationKey_ACU failed, fallback to template/baseSnapshot only.', error);
-        }
-        const identityTargetData = guidedBaseData && Object.keys(guidedBaseData).some(key => key.startsWith('sheet_'))
-            ? guidedBaseData
-            : templateData;
-        if (identityTargetData) {
-            const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(workingTableData, identityTargetData);
-            for (const [sourceKey, targetKey] of historicalKeyMigrations) {
-                workingTableData[targetKey] = workingTableData[sourceKey];
-                if (workingTableData[targetKey] && typeof workingTableData[targetKey] === 'object')
-                    workingTableData[targetKey].uid = targetKey;
-                delete workingTableData[sourceKey];
-            }
         }
         if (!workingTableData.mate && templateData?.mate) {
             workingTableData.mate = JSON.parse(JSON.stringify(templateData.mate));
@@ -108231,6 +108483,10 @@ $CONTENT
                 performanceParentSpanId: options.performanceParentSpanId,
             });
         }
+        // P3: 冻结本次 auto_fill 的 schema timeline；组内索引同时按 full 根与
+        // schema introduction/rebase/reveal/hide 边界拆段，避免跨结构切换的补写在
+        // 单一批次内用错误旧结构生成增量。
+        const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU());
         const failedGroups = new Set();
         let firstError;
         let committedBucketCount = 0;
@@ -108310,7 +108566,7 @@ $CONTENT
                 return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
             }
             const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
-            const segments = splitMessageIndicesAtBoundary_ACU(groupIndices, originalFullIndex);
+            const segments = splitMessageIndicesAtSchemaBoundaries_ACU(groupIndices, originalFullIndex, schemaBoundaries);
             const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < originalFullIndex);
             const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= originalFullIndex);
             for (const preSegment of preSegments) {
@@ -109453,6 +109709,10 @@ $CONTENT
             }
         };
         _set_isAutoUpdatingCard_ACU(true);
+        // P3: capture schema timeline boundaries once after runtime admission. These are
+        // structural switch points (introduction/rebase/reveal/hide) that a catch-up wave
+        // must not silently cross inside a single persisted batch.
+        const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU());
         try {
             for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
                 activeWaveIndex = waveIndex;
@@ -109493,7 +109753,7 @@ $CONTENT
                 const originalFullIndex = boundaryPlan?.scope.originalFullIndex ?? null;
                 const isBoundaryActive = originalFullIndex !== null && !boundaryCommitted;
                 const fullMessageIndexSet = new Set(isBoundaryActive ? [originalFullIndex] : []);
-                const waveSegments = splitMessageIndicesAtBoundary_ACU(wave.messageIndices, originalFullIndex, fullMessageIndexSet);
+                const waveSegments = splitMessageIndicesAtSchemaBoundaries_ACU(wave.messageIndices, originalFullIndex, schemaBoundaries, fullMessageIndexSet);
                 for (const segment of waveSegments) {
                     if (options.abortController?.signal.aborted) {
                         // 终态不变量：stopped 只能在 staging 已汇合或丢弃后写入。
@@ -110287,11 +110547,16 @@ $CONTENT
                         }
                     }
                     else {
-                        // 跨根 staging：组内索引按原 full 边界拆段，pre 段 stage_only、边界汇合、post 段 persist。
+                        // 跨根 staging：组内索引按原 full 边界与 schema 边界拆段，
+                        // pre 段 stage_only、边界汇合、post 段 persist。schema 边界段同样携带
+                        // boundaryKind，供逐段冻结目标结构并在对应楼层使用当时结构补写。
+                        // 注意：此处已离开 manualRefillEnabled 的 currentIsolationKey 词法作用域；
+                        // 必须使用 boundaryPlan.scope.isolationKey（冻结自 planning 阶段）。
+                        const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), boundaryPlan.scope.isolationKey);
                         for (const group of groupedChunk) {
                             let groupFailed = false;
                             const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
-                            const segments = splitMessageIndicesAtBoundary_ACU(groupIndices, boundaryPlan.scope.originalFullIndex);
+                            const segments = splitMessageIndicesAtSchemaBoundaries_ACU(groupIndices, boundaryPlan.scope.originalFullIndex, schemaBoundaries);
                             const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < boundaryPlan.scope.originalFullIndex);
                             const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= boundaryPlan.scope.originalFullIndex);
                             for (const preSegment of preSegments) {
@@ -117127,14 +117392,29 @@ $CONTENT
         const selectedSummary = findSummaryTable_ACU();
         if (selectedSummary) {
             const { summaryKey, table } = selectedSummary;
+            const chat = Array.isArray(getChatArray_ACU()) ? getChatArray_ACU() : [];
+            const targetMessageIndex = getLatestAiMessageIndexFromChat_ACU(chat);
+            if (targetMessageIndex < 0 || !chat[targetMessageIndex] || chat[targetMessageIndex].is_user) {
+                return {
+                    success: false,
+                    skipped: false,
+                    indexedRowCount: 0,
+                    skippedRowCount: 0,
+                    chunkCount: 0,
+                    reason: 'vector_index_rebuild_no_ai_target',
+                    errors: ['当前聊天没有可绑定的 AI 目标楼层，已停止纪要索引重建。'],
+                };
+            }
             const writeSet = [{ kind: 'sheet', sheetKey: summaryKey }];
             const commit = await runTableUpdateCommit_ACU({
                 source: 'system',
                 reason: 'vector_index_rebuild_snapshot',
+                chatKey: currentChatFileIdentifier_ACU,
+                isolationKey: getCurrentIsolationKey_ACU(),
                 writeSet,
                 revisionWriteSet: writeSet,
                 initialData: currentJsonTableData_ACU,
-                targetMessageIndex: getLastMessageIndex_ACU(),
+                targetMessageIndex,
                 targetSheetKeys: [summaryKey],
                 updateGroupKeys: null,
                 trackingSheetKeys: [],
@@ -171047,8 +171327,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-agent-advanced[data-v-5c474c20] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-5c474c20] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-5c474c20] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-5c474c20] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-5c474c20],\n.acu-agent-advanced__prompt-head h5[data-v-5c474c20] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-5c474c20] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-5c474c20] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-5c474c20] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-5c474c20] .acu-form-row,\n.acu-agent-advanced[data-v-5c474c20] .acu-form-row__control,\n.acu-agent-advanced[data-v-5c474c20] .acu-input,\n.acu-agent-advanced[data-v-5c474c20] .acu-segmented,\n.acu-agent-advanced[data-v-5c474c20] .acu-prompt-segs {\n  min-width: 0;\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-5c474c20] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-5c474c20] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-5c474c20] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-5c474c20],\n  .acu-agent-advanced__prompt-head[data-v-5c474c20] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-5c474c20] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-5c474c20");
-    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_5c474c20_lang = null;
+    injectSfcStyle("\n.acu-agent-advanced[data-v-ac5b42ed] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-ac5b42ed] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-ac5b42ed] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-ac5b42ed] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-ac5b42ed],\r\n.acu-agent-advanced__prompt-head h5[data-v-ac5b42ed] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-ac5b42ed] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-ac5b42ed] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-ac5b42ed] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-ac5b42ed] .acu-form-row,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-form-row__control,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-input,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-segmented,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-prompt-segs {\r\n  min-width: 0;\r\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-ac5b42ed] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-ac5b42ed] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-ac5b42ed] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-ac5b42ed],\r\n  .acu-agent-advanced__prompt-head[data-v-ac5b42ed] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-ac5b42ed] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-ac5b42ed");
+    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_ac5b42ed_lang = null;
 
     const _hoisted_1$s = { class: "acu-agent-advanced" };
     const _hoisted_2$q = { class: "acu-agent-advanced__section" };
@@ -171375,7 +171655,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-5c474c20"]]);
+    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-ac5b42ed"]]);
 
     var _sfc_main$r = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentControlBar',
@@ -179638,6 +179918,201 @@ Expected function or array of functions, received type ${typeof value}.`
         return { health, busy, isVisible, refresh, reload };
     }
 
+    /**
+     * reset-defaults-service — 恢复默认配置的业务编排。
+     * UI 只负责选项、等待与结果展示；候选准备、保存顺序、补偿和部分失败分类在这里收敛。
+     */
+    const DEFAULT_RESET_DEFAULTS_OPTIONS = {
+        restoreTemplateAndPrompts: true,
+        clearTemplateSnapshots: true,
+        clearPlotSnapshots: true,
+        clearTableLocks: true,
+        clearTableOrder: true,
+    };
+    function normalizeResetDefaultsOptions(options = {}) {
+        return { ...DEFAULT_RESET_DEFAULTS_OPTIONS, ...options };
+    }
+    function hasSelectedResetDefaultsOption(options) {
+        return Object.values(options).some(Boolean);
+    }
+    function errorMessage(error) {
+        return error instanceof Error ? error.message : String(error);
+    }
+    const SETTINGS_SNAPSHOT_FIELDS = [
+        'charCardPrompt',
+        'mergeSummaryPrompt',
+        'tableKeyOrder',
+        'tableUpdateLocks',
+        'specialIndexLocks',
+        'plotSettings',
+        'plotPresetBindings',
+    ];
+    /**
+     * 恢复默认配置的单一业务入口。
+     * - 候选与快照在任何清理前准备；
+     * - 设置字段在最终 saveSettings 失败时回滚；
+     * - 聊天清理统一在最后一次 saveChatToHost 提交；
+     * - 派生刷新失败返回警告，不把成功步骤降级。
+     */
+    async function resetAllDefaults_ACU(options = {}) {
+        const cleanup = normalizeResetDefaultsOptions(options);
+        if (!hasSelectedResetDefaultsOption(cleanup)) {
+            return {
+                success: false,
+                skipped: true,
+                completedSteps: [],
+                failures: [{ step: 'selection', error: '未选择需要恢复或清理的项目。', compensated: false }],
+                warnings: [],
+            };
+        }
+        const completedSteps = [];
+        const failures = [];
+        const warnings = [];
+        const settingsChanged = cleanup.restoreTemplateAndPrompts
+            || cleanup.clearTableOrder
+            || cleanup.clearTableLocks
+            || cleanup.clearPlotSnapshots;
+        const settingsSnapshot = settingsChanged
+            ? snapshotSettingsFields_ACU([...SETTINGS_SNAPSHOT_FIELDS])
+            : null;
+        const chatDirty = cleanup.clearPlotSnapshots || cleanup.clearTemplateSnapshots;
+        const shouldRefreshTableData = cleanup.restoreTemplateAndPrompts
+            || cleanup.clearTemplateSnapshots
+            || cleanup.clearTableOrder
+            || cleanup.clearTableLocks;
+        let templateSnapshot = null;
+        let persistedOutsideSettings = false;
+        try {
+            if (cleanup.restoreTemplateAndPrompts) {
+                templateSnapshot = getDefaultTemplateSnapshot_ACU();
+                if (!templateSnapshot?.templateStr)
+                    throw new Error('无法解析默认模板。');
+                const promptReset = resetAllPromptsToDefault_ACU(undefined, { save: false });
+                if (!promptReset.ok)
+                    throw new Error(promptReset.message || '恢复默认提示词失败。');
+                completedSteps.push('prompts');
+            }
+            if (cleanup.clearTableOrder) {
+                settings_ACU.tableKeyOrder = [];
+                completedSteps.push('table_order');
+            }
+            if (cleanup.clearTableLocks) {
+                clearCurrentTableLocks_ACU({ save: false });
+                completedSteps.push('table_locks');
+            }
+            if (cleanup.clearPlotSnapshots) {
+                await clearCurrentChatPlotPresetOverride_ACU({
+                    source: 'v2_reset_all_defaults',
+                    saveSettings: false,
+                    saveChat: false,
+                });
+                completedSteps.push('plot_snapshots');
+            }
+            if (cleanup.clearTemplateSnapshots) {
+                await clearCurrentChatTemplateSnapshots_ACU({
+                    clearCurrentOverride: true,
+                    clearArchives: true,
+                    clearGuide: true,
+                    clearLegacyGuide: true,
+                    save: false,
+                });
+                completedSteps.push('template_snapshots');
+            }
+            if (cleanup.restoreTemplateAndPrompts) {
+                const applied = await applyTemplateSnapshotToScope_ACU(templateSnapshot.templateStr, {
+                    scope: 'global',
+                    source: 'v2_reset_all_defaults',
+                    presetName: '',
+                    save: false,
+                    persistChatScope: false,
+                });
+                if (!applied)
+                    throw new Error('默认模板应用失败。');
+                if (typeof applied === 'object' && 'saved' in applied && applied.saved === false) {
+                    throw new Error(applied.error || '默认模板应用失败（当前聊天协调提交被拒绝）。');
+                }
+                persistedOutsideSettings = true;
+                completedSteps.push('template');
+            }
+            else if (cleanup.clearTemplateSnapshots) {
+                applyTemplateScopeForCurrentChat_ACU();
+            }
+            if (settingsChanged) {
+                const saveResult = saveSettings_ACU();
+                if (!saveResult.saved) {
+                    if (settingsSnapshot && !persistedOutsideSettings)
+                        restoreSettingsFields_ACU(settingsSnapshot);
+                    failures.push({
+                        step: 'settings_persist',
+                        error: saveResult.warning || saveResult.error || '设置保存失败。',
+                        compensated: !persistedOutsideSettings,
+                    });
+                }
+                else {
+                    completedSteps.push('settings_persist');
+                }
+            }
+            if (chatDirty) {
+                try {
+                    await saveChatToHost_ACU();
+                    persistedOutsideSettings = true;
+                    completedSteps.push('chat_persist');
+                }
+                catch (error) {
+                    logWarn_ACU('[恢复默认] 保存当前聊天清理结果失败:', error);
+                    failures.push({
+                        step: 'chat_persist',
+                        error: errorMessage(error),
+                        compensated: false,
+                    });
+                    warnings.push('聊天保存失败：内存中的清理变更已生效，可能随下一次聊天保存落盘。');
+                }
+            }
+            if (shouldRefreshTableData) {
+                try {
+                    await loadOrCreateJsonTableFromChatHistory_ACU();
+                    await refreshMergedDataAndNotify_ACU();
+                    completedSteps.push('derived_refresh');
+                }
+                catch (error) {
+                    logWarn_ACU('[恢复默认] 表格合并视图刷新失败:', error);
+                    failures.push({
+                        step: 'derived_refresh',
+                        error: errorMessage(error),
+                        compensated: false,
+                    });
+                    warnings.push('表格合并视图刷新失败：核心恢复已完成，界面可能未同步最新数据。');
+                }
+            }
+            return {
+                success: failures.length === 0,
+                skipped: false,
+                completedSteps,
+                failures,
+                warnings,
+            };
+        }
+        catch (error) {
+            if (settingsSnapshot)
+                restoreSettingsFields_ACU(settingsSnapshot);
+            const compensated = settingsSnapshot !== null && !persistedOutsideSettings;
+            if (chatDirty && !persistedOutsideSettings && !warnings.some(w => w.includes('聊天保存失败'))) {
+                warnings.push('恢复失败时聊天清理变更尚未保存，可能随下一次聊天保存落盘。');
+            }
+            return {
+                success: false,
+                skipped: false,
+                completedSteps,
+                failures: [...failures, {
+                        step: 'reset',
+                        error: errorMessage(error),
+                        compensated,
+                    }],
+                warnings,
+            };
+        }
+    }
+
     const CHECKPOINT_FORMAT_ACU = 'acu-table-checkpoint';
     const CHECKPOINT_VERSION_ACU = 1;
     const DANGEROUS_KEYS_ACU$1 = new Set(['__proto__', 'constructor', 'prototype']);
@@ -180193,19 +180668,6 @@ Expected function or array of functions, received type ${typeof value}.`
      * v2 页面只依赖本 composable；旧 settings / chat / worldbook / template service
      * 调用集中在这里，避免 Vue 组件跨进旧 presentation 层。
      */
-    const DEFAULT_RESET_DEFAULTS_OPTIONS = {
-        restoreTemplateAndPrompts: true,
-        clearTemplateSnapshots: true,
-        clearPlotSnapshots: true,
-        clearTableLocks: true,
-        clearTableOrder: true,
-    };
-    function normalizeResetDefaultsOptions(options = {}) {
-        return { ...DEFAULT_RESET_DEFAULTS_OPTIONS, ...options };
-    }
-    function hasSelectedResetDefaultsOption(options) {
-        return Object.values(options).some(Boolean);
-    }
     function setMessage$1(target, kind, text) {
         target.value = { kind, text, at: Date.now() };
     }
@@ -180712,72 +181174,34 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             busyAction.value = 'reset-defaults';
             try {
-                const snapshot = cleanup.restoreTemplateAndPrompts ? getDefaultTemplateSnapshot_ACU() : null;
-                if (cleanup.restoreTemplateAndPrompts && !snapshot?.templateStr)
-                    throw new Error('无法解析默认模板。');
-                if (cleanup.restoreTemplateAndPrompts) {
-                    // [V1 收敛] 委托 service 写入默认提示词（save: false，由下方统一 saveSettings_ACU 原子落盘）
-                    const promptReset = resetAllPromptsToDefault_ACU(undefined, { save: false });
-                    if (!promptReset.ok) {
-                        throw new Error(promptReset.message || '恢复默认提示词失败。');
+                const outcome = await resetAllDefaults_ACU(cleanup);
+                if (outcome.skipped) {
+                    message.value = null;
+                    toast.warning(outcome.failures[0]?.error || '未选择需要恢复或清理的项目。');
+                    return;
+                }
+                if (!outcome.success) {
+                    const hardFailures = outcome.failures.filter(f => f.step !== 'derived_refresh');
+                    const summary = outcome.failures.map(f => `${f.step}: ${f.error}`).join('；');
+                    message.value = null;
+                    if (hardFailures.length > 0) {
+                        toast.error(hardFailures.some(f => f.compensated)
+                            ? `恢复默认部分失败：${summary}`
+                            : `恢复默认失败：${summary}`);
                     }
-                }
-                if (cleanup.clearTableOrder) {
-                    settings_ACU.tableKeyOrder = [];
-                }
-                if (cleanup.clearTableLocks) {
-                    clearCurrentTableLocks_ACU({ save: false });
-                }
-                if (cleanup.clearPlotSnapshots) {
-                    await clearCurrentChatPlotPresetOverride_ACU({
-                        source: 'v2_reset_all_defaults',
-                        saveSettings: false,
-                        saveChat: true,
-                    });
-                }
-                if (cleanup.clearTemplateSnapshots) {
-                    await clearCurrentChatTemplateSnapshots_ACU({
-                        clearCurrentOverride: true,
-                        clearArchives: true,
-                        clearGuide: true,
-                        clearLegacyGuide: true,
-                        save: true,
-                    });
-                }
-                if (cleanup.restoreTemplateAndPrompts) {
-                    const applied = await applyTemplateSnapshotToScope_ACU(snapshot.templateStr, {
-                        scope: 'global',
-                        source: 'v2_reset_all_defaults',
-                        presetName: '',
-                        save: true,
-                        persistChatScope: false,
-                    });
-                    if (!applied)
-                        throw new Error('默认模板应用失败。');
-                    if (typeof applied === 'object' && 'saved' in applied && applied.saved === false) {
-                        throw new Error(applied.error || '默认模板应用失败（当前聊天协调提交被拒绝）。');
+                    else {
+                        toast.warning(`已按所选项目恢复默认配置，但后续刷新未完成：${summary}`);
                     }
+                    return;
                 }
-                else if (cleanup.clearTemplateSnapshots) {
-                    applyTemplateScopeForCurrentChat_ACU();
+                if (outcome.warnings.length) {
+                    toast.warning(`已按所选项目恢复默认配置，但部分后续刷新未完成：${outcome.warnings.join('；')}`);
                 }
-                const shouldSaveSettings = cleanup.restoreTemplateAndPrompts
-                    || cleanup.clearTableOrder
-                    || cleanup.clearTableLocks
-                    || cleanup.clearPlotSnapshots;
-                if (shouldSaveSettings)
-                    saveSettings_ACU();
-                const shouldRefreshTableData = cleanup.restoreTemplateAndPrompts
-                    || cleanup.clearTemplateSnapshots
-                    || cleanup.clearTableOrder
-                    || cleanup.clearTableLocks;
-                if (shouldRefreshTableData) {
-                    await loadOrCreateJsonTableFromChatHistory_ACU();
-                    await refreshMergedDataAndNotify_ACU();
+                else {
+                    toast.success('已按所选项目恢复默认配置。');
                 }
                 refresh();
                 message.value = null;
-                toast.success('已按所选项目恢复默认配置。');
             }
             catch (e) {
                 logError_ACU('[ACU-V2] resetAllDefaults failed', e);
@@ -183890,6 +184314,16 @@ Expected function or array of functions, received type ${typeof value}.`
             ],
         },
         {
+            id: 'sqlite-ddl-exec',
+            test: /ddl.*(执行|apply|run|fail|失败|error)|执行.*ddl|apply.*ddl|建表失败|创建表失败|alter table.*(失败|fail)|drop table.*(失败|fail)|完整 candidate sqlite hydrate 失败|candidate.*hydrate 失败/,
+            summary: 'SQLite 建表 / 改表（DDL）执行失败，模板结构无法在 SQLite 中落成。',
+            steps: [
+                '通常是模板中存在重复列名、约束冲突或与历史物理表不兼容。',
+                '到「数据管理」页查看模板与历史表结构，或使用结构校准 / 恢复工具重建。',
+                '如果刚切换模板，先刷新页面再重试；仍失败请导出日志反馈。',
+            ],
+        },
+        {
             id: 'table-not-found',
             test: /table "[^"]*" not found|no such table|has no content|表格?\s*[「"“]?[^\s」"”]{0,40}[」"”]?\s*(不存在|未找到)|找不到表|表不存在/,
             summary: '找不到指定的表格（或表格是空的）。',
@@ -183918,6 +184352,26 @@ Expected function or array of functions, received type ${typeof value}.`
                 '刷新酒馆页面（Ctrl+F5）后重试。',
                 '检查浏览器的广告拦截 / 安全插件是否拦截了 .wasm 文件下载。',
                 '重新安装本插件以确保文件完整。回退期间表格仍可用，只是 SQL 相关功能受限。',
+            ],
+        },
+        {
+            id: 'schema-mismatch',
+            test: /schema_missing|未在 sqlite runtime 中创建|未在 sqlite 运行时|缺列|缺少列|runtime 中不存在|结构不一致|schema 不一致|表结构.*(不一致|缺失|不匹配)|hydrate 失败.*(schema|列)|schema.*(fail|mismatch|不一致)/,
+            summary: '表格结构（列 / 物理表）与 SQLite 实际建表结果不一致，属于数据或模板结构问题，不是引擎加载失败。',
+            steps: [
+                '这不是 wasm / 引擎下载问题，不需要检查下载拦截。',
+                '到「数据管理」页运行诊断 / 恢复工具，让插件按当前模板重建或校准运行时结构。',
+                '如果刚切换过模板，先刷新页面并重新加载当前聊天；仍失败请导出日志反馈。',
+            ],
+        },
+        {
+            id: 'identity-conflict',
+            test: /表身份.*(失败|冲突|歧义)|身份冲突|identity conflict|多对一冲突|同时指向|同名.*(冲突|重复)|物理表名冲突|sheetkey.*(冲突|歧义)|表名.*(冲突|歧义)|schema 身份/,
+            summary: '表格身份存在冲突或歧义：同一规范表名 / 别名对应了多个表，或新旧 sheetKey 没有正确归并。',
+            steps: [
+                '这通常是模板切换后旧 key 与新 key 并存导致。',
+                '到「数据管理」页使用诊断 / 恢复工具，优先选择能保留两边数据的保真恢复。',
+                '不要手工删除历史表；导出日志并附上模板切换步骤，便于定位身份映射。',
             ],
         },
         {

@@ -6,6 +6,7 @@ import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU, type UpgradeIdRemap_ACU } from './table-data-repair';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
+import { detectPhysicalTableNameCollisions_ACU, type PhysicalTableNameCollision_ACU } from '../../shared/sheet-identity';
 import { getCurrentStorageMode } from './storage-mode';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from './table-storage-strategy';
@@ -14,7 +15,7 @@ import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
 type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence' | 'restored_from_recovery_backup';
-export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable';
+export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable_identity_conflict' | 'unrecoverable';
 export type V2RecoveryCommitStatus_ACU = 'committed' | 'committed_postcondition_failed' | 'commit_failed_rolled_back';
 
 export interface V2RecoveryCommitResult_ACU {
@@ -61,6 +62,13 @@ function getErrorMessage_ACU(error: unknown): string {
 }
 function getFrameFingerprint_ACU(frame: TableStorageFrameV2_ACU): string {
   return JSON.stringify(frame);
+}
+function countAiFloorInChat_ACU(chat: any[], messageIndex: number): number {
+  let count = 0;
+  for (let i = 0; i <= messageIndex && i < chat.length; i += 1) {
+    if (chat[i] && !chat[i].is_user) count += 1;
+  }
+  return count;
 }
 function currentScopeMatches_ACU(plan: RecoveryPlan_ACU): boolean {
   return getChatArray_ACU() === plan.chat
@@ -251,22 +259,29 @@ function buildRecoveredCandidateChat_ACU(plan: RecoveryPlan_ACU): any[] {
       const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
       if (!isV2TagData_ACU(tagData)) throw new Error(`降级目标消息不再包含 V2 storage frame：messageIndex=${messageIndex}。`);
       const originalFrame = clone_ACU(tagData.storageFrame);
+      const originalCheckpoint = originalFrame.checkpoint;
+      const originalEntries = originalFrame.logEntries || [];
+      // data_replace 是完整替换语义，必须排在原日志之后且 seq 大于所有原日志，
+      // 否则会被回放当成“替换基底之前的普通日志”而重新应用，破坏替换语义。
+      const fallbackSeq = originalEntries.reduce((max, entry) => Math.max(max, entry.seq || 0), 0) + 1;
       const fallbackEntry = {
-        seq: 1,
+        seq: fallbackSeq,
         entryId: `redundant-full-fallback-${messageIndex}`,
-        createdAt: Date.now(),
+        createdAt: originalCheckpoint?.createdAt ?? Date.now(),
         source: 'system' as const,
         targetMessageIndex: messageIndex,
-        aiFloor: 1,
-        filledSheetKeys: [] as string[],
-        changedSheetKeys: [] as string[],
-        groupKeys: [] as string[],
-        operations: [{ kind: 'data_replace' as const, data: clone_ACU(originalFrame.checkpoint?.data || {}) as TableDataObject_ACU, reason: 'checkpoint_fallback' as const }],
+        aiFloor: countAiFloorInChat_ACU(plan.chat, messageIndex),
+        filledSheetKeys: originalCheckpoint?.event?.filledSheetKeys ?? [],
+        changedSheetKeys: originalCheckpoint?.event?.changedSheetKeys ?? [],
+        groupKeys: originalCheckpoint?.event?.groupKeys ?? [],
+        operations: [{ kind: 'data_replace' as const, data: clone_ACU(originalCheckpoint?.data || {}) as TableDataObject_ACU, reason: 'checkpoint_fallback' as const }],
       };
       const downgradedFrame: TableStorageFrameV2_ACU = {
         version: 2,
         headRevision: 'redundant-full-downgraded',
-        logEntries: [fallbackEntry],
+        logEntries: [...originalEntries, fallbackEntry],
+        ...(originalFrame.perSheetCheckpoints ? { perSheetCheckpoints: clone_ACU(originalFrame.perSheetCheckpoints) } : {}),
+        ...(originalFrame.manualRefillProgress ? { manualRefillProgress: clone_ACU(originalFrame.manualRefillProgress) } : {}),
       };
       const isolatedData = cloneIsolatedData_ACU(message);
       const recoveryBackup: TableV2RecoveryBackup_ACU = {
@@ -368,6 +383,68 @@ function findOrphanDataReplace_ACU(frame: TableStorageFrameV2_ACU): TableDataObj
   }
   return candidate;
 }
+type IdentityConflictCategory_ACU = 'empty_shell' | 'duplicate_structure' | 'heterogeneous_with_data' | 'ambiguous_conflict';
+
+function identityConflictRows_ACU(sheet: unknown): unknown[][] {
+  if (!sheet || typeof sheet !== 'object' || !Array.isArray((sheet as any).content)) return [];
+  return ((sheet as any).content as unknown[][]).slice(1);
+}
+
+function identityConflictHeader_ACU(sheet: unknown): string[] {
+  if (!sheet || typeof sheet !== 'object' || !Array.isArray((sheet as any).content) || !Array.isArray((sheet as any).content[0])) return [];
+  return ((sheet as any).content[0] as unknown[]).map(String);
+}
+
+function describeIdentityConflict_ACU(
+  collision: PhysicalTableNameCollision_ACU,
+  data: unknown,
+): { category: IdentityConflictCategory_ACU; detail: string } {
+  const dataRecord = (data || {}) as Record<string, unknown>;
+  const rowsList = collision.sheetKeys.map(key => identityConflictRows_ACU(dataRecord[key]));
+  const headers = collision.sheetKeys.map(key => identityConflictHeader_ACU(dataRecord[key]));
+  const nonEmptyRows = rowsList.map(rows => rows.filter(row => row && row.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== '')));
+  const allEmpty = nonEmptyRows.every(rows => rows.length === 0);
+  const sameHeader = headers.length > 1 && headers.every(header => JSON.stringify(header) === JSON.stringify(headers[0]));
+  const sameStructure = sameHeader && rowsList.every(rows => JSON.stringify(rows) === JSON.stringify(rowsList[0]));
+  const rowCounts = rowsList.map(rows => rows.length).join(' vs ');
+
+  if (allEmpty) return { category: 'empty_shell', detail: '双方均无数据行（仅表头或空壳）。' };
+  if (sameStructure) return { category: 'duplicate_structure', detail: '列结构相同且数据完全一致，是重复 key 而非新数据。' };
+  if (sameHeader) {
+    const rowIdSets = rowsList.map(rows => new Set(rows.map(row => String((row as unknown[])?.[0] ?? '').trim()).filter(Boolean)));
+    const hasSharedRowId = rowIdSets.length === 2 && [...rowIdSets[0]].some(rowId => rowIdSets[1].has(rowId));
+    if (hasSharedRowId) {
+      return { category: 'ambiguous_conflict', detail: `列结构相同但存在同 row_id 冲突（行数 ${rowCounts}），不能仅凭 row_id 选赢家。` };
+    }
+    return { category: 'heterogeneous_with_data', detail: `列结构相同但数据行不同（行数 ${rowCounts}），可按 row_id 补并但需要确认旧 key 是否同属一张表。` };
+  }
+  return {
+    category: 'heterogeneous_with_data',
+    detail: `列结构不同（${headers.map((header, index) => `${collision.sheetKeys[index]}:[${header.join('、')}]`).join(' vs ')}}）且存在数据。`,
+  };
+}
+
+function buildIdentityConflictSummary_ACU(
+  isolationKey: string,
+  sourceMessageIndex: number,
+  conflicts: PhysicalTableNameCollision_ACU[],
+  data: unknown,
+): V2RecoverySummary_ACU {
+  const detail = conflicts
+    .map(collision => {
+      const described = describeIdentityConflict_ACU(collision, data);
+      return `物理表名「${collision.physicalTableName}」← ${collision.sheetNames.map((name, index) => `「${name}」(${collision.sheetKeys[index]})`).join(' / ')}；原因=${collision.reason}；分类=${described.category}；${described.detail}`;
+    })
+    .join('；');
+  return {
+    status: 'unrecoverable_identity_conflict',
+    isolationKey,
+    sourceMessageIndex,
+    affectedSheetKeys: [...new Set(conflicts.flatMap(collision => collision.sheetKeys))],
+    requiresConfirmation: false,
+    message: `检测到 ${conflicts.length} 组物理表名冲突（双身份）：${detail}同一规范表名被保留为多个 sheetKey 时需先完成身份归并（identity_merge_failed）；不同表拼音同名需用户重命名。已拒绝自动恢复。`,
+  };
+}
 async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promise<V2RecoveryDiagnosis_ACU> {
   const frames = getFrames_ACU(chat, isolationKey);
   if (frames.length === 0) return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '当前隔离标识不存在 V2 storage frame。' } };
@@ -384,6 +461,11 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
       // 末位 full 是回放根；其 data 已含之前全部累计状态（convergence full 由该根之上的 replay 构造）。
       // 降级多余 full 在数学上不可能改变回放输出 —— 降级前后指纹必须一致，由 P4-6 强校验。
       const rootReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+      const rootData = rootReplay?.data || latestFull.frame.checkpoint.data;
+      const rootIdentityConflicts = detectPhysicalTableNameCollisions_ACU(rootData);
+      if (rootIdentityConflicts.length > 0) {
+        return { summary: buildIdentityConflictSummary_ACU(isolationKey, rootIndex, rootIdentityConflicts, rootData) };
+      }
       const summary: V2RecoverySummary_ACU = {
         status: 'recoverable_redundant_full_checkpoint',
         isolationKey,
@@ -403,11 +485,18 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
           messageIndex: item.messageIndex,
           fingerprint: getFrameFingerprint_ACU(item.frame),
         })),
-        candidateData: rootReplay?.data || latestFull.frame.checkpoint.data,
+        candidateData: rootData,
       } };
     }
     const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
     if (repair.status === 'clean') {
+      // P5：物理表名冲突（同一规范显示名保留为多个 sheetKey，或不同表拼音同名）
+      // 是双身份的直接证据。JS 回放可能“成功”，因为冲突只发生在 SQLite 物理表名
+      // 维度，不能在 clean 分支直接走到“无需恢复”或 integrity_repair 收敛。
+      const identityConflicts = detectPhysicalTableNameCollisions_ACU(latestFull.frame.checkpoint.data);
+      if (identityConflicts.length > 0) {
+        return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, identityConflicts, latestFull.frame.checkpoint.data) };
+      }
       let replay;
       try {
         replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });

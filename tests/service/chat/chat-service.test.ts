@@ -1372,6 +1372,58 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
+  it('降级 retained window 内的 full 时，timed 单表 checkpoint 不并入 data_replace 且保留在 perSheetCheckpoints', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const untimedCheckpoint = {
+      kind: 'sheet_full',
+      createdAt: 24,
+      reason: 'manual',
+      sheetKey: 'sheet_aux',
+      data: { name: '辅助表', content: [['row_id', '值'], ['1', '保留']] },
+    };
+    const timedHideCheckpoint = {
+      kind: 'sheet_full',
+      createdAt: 24,
+      reason: 'schema_change',
+      sheetKey: 'sheet_hidden',
+      data: { name: '隐藏表', content: [['row_id', '值'], ['1', '隐藏前']] },
+      timeline: { kind: 'sheet_hide', activateAtMessageIndex: 24, afterSeq: 0 },
+    };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            checkpoint: index === 24
+              ? {
+                  kind: 'full',
+                  createdAt: 24,
+                  reason: 'manual',
+                  data: { mate: { type: 'acu', version: 1 }, sheet_0: { name: '最新旧快照', content: [['row_id', '物品名'], ['1', '盾']] }, sheet_other: { name: '其他表', content: [['row_id', '值'], ['1', '不变']] } },
+                }
+              : undefined,
+            perSheetCheckpoints: index === 24 ? { sheet_aux: untimedCheckpoint, sheet_hidden: timedHideCheckpoint } : undefined,
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    const downgradedFrame = chat[24].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(downgradedFrame.checkpoint).toBeUndefined();
+    expect(downgradedFrame.perSheetCheckpoints).toEqual({ sheet_aux: untimedCheckpoint, sheet_hidden: timedHideCheckpoint });
+    const fallbackData = downgradedFrame.logEntries[0].operations[0].data;
+    expect(fallbackData.sheet_aux).toEqual(untimedCheckpoint.data);
+    expect(fallbackData.sheet_hidden).toBeUndefined();
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
   it('boundary checkpoint 恢复失败时不降级旧 full checkpoint 且不保存', async () => {
     mockSettings.retainRecentLayers = 2;
     mockLoadTableStateFromFramesV2Detailed.mockResolvedValueOnce(null);

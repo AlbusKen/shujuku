@@ -61,6 +61,11 @@ export class SyncBridge {
 
   constructor(private engine: SqliteEngine) {}
 
+  /** 返回 SyncBridge 实际执行到 runtime SQLite 的 schema 快照（窄读取接口）。 */
+  getRuntimeEffectiveSchemas_ACU(): ReadonlyMap<string, RuntimeEffectiveSchema_ACU> {
+    return new Map(this.runtimeEffectiveSchemas);
+  }
+
   getRuntimeFallbackDiagnostics_ACU(): readonly RuntimeDdlFallbackDiagnostic_ACU[] {
     return Array.from(this.runtimeFallbackDiagnostics.values());
   }

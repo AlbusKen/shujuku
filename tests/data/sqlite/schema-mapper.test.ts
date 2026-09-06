@@ -284,6 +284,20 @@ describe('downgradeRowIdPrimaryKeyForLegacyReplay_ACU', () => {
     expect(downgraded).toContain('CONSTRAINT inventory_name_unique UNIQUE (name)');
   });
 
+  it('降级带首列前置块注释的 DDL 并保留注释', () => {
+    const ddl = `CREATE TABLE inventory (
+      /* misleading ) */ row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL
+    );`;
+
+    const downgraded = downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl);
+
+    expect(downgraded).not.toMatch(/\bPRIMARY\s+KEY\b/i);
+    expect(downgraded).not.toMatch(/\bAUTOINCREMENT\b/i);
+    expect(downgraded).toContain('/* misleading ) */');
+    expect(downgraded).toContain('name TEXT NOT NULL');
+  });
+
   it('拒绝移除 row_id 主键后会失效的 WITHOUT ROWID 表', () => {
     expect(() => downgradeRowIdPrimaryKeyForLegacyReplay_ACU(
       'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID;',

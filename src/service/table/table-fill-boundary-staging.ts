@@ -411,6 +411,160 @@ export interface BoundarySegment_ACU {
   readonly indices: readonly number[];
   readonly saveTargetIndex: number;
   readonly mergeBaseMaxMessageIndex: number;
+  /** P3: when this segment starts at a schema timeline boundary, record the boundary kind. */
+  readonly boundaryKind?: 'sheet_introduction' | 'sheet_rebase' | 'sheet_reveal' | 'sheet_hide';
+}
+
+/**
+ * P3: schema timeline boundary kind collected from V2 per-sheet checkpoints.
+ * These are the structural switch points that a catch-up run must isolate.
+ */
+export type TableFillSchemaBoundaryKind_ACU =
+  | 'sheet_introduction'
+  | 'sheet_rebase'
+  | 'sheet_reveal'
+  | 'sheet_hide';
+
+export interface TableFillSchemaBoundary_ACU {
+  readonly index: number;
+  readonly kind: TableFillSchemaBoundaryKind_ACU;
+}
+
+/**
+ * Collects the message indices at which any sheet's schema/visibility timeline
+ * becomes active. The result is sorted by index; only one kind is kept per index.
+ */
+export function collectV2SchemaBoundaryIndices_ACU(
+  chat: any[] | null | undefined,
+  isolationKey: string,
+): TableFillSchemaBoundary_ACU[] {
+  if (!Array.isArray(chat) || chat.length === 0) return [];
+  const knownKinds = new Set<TableFillSchemaBoundaryKind_ACU>([
+    'sheet_introduction',
+    'sheet_rebase',
+    'sheet_reveal',
+    'sheet_hide',
+  ]);
+  const seen = new Map<number, TableFillSchemaBoundaryKind_ACU>();
+  for (let i = 0; i < chat.length; i += 1) {
+    const container = readIsolatedDataContainer_ACU(chat[i]);
+    const tagData = container?.[isolationKey];
+    if (!isV2TagData_ACU(tagData)) continue;
+    const frame = (tagData as any).storageFrame as TableStorageFrameV2_ACU | undefined;
+    const checkpoints = frame?.perSheetCheckpoints;
+    if (!checkpoints || typeof checkpoints !== 'object' || Array.isArray(checkpoints)) continue;
+    for (const checkpoint of Object.values(checkpoints) as Array<{
+      timeline?: { kind?: string; activateAtMessageIndex?: unknown };
+    }>) {
+      const timeline = checkpoint?.timeline;
+      if (!timeline) continue;
+      const kind = timeline.kind;
+      if (typeof kind !== 'string' || !knownKinds.has(kind as TableFillSchemaBoundaryKind_ACU)) continue;
+      const index = timeline.activateAtMessageIndex;
+      if (!Number.isInteger(index) || (index as number) < 0) continue;
+      if (!seen.has(index as number)) {
+        seen.set(index as number, kind as TableFillSchemaBoundaryKind_ACU);
+      }
+    }
+  }
+  return [...seen.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([index, kind]) => ({ index, kind }));
+}
+
+/**
+ * P3: split a message-index batch at both the formal full checkpoint root and any
+ * schema timeline boundary. The legacy splitMessageIndicesAtBoundary_ACU is kept
+ * for callers that do not yet supply schema boundaries; this function is the
+ * boundary-aware variant used by catch-up planning.
+ *
+ * Each segment returned by a schema boundary starts at that boundary's index and
+ * carries the boundary kind, so later staging can freeze the active structure.
+ */
+export function splitMessageIndicesAtSchemaBoundaries_ACU(
+  messageIndices: readonly number[],
+  originalFullIndex: number | null,
+  schemaBoundaries: readonly TableFillSchemaBoundary_ACU[] = [],
+  fullMessageIndexSet: ReadonlySet<number> = new Set(),
+): BoundarySegment_ACU[] {
+  const normalized = normalizeStrictlyIncreasingIndices_ACU(messageIndices, '待拆索引');
+  if (!normalized.length) return [];
+  const normalizedBoundaries = [...schemaBoundaries]
+    .filter(boundary => Number.isInteger(boundary.index) && (boundary.index as number) >= 0)
+    .sort((left, right) => left.index - right.index);
+  if (originalFullIndex === null && normalizedBoundaries.length === 0) {
+    const first = normalized[0];
+    const last = normalized[normalized.length - 1];
+    return [{
+      indices: [...normalized],
+      saveTargetIndex: last,
+      mergeBaseMaxMessageIndex: first - 1,
+    }];
+  }
+
+  const cutPoints = [...new Set<number>(
+    (originalFullIndex === null ? [] : [originalFullIndex])
+      .concat(normalizedBoundaries.map(boundary => boundary.index)),
+  )].sort((left, right) => left - right);
+  const segments: BoundarySegment_ACU[] = [];
+  let cursor = 0;
+  for (let cutIndex = 0; cutIndex < cutPoints.length; cutIndex += 1) {
+    const cut = cutPoints[cutIndex];
+    let segmentIndices: number[] = [];
+    while (cursor < normalized.length && normalized[cursor] < cut) {
+      segmentIndices.push(normalized[cursor]);
+      cursor += 1;
+    }
+    if (segmentIndices.length > 0) {
+      const first = segmentIndices[0];
+      const last = segmentIndices[segmentIndices.length - 1];
+      segments.push({
+        indices: segmentIndices,
+        saveTargetIndex: last,
+        mergeBaseMaxMessageIndex: first - 1,
+      });
+    }
+
+    const nextCut = cutIndex + 1 < cutPoints.length ? cutPoints[cutIndex + 1] : Number.POSITIVE_INFINITY;
+    segmentIndices = [];
+    while (cursor < normalized.length && normalized[cursor] < nextCut) {
+      segmentIndices.push(normalized[cursor]);
+      cursor += 1;
+    }
+    if (segmentIndices.length > 0) {
+      const first = segmentIndices[0];
+      const last = segmentIndices[segmentIndices.length - 1];
+      let mergeBaseMax = first - 1;
+      if (originalFullIndex !== null && first === originalFullIndex && fullMessageIndexSet.has(originalFullIndex)) {
+        mergeBaseMax = Math.max(mergeBaseMax, originalFullIndex);
+      }
+      const boundaryKind = normalizedBoundaries.find(boundary => boundary.index === cut)?.kind;
+      // P3: schema timeline 的生效帧本身就是该段的结构源（introduction/rebase/reveal/hide
+      // 均在对应楼层的 afterSeq 后改写 active state）。若填充段从边界帧开始，基底必须回放到
+      // 该帧，才能带出当时结构，而不是用边界前的旧结构生成增量。
+      if (boundaryKind && first === cut) {
+        mergeBaseMax = Math.max(mergeBaseMax, cut);
+      }
+      const segment: BoundarySegment_ACU = {
+        indices: segmentIndices,
+        saveTargetIndex: last,
+        mergeBaseMaxMessageIndex: mergeBaseMax,
+        ...(boundaryKind ? { boundaryKind } : {}),
+      };
+      segments.push(segment);
+    }
+  }
+  if (cursor < normalized.length) {
+    const segmentIndices = normalized.slice(cursor);
+    const first = segmentIndices[0];
+    const last = segmentIndices[segmentIndices.length - 1];
+    segments.push({
+      indices: segmentIndices,
+      saveTargetIndex: last,
+      mergeBaseMaxMessageIndex: first - 1,
+    });
+  }
+  return segments;
 }
 
 export function splitMessageIndicesAtBoundary_ACU(

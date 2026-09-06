@@ -29,8 +29,37 @@ export interface V2ReplayEvidence_ACU {
    * 复用前必须比对 headRevision 汇总，不一致即失效（fail-open 回退冷 replay）。
    */
   headRevisionDigest: string;
+  /**
+   * 结构映射信号：当前聊天模板 header-only 快照的指纹。
+   * 回放核心用该模板做列重绑/临时补锚的 supplemental evidence；
+   * 模板结构变化（全局模板或 chat scope 切换）会使同一冻结历史的结果可能改变，
+   * 必须使 evidence 失效（fail-open 回退冷 replay）。
+   */
+  structureMappingDigest: string;
+  /**
+   * 影响回放结果的 options 指纹：allowTemporaryTemplateBaseline、
+   * compatibilityMode、enableAliasContext。与 buildInflightReplayKey_ACU 的
+   * options 段保持一致；任一变化都禁止复用上次结果。
+   */
+  replayOptionsFingerprint: string;
   /** 生成时间戳（诊断用，不参与判定）。 */
   createdAt: number;
+}
+
+/**
+ * 归一化影响回放结果的 options 为轻量指纹。
+ * 与 in-flight key 的 options 段保持一致；evidence 复用必须携带并比对。
+ */
+export function buildReplayOptionsFingerprint_ACU(options: {
+  allowTemporaryTemplateBaseline?: boolean;
+  compatibilityMode?: 'apply' | 'disabled';
+  enableAliasContext?: boolean;
+}): string {
+  return [
+    'tpl', options.allowTemporaryTemplateBaseline ? 1 : 0,
+    'compat', options.compatibilityMode ?? 'default',
+    'alias', options.enableAliasContext === false ? 0 : 1,
+  ].join('|');
 }
 
 /**
@@ -54,6 +83,8 @@ export function validateV2ReplayEvidenceFresh_ACU(
   isolationKey: string,
   options: { maxMessageIndex?: number } = {},
   currentHeadRevisionDigest?: string,
+  currentStructureMappingDigest?: string,
+  currentReplayOptionsFingerprint?: string,
 ): boolean {
   if (!evidence) return false;
   if (evidence.chatIdentity !== chat) return false;
@@ -63,6 +94,8 @@ export function validateV2ReplayEvidenceFresh_ACU(
   // 同一 computeReplayHeadRevisionDigest_ACU，chat 未变时必然相等；仅 chat 内容变化
   // （且 headRevision 亦变化）才会产生差异，此时必须失效。
   if (evidence.headRevisionDigest !== currentHeadRevisionDigest) return false;
+  if (evidence.structureMappingDigest !== currentStructureMappingDigest) return false;
+  if (evidence.replayOptionsFingerprint !== currentReplayOptionsFingerprint) return false;
   if (evidence.maxMessageIndex !== options.maxMessageIndex) return false;
   if (evidence.baseKind !== 'full_checkpoint') return false;
   if (evidence.compatibilityRepairs && evidence.compatibilityRepairs.length > 0) return false;

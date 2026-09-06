@@ -1,6 +1,7 @@
-import { getLastMessageIndex_ACU } from '../chat/chat-service';
-import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
+import { getChatArray_ACU } from '../chat/chat-service';
+import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../table/table-service';
+import { getLatestAiMessageIndexFromChat_ACU } from '../table/table-history';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import {
@@ -28,14 +29,29 @@ export async function rebuildCurrentSummaryVectorIndexNow_ACU(): Promise<Summary
     const selectedSummary = findSummaryTable_ACU();
     if (selectedSummary) {
         const { summaryKey, table } = selectedSummary;
+        const chat = Array.isArray(getChatArray_ACU()) ? getChatArray_ACU() : [];
+        const targetMessageIndex = getLatestAiMessageIndexFromChat_ACU(chat);
+        if (targetMessageIndex < 0 || !chat[targetMessageIndex] || chat[targetMessageIndex].is_user) {
+            return {
+                success: false,
+                skipped: false,
+                indexedRowCount: 0,
+                skippedRowCount: 0,
+                chunkCount: 0,
+                reason: 'vector_index_rebuild_no_ai_target',
+                errors: ['当前聊天没有可绑定的 AI 目标楼层，已停止纪要索引重建。'],
+            };
+        }
         const writeSet = [{ kind: 'sheet' as const, sheetKey: summaryKey }];
         const commit = await runTableUpdateCommit_ACU<null>({
             source: 'system',
             reason: 'vector_index_rebuild_snapshot',
+            chatKey: currentChatFileIdentifier_ACU,
+            isolationKey: getCurrentIsolationKey_ACU(),
             writeSet,
             revisionWriteSet: writeSet,
             initialData: currentJsonTableData_ACU,
-            targetMessageIndex: getLastMessageIndex_ACU(),
+            targetMessageIndex,
             targetSheetKeys: [summaryKey],
             updateGroupKeys: null,
             trackingSheetKeys: [],

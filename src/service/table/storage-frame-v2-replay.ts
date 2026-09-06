@@ -23,7 +23,7 @@ import { repairTableDataFromAudit_ACU } from './table-data-repair';
 import { cloneSpv79TransitionData_ACU, compareTransitionCutoffs_ACU, findLatestTransitionCheckpoint_ACU, isAfterSpv79TransitionCutoff_ACU, isEntryAfterSpv79TransitionCutoff_ACU, isFrameArtifactAfterSpv79TransitionCutoff_ACU, reindexSpv79TransitionState_ACU } from './compat-transition-checkpoint';
 import { mergeLegacySheetIdentities_ACU, type SheetIdentityRemap_ACU } from '../../shared/sheet-identity-merge';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
-import { computeReplayHeadRevisionDigest_ACU, validateV2ReplayEvidenceFresh_ACU } from './v2-replay-session';
+import { buildReplayOptionsFingerprint_ACU, computeReplayHeadRevisionDigest_ACU, validateV2ReplayEvidenceFresh_ACU } from './v2-replay-session';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -40,9 +40,9 @@ interface V2FrameRef_ACU {
  * SQLite runtime 并从 checkpoint 全量回放，同一份 canonical 数据被重复计算。
  *
  * key 由「影响 replay 结果的全部 options 字段」构成：chat 引用、isolationKey、
- * maxMessageIndex、allowTemporaryTemplateBaseline、compatibilityMode、
- * enableAliasContext。缺任一字段都会导致共享错误结果（例如临时基线 vs null、
- * 冷/热 alias metrics 不同）。
+ * maxMessageIndex、结构映射指纹、allowTemporaryTemplateBaseline、
+ * compatibilityMode、enableAliasContext。缺任一字段都会导致共享错误结果
+ * （例如临时基线 vs null、冷/热 alias metrics 不同、模板结构变化未失效）。
  *
  * 排除的调用：updateRuntimeState:true（副作用路径改写 schedule，不可共享）、
  * captureBoundaries/captureSink（阶段 H 多边界捕获，各自消费 sink）、
@@ -58,6 +58,7 @@ function buildInflightReplayKey_ACU(
   chat: any[],
   isolationKey: string,
   options: LoadTableStateFromFramesV2Options_ACU,
+  structureMappingDigest = '',
 ): string | null {
   if (options.updateRuntimeState) return null;
   if (Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0) return null;
@@ -73,6 +74,7 @@ function buildInflightReplayKey_ACU(
     String(chat),
     'iso', isolationKey,
     'max', options.maxMessageIndex ?? 'latest',
+    'struct', structureMappingDigest || '',
     'tpl', options.allowTemporaryTemplateBaseline ? 1 : 0,
     'compat', options.compatibilityMode ?? 'default',
     'alias', options.enableAliasContext === false ? 0 : 1,
@@ -2474,6 +2476,11 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   // 保持纯函数性质）。不满足一律走冷 replay（fail-open）。
   const evidence = options.replayEvidence;
   const currentHeadRevisionDigest = computeReplayHeadRevisionDigest_ACU(chat, isolationKey);
+  const currentStructureMappingDigest = (() => {
+    const structureMapping = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+    return structureMapping ? getTableDataFingerprint_ACU(structureMapping) : '';
+  })();
+  const currentReplayOptionsFingerprint = buildReplayOptionsFingerprint_ACU(options);
   // updateRuntimeState:true 时不得复用（需副作用）；此处证据仅由 false 路径写入，
   // 命中必然为 false，但防御性再确认一次。
   // 阶段 H：captureBoundaries 非空（多 boundary 前向捕获）时禁止 evidence 复用与
@@ -2489,6 +2496,8 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
       evidence, chat, isolationKey,
       { maxMessageIndex: options.maxMessageIndex },
       currentHeadRevisionDigest,
+      currentStructureMappingDigest,
+      currentReplayOptionsFingerprint,
     );
   if (evidence && evidenceReusable) {
     const data = deepClone_ACU(evidence.data);
@@ -2523,7 +2532,7 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   // 后续调用方 await 同一 promise。共享结果深克隆 data（不共享引用，保持纯函数
   // 性质），metrics 标记 replayShareCount=1 以区分 evidence 复用（replayReuseCount）。
   // 仅合并并发窗口内的重复调用：promise settle 后从 Map 删除，不缓存历史。
-  const inflightKey = buildInflightReplayKey_ACU(chat, isolationKey, options);
+  const inflightKey = buildInflightReplayKey_ACU(chat, isolationKey, options, currentStructureMappingDigest);
   if (inflightKey) {
     const existing = inflightV2Replays_ACU.get(inflightKey);
     if (existing) {
@@ -2635,6 +2644,8 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
       evidence.compatibilityRepairs = null;
       evidence.requiresCheckpointConvergence = false;
       evidence.headRevisionDigest = currentHeadRevisionDigest;
+      evidence.structureMappingDigest = currentStructureMappingDigest;
+      evidence.replayOptionsFingerprint = currentReplayOptionsFingerprint;
       evidence.createdAt = Date.now();
     }
     return result;

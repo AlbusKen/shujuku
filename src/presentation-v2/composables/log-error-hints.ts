@@ -248,6 +248,16 @@ const RULES: HintRule[] = [
     ],
   },
   {
+    id: 'sqlite-ddl-exec',
+    test: /ddl.*(执行|apply|run|fail|失败|error)|执行.*ddl|apply.*ddl|建表失败|创建表失败|alter table.*(失败|fail)|drop table.*(失败|fail)|完整 candidate sqlite hydrate 失败|candidate.*hydrate 失败/,
+    summary: 'SQLite 建表 / 改表（DDL）执行失败，模板结构无法在 SQLite 中落成。',
+    steps: [
+      '通常是模板中存在重复列名、约束冲突或与历史物理表不兼容。',
+      '到「数据管理」页查看模板与历史表结构，或使用结构校准 / 恢复工具重建。',
+      '如果刚切换模板，先刷新页面再重试；仍失败请导出日志反馈。',
+    ],
+  },
+  {
     id: 'table-not-found',
     test: /table "[^"]*" not found|no such table|has no content|表格?\s*[「"“]?[^\s」"”]{0,40}[」"”]?\s*(不存在|未找到)|找不到表|表不存在/,
     summary: '找不到指定的表格（或表格是空的）。',
@@ -277,6 +287,26 @@ const RULES: HintRule[] = [
       '刷新酒馆页面（Ctrl+F5）后重试。',
       '检查浏览器的广告拦截 / 安全插件是否拦截了 .wasm 文件下载。',
       '重新安装本插件以确保文件完整。回退期间表格仍可用，只是 SQL 相关功能受限。',
+    ],
+  },
+  {
+    id: 'schema-mismatch',
+    test: /schema_missing|未在 sqlite runtime 中创建|未在 sqlite 运行时|缺列|缺少列|runtime 中不存在|结构不一致|schema 不一致|表结构.*(不一致|缺失|不匹配)|hydrate 失败.*(schema|列)|schema.*(fail|mismatch|不一致)/,
+    summary: '表格结构（列 / 物理表）与 SQLite 实际建表结果不一致，属于数据或模板结构问题，不是引擎加载失败。',
+    steps: [
+      '这不是 wasm / 引擎下载问题，不需要检查下载拦截。',
+      '到「数据管理」页运行诊断 / 恢复工具，让插件按当前模板重建或校准运行时结构。',
+      '如果刚切换过模板，先刷新页面并重新加载当前聊天；仍失败请导出日志反馈。',
+    ],
+  },
+  {
+    id: 'identity-conflict',
+    test: /表身份.*(失败|冲突|歧义)|身份冲突|identity conflict|多对一冲突|同时指向|同名.*(冲突|重复)|物理表名冲突|sheetkey.*(冲突|歧义)|表名.*(冲突|歧义)|schema 身份/,
+    summary: '表格身份存在冲突或歧义：同一规范表名 / 别名对应了多个表，或新旧 sheetKey 没有正确归并。',
+    steps: [
+      '这通常是模板切换后旧 key 与新 key 并存导致。',
+      '到「数据管理」页使用诊断 / 恢复工具，优先选择能保留两边数据的保真恢复。',
+      '不要手工删除历史表；导出日志并附上模板切换步骤，便于定位身份映射。',
     ],
   },
   {

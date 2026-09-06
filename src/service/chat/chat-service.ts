@@ -526,6 +526,12 @@ function downgradeV2FullCheckpointAtIndex_ACU(chat: any[], isolationKey: string,
                 || typeof sheetCheckpoint.data !== 'object'
                 || Array.isArray(sheetCheckpoint.data)
             ) continue;
+            // P5：timed 单表 checkpoint（sheet_rebase / sheet_hide / sheet_reveal /
+            // sheet_introduction）必须保留在 perSheetCheckpoints 里由回放按
+            // activateAtMessageIndex + afterSeq 调度，不能并入 data_replace 基底，
+            // 否则事件会被提前到帧首生效（例如 hide 的表出现在替换状态、rebase
+            // 的新结构覆盖了该帧更早的操作）。untimed checkpoint 才是帧首事实。
+            if (sheetCheckpoint.timeline !== undefined) continue;
             fallbackData[sheetKey] = JSON.parse(JSON.stringify(sheetCheckpoint.data));
         }
     }

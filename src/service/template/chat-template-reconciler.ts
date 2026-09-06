@@ -1,7 +1,7 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { buildStableSheetKeyCandidate_ACU, canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
-import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
+import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, rebindCreateTableName_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import { generateDDL } from '../../data/sqlite/schema-mapper';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
 import { hydrateTableDataStrict_ACU } from '../table/sqlite-template-validation';
@@ -206,6 +206,14 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
         templateEntry.key,
         input.storageMode === 'native' ? 'native' : 'sqlite',
       );
+      // P2 identity contract: a matched sheet keeps the persistent chat sheet key
+      // (previous.key) as its logical identity. The template may use a different
+      // physical table name (e.g. stable pinyin key vs legacy random key), so the
+      // CREATE TABLE identifier must be rebound to the persistent key here, in all
+      // storage modes, before the sheet is published into candidateData/guide.
+      if (typeof reconciled.sheet?.sourceData?.ddl === 'string' && reconciled.sheet.sourceData.ddl.trim()) {
+        reconciled.sheet.sourceData.ddl = rebindCreateTableName_ACU(reconciled.sheet.sourceData.ddl, previous.key);
+      }
       candidateData[previous.key] = reconciled.sheet;
       if (reconciled.changed) rebaseKeys.add(previous.key);
       audit.push(reconciled.audit);
@@ -905,6 +913,13 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
       return renamePhysicalColumn_ACU(column, source.physical);
     });
     sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, effectiveTargetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
+    // P2 identity contract: the persistent chat sheet key is authoritative for the
+    // logical sheet; a template may carry a different physical table name (e.g. stable
+    // pinyin key vs legacy random key). Rebind the CREATE TABLE identifier so SQLite
+    // never materializes a second physical table for the same logical sheet.
+    if (typeof sheet.sourceData?.ddl === 'string' && sheet.sourceData.ddl.trim()) {
+      sheet.sourceData.ddl = rebindCreateTableName_ACU(sheet.sourceData.ddl, sheetKey);
+    }
     activePhysicalNames = effectiveTargetColumns.map(column => column.sqlName);
     retainedHiddenPhysicalNames = retainedHiddenColumns.map(column => column.sqlName);
   } else {

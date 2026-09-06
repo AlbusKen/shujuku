@@ -726,15 +726,15 @@ describe('buildBatchMergeBase_ACU', () => {
     expect(showUiSurfaceToast_ACU).not.toHaveBeenCalled();
   });
 
-  it('SQLite runtime 旧随机 key 与 guide 稳定 key 可证明同表时折叠到稳定 key 并保留历史数据', async () => {
+  it('SQLite runtime 历史随机 key 保留为已建立身份，guide 同名结构合并到同一 key 且不新增稳定 key', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
     const legacyDdl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);';
     const guide = {
       mate: { type: 'chatSheets', version: 1 },
-      sheet_bei_bao_wu_pin_biao: {
-        uid: 'sheet_bei_bao_wu_pin_biao',
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
         name: '背包物品表',
         sourceData: { ddl: legacyDdl, note: 'guide-structure' },
         content: [['row_id', '物品名称', '数量']],
@@ -758,15 +758,16 @@ describe('buildBatchMergeBase_ACU', () => {
       const result = await buildBatchMergeBase_ACU(1);
 
       expect(result.error).toBeNull();
-      expect(result.data?.sheet_in05z9vz).toBeUndefined();
-      expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
-        uid: 'sheet_bei_bao_wu_pin_biao',
+      expect(result.data?.sheet_in05z9vz).toMatchObject({
+        uid: 'sheet_in05z9vz',
         name: '背包物品表',
         // restoreGuideStructure 只恢复结构：note 保留 runtime 值
         sourceData: { ddl: legacyDdl, note: 'legacy-structure' },
         // 新契约：表头内容不一致（'物品名称' vs '旧物品名'）时保留权威表头，不覆盖
         content: [['row_id', '旧物品名', '数量'], ['1', '铁剑', '1']],
       });
+      // guide 与历史身份已合并，不因模板 key 不同而生成空壳重复表
+      expect(result.data?.sheet_bei_bao_wu_pin_biao).toBeUndefined();
     } finally {
       vi.mocked(isSqliteMode).mockReturnValue(false);
       vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
@@ -775,13 +776,13 @@ describe('buildBatchMergeBase_ACU', () => {
     }
   });
 
-  it('SQLite runtime 与 guide 规范显示名相同但 DDL 不同仍折叠', async () => {
+  it('SQLite runtime 与 guide 规范显示名相同且同身份 key 时按 guide ddl 恢复结构，不生成新 key 表', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
     const guide = {
-      sheet_bei_bao_wu_pin_biao: {
-        uid: 'sheet_bei_bao_wu_pin_biao',
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
         name: '背包物品表',
         sourceData: { ddl: 'CREATE TABLE inventory_v2 (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
         content: [['row_id', '物品名称']],
@@ -804,13 +805,13 @@ describe('buildBatchMergeBase_ACU', () => {
       const result = await buildBatchMergeBase_ACU(1);
 
       expect(result.error).toBeNull();
-      expect(result.data?.sheet_in05z9vz).toBeUndefined();
-      expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
-        uid: 'sheet_bei_bao_wu_pin_biao',
+      expect(result.data?.sheet_in05z9vz).toMatchObject({
+        uid: 'sheet_in05z9vz',
         name: '背包物品表',
         sourceData: { ddl: 'CREATE TABLE inventory_v2 (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
         content: [['row_id', '物品名称'], ['1', '铁剑']],
       });
+      expect(result.data?.sheet_bei_bao_wu_pin_biao).toBeUndefined();
     } finally {
       vi.mocked(isSqliteMode).mockReturnValue(false);
       vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
@@ -941,7 +942,7 @@ describe('buildBatchMergeBase_ACU', () => {
   });
 
 
-  it('restoreGuideStructure：guide 表头与权威数据宽度不一致时不覆盖表头、不继承 guide ddl、记录 warning', async () => {
+  it('restoreGuideStructure：同身份 key 下 guide 表头与权威数据宽度不一致时不覆盖表头、不继承 guide ddl、记录 warning', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
@@ -950,8 +951,8 @@ describe('buildBatchMergeBase_ACU', () => {
     const guideDdl = 'CREATE TABLE inventory_guide (row_id INTEGER PRIMARY KEY, item_name TEXT);';
     const guide = {
       mate: { type: 'chatSheets', version: 1 },
-      sheet_bei_bao_wu_pin_biao: {
-        uid: 'sheet_bei_bao_wu_pin_biao',
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
         name: '背包物品表',
         sourceData: { ddl: guideDdl, note: 'guide-note' },
         // guide 只有 2 列
@@ -978,14 +979,15 @@ describe('buildBatchMergeBase_ACU', () => {
 
       expect(result.error).toBeNull();
       // 表头宽度不一致：保留权威 4 列结构，不覆盖为 guide 2 列
-      expect(result.data?.sheet_bei_bao_wu_pin_biao.content[0]).toEqual(['row_id', '旧物品名', '数量', '重量']);
-      expect(result.data?.sheet_bei_bao_wu_pin_biao.content[0].length).toBe(4);
+      expect(result.data?.sheet_in05z9vz.content[0]).toEqual(['row_id', '旧物品名', '数量', '重量']);
+      expect(result.data?.sheet_in05z9vz.content[0].length).toBe(4);
       // 数据行完整保留
-      expect(result.data?.sheet_bei_bao_wu_pin_biao.content[1]).toEqual(['1', '铁剑', '1', '2.5']);
+      expect(result.data?.sheet_in05z9vz.content[1]).toEqual(['1', '铁剑', '1', '2.5']);
       // 不继承 guide ddl（inheritDdl=false），ddl 保留权威值
-      expect(result.data?.sheet_bei_bao_wu_pin_biao.sourceData.ddl).toContain('quantity INTEGER');
+      expect(result.data?.sheet_in05z9vz.sourceData.ddl).toContain('quantity INTEGER');
       // restoreGuideStructure 只恢复结构：note 保留 runtime 值（聊天过程中可能被合法修改）
-      expect(result.data?.sheet_bei_bao_wu_pin_biao.sourceData.note).toBe('legacy-note');
+      expect(result.data?.sheet_in05z9vz.sourceData.note).toBe('legacy-note');
+      expect(result.data?.sheet_bei_bao_wu_pin_biao).toBeUndefined();
       // 记录结构不一致 warning
       expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('基底表头与权威数据不一致'));
     } finally {
@@ -5633,15 +5635,15 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
   });
 
-  it('SQLite 快照初始化再次遇到旧随机 key 基底时按 guide 稳定 key 归一且不保留重复表', async () => {
+  it('SQLite 快照初始化再次遇到旧随机 key 基底时保留已建立 key，不因 guide 模板 key 生成重复表', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL);';
     const guide = {
       mate: { type: 'chatSheets', version: 1 },
-      sheet_bei_bao_wu_pin_biao: {
-        uid: 'sheet_bei_bao_wu_pin_biao',
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
         name: '背包物品表',
         sourceData: { ddl },
         content: [['row_id', 'item_name']],
@@ -5667,24 +5669,24 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       },
     } as any;
     mockParseAndApplyTableEditsToData.mockImplementationOnce((_response: string, tableData: any) => {
-      tableData.sheet_bei_bao_wu_pin_biao.content.push(['2', '药水']);
-      return { success: true, modifiedKeys: ['sheet_bei_bao_wu_pin_biao'], appliedEdits: 1 };
+      tableData.sheet_in05z9vz.content.push(['2', '药水']);
+      return { success: true, modifiedKeys: ['sheet_in05z9vz'], appliedEdits: 1 };
     });
     const responses = [{
       success: true,
       attempt: 1,
       aiResponse: '<tableEdit>insertRow(0,{"0":"药水"})</tableEdit>',
       tableEditText: 'insertRow(0,{"0":"药水"})',
-      job: { groupKey: 'inventory', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_bei_bao_wu_pin_biao'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+      job: { groupKey: 'inventory', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_in05z9vz'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
     }];
 
     const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
 
     expect(result.success).toBe(true);
     const savedData = mockPersistTablesToChatMessage.mock.calls[0][0].tableData;
-    expect(savedData.sheet_in05z9vz).toBeUndefined();
-    expect(savedData.sheet_bei_bao_wu_pin_biao.uid).toBe('sheet_bei_bao_wu_pin_biao');
-    expect(savedData.sheet_bei_bao_wu_pin_biao.content).toEqual([
+    expect(savedData.sheet_bei_bao_wu_pin_biao).toBeUndefined();
+    expect(savedData.sheet_in05z9vz.uid).toBe('sheet_in05z9vz');
+    expect(savedData.sheet_in05z9vz.content).toEqual([
       ['row_id', 'item_name'],
       ['1', '铁剑'],
       ['2', '药水'],

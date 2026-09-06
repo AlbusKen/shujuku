@@ -21,16 +21,18 @@ import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
-import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
+import { rebindSheetKeysThroughTableAliases_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 import { recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
 import {
   assembleBucketWorkingView_ACU,
+  collectV2SchemaBoundaryIndices_ACU,
   commitStagedSheetsAtFullBoundaryAtomic_ACU,
   createTableFillStagingRunContext_ACU,
   planTableFillBoundaryStaging_ACU,
   publishVerifiedBoundaryHead_ACU,
   readOriginalFullFrameFingerprint_ACU,
   splitMessageIndicesAtBoundary_ACU,
+  splitMessageIndicesAtSchemaBoundaries_ACU,
   type BoundarySegment_ACU,
   type TableFillBoundaryDiagnosticCode_ACU,
   type TableFillBoundaryStagingPlan_ACU,
@@ -810,14 +812,6 @@ function mergeGuideStructureIntoBaseData_ACU(data: Record<string, any>): Record<
     }
 
     const guideBase = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideForBatch);
-    const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(base, guideBase);
-    for (const [sourceKey, targetKey] of historicalKeyMigrations) {
-        base[targetKey] = base[sourceKey];
-        if (base[targetKey] && typeof base[targetKey] === 'object') base[targetKey].uid = targetKey;
-        delete base[sourceKey];
-        logDebug_ACU(`[MergeBase] 已按规范表名将历史 Sheet key 对齐：${sourceKey} -> ${targetKey}`);
-    }
-
     if (!base.mate && guideBase?.mate) base.mate = JSON.parse(JSON.stringify(guideBase.mate));
     Object.keys(guideBase || {}).forEach(sheetKey => {
         if (!sheetKey.startsWith('sheet_')) return;
@@ -1289,18 +1283,6 @@ function buildSqlInitializationBase_ACU(baseSnapshot: Record<string, any>, targe
         guidedBaseData = guideData ? buildGuidedBaseDataFromSheetGuide_ACU(guideData) : null;
     } catch (error) {
         logWarn_ACU('[SQL Init] getChatSheetGuideDataForIsolationKey_ACU failed, fallback to template/baseSnapshot only.', error);
-    }
-
-    const identityTargetData = guidedBaseData && Object.keys(guidedBaseData).some(key => key.startsWith('sheet_'))
-        ? guidedBaseData
-        : templateData;
-    if (identityTargetData) {
-        const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(workingTableData, identityTargetData);
-        for (const [sourceKey, targetKey] of historicalKeyMigrations) {
-            workingTableData[targetKey] = workingTableData[sourceKey];
-            if (workingTableData[targetKey] && typeof workingTableData[targetKey] === 'object') workingTableData[targetKey].uid = targetKey;
-            delete workingTableData[sourceKey];
-        }
     }
 
     if (!workingTableData.mate && templateData?.mate) {
@@ -2627,6 +2609,11 @@ export async function executeAutoFillStagingGroups_ACU(
         });
     }
 
+    // P3: 冻结本次 auto_fill 的 schema timeline；组内索引同时按 full 根与
+    // schema introduction/rebase/reveal/hide 边界拆段，避免跨结构切换的补写在
+    // 单一批次内用错误旧结构生成增量。
+    const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU());
+
     const failedGroups = new Set<string>();
     let firstError: string | undefined;
     let committedBucketCount = 0;
@@ -2710,7 +2697,7 @@ export async function executeAutoFillStagingGroups_ACU(
             return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
         }
         const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
-        const segments = splitMessageIndicesAtBoundary_ACU(groupIndices, originalFullIndex);
+        const segments = splitMessageIndicesAtSchemaBoundaries_ACU(groupIndices, originalFullIndex, schemaBoundaries);
         const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < originalFullIndex);
         const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= originalFullIndex);
 
@@ -4007,6 +3994,10 @@ export async function orchestrateManualCatchUp_ACU(
         }
     };
     _set_isAutoUpdatingCard_ACU(true);
+    // P3: capture schema timeline boundaries once after runtime admission. These are
+    // structural switch points (introduction/rebase/reveal/hide) that a catch-up wave
+    // must not silently cross inside a single persisted batch.
+    const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU());
 
     try {
         for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
@@ -4048,9 +4039,10 @@ export async function orchestrateManualCatchUp_ACU(
             const originalFullIndex = boundaryPlan?.scope.originalFullIndex ?? null;
             const isBoundaryActive = originalFullIndex !== null && !boundaryCommitted;
             const fullMessageIndexSet = new Set<number>(isBoundaryActive ? [originalFullIndex as number] : []);
-            const waveSegments: BoundarySegment_ACU[] = splitMessageIndicesAtBoundary_ACU(
+            const waveSegments: BoundarySegment_ACU[] = splitMessageIndicesAtSchemaBoundaries_ACU(
                 wave.messageIndices,
                 originalFullIndex,
+                schemaBoundaries,
                 fullMessageIndexSet,
             );
             for (const segment of waveSegments) {
@@ -4881,11 +4873,16 @@ export async function orchestrateManualUpdate_ACU(
                         }
                     }
                 } else {
-                    // 跨根 staging：组内索引按原 full 边界拆段，pre 段 stage_only、边界汇合、post 段 persist。
+                    // 跨根 staging：组内索引按原 full 边界与 schema 边界拆段，
+                    // pre 段 stage_only、边界汇合、post 段 persist。schema 边界段同样携带
+                    // boundaryKind，供逐段冻结目标结构并在对应楼层使用当时结构补写。
+                    // 注意：此处已离开 manualRefillEnabled 的 currentIsolationKey 词法作用域；
+                    // 必须使用 boundaryPlan.scope.isolationKey（冻结自 planning 阶段）。
+                    const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), boundaryPlan.scope.isolationKey);
                     for (const group of groupedChunk) {
                         let groupFailed = false;
                         const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
-                        const segments = splitMessageIndicesAtBoundary_ACU(groupIndices, boundaryPlan.scope.originalFullIndex);
+                        const segments = splitMessageIndicesAtSchemaBoundaries_ACU(groupIndices, boundaryPlan.scope.originalFullIndex, schemaBoundaries);
                         const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < boundaryPlan!.scope.originalFullIndex!);
                         const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= boundaryPlan!.scope.originalFullIndex!);
 

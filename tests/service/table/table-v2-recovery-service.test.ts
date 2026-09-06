@@ -515,5 +515,159 @@ describe('table-v2-recovery-service', () => {
     expect(afterFingerprint).toBe(beforeFingerprint);
   });
 
+  it('冗余 full 降级保留原 logEntries/perSheetCheckpoints/手动重填进度与真实 aiFloor，回放指纹不变', async () => {
+    const redundantData = data([['1', '第二根']]);
+    const lateData = data([['1', '第二根'], ['3', '末位累积']]);
+    const originalLog = {
+      seq: 1,
+      entryId: 'before-root',
+      createdAt: 2,
+      source: 'system' as const,
+      targetMessageIndex: 2,
+      aiFloor: 3,
+      filledSheetKeys: ['sheet_0'],
+      changedSheetKeys: [],
+      groupKeys: [],
+      operations: [],
+    };
+    const redundantFrame = {
+      ...frame({ kind: 'full', createdAt: 1, reason: 'init', data: redundantData, event: { filledSheetKeys: ['sheet_0'], changedSheetKeys: [], groupKeys: [] } }, [originalLog]),
+      perSheetCheckpoints: {
+        sheet_0: {
+          kind: 'sheet_full' as const,
+          createdAt: 2,
+          reason: 'schema_change' as const,
+          sheetKey: 'sheet_0',
+          data: redundantData.sheet_0,
+          timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 1 } as const,
+        },
+      },
+      manualRefillProgress: {
+        kind: 'manual_refill' as const,
+        status: 'in_progress' as const,
+        selectedSheetKeys: ['sheet_0'],
+        contextMessageIndices: [0, 1, 2],
+        originalStartMessageIndex: 0,
+        targetMessageIndex: 2,
+        batchSize: 10,
+        completedUntilMessageIndex: 2,
+      },
+    } as any;
+    const lateFrame = frame({ kind: 'full', createdAt: 2, reason: 'integrity_repair', data: lateData }, []);
+    const buildChat = () => Array.from({ length: 11 }, (_, messageIndex) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2 as const,
+          storageFrame: messageIndex === 2
+            ? redundantFrame
+            : messageIndex === 10 ? lateFrame : frame(undefined, []),
+        },
+      },
+    }));
+
+    const beforeFingerprint = getTableDataFingerprint_ACU(await loadTableStateFromFramesV2_ACU(buildChat(), '', { updateRuntimeState: false }));
+    h.chat = buildChat();
+
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared.status).toBe('recoverable_redundant_full_checkpoint');
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toEqual({ status: 'committed', planId: prepared.planId });
+
+    const degradedTag = h.chat[2].TavernDB_ACU_IsolatedData[''];
+    expect(degradedTag.storageFrame.checkpoint).toBeUndefined();
+    expect(degradedTag.storageFrame.logEntries.map((entry: any) => entry.entryId)).toEqual(['before-root', 'redundant-full-fallback-2']);
+    expect(degradedTag.storageFrame.logEntries[1]).toMatchObject({
+      seq: 2,
+      aiFloor: 3,
+      filledSheetKeys: ['sheet_0'],
+      changedSheetKeys: [],
+      groupKeys: [],
+    });
+    expect(degradedTag.storageFrame.perSheetCheckpoints.sheet_0.timeline.kind).toBe('sheet_rebase');
+    expect(degradedTag.storageFrame.manualRefillProgress).toMatchObject({ status: 'in_progress', targetMessageIndex: 2 });
+    expect(degradedTag.recoveryBackup).toMatchObject({ recoveryKind: 'redundant_full_checkpoint_convergence', storageFrame: { checkpoint: { kind: 'full', data: redundantData } } });
+
+    const afterFingerprint = getTableDataFingerprint_ACU(await loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false }));
+    expect(afterFingerprint).toBe(beforeFingerprint);
+  });
+
+  it('含双身份/物理表名冲突的 full checkpoint 诊断为 unrecoverable_identity_conflict 且零保存', async () => {
+    const conflictData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '旧剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_beibao: { uid: 'bag2', name: '背包', content: [['row_id', '名称'], ['2', '新盾']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    expect(prepared.status).toBe('unrecoverable_identity_conflict');
+    expect(prepared.affectedSheetKeys).toEqual(expect.arrayContaining(['sheet_legacy', 'sheet_beibao']));
+    expect(prepared.message).toContain('identity_merge_failed');
+    expect(prepared.message).toContain('heterogeneous_with_data');
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  it('双身份分类：空壳冲突给出 empty_shell 且零保存', async () => {
+    const conflictData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_beibao: { uid: 'bag2', name: '背包', content: [['row_id', '名称']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    expect(prepared.status).toBe('unrecoverable_identity_conflict');
+    expect(prepared.message).toContain('empty_shell');
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  it('双身份分类：等结构重复冲突给出 duplicate_structure 且零保存', async () => {
+    const conflictData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '铁剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_beibao: { uid: 'bag2', name: '背包', content: [['row_id', '名称'], ['1', '铁剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    expect(prepared.status).toBe('unrecoverable_identity_conflict');
+    expect(prepared.message).toContain('duplicate_structure');
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  it('双身份分类：同结构但同 row_id 值不同给出 ambiguous_conflict 且零保存', async () => {
+    const conflictData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '旧剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_beibao: { uid: 'bag2', name: '背包', content: [['row_id', '名称'], ['1', '新剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    expect(prepared.status).toBe('unrecoverable_identity_conflict');
+    expect(prepared.message).toContain('ambiguous_conflict');
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  it('双身份分类：同音不同表名给出 homophone_distinct_names 且零保存', async () => {
+    const conflictData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_beibao: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '背包物品']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_beibao2: { uid: 'bag2', name: '被包', content: [['row_id', '名称'], ['2', '被包物品']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    expect(prepared.status).toBe('unrecoverable_identity_conflict');
+    expect(prepared.message).toContain('homophone_distinct_names');
+    expect(prepared.message).toContain('被包');
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
 });
 

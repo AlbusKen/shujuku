@@ -23,7 +23,11 @@ async function loadFlow() {
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: settings, currentChatFileIdentifier_ACU: 'chat', currentJsonTableData_ACU: { sheet_a: {} }, getCurrentIsolationKey_ACU: () => settings.dataIsolationCode }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: applyTemplateScope, applyCombinedSettingsImport_ACU: vi.fn(), getDataIsolationHistory_ACU: () => [...history], removeDataIsolationHistory_ACU: removeHistory, saveSettings_ACU: vi.fn(), switchIsolationProfile_ACU: switchIsolation }));
-  vi.doMock('../../../src/service/settings/settings-write-service', () => ({ resetAllPromptsToDefault_ACU: vi.fn(() => ({ ok: true, code: 'ok', changed: true })) }));
+  vi.doMock('../../../src/service/settings/settings-write-service', () => ({
+    resetAllPromptsToDefault_ACU: vi.fn(() => ({ ok: true, code: 'ok', changed: true })),
+    snapshotSettingsFields_ACU: vi.fn(() => ({})),
+    restoreSettingsFields_ACU: vi.fn(),
+  }));
   vi.doMock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => [{ is_user: false }], deleteLocalDataWithScope_ACU: deleteScoped, isFullRangeDeletionRequest_ACU: () => false, overrideLatestLayerWithTemplateCore_ACU: overrideLatest }));
   vi.doMock('../../../src/service/table/table-service', () => ({ loadOrCreateJsonTableFromChatHistory_ACU: loadOrCreate }));
   vi.doMock('../../../src/service/worldbook/worldbook-cleanup', () => ({ cleanupWorldbookEntriesAfterDataDeletion_ACU: cleanupWorldbook }));

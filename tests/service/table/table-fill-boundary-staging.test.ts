@@ -68,10 +68,24 @@ describe('planTableFillBoundaryStaging_ACU', () => {
     expect(Object.isFrozen(plan.scope)).toBe(true);
     expect(Object.isFrozen(plan.scope.targetSheetKeys)).toBe(true);
   });
+
+  it('多 full checkpoint（多根）时在规划阶段 fail-closed，拒绝跨根 staging', () => {
+    expect(() => planTableFillBoundaryStaging_ACU({
+      runKind: 'manual_refill',
+      runId: 'run-multi-root',
+      chatKey: 'chat-multi-root',
+      isolationKey: '',
+      targetSheetKeys: ['sheet_a'],
+      templateFingerprint: 'template-multi-root',
+      messageIndices: [1, 2, 4, 5, 8, 9],
+      fullCheckpointIndices: [4, 8],
+    })).toThrow(/同一 isolationKey 下存在 2 个 full checkpoint/);
+  });
+
 });
 
 
-import { splitMessageIndicesAtBoundary_ACU } from '../../../src/service/table/table-fill-boundary-staging';
+import { splitMessageIndicesAtBoundary_ACU, splitMessageIndicesAtSchemaBoundaries_ACU } from '../../../src/service/table/table-fill-boundary-staging';
 
 describe('splitMessageIndicesAtBoundary_ACU', () => {
   it('无 full 根时整段作为普通单段，基底取首楼前一层', () => {
@@ -115,6 +129,51 @@ describe('splitMessageIndicesAtBoundary_ACU', () => {
 
   it('非法索引输入抛出规划错误', () => {
     expect(() => splitMessageIndicesAtBoundary_ACU([2, 1], 30)).toThrow(/严格递增/);
+  });
+
+  it('schema 边界切段：full 根与 schema rebase 边界同时存在时，按边界拆出第三段并携带 boundaryKind', () => {
+    const segments = splitMessageIndicesAtSchemaBoundaries_ACU(
+      [10, 20, 30, 40, 50],
+      30,
+      [{ index: 40, kind: 'sheet_rebase' }],
+      new Set([30]),
+    );
+    expect(segments).toEqual([
+      { indices: [10, 20], saveTargetIndex: 20, mergeBaseMaxMessageIndex: 9 },
+      { indices: [30], saveTargetIndex: 30, mergeBaseMaxMessageIndex: 30 },
+      // 后段从 schema rebase 生效帧开始，基底必须回放到 40 才能带出新结构。
+      { indices: [40, 50], saveTargetIndex: 50, mergeBaseMaxMessageIndex: 40, boundaryKind: 'sheet_rebase' },
+    ]);
+  });
+
+  it('schema 边界与 full 根同楼层时合并为一个切点，post 段带边界类型且基底覆盖原根', () => {
+    const segments = splitMessageIndicesAtSchemaBoundaries_ACU(
+      [30, 40, 50],
+      30,
+      [{ index: 30, kind: 'sheet_introduction' }],
+      new Set([30]),
+    );
+    expect(segments).toEqual([
+      { indices: [30, 40, 50], saveTargetIndex: 50, mergeBaseMaxMessageIndex: 30, boundaryKind: 'sheet_introduction' },
+    ]);
+  });
+
+  it('无 full 根但存在 schema 边界时按 schema 边界拆段', () => {
+    const segments = splitMessageIndicesAtSchemaBoundaries_ACU(
+      [3, 4, 5],
+      null,
+      [{ index: 4, kind: 'sheet_hide' }],
+    );
+    expect(segments).toEqual([
+      { indices: [3], saveTargetIndex: 3, mergeBaseMaxMessageIndex: 2 },
+      // hide 生效帧同样进入该段基底，使回放能看到 hide 后的 active 投影。
+      { indices: [4, 5], saveTargetIndex: 5, mergeBaseMaxMessageIndex: 4, boundaryKind: 'sheet_hide' },
+    ]);
+  });
+
+  it('无 schema 边界时与旧 split 行为一致', () => {
+    expect(splitMessageIndicesAtSchemaBoundaries_ACU([10, 20, 30, 40, 50], 30, [], new Set([30])))
+      .toEqual(splitMessageIndicesAtBoundary_ACU([10, 20, 30, 40, 50], 30, new Set([30])));
   });
 });
 

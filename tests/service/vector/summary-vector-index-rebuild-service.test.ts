@@ -2,6 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   data: { sheet_summary: { name: '纪要表', content: [['row_id', '纪要'], ['1', '内容']] } } as any,
+  chat: [
+    { is_user: true },
+    { is_user: false },
+    { is_user: true },
+    { is_user: false },
+  ] as any[],
+  chatKey: 'chat-a',
   load: vi.fn(),
   commit: vi.fn(),
   archive: vi.fn(),
@@ -12,9 +19,10 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return h.data; },
+  get currentChatFileIdentifier_ACU() { return h.chatKey; },
   getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));
-vi.mock('../../../src/service/chat/chat-service', () => ({ getLastMessageIndex_ACU: () => 3 }));
+vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => h.chat }));
 vi.mock('../../../src/service/table/table-service', () => ({ loadOrCreateJsonTableFromChatHistory_ACU: h.load }));
 vi.mock('../../../src/service/table/table-update-commit', () => ({ runTableUpdateCommit_ACU: h.commit }));
 vi.mock('../../../src/service/worldbook/pipeline', () => ({ updateReadableLorebookEntry_ACU: h.updateLorebook }));
@@ -33,6 +41,13 @@ describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     h.data = { sheet_summary: { name: '纪要表', content: [['row_id', '纪要'], ['1', '内容']] } };
+    h.chat = [
+      { is_user: true },
+      { is_user: false },
+      { is_user: true },
+      { is_user: false },
+    ];
+    h.chatKey = 'chat-a';
     h.commit.mockImplementation(async (_options: any, apply: any) => {
       const applied = await apply();
       return { success: applied.success, saved: true };
@@ -43,12 +58,50 @@ describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
     h.updateLorebook.mockResolvedValue(true);
   });
 
+  it('末条为用户消息但之前有 AI 时绑定最近 AI 楼层', async () => {
+    h.chat = [
+      { is_user: true },
+      { is_user: false },
+      { is_user: true },
+    ];
+
+    const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
+
+    expect(h.commit).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'vector_index_rebuild_snapshot',
+      targetMessageIndex: 1,
+      chatKey: 'chat-a',
+      isolationKey: 'iso-a',
+      targetSheetKeys: ['sheet_summary'],
+    }), expect.any(Function));
+    expect(result).toMatchObject({ success: true, skipped: false });
+  });
+
+  it('空聊天或只有用户消息时返回前置条件失败，不提交快照也不启动归档', async () => {
+    h.chat = [{ is_user: true }];
+
+    const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
+
+    expect(result).toMatchObject({
+      success: false,
+      skipped: false,
+      reason: 'vector_index_rebuild_no_ai_target',
+    });
+    expect(result.errors?.[0]).toContain('没有可绑定的 AI 目标楼层');
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.clearFlush).not.toHaveBeenCalled();
+    expect(h.archive).not.toHaveBeenCalled();
+    expect(h.updateLorebook).not.toHaveBeenCalled();
+  });
+
   it('复用按钮普通路径：提交纪要快照后同步归档并刷新世界书', async () => {
     const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
 
     expect(h.commit).toHaveBeenCalledWith(expect.objectContaining({
       reason: 'vector_index_rebuild_snapshot',
       targetMessageIndex: 3,
+      chatKey: 'chat-a',
+      isolationKey: 'iso-a',
       targetSheetKeys: ['sheet_summary'],
     }), expect.any(Function));
     expect(h.clearFlush).toHaveBeenCalledWith({

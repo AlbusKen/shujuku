@@ -421,6 +421,10 @@ describe('SyncBridge', () => {
 
       bridge.loadFromTableData(data, { strict: true, allowRuntimeDdlFallback: true });
 
+      expect(bridge.getRuntimeEffectiveSchemas_ACU().get('sheet_execution')).toEqual(expect.objectContaining({
+        source: 'fallback_invalid',
+        effectiveDDL: expect.stringContaining(`CREATE TABLE ${tableName}`),
+      }));
       expect(engine.getTableNames()).toContain(tableName);
       expect(engine.query(`SELECT wu_pin_ming_cheng FROM ${tableName};`).values).toEqual([['铁剑']]);
       const exported = bridge.exportToTableData(makeMate()).sheet_execution as Sheet_ACU & { _acu_runtimeEffectiveSchema?: any };

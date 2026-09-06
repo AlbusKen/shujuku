@@ -5477,6 +5477,7 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     const evidence = {
       data: null as any, chatIdentity: null as any, isolationKey: '', maxMessageIndex: undefined,
       baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false, headRevisionDigest: '', createdAt: 0,
+      structureMappingDigest: '', replayOptionsFingerprint: 'tpl|0|compat|default|alias|1',
     };
     const first = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
       updateRuntimeState: false,
@@ -5501,6 +5502,33 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     expect(second?.metrics?.replayReuseCount).toBe(1);
     expect(second?.metrics?.replayReuseFallbackCount).toBe(0);
     expect(second?.metrics?.frameCount).toBe(0);
+    // 性能采样：复用路径跳过整轮 SQLite 回放，hydrate 次数必须为 0。
+    expect(second?.metrics?.sqliteHydrateCount).toBe(0);
+  });
+
+  it('阶段 G：同 fixture 冷回放与 evidence 复用对比回放次数和 SQLite hydrate 次数（不设硬阈值）', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+    const evidence = {
+      data: null as any, chatIdentity: null as any, isolationKey: '', maxMessageIndex: undefined,
+      baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false,
+      headRevisionDigest: '', structureMappingDigest: '', replayOptionsFingerprint: 'tpl|0|compat|default|alias|1', createdAt: 0,
+    };
+
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(cold?.metrics?.replayReuseCount).toBe(0);
+    expect(cold?.metrics?.replayReuseFallbackCount).toBe(1);
+    expect(cold?.metrics?.sqliteHydrateCount).toBeGreaterThan(0);
+
+    const reused = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(reused?.metrics?.replayReuseCount).toBe(1);
+    expect(reused?.metrics?.sqliteHydrateCount).toBe(0);
+    expect(reused?.data).toEqual(cold?.data);
   });
 
   it('阶段 E：boundary 不同或 chat 引用不同时不命中，回退冷 replay', async () => {
@@ -5514,6 +5542,7 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     const evidence = {
       data: { sheet_a: { name: 'stale' } } as any, chatIdentity: chat, isolationKey: ISOLATION, maxMessageIndex: undefined,
       baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false, headRevisionDigest: '', createdAt: 0,
+      structureMappingDigest: '', replayOptionsFingerprint: 'tpl|0|compat|default|alias|1',
     };
 
     // boundary 不同（evidence 未定义 vs 调用 0）→ 不命中，返回真实 replay 结果。
@@ -5554,6 +5583,7 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       data: { sheet_a: { name: 'stale' } } as any, chatIdentity: chat, isolationKey: ISOLATION, maxMessageIndex: undefined,
       baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false,
       headRevisionDigest: 'rev:old', createdAt: 0,
+      structureMappingDigest: '', replayOptionsFingerprint: 'tpl|0|compat|default|alias|1',
     };
     // digest 不匹配（chat 实际无 headRevision → digest 空串）→ 不命中，返回真实 replay 结果。
     const result = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
@@ -5565,6 +5595,92 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     // digest 失配必须计入 fallback：这是「快路径是否真的在拦截陈旧证据」的唯一可观测信号。
     expect(result?.metrics?.replayReuseCount).toBe(0);
     expect(result?.metrics?.replayReuseFallbackCount).toBe(1);
+  });
+
+  it('阶段 G：模板结构映射变化（template fingerprint 不同）时 evidence 失效，回退冷 replay', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const templateA = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: {
+        uid: 'a', name: 'sheet_a',
+        content: [['row_id', 'value'], ['1', 'template-a']],
+        sourceData: { ddl: 'CREATE TABLE a (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    const templateB = {
+      ...templateA,
+      sheet_a: {
+        ...templateA.sheet_a,
+        content: [['row_id', 'value', 'extra'], ['1', 'template-a', 'x']],
+        sourceData: { ddl: 'CREATE TABLE a (row_id INTEGER PRIMARY KEY, value TEXT, extra TEXT);' },
+      },
+    };
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [],
+      },
+    }]) as any;
+    chat[0].TavernDB_ACU_ScopedConfig = {
+      version: 1,
+      template: {
+        '': { mode: 'chat_override', isolationKey: '', templateStr: JSON.stringify(templateA) },
+      },
+    };
+    const evidence = {
+      data: null as any, chatIdentity: null as any, isolationKey: ISOLATION, maxMessageIndex: undefined,
+      baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false,
+      headRevisionDigest: '', structureMappingDigest: '', replayOptionsFingerprint: 'tpl|0|compat|default|alias|1', createdAt: 0,
+    };
+    const first = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(first?.metrics?.replayReuseFallbackCount).toBe(1);
+    const fingerprintA = evidence.structureMappingDigest as string;
+    expect(fingerprintA).not.toBe('');
+
+    // 模板结构变化：fingerprint B 与 evidence 中 A 不一致 → 不命中，回退冷 replay。
+    chat[0].TavernDB_ACU_ScopedConfig.template[''].templateStr = JSON.stringify(templateB);
+    const second = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(second?.data.sheet_a.name).toBe('sheet_a');
+    expect(second?.metrics?.replayReuseCount).toBe(0);
+    expect(second?.metrics?.replayReuseFallbackCount).toBe(1);
+  });
+
+  it('阶段 G：回放 options（compatibilityMode/enableAliasContext）变化时 evidence 失效，回退冷 replay', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [],
+      },
+    }]);
+    const evidence = {
+      data: null as any, chatIdentity: null as any, isolationKey: ISOLATION, maxMessageIndex: undefined,
+      baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false,
+      headRevisionDigest: '', structureMappingDigest: '', replayOptionsFingerprint: '', createdAt: 0,
+    };
+    const first = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      enableAliasContext: false,
+      replayEvidence: evidence as any,
+    });
+    expect(evidence.replayOptionsFingerprint).toContain('alias|0');
+
+    // options 变化（默认 alias 开启）→ fingerprint 失配 → 回退冷 replay。
+    const second = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+      replayEvidence: evidence as any,
+    });
+    expect(second?.data.sheet_a.name).toBe('sheet_a');
+    expect(second?.metrics?.replayReuseCount).toBe(0);
+    expect(second?.metrics?.replayReuseFallbackCount).toBe(1);
   });
 
   it('阶段 I：只读 replay 在 signal 已取消时于 frame 边界抛 V2ReplayAbortedError_ACU', async () => {
@@ -5777,6 +5893,22 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     // 第一个是启动方：真实冷 replay，无共享标记（其 frameCount 反映全量扫描）。
     expect(first?.metrics?.replayShareCount).toBe(0);
     expect(first?.metrics?.frameCount).toBe(62);
+    expect(first?.metrics?.sqliteHydrateCount).toBeGreaterThan(0);
+    expect(second?.metrics?.sqliteHydrateCount).toBe(0);
+  });
+
+  it('阶段 G2：不同回放 options 的并发只读调用不共享（各自独立全量回放）', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    const [disabled, apply] = await Promise.all([
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled' }),
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'apply' }),
+    ]);
+
+    // options 不同 → in-flight key 不同 → 不共享。
+    expect(disabled?.metrics?.replayShareCount).toBe(0);
+    expect(apply?.metrics?.replayShareCount).toBe(0);
+    expect(disabled?.data).toEqual(apply?.data);
   });
 
   it('阶段 G2：不同 boundary 的并发调用不共享（各跑各的全量回放）', async () => {
