@@ -120,7 +120,12 @@ export interface SummaryVectorArchivePreparedRow_ACU {
  */
 export const SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU = 1600;
 
-const SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU = ['纪要', '纪要内容', '纪要正文', '事件纪要', '详细纪要', '正文'];
+export const SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU = ['纪要', '纪要内容', '纪要正文', '事件纪要', '详细纪要', '正文'];
+
+export const SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU = ['时间跨度', '时间', '阶段', '时段'];
+export const SUMMARY_LOCATION_COLUMN_ALIASES_ACU = ['地点', '位置', '场景', '场所'];
+export const SUMMARY_SUMMARY_COLUMN_ALIASES_ACU = ['概要', '概览', '概述', '摘要'];
+export const SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU = ['编码索引'];
 
 /**
  * 概览在前保住高密度摘要信号，纪要正文补充实体与细节；两者都为空的行由调用方跳过。
@@ -327,7 +332,7 @@ function normalizeText_ACU(value: any): string {
     return String(value ?? '').trim();
 }
 
-function resolveColumnIndexByAliases_ACU(headerRow: any[], aliases: string[], fallbackIndex = -1): number {
+export function resolveColumnIndexByAliases_ACU(headerRow: any[], aliases: string[], fallbackIndex = -1): number {
     const normalizedAliases = aliases.map((item) => normalizeText_ACU(item).replace(/\s+/g, ''));
     const index = (Array.isArray(headerRow) ? headerRow : []).findIndex((header) => normalizedAliases.includes(normalizeText_ACU(header).replace(/\s+/g, '')));
     return index >= 0 ? index : fallbackIndex;
@@ -409,10 +414,10 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
 } {
     const content = Array.isArray(table?.content) ? table.content : [];
     const headerRow = Array.isArray(content[0]) ? content[0] : [];
-    const timeSpanColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['时间跨度', '时间', '阶段', '时段'], 0);
-    const locationColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['地点', '位置', '场景', '场所'], 1);
-    const summaryColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['概要', '概览', '概述', '摘要']);
-    const indexColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['编码索引']);
+    const timeSpanColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU, 0);
+    const locationColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_LOCATION_COLUMN_ALIASES_ACU, 1);
+    const summaryColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_SUMMARY_COLUMN_ALIASES_ACU);
+    const indexColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU);
     const chronicleColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU);
     if (summaryColIdx < 0) {
         return { rows: [], skippedRowCount: 0, error: '纪要表缺少概要列，无法构建纪要向量索引。' };
