@@ -13,9 +13,11 @@
  * 并声明别名「主角技能表」）同样属于同一逻辑表。身份交集按并查集传递归并。
  *
  * 本模块在**内存回放副本**上把同一身份组的多个 key 归并为一个：优先保留当前
- * 模板/指导表侧 key，旧 key 的数据按 row_id 并入（winner 同 id 胜出、
- * loser 独有行追加，与旧版逐楼覆盖语义一致），loser 的显示名与别名累积进
- * winner 的 tableAliases 以保留身份。纯函数、幂等、无 IO，不修改任何持久化 storage frame。
+ * 模板/指导表侧 key，旧 key 的行按**表头名**映射到 winner 列结构后按 row_id 并入
+ * （独有行追加；同 id 相等去重、winner 空行取 loser、两侧均有值则 winner 胜出并记录
+ * 冲突），loser 的显示名与别名累积进 winner 的 tableAliases 以保留身份。
+ * 严格回放与 Tier-1 宽容回放共用本函数：同名不同 key 是正常的模板演进结果，不是异常。
+ * 纯函数、幂等、无 IO，不修改任何持久化 storage frame。
  */
 import type { Sheet_ACU, TableDataObject_ACU } from './models/table-data';
 import { buildStableSheetKeyCandidate_ACU, canonicalizeDisplayName_ACU } from './sheet-identity';
@@ -31,6 +33,68 @@ export interface SheetIdentityRemap_ACU {
   overriddenRows: number;
   /** loser 中被追加进 winner 的独有行数。 */
   appendedRows: number;
+  /**
+   * 同 row_id 且两侧业务单元格都非空、映射后仍不相等的行 id：winner 行保留，loser 行
+   * 被丢弃但不静默——调用方（回放诊断 / 恢复）据此向用户展示冲突。
+   */
+  conflictingRowIds: string[];
+  /** loser 表头中 winner 没有的列名：这些列的数据无法并入 winner 结构，随归并丢弃。 */
+  droppedColumns: string[];
+}
+
+function normalizeHeaderCell_ACU(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function hasBusinessCellValue_ACU(row: unknown[]): boolean {
+  for (let index = 1; index < row.length; index += 1) {
+    if (normalizeHeaderCell_ACU(row[index]) !== '') return true;
+  }
+  return false;
+}
+
+function rowsEqual_ACU(left: unknown[], right: unknown[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (normalizeHeaderCell_ACU(left[index]) !== normalizeHeaderCell_ACU(right[index])) return false;
+  }
+  return true;
+}
+
+/**
+ * 把 loser 的一行按**表头名**映射到 winner 的列结构：第 0 列恒为 row_id；其余列按
+ * 表头文本（trim 后精确匹配）对齐，winner 独有列填 ''，loser 独有列丢弃并记入
+ * droppedColumns。表头完全一致时退化为原行拷贝（零成本路径）。
+ * 同名异构模板切换（列重排 / 中间新增列 / 删列）下，按位置拼接会把值写进错误的列；
+ * 按名映射是"同名表直接合并"的最低保真要求。
+ */
+function mapLoserRowToWinnerColumns_ACU(
+  winnerHeader: string[],
+  loserHeader: string[],
+  row: string[],
+  droppedColumns: Set<string>,
+): string[] {
+  if (rowsEqual_ACU(winnerHeader, loserHeader)) return [...row];
+  const loserIndexByName = new Map<string, number>();
+  for (let index = 1; index < loserHeader.length; index += 1) {
+    const name = normalizeHeaderCell_ACU(loserHeader[index]);
+    if (name && !loserIndexByName.has(name)) loserIndexByName.set(name, index);
+  }
+  const winnerNames = new Set<string>();
+  const mapped: string[] = new Array(winnerHeader.length).fill('');
+  mapped[0] = row[0] ?? '';
+  for (let index = 1; index < winnerHeader.length; index += 1) {
+    const name = normalizeHeaderCell_ACU(winnerHeader[index]);
+    winnerNames.add(name);
+    const loserIndex = name ? loserIndexByName.get(name) : undefined;
+    if (loserIndex !== undefined && loserIndex < row.length) mapped[index] = row[loserIndex];
+  }
+  for (const [name, loserIndex] of loserIndexByName) {
+    if (!winnerNames.has(name) && loserIndex < row.length && normalizeHeaderCell_ACU(row[loserIndex]) !== '') {
+      droppedColumns.add(name);
+    }
+  }
+  return mapped;
 }
 
 export interface SheetIdentityMergeResult_ACU {
@@ -40,17 +104,6 @@ export interface SheetIdentityMergeResult_ACU {
 
 function isSheetLike_ACU(value: unknown): value is Sheet_ACU {
   return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function collectRowIds_ACU(content: unknown[]): Set<string> {
-  const ids = new Set<string>();
-  for (let index = 1; index < content.length; index += 1) {
-    const row = content[index];
-    if (!Array.isArray(row)) continue;
-    const id = String(row[0] ?? '').trim();
-    if (id) ids.add(id);
-  }
-  return ids;
 }
 
 function readExplicitTableAliases_ACU(sheet: Sheet_ACU): string[] {
@@ -208,6 +261,8 @@ export function mergeLegacySheetIdentities_ACU(
       const loser = sheets.get(loserKey)!;
       let overriddenRows = 0;
       let appendedRows = 0;
+      const conflictingRowIds: string[] = [];
+      const droppedColumns = new Set<string>();
 
       const winnerHasContent = Array.isArray(winner.content) && winner.content.length > 0;
       const loserHasContent = Array.isArray(loser.content) && loser.content.length > 0;
@@ -216,18 +271,37 @@ export function mergeLegacySheetIdentities_ACU(
         winner.content = loser.content;
         appendedRows = loser.content.length > 0 ? loser.content.length - 1 : 0;
       } else if (winnerHasContent && loserHasContent) {
-        const winnerIds = collectRowIds_ACU(winner.content);
+        const winnerHeader: string[] = Array.isArray(winner.content[0]) ? winner.content[0] : [];
+        const loserHeader: string[] = Array.isArray(loser.content[0]) ? loser.content[0] : [];
+        const winnerRowIndexById = new Map<string, number>();
+        for (let index = 1; index < winner.content.length; index += 1) {
+          const row = winner.content[index];
+          if (!Array.isArray(row)) continue;
+          const id = String(row[0] ?? '').trim();
+          if (id && !winnerRowIndexById.has(id)) winnerRowIndexById.set(id, index);
+        }
         for (let index = 1; index < loser.content.length; index += 1) {
           const row = loser.content[index];
           if (!Array.isArray(row)) continue;
           const rowId = String(row[0] ?? '').trim();
-          if (rowId && winnerIds.has(rowId)) {
-            // 同 row_id：winner（当前/模板侧，写入更晚）胜出。
+          const mapped = mapLoserRowToWinnerColumns_ACU(winnerHeader, loserHeader, row, droppedColumns);
+          const winnerIndex = rowId ? winnerRowIndexById.get(rowId) : undefined;
+          if (winnerIndex !== undefined) {
+            const winnerRow = winner.content[winnerIndex];
             overriddenRows += 1;
+            // 同 row_id：映射后相等 → 纯重复；winner 行没有任何业务值（模板 header-only
+            // 派生或占位行）→ 历史数据更有信息量，取 loser；两侧都有值且不等 → 保留
+            // winner（当前/模板侧）并记录冲突，不静默。
+            if (rowsEqual_ACU(winnerRow, mapped)) continue;
+            if (!hasBusinessCellValue_ACU(winnerRow) && hasBusinessCellValue_ACU(mapped)) {
+              winner.content[winnerIndex] = mapped;
+              continue;
+            }
+            if (hasBusinessCellValue_ACU(mapped)) conflictingRowIds.push(rowId);
             continue;
           }
-          winner.content.push(row);
-          if (rowId) winnerIds.add(rowId);
+          winner.content.push(mapped);
+          if (rowId) winnerRowIndexById.set(rowId, winner.content.length - 1);
           appendedRows += 1;
         }
       }
@@ -245,7 +319,15 @@ export function mergeLegacySheetIdentities_ACU(
 
       delete (state as Record<string, unknown>)[loserKey];
       sheets.delete(loserKey);
-      remaps.push({ fromKey: loserKey, toKey: winnerKey, canonicalName, overriddenRows, appendedRows });
+      remaps.push({
+        fromKey: loserKey,
+        toKey: winnerKey,
+        canonicalName,
+        overriddenRows,
+        appendedRows,
+        conflictingRowIds,
+        droppedColumns: [...droppedColumns].sort(),
+      });
     }
   }
 

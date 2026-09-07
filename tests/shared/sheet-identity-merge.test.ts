@@ -45,12 +45,15 @@ describe('mergeLegacySheetIdentities_ACU', () => {
     const result = mergeLegacySheetIdentities_ACU(state);
 
     expect(result.changed).toBe(true);
+    // row_id=1 两侧都有不同的值：winner 行保留，冲突 id 记录、不静默。
     expect(result.remaps).toEqual([{
       fromKey: 'sheet_x9k2f',
       toKey: NEW_KEY,
       canonicalName: '背包',
       overriddenRows: 1,
       appendedRows: 1,
+      conflictingRowIds: ['1'],
+      droppedColumns: [],
     }]);
     expect(state.sheet_x9k2f).toBeUndefined();
     expect(state[NEW_KEY].content).toEqual([
@@ -74,6 +77,8 @@ describe('mergeLegacySheetIdentities_ACU', () => {
       canonicalName: '背包',
       overriddenRows: 1,
       appendedRows: 1,
+      conflictingRowIds: ['1'],
+      droppedColumns: [],
     }]);
     expect(state[NEW_KEY]).toBeUndefined();
     expect(state.sheet_legacy_hash.content).toEqual([
@@ -136,6 +141,41 @@ describe('mergeLegacySheetIdentities_ACU', () => {
     expect(state).toEqual(afterFirst);
   });
 
+  it('同名异构：loser 行按表头名映射到 winner 列（重排/新增列补空），不按位置拼接', () => {
+    const state = {
+      // 旧结构：name, state
+      sheet_old_hash: { ...makeSheet('主角信息表', []), content: [['row_id', 'name', 'state'], ['1', '名字0', '状态=旧A1']] },
+      // 新结构：state 前移、中间新增 pos 列
+      sheet_zhu_jue_xin_xi_biao: { ...makeSheet('主角信息表', []), content: [['row_id', 'state', 'pos', 'name']] },
+    } as any;
+
+    const result = mergeLegacySheetIdentities_ACU(state, ['sheet_zhu_jue_xin_xi_biao']);
+
+    expect(state.sheet_old_hash).toBeUndefined();
+    expect(state.sheet_zhu_jue_xin_xi_biao.content).toEqual([
+      ['row_id', 'state', 'pos', 'name'],
+      ['1', '状态=旧A1', '', '名字0'],
+    ]);
+    expect(result.remaps).toEqual([expect.objectContaining({ appendedRows: 1, conflictingRowIds: [], droppedColumns: [] })]);
+  });
+
+  it('同名异构：loser 独有列的数据无法并入时记入 droppedColumns；同 id 时 winner 空行取 loser 值', () => {
+    const state = {
+      sheet_old_hash: { ...makeSheet('主角信息表', []), content: [['row_id', 'name', 'legacy_only'], ['1', '名字0', '旧独有值'], ['2', '名字2', '']] },
+      sheet_zhu_jue_xin_xi_biao: { ...makeSheet('主角信息表', []), content: [['row_id', 'name'], ['1', '']] },
+    } as any;
+
+    const result = mergeLegacySheetIdentities_ACU(state, ['sheet_zhu_jue_xin_xi_biao']);
+
+    expect(state.sheet_zhu_jue_xin_xi_biao.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '名字0'],
+      ['2', '名字2'],
+    ]);
+    // 只有 row 1 的 legacy_only 有值，才算丢弃了该列的数据；row 2 该列为空不计。
+    expect(result.remaps).toEqual([expect.objectContaining({ overriddenRows: 1, appendedRows: 1, conflictingRowIds: [], droppedColumns: ['legacy_only'] })]);
+  });
+
   it('行身份守恒：归并后不同 row_id 的行一个不丢', () => {
     const state = {
       sheet_old_hash: makeSheet('背包', [['1', '旧1'], ['2', '旧2'], ['5', '旧5']]),
@@ -166,6 +206,8 @@ describe('mergeLegacySheetIdentities_ACU', () => {
       canonicalName: '主角技能',
       overriddenRows: 0,
       appendedRows: 0,
+      conflictingRowIds: [],
+      droppedColumns: [],
     }]);
     expect(state.sheet_lEARaBa8).toBeUndefined();
     expect(state[SKILL_KEY].content).toEqual([['row_id', 'name'], ['1', '火球']]);

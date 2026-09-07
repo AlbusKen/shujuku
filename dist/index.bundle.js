@@ -40164,20 +40164,60 @@ $CONTENT
         return data;
     }
 
+    function normalizeHeaderCell_ACU(value) {
+        return String(value ?? '').trim();
+    }
+    function hasBusinessCellValue_ACU(row) {
+        for (let index = 1; index < row.length; index += 1) {
+            if (normalizeHeaderCell_ACU(row[index]) !== '')
+                return true;
+        }
+        return false;
+    }
+    function rowsEqual_ACU(left, right) {
+        if (left.length !== right.length)
+            return false;
+        for (let index = 0; index < left.length; index += 1) {
+            if (normalizeHeaderCell_ACU(left[index]) !== normalizeHeaderCell_ACU(right[index]))
+                return false;
+        }
+        return true;
+    }
+    /**
+     * 把 loser 的一行按**表头名**映射到 winner 的列结构：第 0 列恒为 row_id；其余列按
+     * 表头文本（trim 后精确匹配）对齐，winner 独有列填 ''，loser 独有列丢弃并记入
+     * droppedColumns。表头完全一致时退化为原行拷贝（零成本路径）。
+     * 同名异构模板切换（列重排 / 中间新增列 / 删列）下，按位置拼接会把值写进错误的列；
+     * 按名映射是"同名表直接合并"的最低保真要求。
+     */
+    function mapLoserRowToWinnerColumns_ACU(winnerHeader, loserHeader, row, droppedColumns) {
+        if (rowsEqual_ACU(winnerHeader, loserHeader))
+            return [...row];
+        const loserIndexByName = new Map();
+        for (let index = 1; index < loserHeader.length; index += 1) {
+            const name = normalizeHeaderCell_ACU(loserHeader[index]);
+            if (name && !loserIndexByName.has(name))
+                loserIndexByName.set(name, index);
+        }
+        const winnerNames = new Set();
+        const mapped = new Array(winnerHeader.length).fill('');
+        mapped[0] = row[0] ?? '';
+        for (let index = 1; index < winnerHeader.length; index += 1) {
+            const name = normalizeHeaderCell_ACU(winnerHeader[index]);
+            winnerNames.add(name);
+            const loserIndex = name ? loserIndexByName.get(name) : undefined;
+            if (loserIndex !== undefined && loserIndex < row.length)
+                mapped[index] = row[loserIndex];
+        }
+        for (const [name, loserIndex] of loserIndexByName) {
+            if (!winnerNames.has(name) && loserIndex < row.length && normalizeHeaderCell_ACU(row[loserIndex]) !== '') {
+                droppedColumns.add(name);
+            }
+        }
+        return mapped;
+    }
     function isSheetLike_ACU(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
-    }
-    function collectRowIds_ACU$1(content) {
-        const ids = new Set();
-        for (let index = 1; index < content.length; index += 1) {
-            const row = content[index];
-            if (!Array.isArray(row))
-                continue;
-            const id = String(row[0] ?? '').trim();
-            if (id)
-                ids.add(id);
-        }
-        return ids;
     }
     function readExplicitTableAliases_ACU(sheet) {
         const raw = sheet.sourceData?.tableAliases;
@@ -40335,6 +40375,8 @@ $CONTENT
                 const loser = sheets.get(loserKey);
                 let overriddenRows = 0;
                 let appendedRows = 0;
+                const conflictingRowIds = [];
+                const droppedColumns = new Set();
                 const winnerHasContent = Array.isArray(winner.content) && winner.content.length > 0;
                 const loserHasContent = Array.isArray(loser.content) && loser.content.length > 0;
                 if (!winnerHasContent && loserHasContent) {
@@ -40343,20 +40385,43 @@ $CONTENT
                     appendedRows = loser.content.length > 0 ? loser.content.length - 1 : 0;
                 }
                 else if (winnerHasContent && loserHasContent) {
-                    const winnerIds = collectRowIds_ACU$1(winner.content);
+                    const winnerHeader = Array.isArray(winner.content[0]) ? winner.content[0] : [];
+                    const loserHeader = Array.isArray(loser.content[0]) ? loser.content[0] : [];
+                    const winnerRowIndexById = new Map();
+                    for (let index = 1; index < winner.content.length; index += 1) {
+                        const row = winner.content[index];
+                        if (!Array.isArray(row))
+                            continue;
+                        const id = String(row[0] ?? '').trim();
+                        if (id && !winnerRowIndexById.has(id))
+                            winnerRowIndexById.set(id, index);
+                    }
                     for (let index = 1; index < loser.content.length; index += 1) {
                         const row = loser.content[index];
                         if (!Array.isArray(row))
                             continue;
                         const rowId = String(row[0] ?? '').trim();
-                        if (rowId && winnerIds.has(rowId)) {
-                            // 同 row_id：winner（当前/模板侧，写入更晚）胜出。
+                        const mapped = mapLoserRowToWinnerColumns_ACU(winnerHeader, loserHeader, row, droppedColumns);
+                        const winnerIndex = rowId ? winnerRowIndexById.get(rowId) : undefined;
+                        if (winnerIndex !== undefined) {
+                            const winnerRow = winner.content[winnerIndex];
                             overriddenRows += 1;
+                            // 同 row_id：映射后相等 → 纯重复；winner 行没有任何业务值（模板 header-only
+                            // 派生或占位行）→ 历史数据更有信息量，取 loser；两侧都有值且不等 → 保留
+                            // winner（当前/模板侧）并记录冲突，不静默。
+                            if (rowsEqual_ACU(winnerRow, mapped))
+                                continue;
+                            if (!hasBusinessCellValue_ACU(winnerRow) && hasBusinessCellValue_ACU(mapped)) {
+                                winner.content[winnerIndex] = mapped;
+                                continue;
+                            }
+                            if (hasBusinessCellValue_ACU(mapped))
+                                conflictingRowIds.push(rowId);
                             continue;
                         }
-                        winner.content.push(row);
+                        winner.content.push(mapped);
                         if (rowId)
-                            winnerIds.add(rowId);
+                            winnerRowIndexById.set(rowId, winner.content.length - 1);
                         appendedRows += 1;
                     }
                 }
@@ -40372,7 +40437,15 @@ $CONTENT
                 accumulateMergedTableAliases_ACU(winner, loser);
                 delete state[loserKey];
                 sheets.delete(loserKey);
-                remaps.push({ fromKey: loserKey, toKey: winnerKey, canonicalName, overriddenRows, appendedRows });
+                remaps.push({
+                    fromKey: loserKey,
+                    toKey: winnerKey,
+                    canonicalName,
+                    overriddenRows,
+                    appendedRows,
+                    conflictingRowIds,
+                    droppedColumns: [...droppedColumns].sort(),
+                });
             }
         }
         return { changed: remaps.length > 0, remaps };
@@ -41779,11 +41852,57 @@ $CONTENT
             runtime.mode = 'js_materialized';
         }
     }
-    async function ensureSqlReplayRuntime_ACU(runtime, state, options = {}) {
+    function createReplayIdentityMergeContext_ACU(headerOnlyTemplate) {
+        return {
+            preferredKeys: headerOnlyTemplate
+                ? Object.keys(headerOnlyTemplate).filter(key => key.startsWith('sheet_'))
+                : null,
+            merges: [],
+            loserKeys: new Set(),
+        };
+    }
+    /**
+     * 严格回放中的同名 sheetKey 归并（正常语义，不是兼容修复）。
+     *
+     * 同一张逻辑表在旧历史与新模板中持有不同 key（模板导入/切换后的常见演进），
+     * 若放任双 key 进入 SQL 段，物理表名解析必然冲突；用户期望的行为是"同名表直接合并
+     * 到当前模板的表下"。归并只能在 JS state 为权威时执行（runtime 未加载 / 已 materialize），
+     * 调用点：基底建立后、sheet checkpoint 应用后、进入 SQL 段 hydrate 前、回放结束时。
+     * 幂等：无同名冲突时零改动。发生归并后 alias registry 必须失效（表身份证据已变化）。
+     */
+    function mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, stage, aliasContext, metrics) {
+        if (!identity)
+            return;
+        const merge = mergeLegacySheetIdentities_ACU(state, identity.preferredKeys);
+        if (merge.remaps.length === 0)
+            return;
+        for (const remap of merge.remaps) {
+            identity.merges.push(remap);
+            identity.loserKeys.add(remap.fromKey);
+        }
+        if (aliasContext?.enabled)
+            invalidateReplayAliasContext_ACU(aliasContext);
+        else if (metrics)
+            metrics.aliasInvalidateCount += 1;
+        const detail = merge.remaps
+            .map(remap => `${remap.fromKey}→${remap.toKey}「${remap.canonicalName}」（并入 ${remap.appendedRows} 行、同 id ${remap.overriddenRows} 行`
+            + `${remap.conflictingRowIds.length > 0 ? `、冲突 ${remap.conflictingRowIds.length} 行` : ''}`
+            + `${remap.droppedColumns.length > 0 ? `、丢弃列 ${remap.droppedColumns.join('/')}` : ''}）`)
+            .join('；');
+        const hasLoss = merge.remaps.some(remap => remap.conflictingRowIds.length > 0 || remap.droppedColumns.length > 0);
+        const message = `[V2 Replay] 同名 sheetKey 身份归并（${stage}）：${detail}。原 storage frame 未修改；下次 checkpoint 固化后历史只保留归并后的 key。`;
+        if (hasLoss)
+            logWarn_ACU(message);
+        else
+            logDebug_ACU(message);
+    }
+    async function ensureSqlReplayRuntime_ACU(runtime, state, options = {}, context) {
         // 惰性 hydrate：仅在进入下一 SQL 段时从最新 `state` 加载一次。
         // SQLite 已是当前权威状态时直接复用，禁止在每 operation 后重建。
         if (runtime.mode === 'sqlite_loaded')
             return;
+        // 进入 SQL 段前 JS state 是权威：先归并同名 key，否则 hydrate 的物理表名解析必然冲突。
+        mergeSameNameSheetIdentitiesForReplay_ACU(state, options.identity, 'sql hydrate', context, options.metrics);
         if (runtime.mode === 'js_materialized' && runtime.loaded) {
             // 状态机不变量：js_materialized 时 SQLite 必须已 dispose（见 materialize），
             // 因此这里的 loaded 只可能来自未 materialize 的初始构造，按未加载处理。
@@ -41844,7 +41963,7 @@ $CONTENT
             ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
             : deepClone_ACU$5(state);
     }
-    async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime, metrics, context) {
+    async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime, metrics, context, identity) {
         if (checkpoints.length === 0)
             return;
         if (context?.enabled)
@@ -41864,6 +41983,9 @@ $CONTENT
                 candidate[checkpoint.sheetKey] = deepClone_ACU$5(checkpoint.data);
             }
         }
+        // timeline 锚点 / sheet checkpoint 是新 key 进入历史的主要途径（模板切换后首次写入
+        // 补写的 header-only 锚点）：写入 state 后立即按名归并，让同名旧 key 的数据并入。
+        mergeSameNameSheetIdentitiesForReplay_ACU(candidate, identity, `sheet checkpoints@${checkpoints.map(checkpoint => checkpoint.sheetKey).join('/')}`, context, metrics);
         replaceState_ACU(state, candidate);
     }
     function buildReplaySqlTableAliases_ACU(state, operation, metrics, context) {
@@ -41969,7 +42091,7 @@ $CONTENT
             return;
         if (options.metrics)
             options.metrics.sqlOperationCount += statements.length;
-        await ensureSqlReplayRuntime_ACU(runtime, state, options);
+        await ensureSqlReplayRuntime_ACU(runtime, state, options, context);
         // 结构 SQL（CREATE/ALTER/DROP/RENAME）改变 runtime schema，无法证明与 JS
         // state 在连续语句间保持同步；首版对含结构 SQL 的 operation 强制走冷 registry
         // 路径（本次重建，不读取也不写入缓存），保证后续 DML 仍可用同 epoch 缓存。
@@ -42362,8 +42484,8 @@ $CONTENT
             }
         }
     }
-    async function applyTableOperationV2_ACU(state, operation, runtime, supplementalTemplate, metrics, context) {
-        await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, undefined, metrics, context);
+    async function applyTableOperationV2_ACU(state, operation, runtime, supplementalTemplate, metrics, context, identity) {
+        await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, { identity }, metrics, context);
     }
     async function applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, options = {}, metrics, context) {
         if (!operation || typeof operation !== 'object' || typeof operation.kind !== 'string') {
@@ -42633,6 +42755,10 @@ $CONTENT
             headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
             if (headerOnlyTemplate)
                 headerOnlyTemplateFingerprint = getTableDataFingerprint_ACU(headerOnlyTemplate);
+            // 同名 sheetKey 身份归并上下文（严格语义）：模板侧 key 优先保留。基底本身也可能
+            // 已含两代 key（根内双身份），此时 runtime 尚未加载、JS state 权威，先归并。
+            const identity = createReplayIdentityMergeContext_ACU(headerOnlyTemplate);
+            mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, 'base', aliasContext, metrics);
             // 阶段 I：只读 replay 的取消检查点。
             //
             // 只在 updateRuntimeState===false 时生效：副作用路径（replayEventForState_ACU /
@@ -42686,7 +42812,7 @@ $CONTENT
                 // that same frame have no ordering marker proving they occurred after
                 // it, so replaying them would resurrect superseded data. Timeline
                 // checkpoints are retained below and only become due after anchor seq.
-                checkpoints.filter(checkpoint => checkpoint.timeline === undefined && !isAnchorFrame), runtime, metrics, aliasContext);
+                checkpoints.filter(checkpoint => checkpoint.timeline === undefined && !isAnchorFrame), runtime, metrics, aliasContext, identity);
                 const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
                 metrics.logEntryCount += entries.length;
                 const pendingIntroductions = isAnchorFrame
@@ -42696,7 +42822,7 @@ $CONTENT
                     const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline.afterSeq < nextSeq);
                     if (due.length === 0)
                         return;
-                    await applySheetCheckpointsForReplay_ACU(state, due, runtime, metrics, aliasContext);
+                    await applySheetCheckpointsForReplay_ACU(state, due, runtime, metrics, aliasContext, identity);
                     for (const checkpoint of due) {
                         if (options.updateRuntimeState !== false) {
                             replayEventForState_ACU(checkpoint.event, ref.aiFloor);
@@ -42726,10 +42852,13 @@ $CONTENT
                                     continue;
                                 }
                                 try {
+                                    // 目标 key 若已被同名归并掉（loser），它的数据就在 winner 表里，SQL 经
+                                    // 历史 tableName / 别名直达 winner 物理表；此时绝不能再从模板补一个同名锚点。
                                     if (options.compatibilityMode !== 'disabled'
                                         && operation?.kind === 'sql_sheet_batch'
                                         && typeof operation.sheetKey === 'string'
                                         && operation.sheetKey.startsWith('sheet_')
+                                        && !identity.loserKeys.has(operation.sheetKey)
                                         && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
                                         const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                                         if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
@@ -42754,7 +42883,7 @@ $CONTENT
                                             logWarn_ACU(`[V2 Replay] operation 执行点缺少目标表，已从当前聊天模板临时补锚：sheetKey=${operation.sheetKey}, messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}。该状态需要由 recovery 或 compaction 固化。`);
                                         }
                                     }
-                                    await applyTableOperationV2_ACU(state, operation, runtime, headerOnlyTemplate, metrics, aliasContext);
+                                    await applyTableOperationV2_ACU(state, operation, runtime, headerOnlyTemplate, metrics, aliasContext, identity);
                                 }
                                 catch (error) {
                                     const message = error instanceof Error ? error.message : String(error);
@@ -42813,6 +42942,7 @@ $CONTENT
                     // 即整体失败，不得返回不完整快照）。metrics 为该 boundary 捕获时的累计值
                     // 浅拷贝（不共享同一引用，外层可安全持有各快照）。
                     await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+                    mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, `boundary@${ref.messageIndex}`, aliasContext, metrics);
                     const snapshotBaseKind = baseKind;
                     const snapshotRepairs = compatibilityRepairs.length > 0 ? [...compatibilityRepairs] : undefined;
                     capturedBoundaries.set(ref.messageIndex, {
@@ -42822,12 +42952,16 @@ $CONTENT
                         capturedBoundary: ref.messageIndex,
                         ...(snapshotRepairs ? { compatibilityRepairs: snapshotRepairs } : {}),
                         ...(snapshotRepairs ? { requiresCheckpointConvergence: true } : {}),
+                        ...(identity.merges.length > 0 ? { identityMerges: identity.merges.map(remap => ({ ...remap })) } : {}),
                     });
                     captureBoundarySet.delete(ref.messageIndex);
                 }
             }
             // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
             await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+            // JS op（sheet_replace / data_replace）在最后一个 SQL 段之后引入的同名 key 在此收口，
+            // 保证返回的 data 永远是单身份。
+            mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, 'final', aliasContext, metrics);
             // 阶段 H：捕获全部命中后，主结果 data 以最终 state 为准（与单边界语义一致）；
             // capturedBoundaries 由调用方通过 loadTableStatesAtBoundariesFromFramesV2Detailed_ACU
             // 读取。若捕获列表非空（部分 boundary 未命中——例如 boundary 早于起算 checkpoint
@@ -42838,6 +42972,7 @@ $CONTENT
                 metrics,
                 ...(compatibilityRepairs.length > 0 ? { compatibilityRepairs } : {}),
                 ...(compatibilityRepairs.length > 0 ? { requiresCheckpointConvergence: true } : {}),
+                ...(identity.merges.length > 0 ? { identityMerges: identity.merges } : {}),
             };
         }
         finally {
@@ -47861,27 +47996,9 @@ $CONTENT
                     const missingSheetKeys = operationSheetKeys.filter(sheetKey => Boolean(afterData[sheetKey])
                         && (!Object.prototype.hasOwnProperty.call(replayBeforeAppend?.data || {}, sheetKey)
                             || compatibilityOnlySheetKeys.has(sheetKey)));
-                    // 双身份写入口门闸：补写的锚点会以 sheet_introduction/sheet_reveal timeline 把一个
-                    // 新 sheetKey 永久引入历史。若它与既有活跃表解析到同一 SQLite 物理表名（同名表换了
-                    // key，或不同表拼音同名），后续任何 SQL 段回放都会以「物理表名冲突」失败——这正是
-                    // 存量双身份历史的产生方式。同名表必须沿用既有 sheetKey（模板协调保留 previous.key），
-                    // 这里 fail-closed，不让写入口再制造新的双身份。
-                    if (missingSheetKeys.length > 0) {
-                        const projectedActiveState = { ...(replayBeforeAppend?.data || {}) };
-                        for (const sheetKey of missingSheetKeys)
-                            projectedActiveState[sheetKey] = afterData[sheetKey];
-                        const introducedCollisions = detectPhysicalTableNameCollisions_ACU(projectedActiveState)
-                            .filter(collision => collision.sheetKeys.some(sheetKey => missingSheetKeys.includes(sheetKey)));
-                        if (introducedCollisions.length > 0) {
-                            const detail = introducedCollisions
-                                .map(collision => `物理表名「${collision.physicalTableName}」← ${collision.sheetNames.map((name, index) => `「${name}」(${collision.sheetKeys[index]})`).join(' / ')}；原因=${collision.reason}`)
-                                .join('；');
-                            return {
-                                saved: false,
-                                error: `V2 写入前检测到本次要新引入的表与既有活跃表物理表名冲突（双身份），已拒绝补写 per-sheet 锚点：${detail}。同名表应沿用既有 sheetKey；不同表拼音同名需先重命名。`,
-                            };
-                        }
-                    }
+                    // 同名不同 key 的新表在这里以锚点进入历史是模板演进的正常结果：严格回放会在
+                    // 锚点应用时按名把旧 key 的数据并入（storage-frame-v2-replay.ts
+                    // mergeSameNameSheetIdentitiesForReplay_ACU），因此不在写入口拒绝。
                     const introduced = [];
                     for (const sheetKey of missingSheetKeys) {
                         // 锚点只提供表结构，必须裁成 header-only：
@@ -106154,6 +106271,14 @@ $CONTENT
             detail: `列结构不同（${headers.map((header, index) => `${collision.sheetKeys[index]}:[${header.join('、')}]`).join(' vs ')}}）且存在数据。`,
         };
     }
+    /**
+     * 回放无法自动解决的身份冲突：只保留「不同表拼音同名」（homophone_distinct_names）。
+     * 「同一显示名多个 key」（identity_merge_failed）由严格回放按名归并处理，不是恢复阻断项。
+     */
+    function detectUnmergeableIdentityConflicts_ACU(data) {
+        return detectPhysicalTableNameCollisions_ACU((data || {}))
+            .filter(collision => collision.reason === 'homophone_distinct_names');
+    }
     function buildIdentityConflictSummary_ACU(isolationKey, sourceMessageIndex, conflicts, data) {
         const detail = conflicts
             .map(collision => {
@@ -106188,7 +106313,7 @@ $CONTENT
                 // 降级多余 full 在数学上不可能改变回放输出 —— 降级前后指纹必须一致，由 P4-6 强校验。
                 const rootReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
                 const rootData = rootReplay?.data || latestFull.frame.checkpoint.data;
-                const rootIdentityConflicts = detectPhysicalTableNameCollisions_ACU(rootData);
+                const rootIdentityConflicts = detectUnmergeableIdentityConflicts_ACU(rootData);
                 if (rootIdentityConflicts.length > 0) {
                     return { summary: buildIdentityConflictSummary_ACU(isolationKey, rootIndex, rootIdentityConflicts, rootData) };
                 }
@@ -106216,10 +106341,10 @@ $CONTENT
             }
             const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
             if (repair.status === 'clean') {
-                // P5：物理表名冲突（同一规范显示名保留为多个 sheetKey，或不同表拼音同名）
-                // 是双身份的直接证据。JS 回放可能“成功”，因为冲突只发生在 SQLite 物理表名
-                // 维度，不能在 clean 分支直接走到“无需恢复”或 integrity_repair 收敛。
-                const identityConflicts = detectPhysicalTableNameCollisions_ACU(latestFull.frame.checkpoint.data);
+                // P5：不同表拼音同名的物理表名冲突无法由回放自动解决，是需要用户重命名的硬冲突。
+                // 同名不同 key（identity_merge_failed）则由严格回放按名归并（模板演进的正常结果），
+                // 不在这里判为不可恢复。
+                const identityConflicts = detectUnmergeableIdentityConflicts_ACU(latestFull.frame.checkpoint.data);
                 if (identityConflicts.length > 0) {
                     return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, identityConflicts, latestFull.frame.checkpoint.data) };
                 }
@@ -106249,10 +106374,9 @@ $CONTENT
                             message: `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要身份归一化恢复。' : '无身份归并的兼容结果会在后台固化为过渡根。'}`,
                         } };
                 }
-                // 根快照干净不代表整条历史干净：双身份可由 timeline 锚点 / sheet_replace 在根之后
-                // 引入，strict 回放照样成功（SQL 段未触及时物理表名冲突不暴露），双 key 随结果
-                // 静默流出。必须对回放结果也做物理表名冲突审计，否则会落到下方「无需恢复」。
-                const replayIdentityConflicts = detectPhysicalTableNameCollisions_ACU(replay?.data || {});
+                // 根快照干净不代表整条历史干净：回放结果里若仍有拼音同名的不同表（回放归并只处理
+                // 同名表），必须在此报出，否则会落到下方「无需恢复」。
+                const replayIdentityConflicts = detectUnmergeableIdentityConflicts_ACU(replay?.data || {});
                 if (replayIdentityConflicts.length > 0) {
                     return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, replayIdentityConflicts, replay?.data) };
                 }

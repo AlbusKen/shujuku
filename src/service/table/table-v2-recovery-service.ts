@@ -424,6 +424,15 @@ function describeIdentityConflict_ACU(
   };
 }
 
+/**
+ * 回放无法自动解决的身份冲突：只保留「不同表拼音同名」（homophone_distinct_names）。
+ * 「同一显示名多个 key」（identity_merge_failed）由严格回放按名归并处理，不是恢复阻断项。
+ */
+function detectUnmergeableIdentityConflicts_ACU(data: unknown): PhysicalTableNameCollision_ACU[] {
+  return detectPhysicalTableNameCollisions_ACU((data || {}) as Record<string, unknown>)
+    .filter(collision => collision.reason === 'homophone_distinct_names');
+}
+
 function buildIdentityConflictSummary_ACU(
   isolationKey: string,
   sourceMessageIndex: number,
@@ -462,7 +471,7 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
       // 降级多余 full 在数学上不可能改变回放输出 —— 降级前后指纹必须一致，由 P4-6 强校验。
       const rootReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
       const rootData = rootReplay?.data || latestFull.frame.checkpoint.data;
-      const rootIdentityConflicts = detectPhysicalTableNameCollisions_ACU(rootData);
+      const rootIdentityConflicts = detectUnmergeableIdentityConflicts_ACU(rootData);
       if (rootIdentityConflicts.length > 0) {
         return { summary: buildIdentityConflictSummary_ACU(isolationKey, rootIndex, rootIdentityConflicts, rootData) };
       }
@@ -490,10 +499,10 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
     }
     const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
     if (repair.status === 'clean') {
-      // P5：物理表名冲突（同一规范显示名保留为多个 sheetKey，或不同表拼音同名）
-      // 是双身份的直接证据。JS 回放可能“成功”，因为冲突只发生在 SQLite 物理表名
-      // 维度，不能在 clean 分支直接走到“无需恢复”或 integrity_repair 收敛。
-      const identityConflicts = detectPhysicalTableNameCollisions_ACU(latestFull.frame.checkpoint.data);
+      // P5：不同表拼音同名的物理表名冲突无法由回放自动解决，是需要用户重命名的硬冲突。
+      // 同名不同 key（identity_merge_failed）则由严格回放按名归并（模板演进的正常结果），
+      // 不在这里判为不可恢复。
+      const identityConflicts = detectUnmergeableIdentityConflicts_ACU(latestFull.frame.checkpoint.data);
       if (identityConflicts.length > 0) {
         return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, identityConflicts, latestFull.frame.checkpoint.data) };
       }
@@ -522,10 +531,9 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
           message: `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要身份归一化恢复。' : '无身份归并的兼容结果会在后台固化为过渡根。'}`,
         } };
       }
-      // 根快照干净不代表整条历史干净：双身份可由 timeline 锚点 / sheet_replace 在根之后
-      // 引入，strict 回放照样成功（SQL 段未触及时物理表名冲突不暴露），双 key 随结果
-      // 静默流出。必须对回放结果也做物理表名冲突审计，否则会落到下方「无需恢复」。
-      const replayIdentityConflicts = detectPhysicalTableNameCollisions_ACU(replay?.data || {});
+      // 根快照干净不代表整条历史干净：回放结果里若仍有拼音同名的不同表（回放归并只处理
+      // 同名表），必须在此报出，否则会落到下方「无需恢复」。
+      const replayIdentityConflicts = detectUnmergeableIdentityConflicts_ACU(replay?.data || {});
       if (replayIdentityConflicts.length > 0) {
         return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, replayIdentityConflicts, replay?.data) };
       }

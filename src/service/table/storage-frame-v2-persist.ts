@@ -20,7 +20,6 @@ import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } f
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { parseDDLColumnInfos_ACU } from '../../shared/ddl-utils';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
-import { detectPhysicalTableNameCollisions_ACU } from '../../shared/sheet-identity';
 import { findLatestTransitionCheckpoint_ACU } from './compat-transition-checkpoint';
 import { reconcileRevealedSheetWithTemplate_ACU } from '../template/chat-template-reconciler';
 
@@ -2473,26 +2472,9 @@ async function persistTableMutationLogV2Core_ACU(
             && (!Object.prototype.hasOwnProperty.call(replayBeforeAppend?.data || {}, sheetKey)
               || compatibilityOnlySheetKeys.has(sheetKey)),
         );
-        // 双身份写入口门闸：补写的锚点会以 sheet_introduction/sheet_reveal timeline 把一个
-        // 新 sheetKey 永久引入历史。若它与既有活跃表解析到同一 SQLite 物理表名（同名表换了
-        // key，或不同表拼音同名），后续任何 SQL 段回放都会以「物理表名冲突」失败——这正是
-        // 存量双身份历史的产生方式。同名表必须沿用既有 sheetKey（模板协调保留 previous.key），
-        // 这里 fail-closed，不让写入口再制造新的双身份。
-        if (missingSheetKeys.length > 0) {
-          const projectedActiveState: Record<string, unknown> = { ...(replayBeforeAppend?.data || {}) };
-          for (const sheetKey of missingSheetKeys) projectedActiveState[sheetKey] = (afterData as any)[sheetKey];
-          const introducedCollisions = detectPhysicalTableNameCollisions_ACU(projectedActiveState)
-            .filter(collision => collision.sheetKeys.some(sheetKey => missingSheetKeys.includes(sheetKey)));
-          if (introducedCollisions.length > 0) {
-            const detail = introducedCollisions
-              .map(collision => `物理表名「${collision.physicalTableName}」← ${collision.sheetNames.map((name, index) => `「${name}」(${collision.sheetKeys[index]})`).join(' / ')}；原因=${collision.reason}`)
-              .join('；');
-            return {
-              saved: false,
-              error: `V2 写入前检测到本次要新引入的表与既有活跃表物理表名冲突（双身份），已拒绝补写 per-sheet 锚点：${detail}。同名表应沿用既有 sheetKey；不同表拼音同名需先重命名。`,
-            };
-          }
-        }
+        // 同名不同 key 的新表在这里以锚点进入历史是模板演进的正常结果：严格回放会在
+        // 锚点应用时按名把旧 key 的数据并入（storage-frame-v2-replay.ts
+        // mergeSameNameSheetIdentitiesForReplay_ACU），因此不在写入口拒绝。
         const introduced: TableSheetCheckpointV2_ACU[] = [];
         for (const sheetKey of missingSheetKeys) {
           // 锚点只提供表结构，必须裁成 header-only：

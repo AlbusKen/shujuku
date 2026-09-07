@@ -591,24 +591,28 @@ describe('table-v2-recovery-service', () => {
     expect(afterFingerprint).toBe(beforeFingerprint);
   });
 
-  it('含双身份/物理表名冲突的 full checkpoint 诊断为 unrecoverable_identity_conflict 且零保存', async () => {
-    const conflictData = {
+  it('根内同名不同 key（模板演进）由严格回放按名归并：诊断不报身份冲突且零保存', async () => {
+    const sameNameData = {
       mate: { type: 'acu', version: 1 },
       sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '旧剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
       sheet_beibao: { uid: 'bag2', name: '背包', content: [['row_id', '名称'], ['2', '新盾']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
     } as any;
-    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
+    h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: sameNameData }, []));
+
+    // 回放结果：单 key，两侧独有行都保留（无模板时稳定 key sheet_bei_bao 不在候选内，字典序 sheet_beibao 胜出）。
+    const replayed = await loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false });
+    const keys = Object.keys(replayed || {}).filter(key => key.startsWith('sheet_'));
+    expect(keys).toHaveLength(1);
+    expect((replayed as any)[keys[0]].content.slice(1).sort()).toEqual([['1', '旧剑'], ['2', '新盾']]);
 
     const prepared = await prepareV2Recovery_ACU();
-
-    expect(prepared.status).toBe('unrecoverable_identity_conflict');
-    expect(prepared.affectedSheetKeys).toEqual(expect.arrayContaining(['sheet_legacy', 'sheet_beibao']));
-    expect(prepared.message).toContain('identity_merge_failed');
-    expect(prepared.message).toContain('heterogeneous_with_data');
+    expect(prepared.status).not.toBe('unrecoverable_identity_conflict');
+    expect(prepared.status).toBe('unrecoverable');
+    expect(prepared.message).toContain('无需恢复');
     expect(h.save).not.toHaveBeenCalled();
   });
 
-  it('双身份分类：空壳冲突给出 empty_shell 且零保存', async () => {
+  it('同名双身份：两侧均为空壳时归并为单个 header-only 表，诊断无需恢复', async () => {
     const conflictData = {
       mate: { type: 'acu', version: 1 },
       sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
@@ -616,14 +620,19 @@ describe('table-v2-recovery-service', () => {
     } as any;
     h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
 
-    const prepared = await prepareV2Recovery_ACU();
+    const detailed = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(h.chat, '', { updateRuntimeState: false });
+    const keys = Object.keys(detailed?.data || {}).filter(key => key.startsWith('sheet_'));
+    expect(keys).toHaveLength(1);
+    expect(detailed?.data[keys[0]].content).toEqual([['row_id', '名称']]);
+    expect(detailed?.identityMerges).toEqual([expect.objectContaining({ appendedRows: 0, overriddenRows: 0, conflictingRowIds: [] })]);
 
-    expect(prepared.status).toBe('unrecoverable_identity_conflict');
-    expect(prepared.message).toContain('empty_shell');
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared.status).toBe('unrecoverable');
+    expect(prepared.message).toContain('无需恢复');
     expect(h.save).not.toHaveBeenCalled();
   });
 
-  it('双身份分类：等结构重复冲突给出 duplicate_structure 且零保存', async () => {
+  it('同名双身份：等结构且同 row_id 同值时去重归并，诊断无需恢复', async () => {
     const conflictData = {
       mate: { type: 'acu', version: 1 },
       sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '铁剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
@@ -631,14 +640,20 @@ describe('table-v2-recovery-service', () => {
     } as any;
     h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
 
-    const prepared = await prepareV2Recovery_ACU();
+    const detailed = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(h.chat, '', { updateRuntimeState: false });
+    const keys = Object.keys(detailed?.data || {}).filter(key => key.startsWith('sheet_'));
+    expect(keys).toHaveLength(1);
+    expect(detailed?.data[keys[0]].content).toEqual([['row_id', '名称'], ['1', '铁剑']]);
+    // 同 id 同值：计入 overriddenRows 但不是冲突。
+    expect(detailed?.identityMerges).toEqual([expect.objectContaining({ overriddenRows: 1, appendedRows: 0, conflictingRowIds: [] })]);
 
-    expect(prepared.status).toBe('unrecoverable_identity_conflict');
-    expect(prepared.message).toContain('duplicate_structure');
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared.status).toBe('unrecoverable');
+    expect(prepared.message).toContain('无需恢复');
     expect(h.save).not.toHaveBeenCalled();
   });
 
-  it('双身份分类：同结构但同 row_id 值不同给出 ambiguous_conflict 且零保存', async () => {
+  it('同名双身份：同 row_id 值不同时 winner 行保留、冲突行 id 记入 identityMerges，不静默', async () => {
     const conflictData = {
       mate: { type: 'acu', version: 1 },
       sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '旧剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
@@ -646,10 +661,17 @@ describe('table-v2-recovery-service', () => {
     } as any;
     h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
 
-    const prepared = await prepareV2Recovery_ACU();
+    const detailed = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(h.chat, '', { updateRuntimeState: false });
+    const keys = Object.keys(detailed?.data || {}).filter(key => key.startsWith('sheet_'));
+    expect(keys).toHaveLength(1);
+    const winnerKey = keys[0];
+    const winnerOriginalRow = conflictData[winnerKey].content[1];
+    expect(detailed?.data[winnerKey].content).toEqual([['row_id', '名称'], winnerOriginalRow]);
+    expect(detailed?.identityMerges).toEqual([expect.objectContaining({ toKey: winnerKey, conflictingRowIds: ['1'] })]);
 
-    expect(prepared.status).toBe('unrecoverable_identity_conflict');
-    expect(prepared.message).toContain('ambiguous_conflict');
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared.status).toBe('unrecoverable');
+    expect(prepared.message).toContain('无需恢复');
     expect(h.save).not.toHaveBeenCalled();
   });
 

@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU, independentTableStates_ACU, settings_ACU } from '../runtime/state-manager';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
-import { logError_ACU, logWarn_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
+import { logDebug_ACU, logError_ACU, logWarn_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
@@ -169,6 +169,12 @@ export interface TableReplayResultV2_ACU {
   metrics?: TableReplayMetricsV2_ACU;
   /** 仅 compat_tolerant_replay 携带：容忍项明细与严格失败原因（诊断用，不落盘）。 */
   legacyToleranceDiagnosis?: LegacyToleranceDiagnosis_ACU;
+  /**
+   * 严格回放期间发生的同名 sheetKey 身份归并（模板演进：同一张表在旧历史与新模板
+   * 中持有不同 key）。这是**正常严格语义**的一部分——结果仍是严格可写历史，不设
+   * requiresCheckpointConvergence；字段仅供诊断/UI 展示归并明细与冲突行。
+   */
+  identityMerges?: SheetIdentityRemap_ACU[];
   /** 阶段 H：本次调用实际捕获到的 boundary 消息索引（前向捕获命中时设置）。 */
   capturedBoundary?: number;
 }
@@ -1296,14 +1302,75 @@ function disposeSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU): void {
   }
 }
 
+/**
+ * 严格回放的同名身份归并上下文：一次回放调用内共享。
+ * - preferredKeys：当前模板/指导表侧 key，归并时优先保留（null = 无模板，退回稳定 key / 字典序）。
+ * - merges：本次回放实际发生的归并记录（随结果 identityMerges 带出）。
+ * - loserKeys：已被归并掉的 key，用于阻止后续「目标表缺失 → 从模板临时补锚」把同名表再补回来。
+ */
+interface ReplayIdentityMergeContext_ACU {
+  preferredKeys: readonly string[] | null;
+  merges: SheetIdentityRemap_ACU[];
+  loserKeys: Set<string>;
+}
+
+function createReplayIdentityMergeContext_ACU(headerOnlyTemplate: TableDataObject_ACU | null | undefined): ReplayIdentityMergeContext_ACU {
+  return {
+    preferredKeys: headerOnlyTemplate
+      ? Object.keys(headerOnlyTemplate).filter(key => key.startsWith('sheet_'))
+      : null,
+    merges: [],
+    loserKeys: new Set<string>(),
+  };
+}
+
+/**
+ * 严格回放中的同名 sheetKey 归并（正常语义，不是兼容修复）。
+ *
+ * 同一张逻辑表在旧历史与新模板中持有不同 key（模板导入/切换后的常见演进），
+ * 若放任双 key 进入 SQL 段，物理表名解析必然冲突；用户期望的行为是"同名表直接合并
+ * 到当前模板的表下"。归并只能在 JS state 为权威时执行（runtime 未加载 / 已 materialize），
+ * 调用点：基底建立后、sheet checkpoint 应用后、进入 SQL 段 hydrate 前、回放结束时。
+ * 幂等：无同名冲突时零改动。发生归并后 alias registry 必须失效（表身份证据已变化）。
+ */
+function mergeSameNameSheetIdentitiesForReplay_ACU(
+  state: TableDataObject_ACU,
+  identity: ReplayIdentityMergeContext_ACU | null | undefined,
+  stage: string,
+  aliasContext?: ReplayAliasContext_ACU | null,
+  metrics?: TableReplayMetricsV2_ACU,
+): void {
+  if (!identity) return;
+  const merge = mergeLegacySheetIdentities_ACU(state, identity.preferredKeys);
+  if (merge.remaps.length === 0) return;
+  for (const remap of merge.remaps) {
+    identity.merges.push(remap);
+    identity.loserKeys.add(remap.fromKey);
+  }
+  if (aliasContext?.enabled) invalidateReplayAliasContext_ACU(aliasContext);
+  else if (metrics) metrics.aliasInvalidateCount += 1;
+  const detail = merge.remaps
+    .map(remap => `${remap.fromKey}→${remap.toKey}「${remap.canonicalName}」（并入 ${remap.appendedRows} 行、同 id ${remap.overriddenRows} 行`
+      + `${remap.conflictingRowIds.length > 0 ? `、冲突 ${remap.conflictingRowIds.length} 行` : ''}`
+      + `${remap.droppedColumns.length > 0 ? `、丢弃列 ${remap.droppedColumns.join('/')}` : ''}）`)
+    .join('；');
+  const hasLoss = merge.remaps.some(remap => remap.conflictingRowIds.length > 0 || remap.droppedColumns.length > 0);
+  const message = `[V2 Replay] 同名 sheetKey 身份归并（${stage}）：${detail}。原 storage frame 未修改；下次 checkpoint 固化后历史只保留归并后的 key。`;
+  if (hasLoss) logWarn_ACU(message);
+  else logDebug_ACU(message);
+}
+
 async function ensureSqlReplayRuntime_ACU(
   runtime: SqlReplayRuntime_ACU,
   state: TableDataObject_ACU,
-  options: { legacyDuplicateRowIds?: boolean; metrics?: TableReplayMetricsV2_ACU } = {},
+  options: { legacyDuplicateRowIds?: boolean; metrics?: TableReplayMetricsV2_ACU; identity?: ReplayIdentityMergeContext_ACU | null } = {},
+  context?: ReplayAliasContext_ACU | null,
 ): Promise<void> {
   // 惰性 hydrate：仅在进入下一 SQL 段时从最新 `state` 加载一次。
   // SQLite 已是当前权威状态时直接复用，禁止在每 operation 后重建。
   if (runtime.mode === 'sqlite_loaded') return;
+  // 进入 SQL 段前 JS state 是权威：先归并同名 key，否则 hydrate 的物理表名解析必然冲突。
+  mergeSameNameSheetIdentitiesForReplay_ACU(state, options.identity, 'sql hydrate', context, options.metrics);
   if (runtime.mode === 'js_materialized' && runtime.loaded) {
     // 状态机不变量：js_materialized 时 SQLite 必须已 dispose（见 materialize），
     // 因此这里的 loaded 只可能来自未 materialize 的初始构造，按未加载处理。
@@ -1383,6 +1450,7 @@ async function applySheetCheckpointsForReplay_ACU(
   runtime: SqlReplayRuntime_ACU,
   metrics?: TableReplayMetricsV2_ACU,
   context?: ReplayAliasContext_ACU | null,
+  identity?: ReplayIdentityMergeContext_ACU | null,
 ): Promise<void> {
   if (checkpoints.length === 0) return;
   if (context?.enabled) invalidateReplayAliasContext_ACU(context);
@@ -1399,6 +1467,15 @@ async function applySheetCheckpointsForReplay_ACU(
       candidate[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
     }
   }
+  // timeline 锚点 / sheet checkpoint 是新 key 进入历史的主要途径（模板切换后首次写入
+  // 补写的 header-only 锚点）：写入 state 后立即按名归并，让同名旧 key 的数据并入。
+  mergeSameNameSheetIdentitiesForReplay_ACU(
+    candidate,
+    identity,
+    `sheet checkpoints@${checkpoints.map(checkpoint => checkpoint.sheetKey).join('/')}`,
+    context,
+    metrics,
+  );
   replaceState_ACU(state, candidate);
 }
 
@@ -1507,13 +1584,13 @@ async function applySqlBatchOperationV2_ACU(
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
   runtime: SqlReplayRuntime_ACU,
   supplementalTemplate: TableDataObject_ACU | null | undefined,
-  options: { legacyDuplicateRowIds?: boolean; metrics?: TableReplayMetricsV2_ACU } = {},
+  options: { legacyDuplicateRowIds?: boolean; metrics?: TableReplayMetricsV2_ACU; identity?: ReplayIdentityMergeContext_ACU | null } = {},
   context?: ReplayAliasContext_ACU | null,
 ): Promise<void> {
   const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
   if (statements.length === 0) return;
   if (options.metrics) options.metrics.sqlOperationCount += statements.length;
-  await ensureSqlReplayRuntime_ACU(runtime, state, options);
+  await ensureSqlReplayRuntime_ACU(runtime, state, options, context);
   // 结构 SQL（CREATE/ALTER/DROP/RENAME）改变 runtime schema，无法证明与 JS
   // state 在连续语句间保持同步；首版对含结构 SQL 的 operation 强制走冷 registry
   // 路径（本次重建，不读取也不写入缓存），保证后续 DML 仍可用同 epoch 缓存。
@@ -1909,8 +1986,9 @@ export async function applyTableOperationV2_ACU(
   supplementalTemplate?: TableDataObject_ACU | null,
   metrics?: TableReplayMetricsV2_ACU,
   context?: ReplayAliasContext_ACU | null,
+  identity?: ReplayIdentityMergeContext_ACU | null,
 ): Promise<void> {
-  await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, undefined, metrics, context);
+  await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, { identity }, metrics, context);
 }
 
 async function applyTableOperationV2Core_ACU(
@@ -1918,7 +1996,12 @@ async function applyTableOperationV2Core_ACU(
   operation: TableMutationOperationV2_ACU,
   runtime?: SqlReplayRuntime_ACU,
   supplementalTemplate?: TableDataObject_ACU | null,
-  options: { legacyDuplicateRowIds?: boolean; legacyTolerances?: LegacyToleranceReport_ACU } = {},
+  options: {
+    legacyDuplicateRowIds?: boolean;
+    legacyTolerances?: LegacyToleranceReport_ACU;
+    /** 严格回放的同名身份归并上下文（宽容路径自行归并，不传）。 */
+    identity?: ReplayIdentityMergeContext_ACU | null;
+  } = {},
   metrics?: TableReplayMetricsV2_ACU,
   context?: ReplayAliasContext_ACU | null,
 ): Promise<void> {
@@ -2185,6 +2268,10 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
     // 解析失败 → null，列重绑退化为无 supplemental（仍 target-first fail closed）。
     headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
     if (headerOnlyTemplate) headerOnlyTemplateFingerprint = getTableDataFingerprint_ACU(headerOnlyTemplate);
+    // 同名 sheetKey 身份归并上下文（严格语义）：模板侧 key 优先保留。基底本身也可能
+    // 已含两代 key（根内双身份），此时 runtime 尚未加载、JS state 权威，先归并。
+    const identity = createReplayIdentityMergeContext_ACU(headerOnlyTemplate);
+    mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, 'base', aliasContext, metrics);
     // 阶段 I：只读 replay 的取消检查点。
     //
     // 只在 updateRuntimeState===false 时生效：副作用路径（replayEventForState_ACU /
@@ -2240,6 +2327,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         runtime,
         metrics,
         aliasContext,
+        identity,
       );
       const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
       metrics.logEntryCount += entries.length;
@@ -2249,7 +2337,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
       const applyDueIntroductions = async (nextSeq: number): Promise<void> => {
         const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline!.afterSeq < nextSeq);
         if (due.length === 0) return;
-        await applySheetCheckpointsForReplay_ACU(state, due, runtime, metrics, aliasContext);
+        await applySheetCheckpointsForReplay_ACU(state, due, runtime, metrics, aliasContext, identity);
         for (const checkpoint of due) {
           if (options.updateRuntimeState !== false) {
             replayEventForState_ACU(checkpoint.event, ref.aiFloor);
@@ -2282,10 +2370,13 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                 continue;
               }
               try {
+                // 目标 key 若已被同名归并掉（loser），它的数据就在 winner 表里，SQL 经
+                // 历史 tableName / 别名直达 winner 物理表；此时绝不能再从模板补一个同名锚点。
                 if (options.compatibilityMode !== 'disabled'
                   && operation?.kind === 'sql_sheet_batch'
                   && typeof operation.sheetKey === 'string'
                   && operation.sheetKey.startsWith('sheet_')
+                  && !identity.loserKeys.has(operation.sheetKey)
                   && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
                   const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                   if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
@@ -2316,6 +2407,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                   headerOnlyTemplate,
                   metrics,
                   aliasContext,
+                  identity,
                 );
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
@@ -2375,6 +2467,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         // 即整体失败，不得返回不完整快照）。metrics 为该 boundary 捕获时的累计值
         // 浅拷贝（不共享同一引用，外层可安全持有各快照）。
         await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+        mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, `boundary@${ref.messageIndex}`, aliasContext, metrics);
         const snapshotBaseKind = baseKind;
         const snapshotRepairs = compatibilityRepairs.length > 0 ? [...compatibilityRepairs] : undefined;
         capturedBoundaries.set(ref.messageIndex, {
@@ -2384,6 +2477,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
           capturedBoundary: ref.messageIndex,
           ...(snapshotRepairs ? { compatibilityRepairs: snapshotRepairs } : {}),
           ...(snapshotRepairs ? { requiresCheckpointConvergence: true } : {}),
+          ...(identity.merges.length > 0 ? { identityMerges: identity.merges.map(remap => ({ ...remap })) } : {}),
         });
         captureBoundarySet.delete(ref.messageIndex);
       }
@@ -2391,6 +2485,9 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
 
     // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
     await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+    // JS op（sheet_replace / data_replace）在最后一个 SQL 段之后引入的同名 key 在此收口，
+    // 保证返回的 data 永远是单身份。
+    mergeSameNameSheetIdentitiesForReplay_ACU(state, identity, 'final', aliasContext, metrics);
     // 阶段 H：捕获全部命中后，主结果 data 以最终 state 为准（与单边界语义一致）；
     // capturedBoundaries 由调用方通过 loadTableStatesAtBoundariesFromFramesV2Detailed_ACU
     // 读取。若捕获列表非空（部分 boundary 未命中——例如 boundary 早于起算 checkpoint
@@ -2401,6 +2498,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
       metrics,
       ...(compatibilityRepairs.length > 0 ? { compatibilityRepairs } : {}),
       ...(compatibilityRepairs.length > 0 ? { requiresCheckpointConvergence: true } : {}),
+      ...(identity.merges.length > 0 ? { identityMerges: identity.merges } : {}),
     };
   } finally {
     disposeSqlReplayRuntime_ACU(runtime);
