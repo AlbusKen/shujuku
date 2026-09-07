@@ -14,14 +14,14 @@ import { ensureStableRowIdsForSeedRows_ACU, getCurrentChatTemplateScopeState_ACU
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU, restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
-import { getPhysicalTableNameFromResolvedMap_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
+import { canonicalizeDisplayName_ACU, getPhysicalTableNameFromResolvedMap_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
 import { decodeSqlIdentifier_ACU, rebindSqlMutationColumnReferences_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type SheetAliasMapResult_ACU, type SheetColumnAliasMapResult_ACU, type SheetColumnAliasEvidence_ACU } from '../../shared/sql-read-resolver';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 import { cloneSpv79TransitionData_ACU, compareTransitionCutoffs_ACU, findLatestTransitionCheckpoint_ACU, isAfterSpv79TransitionCutoff_ACU, isEntryAfterSpv79TransitionCutoff_ACU, isFrameArtifactAfterSpv79TransitionCutoff_ACU, reindexSpv79TransitionState_ACU } from './compat-transition-checkpoint';
-import { mergeLegacySheetIdentities_ACU, type SheetIdentityRemap_ACU } from '../../shared/sheet-identity-merge';
+import { collectSheetIdentityCanonicals_ACU, mergeLegacySheetIdentities_ACU, type SheetIdentityRemap_ACU } from '../../shared/sheet-identity-merge';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 import { buildReplayOptionsFingerprint_ACU, computeReplayHeadRevisionDigest_ACU, validateV2ReplayEvidenceFresh_ACU } from './v2-replay-session';
 
@@ -1312,6 +1312,8 @@ interface ReplayIdentityMergeContext_ACU {
   preferredKeys: readonly string[] | null;
   merges: SheetIdentityRemap_ACU[];
   loserKeys: Set<string>;
+  /** 被归并/接管掉的 key → 规范 key：后续 operation / checkpoint 引用旧 key 时自动改绑。 */
+  keyRedirects: Map<string, string>;
 }
 
 function createReplayIdentityMergeContext_ACU(headerOnlyTemplate: TableDataObject_ACU | null | undefined): ReplayIdentityMergeContext_ACU {
@@ -1321,7 +1323,101 @@ function createReplayIdentityMergeContext_ACU(headerOnlyTemplate: TableDataObjec
       : null,
     merges: [],
     loserKeys: new Set<string>(),
+    keyRedirects: new Map<string, string>(),
   };
+}
+
+function registerReplayKeyRedirect_ACU(identity: ReplayIdentityMergeContext_ACU, fromKey: string, toKey: string): void {
+  if (fromKey === toKey) return;
+  identity.loserKeys.add(fromKey);
+  identity.keyRedirects.set(fromKey, toKey);
+  // 已指向 fromKey 的旧重定向一并指向新的规范 key（链式接管）。
+  for (const [key, target] of identity.keyRedirects) {
+    if (target === fromKey) identity.keyRedirects.set(key, toKey);
+  }
+}
+
+/** 解析规范 key：沿重定向链到底（链在登记时已压平，最多再跳一次）。 */
+function redirectReplaySheetKey_ACU(identity: ReplayIdentityMergeContext_ACU | null | undefined, sheetKey: string): string {
+  if (!identity) return sheetKey;
+  let current = sheetKey;
+  for (let hop = 0; hop < 8; hop += 1) {
+    const next = identity.keyRedirects.get(current);
+    if (!next || next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * 同名接管（表的身份是表名，key 只是载体）：历史里出现一个 sheetKey 的锚点 / 整表替换，
+ * 而 state 中已有**同名**（显示名或别名重合）的其它 key 时，事件描述的就是「这张表现在
+ * 长这样」——写入时该表确实被重置为事件数据（现场：导入新模板后表 header-only，随后
+ * AI 以 INSERT row_id=1 重填）。因此不合并行：删除旧 key 的表，事件数据写入规范 key。
+ *
+ * 规范 key 的选择：模板/指导表侧 key（preferredKeys 命中者）> 已在 state 中的历史 key
+ * （P2 协调让指导表保留 previous.key，回放身份必须与之一致，否则填表会把它当模板外表剔除）
+ * > 事件自身 key。被淘汰的 key 全部登记重定向，后续 operation 自动改绑。
+ * 返回事件数据应写入的 key；无同名冲突时原样返回 incomingKey（零改动）。
+ */
+function supersedeSameNameSheetForReplay_ACU(
+  candidate: TableDataObject_ACU,
+  incomingKey: string,
+  incomingSheet: Sheet_ACU,
+  identity: ReplayIdentityMergeContext_ACU | null | undefined,
+  stage: string,
+  aliasContext?: ReplayAliasContext_ACU | null,
+  metrics?: TableReplayMetricsV2_ACU,
+): string {
+  if (!identity) return incomingKey;
+  const incomingIdentities = new Set(collectSheetIdentityCanonicals_ACU(incomingSheet));
+  if (incomingIdentities.size === 0) return incomingKey;
+  const sameNameKeys = Object.keys(candidate)
+    .filter(key => key.startsWith('sheet_') && key !== incomingKey)
+    .filter(key => {
+      const sheet = (candidate as Record<string, unknown>)[key];
+      if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) return false;
+      return collectSheetIdentityCanonicals_ACU(sheet as Sheet_ACU).some(name => incomingIdentities.has(name));
+    })
+    .sort();
+  if (sameNameKeys.length === 0) return incomingKey;
+
+  const preferred = new Set(identity.preferredKeys || []);
+  const canonicalKey = preferred.has(incomingKey)
+    ? incomingKey
+    : (sameNameKeys.find(key => preferred.has(key)) ?? sameNameKeys[0]);
+
+  const details: string[] = [];
+  for (const key of sameNameKeys) {
+    const sheet = (candidate as Record<string, Sheet_ACU>)[key];
+    const rows = Array.isArray(sheet?.content) ? Math.max(0, sheet.content.length - 1) : 0;
+    delete (candidate as Record<string, unknown>)[key];
+    if (key !== canonicalKey) registerReplayKeyRedirect_ACU(identity, key, canonicalKey);
+    // 记录方向恒为「被淘汰的 key → 规范 key」：规范 key 恰是被接管的旧 key 时，被淘汰的是事件 key。
+    const remap: SheetIdentityRemap_ACU = {
+      fromKey: key === canonicalKey ? incomingKey : key,
+      toKey: canonicalKey,
+      canonicalName: canonicalizeDisplayName_ACU(incomingSheet.name),
+      overriddenRows: 0,
+      appendedRows: 0,
+      conflictingRowIds: [],
+      droppedColumns: [],
+      supersededRows: rows,
+    };
+    identity.merges.push(remap);
+    details.push(`${key}（${rows} 行）`);
+  }
+  if (incomingKey !== canonicalKey) registerReplayKeyRedirect_ACU(identity, incomingKey, canonicalKey);
+  if (aliasContext?.enabled) invalidateReplayAliasContext_ACU(aliasContext);
+  else if (metrics) metrics.aliasInvalidateCount += 1;
+  const totalSuperseded = identity.merges
+    .filter(remap => remap.toKey === canonicalKey && remap.supersededRows !== undefined)
+    .reduce((sum, remap) => sum + (remap.supersededRows || 0), 0);
+  const message = `[V2 Replay] 同名表接管（${stage}）：「${String(incomingSheet.name || '')}」事件 key=${incomingKey} 接管 ${details.join('、')}，`
+    + `按规范 key=${canonicalKey} 继续回放；表内容以事件数据为准（历史写入时该表即为此状态）。原 storage frame 未修改。`;
+  if (totalSuperseded > 0) logWarn_ACU(message);
+  else logDebug_ACU(message);
+  return canonicalKey;
 }
 
 /**
@@ -1345,7 +1441,7 @@ function mergeSameNameSheetIdentitiesForReplay_ACU(
   if (merge.remaps.length === 0) return;
   for (const remap of merge.remaps) {
     identity.merges.push(remap);
-    identity.loserKeys.add(remap.fromKey);
+    registerReplayKeyRedirect_ACU(identity, remap.fromKey, remap.toKey);
   }
   if (aliasContext?.enabled) invalidateReplayAliasContext_ACU(aliasContext);
   else if (metrics) metrics.aliasInvalidateCount += 1;
@@ -1461,21 +1557,23 @@ async function applySheetCheckpointsForReplay_ACU(
   for (const checkpoint of checkpoints) {
     if (checkpoint.timeline?.kind === 'sheet_hide') {
       // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
-      delete candidate[checkpoint.sheetKey];
+      delete candidate[redirectReplaySheetKey_ACU(identity, checkpoint.sheetKey)];
     } else {
       // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
-      candidate[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
+      // 表的身份是表名：同名旧 key 的表被本事件接管（不合并行），写入规范 key。
+      const sheet = deepClone_ACU(checkpoint.data);
+      const targetKey = supersedeSameNameSheetForReplay_ACU(
+        candidate,
+        redirectReplaySheetKey_ACU(identity, checkpoint.sheetKey),
+        sheet,
+        identity,
+        `sheet checkpoint ${checkpoint.timeline?.kind ?? 'untimed'}@${checkpoint.sheetKey}`,
+        context,
+        metrics,
+      );
+      candidate[targetKey] = sheet;
     }
   }
-  // timeline 锚点 / sheet checkpoint 是新 key 进入历史的主要途径（模板切换后首次写入
-  // 补写的 header-only 锚点）：写入 state 后立即按名归并，让同名旧 key 的数据并入。
-  mergeSameNameSheetIdentitiesForReplay_ACU(
-    candidate,
-    identity,
-    `sheet checkpoints@${checkpoints.map(checkpoint => checkpoint.sheetKey).join('/')}`,
-    context,
-    metrics,
-  );
   replaceState_ACU(state, candidate);
 }
 
@@ -2013,6 +2111,15 @@ async function applyTableOperationV2Core_ACU(
     }
     throw new Error('[V2 Replay] operation 缺少有效 kind。');
   }
+  // 同名接管 / 归并后的 key 重定向：引用被淘汰 key 的 operation 一律改绑到规范 key
+  // （sheet_replace 自身的同名接管在其分支内再判定一次，这里先把已知重定向套上）。
+  if (options.identity && typeof (operation as { sheetKey?: unknown }).sheetKey === 'string') {
+    const originalKey = (operation as { sheetKey: string }).sheetKey;
+    const redirectedKey = redirectReplaySheetKey_ACU(options.identity, originalKey);
+    if (redirectedKey !== originalKey) {
+      operation = { ...(operation as object), sheetKey: redirectedKey } as TableMutationOperationV2_ACU;
+    }
+  }
   const ownedRuntime = !runtime && (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch')
     ? { engine: new SqliteEngine(), syncBridge: null as unknown as SyncBridge, loaded: false, mode: 'js_materialized' as const }
     : null;
@@ -2057,7 +2164,18 @@ async function applyTableOperationV2Core_ACU(
     if (operation.kind === 'sheet_replace') {
       if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
-      candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
+      const replacedSheet = deepClone_ACU(operation.sheet);
+      // 整表替换引入同名新 key：接管同名旧表（不合并行），写入规范 key。
+      const targetKey = supersedeSameNameSheetForReplay_ACU(
+        candidate,
+        operation.sheetKey,
+        replacedSheet,
+        options.identity,
+        `sheet_replace@${operation.sheetKey}`,
+        context,
+        metrics,
+      );
+      candidate[targetKey] = replacedSheet;
       if (options.legacyDuplicateRowIds) {
         // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
       } else normalizeHistoricalReplayState_ACU(candidate, 'sheet_replace');
@@ -2377,7 +2495,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                   && typeof operation.sheetKey === 'string'
                   && operation.sheetKey.startsWith('sheet_')
                   && !identity.loserKeys.has(operation.sheetKey)
-                  && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
+                  && !Object.prototype.hasOwnProperty.call(state, redirectReplaySheetKey_ACU(identity, operation.sheetKey))) {
                   const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                   if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
                     // 补锚是 JS 语义（模板 header-only 快照），先退出 SQL 段再合并。

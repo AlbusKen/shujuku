@@ -262,22 +262,22 @@ describe('自动降级链（严格失败 → Tier-1 → 固化）', () => {
 
     const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
 
-    // 同名不同 key 已是严格回放的正常归并语义：不再进入降级链，结果是严格可写历史。
+    // 表的身份是表名：同名新 key 的 sheet_replace 接管旧表（表内容以事件数据为准，不合并行），
+    // 不再进入降级链，结果是严格可写历史；被接管的旧行数记录在 identityMerges 里。
     expect(replay?.baseKind).toBe('full_checkpoint');
     expect(replay?.requiresCheckpointConvergence).toBeFalsy();
-    // row_id=1 两侧都有值且不同（旧行 vs 模板行）：模板侧胜出并记录冲突，不静默。
+    // 本测试无宿主模板（无 key 偏好）：规范 key 沿用已在历史中的旧 key，事件 key 登记重定向。
     expect(replay?.identityMerges).toEqual([
-      expect.objectContaining({ fromKey: 'sheet_x9k2f', toKey: NEW_KEY, appendedRows: 1, overriddenRows: 1, conflictingRowIds: ['1'], droppedColumns: [] }),
+      expect.objectContaining({ fromKey: NEW_KEY, toKey: 'sheet_x9k2f', supersededRows: 2 }),
     ]);
-    expect(replay?.data.sheet_x9k2f).toBeUndefined();
-    expect(replay?.data[NEW_KEY].content).toEqual([
+    expect(replay?.data[NEW_KEY]).toBeUndefined();
+    expect(replay?.data.sheet_x9k2f.content).toEqual([
       ['row_id', 'name'],
       ['1', 'SQL 改'],
-      ['2', '旧独有行'],
     ]);
     // 严格探针（写路径语义）得到同一结果。
     const strictProbe = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled' });
-    expect(strictProbe?.data[NEW_KEY].content).toEqual(replay?.data[NEW_KEY].content);
+    expect(strictProbe?.data.sheet_x9k2f.content).toEqual(replay?.data.sheet_x9k2f.content);
     // 未进入兼容路径：没有固化调度。
     await flushPendingCompatTransitionFixations_ACU();
     expect(chat[0].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint).toBeUndefined();

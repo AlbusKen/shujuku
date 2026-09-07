@@ -40,6 +40,11 @@ export interface SheetIdentityRemap_ACU {
   conflictingRowIds: string[];
   /** loser 表头中 winner 没有的列名：这些列的数据无法并入 winner 结构，随归并丢弃。 */
   droppedColumns: string[];
+  /**
+   * 仅严格回放的「同名接管」事件携带：历史里同名新 key 的锚点/整表替换接管了旧 key 的表，
+   * 旧表当时的数据行数（不合并、随事件语义丢弃——记录写入时表确实被重置为事件数据）。
+   */
+  supersededRows?: number;
 }
 
 function normalizeHeaderCell_ACU(value: unknown): string {
