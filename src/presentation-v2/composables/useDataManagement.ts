@@ -162,6 +162,43 @@ export function useDataManagement() {
       : 0,
   );
 
+  /** 手动删除的可选表：勾选后只删这些表的数据（含 checkpoint 中的该表），其它表不动。 */
+  const deleteSheetKeys = ref<string[]>([]);
+  /** 运行时当前表清单（按 orderNo 排序），供「限定表格」勾选列表使用。 */
+  const deletableSheetOptions = ref<Array<{ sheetKey: string; name: string }>>([]);
+  const hasDeleteSheetSelection = computed(() => deleteSheetKeys.value.length > 0);
+  const selectedDeleteSheetNames = computed(() =>
+    deleteSheetKeys.value.map(sheetKey => deletableSheetOptions.value.find(option => option.sheetKey === sheetKey)?.name || sheetKey),
+  );
+
+  function collectDeletableSheetOptions(): Array<{ sheetKey: string; name: string }> {
+    const data = currentJsonTableData_ACU;
+    if (!data || typeof data !== 'object') return [];
+    return Object.keys(data)
+      .filter(key => key.startsWith('sheet_'))
+      .map(key => {
+        const sheet = (data as Record<string, any>)[key];
+        return {
+          sheetKey: key,
+          name: String(sheet?.name || key),
+          orderNo: Number.isFinite(Number(sheet?.orderNo)) ? Number(sheet.orderNo) : Number.MAX_SAFE_INTEGER,
+        };
+      })
+      .sort((left, right) => left.orderNo - right.orderNo || left.sheetKey.localeCompare(right.sheetKey))
+      .map(({ sheetKey, name }) => ({ sheetKey, name }));
+  }
+
+  function toggleDeleteSheetKey(sheetKey: string, selected: boolean): void {
+    const next = new Set(deleteSheetKeys.value);
+    if (selected) next.add(sheetKey);
+    else next.delete(sheetKey);
+    deleteSheetKeys.value = [...next];
+  }
+
+  function clearDeleteSheetSelection(): void {
+    deleteSheetKeys.value = [];
+  }
+
   function refresh(): void {
     const currentCode = normalizeIsolationCode_ACU(settings_ACU.dataIsolationCode || '');
     activeIsolationCode.value = currentCode;
@@ -172,6 +209,10 @@ export function useDataManagement() {
     retainRecentLayers.value = normalizeRetainRecentLayers(settings_ACU.retainRecentLayers ?? 100);
     aiMessageCount.value = getAiMessageCount();
     mixedStorageDecision.value = getActiveMixedStorageDecisionSummary_ACU();
+    // 聊天/模板切换后运行时表集合可能变化：剔除已不存在的勾选，避免删到看不见的 key。
+    deletableSheetOptions.value = collectDeletableSheetOptions();
+    const available = new Set(deletableSheetOptions.value.map(option => option.sheetKey));
+    deleteSheetKeys.value = deleteSheetKeys.value.filter(sheetKey => available.has(sheetKey));
   }
 
   function getCheckpointTargetStorageMode(): 'native' | 'sqlite' {
@@ -596,6 +637,8 @@ export function useDataManagement() {
    */
   function resolveDeletionPath(mode: 'current' | 'all'): 'purge' | 'range' {
     if (mode !== 'all') return 'range';
+    // 按表删除永不硬清空：其它表与聊天级 guide/scope 必须保留。
+    if (hasDeleteSheetSelection.value) return 'range';
     const start = normalizeFloorValue(deleteRange.startFloor);
     const end = normalizeFloorValue(deleteRange.endFloor);
     return isFullRangeDeletionRequest_ACU(start, end, getAiMessageCount()) ? 'purge' : 'range';
@@ -603,6 +646,7 @@ export function useDataManagement() {
 
   async function deleteLocalData(mode: 'current' | 'all'): Promise<void> {
     const expectedPath = resolveDeletionPath(mode);
+    const sheetKeys = hasDeleteSheetSelection.value ? [...deleteSheetKeys.value] : null;
     busyAction.value = expectedPath === 'purge'
       ? 'purge-all-local'
       : (mode === 'current' ? 'delete-current-local' : 'delete-all-local');
@@ -613,7 +657,10 @@ export function useDataManagement() {
       settings_ACU.deleteEndFloor = end;
       saveSettings_ACU();
 
-      const outcome = await deleteLocalDataWithScope_ACU(mode, start, end, expectedPath);
+      // 只在选表时传第 5 参：整楼层删除的调用形态保持不变。
+      const outcome = sheetKeys
+        ? await deleteLocalDataWithScope_ACU(mode, start, end, expectedPath, sheetKeys)
+        : await deleteLocalDataWithScope_ACU(mode, start, end, expectedPath);
 
       if (outcome.path === 'aborted') {
         message.value = null;
@@ -624,7 +671,7 @@ export function useDataManagement() {
         applyPurgeOutcome(outcome.result);
         return;
       }
-      await applyRangeDeletionOutcome(outcome.deletedCount);
+      await applyRangeDeletionOutcome(outcome.deletedCount, sheetKeys ? selectedDeleteSheetNames.value : null);
     } catch (e: any) {
       logError_ACU('[ACU-V2] deleteLocalData failed', e);
       message.value = null;
@@ -634,17 +681,20 @@ export function useDataManagement() {
     }
   }
 
-  async function applyRangeDeletionOutcome(deletedCount: number): Promise<void> {
+  async function applyRangeDeletionOutcome(deletedCount: number, sheetNames: string[] | null = null): Promise<void> {
     if (deletedCount > 0) {
       await loadOrCreateJsonTableFromChatHistory_ACU();
       if (isSqliteMode()) await reloadStorageProvider();
       await refreshMergedDataAndNotify_ACU();
       const worldbookDeleted = await cleanupWorldbookEntriesAfterDataDeletion_ACU();
       refresh();
+      const scopeText = sheetNames && sheetNames.length > 0
+        ? `表「${sheetNames.join('」「')}」在 ${deletedCount} 条消息中的数据`
+        : `${deletedCount} 条消息中的本地数据`;
       setMessage(
         message,
         'success',
-        `已删除 ${deletedCount} 条消息中的本地数据${worldbookDeleted ? `，并清理 ${worldbookDeleted} 个世界书条目` : ''}。`,
+        `已删除 ${scopeText}${worldbookDeleted ? `，并清理 ${worldbookDeleted} 个世界书条目` : ''}。`,
       );
       const text = message.value?.text || '';
       message.value = null;
@@ -705,6 +755,12 @@ export function useDataManagement() {
     currentIsolationLabel,
     isolationModeLabel,
     deleteRange,
+    deleteSheetKeys,
+    deletableSheetOptions,
+    hasDeleteSheetSelection,
+    selectedDeleteSheetNames,
+    toggleDeleteSheetKey,
+    clearDeleteSheetSelection,
     retainRecentLayers,
     rangeLabel,
     aiMessageCount,

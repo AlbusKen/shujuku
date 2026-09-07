@@ -273,16 +273,6 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     scanV2IsolationDiagnostics_ACU: scanV2IsolationDiagnostics,
     commitPreparedV2Recovery_ACU: commitV2Recovery,
   }));
-  // S3-4 休眠数据面板：页面测试只验证面板挂载与布局，清单/唤醒行为由
-  // dormant-data-service 单测与 use-dormant-data 测试直接覆盖。
-  vi.doMock('../../../src/service/template/dormant-data-service', () => ({
-    listDormantTables_ACU: vi.fn(() => ({ ok: true, entries: [] })),
-    listDormantColumns_ACU: vi.fn(() => ({ ok: true, entries: [] })),
-    auditDormantDataIntegrity_ACU: vi.fn(() => ({ ok: true, issues: [], hiddenCount: 0 })),
-    wakeDormantTable_ACU: vi.fn(async () => ({ saved: true })),
-    wakeDormantColumn_ACU: vi.fn(async () => ({ saved: true })),
-  }));
-
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
   await new Promise(r => setTimeout(r, 0));
@@ -383,7 +373,7 @@ describe('DataMgmtPage', () => {
     const { mount } = await mountDataMgmtPage();
 
     const panels = document.querySelectorAll('.acu-v2-data-mgmt-page .acu-panel');
-    expect(panels.length).toBe(3);
+    expect(panels.length).toBe(2);
     panels.forEach(panel => {
       expect(panel.querySelector('.acu-panel__description-region .acu-info-banner')).not.toBeNull();
       expect(panel.querySelector('.acu-panel__header .acu-info-banner')).toBeNull();
@@ -404,8 +394,8 @@ describe('DataMgmtPage', () => {
       .map(title => title.textContent?.trim() || '');
 
     expect(leftTitles).toEqual(['备份与恢复']);
-    // S3-4：右列在删除清理面板上方新增常驻「休眠数据」面板。
-    expect(rightTitles).toEqual(['休眠数据', '删除与清理']);
+    // 休眠数据面板已移除：切回含该表/列的模板即自动唤醒（协调器 reveal 链路），无需单独入口。
+    expect(rightTitles).toEqual(['删除与清理']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -610,6 +600,56 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('T12b 勾选表格后：按钮改为「删除所选 N 张表的数据」，全范围也走 range 单级确认，服务收到第 5 参 sheetKeys', async () => {
+    const { mount, deleteLocalDataWithScope, loadOrCreate, reloadStorageProvider, cleanupWorldbook } = await mountDataMgmtPage('chat-data', null, true);
+    // 运行时有 sheet_a(A) / sheet_b(B)：限定表格列表按表名展示。
+    const checkbox = document.querySelector<HTMLButtonElement>('.acu-v2-data-mgmt-page__sheet-filter [data-sheet-key="sheet_a"]');
+    expect(checkbox).toBeTruthy();
+    expect(document.body.textContent || '').toContain('限定表格（可选）');
+    checkbox!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    // 危险按钮文案随选表变化；范围留空（覆盖全部楼层）也不再是硬清空语义。
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所选 1 张表的数据'));
+    expect(button).toBeTruthy();
+    expect(document.body.textContent || '').toContain('当前已限定 1 张表：A');
+    button!.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(document.body.textContent || '').toContain('删除所选表格数据');
+    expect(document.body.textContent || '').toContain('表「A」');
+    expect(document.body.textContent || '').not.toContain('再次确认删除');
+    await clickDialogButton('删除所选表格数据');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(deleteLocalDataWithScope).toHaveBeenCalledWith('all', 1, null, 'range', ['sheet_a']);
+    expect(loadOrCreate).toHaveBeenCalled();
+    expect(reloadStorageProvider).toHaveBeenCalled();
+    expect(cleanupWorldbook).toHaveBeenCalled();
+    expect(document.body.textContent || '').toContain('表「A」在');
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T12c 未勾选任何表时整楼层删除调用形态不变（不带第 5 参）', async () => {
+    const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage('chat-data', null, true);
+    const startFloorInput = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find(input => input.closest('.acu-form-row')?.textContent?.includes('起始楼层'))!;
+    startFloorInput.value = '2';
+    startFloorInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('删除数据');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    expect(deleteLocalDataWithScope).toHaveBeenCalledTimes(1);
+    expect(deleteLocalDataWithScope.mock.calls[0]).toEqual(['all', 2, null, 'range']);
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('T13 服务返回 aborted（确认期范围变化）时显示 warning toast，无成功', async () => {
     const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
     deleteLocalDataWithScope.mockResolvedValueOnce({
@@ -678,8 +718,10 @@ describe('DataMgmtPage', () => {
     expect(dialogText).toContain('当前聊天表格锁');
     expect(dialogText).not.toContain('表格选择状态');
     expect(dialogText).not.toContain('手动填表选择状态');
-    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]'))
-      .every(item => item.getAttribute('aria-checked') === 'true')).toBe(true);
+    // 只看恢复默认弹窗里的勾选项：页面「限定表格」勾选框默认未勾选，不属于本弹窗。
+    const dialogCheckboxes = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-dialog-layer button[role="checkbox"]'));
+    expect(dialogCheckboxes.length).toBeGreaterThan(0);
+    expect(dialogCheckboxes.every(item => item.getAttribute('aria-checked') === 'true')).toBe(true);
 
     await clickDialogButton('按所选项目恢复');
     await new Promise(r => setTimeout(r, 0));

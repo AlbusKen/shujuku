@@ -12,7 +12,6 @@ import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../se
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
 import { captureCheckpointVaultForCurrentChat_ACU, installCheckpointDeleteGuard_ACU } from '../../service/chat/checkpoint-delete-guard';
-import { auditDormantDataIntegrity_ACU } from '../../service/template/dormant-data-service';
 import { reloadStorageProvider, disposeStorageProvider, getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from '../../service/table/table-storage-strategy';
 import { createCanonicalSnapshotEnvelope_ACU } from '../../service/table/canonical-snapshot-envelope';
 import { isSqliteMode } from '../../service/table/storage-mode';
@@ -96,36 +95,6 @@ function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
   generationGate_ACU.activeGenerations = [];
   notifyRuntimeTableCleared_ACU();
   logDebug_ACU(`ACU: No active chat after CHAT_CHANGED (${String(chatFileName)}), runtime table state cleared.`);
-}
-
-/**
- * S3-3 休眠完整性自检：聊天加载完成后校验每个 hidden 表的恢复来源可达，
- * 发现孤儿即 logWarn + warning toast（带跳转数据管理入口）。
- * 纯只读且全降级——审计自身故障绝不影响加载主链路；
- * 生命周期派生失败只记日志（加载失败已有 C5 error toast，休眠面板另有 listError），不重复弹报。
- */
-function runDormantIntegrityAuditQuietly_ACU(stage: string): void {
-  try {
-    const audit = auditDormantDataIntegrity_ACU();
-    if (!audit.ok) {
-      logWarn_ACU(`[休眠自检] ${stage} 审计不可用：${audit.error || '未知错误'}`);
-      return;
-    }
-    if (audit.issues.length === 0) return;
-    for (const issue of audit.issues) {
-      logWarn_ACU(`[休眠自检] ${stage} 发现问题（${issue.kind}）：${issue.message}`);
-    }
-    showUiSurfaceToast_ACU({
-      kind: 'warning',
-      text: `检测到 ${audit.issues.length} 项休眠数据完整性问题（涉及恢复来源缺失或损坏），相关表暂时无法唤醒。详情见数据管理页的「休眠数据」面板。`,
-      action: {
-        label: '打开数据管理',
-        onClick: async () => { await getUiSurface_ACU()?.openSettings?.(); },
-      },
-    });
-  } catch (e: any) {
-    logWarn_ACU(`[休眠自检] ${stage} 审计执行失败: ${e?.message}`);
-  }
 }
 
 function installSendIntentCaptureHooks_ACU() {
@@ -424,9 +393,6 @@ export   function mainInitialize_ACU() {
             } catch (vaultError: any) {
                 logWarn_ACU(`[删楼守卫] CHAT_CHANGED 保管库捕获失败: ${vaultError?.message}`);
             }
-
-            // S3-3：加载完成后做休眠完整性自检（只读，发现孤儿即警告）。
-            runDormantIntegrityAuditQuietly_ACU('CHAT_CHANGED');
 
             logDebug_ACU('ACU: Chat data reload and UI refresh triggered after chat change (Delayed).');
            } catch (chatChangedError) {
@@ -766,9 +732,6 @@ export   function mainInitialize_ACU() {
           } catch (e: any) {
               logWarn_ACU(`[删楼守卫] initWithChatId 保管库捕获失败: ${e?.message}`);
           }
-
-          // S3-3：初始加载完成后做休眠完整性自检（只读，发现孤儿即警告）。
-          runDormantIntegrityAuditQuietly_ACU('initWithChatId');
       };
 
       // C5 加载失败可见化：初始加载与 CHAT_CHANGED 同级兜底，不允许静默空表。

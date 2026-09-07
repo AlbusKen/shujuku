@@ -1887,6 +1887,26 @@ export function countAiMessages_ACU(chat: any[] | null | undefined): number {
 }
 
 /**
+ * 把 1-based AI 楼层范围换算为聊天数组中的物理消息索引（只含 AI 消息）。
+ * startFloor/endFloor 为 null 分别表示从第一层 / 到最后一层；越界自动 clamp。
+ * 整楼层删除与按表删除共用此口径，避免两条路径对「第 N 层」的解释漂移。
+ */
+export function resolveAiMessageIndicesInFloorRange_ACU(
+    chat: any[] | null | undefined,
+    startFloor: number | null,
+    endFloor: number | null,
+): number[] {
+    if (!Array.isArray(chat) || chat.length === 0) return [];
+    const aiMessageIndices = chat
+        .map((msg: any, index: number) => (!msg?.is_user) ? index : -1)
+        .filter((index: number) => index !== -1);
+    if (aiMessageIndices.length === 0) return [];
+    const startAiIndex = startFloor ? Math.max(0, startFloor - 1) : 0;
+    const endAiIndex = endFloor ? Math.min(aiMessageIndices.length - 1, endFloor - 1) : aiMessageIndices.length - 1;
+    return aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
+}
+
+/**
  * 删除聊天记录中的本地数据（核心业务逻辑）
  * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
  * 
@@ -1914,22 +1934,14 @@ async function deleteLocalDataInChatCoreInner_ACU(
     const targetIdentity = settings_ACU.dataIsolationEnabled ? settings_ACU.dataIsolationCode : null;
     const currentIsolationKey = getCurrentIsolationKey_ACU();
 
-    // 计算AI消息索引列表（只计算AI楼层）
-    const aiMessageIndices = chat
-        .map((msg: any, index: number) => (!msg.is_user) ? index : -1)
-        .filter((index: number) => index !== -1);
-
-    if (aiMessageIndices.length === 0) {
+    const aiMessageCount = countAiMessages_ACU(chat);
+    if (aiMessageCount === 0) {
         return 0;
     }
 
-    // 转换AI楼层范围为AI消息索引范围
-    const startAiIndex = startFloor ? Math.max(0, startFloor - 1) : 0;
-    const endAiIndex = endFloor ? Math.min(aiMessageIndices.length - 1, endFloor - 1) : aiMessageIndices.length - 1;
-
-    // 获取要处理的AI消息的物理索引
-    const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
-    const isFullRangeDeletion = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageIndices.length);
+    // 要处理的 AI 消息的物理索引（1-based 楼层 → 物理索引）
+    const targetIndices = resolveAiMessageIndicesInFloorRange_ACU(chat, startFloor, endFloor);
+    const isFullRangeDeletion = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount);
 
     for (const physicalIndex of targetIndices) {
         const msg = chat[physicalIndex];
@@ -2064,7 +2076,8 @@ export async function deleteLocalDataInChatCore_ACU(
 /** 范围感知删除的分派结果。path 决定调用方必须执行哪套收尾。 */
 export type ScopedDeletionOutcome_ACU =
     | { path: 'purge'; result: ChatDatabasePurgeResult_ACU }
-    | { path: 'range'; deletedCount: number }
+    /** sheetKeys 存在 = 本次只删了这些表（按表删除），其它表与聊天级 guide/scope 未动。 */
+    | { path: 'range'; deletedCount: number; sheetKeys?: string[] }
     | { path: 'aborted'; reason: string };
 
 /**
@@ -2084,14 +2097,34 @@ export type ScopedDeletionOutcome_ACU =
  *   新增第 6 层后仍是 range，但原本 end=5 覆盖全部的场景会变成局部）。
  *   传入预判值后，一旦实际判定与预判不一致即返回 aborted，由调用方提示用户重新确认，
  *   避免「用户以为只删部分，实际被硬清空」这类破坏性误判。
+ * @param sheetKeys 可选按表删除：只清除这些表在范围内楼层的数据（full checkpoint /
+ *   单表 checkpoint / 过渡根 / 日志增量中属于这些表的部分），其它表、聊天级 guide 与
+ *   scope 容器一律不动，且永不触发硬清空（即便范围覆盖全部楼层）。作用于当前隔离键。
  */
 export async function deleteLocalDataWithScope_ACU(
     mode: 'current' | 'all' = 'current',
     startFloor: number | null = null,
     endFloor: number | null = null,
-    expectedPath?: 'purge' | 'range'
+    expectedPath?: 'purge' | 'range',
+    sheetKeys: string[] | null = null,
 ): Promise<ScopedDeletionOutcome_ACU> {
     const chat = getChatArray_ACU();
+    const normalizedSheetKeys = Array.isArray(sheetKeys)
+        ? [...new Set(sheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_')))]
+        : [];
+    if (normalizedSheetKeys.length > 0) {
+        if (expectedPath === 'purge') {
+            return {
+                path: 'aborted',
+                reason: '按表删除只会清除所选表的数据，不会执行完全清空；预判路径与实际不一致，已中止，请重新确认。',
+            };
+        }
+        const targetMessageIndices = resolveAiMessageIndicesInFloorRange_ACU(chat, startFloor, endFloor);
+        if (targetMessageIndices.length === 0) return { path: 'range', deletedCount: 0, sheetKeys: normalizedSheetKeys };
+        // 复用手动重填的按表范围清理：候选克隆上裁剪 → strict save 成功才落地，失败原位回滚。
+        const deletedCount = await clearManualRefillSheetDataInRange_ACU(targetMessageIndices, normalizedSheetKeys);
+        return { path: 'range', deletedCount, sheetKeys: normalizedSheetKeys };
+    }
     const aiMessageCount = countAiMessages_ACU(chat);
     const isFullRange = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount);
     const path: 'purge' | 'range' = (mode === 'all' && isFullRange) ? 'purge' : 'range';
