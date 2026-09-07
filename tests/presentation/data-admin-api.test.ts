@@ -212,7 +212,10 @@ describe('createDataAdminApi', () => {
     await expect(api.commitV2Recovery(' plan-1 ', { confirmOrphanDataReplace: true })).resolves.toEqual({ status: 'committed', planId: 'plan-1' });
 
     expect(mockPrepareV2Recovery).toHaveBeenCalledTimes(1);
-    expect(mockCommitV2Recovery).toHaveBeenCalledWith('plan-1', { confirmOrphanDataReplace: true });
+    expect(mockCommitV2Recovery).toHaveBeenCalledWith('plan-1', { confirmOrphanDataReplace: true, confirmCompatTolerantFixation: false });
+
+    await api.commitV2Recovery('plan-2', { confirmCompatTolerantFixation: true });
+    expect(mockCommitV2Recovery).toHaveBeenLastCalledWith('plan-2', { confirmOrphanDataReplace: false, confirmCompatTolerantFixation: true });
   });
 
   it('V2 恢复 API 拒绝空 planId、非对象选项及非严格布尔确认', async () => {
@@ -220,9 +223,9 @@ describe('createDataAdminApi', () => {
 
     await expect(api.commitV2Recovery(' ', { confirmOrphanDataReplace: true })).resolves.toMatchObject({ success: false, error: expect.stringContaining('planId') });
     await expect(api.commitV2Recovery('plan-1', 'yes')).resolves.toMatchObject({ success: false, error: expect.stringContaining('选项') });
-    await api.commitV2Recovery('plan-1', { confirmOrphanDataReplace: 'yes' });
+    await api.commitV2Recovery('plan-1', { confirmOrphanDataReplace: 'yes', confirmCompatTolerantFixation: 1 });
 
     expect(mockCommitV2Recovery).toHaveBeenCalledTimes(1);
-    expect(mockCommitV2Recovery).toHaveBeenLastCalledWith('plan-1', { confirmOrphanDataReplace: false });
+    expect(mockCommitV2Recovery).toHaveBeenLastCalledWith('plan-1', { confirmOrphanDataReplace: false, confirmCompatTolerantFixation: false });
   });
 });

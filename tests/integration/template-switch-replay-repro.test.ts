@@ -126,7 +126,7 @@ import {
 } from '../../src/service/table/storage-frame-v2-replay';
 import { ensureV2BoundaryCheckpointForRetainedBuffer_ACU } from '../../src/service/chat/chat-service';
 import { getTableDataFingerprint_ACU } from '../../src/service/table/table-data-upgrade-audit';
-import { prepareV2Recovery_ACU } from '../../src/service/table/table-v2-recovery-service';
+import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU } from '../../src/service/table/table-v2-recovery-service';
 import { flushRuntimeOnlyPendingChanges_ACU } from '../../src/service/table/runtime-only-pending-flush';
 import {
   clearRuntimeOnlyPendingSheets_ACU,
@@ -910,29 +910,27 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
     console.log('[F2 观察] 追平 outcome:', result.outcome, '| diagnosticCode:', result.diagnosticCode, '| error:', result.error);
     await flushPendingCompatTransitionFixations_ACU();
     expect(result.success).toBe(false);
-    // 实测路径（模板复位后确定）：规划出 1 wave/50 楼，首个 bucket 在 AI 调用前由
-    // loadV2ReplayMergeBase_ACU 的 F2 分支 throw → 本批中止；随后终态 progress 写入
-    // 也被 persist 写前门拒绝——聊天零写入。该路径无 diagnosticCode（catch 转 failed）。
-    expect(result.outcome).toBeUndefined();
+    // 回放宽容、写入严格：追平预检在任何 AI 调用与 bucket 之前检测到历史只能兼容读出，
+    // 直接 blocked 并给出可操作的诊断码（不在写路径里隐式修历史），聊天零写入。
+    expect(result.outcome).toBe('blocked');
+    expect(result.diagnosticCode).toBe('replay_requires_checkpoint_convergence');
     expect(result.committedBucketCount).toBe(0);
     expect(result.dataCommitted).toBe(false);
-    expect(result.error).toContain('不能作为填表基底');
-    expect(result.error).toContain('终态进度保存失败');
     expect(result.error).toContain('兼容宽容回放读出');
+    expect(result.error).toContain('诊断 V2 数据恢复');
     expect(mocks.callCustomOpenAI.mock.calls.length).toBe(callsBefore);
     expect(countAppendedLogEntriesOutsideRoot()).toBe(0);
     expect(hasAnyCompatTransitionCheckpoint()).toBe(false);
   }, 120000);
 
-  it('追平 fail-closed（零 bucket 路径）：全局模板已切到新 key 时终态验证报 replay_requires_checkpoint_convergence', async () => {
+  it('追平 fail-closed（零 bucket 路径）：全局模板已切到新 key 时预检仍报 replay_requires_checkpoint_convergence', async () => {
     mountTolerantChat();
     const replay = await loadTolerant();
     const sheetKey = sheetKeys(replay.data)[0];
     // 现场配置：全局模板已切到模板 B（同名、新稳定 key），聊天 guide 仍只有旧 key。
-    // chunk 处理里 rebindSheetKeysThroughTableAliases_ACU 按同名别名把目标旧 key 改绑为
-    // 新 key，随后 TemplateScope（来自 guide）判定新 key「模板未声明」而剔除→本 wave
-    // 零 bucket→不经 merge base 直接进入 verifyCommittedCatchUpReplay。该终态验证必须
-    // 识别 tolerant 态并报恢复需求，不能把兼容数据当作「验证通过」回写运行时视图。
+    // 追平预检在 bucket 规划之后、任何 AI 调用之前检查历史严格可回放性：无论 wave 里
+    // 有没有 bucket，tolerant 态历史都在预检处以 blocked 阻断，不会把兼容数据当作
+    // 「验证通过」回写运行时视图。
     _set_TABLE_TEMPLATE_ACU(JSON.stringify(templateB()));
     stateManager._set_currentJsonTableData_ACU(clone(replay.data));
     mocks.callCustomOpenAI.mockResolvedValue('<tableEdit>\ninsertRow(0, {"0":"名字A", "1":"状态A"});\n</tableEdit>');
@@ -946,10 +944,11 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
     console.log('[F2 观察] 零 bucket 追平 outcome:', result.outcome, '| diagnosticCode:', result.diagnosticCode, '| error:', result.error);
     await flushPendingCompatTransitionFixations_ACU();
     expect(result.success).toBe(false);
-    expect(result.outcome).toBe('integrity_failed');
+    expect(result.outcome).toBe('blocked');
     expect(result.diagnosticCode).toBe('replay_requires_checkpoint_convergence');
     expect(result.error).toContain('兼容宽容回放读出');
-    expect(result.replayVerified).toBe(false);
+    expect(result.error).toContain('诊断 V2 数据恢复');
+    expect(result.replayVerified).toBeFalsy();
     expect(mocks.callCustomOpenAI.mock.calls.length).toBe(callsBefore);
     expect(countAppendedLogEntriesOutsideRoot()).toBe(0);
     expect(hasAnyCompatTransitionCheckpoint()).toBe(false);
@@ -966,8 +965,19 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
     expect(summary.message).toContain('兼容宽容回放');
     expect(summary.message).toContain('unknown_operation_kind_skipped:1');
     expect(summary.message).toContain('身份归并=无');
+    // 显式恢复是把兼容结果转成权威根的用户入口：诊断即产出经严格探针验证的固化 plan。
+    expect(summary.planId).toBeTruthy();
+    expect(summary.message).toContain('固化方案');
     await flushPendingCompatTransitionFixations_ACU();
     expect(hasAnyCompatTransitionCheckpoint()).toBe(false);
+
+    // 本套件宿主严格保存被拒：提交必须回滚且报告失败，聊天零残迹。
+    const commit = await commitPreparedV2Recovery_ACU(summary.planId!);
+    console.log('[F2 观察] recovery commit:', JSON.stringify(commit));
+    expect(commit.status).toBe('commit_failed_rolled_back');
+    expect(commit.error).toContain('宿主保存失败');
+    expect(hasAnyCompatTransitionCheckpoint()).toBe(false);
+    expect(countAppendedLogEntriesOutsideRoot()).toBe(0);
   }, 60000);
 
   it('flush 兼容态：runtime-only 落盘跳过并保留登记，不把兼容数据固化为权威快照', async () => {

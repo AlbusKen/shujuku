@@ -355,8 +355,9 @@ describe('DataMgmtPage', () => {
     expect(text).not.toContain('加载序号');
     expect(text).not.toContain('删除当前标识本地数据');
     expect(text).not.toContain('合并导入（模板+指令）');
-    expect(text).not.toContain('扫描全部 V2 隔离域');
-    expect(text).not.toContain('诊断 V2 数据恢复');
+    // V2 恢复入口不受 legacy UI 开关控制：写入门闸的错误文案会把用户引导到这里。
+    expect(text).toContain('扫描全部 V2 隔离域');
+    expect(text).toContain('诊断 V2 数据恢复');
     expect(text).not.toContain('交火模式索引管理');
     expect(text).not.toContain('删除当前交火索引');
     expect(text).not.toContain('清空临时缓存');
@@ -999,6 +1000,57 @@ describe('DataMgmtPage', () => {
 
     expect(commitMixedDecision).toHaveBeenCalledWith('decision-test', 'commit_merge_candidate');
     expect(commitMixedDecision.mock.calls[0]).toHaveLength(2);
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('V2 恢复：兼容宽容回放固化 plan 经确认后以 confirmCompatTolerantFixation 提交（含身份归并需二次确认）', async () => {
+    const { mount, prepareV2Recovery, commitV2Recovery } = await mountDataMgmtPage();
+    const pageButtons = () => Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page button'));
+
+    // 场景 1：无身份归并 → 单次确认，confirmCompatTolerantFixation=false。
+    prepareV2Recovery.mockResolvedValueOnce({
+      planId: 'compat-plan', status: 'recoverable_compat_tolerant_replay', isolationKey: 'alpha',
+      requiresConfirmation: false, message: 'V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出。固化方案：在楼层 #2 写入兼容过渡根。',
+    });
+    pageButtons().find(button => button.textContent?.includes('诊断 V2 数据恢复'))!.click();
+    await new Promise(r => setTimeout(r, 0));
+    const fixButton = pageButtons().find(button => button.textContent?.includes('固化兼容回放为过渡根'));
+    expect(fixButton).not.toBeUndefined();
+    expect(fixButton!.textContent).not.toContain('确认身份归并');
+    fixButton!.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('固化兼容回放为过渡根');
+    expect(commitV2Recovery).not.toHaveBeenCalled();
+    await clickDialogButton('固化');
+    expect(commitV2Recovery).toHaveBeenCalledWith('compat-plan', { confirmOrphanDataReplace: false, confirmCompatTolerantFixation: false });
+
+    // 场景 2：含身份归并 → 两次确认，confirmCompatTolerantFixation=true。
+    commitV2Recovery.mockClear();
+    prepareV2Recovery.mockResolvedValueOnce({
+      planId: 'compat-plan-remap', status: 'recoverable_compat_tolerant_replay', isolationKey: 'alpha',
+      requiresConfirmation: true, message: '身份归并=sheet_a→sheet_b。固化方案：在楼层 #2 写入兼容过渡根。',
+    });
+    pageButtons().find(button => button.textContent?.includes('诊断 V2 数据恢复'))!.click();
+    await new Promise(r => setTimeout(r, 0));
+    const remapButton = pageButtons().find(button => button.textContent?.includes('确认身份归并并固化兼容回放为过渡根'));
+    expect(remapButton).not.toBeUndefined();
+    remapButton!.click();
+    await new Promise(r => setTimeout(r, 0));
+    await clickDialogButton('固化');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('再次确认 sheetKey 身份归并');
+    expect(commitV2Recovery).not.toHaveBeenCalled();
+    await clickDialogButton('确认归并并固化');
+    expect(commitV2Recovery).toHaveBeenCalledWith('compat-plan-remap', { confirmOrphanDataReplace: false, confirmCompatTolerantFixation: true });
+
+    // 场景 3：诊断结果无 plan（不可自动固化）→ 不出现固化按钮。
+    prepareV2Recovery.mockResolvedValueOnce({
+      status: 'recoverable_compat_tolerant_replay', isolationKey: 'alpha',
+      requiresConfirmation: false, message: '自动固化不可用：放置过渡根后严格探针仍失败。',
+    });
+    pageButtons().find(button => button.textContent?.includes('诊断 V2 数据恢复'))!.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(pageButtons().some(button => button.textContent?.includes('固化兼容回放为过渡根'))).toBe(false);
+    expect(document.querySelector('.acu-v2-data-mgmt-page')?.textContent).toContain('自动固化不可用');
     mount.__resetAcuV2MountForTests();
   });
 

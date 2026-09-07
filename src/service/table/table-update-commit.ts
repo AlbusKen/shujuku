@@ -6,6 +6,7 @@ import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_
 import { ensureStorageProviderReady_ACU, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from './manual-catch-up-provisional-bridge';
+import { isAppendedOperationsWriteRejection_ACU, isCompatReadonlyWriteRejection_ACU } from './storage-frame-v2-replay';
 import type { ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationIdentifiers_ACU } from './sql-table-service';
@@ -119,6 +120,21 @@ class TableUpdateCommitError_ACU extends Error {
 
 function cloneTableData_ACU(data: TableDataObject_ACU): TableDataObject_ACU {
   return JSON.parse(JSON.stringify(data));
+}
+
+/**
+ * 原则：回放宽容、写入严格。persist 拒绝写入时按"谁的错"分类，决定调用方能否重试：
+ * - 写时严格探针拒绝（本次增量叠加到目标楼层历史上不能严格回放，典型是 AI 重复插行
+ *   撞 UNIQUE）→ 'model'：是这份 AI 结果的问题，历史没被写坏，chunk 级重试会把错误反馈
+ *   给模型重新生成。
+ * - 兼容只读门闸拒绝（聊天历史本身只能宽容回放）→ 'precondition'：重试 AI 修不好历史，
+ *   必须在数据管理中显式恢复；不重试，避免浪费 AI 调用。
+ * - 其余 → 'infrastructure'。
+ */
+function classifyPersistRejection_ACU(error: string | undefined): TableUpdateCommitErrorCategory_ACU {
+  if (isAppendedOperationsWriteRejection_ACU(error)) return 'model';
+  if (isCompatReadonlyWriteRejection_ACU(error)) return 'precondition';
+  return 'infrastructure';
 }
 
 function normalizeSqlBindParams_ACU(params: (string | number | null)[] | undefined): (string | number | null)[][] | undefined {
@@ -369,7 +385,10 @@ export async function runTableUpdateCommit_ACU<T>(
             if (!saveResult.saved) {
               logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update; reload after releasing transaction locks: ${saveResult.error || 'unknown error'}`);
               requiresRuntimeReload = true;
-              throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
+              throw new TableUpdateCommitError_ACU(
+                saveResult.error || `${options.reason}: persist failed`,
+                classifyPersistRejection_ACU(saveResult.error),
+              );
             }
           } else {
             markRuntimeOnlyPendingAfterSkipChatSave_ACU(options, revisionWriteSet, applied.tableData);

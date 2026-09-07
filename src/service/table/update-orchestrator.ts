@@ -847,11 +847,15 @@ async function loadV2ReplayMergeBase_ACU(
             throwOnRecoveryRequired: true,
             ...(replayEvidence ? { replayEvidence } : {}),
         });
-        // F2：Tier-1 宽容回放结果不是严格可写历史，不能作为填表 merge base 喂给
-        // AI（否则本轮生成基于兼容态数据，提交时才被 persist 写前门拒绝，浪费 AI
-        // 调用）。在 AI 调用前中止本批（catch 会转为 failed 并阻止本批继续）。
+        // 回放宽容、写入严格：Tier-1 宽容回放结果可读，但不是严格可写历史，不能作为
+        // 填表 merge base 喂给 AI（否则本轮生成基于兼容态数据，提交时才被 persist 写前门
+        // 拒绝，浪费 AI 调用）。在 AI 调用前中止本批（catch 会转为 failed 并阻止本批继续）；
+        // 历史修复走数据管理的显式恢复，不在写路径里隐式改历史。
         if (replayResult?.baseKind === 'compat_tolerant_replay') {
-            throw new Error(`V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replayResult.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能作为填表基底；请先在数据管理中完成 V2 恢复收敛。`);
+            throw new Error(
+                `V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replayResult.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能作为填表基底；`
+                + '请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。',
+            );
         }
         if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
@@ -3599,6 +3603,48 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
 }
 
 /**
+ * 追平预检（回放宽容、写入严格）：首目标楼层的 bounded 回放与无界回放都必须严格可回放。
+ *
+ * bucket 提交写到首目标楼层帧、终态校验做无界回放，两条边界任一只能兼容读出，
+ * 后续提交就必然被 persist 写前门闸拒绝——那时 AI 调用已经消耗。这里只检测不修复：
+ * 兼容态历史在任何 AI 调用前阻断，并把用户指向数据管理的显式恢复。
+ * chat 非 V2 或无帧时回放为 null，直接放行。
+ */
+async function ensureStrictlyReplayableHistoryForCatchUp_ACU(
+    targetMessageIndex: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+    const chat = getChatArray_ACU();
+    if (!Array.isArray(chat) || chat.length === 0) return { ok: true };
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const bounds: Array<{ label: string; maxMessageIndex?: number }> = [
+        { label: `目标楼层 ${targetMessageIndex} 边界`, maxMessageIndex: targetMessageIndex },
+        { label: '聊天末尾', maxMessageIndex: undefined },
+    ];
+    for (const bound of bounds) {
+        let replay;
+        try {
+            replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                updateRuntimeState: false,
+                ...(Number.isInteger(bound.maxMessageIndex) ? { maxMessageIndex: bound.maxMessageIndex } : {}),
+            });
+        } catch (error) {
+            return {
+                ok: false,
+                error: `追平前无法回放聊天历史（${bound.label}）：${error instanceof Error ? error.message : String(error)}`,
+            };
+        }
+        if (replay?.baseKind === 'compat_tolerant_replay') {
+            return {
+                ok: false,
+                error: `追平前检测到聊天历史（${bound.label}）仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），`
+                    + '不能继续写入；请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。',
+            };
+        }
+    }
+    return { ok: true };
+}
+
+/**
  * 按聊天中已提交的 scheduleSummary/事件事实规划并执行所选表的后缀追平。
  * 不扫描或声称修复历史内部空洞；一期只处理每表连续前沿后的缺口。
  */
@@ -3717,6 +3763,20 @@ export async function orchestrateManualCatchUp_ACU(
     // 伪提交后由 terminal progress-only 写入兜底报错。
     const preflightTargetIndex = plan.waves[0]?.messageIndices[0] ?? plan.targetMessageIndex;
     if (preflightTargetIndex !== null && preflightTargetIndex !== undefined) {
+        // 历史处于兼容只读态（严格回放失败、只能宽容回放）时，所有 bucket 提交都会被
+        // persist 写前门闸拒绝——这时还去调用 AI 只是浪费，在任何 AI 调用前阻断。
+        const strictHistory = await ensureStrictlyReplayableHistoryForCatchUp_ACU(preflightTargetIndex);
+        if (strictHistory.ok === false) {
+            return {
+                success: false,
+                outcome: 'blocked',
+                error: strictHistory.error,
+                catchUpPlan: plan,
+                committedBucketCount: 0,
+                dataCommitted: false,
+                diagnosticCode: 'replay_requires_checkpoint_convergence',
+            };
+        }
         const anchorPreflight = await ensureManualCatchUpAnchorBeforeTarget_ACU(preflightTargetIndex, getCurrentIsolationKey_ACU());
         if (anchorPreflight.status === 'blocked') {
             return {

@@ -212,7 +212,7 @@
                 variant="danger"
                 :disabled="runtimeDiagnostic.busy.value"
                 :loading="flow.busyAction.value === 'commit-v2-recovery'"
-                @click="onCommitV2Recovery(false)"
+                @click="onCommitV2Recovery('checkpoint')"
               >
                 应用 Checkpoint 修复/收敛
               </AcuButton>
@@ -222,9 +222,19 @@
                 variant="danger"
                 :disabled="runtimeDiagnostic.busy.value"
                 :loading="flow.busyAction.value === 'commit-v2-recovery'"
-                @click="onCommitV2Recovery(true)"
+                @click="onCommitV2Recovery('orphan-data-replace')"
               >
                 确认无锚点 data_replace 恢复
+              </AcuButton>
+              <AcuButton
+                v-if="flow.v2RecoverySummary.value.status === 'recoverable_compat_tolerant_replay' && flow.v2RecoverySummary.value.planId"
+                block
+                variant="danger"
+                :disabled="runtimeDiagnostic.busy.value"
+                :loading="flow.busyAction.value === 'commit-v2-recovery'"
+                @click="onCommitV2Recovery('compat-fixation')"
+              >
+                {{ flow.v2RecoverySummary.value.requiresConfirmation ? '确认身份归并并固化兼容回放为过渡根' : '固化兼容回放为过渡根' }}
               </AcuButton>
             </div>
           </section>
@@ -272,7 +282,8 @@
               </AcuButton>
             </div>
           </section>
-          <div v-if="SHOW_LEGACY_DATA_MGMT_UI" class="acu-v2-data-mgmt-page__checkpoint-actions">
+          <!-- 恢复入口不受 legacy UI 开关控制：写入门闸的错误提示会把用户引导到这里。 -->
+          <div class="acu-v2-data-mgmt-page__checkpoint-actions" data-testid="v2-recovery-actions">
             <AcuButton block :disabled="runtimeDiagnostic.busy.value" :loading="flow.busyAction.value === 'scan-v2-isolation-diagnostics'" @click="flow.scanV2IsolationDiagnostics">
               扫描全部 V2 隔离域
             </AcuButton>
@@ -676,15 +687,25 @@ async function onCommitMixedStorageDecision(action: MixedStorageCommitAction_ACU
   void flow.commitMixedStorageDecision(action);
 }
 
-async function onCommitV2Recovery(confirmOrphanDataReplace: boolean): Promise<void> {
+type V2RecoveryCommitMode = 'checkpoint' | 'orphan-data-replace' | 'compat-fixation';
+
+async function onCommitV2Recovery(mode: V2RecoveryCommitMode): Promise<void> {
   if (runtimeDiagnostic.busy.value) return;
-  const isOrphan = confirmOrphanDataReplace;
+  const isOrphan = mode === 'orphan-data-replace';
+  const isCompatFixation = mode === 'compat-fixation';
+  const compatRequiresIdentityConfirmation = isCompatFixation && !!flow.v2RecoverySummary.value?.requiresConfirmation;
   const confirmed = await dialogStore.confirm({
-    title: isOrphan ? '确认无锚点 data_replace 恢复' : '应用 V2 Checkpoint 修复',
+    title: isOrphan
+      ? '确认无锚点 data_replace 恢复'
+      : isCompatFixation
+        ? '固化兼容回放为过渡根'
+        : '应用 V2 Checkpoint 修复',
     message: isOrphan
       ? '将只提交服务端冻结的无锚点 data_replace 候选。原始 frame 会保留为隔离备份，页面不会提交任何可编辑表格数据。确认继续？'
-      : '将只提交服务端冻结且已审计通过的 Checkpoint 修复候选。原始 frame 会保留为隔离备份。确认继续？',
-    confirmLabel: isOrphan ? '继续恢复' : '应用修复',
+      : isCompatFixation
+        ? '将把当前兼容宽容回放的读取结果写成严格可回放的过渡根（写在消息 tagData，不改写任何 storage frame）。固化后写入与追平恢复正常；原始历史仍完整保留。确认继续？'
+        : '将只提交服务端冻结且已审计通过的 Checkpoint 修复候选。原始 frame 会保留为隔离备份。确认继续？',
+    confirmLabel: isOrphan ? '继续恢复' : isCompatFixation ? '固化' : '应用修复',
     confirmVariant: 'danger',
   });
   if (!confirmed) return;
@@ -697,8 +718,20 @@ async function onCommitV2Recovery(confirmOrphanDataReplace: boolean): Promise<vo
     });
     if (!secondConfirmed) return;
   }
+  if (compatRequiresIdentityConfirmation) {
+    const secondConfirmed = await dialogStore.confirm({
+      title: '再次确认 sheetKey 身份归并',
+      message: '兼容回放结果按 key 优先级归并了同名不同 key 的表：同 row_id 时被覆盖的行会永久丢弃，列不做身份转换。固化后该归并结果成为持久历史的身份权威。确认提交？',
+      confirmLabel: '确认归并并固化',
+      confirmVariant: 'danger',
+    });
+    if (!secondConfirmed) return;
+  }
   if (runtimeDiagnostic.busy.value) return;
-  void flow.commitV2Recovery(isOrphan);
+  void flow.commitV2Recovery({
+    confirmOrphanDataReplace: isOrphan,
+    confirmCompatTolerantFixation: compatRequiresIdentityConfirmation,
+  });
 }
 
 async function onReloadSqliteRuntime(): Promise<void> {

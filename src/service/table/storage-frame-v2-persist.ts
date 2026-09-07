@@ -11,7 +11,7 @@ import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
 import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, hasV2TableHistoryEvidence_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
-import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU } from './storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, buildAppendedOperationsWriteRejectionMessage_ACU, buildCompatReadonlyWriteRejectionMessage_ACU, collectScheduleSummaryFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
@@ -620,6 +620,37 @@ async function validateTemporaryBaselineUpgradeCandidate_ACU(
 
   return await validateReplay('boundary', { maxMessageIndex: targetMessageIndex })
     || await validateReplay('suffix', {});
+}
+
+/**
+ * 普通增量追加后的写时严格探针：候选 chat（含本次 entry）在目标楼层边界必须能被严格回放。
+ *
+ * 追加 entry 的写入方以「写入时基底」（live runtime / 上一批结果）生成 operations，而
+ * 回放把它们叠加在「≤ 目标楼层的历史」之上；两者不一致时（典型：追平以 live 快照为
+ * prompt 基底却写到早期楼层），INSERT 会在回放里撞 UNIQUE、UPDATE 会落到不存在的行。
+ * 这样的 entry 一旦落盘，之后所有加载都只能走兼容宽容回放，全部写路径被门闸拒绝。
+ * 因此必须在落盘前用 compatibilityMode:'disabled' 探针拦截：回放抛错即拒绝本次写入。
+ * 返回 null 的回放（无 full 根）不在本探针职责内——该形态由 temporaryBaselineUpgrade 路径覆盖。
+ */
+async function validateAppendedOperationsReplayCandidate_ACU(
+  candidateChat: any[],
+  isolationKey: string,
+  targetMessageIndex: number,
+): Promise<string | null> {
+  let replay;
+  try {
+    replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+      maxMessageIndex: targetMessageIndex,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+  } catch (error) {
+    return buildAppendedOperationsWriteRejectionMessage_ACU(error instanceof Error ? error.message : String(error));
+  }
+  if (replay?.baseKind === 'compat_tolerant_replay') {
+    return buildAppendedOperationsWriteRejectionMessage_ACU(replay.legacyToleranceDiagnosis?.strictError || '严格回放失败');
+  }
+  return null;
 }
 
 async function validateProvisionalConvergenceCandidate_ACU(
@@ -2222,7 +2253,7 @@ async function persistTableMutationLogV2Core_ACU(
       // F2：Tier-1 宽容回放结果不是严格可写历史，也没有可收敛的 temporary_sheet_anchor
       // 模型（provisional 收敛依赖 repairs 定位锚点数据），必须拒绝写入并指向恢复收敛。
       if (replay?.baseKind === 'compat_tolerant_replay') {
-        return { saved: false, error: `V2 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+        return { saved: false, error: buildCompatReadonlyWriteRejectionMessage_ACU('V2 写入前', replay) };
       }
       if (!replay || !replay.compatibilityRepairs?.length
         || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
@@ -2593,6 +2624,21 @@ async function persistTableMutationLogV2Core_ACU(
       return { saved: false, error: candidateValidationError };
     }
     options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_boundary_checkpoint_save');
+  } else if (!shouldCheckpoint && entry && operations.length > 0) {
+    // 写时严格探针：普通增量追加后，候选历史在目标楼层边界必须严格可回放。
+    // 追平 / 早期楼层写入的 operations 由 live 基底生成，回放却叠加在 ≤ 目标楼层的
+    // 历史上；两者不一致的 entry 一旦落盘，整个聊天历史只能走兼容宽容回放，之后
+    // 所有写路径都会被门闸拒绝——必须在这里拦住。
+    const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
+    const candidateValidationError = await validateAppendedOperationsReplayCandidate_ACU(
+      candidateChat,
+      isolationKey,
+      target.index,
+    );
+    if (candidateValidationError) {
+      return { saved: false, error: candidateValidationError };
+    }
+    options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_appended_operations_save');
   }
   const previousMessageState = [...replacementIsolatedDataByMessageIndex.keys()].map(messageIndex => {
     const message = chat[messageIndex];
@@ -2780,7 +2826,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
     if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
       // F2：同单写入门——宽容回放结果不是严格可写历史，直接拒绝 batch 写入。
       if (replay?.baseKind === 'compat_tolerant_replay') {
-        return { saved: false, error: `V2 batch 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+        return { saved: false, error: buildCompatReadonlyWriteRejectionMessage_ACU('V2 batch 写入前', replay) };
       }
       if (!replay?.compatibilityRepairs?.length
         || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
@@ -2895,6 +2941,16 @@ async function persistTableMutationLogBatchV2Core_ACU(
     );
     if (candidateValidationError) return { saved: false, error: candidateValidationError };
     options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_convergence_save');
+  } else if (operationCount > 0) {
+    // 写时严格探针（同单写路径）：batch 追加的 entries 在最大目标楼层边界必须严格可回放，
+    // 否则拒绝落盘，避免写出只能兼容读取的历史。
+    const candidateValidationError = await validateAppendedOperationsReplayCandidate_ACU(
+      candidateChat,
+      isolationKey,
+      Math.max(...targetMessageIndices),
+    );
+    if (candidateValidationError) return { saved: false, error: candidateValidationError };
+    options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_appended_operations_save');
   }
 
   // convergence 会把锚点写入根帧（latestCheckpoint.index）；若根帧不是 batch target，

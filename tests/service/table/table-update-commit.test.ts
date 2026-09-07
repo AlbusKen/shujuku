@@ -233,9 +233,41 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
       persist: { beforePersist },
     }));
 
-    expect(result).toMatchObject({ success: false, error: 'host save failed' });
+    expect(result).toMatchObject({ success: false, error: 'host save failed', errorCategory: 'infrastructure' });
     expect(beforePersist).toHaveBeenCalledWith(data);
     expect(rollback).toHaveBeenCalledOnce();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
+  });
+
+  it('回放宽容、写入严格：persist 拒绝按成因分类——写时探针拒绝可重试(model)，兼容只读门闸不可重试(precondition)', async () => {
+    const data: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_target: { uid: 'sheet_target', name: '目标表', content: [['row_id'], ['r1']] },
+    };
+    mocks.migration.mockResolvedValue({ success: true, migrated: false });
+    mocks.transaction.mockImplementation(async (_options: any, task: any) => task({
+      runCommit: async (commitTask: any) => commitTask(),
+    }, null));
+    const apply = async () => ({ success: true, tableData: data });
+
+    // 写时严格探针：本次增量叠加到目标楼层历史上撞 UNIQUE——是这份 AI 结果的问题，
+    // 历史没被写坏，chunk 级重试应把错误反馈给模型重新生成。
+    mocks.persist.mockResolvedValueOnce({
+      saved: false,
+      error: 'V2 写入被拒绝：本次增量与聊天历史回放状态不一致（写入时基底与回放基底不一致），已阻止写出不可严格回放的历史：第 1 条语句失败: INSERT INTO t (row_id) VALUES (1) → UNIQUE constraint failed: t.row_id',
+    });
+    const guarded = await runTableUpdateCommit_ACU({ ...options('test_write_guard'), targetSheetKeys: ['sheet_target'] }, apply);
+    expect(guarded).toMatchObject({ success: false, errorCategory: 'model', error: expect.stringContaining('写入时基底与回放基底不一致') });
+    expect(mocks.reload).toHaveBeenCalledTimes(1);
+
+    // 兼容只读门闸：聊天历史本身只能宽容回放，重试 AI 修不好历史——不重试，指向显式恢复。
+    mocks.persist.mockResolvedValueOnce({
+      saved: false,
+      error: 'V2 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：x），不能继续写入；请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。',
+    });
+    const readonly = await runTableUpdateCommit_ACU({ ...options('test_compat_readonly'), targetSheetKeys: ['sheet_target'] }, apply);
+    expect(readonly).toMatchObject({ success: false, errorCategory: 'precondition', error: expect.stringContaining('兼容宽容回放读出') });
+    expect(mocks.reload).toHaveBeenCalledTimes(2);
     expect(mocks.setCurrentData).not.toHaveBeenCalled();
   });
 

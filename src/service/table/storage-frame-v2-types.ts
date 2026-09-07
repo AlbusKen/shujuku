@@ -533,7 +533,7 @@ export interface TableMigrationAuditBackupV1_ACU {
 export interface TableV2RecoveryBackup_ACU {
   version: 1;
   createdAt: number;
-  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix' | 'manual_catch_up_provisional_bridge' | 'redundant_full_checkpoint_convergence' | 'demoted_template_only_root' | 'restored_from_recovery_backup';
+  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix' | 'manual_catch_up_provisional_bridge' | 'redundant_full_checkpoint_convergence' | 'demoted_template_only_root' | 'restored_from_recovery_backup' | 'compat_tolerant_replay_fixation';
   sourceMessageIndex: number | null;
   failedMessageIndex?: number;
   failedSeq?: number;

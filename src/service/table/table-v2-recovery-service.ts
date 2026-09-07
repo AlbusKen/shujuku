@@ -10,11 +10,19 @@ import { detectPhysicalTableNameCollisions_ACU, type PhysicalTableNameCollision_
 import { getCurrentStorageMode } from './storage-mode';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from './table-storage-strategy';
-import { loadTableStateFromFramesV2Detailed_ACU, type TableReplayCompatibilityRepairV2_ACU } from './storage-frame-v2-replay';
+import {
+  applyCompatTransitionPlacementsToChat_ACU,
+  buildCompatTransitionFixationPlan_ACU,
+  collectCompatTransitionAffectedIndices_ACU,
+  flushPendingCompatTransitionFixations_ACU,
+  loadTableStateFromFramesV2Detailed_ACU,
+  type CompatTransitionPlacement_ACU,
+  type TableReplayCompatibilityRepairV2_ACU,
+} from './storage-frame-v2-replay';
 import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
-type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence' | 'restored_from_recovery_backup';
+type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence' | 'restored_from_recovery_backup' | 'compat_tolerant_replay_fixation';
 export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_compat_tolerant_replay' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable_identity_conflict' | 'unrecoverable';
 export type V2RecoveryCommitStatus_ACU = 'committed' | 'committed_postcondition_failed' | 'commit_failed_rolled_back';
 
@@ -26,6 +34,11 @@ export interface V2RecoveryCommitResult_ACU {
 
 export interface CommitPreparedV2RecoveryOptions_ACU {
   confirmOrphanDataReplace?: boolean;
+  /**
+   * 兼容宽容回放固化计划含 sheetKey 身份归并时必须显式确认：归并结果会成为持久历史的
+   * 身份权威（同 row_id 的 loser 行被丢弃、列不做身份转换）。
+   */
+  confirmCompatTolerantFixation?: boolean;
 }
 
 export interface V2RecoverySummary_ACU {
@@ -52,6 +65,13 @@ interface RecoveryPlan_ACU extends V2RecoverySummary_ACU {
   sourceFrameFingerprint: string;
   redundantFullIndices?: number[];
   redundantFrameFingerprints?: Array<{ messageIndex: number; fingerprint: string }>;
+  /** compat_tolerant_replay_fixation：要写入的过渡根放置（诊断时已通过严格探针）。 */
+  compatTransitionPlacements?: CompatTransitionPlacement_ACU[];
+  /**
+   * compat_tolerant_replay_fixation：放置会改动的楼层 tagData 指纹（含被移除旧过渡根的楼层）。
+   * 过渡根不在 storageFrame 内，帧指纹校验覆盖不到，需要单独按 tagData 校验。
+   */
+  affectedTagDataFingerprints?: Array<{ messageIndex: number; fingerprint: string }>;
   candidateData: TableDataObject_ACU;
 }
 const plans_ACU = new Map<string, RecoveryPlan_ACU>();
@@ -62,6 +82,11 @@ function getErrorMessage_ACU(error: unknown): string {
 }
 function getFrameFingerprint_ACU(frame: TableStorageFrameV2_ACU): string {
   return JSON.stringify(frame);
+}
+function getTagDataFingerprint_ACU(chat: any[], isolationKey: string, messageIndex: number): string {
+  const message = chat[messageIndex];
+  if (!message || message.is_user) return 'missing';
+  return JSON.stringify(readIsolatedTagData_ACU(message, isolationKey) ?? null);
 }
 function countAiFloorInChat_ACU(chat: any[], messageIndex: number): number {
   let count = 0;
@@ -236,6 +261,11 @@ function planAffectedFramesUnchanged_ACU(plan: RecoveryPlan_ACU): string | null 
       return `受影响帧已变化：messageIndex=${item.messageIndex}。`;
     }
   }
+  for (const item of plan.affectedTagDataFingerprints || []) {
+    if (getTagDataFingerprint_ACU(plan.chat, plan.isolationKey, item.messageIndex) !== item.fingerprint) {
+      return `过渡根放置目标楼层已变化：messageIndex=${item.messageIndex}，请重新诊断。`;
+    }
+  }
   const sourceFrame = getPlanSourceFrame_ACU(plan);
   if (!sourceFrame || getFrameFingerprint_ACU(sourceFrame) !== plan.sourceFrameFingerprint) {
     return '恢复源 frame 已变化，请重新诊断。';
@@ -246,6 +276,14 @@ function buildRecoveredCandidateChat_ACU(plan: RecoveryPlan_ACU): any[] {
   const sourceMessageIndex = plan.sourceMessageIndex;
   if (!Number.isInteger(sourceMessageIndex)) throw new Error('恢复计划缺少 sourceMessageIndex。');
   const candidateChat = clone_ACU(plan.chat);
+  if (plan.kind === 'compat_tolerant_replay_fixation') {
+    // 过渡根写在 tagData.compatTransitionCheckpoint，不改写任何 storageFrame：原始
+    // 历史（含被宽容的坏 entry）原样保留，可随时删除过渡根回到兼容读取。
+    const placements = plan.compatTransitionPlacements || [];
+    if (placements.length === 0) throw new Error('兼容回放固化计划缺少过渡根放置。');
+    applyCompatTransitionPlacementsToChat_ACU(candidateChat, plan.isolationKey, placements);
+    return candidateChat;
+  }
   if (plan.kind === 'redundant_full_checkpoint_convergence') {
     // 多消息降级：保留末位 full（回放根）不动，其余 full 帧无损降级为
     // data_replace fallback entry，原帧整体入 recoveryBackup。
@@ -345,6 +383,25 @@ async function validateRecoveredCandidateReplay_ACU(plan: RecoveryPlan_ACU, cand
   });
   if (!replay) throw new Error('恢复候选未产生可回放表数据。');
   if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) throw new Error('恢复候选仍依赖临时 Sheet 补锚。');
+  if (plan.kind === 'compat_tolerant_replay_fixation') {
+    // 每个放置楼层的 bounded 严格回放都必须以过渡根为基底：追平/写前门闸做的正是
+    // bounded 回放，只验证无界回放通过不足以证明它们不再被拒绝。
+    for (const placement of plan.compatTransitionPlacements || []) {
+      const bounded = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, plan.isolationKey, {
+        updateRuntimeState: false,
+        compatibilityMode: 'disabled',
+        maxMessageIndex: placement.messageIndex,
+      });
+      if (!bounded) throw new Error(`过渡根楼层 #${placement.messageIndex} 的 bounded 回放未产生表数据。`);
+      if (bounded.baseKind !== 'compat_transition_checkpoint') {
+        throw new Error(`过渡根楼层 #${placement.messageIndex} 的 bounded 回放未以过渡根为基底（baseKind=${bounded.baseKind}）。`);
+      }
+    }
+    if (getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
+      throw new Error('固化后严格回放结果与诊断时的探针结果不一致，拒绝提交。');
+    }
+    return;
+  }
   // 单 full 收敛：收敛前（原始 chat）必须可完整回放，且收敛前后 replay 指纹必须完全一致，否则拒绝提交。
   // 在 validate 内重算基线而非依赖诊断期存档，可覆盖 diagnose 与 commit 之间任何帧的外部改动。
   if (plan.kind === 'redundant_full_checkpoint_convergence') {
@@ -506,9 +563,10 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
       if (identityConflicts.length > 0) {
         return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, identityConflicts, latestFull.frame.checkpoint.data) };
       }
+      // 诊断是纯读取：不调度后台固化（读取不得隐式改历史，也避免与下方生成的固化 plan 竞争）。
       let replay;
       try {
-        replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+        replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false, backgroundFixation: 'skip' });
       } catch (error) {
         return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: `full checkpoint 虽通过静态审计，但完整回放失败：${getErrorMessage_ACU(error)}` } };
       }
@@ -518,17 +576,61 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
       // 写入/模板提交/追平已被结果契约拒绝；无身份归并的纯 legacy 容忍项会在加载时
       // 后台固化为兼容过渡根，含身份归并的历史则拒绝自动固化，持久修复连 F3（身份归一化）。
       if (replay?.baseKind === 'compat_tolerant_replay') {
+        // 宿主聊天此前的普通加载可能已调度后台固化；等它结束再诊断，避免固化写入与
+        // 本次 plan 的指纹/放置竞争。后台固化成功则历史已严格可回放，直接复检。
+        if (chat === getChatArray_ACU()) {
+          await flushPendingCompatTransitionFixations_ACU();
+          const recheck = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false, backgroundFixation: 'skip' });
+          if (recheck?.baseKind !== 'compat_tolerant_replay') {
+            return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '兼容宽容回放结果已在后台固化为过渡根，当前历史可严格回放，无需恢复。' } };
+          }
+          replay = recheck;
+        }
         const identityRemaps = replay.legacyToleranceDiagnosis?.identityRemaps || [];
         const remapDetail = identityRemaps.length > 0
           ? identityRemaps.map(remap => `${remap.fromKey}→${remap.toKey}「${remap.canonicalName}」（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`).join('；')
           : '无';
-        return { summary: {
+        const baseMessage = `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要在此显式确认后固化（归并结果将成为持久历史的身份权威）。' : '无身份归并的兼容结果会在加载时后台固化为过渡根；也可在此立即固化。'}`;
+        const summaryBase: V2RecoverySummary_ACU = {
           status: 'recoverable_compat_tolerant_replay',
           isolationKey,
           sourceMessageIndex: latestFull.messageIndex,
           affectedSheetKeys: [...new Set(identityRemaps.flatMap(remap => [remap.fromKey, remap.toKey]))],
-          requiresConfirmation: false,
-          message: `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要身份归一化恢复。' : '无身份归并的兼容结果会在后台固化为过渡根。'}`,
+          requiresConfirmation: identityRemaps.length > 0,
+          message: baseMessage,
+        };
+        // 显式恢复路径允许身份归并（用户确认后提交）；固化候选在这里就通过严格探针，
+        // 不可固化的历史只返回诊断（无 plan），并把原因写进 message。
+        let fixation: Awaited<ReturnType<typeof buildCompatTransitionFixationPlan_ACU>>;
+        try {
+          fixation = await buildCompatTransitionFixationPlan_ACU(chat, isolationKey, {
+            strictFailure: replay.legacyToleranceDiagnosis?.strictFailure,
+            allowIdentityRemaps: true,
+          });
+        } catch (error) {
+          return { summary: { ...summaryBase, message: `${baseMessage}自动固化不可用：${getErrorMessage_ACU(error)}` } };
+        }
+        if (fixation.ok === false) {
+          return { summary: { ...summaryBase, message: `${baseMessage}自动固化不可用：${fixation.reason}` } };
+        }
+        const placementIndices = fixation.placements.map(placement => placement.messageIndex);
+        const affectedIndices = collectCompatTransitionAffectedIndices_ACU(chat, isolationKey, fixation.placements);
+        const summary: V2RecoverySummary_ACU = {
+          ...summaryBase,
+          message: `${baseMessage}固化方案：在楼层 #${placementIndices.join('、#')} 写入兼容过渡根（tolerances=${fixation.tolerances.join(', ') || '无'}；行身份修复 ${fixation.rowIdentityRepairs.length} 处），固化后严格回放已通过探针验证；原始 storage frame 不会被改写。`,
+        };
+        return { summary, plan: {
+          ...summary,
+          kind: 'compat_tolerant_replay_fixation',
+          chat,
+          chatKey: String(currentChatFileIdentifier_ACU || '').trim(),
+          sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame),
+          compatTransitionPlacements: fixation.placements,
+          affectedTagDataFingerprints: affectedIndices.map(messageIndex => ({
+            messageIndex,
+            fingerprint: getTagDataFingerprint_ACU(chat, isolationKey, messageIndex),
+          })),
+          candidateData: fixation.strictProbeData,
         } };
       }
       // 根快照干净不代表整条历史干净：回放结果里若仍有拼音同名的不同表（回放归并只处理
@@ -660,8 +762,14 @@ export async function commitPreparedV2Recovery_ACU(
   const plan = plans_ACU.get(planId);
   const failure = (error: string): V2RecoveryCommitResult_ACU => ({ status: 'commit_failed_rolled_back', planId, error });
   if (!plan) return failure('恢复计划不存在或已失效，请重新诊断。');
-  if (plan.requiresConfirmation && options.confirmOrphanDataReplace !== true) {
-    return failure('无锚点 data_replace 恢复必须显式确认。');
+  if (plan.requiresConfirmation) {
+    if (plan.kind === 'compat_tolerant_replay_fixation') {
+      if (options.confirmCompatTolerantFixation !== true) {
+        return failure('含 sheetKey 身份归并的兼容回放固化必须显式确认。');
+      }
+    } else if (options.confirmOrphanDataReplace !== true) {
+      return failure('无锚点 data_replace 恢复必须显式确认。');
+    }
   }
   if (!currentScopeMatches_ACU(plan)) {
     plans_ACU.delete(planId);

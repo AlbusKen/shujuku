@@ -40163,6 +40163,75 @@ $CONTENT
         });
         return data;
     }
+    /**
+     * 把兼容宽容回放的可见状态归一为 canonical 行身份契约，但**保留每一个已有 row_id**。
+     *
+     * 与 reindexSpv79TransitionState_ACU 的全表重编号不同：兼容过渡根可能落在聊天中段，
+     * 其后仍有严格回放的增量按 row_id 引用行（`UPDATE ... WHERE row_id = 5`）。如果固化时把
+     * 5 改成 3，后续增量会静默更新到另一行。因此这里只处理会让 canonical 校验失败的行：
+     * - 同表内第二次及之后出现的重复 row_id → 分配该表当前最大 id + 1（首次出现保留原 id）；
+     * - 空 row_id（restoreLegacyRowIdentity_ACU 之后仍为空的行）→ 同样分配新 id。
+     * 所有 id 按 trim 后的字符串比较与写回；表头身份列统一为 'row_id'。
+     */
+    function dedupeCompatTransitionRowIdentities_ACU(source) {
+        const data = JSON.parse(JSON.stringify(source));
+        restoreLegacyRowIdentity_ACU(data);
+        const repairs = [];
+        Object.entries(data).forEach(([sheetKey, value]) => {
+            if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object')
+                return;
+            const sheet = value;
+            if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]))
+                return;
+            sheet.content[0][0] = 'row_id';
+            const contentRows = [];
+            for (let index = 1; index < sheet.content.length; index += 1) {
+                if (Array.isArray(sheet.content[index]))
+                    contentRows.push(sheet.content[index]);
+            }
+            const seedRows = Array.isArray(sheet.seedRows)
+                ? sheet.seedRows.filter((row) => Array.isArray(row))
+                : [];
+            // 先登记全部合法 id，再给冲突行分配，保证新 id 不会撞到后面尚未遍历的行。
+            const reserved = new Set();
+            const seen = new Set();
+            for (const row of [...contentRows, ...seedRows]) {
+                if (isEmptyCanonicalRowId_ACU(row[0]))
+                    continue;
+                reserved.add(String(row[0]).trim());
+            }
+            const repairRow = (row, rowIndex) => {
+                if (isEmptyCanonicalRowId_ACU(row[0])) {
+                    const nextRowId = allocateStableRowId_ACU(reserved);
+                    reserved.add(nextRowId);
+                    seen.add(nextRowId);
+                    repairs.push({ sheetKey, rowIndex, previousRowId: '', nextRowId, reason: 'empty_row_id' });
+                    row[0] = nextRowId;
+                    return;
+                }
+                const rowId = String(row[0]).trim();
+                if (!seen.has(rowId)) {
+                    seen.add(rowId);
+                    row[0] = rowId;
+                    return;
+                }
+                const nextRowId = allocateStableRowId_ACU(reserved);
+                reserved.add(nextRowId);
+                seen.add(nextRowId);
+                repairs.push({ sheetKey, rowIndex, previousRowId: rowId, nextRowId, reason: 'duplicate_row_id' });
+                row[0] = nextRowId;
+            };
+            let contentRowIndex = 0;
+            for (let index = 1; index < sheet.content.length; index += 1) {
+                if (!Array.isArray(sheet.content[index]))
+                    continue;
+                repairRow(contentRows[contentRowIndex], index);
+                contentRowIndex += 1;
+            }
+            seedRows.forEach((row, index) => repairRow(row, -(index + 1)));
+        });
+        return { data, repairs };
+    }
 
     function normalizeHeaderCell_ACU(value) {
         return String(value ?? '').trim();
@@ -41025,6 +41094,50 @@ $CONTENT
             this.code = 'v2_replay_aborted';
             this.name = 'V2ReplayAbortedError_ACU';
         }
+    }
+    /**
+     * 严格回放 operation 级失败。message 与历史字符串格式完全一致（日志/测试/错误提示
+     * 均按该格式匹配），额外携带结构化定位字段，供固化与恢复直接消费而不必解析字符串。
+     */
+    class V2ReplayOperationError_ACU extends Error {
+        constructor(point, cause) {
+            const causeMessage = cause instanceof Error ? cause.message : String(cause);
+            super(`[V2 Replay] operation failed: messageIndex=${point.messageIndex}, seq=${point.seq}, operationIndex=${point.operationIndex}, kind=${point.kind}: ${causeMessage}`);
+            this.code = 'v2_replay_operation_failed';
+            this.name = 'V2ReplayOperationError_ACU';
+            this.messageIndex = point.messageIndex;
+            this.seq = point.seq;
+            this.operationIndex = point.operationIndex;
+            this.kind = point.kind;
+            this.cause = cause;
+        }
+    }
+    /**
+     * 写路径拒绝「兼容只读态」历史时的统一关键短语。所有写门闸（persist 单写/批量、
+     * merge base、追平预检/终态验证、runtime-only flush、模板提交）的拒绝文案都包含它；
+     * isCompatReadonlyWriteRejection_ACU 据此识别该类失败以触发「先固化、再重试提交」。
+     */
+    const V2_COMPAT_READONLY_MARKER_ACU = '仅可经兼容宽容回放读出';
+    function buildCompatReadonlyWriteRejectionMessage_ACU(scope, replay, extra) {
+        const strictError = replay?.legacyToleranceDiagnosis?.strictError || '未知错误';
+        const suffix = extra ? `；${extra}` : '';
+        return `${scope}检测到聊天历史${V2_COMPAT_READONLY_MARKER_ACU}（严格回放失败：${strictError}），不能继续写入${suffix}；请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。`;
+    }
+    function isCompatReadonlyWriteRejection_ACU(error) {
+        const message = error instanceof Error ? error.message : (typeof error === 'string' ? error : '');
+        return message.includes(V2_COMPAT_READONLY_MARKER_ACU);
+    }
+    /**
+     * 写时严格探针的拒绝标记：本次增量叠加到目标楼层历史上不能严格回放。
+     * 与兼容只读门闸不同，这类拒绝是"这份增量"的问题（历史未被写坏），调用方可按模型错误重试。
+     */
+    const V2_WRITE_GUARD_MARKER_ACU = '写入时基底与回放基底不一致';
+    function buildAppendedOperationsWriteRejectionMessage_ACU(detail) {
+        return `V2 写入被拒绝：本次增量与聊天历史回放状态不一致（${V2_WRITE_GUARD_MARKER_ACU}），已阻止写出不可严格回放的历史：${detail}`;
+    }
+    function isAppendedOperationsWriteRejection_ACU(error) {
+        const message = error instanceof Error ? error.message : (typeof error === 'string' ? error : '');
+        return message.includes(V2_WRITE_GUARD_MARKER_ACU);
     }
     function createReplayMetrics_ACU() {
         return {
@@ -42993,8 +43106,14 @@ $CONTENT
                                     await applyTableOperationV2_ACU(state, operation, runtime, headerOnlyTemplate, metrics, aliasContext, identity);
                                 }
                                 catch (error) {
-                                    const message = error instanceof Error ? error.message : String(error);
-                                    throw new Error(`[V2 Replay] operation failed: messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}, kind=${String(operation?.kind || 'unknown')}: ${message}`);
+                                    if (error instanceof V2ReplayAbortedError_ACU)
+                                        throw error;
+                                    throw new V2ReplayOperationError_ACU({
+                                        messageIndex: ref.messageIndex,
+                                        seq: entry.seq,
+                                        operationIndex,
+                                        kind: String(operation?.kind || 'unknown'),
+                                    }, error);
                                 }
                             }
                         }
@@ -43136,24 +43255,26 @@ $CONTENT
         if (options.updateRuntimeState !== false) {
             applyScheduleSummaryBestEffort_ACU(chat, isolationKey, options.maxMessageIndex);
         }
-        // 只有宿主当前聊天允许后台固化（候选回放、bounded 验证、导入诊断保持纯函数性质）。
-        if (chat === getChatArray_ACU()) {
-            scheduleCompatTransitionFixation_ACU(chat, isolationKey);
+        const strictFailure = toReplayOperationFailurePoint_ACU(originalError);
+        // 只有宿主当前聊天允许后台固化（候选回放、bounded 验证、导入诊断保持纯函数性质）；
+        // 显式诊断路径以 backgroundFixation:'skip' 关闭它。
+        if (chat === getChatArray_ACU() && options.backgroundFixation !== 'skip') {
+            scheduleCompatTransitionFixation_ACU(chat, isolationKey, { strictFailure });
         }
-        // 返回前尽力把行身份归一为新版契约（与固化根使用同一 reindex 纯函数）：
+        // 返回前尽力把行身份归一为新版契约（与固化根使用同一去重纯函数，保留既有 row_id）：
         // 成功则首次加载与固化后的后续加载看到完全一致的 row_id；失败则原样返回
         // 兼容结果（仍可用，只是该历史无法固化）。
         let resultData = tolerant.data;
         try {
-            const reindexed = reindexSpv79TransitionState_ACU(tolerant.data);
-            const normalization = normalizeCanonicalTableRows_ACU(reindexed);
+            const deduped = dedupeCompatTransitionRowIdentities_ACU(tolerant.data).data;
+            const normalization = normalizeCanonicalTableRows_ACU(deduped);
             if (normalization.errors.length === 0 && normalization.removedRows.length === 0) {
-                resultData = reindexed;
+                resultData = deduped;
             }
         }
-        catch (reindexError) {
-            logWarn_ACU(`[V2 Compat Replay] 兼容结果行身份重编号失败，按原始兼容结果返回：`
-                + `${reindexError instanceof Error ? reindexError.message : String(reindexError)}`);
+        catch (dedupeError) {
+            logWarn_ACU(`[V2 Compat Replay] 兼容结果行身份去重失败，按原始兼容结果返回：`
+                + `${dedupeError instanceof Error ? dedupeError.message : String(dedupeError)}`);
         }
         return {
             data: resultData,
@@ -43165,9 +43286,20 @@ $CONTENT
             legacyToleranceDiagnosis: {
                 tolerances: toleranceSummary,
                 strictError: originalMessage,
+                ...(strictFailure ? { strictFailure } : {}),
                 identityRemaps: tolerant.toleranceReport.identityRemaps.map(remap => ({ ...remap })),
             },
             metrics: createReplayMetrics_ACU(),
+        };
+    }
+    function toReplayOperationFailurePoint_ACU(error) {
+        if (!(error instanceof V2ReplayOperationError_ACU))
+            return undefined;
+        return {
+            messageIndex: error.messageIndex,
+            seq: error.seq,
+            operationIndex: error.operationIndex,
+            kind: error.kind,
         };
     }
     async function loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options = {}) {
@@ -43603,60 +43735,317 @@ $CONTENT
         const result = await replayWithLegacyTolerances_ACU(chatArg, isolationKey);
         return { data: result.data, cutoff: result.cutoff };
     }
+    /** 单次固化最多放置的过渡根数：每个放置都消除一个严格失败点，超过说明历史损坏面过大，交给人工。 */
+    const MAX_COMPAT_TRANSITION_PLACEMENTS_ACU = 8;
+    function findLastAiMessageIndex_ACU(chat) {
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            if (chat[index] && !chat[index].is_user)
+                return index;
+        }
+        return -1;
+    }
+    function describeIdentityRemaps_ACU(remaps) {
+        return remaps
+            .map(remap => `${remap.fromKey}→${remap.toKey}（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`)
+            .join('；');
+    }
+    function hasTransitionCheckpointTagData_ACU(tagData) {
+        return !!tagData && typeof tagData === 'object' && !Array.isArray(tagData)
+            && ('compatTransitionCheckpoint' in tagData || 'spv79TransitionCheckpoint' in tagData);
+    }
+    /**
+     * 放置过渡根会改动的全部楼层：放置目标本身 + 首个放置之后仍带旧过渡根的楼层
+     * （旧根会被移除，见 applyCompatTransitionPlacementsToChat_ACU）。恢复服务据此做
+     * 提交前的 tagData 指纹校验。
+     */
+    function collectCompatTransitionAffectedIndices_ACU(chat, isolationKey, placements) {
+        const affected = new Set(placements.map(placement => placement.messageIndex));
+        if (placements.length > 0) {
+            const anchorIndex = Math.min(...placements.map(placement => placement.messageIndex));
+            for (let index = anchorIndex + 1; index < chat.length; index += 1) {
+                const message = chat[index];
+                if (!message || message.is_user)
+                    continue;
+                if (hasTransitionCheckpointTagData_ACU(readIsolatedTagData_ACU(message, isolationKey)))
+                    affected.add(index);
+            }
+        }
+        return [...affected].sort((left, right) => left - right);
+    }
+    /**
+     * 把过渡根放置写到 chat 上（原地修改），并移除首个放置之后既有的旧过渡根——
+     * 严格探针就是在剔除了这些旧根的副本上通过的，落盘状态必须与被验证的状态一致；
+     * 旧根只是历史兼容回放的派生缓存，被验证过的严格回放已能覆盖它们的区间。
+     * 返回可精确回滚的快照，供事务失败时还原。
+     * 恢复服务在候选 chat（深拷贝）上调用；后台固化在宿主 chat 上事务内调用。
+     */
+    function applyCompatTransitionPlacementsToChat_ACU(chat, isolationKey, placements) {
+        const affectedIndices = collectCompatTransitionAffectedIndices_ACU(chat, isolationKey, placements);
+        const snapshots = affectedIndices.map(messageIndex => {
+            const target = chat[messageIndex];
+            return {
+                target,
+                hadIsolatedData: Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_IsolatedData'),
+                isolatedData: target.TavernDB_ACU_IsolatedData,
+                hadIdentity: Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_Identity'),
+                identity: target.TavernDB_ACU_Identity,
+            };
+        });
+        const rollback = () => {
+            for (const snapshot of snapshots) {
+                if (snapshot.hadIsolatedData)
+                    snapshot.target.TavernDB_ACU_IsolatedData = snapshot.isolatedData;
+                else
+                    delete snapshot.target.TavernDB_ACU_IsolatedData;
+                if (snapshot.hadIdentity)
+                    snapshot.target.TavernDB_ACU_Identity = snapshot.identity;
+                else
+                    delete snapshot.target.TavernDB_ACU_Identity;
+            }
+        };
+        const placementByIndex = new Map(placements.map(placement => [placement.messageIndex, placement]));
+        try {
+            for (const messageIndex of affectedIndices) {
+                const target = chat[messageIndex];
+                if (!target || target.is_user)
+                    throw new Error(`兼容过渡 checkpoint 的目标 AI 楼层已变化：messageIndex=${messageIndex}。`);
+                const previousIsolatedData = target.TavernDB_ACU_IsolatedData;
+                const isolatedData = previousIsolatedData && typeof previousIsolatedData === 'object' && !Array.isArray(previousIsolatedData)
+                    ? deepClone_ACU$4(previousIsolatedData)
+                    : {};
+                const tagData = isolatedData[isolationKey] && typeof isolatedData[isolationKey] === 'object' && !Array.isArray(isolatedData[isolationKey])
+                    ? isolatedData[isolationKey]
+                    : {};
+                delete tagData.compatTransitionCheckpoint;
+                delete tagData.spv79TransitionCheckpoint;
+                const placement = placementByIndex.get(messageIndex);
+                if (placement)
+                    tagData.compatTransitionCheckpoint = deepClone_ACU$4(placement.checkpoint);
+                isolatedData[isolationKey] = tagData;
+                target.TavernDB_ACU_IsolatedData = isolatedData;
+                writeMessageIdentity_ACU(target, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+            }
+        }
+        catch (error) {
+            rollback();
+            throw error;
+        }
+        return { rollback };
+    }
+    /**
+     * 探针副本：剔除 anchorIndex 之后既有的过渡根。它们会遮蔽 (anchor, root) 区间的
+     * bounded 严格回放失败——无界探针会直接从后面的旧根起算而"通过"，但追平/写前的
+     * bounded 回放看不到那个旧根。剔除后探针才真正验证「从新放置起每一段都严格可回放」；
+     * applyCompatTransitionPlacementsToChat_ACU 落盘时做同样的剔除，保证验证态 == 落盘态。
+     */
+    function buildCompatFixationProbeChat_ACU(chat, isolationKey, anchorIndex) {
+        const probe = deepClone_ACU$4(chat);
+        for (let index = anchorIndex + 1; index < probe.length; index += 1) {
+            const message = probe[index];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!tagData)
+                continue;
+            if ('compatTransitionCheckpoint' in tagData)
+                delete tagData.compatTransitionCheckpoint;
+            if ('spv79TransitionCheckpoint' in tagData)
+                delete tagData.spv79TransitionCheckpoint;
+        }
+        return probe;
+    }
+    /**
+     * 分段严格探针：对 anchorIndex 之后的每个 full checkpoint 前一楼做 bounded 探测，
+     * 再做无界探测。full 根会在无界回放中接管其后的历史，若只做无界探针，(anchor, full)
+     * 区间的失败会被遮蔽；bounded 追平恰恰落在这个区间。
+     */
+    async function runCompatFixationStrictProbe_ACU(probeChat, isolationKey, anchorIndex) {
+        const laterFullIndices = getV2FrameRefs_ACU(probeChat, isolationKey)
+            .filter(ref => ref.messageIndex > anchorIndex && ref.frame.checkpoint?.kind === 'full')
+            .map(ref => ref.messageIndex);
+        const bounds = [
+            ...laterFullIndices.map(index => index - 1).filter(bound => bound >= anchorIndex),
+            undefined,
+        ];
+        let lastData = null;
+        for (const bound of bounds) {
+            try {
+                const replay = await loadTableStateFromFramesV2Detailed_ACU(probeChat, isolationKey, {
+                    ...(bound === undefined ? {} : { maxMessageIndex: bound }),
+                    updateRuntimeState: false,
+                    compatibilityMode: 'disabled',
+                });
+                if (!replay)
+                    return { ok: false, error: new Error(`严格探针未产生回放结果（bound=${bound ?? 'latest'}）。`) };
+                if (replay.baseKind === 'compat_tolerant_replay') {
+                    return { ok: false, error: new Error('严格探针仍返回兼容宽容回放结果。') };
+                }
+                lastData = replay.data;
+            }
+            catch (error) {
+                return { ok: false, error };
+            }
+        }
+        return { ok: true, data: lastData };
+    }
+    /**
+     * 构造兼容过渡根固化计划（纯函数：不修改传入 chat，不落盘）。
+     *
+     * 过渡根必须锚在严格失败点所在楼层而不是聊天末尾：findLatestTransitionCheckpoint_ACU
+     * 受 maxMessageIndex 约束，末尾根对追平/写前的 bounded 回放不可见，历史会一直处于
+     * 兼容只读态。算法：以失败楼层为锚点做 bounded 宽容回放 → 去重行身份（保留既有
+     * row_id）→ canonical 校验 → 放置到探针副本 → 分段严格探针；探针在更后的楼层再次
+     * 失败则在该楼层补放置，直到无界严格通过或达到放置上限。
+     */
+    async function buildCompatTransitionFixationPlan_ACU(chat, isolationKey, options) {
+        const lastAiIndex = findLastAiMessageIndex_ACU(chat);
+        if (lastAiIndex < 0) {
+            return { ok: false, code: 'no_ai_floor', reason: '缺少可写入的 AI 楼层。' };
+        }
+        const initialAnchor = options.strictFailure
+            && Number.isInteger(options.strictFailure.messageIndex)
+            && options.strictFailure.messageIndex >= 0
+            && options.strictFailure.messageIndex <= lastAiIndex
+            && chat[options.strictFailure.messageIndex]
+            && !chat[options.strictFailure.messageIndex].is_user
+            ? options.strictFailure.messageIndex
+            : lastAiIndex;
+        let probeChat = null;
+        const placements = [];
+        const tolerances = new Set();
+        const identityRemaps = [];
+        const rowIdentityRepairs = [];
+        let anchorIndex = initialAnchor;
+        while (placements.length < MAX_COMPAT_TRANSITION_PLACEMENTS_ACU) {
+            let tolerant;
+            try {
+                tolerant = await replayWithLegacyTolerances_ACU(chat, isolationKey, { maxMessageIndex: anchorIndex });
+            }
+            catch (error) {
+                return {
+                    ok: false,
+                    code: 'tolerant_replay_failed',
+                    reason: `锚点楼层 ${anchorIndex} 的兼容宽容回放失败：${error instanceof Error ? error.message : String(error)}`,
+                };
+            }
+            if (tolerant.toleranceReport.identityRemaps.length > 0 && !options.allowIdentityRemaps) {
+                return {
+                    ok: false,
+                    code: 'identity_remaps',
+                    reason: `兼容结果含 sheetKey 身份归并（${describeIdentityRemaps_ACU(tolerant.toleranceReport.identityRemaps)}），按 key 优先级的归并不能作为持久权威根；请在数据管理中执行 V2 恢复（身份归一化）。`,
+                };
+            }
+            for (const remap of tolerant.toleranceReport.identityRemaps) {
+                if (!identityRemaps.some(item => item.fromKey === remap.fromKey && item.toKey === remap.toKey)) {
+                    identityRemaps.push({ ...remap });
+                }
+            }
+            const deduped = dedupeCompatTransitionRowIdentities_ACU(tolerant.data);
+            const normalization = normalizeCanonicalTableRows_ACU(deduped.data);
+            const issues = [...normalization.errors, ...normalization.removedRows];
+            if (issues.length > 0) {
+                return {
+                    ok: false,
+                    code: 'canonical_violation',
+                    reason: `去重结果不满足 canonical 行身份契约：${formatCanonicalRowIssues_ACU(issues)}。`,
+                };
+            }
+            rowIdentityRepairs.push(...deduped.repairs);
+            // 锚点帧本身没有 entries 时 tolerant.cutoff 停在更早的楼层；cutoff 必须提升到锚点楼层，
+            // 否则 (cutoff, anchor] 内的 per-sheet 锚点会被回放当成"根之后的 artifact"重复应用。
+            const cutoff = tolerant.cutoff.messageIndex >= anchorIndex
+                ? tolerant.cutoff
+                : { messageIndex: anchorIndex, seq: 0, operationIndex: -1 };
+            const existing = readIsolatedTagData_ACU(chat[anchorIndex], isolationKey);
+            const existingCheckpoint = existing?.compatTransitionCheckpoint;
+            if (existingCheckpoint?.cutoff && compareTransitionCutoffs_ACU(existingCheckpoint.cutoff, cutoff) >= 0
+                && !placements.some(placement => placement.messageIndex === anchorIndex)) {
+                // 同一楼层已有覆盖同样历史的过渡根却仍严格失败：再放一次不会改变结果。
+                return {
+                    ok: false,
+                    code: 'already_covered',
+                    reason: `楼层 ${anchorIndex} 已存在覆盖 cutoff=${JSON.stringify(existingCheckpoint.cutoff)} 的过渡根，但该楼层的严格回放仍失败；需要人工核对该楼层历史。`,
+                };
+            }
+            let scheduleSummary;
+            try {
+                scheduleSummary = collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: anchorIndex });
+            }
+            catch (_) {
+                scheduleSummary = undefined;
+            }
+            const placementTolerances = summarizeLegacyToleranceReport_ACU(tolerant.toleranceReport);
+            placementTolerances.forEach(code => tolerances.add(code));
+            const placement = {
+                messageIndex: anchorIndex,
+                checkpoint: {
+                    version: 1,
+                    kind: 'compat_replay_transition',
+                    createdAt: Date.now(),
+                    data: deduped.data,
+                    cutoff,
+                    ...(scheduleSummary === undefined ? {} : { scheduleSummary }),
+                    tolerances: placementTolerances,
+                },
+            };
+            placements.push(placement);
+            if (!probeChat)
+                probeChat = buildCompatFixationProbeChat_ACU(chat, isolationKey, initialAnchor);
+            applyCompatTransitionPlacementsToChat_ACU(probeChat, isolationKey, [placement]);
+            const probe = await runCompatFixationStrictProbe_ACU(probeChat, isolationKey, anchorIndex);
+            if (probe.ok === true) {
+                return {
+                    ok: true,
+                    placements,
+                    strictProbeData: probe.data,
+                    tolerances: [...tolerances],
+                    identityRemaps,
+                    rowIdentityRepairs,
+                };
+            }
+            const nextFailure = toReplayOperationFailurePoint_ACU(probe.error);
+            if (!nextFailure || nextFailure.messageIndex <= anchorIndex || nextFailure.messageIndex > lastAiIndex) {
+                return {
+                    ok: false,
+                    code: 'strict_probe_failed',
+                    reason: `放置过渡根后严格探针仍失败：${probe.error instanceof Error ? probe.error.message : String(probe.error)}`,
+                };
+            }
+            anchorIndex = nextFailure.messageIndex;
+        }
+        return {
+            ok: false,
+            code: 'placement_limit',
+            reason: `严格失败点超过 ${MAX_COMPAT_TRANSITION_PLACEMENTS_ACU} 处，放弃自动固化；请在数据管理中导出原始数据后人工处理。`,
+        };
+    }
     /**
      * 把 Tier-1 兼容回放结果固化为通用兼容过渡根 compatTransitionCheckpoint。
      *
-     * 固化是尽力而为的后台优化：canonical 校验不过、缺少可写楼层、已有更新
-     * 过渡根时**放弃固化并返回 false，不抛错**——本次兼容读取结果的可用性
-     * 与固化是否成功完全解耦。固化成功后，后续加载从该根起算走严格快路径。
+     * 固化是尽力而为的收敛：canonical 校验不过、缺少可写楼层、含身份归并、严格探针
+     * 仍失败时**放弃固化并返回 fixed=false，不抛错**——本次兼容读取结果的可用性
+     * 与固化是否成功完全解耦。固化成功后，后续加载与 bounded 回放从该根起算走严格快路径。
+     * 宿主保存失败会抛出（调用方决定告警或返回原因）。
      */
-    async function createCompatTransitionCheckpointFromTolerantReplay_ACU(chat, isolationKey) {
-        const targetMessageIndex = (() => {
-            for (let index = chat.length - 1; index >= 0; index -= 1) {
-                if (chat[index] && !chat[index].is_user)
-                    return index;
-            }
-            return -1;
-        })();
-        if (targetMessageIndex < 0) {
-            logWarn_ACU('[V2 Compat Replay] 放弃固化兼容过渡根：缺少可写入的 AI 楼层。数据仍按兼容读取结果可用。');
-            return false;
+    async function createCompatTransitionCheckpointFromTolerantReplay_ACU(chat, isolationKey, options = {}) {
+        const plan = await buildCompatTransitionFixationPlan_ACU(chat, isolationKey, {
+            strictFailure: options.strictFailure,
+            allowIdentityRemaps: false,
+        });
+        if (plan.ok === false) {
+            // 身份归并不是可自动固化的容忍项：mergeLegacySheetIdentities_ACU 按模板 key /
+            // 稳定 key / 字典序选赢家，同 row_id 直接丢弃 loser 行，不做列身份转换。把这样的
+            // 结果写成过渡根，等于让后续加载走严格快路径、写路径全部放行，用「读兼容」悄悄
+            // 替换掉持久历史的身份权威（前序计划不变量：同名不是历史可合并的充分条件）。
+            // 这类历史必须经数据管理的显式恢复（身份归一化）处理；这里只放弃固化，数据仍可读。
+            logWarn_ACU(`[V2 Compat Replay] 放弃固化兼容过渡根：${plan.reason}数据仍按兼容读取结果可用`
+                + `${plan.code === 'canonical_violation' ? '，下次加载将继续走兼容回放' : ''}。`);
+            return { fixed: false, code: plan.code, reason: plan.reason };
         }
-        const tolerant = await replayWithLegacyTolerances_ACU(chat, isolationKey);
-        // 身份归并不是可自动固化的容忍项：mergeLegacySheetIdentities_ACU 按模板 key /
-        // 稳定 key / 字典序选赢家，同 row_id 直接丢弃 loser 行，不做列身份转换。把这样的
-        // 结果写成过渡根，等于让后续加载走严格快路径、写路径全部放行，用「读兼容」悄悄
-        // 替换掉持久历史的身份权威（前序计划不变量：同名不是历史可合并的充分条件）。
-        // 这类历史必须经数据管理的显式恢复（身份归一化）处理；这里只放弃固化，数据仍可读。
-        if (tolerant.toleranceReport.identityRemaps.length > 0) {
-            const remapSummary = tolerant.toleranceReport.identityRemaps
-                .map(remap => `${remap.fromKey}→${remap.toKey}（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`)
-                .join('；');
-            logWarn_ACU(`[V2 Compat Replay] 放弃固化兼容过渡根：兼容结果含 sheetKey 身份归并（${remapSummary}），`
-                + '按 key 优先级的归并不能作为持久权威根；请在数据管理中执行 V2 恢复（身份归一化）。数据仍按兼容读取结果可用。');
-            return false;
-        }
-        const existing = findLatestTransitionCheckpoint_ACU(chat, isolationKey);
-        if (existing && compareTransitionCutoffs_ACU(existing.checkpoint.cutoff, tolerant.cutoff) >= 0) {
-            // 已有过渡根覆盖了同样或更新的历史，无需重复固化。
-            return false;
-        }
-        const data = reindexSpv79TransitionState_ACU(tolerant.data);
-        const normalization = normalizeCanonicalTableRows_ACU(data);
-        const issues = [...normalization.errors, ...normalization.removedRows];
-        if (issues.length > 0) {
-            logWarn_ACU(`[V2 Compat Replay] 放弃固化兼容过渡根：重编号结果不满足 canonical 行身份契约：`
-                + `${formatCanonicalRowIssues_ACU(issues)}。数据仍按兼容读取结果可用，下次加载将继续走兼容回放。`);
-            return false;
-        }
-        let scheduleSummary;
-        try {
-            scheduleSummary = collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey);
-        }
-        catch (_) {
-            scheduleSummary = undefined;
-        }
-        const tolerances = summarizeLegacyToleranceReport_ACU(tolerant.toleranceReport);
+        const placementSummary = plan.placements.map(placement => ({ messageIndex: placement.messageIndex, cutoff: placement.checkpoint.cutoff }));
         await runTableWriteTransaction_ACU({
             source: 'system_cleanup',
             reason: 'createCompatTransitionCheckpointFromTolerantReplay',
@@ -43665,73 +44054,43 @@ $CONTENT
             maintenanceMode: 'exclusive',
             workingDataMode: 'none',
         }, async (ctx) => ctx.runCommit(async () => {
-            const target = chat[targetMessageIndex];
-            if (!target || target.is_user)
-                throw new Error('兼容过渡 checkpoint 的目标 AI 楼层在提交前已变化。');
-            const latest = findLatestTransitionCheckpoint_ACU(chat, isolationKey);
-            if (latest && compareTransitionCutoffs_ACU(latest.checkpoint.cutoff, tolerant.cutoff) >= 0)
-                return;
-            const hadIsolatedData = Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_IsolatedData');
-            const previousIsolatedData = target.TavernDB_ACU_IsolatedData;
-            const hadIdentity = Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_Identity');
-            const previousIdentity = target.TavernDB_ACU_Identity;
+            const applied = applyCompatTransitionPlacementsToChat_ACU(chat, isolationKey, plan.placements);
             try {
-                const isolatedData = previousIsolatedData && typeof previousIsolatedData === 'object' && !Array.isArray(previousIsolatedData)
-                    ? deepClone_ACU$4(previousIsolatedData)
-                    : {};
-                const tagData = isolatedData[isolationKey] && typeof isolatedData[isolationKey] === 'object' && !Array.isArray(isolatedData[isolationKey])
-                    ? isolatedData[isolationKey]
-                    : {};
-                tagData.compatTransitionCheckpoint = {
-                    version: 1,
-                    kind: 'compat_replay_transition',
-                    createdAt: Date.now(),
-                    data: deepClone_ACU$4(data),
-                    cutoff: tolerant.cutoff,
-                    ...(scheduleSummary === undefined ? {} : { scheduleSummary }),
-                    tolerances,
-                };
-                isolatedData[isolationKey] = tagData;
-                target.TavernDB_ACU_IsolatedData = isolatedData;
-                writeMessageIdentity_ACU(target, {
-                    enabled: settings_ACU.dataIsolationEnabled,
-                    code: settings_ACU.dataIsolationCode,
-                });
                 await saveChatToHostStrict_ACU();
             }
             catch (error) {
-                if (hadIsolatedData)
-                    target.TavernDB_ACU_IsolatedData = previousIsolatedData;
-                else
-                    delete target.TavernDB_ACU_IsolatedData;
-                if (hadIdentity)
-                    target.TavernDB_ACU_Identity = previousIdentity;
-                else
-                    delete target.TavernDB_ACU_Identity;
+                applied.rollback();
                 throw error;
             }
         }));
-        logWarn_ACU(`[V2 Compat Replay] 已把兼容读取结果固化为过渡根：cutoff=${JSON.stringify(tolerant.cutoff)}, tolerances=${tolerances.join(', ')}。后续加载将走严格快路径。`);
-        return true;
+        logWarn_ACU(`[V2 Compat Replay] 已把兼容读取结果固化为过渡根：placements=${JSON.stringify(placementSummary)}, `
+            + `tolerances=${plan.tolerances.join(', ')}, rowIdRepairs=${plan.rowIdentityRepairs.length}。后续加载将走严格快路径。`);
+        return { fixed: true, placements: placementSummary };
     }
     /** 后台固化的 in-flight 去重（isolationKey 维度）。固化失败只告警，不影响已返回的数据。 */
     const pendingCompatTransitionFixations_ACU = new Map();
-    function scheduleCompatTransitionFixation_ACU(chat, isolationKey) {
-        if (pendingCompatTransitionFixations_ACU.has(isolationKey))
-            return;
+    function startCompatTransitionFixation_ACU(chat, isolationKey, options) {
+        const pending = pendingCompatTransitionFixations_ACU.get(isolationKey);
+        if (pending)
+            return pending;
         const task = (async () => {
             try {
-                await createCompatTransitionCheckpointFromTolerantReplay_ACU(chat, isolationKey);
+                return await createCompatTransitionCheckpointFromTolerantReplay_ACU(chat, isolationKey, options);
             }
             catch (error) {
-                logWarn_ACU(`[V2 Compat Replay] 兼容过渡根固化失败（不影响当前数据使用，下次加载重试）：`
-                    + `${error instanceof Error ? error.message : String(error)}`);
+                const message = error instanceof Error ? error.message : String(error);
+                logWarn_ACU(`[V2 Compat Replay] 兼容过渡根固化失败（不影响当前数据使用，下次加载重试）：${message}`);
+                return { fixed: false, code: 'save_failed', reason: `兼容过渡根固化失败：${message}` };
             }
             finally {
                 pendingCompatTransitionFixations_ACU.delete(isolationKey);
             }
         })();
         pendingCompatTransitionFixations_ACU.set(isolationKey, task);
+        return task;
+    }
+    function scheduleCompatTransitionFixation_ACU(chat, isolationKey, options = {}) {
+        void startCompatTransitionFixation_ACU(chat, isolationKey, options);
     }
     /** 测试辅助：等待所有后台固化任务完成（生产代码不调用）。 */
     async function flushPendingCompatTransitionFixations_ACU() {
@@ -43743,16 +44102,18 @@ $CONTENT
         const chat = options.chat || getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0)
             return { success: true };
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
         try {
-            const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, options.isolationKey ?? getCurrentIsolationKey_ACU(), { updateRuntimeState: false });
-            // F2：Tier-1 宽容回放结果不是严格可写历史。它的容忍项不属于
+            const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+            // 回放宽容、写入严格：Tier-1 宽容回放结果可读但不是严格可写历史。它的容忍项不属于
             // temporary_sheet_anchor 模型，不能沿用下方「临时 Sheet 补锚」消息误导用户；
-            // 单独给出指向恢复收敛的精确诊断。
+            // 这里只诊断不修复，修复走数据管理的显式恢复。
             if (replay?.baseKind === 'compat_tolerant_replay') {
                 return {
                     success: false,
                     diagnosticCode: 'replay_requires_checkpoint_convergence',
-                    error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。在数据管理中完成 V2 恢复收敛前，写入与追平会被拒绝。`,
+                    error: `当前 V2 历史${V2_COMPAT_READONLY_MARKER_ACU}（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。`
+                        + '在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根前，写入与追平会被拒绝。',
                 };
             }
             if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
@@ -46467,6 +46828,33 @@ $CONTENT
         return await validateReplay('boundary', { maxMessageIndex: targetMessageIndex })
             || await validateReplay('suffix', {});
     }
+    /**
+     * 普通增量追加后的写时严格探针：候选 chat（含本次 entry）在目标楼层边界必须能被严格回放。
+     *
+     * 追加 entry 的写入方以「写入时基底」（live runtime / 上一批结果）生成 operations，而
+     * 回放把它们叠加在「≤ 目标楼层的历史」之上；两者不一致时（典型：追平以 live 快照为
+     * prompt 基底却写到早期楼层），INSERT 会在回放里撞 UNIQUE、UPDATE 会落到不存在的行。
+     * 这样的 entry 一旦落盘，之后所有加载都只能走兼容宽容回放，全部写路径被门闸拒绝。
+     * 因此必须在落盘前用 compatibilityMode:'disabled' 探针拦截：回放抛错即拒绝本次写入。
+     * 返回 null 的回放（无 full 根）不在本探针职责内——该形态由 temporaryBaselineUpgrade 路径覆盖。
+     */
+    async function validateAppendedOperationsReplayCandidate_ACU(candidateChat, isolationKey, targetMessageIndex) {
+        let replay;
+        try {
+            replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                maxMessageIndex: targetMessageIndex,
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
+        }
+        catch (error) {
+            return buildAppendedOperationsWriteRejectionMessage_ACU(error instanceof Error ? error.message : String(error));
+        }
+        if (replay?.baseKind === 'compat_tolerant_replay') {
+            return buildAppendedOperationsWriteRejectionMessage_ACU(replay.legacyToleranceDiagnosis?.strictError || '严格回放失败');
+        }
+        return null;
+    }
     async function validateProvisionalConvergenceCandidate_ACU(candidateChat, isolationKey, targetMessageIndex) {
         // 单根不变量显式守护：候选 chat 同一隔离键下至多一个 full checkpoint。
         // convergence 只允许把临时锚点固化到既有唯一根，绝不允许候选再造出第二个基线。
@@ -47888,7 +48276,7 @@ $CONTENT
                 // F2：Tier-1 宽容回放结果不是严格可写历史，也没有可收敛的 temporary_sheet_anchor
                 // 模型（provisional 收敛依赖 repairs 定位锚点数据），必须拒绝写入并指向恢复收敛。
                 if (replay?.baseKind === 'compat_tolerant_replay') {
-                    return { saved: false, error: `V2 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+                    return { saved: false, error: buildCompatReadonlyWriteRejectionMessage_ACU('V2 写入前', replay) };
                 }
                 if (!replay || !replay.compatibilityRepairs?.length
                     || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
@@ -48215,6 +48603,18 @@ $CONTENT
             }
             options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_boundary_checkpoint_save');
         }
+        else if (!shouldCheckpoint && entry && operations.length > 0) {
+            // 写时严格探针：普通增量追加后，候选历史在目标楼层边界必须严格可回放。
+            // 追平 / 早期楼层写入的 operations 由 live 基底生成，回放却叠加在 ≤ 目标楼层的
+            // 历史上；两者不一致的 entry 一旦落盘，整个聊天历史只能走兼容宽容回放，之后
+            // 所有写路径都会被门闸拒绝——必须在这里拦住。
+            const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
+            const candidateValidationError = await validateAppendedOperationsReplayCandidate_ACU(candidateChat, isolationKey, target.index);
+            if (candidateValidationError) {
+                return { saved: false, error: candidateValidationError };
+            }
+            options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_appended_operations_save');
+        }
         const previousMessageState = [...replacementIsolatedDataByMessageIndex.keys()].map(messageIndex => {
             const message = chat[messageIndex];
             return {
@@ -48391,7 +48791,7 @@ $CONTENT
             if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
                 // F2：同单写入门——宽容回放结果不是严格可写历史，直接拒绝 batch 写入。
                 if (replay?.baseKind === 'compat_tolerant_replay') {
-                    return { saved: false, error: `V2 batch 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+                    return { saved: false, error: buildCompatReadonlyWriteRejectionMessage_ACU('V2 batch 写入前', replay) };
                 }
                 if (!replay?.compatibilityRepairs?.length
                     || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
@@ -48488,6 +48888,14 @@ $CONTENT
             if (candidateValidationError)
                 return { saved: false, error: candidateValidationError };
             options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_convergence_save');
+        }
+        else if (operationCount > 0) {
+            // 写时严格探针（同单写路径）：batch 追加的 entries 在最大目标楼层边界必须严格可回放，
+            // 否则拒绝落盘，避免写出只能兼容读取的历史。
+            const candidateValidationError = await validateAppendedOperationsReplayCandidate_ACU(candidateChat, isolationKey, Math.max(...targetMessageIndices));
+            if (candidateValidationError)
+                return { saved: false, error: candidateValidationError };
+            options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_appended_operations_save');
         }
         // convergence 会把锚点写入根帧（latestCheckpoint.index）；若根帧不是 batch target，
         // 必须把根帧一并纳入原子落盘集合，否则锚点只在内存候选里、落盘即丢失。
@@ -88927,6 +89335,22 @@ $CONTENT
     function cloneTableData_ACU(data) {
         return JSON.parse(JSON.stringify(data));
     }
+    /**
+     * 原则：回放宽容、写入严格。persist 拒绝写入时按"谁的错"分类，决定调用方能否重试：
+     * - 写时严格探针拒绝（本次增量叠加到目标楼层历史上不能严格回放，典型是 AI 重复插行
+     *   撞 UNIQUE）→ 'model'：是这份 AI 结果的问题，历史没被写坏，chunk 级重试会把错误反馈
+     *   给模型重新生成。
+     * - 兼容只读门闸拒绝（聊天历史本身只能宽容回放）→ 'precondition'：重试 AI 修不好历史，
+     *   必须在数据管理中显式恢复；不重试，避免浪费 AI 调用。
+     * - 其余 → 'infrastructure'。
+     */
+    function classifyPersistRejection_ACU(error) {
+        if (isAppendedOperationsWriteRejection_ACU(error))
+            return 'model';
+        if (isCompatReadonlyWriteRejection_ACU(error))
+            return 'precondition';
+        return 'infrastructure';
+    }
     function normalizeSqlBindParams_ACU(params) {
         return Array.isArray(params) && params.length > 0 ? [params.map(value => value ?? null)] : undefined;
     }
@@ -89158,7 +89582,7 @@ $CONTENT
                             if (!saveResult.saved) {
                                 logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update; reload after releasing transaction locks: ${saveResult.error || 'unknown error'}`);
                                 requiresRuntimeReload = true;
-                                throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
+                                throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, classifyPersistRejection_ACU(saveResult.error));
                             }
                         }
                         else {
@@ -106041,6 +106465,12 @@ $CONTENT
     function getFrameFingerprint_ACU(frame) {
         return JSON.stringify(frame);
     }
+    function getTagDataFingerprint_ACU(chat, isolationKey, messageIndex) {
+        const message = chat[messageIndex];
+        if (!message || message.is_user)
+            return 'missing';
+        return JSON.stringify(readIsolatedTagData_ACU(message, isolationKey) ?? null);
+    }
     function countAiFloorInChat_ACU(chat, messageIndex) {
         let count = 0;
         for (let i = 0; i <= messageIndex && i < chat.length; i += 1) {
@@ -106217,6 +106647,11 @@ $CONTENT
                 return `受影响帧已变化：messageIndex=${item.messageIndex}。`;
             }
         }
+        for (const item of plan.affectedTagDataFingerprints || []) {
+            if (getTagDataFingerprint_ACU(plan.chat, plan.isolationKey, item.messageIndex) !== item.fingerprint) {
+                return `过渡根放置目标楼层已变化：messageIndex=${item.messageIndex}，请重新诊断。`;
+            }
+        }
         const sourceFrame = getPlanSourceFrame_ACU(plan);
         if (!sourceFrame || getFrameFingerprint_ACU(sourceFrame) !== plan.sourceFrameFingerprint) {
             return '恢复源 frame 已变化，请重新诊断。';
@@ -106228,6 +106663,15 @@ $CONTENT
         if (!Number.isInteger(sourceMessageIndex))
             throw new Error('恢复计划缺少 sourceMessageIndex。');
         const candidateChat = clone_ACU$3(plan.chat);
+        if (plan.kind === 'compat_tolerant_replay_fixation') {
+            // 过渡根写在 tagData.compatTransitionCheckpoint，不改写任何 storageFrame：原始
+            // 历史（含被宽容的坏 entry）原样保留，可随时删除过渡根回到兼容读取。
+            const placements = plan.compatTransitionPlacements || [];
+            if (placements.length === 0)
+                throw new Error('兼容回放固化计划缺少过渡根放置。');
+            applyCompatTransitionPlacementsToChat_ACU(candidateChat, plan.isolationKey, placements);
+            return candidateChat;
+        }
         if (plan.kind === 'redundant_full_checkpoint_convergence') {
             // 多消息降级：保留末位 full（回放根）不动，其余 full 帧无损降级为
             // data_replace fallback entry，原帧整体入 recoveryBackup。
@@ -106331,6 +106775,26 @@ $CONTENT
             throw new Error('恢复候选未产生可回放表数据。');
         if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length)
             throw new Error('恢复候选仍依赖临时 Sheet 补锚。');
+        if (plan.kind === 'compat_tolerant_replay_fixation') {
+            // 每个放置楼层的 bounded 严格回放都必须以过渡根为基底：追平/写前门闸做的正是
+            // bounded 回放，只验证无界回放通过不足以证明它们不再被拒绝。
+            for (const placement of plan.compatTransitionPlacements || []) {
+                const bounded = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, plan.isolationKey, {
+                    updateRuntimeState: false,
+                    compatibilityMode: 'disabled',
+                    maxMessageIndex: placement.messageIndex,
+                });
+                if (!bounded)
+                    throw new Error(`过渡根楼层 #${placement.messageIndex} 的 bounded 回放未产生表数据。`);
+                if (bounded.baseKind !== 'compat_transition_checkpoint') {
+                    throw new Error(`过渡根楼层 #${placement.messageIndex} 的 bounded 回放未以过渡根为基底（baseKind=${bounded.baseKind}）。`);
+                }
+            }
+            if (getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
+                throw new Error('固化后严格回放结果与诊断时的探针结果不一致，拒绝提交。');
+            }
+            return;
+        }
         // 单 full 收敛：收敛前（原始 chat）必须可完整回放，且收敛前后 replay 指纹必须完全一致，否则拒绝提交。
         // 在 validate 内重算基线而非依赖诊断期存档，可覆盖 diagnose 与 commit 之间任何帧的外部改动。
         if (plan.kind === 'redundant_full_checkpoint_convergence') {
@@ -106486,9 +106950,10 @@ $CONTENT
                 if (identityConflicts.length > 0) {
                     return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, identityConflicts, latestFull.frame.checkpoint.data) };
                 }
+                // 诊断是纯读取：不调度后台固化（读取不得隐式改历史，也避免与下方生成的固化 plan 竞争）。
                 let replay;
                 try {
-                    replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+                    replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false, backgroundFixation: 'skip' });
                 }
                 catch (error) {
                     return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: `full checkpoint 虽通过静态审计，但完整回放失败：${getErrorMessage_ACU$1(error)}` } };
@@ -106499,17 +106964,62 @@ $CONTENT
                 // 写入/模板提交/追平已被结果契约拒绝；无身份归并的纯 legacy 容忍项会在加载时
                 // 后台固化为兼容过渡根，含身份归并的历史则拒绝自动固化，持久修复连 F3（身份归一化）。
                 if (replay?.baseKind === 'compat_tolerant_replay') {
+                    // 宿主聊天此前的普通加载可能已调度后台固化；等它结束再诊断，避免固化写入与
+                    // 本次 plan 的指纹/放置竞争。后台固化成功则历史已严格可回放，直接复检。
+                    if (chat === getChatArray_ACU()) {
+                        await flushPendingCompatTransitionFixations_ACU();
+                        const recheck = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false, backgroundFixation: 'skip' });
+                        if (recheck?.baseKind !== 'compat_tolerant_replay') {
+                            return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '兼容宽容回放结果已在后台固化为过渡根，当前历史可严格回放，无需恢复。' } };
+                        }
+                        replay = recheck;
+                    }
                     const identityRemaps = replay.legacyToleranceDiagnosis?.identityRemaps || [];
                     const remapDetail = identityRemaps.length > 0
                         ? identityRemaps.map(remap => `${remap.fromKey}→${remap.toKey}「${remap.canonicalName}」（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`).join('；')
                         : '无';
-                    return { summary: {
-                            status: 'recoverable_compat_tolerant_replay',
-                            isolationKey,
-                            sourceMessageIndex: latestFull.messageIndex,
-                            affectedSheetKeys: [...new Set(identityRemaps.flatMap(remap => [remap.fromKey, remap.toKey]))],
-                            requiresConfirmation: false,
-                            message: `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要身份归一化恢复。' : '无身份归并的兼容结果会在后台固化为过渡根。'}`,
+                    const baseMessage = `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要在此显式确认后固化（归并结果将成为持久历史的身份权威）。' : '无身份归并的兼容结果会在加载时后台固化为过渡根；也可在此立即固化。'}`;
+                    const summaryBase = {
+                        status: 'recoverable_compat_tolerant_replay',
+                        isolationKey,
+                        sourceMessageIndex: latestFull.messageIndex,
+                        affectedSheetKeys: [...new Set(identityRemaps.flatMap(remap => [remap.fromKey, remap.toKey]))],
+                        requiresConfirmation: identityRemaps.length > 0,
+                        message: baseMessage,
+                    };
+                    // 显式恢复路径允许身份归并（用户确认后提交）；固化候选在这里就通过严格探针，
+                    // 不可固化的历史只返回诊断（无 plan），并把原因写进 message。
+                    let fixation;
+                    try {
+                        fixation = await buildCompatTransitionFixationPlan_ACU(chat, isolationKey, {
+                            strictFailure: replay.legacyToleranceDiagnosis?.strictFailure,
+                            allowIdentityRemaps: true,
+                        });
+                    }
+                    catch (error) {
+                        return { summary: { ...summaryBase, message: `${baseMessage}自动固化不可用：${getErrorMessage_ACU$1(error)}` } };
+                    }
+                    if (fixation.ok === false) {
+                        return { summary: { ...summaryBase, message: `${baseMessage}自动固化不可用：${fixation.reason}` } };
+                    }
+                    const placementIndices = fixation.placements.map(placement => placement.messageIndex);
+                    const affectedIndices = collectCompatTransitionAffectedIndices_ACU(chat, isolationKey, fixation.placements);
+                    const summary = {
+                        ...summaryBase,
+                        message: `${baseMessage}固化方案：在楼层 #${placementIndices.join('、#')} 写入兼容过渡根（tolerances=${fixation.tolerances.join(', ') || '无'}；行身份修复 ${fixation.rowIdentityRepairs.length} 处），固化后严格回放已通过探针验证；原始 storage frame 不会被改写。`,
+                    };
+                    return { summary, plan: {
+                            ...summary,
+                            kind: 'compat_tolerant_replay_fixation',
+                            chat,
+                            chatKey: String(currentChatFileIdentifier_ACU || '').trim(),
+                            sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame),
+                            compatTransitionPlacements: fixation.placements,
+                            affectedTagDataFingerprints: affectedIndices.map(messageIndex => ({
+                                messageIndex,
+                                fingerprint: getTagDataFingerprint_ACU(chat, isolationKey, messageIndex),
+                            })),
+                            candidateData: fixation.strictProbeData,
                         } };
                 }
                 // 根快照干净不代表整条历史干净：回放结果里若仍有拼音同名的不同表（回放归并只处理
@@ -106650,8 +107160,15 @@ $CONTENT
         const failure = (error) => ({ status: 'commit_failed_rolled_back', planId, error });
         if (!plan)
             return failure('恢复计划不存在或已失效，请重新诊断。');
-        if (plan.requiresConfirmation && options.confirmOrphanDataReplace !== true) {
-            return failure('无锚点 data_replace 恢复必须显式确认。');
+        if (plan.requiresConfirmation) {
+            if (plan.kind === 'compat_tolerant_replay_fixation') {
+                if (options.confirmCompatTolerantFixation !== true) {
+                    return failure('含 sheetKey 身份归并的兼容回放固化必须显式确认。');
+                }
+            }
+            else if (options.confirmOrphanDataReplace !== true) {
+                return failure('无锚点 data_replace 恢复必须显式确认。');
+            }
         }
         if (!currentScopeMatches_ACU$1(plan)) {
             plans_ACU.delete(planId);
@@ -107283,11 +107800,13 @@ $CONTENT
                 throwOnRecoveryRequired: true,
                 ...(replayEvidence ? { replayEvidence } : {}),
             });
-            // F2：Tier-1 宽容回放结果不是严格可写历史，不能作为填表 merge base 喂给
-            // AI（否则本轮生成基于兼容态数据，提交时才被 persist 写前门拒绝，浪费 AI
-            // 调用）。在 AI 调用前中止本批（catch 会转为 failed 并阻止本批继续）。
+            // 回放宽容、写入严格：Tier-1 宽容回放结果可读，但不是严格可写历史，不能作为
+            // 填表 merge base 喂给 AI（否则本轮生成基于兼容态数据，提交时才被 persist 写前门
+            // 拒绝，浪费 AI 调用）。在 AI 调用前中止本批（catch 会转为 failed 并阻止本批继续）；
+            // 历史修复走数据管理的显式恢复，不在写路径里隐式改历史。
             if (replayResult?.baseKind === 'compat_tolerant_replay') {
-                throw new Error(`V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replayResult.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能作为填表基底；请先在数据管理中完成 V2 恢复收敛。`);
+                throw new Error(`V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replayResult.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能作为填表基底；`
+                    + '请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。');
             }
             if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
@@ -109719,6 +110238,47 @@ $CONTENT
         return { success: true, plan };
     }
     /**
+     * 追平预检（回放宽容、写入严格）：首目标楼层的 bounded 回放与无界回放都必须严格可回放。
+     *
+     * bucket 提交写到首目标楼层帧、终态校验做无界回放，两条边界任一只能兼容读出，
+     * 后续提交就必然被 persist 写前门闸拒绝——那时 AI 调用已经消耗。这里只检测不修复：
+     * 兼容态历史在任何 AI 调用前阻断，并把用户指向数据管理的显式恢复。
+     * chat 非 V2 或无帧时回放为 null，直接放行。
+     */
+    async function ensureStrictlyReplayableHistoryForCatchUp_ACU(targetMessageIndex) {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0)
+            return { ok: true };
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const bounds = [
+            { label: `目标楼层 ${targetMessageIndex} 边界`, maxMessageIndex: targetMessageIndex },
+            { label: '聊天末尾', maxMessageIndex: undefined },
+        ];
+        for (const bound of bounds) {
+            let replay;
+            try {
+                replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                    updateRuntimeState: false,
+                    ...(Number.isInteger(bound.maxMessageIndex) ? { maxMessageIndex: bound.maxMessageIndex } : {}),
+                });
+            }
+            catch (error) {
+                return {
+                    ok: false,
+                    error: `追平前无法回放聊天历史（${bound.label}）：${error instanceof Error ? error.message : String(error)}`,
+                };
+            }
+            if (replay?.baseKind === 'compat_tolerant_replay') {
+                return {
+                    ok: false,
+                    error: `追平前检测到聊天历史（${bound.label}）仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），`
+                        + '不能继续写入；请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。',
+                };
+            }
+        }
+        return { ok: true };
+    }
+    /**
      * 按聊天中已提交的 scheduleSummary/事件事实规划并执行所选表的后缀追平。
      * 不扫描或声称修复历史内部空洞；一期只处理每表连续前沿后的缺口。
      */
@@ -109817,6 +110377,20 @@ $CONTENT
         // 伪提交后由 terminal progress-only 写入兜底报错。
         const preflightTargetIndex = plan.waves[0]?.messageIndices[0] ?? plan.targetMessageIndex;
         if (preflightTargetIndex !== null && preflightTargetIndex !== undefined) {
+            // 历史处于兼容只读态（严格回放失败、只能宽容回放）时，所有 bucket 提交都会被
+            // persist 写前门闸拒绝——这时还去调用 AI 只是浪费，在任何 AI 调用前阻断。
+            const strictHistory = await ensureStrictlyReplayableHistoryForCatchUp_ACU(preflightTargetIndex);
+            if (strictHistory.ok === false) {
+                return {
+                    success: false,
+                    outcome: 'blocked',
+                    error: strictHistory.error,
+                    catchUpPlan: plan,
+                    committedBucketCount: 0,
+                    dataCommitted: false,
+                    diagnosticCode: 'replay_requires_checkpoint_convergence',
+                };
+            }
             const anchorPreflight = await ensureManualCatchUpAnchorBeforeTarget_ACU(preflightTargetIndex, getCurrentIsolationKey_ACU());
             if (anchorPreflight.status === 'blocked') {
                 return {
@@ -136536,7 +137110,7 @@ $CONTENT
                     return { success: false, error: 'planId 必须是非空字符串。' };
                 if (options === null || typeof options !== 'object' || Array.isArray(options))
                     return { success: false, error: 'V2 恢复确认选项必须是对象。' };
-                return await commitPreparedV2Recovery_ACU(planId.trim(), { confirmOrphanDataReplace: options.confirmOrphanDataReplace === true });
+                return await commitPreparedV2Recovery_ACU(planId.trim(), { confirmOrphanDataReplace: options.confirmOrphanDataReplace === true, confirmCompatTolerantFixation: options.confirmCompatTolerantFixation === true });
             }
             catch (e) {
                 logError_ACU('commitV2Recovery failed:', e);
@@ -180798,6 +181372,16 @@ Expected function or array of functions, received type ${typeof value}.`
                 else if (summary.status === 'recoverable_redundant_full_checkpoint') {
                     toast.warning('检测到同一隔离键下存在多个 full checkpoint（回放只认最后一个，之前增量已失效）。请先导出原始 frame 备份，再提交收敛。', { muteable: false, durationMs: 6000 });
                 }
+                else if (summary.status === 'recoverable_compat_tolerant_replay') {
+                    if (summary.planId) {
+                        toast.warning(summary.requiresConfirmation
+                            ? '检测到聊天历史仅可经兼容宽容回放读出，且兼容结果含 sheetKey 身份归并。确认后可固化为过渡根，恢复写入与追平。'
+                            : '检测到聊天历史仅可经兼容宽容回放读出（写入/追平被拒绝）。请提交固化，把兼容回放结果写成严格可回放的过渡根。', { muteable: false, durationMs: 6000 });
+                    }
+                    else {
+                        toast.warning(summary.message, { muteable: false, durationMs: 8000 });
+                    }
+                }
                 else if (summary.status === 'unrecoverable_late_checkpoint_artifacts') {
                     toast.warning('检测到较晚 checkpoint 两侧均有 V2 artifact。自动前移会改变后缀回放语义；请先导出恢复备份，再人工核对。', { muteable: false, durationMs: 6000 });
                 }
@@ -180836,18 +181420,21 @@ Expected function or array of functions, received type ${typeof value}.`
                 toast.error(`导出 V2 恢复备份失败：${e?.message || '未知错误'}`);
             }
         }
-        async function commitV2Recovery(confirmOrphanDataReplace) {
+        async function commitV2Recovery(options = {}) {
             const summary = v2RecoverySummary.value;
             if (!summary?.planId || !summary.status.startsWith('recoverable_')) {
                 toast.warning('V2 恢复计划已失效，请重新诊断。');
                 return;
             }
+            const isCompatFixation = summary.status === 'recoverable_compat_tolerant_replay';
             busyAction.value = 'commit-v2-recovery';
             try {
-                const result = await commitPreparedV2Recovery_ACU(summary.planId, { confirmOrphanDataReplace });
+                const result = await commitPreparedV2Recovery_ACU(summary.planId, options);
                 if (result.status === 'committed') {
                     v2RecoverySummary.value = null;
-                    toast.success('V2 恢复已保存；原始 frame 已写入隔离备份。');
+                    toast.success(isCompatFixation
+                        ? '兼容回放结果已固化为过渡根；原始 storage frame 未改写，写入与追平已恢复。'
+                        : 'V2 恢复已保存；原始 frame 已写入隔离备份。');
                 }
                 else if (result.status === 'committed_postcondition_failed') {
                     v2RecoverySummary.value = null;
@@ -181378,16 +181965,24 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 void flow.commitMixedStorageDecision(action);
             }
-            async function onCommitV2Recovery(confirmOrphanDataReplace) {
+            async function onCommitV2Recovery(mode) {
                 if (runtimeDiagnostic.busy.value)
                     return;
-                const isOrphan = confirmOrphanDataReplace;
+                const isOrphan = mode === 'orphan-data-replace';
+                const isCompatFixation = mode === 'compat-fixation';
+                const compatRequiresIdentityConfirmation = isCompatFixation && !!flow.v2RecoverySummary.value?.requiresConfirmation;
                 const confirmed = await dialogStore.confirm({
-                    title: isOrphan ? '确认无锚点 data_replace 恢复' : '应用 V2 Checkpoint 修复',
+                    title: isOrphan
+                        ? '确认无锚点 data_replace 恢复'
+                        : isCompatFixation
+                            ? '固化兼容回放为过渡根'
+                            : '应用 V2 Checkpoint 修复',
                     message: isOrphan
                         ? '将只提交服务端冻结的无锚点 data_replace 候选。原始 frame 会保留为隔离备份，页面不会提交任何可编辑表格数据。确认继续？'
-                        : '将只提交服务端冻结且已审计通过的 Checkpoint 修复候选。原始 frame 会保留为隔离备份。确认继续？',
-                    confirmLabel: isOrphan ? '继续恢复' : '应用修复',
+                        : isCompatFixation
+                            ? '将把当前兼容宽容回放的读取结果写成严格可回放的过渡根（写在消息 tagData，不改写任何 storage frame）。固化后写入与追平恢复正常；原始历史仍完整保留。确认继续？'
+                            : '将只提交服务端冻结且已审计通过的 Checkpoint 修复候选。原始 frame 会保留为隔离备份。确认继续？',
+                    confirmLabel: isOrphan ? '继续恢复' : isCompatFixation ? '固化' : '应用修复',
                     confirmVariant: 'danger',
                 });
                 if (!confirmed)
@@ -181402,9 +181997,22 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (!secondConfirmed)
                         return;
                 }
+                if (compatRequiresIdentityConfirmation) {
+                    const secondConfirmed = await dialogStore.confirm({
+                        title: '再次确认 sheetKey 身份归并',
+                        message: '兼容回放结果按 key 优先级归并了同名不同 key 的表：同 row_id 时被覆盖的行会永久丢弃，列不做身份转换。固化后该归并结果成为持久历史的身份权威。确认提交？',
+                        confirmLabel: '确认归并并固化',
+                        confirmVariant: 'danger',
+                    });
+                    if (!secondConfirmed)
+                        return;
+                }
                 if (runtimeDiagnostic.busy.value)
                     return;
-                void flow.commitV2Recovery(isOrphan);
+                void flow.commitV2Recovery({
+                    confirmOrphanDataReplace: isOrphan,
+                    confirmCompatTolerantFixation: compatRequiresIdentityConfirmation,
+                });
             }
             async function onReloadSqliteRuntime() {
                 if (runtimeDiagnostic.busy.value || flow.busyAction.value)
@@ -181459,8 +182067,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-a3607145] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-a3607145] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-a3607145] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-a3607145] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-a3607145] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-a3607145] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__sheet-filter[data-v-a3607145] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 10px 12px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md, 8px);\n  background: var(--acu-bg-1);\n}\n.acu-v2-data-mgmt-page__sheet-filter-head[data-v-a3607145] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__sheet-filter-title[data-v-a3607145] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 600;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-a3607145] {\n  padding: 0;\n  border: 0;\n  background: transparent;\n  color: var(--acu-accent);\n  font: inherit;\n  font-size: var(--acu-font-size-body, 12px);\n  cursor: pointer;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-a3607145]:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n.acu-v2-data-mgmt-page__sheet-filter-list[data-v-a3607145] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));\n  gap: 6px 12px;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-a3607145] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-a3607145] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-a3607145] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-a3607145] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-a3607145] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-a3607145] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-a3607145] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-a3607145] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-a3607145] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-a3607145] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-a3607145] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-a3607145],\n.acu-v2-data-mgmt-page__command-grid[data-v-a3607145] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-a3607145] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-a3607145] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-a3607145] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-a3607145] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-a3607145] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-a3607145] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-a3607145] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-a3607145] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-a3607145] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-a3607145] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-a3607145] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-a3607145] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-a3607145] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-a3607145] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-a3607145] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-a3607145] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-a3607145] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-a3607145");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_a3607145_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-704d41b3] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-704d41b3] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-704d41b3] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-704d41b3] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-704d41b3] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-704d41b3] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__sheet-filter[data-v-704d41b3] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 10px 12px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md, 8px);\n  background: var(--acu-bg-1);\n}\n.acu-v2-data-mgmt-page__sheet-filter-head[data-v-704d41b3] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__sheet-filter-title[data-v-704d41b3] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 600;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-704d41b3] {\n  padding: 0;\n  border: 0;\n  background: transparent;\n  color: var(--acu-accent);\n  font: inherit;\n  font-size: var(--acu-font-size-body, 12px);\n  cursor: pointer;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-704d41b3]:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n.acu-v2-data-mgmt-page__sheet-filter-list[data-v-704d41b3] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));\n  gap: 6px 12px;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-704d41b3] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-704d41b3] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-704d41b3] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-704d41b3] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-704d41b3] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-704d41b3] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-704d41b3] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-704d41b3] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-704d41b3] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-704d41b3] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-704d41b3] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-704d41b3],\n.acu-v2-data-mgmt-page__command-grid[data-v-704d41b3] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-704d41b3] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-704d41b3] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-704d41b3] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-704d41b3] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-704d41b3] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-704d41b3] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-704d41b3] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-704d41b3] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-704d41b3] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-704d41b3] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-704d41b3] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-704d41b3] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-704d41b3] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-704d41b3] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-704d41b3] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-704d41b3] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-704d41b3] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-704d41b3");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_704d41b3_lang = null;
 
     const _hoisted_1$g = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$f = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -181529,8 +182137,8 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-data-mgmt-page__checkpoint-actions"
     };
     const _hoisted_27$2 = {
-	key: 5,
-	class: "acu-v2-data-mgmt-page__checkpoint-actions"
+	class: "acu-v2-data-mgmt-page__checkpoint-actions",
+	"data-testid": "v2-recovery-actions"
     };
     const _hoisted_28$1 = { class: "acu-v2-data-mgmt-page__panel-stack" };
     const _hoisted_29$1 = {
@@ -181641,7 +182249,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
 				onClick: $setup.onDeleteCurrentIsolationEntries
 			}, {
-				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+				default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
 					" 删除当前标识注入条目 ",
 					-1
 					/* CACHED */
@@ -181653,7 +182261,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				loading: $setup.flow.busyAction.value === "apply-isolation",
 				onClick: $setup.onApplyIsolation
 			}, {
-				default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
+				default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
 					" 保存并应用 ",
 					-1
 					/* CACHED */
@@ -181674,7 +182282,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
 						onFile: $setup.flow.importCombinedSettings
 					}, {
-						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
+						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
 							"i",
 							{ class: "fa-solid fa-download" },
 							null,
@@ -181692,7 +182300,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
 						onClick: $setup.flow.exportCombinedSettings
 					}, {
-						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+						default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
 							"i",
 							{ class: "fa-solid fa-upload" },
 							null,
@@ -181710,7 +182318,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
 						onClick: $setup.flow.exportJsonData
 					}, {
-						default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
+						default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
 							"i",
 							{ class: "fa-solid fa-upload" },
 							null,
@@ -181729,7 +182337,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						loading: $setup.flow.busyAction.value === "override-latest",
 						onClick: $setup.onOverrideLatestLayer
 					}, {
-						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
 							" 模板覆盖最新层数据 ",
 							-1
 							/* CACHED */
@@ -181738,7 +182346,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, 8, ["disabled", "loading"])
 				])) : createCommentVNode("v-if", true),
 				createBaseVNode("section", _hoisted_10$6, [
-					_cache[20] || (_cache[20] = createBaseVNode(
+					_cache[21] || (_cache[21] = createBaseVNode(
 						"h3",
 						{
 							id: "acu-checkpoint-title",
@@ -181748,7 +182356,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					)),
-					_cache[21] || (_cache[21] = createBaseVNode(
+					_cache[22] || (_cache[22] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-data-mgmt-page__section-description" },
 						" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
@@ -181760,7 +182368,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
 						onClick: $setup.flow.exportTableCheckpoint
 					}, {
-						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+						default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
 							" 导出 Checkpoint ",
 							-1
 							/* CACHED */
@@ -181772,7 +182380,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
 						onFile: $setup.onImportTableCheckpoint
 					}, {
-						default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
+						default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
 							" 导入 Checkpoint ",
 							-1
 							/* CACHED */
@@ -181781,7 +182389,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, 8, ["disabled"])])
 				]),
 				$setup.flow.mixedStorageDecision.value ? (openBlock(), createElementBlock("section", _hoisted_12$6, [
-					_cache[26] || (_cache[26] = createBaseVNode(
+					_cache[27] || (_cache[27] = createBaseVNode(
 						"h3",
 						{
 							id: "acu-mixed-storage-title",
@@ -181819,7 +182427,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							64
 							/* STABLE_FRAGMENT */
 						)) : createCommentVNode("v-if", true),
-						_cache[22] || (_cache[22] = createTextVNode(
+						_cache[23] || (_cache[23] = createTextVNode(
 							" 可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。 ",
 							-1
 							/* CACHED */
@@ -181832,7 +182440,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							loading: $setup.flow.busyAction.value === "export-mixed-storage-snapshots",
 							onClick: $setup.flow.exportMixedStorageSnapshots
 						}, {
-							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
 								" 导出 legacy/V2 快照 ",
 								-1
 								/* CACHED */
@@ -181850,7 +182458,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							loading: $setup.flow.busyAction.value === "commit-mixed-storage-keep_v2",
 							onClick: _cache[2] || (_cache[2] = ($event) => $setup.onCommitMixedStorageDecision("keep_v2"))
 						}, {
-							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
+							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
 								" 保留 V2 并清理 legacy ",
 								-1
 								/* CACHED */
@@ -181864,7 +182472,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							loading: $setup.flow.busyAction.value === "commit-mixed-storage-commit_merge_candidate",
 							onClick: _cache[3] || (_cache[3] = ($event) => $setup.onCommitMixedStorageDecision("commit_merge_candidate"))
 						}, {
-							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
+							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
 								" 提交受限合并候选 ",
 								-1
 								/* CACHED */
@@ -181874,7 +182482,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				])) : createCommentVNode("v-if", true),
 				$setup.flow.v2RecoverySummary.value ? (openBlock(), createElementBlock("section", _hoisted_15$5, [
-					_cache[30] || (_cache[30] = createBaseVNode(
+					_cache[31] || (_cache[31] = createBaseVNode(
 						"h3",
 						{
 							id: "acu-v2-recovery-title",
@@ -181897,7 +182505,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
 							onClick: $setup.flow.exportV2RecoveryBackups
 						}, {
-							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
 								" 导出已保存的原始 frame 备份 ",
 								-1
 								/* CACHED */
@@ -181910,9 +182518,9 @@ Expected function or array of functions, received type ${typeof value}.`
 							variant: "danger",
 							disabled: $setup.runtimeDiagnostic.busy.value,
 							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
-							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery(false))
+							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery("checkpoint"))
 						}, {
-							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
+							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
 								" 应用 Checkpoint 修复/收敛 ",
 								-1
 								/* CACHED */
@@ -181925,18 +182533,33 @@ Expected function or array of functions, received type ${typeof value}.`
 							variant: "danger",
 							disabled: $setup.runtimeDiagnostic.busy.value,
 							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
-							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery(true))
+							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery("orphan-data-replace"))
 						}, {
-							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
+							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
 								" 确认无锚点 data_replace 恢复 ",
 								-1
 								/* CACHED */
 							)])]),
 							_: 1
+						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
+						$setup.flow.v2RecoverySummary.value.status === "recoverable_compat_tolerant_replay" && $setup.flow.v2RecoverySummary.value.planId ? (openBlock(), createBlock($setup["AcuButton"], {
+							key: 2,
+							block: "",
+							variant: "danger",
+							disabled: $setup.runtimeDiagnostic.busy.value,
+							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
+							onClick: _cache[6] || (_cache[6] = ($event) => $setup.onCommitV2Recovery("compat-fixation"))
+						}, {
+							default: withCtx(() => [createTextVNode(
+								toDisplayString($setup.flow.v2RecoverySummary.value.requiresConfirmation ? "确认身份归并并固化兼容回放为过渡根" : "固化兼容回放为过渡根"),
+								1
+								/* TEXT */
+							)]),
+							_: 1
 						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
 					])
 				])) : createCommentVNode("v-if", true),
-				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[31] || (_cache[31] = createBaseVNode(
+				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[32] || (_cache[32] = createBaseVNode(
 					"h3",
 					{
 						id: "acu-v2-isolation-diagnostics-title",
@@ -182083,13 +182706,14 @@ Expected function or array of functions, received type ${typeof value}.`
 						_: 1
 					}, 8, ["disabled", "loading"])])) : createCommentVNode("v-if", true)
 				])) : createCommentVNode("v-if", true),
-				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_27$2, [createVNode($setup["AcuButton"], {
+				createCommentVNode(" 恢复入口不受 legacy UI 开关控制：写入门闸的错误提示会把用户引导到这里。 "),
+				createBaseVNode("div", _hoisted_27$2, [createVNode($setup["AcuButton"], {
 					block: "",
 					disabled: $setup.runtimeDiagnostic.busy.value,
 					loading: $setup.flow.busyAction.value === "scan-v2-isolation-diagnostics",
 					onClick: $setup.flow.scanV2IsolationDiagnostics
 				}, {
-					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+					default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
 						" 扫描全部 V2 隔离域 ",
 						-1
 						/* CACHED */
@@ -182105,7 +182729,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.flow.busyAction.value === "prepare-v2-recovery",
 					onClick: $setup.flow.prepareV2Recovery
 				}, {
-					default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
+					default: withCtx(() => [..._cache[34] || (_cache[34] = [createTextVNode(
 						" 诊断 V2 数据恢复 ",
 						-1
 						/* CACHED */
@@ -182115,7 +182739,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"disabled",
 					"loading",
 					"onClick"
-				])])) : createCommentVNode("v-if", true)
+				])])
 			]),
 			_: 1
 		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$1, [createVNode($setup["AcuPanel"], {
@@ -182123,7 +182747,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: $setup.dataMgmtCopy.panels.cleanup.description
 		}, {
 			default: withCtx(() => [
-				createBaseVNode("section", _hoisted_29$1, [_cache[34] || (_cache[34] = createBaseVNode(
+				createBaseVNode("section", _hoisted_29$1, [_cache[35] || (_cache[35] = createBaseVNode(
 					"h3",
 					{
 						id: "acu-cleanup-auto-title",
@@ -182142,12 +182766,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						step: 1,
 						disabled: $setup.runtimeDiagnostic.busy.value,
 						"model-value": $setup.flow.retainRecentLayers.value,
-						onChange: _cache[6] || (_cache[6] = ($event) => $setup.flow.setRetainRecentLayers($event))
+						onChange: _cache[7] || (_cache[7] = ($event) => $setup.flow.setRetainRecentLayers($event))
 					}, null, 8, ["disabled", "model-value"])]),
 					_: 1
 				})])]),
 				createBaseVNode("section", _hoisted_31$1, [
-					_cache[37] || (_cache[37] = createBaseVNode(
+					_cache[38] || (_cache[38] = createBaseVNode(
 						"h3",
 						{
 							id: "acu-cleanup-manual-title",
@@ -182173,7 +182797,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							type: "number",
 							min: 1,
 							step: 1,
-							"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.flow.deleteRange.startFloor = $event)
+							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.flow.deleteRange.startFloor = $event)
 						}, null, 8, ["model-value"])]),
 						_: 1
 					}), createVNode($setup["AcuFormRow"], {
@@ -182186,12 +182810,12 @@ Expected function or array of functions, received type ${typeof value}.`
 							min: 1,
 							step: 1,
 							placeholder: "到最后",
-							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.flow.deleteRange.endFloor = $event)
+							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.flow.deleteRange.endFloor = $event)
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})]),
 					$setup.flow.deletableSheetOptions.value.length > 0 ? (openBlock(), createElementBlock("div", _hoisted_34, [
-						createBaseVNode("div", _hoisted_35, [_cache[35] || (_cache[35] = createBaseVNode(
+						createBaseVNode("div", _hoisted_35, [_cache[36] || (_cache[36] = createBaseVNode(
 							"span",
 							{
 								id: "acu-cleanup-sheet-filter-title",
@@ -182205,7 +182829,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							type: "button",
 							class: "acu-v2-data-mgmt-page__sheet-filter-clear",
 							disabled: $setup.runtimeDiagnostic.busy.value,
-							onClick: _cache[9] || (_cache[9] = (...args) => $setup.flow.clearDeleteSheetSelection && $setup.flow.clearDeleteSheetSelection(...args))
+							onClick: _cache[10] || (_cache[10] = (...args) => $setup.flow.clearDeleteSheetSelection && $setup.flow.clearDeleteSheetSelection(...args))
 						}, " 清除选择 ", 8, _hoisted_36)) : createCommentVNode("v-if", true)]),
 						createBaseVNode("div", _hoisted_37, [(openBlock(true), createElementBlock(
 							Fragment,
@@ -182229,7 +182853,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							128
 							/* KEYED_FRAGMENT */
 						))]),
-						_cache[36] || (_cache[36] = createBaseVNode(
+						_cache[37] || (_cache[37] = createBaseVNode(
 							"p",
 							{ class: "acu-v2-data-mgmt-page__meta" },
 							" 勾选后只删除所选表格在楼层范围内的数据（包括 checkpoint 里这些表的数据），其它表格、模板与指导表都不受影响；不勾选则按整楼层删除。 ",
@@ -182251,9 +182875,9 @@ Expected function or array of functions, received type ${typeof value}.`
 						block: "",
 						disabled: $setup.runtimeDiagnostic.busy.value,
 						loading: $setup.flow.busyAction.value === "delete-current-local",
-						onClick: _cache[10] || (_cache[10] = ($event) => $setup.onDeleteLocalData("current"))
+						onClick: _cache[11] || (_cache[11] = ($event) => $setup.onDeleteLocalData("current"))
 					}, {
-						default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
+						default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
 							" 删除当前标识本地数据 ",
 							-1
 							/* CACHED */
@@ -182265,7 +182889,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						variant: "danger",
 						disabled: $setup.runtimeDiagnostic.busy.value,
 						loading: $setup.flow.busyAction.value === "purge-all-local" || $setup.flow.busyAction.value === "delete-all-local",
-						onClick: _cache[11] || (_cache[11] = ($event) => $setup.onDeleteLocalData("all"))
+						onClick: _cache[12] || (_cache[12] = ($event) => $setup.onDeleteLocalData("all"))
 					}, {
 						default: withCtx(() => [createTextVNode(
 							toDisplayString($setup.flow.hasDeleteSheetSelection.value ? `删除所选 ${$setup.flow.deleteSheetKeys.value.length} 张表的数据` : "删除所有本地数据"),
@@ -182280,7 +182904,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						loading: $setup.flow.busyAction.value === "reset-defaults",
 						onClick: $setup.onResetAllDefaults
 					}, {
-						default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
+						default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
 							" 恢复默认配置 ",
 							-1
 							/* CACHED */
@@ -182294,7 +182918,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-a3607145"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-704d41b3"]]);
 
     var _sfc_main$f = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
@@ -184159,6 +184783,29 @@ Expected function or array of functions, received type ${typeof value}.`
                 '打开对应的世界书条目或提示词，检查日志里给出的表达式写法：括号、引号是否配对，表名列名是否正确。',
                 '对照插件自带的语法参考（syntax-reference）核对函数名与参数。',
                 '先把表达式替换成一个最简单的例子确认能跑通，再逐步加复杂度。',
+            ],
+        },
+        // ─── V2 历史回放 / 恢复 ───
+        // 必须排在 sql-constraint 之前：这类错误正文里会原样带着「UNIQUE constraint failed」，
+        // 但根因不是这次 SQL，而是聊天历史只能宽容回放；「重试让模型重新生成」修不好它。
+        {
+            id: 'v2-write-guard',
+            test: /写入时基底与回放基底不一致|不可严格回放的历史/,
+            summary: '本次表格增量与聊天历史回放状态不一致，插件在写入前拦住了它（历史没有被写坏）。',
+            steps: [
+                '这通常是模型重复填行：它生成的 INSERT 在按楼层回放时与已有行的 row_id 冲突。填表 / 追平会把这条错误反馈给模型自动重试，一般无需处理。',
+                '如果同一楼层反复失败，说明模型看到的表内容与该楼层的历史状态不一致（多见于手动追平早期楼层）；换一个追平起点或缩小选表范围再试。',
+                EXPORT_LOGS,
+            ],
+        },
+        {
+            id: 'v2-compat-readonly',
+            test: /兼容宽容回放读出|仅可经兼容|compat_tolerant_replay|v2 恢复收敛|固化为过渡根|兼容过渡根/,
+            summary: '聊天里的表格历史只能以兼容（宽容）模式读出：某条历史增量在严格回放时失败（常见是重复插入同一 row_id）。读取仍然正常，但写入、追平和模板提交会被拒绝。',
+            steps: [
+                '这不是本次 AI 输出的问题，重试生成不会修复历史，所以插件不会自动重试。',
+                '到「数据管理」→「诊断 V2 数据恢复」，点「固化兼容回放为过渡根」：把当前兼容读取结果写成严格可回放的根，之后写入与追平恢复正常（含 sheetKey 身份归并时需要额外确认）。',
+                '固化不会改写任何原始 storage frame；如需人工核对，先用「导出已保存的原始 frame 备份」。',
             ],
         },
         // ─── 表格结构 ───

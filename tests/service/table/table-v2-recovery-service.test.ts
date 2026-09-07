@@ -294,6 +294,96 @@ describe('table-v2-recovery-service', () => {
     expect(h.save).not.toHaveBeenCalled();
   });
 
+  it('兼容宽容回放历史：诊断产出经严格探针验证的固化 plan，提交后写入过渡根且原 storageFrame 不变', async () => {
+    // 历史 sheet_replace 带重复 row_id：严格回放在 canonical 校验处失败，只能宽容读出。
+    const duplicateSheet = { ...data().sheet_0, content: [['row_id', '名称'], ['1', '铁剑'], ['1', '副本']] };
+    const source = frame(
+      { kind: 'full', createdAt: 1, reason: 'init', data: data() },
+      [{ seq: 1, entryId: 'legacy-duplicate', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [], operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: duplicateSheet, reason: 'system' }] }],
+    );
+    h.chat = chatWithFrame(source);
+    const storageFrameBefore = structuredClone(source);
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    // 诊断是纯读取：不触发后台固化，不保存。
+    expect(h.save).not.toHaveBeenCalled();
+    expect(h.chat[0].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint).toBeUndefined();
+    expect(prepared).toMatchObject({ status: 'recoverable_compat_tolerant_replay', requiresConfirmation: false, sourceMessageIndex: 0 });
+    expect(prepared.planId).toBeTruthy();
+    expect(prepared.message).toContain('身份归并=无');
+    expect(prepared.message).toContain('固化方案：在楼层 #0');
+
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toEqual({ status: 'committed', planId: prepared.planId });
+    expect(h.save).toHaveBeenCalledTimes(1);
+    const tag = h.chat[0].TavernDB_ACU_IsolatedData[''];
+    expect(tag.storageFrame).toEqual(storageFrameBefore);
+    expect(tag.compatTransitionCheckpoint).toEqual(expect.objectContaining({
+      kind: 'compat_replay_transition',
+      cutoff: { messageIndex: 0, seq: 1, operationIndex: 0 },
+    }));
+    // 保留既有 row_id，只给重复行分配新 id。
+    expect(tag.compatTransitionCheckpoint.data.sheet_0.content).toEqual([['row_id', '名称'], ['1', '铁剑'], ['2', '副本']]);
+
+    // 固化后严格回放（写路径探针模式）通过，且结果等于固化数据。
+    const strict = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(h.chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled' });
+    expect(strict?.baseKind).toBe('compat_transition_checkpoint');
+    expect(strict?.data.sheet_0.content).toEqual([['row_id', '名称'], ['1', '铁剑'], ['2', '副本']]);
+    // 再次诊断：历史已严格可回放，无需恢复。
+    await expect(prepareV2Recovery_ACU()).resolves.toMatchObject({ status: 'unrecoverable', message: expect.stringContaining('无需恢复') });
+  });
+
+  it('兼容宽容回放固化 plan：过渡根目标楼层 tagData 在诊断后变化时计划失效且零保存', async () => {
+    const duplicateSheet = { ...data().sheet_0, content: [['row_id', '名称'], ['1', '铁剑'], ['1', '副本']] };
+    h.chat = chatWithFrame(frame(
+      { kind: 'full', createdAt: 1, reason: 'init', data: data() },
+      [{ seq: 1, entryId: 'legacy-duplicate', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [], operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: duplicateSheet, reason: 'system' }] }],
+    ));
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared.planId).toBeTruthy();
+    // 模拟其它路径（如后台固化）已在同一楼层写入过渡根：storageFrame 指纹不变，但 tagData 变了。
+    h.chat[0].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint = { version: 1, kind: 'compat_replay_transition', createdAt: 3, data: data(), cutoff: { messageIndex: 0, seq: 1, operationIndex: 0 }, tolerances: [] };
+
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toMatchObject({
+      status: 'commit_failed_rolled_back', error: expect.stringContaining('过渡根放置目标楼层已变化'),
+    });
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  it('兼容宽容回放固化 plan 含 sheetKey 身份归并时必须显式确认 confirmCompatTolerantFixation', async () => {
+    // 未知 operation kind 迫使严格回放失败；sheet_replace 引入与根表同名的新 key → 宽容回放做身份归并。
+    const sameNameNewKey = { uid: 'inventory_v2', name: '背包', content: [['row_id', '名称'], ['2', '木盾']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 };
+    h.chat = chatWithFrame(frame(
+      { kind: 'full', createdAt: 1, reason: 'init', data: data() },
+      [{ seq: 1, entryId: 'legacy-remap', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_1'], groupKeys: [], operations: [
+        { kind: 'future_unknown_operation_v99' },
+        { kind: 'sheet_replace', sheetKey: 'sheet_1', sheet: sameNameNewKey, reason: 'system' },
+      ] }],
+    ));
+    const before = structuredClone(h.chat);
+
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared).toMatchObject({ status: 'recoverable_compat_tolerant_replay', requiresConfirmation: true });
+    expect(prepared.message).toContain('身份归并=');
+    expect(prepared.message).not.toContain('身份归并=无');
+    expect(prepared.planId).toBeTruthy();
+
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toMatchObject({
+      status: 'commit_failed_rolled_back', error: expect.stringContaining('身份归并的兼容回放固化必须显式确认'),
+    });
+    // 错误的确认位（孤立 data_replace 的确认）不能替代。
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!, { confirmOrphanDataReplace: true })).resolves.toMatchObject({
+      status: 'commit_failed_rolled_back', error: expect.stringContaining('身份归并'),
+    });
+    expect(h.chat).toEqual(before);
+    expect(h.save).not.toHaveBeenCalled();
+
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!, { confirmCompatTolerantFixation: true })).resolves.toEqual({ status: 'committed', planId: prepared.planId });
+    expect(h.save).toHaveBeenCalledTimes(1);
+    const strict = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(h.chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled' });
+    expect(strict?.baseKind).toBe('compat_transition_checkpoint');
+  });
+
   it('宿主严格保存失败时恢复 live chat', async () => {
     const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) });
     h.chat = chatWithFrame(source);

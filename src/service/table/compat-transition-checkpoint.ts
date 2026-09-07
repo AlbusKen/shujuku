@@ -8,8 +8,9 @@
  */
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
-import { restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
+import { isEmptyCanonicalRowId_ACU, restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
 import { validateCanonicalCheckpointData_ACU } from '../../shared/canonical-checkpoint-validator';
+import { allocateStableRowId_ACU } from '../../shared/stable-row-id-allocator';
 import type { CompatTransitionCheckpointV1_ACU, Spv79TransitionCheckpointV1_ACU } from './storage-frame-v2-types';
 
 export interface Spv79TransitionCheckpointRef_ACU {
@@ -222,4 +223,83 @@ export function reindexSpv79TransitionState_ACU(source: TableDataObject_ACU): Ta
     }
   });
   return data;
+}
+
+export interface CompatTransitionRowIdentityRepair_ACU {
+  sheetKey: string;
+  /** content 行索引（含表头，从 1 起）；seedRows 用负数表示：-(index+1)。 */
+  rowIndex: number;
+  previousRowId: string;
+  nextRowId: string;
+  reason: 'duplicate_row_id' | 'empty_row_id';
+}
+
+export interface CompatTransitionRowIdentityResult_ACU {
+  data: TableDataObject_ACU;
+  repairs: CompatTransitionRowIdentityRepair_ACU[];
+}
+
+/**
+ * 把兼容宽容回放的可见状态归一为 canonical 行身份契约，但**保留每一个已有 row_id**。
+ *
+ * 与 reindexSpv79TransitionState_ACU 的全表重编号不同：兼容过渡根可能落在聊天中段，
+ * 其后仍有严格回放的增量按 row_id 引用行（`UPDATE ... WHERE row_id = 5`）。如果固化时把
+ * 5 改成 3，后续增量会静默更新到另一行。因此这里只处理会让 canonical 校验失败的行：
+ * - 同表内第二次及之后出现的重复 row_id → 分配该表当前最大 id + 1（首次出现保留原 id）；
+ * - 空 row_id（restoreLegacyRowIdentity_ACU 之后仍为空的行）→ 同样分配新 id。
+ * 所有 id 按 trim 后的字符串比较与写回；表头身份列统一为 'row_id'。
+ */
+export function dedupeCompatTransitionRowIdentities_ACU(source: TableDataObject_ACU): CompatTransitionRowIdentityResult_ACU {
+  const data = JSON.parse(JSON.stringify(source)) as TableDataObject_ACU;
+  restoreLegacyRowIdentity_ACU(data);
+  const repairs: CompatTransitionRowIdentityRepair_ACU[] = [];
+  Object.entries(data).forEach(([sheetKey, value]) => {
+    if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object') return;
+    const sheet = value as any;
+    if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) return;
+    sheet.content[0][0] = 'row_id';
+    const contentRows: unknown[][] = [];
+    for (let index = 1; index < sheet.content.length; index += 1) {
+      if (Array.isArray(sheet.content[index])) contentRows.push(sheet.content[index]);
+    }
+    const seedRows: unknown[][] = Array.isArray(sheet.seedRows)
+      ? (sheet.seedRows as unknown[]).filter((row): row is unknown[] => Array.isArray(row))
+      : [];
+    // 先登记全部合法 id，再给冲突行分配，保证新 id 不会撞到后面尚未遍历的行。
+    const reserved = new Set<string>();
+    const seen = new Set<string>();
+    for (const row of [...contentRows, ...seedRows]) {
+      if (isEmptyCanonicalRowId_ACU(row[0])) continue;
+      reserved.add(String(row[0]).trim());
+    }
+    const repairRow = (row: unknown[], rowIndex: number): void => {
+      if (isEmptyCanonicalRowId_ACU(row[0])) {
+        const nextRowId = allocateStableRowId_ACU(reserved);
+        reserved.add(nextRowId);
+        seen.add(nextRowId);
+        repairs.push({ sheetKey, rowIndex, previousRowId: '', nextRowId, reason: 'empty_row_id' });
+        row[0] = nextRowId;
+        return;
+      }
+      const rowId = String(row[0]).trim();
+      if (!seen.has(rowId)) {
+        seen.add(rowId);
+        row[0] = rowId;
+        return;
+      }
+      const nextRowId = allocateStableRowId_ACU(reserved);
+      reserved.add(nextRowId);
+      seen.add(nextRowId);
+      repairs.push({ sheetKey, rowIndex, previousRowId: rowId, nextRowId, reason: 'duplicate_row_id' });
+      row[0] = nextRowId;
+    };
+    let contentRowIndex = 0;
+    for (let index = 1; index < sheet.content.length; index += 1) {
+      if (!Array.isArray(sheet.content[index])) continue;
+      repairRow(contentRows[contentRowIndex], index);
+      contentRowIndex += 1;
+    }
+    seedRows.forEach((row, index) => repairRow(row, -(index + 1)));
+  });
+  return { data, repairs };
 }

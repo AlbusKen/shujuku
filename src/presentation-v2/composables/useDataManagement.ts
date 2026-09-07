@@ -30,7 +30,7 @@ import { sanitizeChatSheetsObject_ACU } from '../../service/template/chat-scope'
 import { buildCurrentTableCheckpoint_ACU, parseTableCheckpointFile_ACU, restoreTableCheckpointToLatestAi_ACU, type TableCheckpointFileV1_ACU } from '../../service/table/table-checkpoint-transfer';
 import { buildRegisteredMixedStorageSnapshotTransfer_ACU, commitRegisteredMixedStorageDecision_ACU, getActiveMixedStorageDecisionSummary_ACU, type MixedStorageDecisionSummary_ACU } from '../../service/table/mixed-storage-decision-registry';
 import type { MixedStorageCommitAction_ACU } from '../../shared/models/mixed-storage-commit-action';
-import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU, scanV2IsolationDiagnostics_ACU, type V2IsolationDiagnostic_ACU, type V2RecoverySummary_ACU } from '../../service/table/table-v2-recovery-service';
+import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU, scanV2IsolationDiagnostics_ACU, type CommitPreparedV2RecoveryOptions_ACU, type V2IsolationDiagnostic_ACU, type V2RecoverySummary_ACU } from '../../service/table/table-v2-recovery-service';
 import { useToastStore } from '../stores/toast-store';
 
 export type DataMgmtMessageKind = 'info' | 'success' | 'warning' | 'error';
@@ -439,6 +439,17 @@ export function useDataManagement() {
         toast.warning('检测到历史回放依赖临时 Sheet 补锚。请提交恢复，将兼容状态固化为 integrity_repair checkpoint。', { muteable: false, durationMs: 6000 });
       } else if (summary.status === 'recoverable_redundant_full_checkpoint') {
         toast.warning('检测到同一隔离键下存在多个 full checkpoint（回放只认最后一个，之前增量已失效）。请先导出原始 frame 备份，再提交收敛。', { muteable: false, durationMs: 6000 });
+      } else if (summary.status === 'recoverable_compat_tolerant_replay') {
+        if (summary.planId) {
+          toast.warning(
+            summary.requiresConfirmation
+              ? '检测到聊天历史仅可经兼容宽容回放读出，且兼容结果含 sheetKey 身份归并。确认后可固化为过渡根，恢复写入与追平。'
+              : '检测到聊天历史仅可经兼容宽容回放读出（写入/追平被拒绝）。请提交固化，把兼容回放结果写成严格可回放的过渡根。',
+            { muteable: false, durationMs: 6000 },
+          );
+        } else {
+          toast.warning(summary.message, { muteable: false, durationMs: 8000 });
+        }
       } else if (summary.status === 'unrecoverable_late_checkpoint_artifacts') {
         toast.warning('检测到较晚 checkpoint 两侧均有 V2 artifact。自动前移会改变后缀回放语义；请先导出恢复备份，再人工核对。', { muteable: false, durationMs: 6000 });
       } else {
@@ -474,18 +485,21 @@ export function useDataManagement() {
     }
   }
 
-  async function commitV2Recovery(confirmOrphanDataReplace: boolean): Promise<void> {
+  async function commitV2Recovery(options: CommitPreparedV2RecoveryOptions_ACU = {}): Promise<void> {
     const summary = v2RecoverySummary.value;
     if (!summary?.planId || !summary.status.startsWith('recoverable_')) {
       toast.warning('V2 恢复计划已失效，请重新诊断。');
       return;
     }
+    const isCompatFixation = summary.status === 'recoverable_compat_tolerant_replay';
     busyAction.value = 'commit-v2-recovery';
     try {
-      const result = await commitPreparedV2Recovery_ACU(summary.planId, { confirmOrphanDataReplace });
+      const result = await commitPreparedV2Recovery_ACU(summary.planId, options);
       if (result.status === 'committed') {
         v2RecoverySummary.value = null;
-        toast.success('V2 恢复已保存；原始 frame 已写入隔离备份。');
+        toast.success(isCompatFixation
+          ? '兼容回放结果已固化为过渡根；原始 storage frame 未改写，写入与追平已恢复。'
+          : 'V2 恢复已保存；原始 frame 已写入隔离备份。');
       } else if (result.status === 'committed_postcondition_failed') {
         v2RecoverySummary.value = null;
         toast.warning(`V2 恢复已保存，但后置校验失败：${result.error || '未知错误'}。请重新加载当前聊天核对数据。`, { muteable: false, durationMs: 6000 });

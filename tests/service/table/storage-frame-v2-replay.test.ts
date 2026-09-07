@@ -4909,9 +4909,11 @@ describe('SPv7.9 duplicate row_id transition checkpoint', () => {
       const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
 
       expect(replay?.baseKind).toBe('compat_tolerant_replay');
+      // 兼容结果保留既有 row_id（只给重复行分配新 id），不做全表重编号：
+      // 过渡根锚在聊天中段时，其后 `WHERE row_id = N` 才不会引用被改掉的 id。
       expect(replay?.data.sheet_0.content).toEqual([
         ['row_id', 'name'],
-        ['1', '非 SQL 后缀'],
+        ['2', '非 SQL 后缀'],
       ]);
 
       await flushPendingCompatTransitionFixations_ACU();
@@ -4919,6 +4921,122 @@ describe('SPv7.9 duplicate row_id transition checkpoint', () => {
       expect(chat[0].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint?.cutoff).toEqual({
         messageIndex: 0, seq: 1, operationIndex: 4,
       });
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
+
+  it('聊天中段 AI 重复插行导致严格回放 UNIQUE 失败：过渡根锚在失败楼层，bounded 与无界严格回放都能通过', async () => {
+    // 复现用户截图：追平写入早期楼层的 INSERT 与已有 row_id 冲突。
+    const makeAiFrameMessage = (entryId: string, messageIndex: number, statements: string[], checkpointData?: ReturnType<typeof makeCheckpointData>) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(checkpointData ? { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData } } : {}),
+            logEntries: [{
+              seq: 1, entryId, createdAt: 2, source: 'system', targetMessageIndex: messageIndex, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system', statements }],
+            }],
+          },
+        },
+      },
+    });
+    const chat = [
+      makeAiFrameMessage('root', 0, ["INSERT INTO inventory (row_id, name) VALUES (2, '第二行')"], makeCheckpointData()),
+      { is_user: true, mes: 'u1' },
+      makeAiFrameMessage('duplicate-insert', 2, ["INSERT INTO inventory (row_id, name) VALUES (1, '重复插入')"]),
+      { is_user: true, mes: 'u2' },
+      makeAiFrameMessage('later-update', 4, ["UPDATE inventory SET name = '后续更新' WHERE row_id = 2"]),
+    ];
+    const saveChat = vi.fn(async () => undefined);
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+
+      // 严格回放失败必须带结构化失败点，且 disabled 模式下以 V2ReplayOperationError_ACU 抛出。
+      await expect(loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled' }))
+        .rejects.toMatchObject({ messageIndex: 2, seq: 1, operationIndex: 0, kind: 'sql_sheet_batch' });
+
+      const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(replay?.baseKind).toBe('compat_tolerant_replay');
+      expect(replay?.legacyToleranceDiagnosis?.strictFailure).toEqual({ messageIndex: 2, seq: 1, operationIndex: 0, kind: 'sql_sheet_batch' });
+      // 兼容读取：重复插入的行保留（分配新 id 3），既有 row_id 1/2 不变，后续 UPDATE 命中 row 2。
+      expect(replay?.data.sheet_0.content).toEqual([
+        ['row_id', 'name'],
+        ['1', '铁剑'],
+        ['2', '后续更新'],
+        ['3', '重复插入'],
+      ]);
+
+      await flushPendingCompatTransitionFixations_ACU();
+      expect(saveChat).toHaveBeenCalledTimes(1);
+      // 过渡根锚在失败楼层 #2 而不是最后一个 AI 楼层：bounded 到 #2 的回放才能受益。
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint).toBeUndefined();
+      expect(chat[4].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint).toBeUndefined();
+      const placed = chat[2].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint;
+      expect(placed).toEqual(expect.objectContaining({
+        kind: 'compat_replay_transition',
+        cutoff: { messageIndex: 2, seq: 1, operationIndex: 0 },
+      }));
+      expect(placed.data.sheet_0.content).toEqual([
+        ['row_id', 'name'],
+        ['1', '铁剑'],
+        ['2', '第二行'],
+        ['3', '重复插入'],
+      ]);
+      // 原始 storageFrame 未被改写（坏 entry 仍在历史里，只是被过渡根吸收）。
+      expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+
+      // 固化后：写前门闸 / 追平使用的 bounded 严格回放与无界严格回放全部通过。
+      const boundedAtFailure = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled', maxMessageIndex: 2 });
+      expect(boundedAtFailure?.baseKind).toBe('compat_transition_checkpoint');
+      expect(boundedAtFailure?.data.sheet_0.content).toEqual(placed.data.sheet_0.content);
+      const unbounded = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled' });
+      expect(unbounded?.baseKind).toBe('compat_transition_checkpoint');
+      expect(unbounded?.data.sheet_0.content).toEqual(replay?.data.sheet_0.content);
+      // 失败楼层之前的 bounded 回放仍走原 full 根严格路径，不受过渡根影响。
+      const boundedBefore = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, compatibilityMode: 'disabled', maxMessageIndex: 0 });
+      expect(boundedBefore?.baseKind).toBe('full_checkpoint');
+      expect(boundedBefore?.data.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑'], ['2', '第二行']]);
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
+
+  it('后台固化：宿主保存失败时回滚过渡根、不抛错，兼容读取结果仍可用', async () => {
+    const checkpointData = makeCheckpointData();
+    const duplicateSheet = structuredClone(checkpointData.sheet_0);
+    duplicateSheet.content.push(['1', '重复行']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-duplicate', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: duplicateSheet, reason: 'system' }],
+            }],
+          },
+        },
+      },
+    }];
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn(async () => { throw new Error('宿主保存不可用'); }) } as any);
+      const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(replay?.baseKind).toBe('compat_tolerant_replay');
+      expect(replay?.data.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑'], ['2', '重复行']]);
+      await flushPendingCompatTransitionFixations_ACU();
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].compatTransitionCheckpoint).toBeUndefined();
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
     } finally {
       _set_SillyTavern_API_ACU(previousHostApi);
     }

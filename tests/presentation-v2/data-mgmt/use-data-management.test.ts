@@ -88,9 +88,18 @@ describe('useDataManagement', () => {
     expect(d.flow.v2IsolationDiagnostics.value).toHaveLength(1);
 
     await d.flow.prepareV2Recovery();
-    await d.flow.commitV2Recovery(true);
+    await d.flow.commitV2Recovery({ confirmOrphanDataReplace: true });
     expect(d.prepare).toHaveBeenCalledOnce();
     expect(d.commit).toHaveBeenCalledWith('plan-1', { confirmOrphanDataReplace: true });
+
+    // 兼容回放固化 plan：确认位按原样透传，不由 UI 层推断。
+    d.prepare.mockResolvedValueOnce({
+      planId: 'plan-compat', status: 'recoverable_compat_tolerant_replay', isolationKey: 'alpha',
+      requiresConfirmation: true, message: '身份归并=sheet_a→sheet_b',
+    });
+    await d.flow.prepareV2Recovery();
+    await d.flow.commitV2Recovery({ confirmOrphanDataReplace: false, confirmCompatTolerantFixation: true });
+    expect(d.commit).toHaveBeenLastCalledWith('plan-compat', { confirmOrphanDataReplace: false, confirmCompatTolerantFixation: true });
   });
 
   it('purge 成功时不在 UI 层 reload（回落由 purge 服务内部完成），只刷新合并视图与 toast', async () => {
