@@ -15,7 +15,7 @@ import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
 type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence' | 'restored_from_recovery_backup';
-export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable_identity_conflict' | 'unrecoverable';
+export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_compat_tolerant_replay' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable_identity_conflict' | 'unrecoverable';
 export type V2RecoveryCommitStatus_ACU = 'committed' | 'committed_postcondition_failed' | 'commit_failed_rolled_back';
 
 export interface V2RecoveryCommitResult_ACU {
@@ -502,6 +502,32 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
         replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
       } catch (error) {
         return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: `full checkpoint 虽通过静态审计，但完整回放失败：${getErrorMessage_ACU(error)}` } };
+      }
+      // F2：Tier-1 宽容回放结果是「兼容只读」诊断，不是 temporary_sheet_anchor 模型
+      //（无 compatibilityRepairs，下方 AND 门不会命中，历史会被「已通过完整性审计，
+      // 无需恢复」误判）。显式返回 recoverable 诊断：数据当前可经宽容回放读取，但
+      // 写入/模板提交/追平已被结果契约拒绝；无身份归并的纯 legacy 容忍项会在加载时
+      // 后台固化为兼容过渡根，含身份归并的历史则拒绝自动固化，持久修复连 F3（身份归一化）。
+      if (replay?.baseKind === 'compat_tolerant_replay') {
+        const identityRemaps = replay.legacyToleranceDiagnosis?.identityRemaps || [];
+        const remapDetail = identityRemaps.length > 0
+          ? identityRemaps.map(remap => `${remap.fromKey}→${remap.toKey}「${remap.canonicalName}」（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`).join('；')
+          : '无';
+        return { summary: {
+          status: 'recoverable_compat_tolerant_replay',
+          isolationKey,
+          sourceMessageIndex: latestFull.messageIndex,
+          affectedSheetKeys: [...new Set(identityRemaps.flatMap(remap => [remap.fromKey, remap.toKey]))],
+          requiresConfirmation: false,
+          message: `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要身份归一化恢复。' : '无身份归并的兼容结果会在后台固化为过渡根。'}`,
+        } };
+      }
+      // 根快照干净不代表整条历史干净：双身份可由 timeline 锚点 / sheet_replace 在根之后
+      // 引入，strict 回放照样成功（SQL 段未触及时物理表名冲突不暴露），双 key 随结果
+      // 静默流出。必须对回放结果也做物理表名冲突审计，否则会落到下方「无需恢复」。
+      const replayIdentityConflicts = detectPhysicalTableNameCollisions_ACU(replay?.data || {});
+      if (replayIdentityConflicts.length > 0) {
+        return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, replayIdentityConflicts, replay?.data) };
       }
       if (replay?.requiresCheckpointConvergence && replay.compatibilityRepairs?.length) {
         const source = frames[frames.length - 1];

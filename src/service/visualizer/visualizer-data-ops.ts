@@ -301,6 +301,12 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
         if (!replay) {
             return { success: false, changed: false, error: 'V2 replay 未产生表格数据，已阻止可视化编辑器保存。' };
         }
+        // F2：宽容回放结果不是严格可写历史，且不是 provisional temporary_sheet_anchor
+        // 模型——batch persist 的收敛分支依赖 repairs 定位锚点，不会收敛宽容态；提前
+        // 拒绝是唯一正确路径。
+        if (replay.baseKind === 'compat_tolerant_replay') {
+            return { success: false, changed: false, error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）；请先在数据管理中完成 V2 恢复收敛，再使用可视化编辑器保存。` };
+        }
         if (hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
             return { success: false, changed: false, error: '当前 V2 回放存在结构性兼容修复，不能自动收敛；请先在数据管理中完成恢复，再使用可视化编辑器保存。' };
         }

@@ -847,6 +847,12 @@ async function loadV2ReplayMergeBase_ACU(
             throwOnRecoveryRequired: true,
             ...(replayEvidence ? { replayEvidence } : {}),
         });
+        // F2：Tier-1 宽容回放结果不是严格可写历史，不能作为填表 merge base 喂给
+        // AI（否则本轮生成基于兼容态数据，提交时才被 persist 写前门拒绝，浪费 AI
+        // 调用）。在 AI 调用前中止本批（catch 会转为 failed 并阻止本批继续）。
+        if (replayResult?.baseKind === 'compat_tolerant_replay') {
+            throw new Error(`V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replayResult.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能作为填表基底；请先在数据管理中完成 V2 恢复收敛。`);
+        }
         if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
             throw new Error(`V2 replay 存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
@@ -3885,6 +3891,14 @@ export async function orchestrateManualCatchUp_ACU(
                 maxMessageIndex: safeTargetMessageIndex,
                 updateRuntimeState: false,
             });
+            // F2：宽容回放态说明提交后的历史仍未严格可读——终态验证必须报恢复需求，
+            // 不得把兼容数据当作验证通过并回写运行时视图。
+            if (replay?.baseKind === 'compat_tolerant_replay') {
+                return {
+                    error: `V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。请先执行恢复收敛。`,
+                    diagnosticCode: 'replay_requires_checkpoint_convergence',
+                };
+            }
             if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
                 return {

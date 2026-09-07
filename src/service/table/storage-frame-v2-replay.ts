@@ -132,13 +132,43 @@ export function hasStructuralReplayCompatibilityRepairs_ACU(
  * 任何临时构造，也没有需要 checkpoint 固化的状态。它只写稳定日志，不驱动收敛，
  * 更不向 replay 结果暴露会被调用方误当作持久化状态的诊断字段。
  */
+/**
+ * Tier-1 兼容宽容回放结果的诊断载体（仅 baseKind='compat_tolerant_replay' 携带）。
+ *
+ * 与 compatibilityRepairs（temporary_sheet_anchor 模型，含 sheetKey/seq/
+ * templateFingerprint 定位）不同，宽容态的容忍项是逐类计数/明细（见
+ * LegacyToleranceReport_ACU），无法映射成单个补锚 repair；刻意不写入
+ * compatibilityRepairs，避免既有 `compatibilityRepairs?.length` 门闸把宽容态
+ * 误判为「可收敛的临时补锚」（Phase 4b 注释的同一约束）。
+ */
+export interface LegacyToleranceDiagnosis_ACU {
+  tolerances: string[];
+  strictError: string;
+  /**
+   * 两代 sheetKey 身份归并明细（fromKey→toKey、覆盖/并入行数）。归并按 key 优先级
+   * 选赢家、不做列身份转换，因此这里是「兼容读副本发生了什么」的证据，供恢复诊断
+   * 与身份归一化恢复（F3）消费，不是可直接持久化的映射。
+   */
+  identityRemaps: SheetIdentityRemap_ACU[];
+}
+
 export interface TableReplayResultV2_ACU {
   data: TableDataObject_ACU;
   baseKind: TableReplayBaseKindV2_ACU;
   compatibilityRepairs?: TableReplayCompatibilityRepairV2_ACU[];
+  /**
+   * 原义「回放依赖临时补锚，需 checkpoint 收敛」；扩展后同时覆盖 Tier-1 兼容
+   * 宽容回放结果（compat_tolerant_replay，此时无 compatibilityRepairs）。统一
+   * 语义：「该结果不是严格可写历史的证据」。读路径仍可消费 data 做只读展示；
+   * 全部写路径门闸（persist 单写/批量/模板提交、追平预检与终态验证、边界提交、
+   * 可视化保存、模板切换）遇到 true 必须 fail-closed 或走显式收敛，不得把
+   * data 当作严格回放基底。
+   */
   requiresCheckpointConvergence?: boolean;
   /** 阶段 A 观测：单次回放的纯数值安全指标（可选，兼容既有调用方）。 */
   metrics?: TableReplayMetricsV2_ACU;
+  /** 仅 compat_tolerant_replay 携带：容忍项明细与严格失败原因（诊断用，不落盘）。 */
+  legacyToleranceDiagnosis?: LegacyToleranceDiagnosis_ACU;
   /** 阶段 H：本次调用实际捕获到的 boundary 消息索引（前向捕获命中时设置）。 */
   capturedBoundary?: number;
 }
@@ -2460,6 +2490,15 @@ async function recoverWithLegacyTolerantReplay_ACU(
   return {
     data: resultData,
     baseKind: 'compat_tolerant_replay',
+    // F2 结果契约：宽容回放结果显式标记「非严格可写」，写路径门闸据此拒绝或指向
+    // 恢复收敛，不再把兼容只读态误判为严格可写历史。toleranceSummary 已在上方
+    // summarizeLegacyToleranceReport_ACU 计算完毕；strictError 保留原始失败原因。
+    requiresCheckpointConvergence: true,
+    legacyToleranceDiagnosis: {
+      tolerances: toleranceSummary,
+      strictError: originalMessage,
+      identityRemaps: tolerant.toleranceReport.identityRemaps.map(remap => ({ ...remap })),
+    },
     metrics: createReplayMetrics_ACU(),
   };
 }
@@ -2951,6 +2990,21 @@ export async function createCompatTransitionCheckpointFromTolerantReplay_ACU(
   }
 
   const tolerant = await replayWithLegacyTolerances_ACU(chat, isolationKey);
+  // 身份归并不是可自动固化的容忍项：mergeLegacySheetIdentities_ACU 按模板 key /
+  // 稳定 key / 字典序选赢家，同 row_id 直接丢弃 loser 行，不做列身份转换。把这样的
+  // 结果写成过渡根，等于让后续加载走严格快路径、写路径全部放行，用「读兼容」悄悄
+  // 替换掉持久历史的身份权威（前序计划不变量：同名不是历史可合并的充分条件）。
+  // 这类历史必须经数据管理的显式恢复（身份归一化）处理；这里只放弃固化，数据仍可读。
+  if (tolerant.toleranceReport.identityRemaps.length > 0) {
+    const remapSummary = tolerant.toleranceReport.identityRemaps
+      .map(remap => `${remap.fromKey}→${remap.toKey}（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`)
+      .join('；');
+    logWarn_ACU(
+      `[V2 Compat Replay] 放弃固化兼容过渡根：兼容结果含 sheetKey 身份归并（${remapSummary}），`
+      + '按 key 优先级的归并不能作为持久权威根；请在数据管理中执行 V2 恢复（身份归一化）。数据仍按兼容读取结果可用。',
+    );
+    return false;
+  }
   const existing = findLatestTransitionCheckpoint_ACU(chat, isolationKey);
   if (existing && compareTransitionCutoffs_ACU(existing.checkpoint.cutoff, tolerant.cutoff) >= 0) {
     // 已有过渡根覆盖了同样或更新的历史，无需重复固化。
@@ -3066,6 +3120,16 @@ export async function validateCurrentChatTableRecovery_ACU(
       options.isolationKey ?? getCurrentIsolationKey_ACU(),
       { updateRuntimeState: false },
     );
+    // F2：Tier-1 宽容回放结果不是严格可写历史。它的容忍项不属于
+    // temporary_sheet_anchor 模型，不能沿用下方「临时 Sheet 补锚」消息误导用户；
+    // 单独给出指向恢复收敛的精确诊断。
+    if (replay?.baseKind === 'compat_tolerant_replay') {
+      return {
+        success: false,
+        diagnosticCode: 'replay_requires_checkpoint_convergence',
+        error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。在数据管理中完成 V2 恢复收敛前，写入与追平会被拒绝。`,
+      };
+    }
     if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
       const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
       return {

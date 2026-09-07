@@ -692,6 +692,11 @@ async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?:
             throw error;
         }
         if (signal?.aborted) return { error: '模板提交已取消。' };
+        // F2：宽容回放结果不是严格可写历史；模板切换提交无法在该历史上收敛
+        //（provisional 收敛依赖 temporary_sheet_anchor repairs 定位锚点，宽容态没有）。
+        if (replay?.baseKind === 'compat_tolerant_replay') {
+            return { error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）；请先在数据管理中完成 V2 恢复收敛，再切换模板。` };
+        }
         if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
             return { error: `当前 V2 历史存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复，再切换模板。` };

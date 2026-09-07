@@ -20,6 +20,7 @@ import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } f
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { parseDDLColumnInfos_ACU } from '../../shared/ddl-utils';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
+import { detectPhysicalTableNameCollisions_ACU } from '../../shared/sheet-identity';
 import { findLatestTransitionCheckpoint_ACU } from './compat-transition-checkpoint';
 import { reconcileRevealedSheetWithTemplate_ACU } from '../template/chat-template-reconciler';
 
@@ -2219,6 +2220,11 @@ async function persistTableMutationLogV2Core_ACU(
       return { saved: false, error: `V2 写入前无法验证 provisional replay：${message}` };
     }
     if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+      // F2：Tier-1 宽容回放结果不是严格可写历史，也没有可收敛的 temporary_sheet_anchor
+      // 模型（provisional 收敛依赖 repairs 定位锚点数据），必须拒绝写入并指向恢复收敛。
+      if (replay?.baseKind === 'compat_tolerant_replay') {
+        return { saved: false, error: `V2 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+      }
       if (!replay || !replay.compatibilityRepairs?.length
         || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
         return { saved: false, error: 'V2 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
@@ -2467,6 +2473,26 @@ async function persistTableMutationLogV2Core_ACU(
             && (!Object.prototype.hasOwnProperty.call(replayBeforeAppend?.data || {}, sheetKey)
               || compatibilityOnlySheetKeys.has(sheetKey)),
         );
+        // 双身份写入口门闸：补写的锚点会以 sheet_introduction/sheet_reveal timeline 把一个
+        // 新 sheetKey 永久引入历史。若它与既有活跃表解析到同一 SQLite 物理表名（同名表换了
+        // key，或不同表拼音同名），后续任何 SQL 段回放都会以「物理表名冲突」失败——这正是
+        // 存量双身份历史的产生方式。同名表必须沿用既有 sheetKey（模板协调保留 previous.key），
+        // 这里 fail-closed，不让写入口再制造新的双身份。
+        if (missingSheetKeys.length > 0) {
+          const projectedActiveState: Record<string, unknown> = { ...(replayBeforeAppend?.data || {}) };
+          for (const sheetKey of missingSheetKeys) projectedActiveState[sheetKey] = (afterData as any)[sheetKey];
+          const introducedCollisions = detectPhysicalTableNameCollisions_ACU(projectedActiveState)
+            .filter(collision => collision.sheetKeys.some(sheetKey => missingSheetKeys.includes(sheetKey)));
+          if (introducedCollisions.length > 0) {
+            const detail = introducedCollisions
+              .map(collision => `物理表名「${collision.physicalTableName}」← ${collision.sheetNames.map((name, index) => `「${name}」(${collision.sheetKeys[index]})`).join(' / ')}；原因=${collision.reason}`)
+              .join('；');
+            return {
+              saved: false,
+              error: `V2 写入前检测到本次要新引入的表与既有活跃表物理表名冲突（双身份），已拒绝补写 per-sheet 锚点：${detail}。同名表应沿用既有 sheetKey；不同表拼音同名需先重命名。`,
+            };
+          }
+        }
         const introduced: TableSheetCheckpointV2_ACU[] = [];
         for (const sheetKey of missingSheetKeys) {
           // 锚点只提供表结构，必须裁成 header-only：
@@ -2770,6 +2796,10 @@ async function persistTableMutationLogBatchV2Core_ACU(
       updateRuntimeState: false,
     });
     if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+      // F2：同单写入门——宽容回放结果不是严格可写历史，直接拒绝 batch 写入。
+      if (replay?.baseKind === 'compat_tolerant_replay') {
+        return { saved: false, error: `V2 batch 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+      }
       if (!replay?.compatibilityRepairs?.length
         || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
         return { saved: false, error: 'V2 batch 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
@@ -3728,6 +3758,10 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       if (checkpoint !== undefined) revealCheckpointSources.set(change.sheetKey, deepClone_ACU(checkpoint));
     }
     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
+      // F2：同 persist 写前门——宽容回放结果不是严格可写历史，模板提交直接失败。
+      if (activeReplay.baseKind === 'compat_tolerant_replay') {
+        throw new Error(`V2 当前楼层模板提交检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${activeReplay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。`);
+      }
       if (!activeReplay.compatibilityRepairs?.length
         || hasStructuralReplayCompatibilityRepairs_ACU(activeReplay.compatibilityRepairs)) {
         const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];

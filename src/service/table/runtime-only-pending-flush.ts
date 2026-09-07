@@ -55,8 +55,12 @@ function serializeSheetContent_ACU(sheet: unknown): string {
 }
 
 /**
- * 回放到目标楼层，找出运行时内容与聊天不一致的表。回放失败时保守地返回全部候选表：
+ * 回放到目标楼层，找出运行时内容与聊天不一致的表。回放抛错时保守地返回全部候选表：
  * 多写一条与既有状态相同的 sheet_replace 是幂等的，漏写才会丢数据。
+ * 返回 null 表示「回放结果不是严格可写历史的证据」（F2：Tier-1 兼容宽容回放态或
+ * 依赖临时补锚的严格回放态）：把兼容数据当回放真值与 runtime 比对会得出错误等价
+ * 判定；调用方必须保留登记并放弃本次落盘，不得走「全部落盘」的保守路径——那会把
+ * 兼容态数据持久化为权威快照，掩盖恢复需求。
  */
 async function resolveDivergedSheetKeys_ACU(
   chat: any[],
@@ -64,13 +68,21 @@ async function resolveDivergedSheetKeys_ACU(
   targetMessageIndex: number,
   runtimeData: TableDataObject_ACU,
   candidateSheetKeys: string[],
-): Promise<string[]> {
+): Promise<string[] | null> {
   try {
     const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
       maxMessageIndex: targetMessageIndex,
       updateRuntimeState: false,
       allowTemporaryTemplateBaseline: true,
     });
+    // F2：宽容回放结果（或依赖临时补锚的严格回放）不能作为「runtime 是否需要写回」
+    // 的比对真值——兼容数据可能含身份归并副作用与临时锚点状态，比对结果不可信。
+    if (replay?.baseKind === 'compat_tolerant_replay'
+      || replay?.requiresCheckpointConvergence
+      || replay?.compatibilityRepairs?.length) {
+      logWarn_ACU('[RuntimeOnlyFlush] 回放处于兼容只读态（严格回放不可用），本次跳过落盘并保留登记。');
+      return null;
+    }
     const replayed = replay?.data as Record<string, unknown> | undefined;
     if (!replayed) return candidateSheetKeys;
     return candidateSheetKeys.filter(sheetKey => (
@@ -114,6 +126,10 @@ export async function flushRuntimeOnlyPendingChanges_ACU(reason: string): Promis
   }
 
   const divergedSheetKeys = await resolveDivergedSheetKeys_ACU(chat, scope.isolationKey, targetMessageIndex, runtimeData, candidateSheetKeys);
+  if (divergedSheetKeys === null) {
+    // 保留登记：恢复收敛完成后，下次提交或构建基底前的 flush 会重试。
+    return { flushed: false, sheetKeys: [], error: '聊天历史仅可经兼容宽容回放读出（严格回放失败），已跳过 runtime-only 落盘；请先完成 V2 恢复收敛。' };
+  }
   if (divergedSheetKeys.length === 0) {
     clearRuntimeOnlyPendingSheets_ACU(scope);
     logDebug_ACU(`[RuntimeOnlyFlush] ${reason}: 运行时与聊天回放一致，无需落盘（${candidateSheetKeys.join('、')}）。`);

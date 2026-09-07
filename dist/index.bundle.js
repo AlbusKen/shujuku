@@ -42916,6 +42916,15 @@ $CONTENT
         return {
             data: resultData,
             baseKind: 'compat_tolerant_replay',
+            // F2 结果契约：宽容回放结果显式标记「非严格可写」，写路径门闸据此拒绝或指向
+            // 恢复收敛，不再把兼容只读态误判为严格可写历史。toleranceSummary 已在上方
+            // summarizeLegacyToleranceReport_ACU 计算完毕；strictError 保留原始失败原因。
+            requiresCheckpointConvergence: true,
+            legacyToleranceDiagnosis: {
+                tolerances: toleranceSummary,
+                strictError: originalMessage,
+                identityRemaps: tolerant.toleranceReport.identityRemaps.map(remap => ({ ...remap })),
+            },
             metrics: createReplayMetrics_ACU(),
         };
     }
@@ -43372,6 +43381,19 @@ $CONTENT
             return false;
         }
         const tolerant = await replayWithLegacyTolerances_ACU(chat, isolationKey);
+        // 身份归并不是可自动固化的容忍项：mergeLegacySheetIdentities_ACU 按模板 key /
+        // 稳定 key / 字典序选赢家，同 row_id 直接丢弃 loser 行，不做列身份转换。把这样的
+        // 结果写成过渡根，等于让后续加载走严格快路径、写路径全部放行，用「读兼容」悄悄
+        // 替换掉持久历史的身份权威（前序计划不变量：同名不是历史可合并的充分条件）。
+        // 这类历史必须经数据管理的显式恢复（身份归一化）处理；这里只放弃固化，数据仍可读。
+        if (tolerant.toleranceReport.identityRemaps.length > 0) {
+            const remapSummary = tolerant.toleranceReport.identityRemaps
+                .map(remap => `${remap.fromKey}→${remap.toKey}（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`)
+                .join('；');
+            logWarn_ACU(`[V2 Compat Replay] 放弃固化兼容过渡根：兼容结果含 sheetKey 身份归并（${remapSummary}），`
+                + '按 key 优先级的归并不能作为持久权威根；请在数据管理中执行 V2 恢复（身份归一化）。数据仍按兼容读取结果可用。');
+            return false;
+        }
         const existing = findLatestTransitionCheckpoint_ACU(chat, isolationKey);
         if (existing && compareTransitionCutoffs_ACU(existing.checkpoint.cutoff, tolerant.cutoff) >= 0) {
             // 已有过渡根覆盖了同样或更新的历史，无需重复固化。
@@ -43481,6 +43503,16 @@ $CONTENT
             return { success: true };
         try {
             const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, options.isolationKey ?? getCurrentIsolationKey_ACU(), { updateRuntimeState: false });
+            // F2：Tier-1 宽容回放结果不是严格可写历史。它的容忍项不属于
+            // temporary_sheet_anchor 模型，不能沿用下方「临时 Sheet 补锚」消息误导用户；
+            // 单独给出指向恢复收敛的精确诊断。
+            if (replay?.baseKind === 'compat_tolerant_replay') {
+                return {
+                    success: false,
+                    diagnosticCode: 'replay_requires_checkpoint_convergence',
+                    error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。在数据管理中完成 V2 恢复收敛前，写入与追平会被拒绝。`,
+                };
+            }
             if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
                 const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
                 return {
@@ -47611,6 +47643,11 @@ $CONTENT
                 return { saved: false, error: `V2 写入前无法验证 provisional replay：${message}` };
             }
             if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+                // F2：Tier-1 宽容回放结果不是严格可写历史，也没有可收敛的 temporary_sheet_anchor
+                // 模型（provisional 收敛依赖 repairs 定位锚点数据），必须拒绝写入并指向恢复收敛。
+                if (replay?.baseKind === 'compat_tolerant_replay') {
+                    return { saved: false, error: `V2 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+                }
                 if (!replay || !replay.compatibilityRepairs?.length
                     || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
                     return { saved: false, error: 'V2 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
@@ -47824,6 +47861,27 @@ $CONTENT
                     const missingSheetKeys = operationSheetKeys.filter(sheetKey => Boolean(afterData[sheetKey])
                         && (!Object.prototype.hasOwnProperty.call(replayBeforeAppend?.data || {}, sheetKey)
                             || compatibilityOnlySheetKeys.has(sheetKey)));
+                    // 双身份写入口门闸：补写的锚点会以 sheet_introduction/sheet_reveal timeline 把一个
+                    // 新 sheetKey 永久引入历史。若它与既有活跃表解析到同一 SQLite 物理表名（同名表换了
+                    // key，或不同表拼音同名），后续任何 SQL 段回放都会以「物理表名冲突」失败——这正是
+                    // 存量双身份历史的产生方式。同名表必须沿用既有 sheetKey（模板协调保留 previous.key），
+                    // 这里 fail-closed，不让写入口再制造新的双身份。
+                    if (missingSheetKeys.length > 0) {
+                        const projectedActiveState = { ...(replayBeforeAppend?.data || {}) };
+                        for (const sheetKey of missingSheetKeys)
+                            projectedActiveState[sheetKey] = afterData[sheetKey];
+                        const introducedCollisions = detectPhysicalTableNameCollisions_ACU(projectedActiveState)
+                            .filter(collision => collision.sheetKeys.some(sheetKey => missingSheetKeys.includes(sheetKey)));
+                        if (introducedCollisions.length > 0) {
+                            const detail = introducedCollisions
+                                .map(collision => `物理表名「${collision.physicalTableName}」← ${collision.sheetNames.map((name, index) => `「${name}」(${collision.sheetKeys[index]})`).join(' / ')}；原因=${collision.reason}`)
+                                .join('；');
+                            return {
+                                saved: false,
+                                error: `V2 写入前检测到本次要新引入的表与既有活跃表物理表名冲突（双身份），已拒绝补写 per-sheet 锚点：${detail}。同名表应沿用既有 sheetKey；不同表拼音同名需先重命名。`,
+                            };
+                        }
+                    }
                     const introduced = [];
                     for (const sheetKey of missingSheetKeys) {
                         // 锚点只提供表结构，必须裁成 header-only：
@@ -48107,6 +48165,10 @@ $CONTENT
                 updateRuntimeState: false,
             });
             if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+                // F2：同单写入门——宽容回放结果不是严格可写历史，直接拒绝 batch 写入。
+                if (replay?.baseKind === 'compat_tolerant_replay') {
+                    return { saved: false, error: `V2 batch 写入前检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。` };
+                }
                 if (!replay?.compatibilityRepairs?.length
                     || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
                     return { saved: false, error: 'V2 batch 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
@@ -49026,6 +49088,10 @@ $CONTENT
                             revealCheckpointSources.set(change.sheetKey, deepClone_ACU$3(checkpoint));
                     }
                     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
+                        // F2：同 persist 写前门——宽容回放结果不是严格可写历史，模板提交直接失败。
+                        if (activeReplay.baseKind === 'compat_tolerant_replay') {
+                            throw new Error(`V2 当前楼层模板提交检测到聊天历史仅可经兼容宽容回放读出（严格回放失败：${activeReplay.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能继续写入；请先在数据管理中完成 V2 恢复收敛。`);
+                        }
                         if (!activeReplay.compatibilityRepairs?.length
                             || hasStructuralReplayCompatibilityRepairs_ACU(activeReplay.compatibilityRepairs)) {
                             const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
@@ -54295,6 +54361,11 @@ $CONTENT
             }
             if (signal?.aborted)
                 return { error: '模板提交已取消。' };
+            // F2：宽容回放结果不是严格可写历史；模板切换提交无法在该历史上收敛
+            //（provisional 收敛依赖 temporary_sheet_anchor repairs 定位锚点，宽容态没有）。
+            if (replay?.baseKind === 'compat_tolerant_replay') {
+                return { error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）；请先在数据管理中完成 V2 恢复收敛，再切换模板。` };
+            }
             if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
                 return { error: `当前 V2 历史存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复，再切换模板。` };
@@ -105594,8 +105665,12 @@ $CONTENT
         return JSON.stringify(Array.isArray(content) ? content : null);
     }
     /**
-     * 回放到目标楼层，找出运行时内容与聊天不一致的表。回放失败时保守地返回全部候选表：
+     * 回放到目标楼层，找出运行时内容与聊天不一致的表。回放抛错时保守地返回全部候选表：
      * 多写一条与既有状态相同的 sheet_replace 是幂等的，漏写才会丢数据。
+     * 返回 null 表示「回放结果不是严格可写历史的证据」（F2：Tier-1 兼容宽容回放态或
+     * 依赖临时补锚的严格回放态）：把兼容数据当回放真值与 runtime 比对会得出错误等价
+     * 判定；调用方必须保留登记并放弃本次落盘，不得走「全部落盘」的保守路径——那会把
+     * 兼容态数据持久化为权威快照，掩盖恢复需求。
      */
     async function resolveDivergedSheetKeys_ACU(chat, isolationKey, targetMessageIndex, runtimeData, candidateSheetKeys) {
         try {
@@ -105604,6 +105679,14 @@ $CONTENT
                 updateRuntimeState: false,
                 allowTemporaryTemplateBaseline: true,
             });
+            // F2：宽容回放结果（或依赖临时补锚的严格回放）不能作为「runtime 是否需要写回」
+            // 的比对真值——兼容数据可能含身份归并副作用与临时锚点状态，比对结果不可信。
+            if (replay?.baseKind === 'compat_tolerant_replay'
+                || replay?.requiresCheckpointConvergence
+                || replay?.compatibilityRepairs?.length) {
+                logWarn_ACU('[RuntimeOnlyFlush] 回放处于兼容只读态（严格回放不可用），本次跳过落盘并保留登记。');
+                return null;
+            }
             const replayed = replay?.data;
             if (!replayed)
                 return candidateSheetKeys;
@@ -105645,6 +105728,10 @@ $CONTENT
             return { flushed: false, sheetKeys: [], error: 'no AI message to persist runtime-only changes' };
         }
         const divergedSheetKeys = await resolveDivergedSheetKeys_ACU(chat, scope.isolationKey, targetMessageIndex, runtimeData, candidateSheetKeys);
+        if (divergedSheetKeys === null) {
+            // 保留登记：恢复收敛完成后，下次提交或构建基底前的 flush 会重试。
+            return { flushed: false, sheetKeys: [], error: '聊天历史仅可经兼容宽容回放读出（严格回放失败），已跳过 runtime-only 落盘；请先完成 V2 恢复收敛。' };
+        }
         if (divergedSheetKeys.length === 0) {
             clearRuntimeOnlyPendingSheets_ACU(scope);
             logDebug_ACU(`[RuntimeOnlyFlush] ${reason}: 运行时与聊天回放一致，无需落盘（${candidateSheetKeys.join('、')}）。`);
@@ -106142,6 +106229,32 @@ $CONTENT
                 }
                 catch (error) {
                     return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: `full checkpoint 虽通过静态审计，但完整回放失败：${getErrorMessage_ACU$1(error)}` } };
+                }
+                // F2：Tier-1 宽容回放结果是「兼容只读」诊断，不是 temporary_sheet_anchor 模型
+                //（无 compatibilityRepairs，下方 AND 门不会命中，历史会被「已通过完整性审计，
+                // 无需恢复」误判）。显式返回 recoverable 诊断：数据当前可经宽容回放读取，但
+                // 写入/模板提交/追平已被结果契约拒绝；无身份归并的纯 legacy 容忍项会在加载时
+                // 后台固化为兼容过渡根，含身份归并的历史则拒绝自动固化，持久修复连 F3（身份归一化）。
+                if (replay?.baseKind === 'compat_tolerant_replay') {
+                    const identityRemaps = replay.legacyToleranceDiagnosis?.identityRemaps || [];
+                    const remapDetail = identityRemaps.length > 0
+                        ? identityRemaps.map(remap => `${remap.fromKey}→${remap.toKey}「${remap.canonicalName}」（覆盖 ${remap.overriddenRows} 行、并入 ${remap.appendedRows} 行）`).join('；')
+                        : '无';
+                    return { summary: {
+                            status: 'recoverable_compat_tolerant_replay',
+                            isolationKey,
+                            sourceMessageIndex: latestFull.messageIndex,
+                            affectedSheetKeys: [...new Set(identityRemaps.flatMap(remap => [remap.fromKey, remap.toKey]))],
+                            requiresConfirmation: false,
+                            message: `V2 严格回放失败，当前数据经 Tier-1 兼容宽容回放读出（严格错误：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。兼容数据仅可读：写入/模板提交/追平会被拒绝，直到恢复收敛完成。tolerances=${(replay.legacyToleranceDiagnosis?.tolerances || []).join(', ') || '无'}；身份归并=${remapDetail}。${identityRemaps.length > 0 ? '含身份归并的兼容结果不会自动固化为过渡根，需要身份归一化恢复。' : '无身份归并的兼容结果会在后台固化为过渡根。'}`,
+                        } };
+                }
+                // 根快照干净不代表整条历史干净：双身份可由 timeline 锚点 / sheet_replace 在根之后
+                // 引入，strict 回放照样成功（SQL 段未触及时物理表名冲突不暴露），双 key 随结果
+                // 静默流出。必须对回放结果也做物理表名冲突审计，否则会落到下方「无需恢复」。
+                const replayIdentityConflicts = detectPhysicalTableNameCollisions_ACU(replay?.data || {});
+                if (replayIdentityConflicts.length > 0) {
+                    return { summary: buildIdentityConflictSummary_ACU(isolationKey, latestFull.messageIndex, replayIdentityConflicts, replay?.data) };
                 }
                 if (replay?.requiresCheckpointConvergence && replay.compatibilityRepairs?.length) {
                     const source = frames[frames.length - 1];
@@ -106908,6 +107021,12 @@ $CONTENT
                 throwOnRecoveryRequired: true,
                 ...(replayEvidence ? { replayEvidence } : {}),
             });
+            // F2：Tier-1 宽容回放结果不是严格可写历史，不能作为填表 merge base 喂给
+            // AI（否则本轮生成基于兼容态数据，提交时才被 persist 写前门拒绝，浪费 AI
+            // 调用）。在 AI 调用前中止本批（catch 会转为 failed 并阻止本批继续）。
+            if (replayResult?.baseKind === 'compat_tolerant_replay') {
+                throw new Error(`V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replayResult.legacyToleranceDiagnosis?.strictError || '未知错误'}），不能作为填表基底；请先在数据管理中完成 V2 恢复收敛。`);
+            }
             if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
                 throw new Error(`V2 replay 存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
@@ -109600,6 +109719,14 @@ $CONTENT
                     maxMessageIndex: safeTargetMessageIndex,
                     updateRuntimeState: false,
                 });
+                // F2：宽容回放态说明提交后的历史仍未严格可读——终态验证必须报恢复需求，
+                // 不得把兼容数据当作验证通过并回写运行时视图。
+                if (replay?.baseKind === 'compat_tolerant_replay') {
+                    return {
+                        error: `V2 replay 仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）。请先执行恢复收敛。`,
+                        diagnosticCode: 'replay_requires_checkpoint_convergence',
+                    };
+                }
                 if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
                     const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
                     return {
@@ -163973,6 +164100,12 @@ Expected function or array of functions, received type ${typeof value}.`
             const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
             if (!replay) {
                 return { success: false, changed: false, error: 'V2 replay 未产生表格数据，已阻止可视化编辑器保存。' };
+            }
+            // F2：宽容回放结果不是严格可写历史，且不是 provisional temporary_sheet_anchor
+            // 模型——batch persist 的收敛分支依赖 repairs 定位锚点，不会收敛宽容态；提前
+            // 拒绝是唯一正确路径。
+            if (replay.baseKind === 'compat_tolerant_replay') {
+                return { success: false, changed: false, error: `当前 V2 历史仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}）；请先在数据管理中完成 V2 恢复收敛，再使用可视化编辑器保存。` };
             }
             if (hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
                 return { success: false, changed: false, error: '当前 V2 回放存在结构性兼容修复，不能自动收敛；请先在数据管理中完成恢复，再使用可视化编辑器保存。' };
