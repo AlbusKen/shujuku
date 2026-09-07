@@ -129,6 +129,7 @@ import {
   persistTableMutationLogBatchV2_ACU,
   persistTableSheetCheckpointV2_ACU,
 } from '../../../src/service/table/storage-frame-v2-persist';
+import { V2ReplayOperationError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperationV2_ACU } from '../../../src/service/table/table-schema-migration';
 
 const sheetA = { uid: 'a', name: 'A', sourceData: {}, content: [['row_id', 'value'], ['1', 'new']], updateConfig: {}, exportConfig: {}, orderNo: 1 } as any;
@@ -461,9 +462,37 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
   });
 
   it.each([
-    { label: '严格回放抛错（UNIQUE 冲突）', probe: () => Promise.reject(new Error('[V2 Replay] operation failed: messageIndex=0, seq=1, operationIndex=0, kind=sql_sheet_batch: UNIQUE constraint failed: a.row_id')), detail: 'UNIQUE constraint failed' },
-    { label: '严格回放降级为兼容宽容回放', probe: () => Promise.resolve({ baseKind: 'compat_tolerant_replay', data: {}, legacyToleranceDiagnosis: { strictError: 'strict failed at appended entry', tolerances: [], identityRemaps: [] } }), detail: 'strict failed at appended entry' },
-  ])('回放宽容、写入严格：追加 entry 后候选历史 $label 时拒绝落盘，聊天与宿主零写入', async ({ probe, detail }) => {
+    {
+      label: '严格回放在本次 entry 抛错',
+      probe: () => Promise.reject(new V2ReplayOperationError_ACU(
+        { messageIndex: 0, seq: 1, operationIndex: 0, kind: 'sql_sheet_batch' },
+        new Error('UNIQUE constraint failed: a.row_id'),
+      )),
+      expectedMarker: '写入时基底与回放基底不一致',
+      detail: 'UNIQUE constraint failed',
+    },
+    {
+      label: '兼容回放定位到本次 entry',
+      probe: () => Promise.resolve({
+        baseKind: 'compat_tolerant_replay', data: {},
+        legacyToleranceDiagnosis: {
+          strictError: 'strict failed at appended entry', tolerances: [], identityRemaps: [],
+          strictFailure: { messageIndex: 0, seq: 1, operationIndex: 0, kind: 'sql_sheet_batch' },
+        },
+      }),
+      expectedMarker: '写入时基底与回放基底不一致',
+      detail: 'strict failed at appended entry',
+    },
+    {
+      label: '严格回放在历史 entry 抛错',
+      probe: () => Promise.reject(new V2ReplayOperationError_ACU(
+        { messageIndex: 0, seq: 99, operationIndex: 0, kind: 'sql_sheet_batch' },
+        new Error('historical UNIQUE constraint failed'),
+      )),
+      expectedMarker: '仅可经兼容宽容回放读出',
+      detail: 'historical UNIQUE constraint failed',
+    },
+  ])('回放宽容、写入严格：追加 entry 后候选历史 $label 时拒绝落盘，聊天与宿主零写入', async ({ probe, expectedMarker, detail }) => {
     const message = seedFrame({ logEntries: [] });
     message.TavernDB_ACU_Identity = 'identity-before-rejection';
     const messageBefore = JSON.parse(JSON.stringify(message));
@@ -491,7 +520,7 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     });
 
     expect(result.saved).toBe(false);
-    expect(result.error).toContain('写入时基底与回放基底不一致');
+    expect(result.error).toContain(expectedMarker);
     expect(result.error).toContain(detail);
     // 探针在候选 chat（含本次 entry 的深拷贝）上以目标楼层为界严格回放，不是在宿主 chat 上。
     expect(probeCalls).toHaveLength(1);
@@ -861,6 +890,49 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     });
     expect(secondFrame.headRevision).toBe(secondFrame.logEntries[0].commitRevision);
   });
+
+  it('replacement 写前两次回放使用已裁掉旧增量的同一候选 chat', async () => {
+    const first = seedFrame({
+      headRevision: '1:first-old',
+      logEntries: [makeEntry({ seq: 1, commitRevision: '1:first-old', operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: { ...sheetA, name: '旧 A' }, reason: 'system' }] })],
+    });
+    const second = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            headRevision: '2:target-old',
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } },
+            logEntries: [makeEntry({ seq: 2, entryId: 'target-old', commitRevision: '2:target-old', operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: { ...sheetA, name: '旧目标 A' }, reason: 'system' }] })],
+          },
+        },
+      },
+    };
+    mocks.chat.splice(0, mocks.chat.length, first, second);
+    const preWriteCalls: Array<{ chat: any[]; entriesByIndex: any[][] }> = [];
+    mocks.loadReplayDetailed.mockImplementation(async (chat: any[], _key: string, options: any) => {
+      if (options?.compatibilityMode !== 'disabled') {
+        preWriteCalls.push({
+          chat,
+          entriesByIndex: [0, 1].map(index => structuredClone(chat[index].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries)),
+        });
+      }
+      return { baseKind: 'full_checkpoint', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } };
+    });
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+
+    const result = await persistTableMutationLogV2_ACU(makeReplacementOptions(1));
+
+    expect(result.saved).toBe(true);
+    expect(preWriteCalls).toHaveLength(2);
+    expect(preWriteCalls[0].chat).toBe(preWriteCalls[1].chat);
+    expect(preWriteCalls[0].chat).not.toBe(mocks.chat);
+    expect(preWriteCalls[0].entriesByIndex).toEqual([[], []]);
+    expect(preWriteCalls[1].entriesByIndex).toEqual([[], []]);
+  });
+
 
   it('replacement 的严格保存失败时恢复所有目标消息的内存状态', async () => {
     const first = seedFrame({

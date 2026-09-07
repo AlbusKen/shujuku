@@ -33,6 +33,7 @@ import {
   scanResidualFirstMessageScopeFields_ACU,
   MESSAGE_TABLE_FIELDS_ACU,
   FIRST_MESSAGE_SCOPE_GUIDE_FIELDS_ACU,
+  collectSheetIdentityAliasesForPurge_ACU,
   patchIsolatedTagMetadata_ACU,
   ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU,
   ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU,
@@ -1317,6 +1318,39 @@ describe('purgeManualRefillIncrementalSheetKeysFromMessage_ACU', () => {
       tableName: 'quest_log',
       reason: 'system',
     }]);
+  });
+
+  it('按表身份扩展同名旧 key 与拼音物理表名，但不合并近名表', () => {
+    const currentKey = 'sheet_zhu_jue_xin_xi_biao';
+    const legacyKey = 'sheet_DpKcVGqg';
+    const nearNameKey = 'sheet_zhu_jue_xin_xi';
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              data: {
+                [legacyKey]: { uid: legacyKey, name: '主角信息表', content: [['row_id']], sourceData: { ddl: 'CREATE TABLE zhujuexinxibiao (row_id TEXT)' } },
+                [nearNameKey]: { uid: nearNameKey, name: '主角信息', content: [['row_id']], sourceData: { ddl: 'CREATE TABLE zhujuexinxi (row_id TEXT)' } },
+              },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    const aliases = collectSheetIdentityAliasesForPurge_ACU(chat, 'tag1', [currentKey], {
+      [currentKey]: { uid: currentKey, name: '主角信息表', content: [['row_id']], sourceData: { ddl: 'CREATE TABLE zhujuexinxibiao (row_id TEXT)' } },
+    });
+
+    expect(aliases.sheetKeys).toEqual([legacyKey, currentKey].sort());
+    expect(aliases.sqlTableNames).toContain('zhujuexinxibiao');
+    expect(aliases.sheetKeys).not.toContain(nearNameKey);
+    expect(aliases.sqlTableNames).not.toContain('zhujuexinxi');
   });
 
   it('SQL 模式增量预清理遇到无法识别的 sql_batch 语句时保留原 operation', () => {

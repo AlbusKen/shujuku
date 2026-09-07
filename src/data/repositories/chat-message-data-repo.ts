@@ -13,6 +13,7 @@
 
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { isUsableIsolationSlotKey_ACU } from '../../shared/isolation-policy';
+import { canonicalizeDisplayName_ACU, resolvePhysicalTableName_ACU } from '../../shared/sheet-identity';
 import type { Sheet_ACU } from '../../shared/models/table-data';
 import type {
     IsolationTagData_ACU,
@@ -190,9 +191,13 @@ function collectSqlTableNameCandidatesFromSheetForPurge_ACU(sheetKey: string, sh
     const uid = normalizeSqlIdentifierForPurge_ACU(sheet.uid);
     const name = normalizeSqlIdentifierForPurge_ACU(sheet.name);
     const ddlName = parseSqlDDLTableNameForPurge_ACU(sheet.sourceData?.ddl);
+    // SQLite runtime 真正使用的物理表名是显示名的拼音 slug（如「主角信息表」→ zhujuexinxibiao），
+    // AI 写出的 INSERT/UPDATE 语句引用的正是这个名字，而不是 sheetKey 或显示名本身。
+    const physicalName = normalizeSqlIdentifierForPurge_ACU(resolvePhysicalTableName_ACU(sheet as Sheet_ACU, sheetKey));
     if (uid) targetNames.add(uid);
     if (name) targetNames.add(name);
     if (ddlName) targetNames.add(ddlName);
+    if (physicalName) targetNames.add(physicalName);
 }
 
 function collectSqlTargetTableNamesFromRecordForPurge_ACU(record: any, sheetKeys: Set<string>, targetNames: Set<string>): void {
@@ -494,6 +499,19 @@ function purgeSqlBatchOperationV2_ACU(operation: any, targetSqlTableNames: Set<s
     return { operation: nextOperation, changed: true };
 }
 
+/**
+ * sql_sheet_batch 的 sheetKey 可能是同一张表的另一代 key（模板换代、兼容归并），
+ * 但语句里的物理表名不会变。key 不命中时按 tableName / 语句改写的表名再判一次，
+ * 否则「删除主角信息表」会放过旧 key 写下的 INSERT INTO zhujuexinxibiao。
+ */
+function purgeSqlSheetBatchOperationV2_ACU(operation: any, targetSqlTableNames: Set<string>): { operation: any | null; changed: boolean } {
+    const tableName = normalizeSqlIdentifierForPurge_ACU(operation.tableName);
+    if (tableName && targetSqlTableNames.has(tableName)) {
+        return { operation: null, changed: true };
+    }
+    return purgeSqlBatchOperationV2_ACU(operation, targetSqlTableNames);
+}
+
 function purgeOperationV2_ACU(operation: any, sheetKeys: Set<string>, targetSqlTableNames: Set<string>): { operation: any | null; changed: boolean } {
     if (!isObjectRecord_ACU(operation)) return { operation, changed: false };
 
@@ -519,6 +537,10 @@ function purgeOperationV2_ACU(operation: any, sheetKeys: Set<string>, targetSqlT
         return purgeSqlBatchOperationV2_ACU(operation, targetSqlTableNames);
     }
 
+    if (operation.kind === 'sql_sheet_batch') {
+        return purgeSqlSheetBatchOperationV2_ACU(operation, targetSqlTableNames);
+    }
+
     return { operation, changed: false };
 }
 
@@ -542,6 +564,10 @@ function purgePatchV2_ACU(patch: any, sheetKeys: Set<string>, targetSqlTableName
 
     if (patch.kind === 'sql_batch') {
         const result = purgeSqlBatchOperationV2_ACU(patch, targetSqlTableNames);
+        return { patch: result.operation, changed: result.changed };
+    }
+    if (patch.kind === 'sql_sheet_batch') {
+        const result = purgeSqlSheetBatchOperationV2_ACU(patch, targetSqlTableNames);
         return { patch: result.operation, changed: result.changed };
     }
     return { patch, changed: false };
@@ -627,11 +653,21 @@ function purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData: any, sheetKeys: Se
     return changed;
 }
 
-function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>): boolean {
+function mergeKnownSqlTableNamesForPurge_ACU(targetSqlTableNames: Set<string>, knownSqlTableNames?: Iterable<string>): void {
+    if (!knownSqlTableNames) return;
+    for (const tableName of knownSqlTableNames) {
+        const normalized = normalizeSqlIdentifierForPurge_ACU(tableName);
+        if (normalized) targetSqlTableNames.add(normalized);
+    }
+}
+
+function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>, knownSqlTableNames?: Iterable<string>): boolean {
     if (!isObjectRecord_ACU(frame)) return false;
     let changed = false;
     const previousHeadRevision = frame.headRevision;
+    // 本帧可能没有目标表的定义（只有增量），物理表名要靠调用方从整条聊天/运行时收集后传入。
     const targetSqlTableNames = collectSqlTargetTableNamesFromStorageFrameV2_ACU(frame, sheetKeys);
+    mergeKnownSqlTableNamesForPurge_ACU(targetSqlTableNames, knownSqlTableNames);
 
     const checkpoint = frame.checkpoint;
     if (isObjectRecord_ACU(checkpoint)) {
@@ -729,12 +765,7 @@ export function purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU(fram
     // 需要替换基底时必须走完整的 purgeSheetKeysFromStorageFrameV2_ACU 流程。
     let changed = false;
     const targetSqlTableNames = collectSqlTargetTableNamesFromStorageFrameV2_ACU(frame, sheetKeys);
-    if (knownSqlTableNames) {
-        for (const tableName of knownSqlTableNames) {
-            const normalized = normalizeSqlIdentifierForPurge_ACU(tableName);
-            if (normalized) targetSqlTableNames.add(normalized);
-        }
-    }
+    mergeKnownSqlTableNamesForPurge_ACU(targetSqlTableNames, knownSqlTableNames);
 
     const checkpoint = frame.checkpoint;
     if (isObjectRecord_ACU(checkpoint)) {
@@ -823,6 +854,7 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
     msg: any,
     isolationKey: string,
     sheetKeys: string[],
+    knownSqlTableNames?: Iterable<string>,
 ): boolean {
     if (!msg || !Array.isArray(sheetKeys) || sheetKeys.length === 0) return false;
 
@@ -868,10 +900,129 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
     if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
         msgChanged = true;
     }
-    if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) msgChanged = true;
+    if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet, knownSqlTableNames)) msgChanged = true;
 
     if (msgChanged) msg.TavernDB_ACU_IsolatedData = nextIsolated;
     return msgChanged;
+}
+
+export interface SheetIdentityAliasesForPurge_ACU {
+    /** 原始目标 key ∪ 整条聊天中显示名相同的其它代 key。 */
+    sheetKeys: string[];
+    /** 上述全部 key 在运行时与各帧定义中的 SQL 表名候选（含拼音物理表名），已小写规范化。 */
+    sqlTableNames: string[];
+}
+
+function forEachSheetDefinitionInTagData_ACU(
+    tagData: any,
+    visit: (sheetKey: string, sheet: any) => void,
+): void {
+    if (!isObjectRecord_ACU(tagData)) return;
+    const visitRecord = (record: any): void => {
+        if (!isObjectRecord_ACU(record)) return;
+        Object.keys(record).forEach(sheetKey => {
+            if (sheetKey.startsWith('sheet_')) visit(sheetKey, record[sheetKey]);
+        });
+    };
+    for (const slotKey of ['spv79TransitionCheckpoint', 'compatTransitionCheckpoint'] as const) {
+        visitRecord(tagData[slotKey]?.data);
+    }
+    const frame = tagData.storageFrame;
+    if (!isObjectRecord_ACU(frame)) return;
+    visitRecord(frame.checkpoint?.data);
+    if (isObjectRecord_ACU(frame.perSheetCheckpoints)) {
+        Object.keys(frame.perSheetCheckpoints).forEach(sheetKey => {
+            if (!sheetKey.startsWith('sheet_')) return;
+            visit(sheetKey, frame.perSheetCheckpoints[sheetKey]?.data);
+        });
+    }
+    if (!Array.isArray(frame.logEntries)) return;
+    frame.logEntries.forEach((entry: any) => {
+        if (!isObjectRecord_ACU(entry)) return;
+        for (const field of ['operations', 'patches'] as const) {
+            const artifacts = entry[field];
+            if (!Array.isArray(artifacts)) continue;
+            artifacts.forEach(artifact => {
+                if (!isObjectRecord_ACU(artifact)) return;
+                if (artifact.kind === 'sheet_replace' && typeof artifact.sheetKey === 'string') {
+                    visit(artifact.sheetKey, artifact.sheet);
+                } else if (artifact.kind === 'data_replace') {
+                    visitRecord(artifact.data);
+                }
+            });
+        }
+    });
+}
+
+/**
+ * 按「表的身份 = 显示名」把删除目标扩展到整条聊天里的所有 key 代，并收集它们的 SQL 表名。
+ *
+ * 模板换代 / 兼容归并会让同一张表在历史里以多个 sheetKey 出现（如 sheet_DpKcVGqg 与
+ * sheet_zhu_jue_xin_xi_biao 都是「主角信息表」）；AI 写下的 sql_sheet_batch 引用的又是
+ * 显示名派生的物理表名。只按当前 key 删除会放过旧 key 的 op 与物理表名 SQL，留下用户看不到、
+ * 却会在回放里撞 UNIQUE 的残留。显示名比较用 canonicalizeDisplayName_ACU 严格相等，
+ * 「主角信息」不会被并入「主角信息表」。
+ *
+ * @param runtimeData 当前运行时表数据（可选）：目标 key 的显示名与物理表名优先从这里取。
+ */
+export function collectSheetIdentityAliasesForPurge_ACU(
+    chat: any[] | null | undefined,
+    isolationKey: string,
+    sheetKeys: string[],
+    runtimeData?: Record<string, any> | null,
+): SheetIdentityAliasesForPurge_ACU {
+    const targetKeys = new Set(
+        (Array.isArray(sheetKeys) ? sheetKeys : []).filter(key => typeof key === 'string' && key.startsWith('sheet_')),
+    );
+    if (targetKeys.size === 0) return { sheetKeys: [], sqlTableNames: [] };
+
+    const targetDisplayNames = new Set<string>();
+    const noteDisplayName = (sheet: any): void => {
+        const canonical = canonicalizeDisplayName_ACU(sheet?.name);
+        if (canonical) targetDisplayNames.add(canonical);
+    };
+    const messages = Array.isArray(chat) ? chat : [];
+    const tagDataList: any[] = [];
+    messages.forEach(message => {
+        if (!message || message.is_user) return;
+        const tagData = readIsolatedTagData_ACU(message, isolationKey);
+        if (tagData) tagDataList.push(tagData);
+    });
+
+    if (isObjectRecord_ACU(runtimeData)) {
+        targetKeys.forEach(sheetKey => noteDisplayName(runtimeData[sheetKey]));
+    }
+    tagDataList.forEach(tagData => forEachSheetDefinitionInTagData_ACU(tagData, (sheetKey, sheet) => {
+        if (targetKeys.has(sheetKey)) noteDisplayName(sheet);
+    }));
+
+    const expandedKeys = new Set(targetKeys);
+    if (targetDisplayNames.size > 0) {
+        tagDataList.forEach(tagData => forEachSheetDefinitionInTagData_ACU(tagData, (sheetKey, sheet) => {
+            if (targetDisplayNames.has(canonicalizeDisplayName_ACU(sheet?.name))) expandedKeys.add(sheetKey);
+        }));
+        if (isObjectRecord_ACU(runtimeData)) {
+            Object.keys(runtimeData).forEach(sheetKey => {
+                if (!sheetKey.startsWith('sheet_')) return;
+                if (targetDisplayNames.has(canonicalizeDisplayName_ACU(runtimeData[sheetKey]?.name))) expandedKeys.add(sheetKey);
+            });
+        }
+    }
+
+    const sqlTableNames = new Set<string>();
+    expandedKeys.forEach(sheetKey => {
+        collectSqlTableNameCandidatesFromSheetForPurge_ACU(sheetKey, isObjectRecord_ACU(runtimeData) ? runtimeData[sheetKey] : undefined, sqlTableNames);
+    });
+    tagDataList.forEach(tagData => {
+        if (!isObjectRecord_ACU(tagData?.storageFrame)) return;
+        collectSqlTargetTableNamesFromStorageFrameV2_ACU(tagData.storageFrame, expandedKeys)
+            .forEach(tableName => sqlTableNames.add(tableName));
+    });
+
+    return {
+        sheetKeys: [...expandedKeys].sort(),
+        sqlTableNames: [...sqlTableNames].sort(),
+    };
 }
 
 // ════════════════════════════════════════════════════════════════

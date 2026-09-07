@@ -68,7 +68,7 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
     return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
 }
 import { checkIfFirstTimeInit_ACU, ensureLegacyStorageMigratedBeforeWrite_ACU } from './table-service';
-import { assertSingleActiveFullCheckpointV2_ACU, assertWriteTargetNotBeforeReplayRoot_ACU, hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
+import { assertSingleActiveFullCheckpointV2_ACU, assertWriteTargetNotBeforeReplayRoot_ACU, buildReplacementPurgedCandidateChat_ACU, collectV2FullCheckpointIndices_ACU, hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
 import { parseAndApplyTableEditsToData_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { extractStrictJsonTableFillResponse_ACU } from '../ai/prompt-builder/strict-json-table-fill';
 import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
@@ -3611,32 +3611,47 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
  * chat 非 V2 或无帧时回放为 null，直接放行。
  */
 async function ensureStrictlyReplayableHistoryForCatchUp_ACU(
-    targetMessageIndex: number,
+    plan: ManualCatchUpPlan_ACU,
+    isolationKey: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
     const chat = getChatArray_ACU();
     if (!Array.isArray(chat) || chat.length === 0) return { ok: true };
-    const isolationKey = getCurrentIsolationKey_ACU();
-    const bounds: Array<{ label: string; maxMessageIndex?: number }> = [
-        { label: `目标楼层 ${targetMessageIndex} 边界`, maxMessageIndex: targetMessageIndex },
-        { label: '聊天末尾', maxMessageIndex: undefined },
-    ];
-    for (const bound of bounds) {
+    const plannedIndices = [...new Set(plan.waves.flatMap(wave => wave.messageIndices))]
+        .filter((index): index is number => Number.isInteger(index) && index >= 0 && index < chat.length)
+        .sort((left, right) => left - right);
+    const selectedSheetKeys = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
+    if (plannedIndices.length === 0 || selectedSheetKeys.length === 0) return { ok: true };
+
+    const candidate = buildReplacementPurgedCandidateChat_ACU(chat, isolationKey, plannedIndices, selectedSheetKeys);
+    const roots = collectV2FullCheckpointIndices_ACU(candidate, isolationKey);
+    if (roots.length === 0) return { ok: true };
+    const precedingRoots = roots.filter(index => index <= plannedIndices[0]);
+    const startRoot = precedingRoots.length > 0 ? precedingRoots[precedingRoots.length - 1] : roots[0];
+    const startRootOffset = roots.indexOf(startRoot);
+
+    for (let rootOffset = startRootOffset; rootOffset < roots.length; rootOffset += 1) {
+        const rootIndex = roots[rootOffset];
+        const nextRootIndex = roots[rootOffset + 1];
+        const maxMessageIndex = nextRootIndex === undefined ? undefined : nextRootIndex - 1;
+        const label = nextRootIndex === undefined
+            ? `full checkpoint ${rootIndex} 至聊天末尾`
+            : `full checkpoint ${rootIndex} 至 ${maxMessageIndex}`;
         let replay;
         try {
-            replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+            replay = await loadTableStateFromFramesV2Detailed_ACU(candidate, isolationKey, {
                 updateRuntimeState: false,
-                ...(Number.isInteger(bound.maxMessageIndex) ? { maxMessageIndex: bound.maxMessageIndex } : {}),
+                ...(Number.isInteger(maxMessageIndex) ? { maxMessageIndex } : {}),
             });
         } catch (error) {
             return {
                 ok: false,
-                error: `追平前无法回放聊天历史（${bound.label}）：${error instanceof Error ? error.message : String(error)}`,
+                error: `追平前无法回放聊天历史（${label}）：${error instanceof Error ? error.message : String(error)}`,
             };
         }
         if (replay?.baseKind === 'compat_tolerant_replay') {
             return {
                 ok: false,
-                error: `追平前检测到聊天历史（${bound.label}）仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），`
+                error: `追平前检测到聊天历史（${label}）仅可经兼容宽容回放读出（严格回放失败：${replay.legacyToleranceDiagnosis?.strictError || '未知错误'}），`
                     + '不能继续写入；请在数据管理 → 「诊断 V2 数据恢复」中把兼容回放结果固化为过渡根后重试。',
             };
         }
@@ -3765,7 +3780,7 @@ export async function orchestrateManualCatchUp_ACU(
     if (preflightTargetIndex !== null && preflightTargetIndex !== undefined) {
         // 历史处于兼容只读态（严格回放失败、只能宽容回放）时，所有 bucket 提交都会被
         // persist 写前门闸拒绝——这时还去调用 AI 只是浪费，在任何 AI 调用前阻断。
-        const strictHistory = await ensureStrictlyReplayableHistoryForCatchUp_ACU(preflightTargetIndex);
+        const strictHistory = await ensureStrictlyReplayableHistoryForCatchUp_ACU(plan, getCurrentIsolationKey_ACU());
         if (strictHistory.ok === false) {
             return {
                 success: false,

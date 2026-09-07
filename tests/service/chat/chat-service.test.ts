@@ -3848,6 +3848,60 @@ describe('replaceManualRefillSheetBaselineInRangeAtomic_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
+  it('基底替换按显示名清理同名旧 key 与 SQL 物理表名，并保留近名表', async () => {
+    const currentKey = 'sheet_zhu_jue_xin_xi_biao';
+    const legacyKey = 'sheet_DpKcVGqg';
+    const nearNameKey = 'sheet_zhu_jue_xin_xi';
+    const originalRuntime = { ...mockCurrentJsonTableData };
+    Object.assign(mockCurrentJsonTableData, {
+      [currentKey]: { uid: currentKey, name: '主角信息表', content: [['row_id']], sourceData: { ddl: 'CREATE TABLE zhujuexinxibiao (row_id TEXT)' } },
+    });
+    const chat = [
+      makeFullFrameMessage({
+        [currentKey]: mockCurrentJsonTableData[currentKey],
+        [legacyKey]: { uid: legacyKey, name: '主角信息表', content: [['row_id']], sourceData: { ddl: 'CREATE TABLE zhujuexinxibiao (row_id TEXT)' } },
+        [nearNameKey]: { uid: nearNameKey, name: '主角信息', content: [['row_id']], sourceData: { ddl: 'CREATE TABLE zhujuexinxi (row_id TEXT)' } },
+      }),
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [{
+                seq: 1,
+                operations: [
+                  { kind: 'sheet_replace', sheetKey: legacyKey, sheet: { name: '主角信息表' }, reason: 'manual_crud' },
+                  { kind: 'sql_sheet_batch', sheetKey: legacyKey, tableName: 'zhujuexinxibiao', reason: 'manual_crud', statements: ['INSERT INTO zhujuexinxibiao VALUES (1)'] },
+                  { kind: 'sql_sheet_batch', sheetKey: nearNameKey, tableName: 'zhujuexinxi', reason: 'manual_crud', statements: ['INSERT INTO zhujuexinxi VALUES (1)'] },
+                ],
+              }],
+            },
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    try {
+      const result = await replaceManualRefillSheetBaselineInRangeAtomic_ACU({
+        isolationKey: '',
+        targetMessageIndices: [0, 1],
+        targetSheetKeys: [currentKey],
+        baselineData: { [currentKey]: mockCurrentJsonTableData[currentKey] },
+      });
+
+      expect(result.success).toBe(true);
+      const operations = chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations;
+      expect(operations).toEqual([{ kind: 'sql_sheet_batch', sheetKey: nearNameKey, tableName: 'zhujuexinxi', reason: 'manual_crud', statements: ['INSERT INTO zhujuexinxi VALUES (1)'] }]);
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints[currentKey]).toBeDefined();
+    } finally {
+      Object.keys(mockCurrentJsonTableData).forEach(key => delete mockCurrentJsonTableData[key]);
+      Object.assign(mockCurrentJsonTableData, originalRuntime);
+    }
+  });
+
   it('严格宿主保存失败时恢复目标范围内字段，避免内存半状态', async () => {
     const chat = [
       makeFullFrameMessage({

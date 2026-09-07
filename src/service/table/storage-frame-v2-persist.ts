@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
-import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import type { StorageMode } from '../../shared/table-storage-provider';
@@ -11,7 +11,7 @@ import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
 import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, hasV2TableHistoryEvidence_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
-import { applyTableOperationV2_ACU, buildAppendedOperationsWriteRejectionMessage_ACU, buildCompatReadonlyWriteRejectionMessage_ACU, collectScheduleSummaryFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU } from './storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, buildAppendedOperationsWriteRejectionMessage_ACU, buildCompatReadonlyWriteRejectionMessage_ACU, collectScheduleSummaryFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU, V2ReplayOperationError_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
@@ -395,22 +395,46 @@ function normalizeIncrementalReplacement_ACU(
   return { targetMessageIndices, targetSheetKeys };
 }
 
-function collectReplacementSqlTableNames_ACU(
+function buildReplacementPurgedIsolatedDataOverrides_ACU(
   chat: any[],
   isolationKey: string,
   targetMessageIndices: number[],
   targetSheetKeys: string[],
-): Set<string> {
-  const maxTargetMessageIndex = Math.max(...targetMessageIndices);
-  const sheetKeySet = new Set(targetSheetKeys);
-  const knownSqlTableNames = new Set<string>();
-  for (let index = 0; index <= maxTargetMessageIndex; index += 1) {
-    const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
+  runtimeData?: TableDataObject_ACU | null,
+): Map<number, Record<string, any>> {
+  const aliases = collectSheetIdentityAliasesForPurge_ACU(chat, isolationKey, targetSheetKeys, runtimeData);
+  const overrides = new Map<number, Record<string, any>>();
+  for (const messageIndex of targetMessageIndices) {
+    const nextIsolatedData = cloneIsolatedData_ACU(chat[messageIndex]) as Record<string, any>;
+    const tagData = nextIsolatedData[isolationKey];
     if (!isV2TagData_ACU(tagData)) continue;
-    collectSqlTargetTableNamesFromStorageFrameV2_ACU(tagData.storageFrame, sheetKeySet)
-      .forEach(tableName => knownSqlTableNames.add(tableName));
+    if (purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU(
+      tagData.storageFrame,
+      new Set(aliases.sheetKeys),
+      aliases.sqlTableNames,
+    )) {
+      overrides.set(messageIndex, nextIsolatedData);
+    }
   }
-  return knownSqlTableNames;
+  return overrides;
+}
+
+/** 构造 replacement 落盘前的只读候选聊天，供写前门闸与追平预检复用。 */
+export function buildReplacementPurgedCandidateChat_ACU(
+  chat: any[],
+  isolationKey: string,
+  targetMessageIndices: number[],
+  targetSheetKeys: string[],
+): any[] {
+  const overrides = buildReplacementPurgedIsolatedDataOverrides_ACU(
+    chat,
+    isolationKey,
+    targetMessageIndices,
+    targetSheetKeys,
+  );
+  return overrides.size > 0
+    ? buildCandidateChatWithIsolatedDataOverrides_ACU(chat, overrides)
+    : chat;
 }
 
 function countAiFloor_ACU(chat: any[], messageIndex: number): number {
@@ -636,7 +660,17 @@ async function validateAppendedOperationsReplayCandidate_ACU(
   candidateChat: any[],
   isolationKey: string,
   targetMessageIndex: number,
+  appendedEntries: Array<{ messageIndex: number; seq: number }>,
+  scope: string,
 ): Promise<string | null> {
+  const appendedEntryKeys = new Set(appendedEntries.map(entry => `${entry.messageIndex}:${entry.seq}`));
+  const isAppendedFailure = (failure: { messageIndex: number; seq: number } | undefined): boolean => {
+    return !!failure && appendedEntryKeys.has(`${failure.messageIndex}:${failure.seq}`);
+  };
+  const compatReadonlyRejection = (strictError: string): string => buildCompatReadonlyWriteRejectionMessage_ACU(
+    scope,
+    { legacyToleranceDiagnosis: { strictError, tolerances: [], identityRemaps: [] } },
+  );
   let replay;
   try {
     replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
@@ -645,10 +679,17 @@ async function validateAppendedOperationsReplayCandidate_ACU(
       compatibilityMode: 'disabled',
     });
   } catch (error) {
-    return buildAppendedOperationsWriteRejectionMessage_ACU(error instanceof Error ? error.message : String(error));
+    const strictError = error instanceof Error ? error.message : String(error);
+    return error instanceof V2ReplayOperationError_ACU && isAppendedFailure(error)
+      ? buildAppendedOperationsWriteRejectionMessage_ACU(strictError)
+      : compatReadonlyRejection(strictError);
   }
   if (replay?.baseKind === 'compat_tolerant_replay') {
-    return buildAppendedOperationsWriteRejectionMessage_ACU(replay.legacyToleranceDiagnosis?.strictError || '严格回放失败');
+    const diagnosis = replay.legacyToleranceDiagnosis;
+    const strictError = diagnosis?.strictError || '严格回放失败';
+    return isAppendedFailure(diagnosis?.strictFailure)
+      ? buildAppendedOperationsWriteRejectionMessage_ACU(strictError)
+      : compatReadonlyRejection(strictError);
   }
   return null;
 }
@@ -2226,6 +2267,18 @@ async function persistTableMutationLogV2Core_ACU(
     }
     temporaryBaselineUpgrade = true;
   }
+  const replacementIsolatedDataByMessageIndex = replacement
+    ? buildReplacementPurgedIsolatedDataOverrides_ACU(
+      chat,
+      isolationKey,
+      replacement.targetMessageIndices,
+      replacement.targetSheetKeys,
+      afterData,
+    )
+    : new Map<number, Record<string, any>>();
+  const preWriteChat = replacementIsolatedDataByMessageIndex.size > 0
+    ? buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex)
+    : chat;
   // A temporary sheet anchor is derived from the current template, not from
   // persisted evidence. Before accepting another write, replace that dependency
   // with the *pre-write* replay state in the same candidate commit. Using
@@ -2236,7 +2289,7 @@ async function persistTableMutationLogV2Core_ACU(
   if (hasExistingCheckpoint && writesReplayArtifact) {
     let replay;
     try {
-      replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+      replay = await loadTableStateFromFramesV2Detailed_ACU(preWriteChat, isolationKey, {
         maxMessageIndex: target.index,
         updateRuntimeState: false,
         ...(boundaryReplayEvidence ? { replayEvidence: boundaryReplayEvidence } : {}),
@@ -2312,31 +2365,9 @@ async function persistTableMutationLogV2Core_ACU(
   const targetExistingFrame = isV2TagData_ACU(targetExistingTagData)
     ? deepClone_ACU(targetExistingTagData.storageFrame)
     : null;
-  const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
+  const isolatedData = replacementIsolatedDataByMessageIndex.get(target.index)
+    ?? cloneIsolatedData_ACU(target.message) as Record<string, any>;
   const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
-  const replacementIsolatedDataByMessageIndex = new Map<number, Record<string, any>>();
-  if (replacement) {
-    const knownSqlTableNames = collectReplacementSqlTableNames_ACU(
-      chat,
-      isolationKey,
-      replacement.targetMessageIndices,
-      replacement.targetSheetKeys,
-    );
-    for (const messageIndex of replacement.targetMessageIndices) {
-      const nextIsolatedData = messageIndex === target.index
-        ? isolatedData
-        : cloneIsolatedData_ACU(chat[messageIndex]) as Record<string, any>;
-      const tagData = nextIsolatedData[isolationKey];
-      if (!isV2TagData_ACU(tagData)) continue;
-      if (purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU(
-        tagData.storageFrame,
-        new Set(replacement.targetSheetKeys),
-        knownSqlTableNames,
-      )) {
-        replacementIsolatedDataByMessageIndex.set(messageIndex, nextIsolatedData);
-      }
-    }
-  }
   const currentWriteSet = options.writeSet ?? options.transactionContext?.writeSet;
   const revisionWriteSet = options.revisionWriteSet;
   const requestedBaseRevision = options.baseRevision !== undefined
@@ -2478,7 +2509,7 @@ async function persistTableMutationLogV2Core_ACU(
     if (operationSheetKeys.length > 0) {
       let replayBeforeAppend;
       try {
-        replayBeforeAppend = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+        replayBeforeAppend = await loadTableStateFromFramesV2Detailed_ACU(preWriteChat, isolationKey, {
           maxMessageIndex: target.index,
           updateRuntimeState: false,
           ...(boundaryReplayEvidence ? { replayEvidence: boundaryReplayEvidence } : {}),
@@ -2634,6 +2665,8 @@ async function persistTableMutationLogV2Core_ACU(
       candidateChat,
       isolationKey,
       target.index,
+      [{ messageIndex: target.index, seq: entry.seq }],
+      'V2 写入时',
     );
     if (candidateValidationError) {
       return { saved: false, error: candidateValidationError };
@@ -2840,6 +2873,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
   }
 
   const candidateChat = deepClone_ACU(chat);
+  const appendedEntries: Array<{ messageIndex: number; seq: number }> = [];
   for (const [targetIndex, target] of targetByIndex) {
     const message = candidateChat[targetIndex];
     let isolatedData = cloneIsolatedData_ACU(message) as Record<string, any>;
@@ -2921,6 +2955,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
     };
     frame.logEntries = [...(frame.logEntries || []), entry];
     frame.headRevision = entry.commitRevision;
+    appendedEntries.push({ messageIndex: targetIndex, seq: entry.seq });
     message.TavernDB_ACU_IsolatedData = isolatedData;
     writeMessageIdentity_ACU(message, {
       enabled: settings_ACU.dataIsolationEnabled,
@@ -2948,6 +2983,8 @@ async function persistTableMutationLogBatchV2Core_ACU(
       candidateChat,
       isolationKey,
       Math.max(...targetMessageIndices),
+      appendedEntries,
+      'V2 batch 写入时',
     );
     if (candidateValidationError) return { saved: false, error: candidateValidationError };
     options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_appended_operations_save');

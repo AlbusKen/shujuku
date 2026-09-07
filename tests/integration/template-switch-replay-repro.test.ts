@@ -785,6 +785,64 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
     mocks.chat.push(...chat);
   }
 
+  function mountReplacementEligibleDuplicateChat(): void {
+    const chat = buildChat(50);
+    chat[0] = {
+      is_user: false, mes: 'AI 楼层 0',
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 0, reason: 'init', data: tolerantRootData() },
+            logEntries: [],
+          },
+        },
+      },
+    };
+    chat[4] = {
+      is_user: false, mes: 'AI 楼层 3',
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1, entryId: 'replacement-eligible-duplicate', createdAt: 4, source: 'system', targetMessageIndex: 4, aiFloor: 3,
+              filledSheetKeys: [OLD_KEY], changedSheetKeys: [OLD_KEY], groupKeys: [OLD_KEY],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: OLD_KEY, tableName: TABLE_NAME, reason: 'system',
+                statements: [`INSERT INTO ${TABLE_NAME} (row_id, name, state) VALUES (1, '重复', '重复')`],
+              }],
+            }],
+          },
+        },
+      },
+    };
+    mocks.chat.length = 0;
+    mocks.chat.push(...chat);
+  }
+
+  it('追平预检候选会裁掉本次 replacement 覆盖的重复 SQL 增量', async () => {
+    mountReplacementEligibleDuplicateChat();
+    stateManager._set_currentJsonTableData_ACU(clone(tolerantRootData()));
+    const { buildReplacementPurgedCandidateChat_ACU } = await import('../../src/service/table/storage-frame-v2-persist');
+    const candidate = buildReplacementPurgedCandidateChat_ACU(
+      mocks.chat,
+      mocks.isolationKey,
+      [4],
+      [OLD_KEY],
+    );
+    expect(candidate).not.toBe(mocks.chat);
+    expect(candidate[4].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toEqual([]);
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(candidate, mocks.isolationKey, {
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    expect(replay?.baseKind).toBe('full_checkpoint');
+  }, 120000);
+
+
   async function loadTolerant() {
     const replay = await loadTableStateFromFramesV2Detailed_ACU(mocks.chat, mocks.isolationKey, { updateRuntimeState: false });
     if (!replay) throw new Error('F2 构造未产生回放结果');
