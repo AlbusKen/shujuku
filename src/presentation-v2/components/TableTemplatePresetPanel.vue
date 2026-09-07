@@ -17,12 +17,6 @@
       <AcuBadge :variant="templates.isChatOverridden.value ? 'accent' : 'neutral'">
         {{ templates.isChatOverridden.value ? '已覆盖' : '跟随全局' }}
       </AcuBadge>
-      <AcuBadge v-if="templates.runtimeDiffersFromLibrary.value" variant="warning">
-        当前生效模板与预设库内容不同
-      </AcuBadge>
-      <AcuBadge v-if="templates.chatSnapshotDiffersFromLibrary.value" variant="warning">
-        聊天快照内容已偏离库中同名预设
-      </AcuBadge>
     </AcuText>
 
     <div class="acu-table-template-panel__preset-row">

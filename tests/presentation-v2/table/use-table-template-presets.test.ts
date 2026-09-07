@@ -244,6 +244,26 @@ describe('useTableTemplatePresets', () => {
     }));
   });
 
+  it('从聊天快照切回默认预设时使用空名称并显示默认聊天快照', async () => {
+    const { useTableTemplatePresets, applyTemplatePresetToCurrent_ACU, runFollowGlobalTemplateFlow_ACU, setSelectedChat, setActiveMode } = await importComposable();
+    setSelectedChat('chat-A');
+    setActiveMode('chat_override');
+    const presets = useTableTemplatePresets();
+
+    await presets.selectChatPreset('global:');
+
+    expect(applyTemplatePresetToCurrent_ACU).toHaveBeenCalledWith('', expect.objectContaining({
+      updateGlobal: false,
+      chatSelectionSource: 'global',
+    }));
+    expect(runFollowGlobalTemplateFlow_ACU).not.toHaveBeenCalled();
+    setSelectedChat('');
+    setActiveMode('chat_override');
+    presets.refresh();
+    expect(presets.selectedChatPreset.value).toBe('snapshot:');
+    expect(presets.selectedChatPresetLabel.value).toBe('默认预设（当前聊天快照）');
+  });
+
   it('切换当前聊天模板前使用统一恢复 guard，guard 取消时不切换', async () => {
     const { useTableTemplatePresets, applyTemplatePresetToCurrent_ACU, ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU } = await importComposable();
     const presets = useTableTemplatePresets();

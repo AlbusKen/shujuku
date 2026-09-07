@@ -96,7 +96,7 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('TableTemplatePresetPanel · runtime 导出与差异提示', () => {
+describe('TableTemplatePresetPanel · runtime 导出与状态展示', () => {
   it('渲染导出当前生效模板按钮，点击调用 exportTemplate(runtime)', async () => {
     const { app, tplExportTemplate } = await mountPanel();
     const exportBtn = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(btn => btn.title === '导出当前生效模板');
@@ -115,7 +115,7 @@ describe('TableTemplatePresetPanel · runtime 导出与差异提示', () => {
     app.unmount();
   });
 
-  it('runtimeDiffersFromLibrary 为真时状态行显示差异提示', async () => {
+  it('runtimeDiffersFromLibrary 为真时状态行不显示差异提示', async () => {
     const { app, runtimeDiffersFromLibrary } = await mountPanel({ runtimeDiffers: false });
     const statusLine = document.querySelector<HTMLElement>('.acu-table-template-panel__status-line')!;
     expect(statusLine).not.toBeNull();
@@ -123,11 +123,11 @@ describe('TableTemplatePresetPanel · runtime 导出与差异提示', () => {
 
     runtimeDiffersFromLibrary.value = true;
     await nextTick();
-    expect(statusLine.textContent).toContain('当前生效模板与预设库内容不同');
+    expect(statusLine.textContent).not.toContain('当前生效模板与预设库内容不同');
     app.unmount();
   });
 
-  it('chatSnapshotDiffersFromLibrary 为真时状态行显示快照偏离提示（S3-8）', async () => {
+  it('chatSnapshotDiffersFromLibrary 为真时状态行不显示快照偏离提示', async () => {
     const { app, chatSnapshotDiffersFromLibrary } = await mountPanel({ snapshotDiffers: false });
     const statusLine = document.querySelector<HTMLElement>('.acu-table-template-panel__status-line')!;
     expect(statusLine).not.toBeNull();
@@ -135,7 +135,7 @@ describe('TableTemplatePresetPanel · runtime 导出与差异提示', () => {
 
     chatSnapshotDiffersFromLibrary.value = true;
     await nextTick();
-    expect(statusLine.textContent).toContain('聊天快照内容已偏离库中同名预设');
+    expect(statusLine.textContent).not.toContain('聊天快照内容已偏离库中同名预设');
     app.unmount();
   });
 

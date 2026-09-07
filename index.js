@@ -166755,8 +166755,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-ba7e883c] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-ba7e883c] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-ba7e883c] {\r\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-ba7e883c] {\r\n  width: 100%;\n}\r\n\r\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-ba7e883c");
-    var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_ba7e883c_lang = null;
+    injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-5eb94606] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-5eb94606] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-5eb94606] {\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-5eb94606] {\n  width: 100%;\n}\n\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-5eb94606");
+    var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_5eb94606_lang = null;
 
     const _hoisted_1$H = { class: "acu-text__value" };
     const _hoisted_2$A = { class: "acu-text__value" };
@@ -166795,7 +166795,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				class: "acu-table-template-panel__status-line"
 			}, {
 				default: withCtx(() => [
-					_cache[14] || (_cache[14] = createTextVNode(
+					_cache[12] || (_cache[12] = createTextVNode(
 						" 当前聊天: ",
 						-1
 						/* CACHED */
@@ -166847,29 +166847,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						)]),
 						_: 1
-					}, 8, ["variant"]),
-					$setup.templates.runtimeDiffersFromLibrary.value ? (openBlock(), createBlock($setup["AcuBadge"], {
-						key: 2,
-						variant: "warning"
-					}, {
-						default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
-							" 当前生效模板与预设库内容不同 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					})) : createCommentVNode("v-if", true),
-					$setup.templates.chatSnapshotDiffersFromLibrary.value ? (openBlock(), createBlock($setup["AcuBadge"], {
-						key: 3,
-						variant: "warning"
-					}, {
-						default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
-							" 聊天快照内容已偏离库中同名预设 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					})) : createCommentVNode("v-if", true)
+					}, 8, ["variant"])
 				]),
 				_: 1
 			}),
@@ -166895,7 +166873,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					disabled: $setup.templates.busy.value || $setup.management.busy.value,
 					onFile: _cache[2] || (_cache[2] = ($event) => $setup.templates.importPresetForCurrentChat($event))
 				}, {
-					default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+					default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
 						"i",
 						{ class: "fa-solid fa-download" },
 						null,
@@ -166937,7 +166915,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				disabled: $setup.templates.busy.value || $setup.management.busy.value,
 				onClick: $setup.management.openVisualizer
 			}, {
-				default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
+				default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
 					"i",
 					{ class: "fa-solid fa-table-columns" },
 					null,
@@ -166978,7 +166956,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-ba7e883c"]]);
+    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-5eb94606"]]);
 
     const basicConfigCopy = {
         nav: {
