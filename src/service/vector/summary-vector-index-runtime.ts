@@ -48,6 +48,12 @@ import {
 import {
     buildPreparedRows_ACU,
     findSummaryTable_ACU,
+    resolveColumnIndexByAliases_ACU,
+    SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU,
+    SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU,
+    SUMMARY_LOCATION_COLUMN_ALIASES_ACU,
+    SUMMARY_SUMMARY_COLUMN_ALIASES_ACU,
+    SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU,
     type SummaryVectorArchivePreparedRow_ACU,
 } from './summary-vector-index-archive-service';
 
@@ -324,12 +330,7 @@ function escapeMarkdownTableCell_ACU(value: any): string {
         .replace(/\|/g, '\\|');
 }
 
-function buildSummaryIndexOverwriteContent_ACU(candidates: SummaryIndexSelectedCandidate_ACU[]): string {
-    const selectedRows = (Array.isArray(candidates) ? candidates : [])
-        .map((candidate) => candidate.row)
-        .filter((row): row is ChatSummaryVectorIndexRow_ACU => !!row)
-        .sort((left, right) => (Number(left.rowOrder) || 0) - (Number(right.rowOrder) || 0));
-
+function buildFallbackSummaryIndexOverwriteContent_ACU(selectedRows: ChatSummaryVectorIndexRow_ACU[]): string {
     const lines = [
         '# 纪要索引',
         '',
@@ -346,6 +347,92 @@ function buildSummaryIndexOverwriteContent_ACU(candidates: SummaryIndexSelectedC
     }
 
     return lines.join('\n');
+}
+
+function resolveCrossfireExtraIndexColumns_ACU(): { columns: string[]; colIndexes: number[]; headerRow: any[]; table: any; template: string } | null {
+    try {
+        const selected = findSummaryTable_ACU();
+        const table = selected?.table;
+        const cfg = table?.exportConfig;
+        if (!table || !cfg || cfg.extraIndexEnabled !== true) return null;
+        const content = Array.isArray(table.content) ? table.content : [];
+        const headerRow = Array.isArray(content[0]) ? content[0] : [];
+        if (headerRow.length === 0) return null;
+        const selectedRaw = Array.isArray(cfg.extraIndexColumns) ? cfg.extraIndexColumns : [];
+        const columns: string[] = [];
+        for (const col of selectedRaw) {
+            if (typeof col === 'string' && headerRow.includes(col) && !columns.includes(col)) columns.push(col);
+        }
+        if (columns.length === 0) return null;
+        const colIndexes = columns.map((col) => headerRow.indexOf(col)).filter((idx) => idx >= 0);
+        if (colIndexes.length === 0) return null;
+        const template = typeof cfg.extraIndexInjectionTemplate === 'string' ? cfg.extraIndexInjectionTemplate : '';
+        return { columns, colIndexes, headerRow, table, template };
+    } catch (_error) {
+        return null;
+    }
+}
+
+function getStoredRowFallbackCell_ACU(row: ChatSummaryVectorIndexRow_ACU, columnName: string): string {
+    const name = String(columnName || '').trim();
+    if (SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU.includes(name)) return (row as any)?.timeSpan ?? '';
+    if (SUMMARY_LOCATION_COLUMN_ALIASES_ACU.includes(name)) return (row as any)?.location ?? '';
+    if (SUMMARY_SUMMARY_COLUMN_ALIASES_ACU.includes(name)) return (row as any)?.summary ?? '';
+    if (SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU.includes(name)) return (row as any)?.indexCode ?? '';
+    if (SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU.includes(name)) return (row as any)?.vectorSourceText ?? '';
+    return '';
+}
+
+function buildSummaryIndexOverwriteContent_ACU(candidates: SummaryIndexSelectedCandidate_ACU[]): string {
+    const selectedRows = (Array.isArray(candidates) ? candidates : [])
+        .map((candidate) => candidate.row)
+        .filter((row): row is ChatSummaryVectorIndexRow_ACU => !!row)
+        .sort((left, right) => (Number(left.rowOrder) || 0) - (Number(right.rowOrder) || 0));
+
+    try {
+        const spec = resolveCrossfireExtraIndexColumns_ACU();
+        if (spec) {
+            const content = Array.isArray(spec.table?.content) ? spec.table.content : [];
+            const dataRows = content.slice(1).filter((row: any) => Array.isArray(row));
+            const indexCodeColIdx = resolveColumnIndexByAliases_ACU(spec.headerRow, SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU);
+            const byIndexCode = new Map<string, any[]>();
+            dataRows.forEach((row: any[]) => {
+                const indexCode = indexCodeColIdx >= 0 ? normalizeText_ACU(row?.[indexCodeColIdx]) : '';
+                if (indexCode && !byIndexCode.has(indexCode)) byIndexCode.set(indexCode, row);
+            });
+            const lines = [
+                `| ${spec.columns.join(' | ')} |`,
+                `|${spec.columns.map(() => '---').join('|')}|`,
+            ];
+            selectedRows.forEach((row) => {
+                const liveRow = byIndexCode.get(normalizeText_ACU((row as any)?.indexCode)) || null;
+                const cells = spec.colIndexes.map((colIdx, i) => {
+                    let value = '';
+                    if (liveRow) {
+                        const v = liveRow[colIdx];
+                        value = v === null || v === undefined ? '' : String(v);
+                    } else {
+                        value = getStoredRowFallbackCell_ACU(row, spec.columns[i]);
+                    }
+                    return escapeMarkdownTableCell_ACU(value);
+                });
+                lines.push(`| ${cells.join(' | ')} |`);
+            });
+            if (selectedRows.length === 0) {
+                const markerCol = spec.columns.findIndex((col) => SUMMARY_SUMMARY_COLUMN_ALIASES_ACU.includes(String(col).trim()));
+                const markerIdx = markerCol >= 0 ? markerCol : 0;
+                lines.push(`| ${spec.columns.map((_, i) => (i === markerIdx ? '（无命中纪要）' : '')).join(' | ')} |`);
+            }
+            const tableText = lines.join('\n');
+            if (spec.template && spec.template.includes('$1')) {
+                return spec.template.replace('$1', tableText);
+            }
+            return `# 纪要索引\n\n${tableText}`;
+        }
+    } catch (error) {
+        logWarn_ACU('[交火模式纪要索引] 自定义列拼表失败，回退固定4列:', error);
+    }
+    return buildFallbackSummaryIndexOverwriteContent_ACU(selectedRows);
 }
 
 async function upsertOriginalSummaryIndexEntry_ACU(content: string): Promise<void> {

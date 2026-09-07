@@ -95,6 +95,16 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
   // buildLiveSummaryVectorRows_ACU 取 prepared.rows 恒为 undefined → live 表恒空 →
   // 只要 summaryTable 非 null 就恒判 stale，对账分支从未被真实测试。
   buildPreparedRows_ACU: () => ({ rows: h.preparedRows, skippedRowCount: 0, error: '' }),
+  resolveColumnIndexByAliases_ACU: (headerRow: any[], aliases: string[], fallbackIndex = -1) => {
+    const normalized = (Array.isArray(aliases) ? aliases : []).map((a) => String(a ?? '').trim().replace(/\s+/g, ''));
+    const idx = (Array.isArray(headerRow) ? headerRow : []).findIndex((cell) => normalized.includes(String(cell ?? '').trim().replace(/\s+/g, '')));
+    return idx >= 0 ? idx : fallbackIndex;
+  },
+  SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU: ['时间跨度', '时间', '阶段', '时段'],
+  SUMMARY_LOCATION_COLUMN_ALIASES_ACU: ['地点', '位置', '场景', '场所'],
+  SUMMARY_SUMMARY_COLUMN_ALIASES_ACU: ['概要', '概览', '概述', '摘要'],
+  SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU: ['编码索引'],
+  SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU: ['纪要', '纪要内容', '纪要正文', '事件纪要', '详细纪要', '正文'],
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   loadSummaryVectorIndexChunksFromManifest_ACU: (...a: any[]) => h.loadChunks(...a),
@@ -120,6 +130,7 @@ import {
   processSummaryVectorIndexBeforeGeneration_ACU,
   resetSummaryVectorIndexRuntimeDedupeState_ACU,
 } from '../../../src/service/vector/summary-vector-index-runtime';
+import { logError_ACU, logWarn_ACU } from '../../../src/shared/utils';
 
 
 function row_ACU(key: string, order: number, summary: string): any {
@@ -581,6 +592,176 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     expect(content).toContain('recent fixed summary');
   });
 
+});
+
+describe('processSummaryVectorIndexBeforeGeneration_ACU crossfire overwrite columns', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetSummaryVectorIndexRuntimeDedupeState_ACU();
+    h.chat = [{ is_user: true, mes: 'latest user' } as any];
+    h.entries = [];
+    h.callAI.mockResolvedValue('<keywords>secret relic</keywords>');
+    h.createEmbeddings.mockResolvedValue([{ index: 0, embedding: [1, 0] }]);
+    h.createEntries.mockResolvedValue(undefined);
+    h.setEntries.mockResolvedValue(undefined);
+    h.loadChunks.mockImplementation(async () => h.chunks);
+    h.clearMissing.mockResolvedValue(true);
+    h.clearInvalid.mockResolvedValue({ chatStateCleared: true, cacheCleared: true, flushTaskCountCleared: 1 });
+    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
+    h.missingError = false;
+    h.invalidError = false;
+    h.snapshot = null;
+    h.registry = [];
+    h.readSnapshot.mockReset();
+    h.validateSnapshot.mockReset();
+    h.saveChatStrict.mockResolvedValue(undefined);
+    h.tagData = {};
+    h.writeTagData.mockReset();
+    vi.stubGlobal('fetch', vi.fn());
+    // 与实时纪要表逐行对应的索引行（rowId / 编码索引可命中实时行）。
+    h.rows = [
+      { rowKey: 'k1', rowId: '1', rowOrder: 0, timeSpan: 't1', location: 'loc1', summary: '概要一', indexCode: 'AM0001', status: 'active' },
+      { rowKey: 'k2', rowId: '2', rowOrder: 1, timeSpan: 't2', location: 'loc2', summary: '概要二', indexCode: 'AM0002', status: 'active' },
+    ];
+    h.chunks = [
+      { chunkId: 'chunk-k1', rowKey: 'k1', sequence: 0, text: 'unrelated dense vector row', textHash: 'hash-k1', vector: [1, 0] },
+      { chunkId: 'chunk-k2', rowKey: 'k2', sequence: 0, text: 'secret relic ancient tale', textHash: 'hash-k2', vector: [0, 1] },
+    ];
+    h.config = defaultConfig_ACU();
+    h.preparedRows = [{ rowKey: 'k1' }, { rowKey: 'k2' }];
+  });
+
+  function expectNoSilentFallback_ACU(): void {
+    expect(vi.mocked(logWarn_ACU)).not.toHaveBeenCalled();
+    expect(vi.mocked(logError_ACU)).not.toHaveBeenCalled();
+  }
+
+  function summaryTableFixture_ACU(exportOverrides: Record<string, any> = {}): any {
+    return {
+      summaryKey: 'summary-source',
+      table: {
+        name: '纪要表',
+        content: [
+          ['row_id', '时间跨度', '地点', '纪要', '概览', '编码索引'],
+          ['1', 't1', 'loc1', '正文一', '概要一', 'AM0001'],
+          ['2', 't2', 'loc2', '正文二', '概要二', 'AM0002'],
+        ],
+        exportConfig: {
+          extraIndexEnabled: true,
+          extraIndexColumns: ['概览', '编码索引'],
+          extraIndexInjectionTemplate: '<已发生的事件概览>\n$1\n</已发生的事件概览>',
+          ...exportOverrides,
+        },
+      },
+    };
+  }
+
+  it('有附加索引配置时按配置列拼表并套模板，不再写死4列', async () => {
+    h.summaryTable = summaryTableFixture_ACU();
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    const content = createdContent_ACU();
+    expect(content).toContain('<已发生的事件概览>');
+    expect(content).toContain('| 概览 | 编码索引 |');
+    expect(content).toContain('概要一');
+    expect(content).toContain('AM0002');
+    expect(content).not.toContain('| 时间 | 地点 | 概要 | 编码索引 |');
+    expect(content).not.toContain('loc1');
+  });
+
+  it('配置列包含时间地点时取实时表对应单元格', async () => {
+    h.summaryTable = summaryTableFixture_ACU({ extraIndexColumns: ['时间跨度', '地点', '概览', '编码索引'] });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns-full' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    const content = createdContent_ACU();
+    expect(content).toContain('| 时间跨度 | 地点 | 概览 | 编码索引 |');
+    expect(content).toContain('t1');
+    expect(content).toContain('loc2');
+  });
+
+  it('附加索引关闭时回退固定4列', async () => {
+    h.summaryTable = summaryTableFixture_ACU({ extraIndexEnabled: false });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns-disabled' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    expect(createdContent_ACU()).toContain('| 时间 | 地点 | 概要 | 编码索引 |');
+  });
+
+  it('无实时纪要表时回退固定4列', async () => {
+    h.summaryTable = null;
+    h.preparedRows = [];
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns-no-table' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    const content = createdContent_ACU();
+    expect(content).toContain('| 时间 | 地点 | 概要 | 编码索引 |');
+    expect(content).toContain('AM0001');
+  });
+
+  it('模板不含 $1 时用纪要索引标题包裹自定义列', async () => {
+    h.summaryTable = summaryTableFixture_ACU({ extraIndexInjectionTemplate: '' });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns-no-template' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    const content = createdContent_ACU();
+    expect(content).toContain('# 纪要索引');
+    expect(content).toContain('| 概览 | 编码索引 |');
+    expect(content).not.toContain('<已发生的事件概览>');
+  });
+
+  it('配置列全是未知列时回退固定4列', async () => {
+    h.summaryTable = summaryTableFixture_ACU({ extraIndexColumns: ['不存在的列'] });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns-unknown' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    const content = createdContent_ACU();
+    expect(content).toContain('| 时间 | 地点 | 概要 | 编码索引 |');
+    expect(content).toContain('AM0001');
+  });
+
+  it('实时表缺编码列时用索引行自带字段兜底', async () => {
+    // 实时表没有编码列 → 按编码定位全部 miss，单元格必须来自索引行（概要一），而非实时表（实时概要一）。
+    h.summaryTable = {
+      summaryKey: 'summary-source',
+      table: {
+        name: '纪要表',
+        content: [
+          ['row_id', '时间跨度', '地点', '纪要', '概览'],
+          ['1', 't1', 'loc1', '正文一', '实时概要一'],
+          ['2', 't2', 'loc2', '正文二', '实时概要二'],
+        ],
+        exportConfig: {
+          extraIndexEnabled: true,
+          extraIndexColumns: ['概览'],
+          extraIndexInjectionTemplate: '<已发生的事件概览>\n$1\n</已发生的事件概览>',
+        },
+      },
+    };
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'custom-columns-no-index-col' });
+
+    expect(result.success).toBe(true);
+    expectNoSilentFallback_ACU();
+    const content = createdContent_ACU();
+    expect(content).toContain('| 概览 |');
+    expect(content).not.toContain('| 时间 | 地点 | 概要 | 编码索引 |');
+    expect(content).toContain('概要一');
+    expect(content).not.toContain('实时概要一');
+  });
 });
 
 describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recovery', () => {
