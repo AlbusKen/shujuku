@@ -19,6 +19,7 @@ import {
     enqueueSummaryVectorIndexFlush_ACU,
     type SummaryVectorIndexFlushQueueResult_ACU,
 } from '../vector/summary-vector-index-flush-queue';
+import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../vector/summary-vector-index-state-service';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
@@ -94,30 +95,72 @@ import { getCurrentFlightModeState_ACU, stageFlightModeHiddenRowIds_ACU } from '
 
 interface ManualRefillSummaryVectorCleanup_ACU {
     sourceTableKey: string;
-    rowIds: string[];
+    removedRowIds: string[];
 }
 
-function collectManualRefillSummaryVectorCleanup_ACU(targetSheetKeys: string[]): ManualRefillSummaryVectorCleanup_ACU[] {
+function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: number[], targetSheetKeys: string[]): ManualRefillSummaryVectorCleanup_ACU[] {
     const tableData = currentJsonTableData_ACU || {};
-    return [...new Set(targetSheetKeys)].flatMap((sheetKey) => {
+    const summarySourceTableKeys = [...new Set(targetSheetKeys)].filter((sheetKey) => {
         const table = (tableData as any)[sheetKey];
-        if (!table || !isSummaryOrOutlineTable_ACU(String(table.name || ''))) return [];
-        const rows = Array.isArray(table.content) ? table.content.slice(1) : [];
-        const rowIds = rows.map((row: any): string => String(Array.isArray(row) ? row[0] ?? '' : '').trim());
-        const missingRowIndex = rowIds.findIndex((rowId: string) => !rowId);
-        if (missingRowIndex >= 0) {
-            throw new Error(`手动重填清理前无法确认纪要表 ${sheetKey} 的 row_id（数据行 ${missingRowIndex + 1}）。`);
+        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
+    });
+    if (summarySourceTableKeys.length === 0) return [];
+
+    const sourceTableKeySet = new Set(summarySourceTableKeys);
+    const removedRowIdsBySourceTable = new Map(summarySourceTableKeys.map((sheetKey) => [sheetKey, new Set<string>()]));
+    const chat = getChatArray_ACU();
+    for (const messageIndex of targetMessageIndices) {
+        const message = chat?.[messageIndex];
+        const frame = readIsolatedTagData_ACU(message, getCurrentIsolationKey_ACU())?.storageFrame;
+        for (const entry of Array.isArray(frame?.logEntries) ? frame.logEntries : []) {
+            for (const operation of Array.isArray(entry?.operations) ? entry.operations : []) {
+                const rowOperation = operation as { kind?: string; sheetKey?: string; rowId?: string };
+                const kind = String(rowOperation.kind || '');
+                const sheetKey = String(rowOperation.sheetKey || '');
+                if (kind === 'row_upsert' || kind === 'row_delete') {
+                    if (!sourceTableKeySet.has(sheetKey)) continue;
+                    const rowId = String(rowOperation.rowId || '').trim();
+                    if (!rowId) {
+                        throw new Error(`手动重填清理前无法确认纪要表 ${sheetKey} 的历史 row_id。`);
+                    }
+                    removedRowIdsBySourceTable.get(sheetKey)!.add(rowId);
+                    continue;
+                }
+                if (kind === 'meta_update') continue;
+                if (kind === 'data_replace' || kind === 'sql_batch' || kind === 'table_edit_dsl') {
+                    throw new Error(`手动重填清理前无法精确识别操作 ${kind} 影响的纪要表历史 row_id。`);
+                }
+                if (sourceTableKeySet.has(sheetKey)) {
+                    throw new Error(`手动重填清理前无法精确识别纪要表 ${sheetKey} 的 ${kind || 'unknown'} 操作历史 row_id。`);
+                }
+                if (!kind || !sheetKey) {
+                    throw new Error(`手动重填清理前无法确认目标范围内操作 ${kind || 'unknown'} 是否影响纪要表。`);
+                }
+            }
         }
-        return [{ sourceTableKey: sheetKey, rowIds }];
+    }
+
+
+    const currentIndex = getAggregatedSummaryVectorIndexSnapshot_ACU()?.summaryVectorIndexState || null;
+    return summarySourceTableKeys.flatMap((sourceTableKey) => {
+        const removedRowIds = Array.from(removedRowIdsBySourceTable.get(sourceTableKey) || []).sort();
+        const hasCurrentIndex = currentIndex?.sourceTableKey === sourceTableKey
+            && Array.isArray(currentIndex.rows)
+            && currentIndex.rows.some((row) => row.status !== 'removed');
+        if (hasCurrentIndex && removedRowIds.length === 0) {
+            throw new Error(`手动重填清理前无法从目标范围识别纪要表 ${sourceTableKey} 的历史 row_id。`);
+        }
+        return [{ sourceTableKey, removedRowIds }];
     });
 }
 
 async function removeManualRefillSummaryVectors_ACU(cleanups: ManualRefillSummaryVectorCleanup_ACU[]): Promise<void> {
     for (const cleanup of cleanups) {
+        if (cleanup.removedRowIds.length === 0) continue;
         const result = await archiveSummaryVectorIndexNow_ACU({
             mode: 'sync',
             sourceTableKey: cleanup.sourceTableKey,
-            excludedRowIds: cleanup.rowIds,
+            excludedRowIds: cleanup.removedRowIds,
             removalOnly: true,
         });
         if (!result.success) {
@@ -4800,7 +4843,7 @@ export async function orchestrateManualUpdate_ACU(
             }
 
             try {
-                const summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(targetKeys);
+                const summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
                 manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
                 // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                 refillCleanupStarted = true;

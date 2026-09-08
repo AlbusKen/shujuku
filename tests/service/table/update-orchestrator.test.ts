@@ -2641,7 +2641,7 @@ describe('orchestrateManualUpdate_ACU', () => {
   });
 
 
-  it('已有 V2 增量但无 full checkpoint 时直接清理并重填，不再要求二次确认', async () => {
+  it('手动重填只移除目标楼层 3、4 的纪要向量，并在严格 checkpoint 后按其目标索引增量入队', async () => {
     const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
@@ -2661,7 +2661,7 @@ describe('orchestrateManualUpdate_ACU', () => {
               checkpoint: undefined,
               logEntries: [{
                 seq: 1,
-                entryId: 'log-only-without-checkpoint',
+                entryId: 'summary-row-1',
                 createdAt: 1,
                 source: 'auto_fill',
                 targetMessageIndex: 0,
@@ -2669,25 +2669,81 @@ describe('orchestrateManualUpdate_ACU', () => {
                 filledSheetKeys: ['sheet_0'],
                 changedSheetKeys: ['sheet_0'],
                 groupKeys: [],
-                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '孤立增量'] }],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '第一层'] }],
               }],
             },
           },
         },
       },
       { is_user: true, mes: '用户2' },
-      { is_user: false, mes: 'AI回复3' },
+      {
+        is_user: false,
+        mes: 'AI回复3',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: undefined,
+              logEntries: [{
+                seq: 1, entryId: 'summary-row-2', createdAt: 2, source: 'auto_fill', targetMessageIndex: 2, aiFloor: 2,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '第二层'] }],
+              }],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: '用户4' },
+      {
+        is_user: false,
+        mes: 'AI回复5',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: undefined,
+              logEntries: [{
+                seq: 1, entryId: 'summary-row-3', createdAt: 3, source: 'auto_fill', targetMessageIndex: 4, aiFloor: 3,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '3', cells: ['3', '第三层'] }],
+              }],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: '用户6' },
+      {
+        is_user: false,
+        mes: 'AI回复7',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: undefined,
+              logEntries: [{
+                seq: 1, entryId: 'summary-row-4', createdAt: 4, source: 'auto_fill', targetMessageIndex: 6, aiFloor: 4,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '4', cells: ['4', '第四层'] }],
+              }],
+            },
+          },
+        },
+      },
     ]);
     mockSettings.maxConcurrentGroups = 1;
-    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateContextDepth = 2;
     mockSettings.manualUpdateBatchSize = 1;
     mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
     mockEnqueueSummaryVectorIndexFlush.mockClear();
     mockArchiveSummaryVectorIndexNow.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
-      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧1'], ['2', '旧2'], ['3', '旧3'], ['4', '旧4']] },
     };
+    vi.mocked(commitManualRefillSheetSnapshotInRangeAtomic_ACU).mockResolvedValueOnce({ success: true, changed: true, clearedCount: 2, checkpointCount: 1, targetMessageIndex: 6 });
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
 
@@ -2696,23 +2752,72 @@ describe('orchestrateManualUpdate_ACU', () => {
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
 
     expect(result.success).toBe(true);
-    // 无 full checkpoint 也直接清理范围内选中表，让用户可以从头开始填表。
+    // 当前表仍含 1 至 4，但重填范围仅含 AI 楼层 3、4；清理目标不得由当前完整表反推。
     expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledTimes(1);
-    expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([0, 2], ['sheet_0']);
+    expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([4, 6], ['sheet_0']);
     expect(mockReloadStorageProvider).toHaveBeenCalled();
-    // 清理后必须补写完整单表 checkpoint，否则新增量将没有回放锚点。
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).toHaveBeenCalledTimes(1);
-    expect(mockArchiveSummaryVectorIndexNow).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mockArchiveSummaryVectorIndexNow).toHaveBeenCalledWith({
+      mode: 'sync',
       sourceTableKey: 'sheet_0',
+      excludedRowIds: ['3', '4'],
       removalOnly: true,
-    }));
+    });
     expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledWith({
-      targetMessageIndex: 0,
+      targetMessageIndex: 6,
       sourceTableKey: 'sheet_0',
       mode: 'sync',
       reason: 'manual_refill_complete',
     });
+    expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU.mock.invocationCallOrder[0])
+      .toBeLessThan(mockEnqueueSummaryVectorIndexFlush.mock.invocationCallOrder[0]);
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
+  });
+
+  it('手动重填范围含无法精确归属的纪要表操作时，在清理前拒绝删除向量', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户0' },
+      {
+        is_user: false,
+        mes: 'AI回复1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: undefined,
+              logEntries: [{
+                seq: 1, entryId: 'opaque-summary-operation', createdAt: 1, source: 'manual_crud', targetMessageIndex: 1, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{
+                  kind: 'sheet_replace', sheetKey: 'sheet_0', reason: 'manual_crud',
+                  sheet: { name: '纪要表', content: [['row_id', '事件'], ['3', '无法精确归属']] },
+                }],
+              }],
+            },
+          },
+        },
+      },
+    ]);
+    mockSettings.manualUpdateContextDepth = 1;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
+    mockArchiveSummaryVectorIndexNow.mockClear();
+    mockClearManualRefillSheetDataInRange.mockClear();
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '事件'], ['3', '旧值']] },
+    };
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('无法精确识别纪要表 sheet_0 的 sheet_replace 操作历史 row_id');
+    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
+    expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
   });
 
   it('范围末端 full checkpoint 被目标表全覆盖时禁用跨根 staging：清理后建模板临时根，各层普通 persist', async () => {

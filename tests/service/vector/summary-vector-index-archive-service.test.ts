@@ -315,6 +315,8 @@ describe('summary-vector-index-archive-service pending 归档', () => {
       ['row_id', '时间跨度', '地点', '概要', '编码索引'],
       ['1', '上午', '甲地', '事件一。', 'AM-0001'],
       ['2', '下午', '乙地', '事件二。', 'PM-0002'],
+      ['3', '晚上', '丙地', '事件三。', 'EV-0003'],
+      ['4', '深夜', '丁地', '事件四。', 'NI-0004'],
     ];
     await expect(archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 })).resolves.toMatchObject({ success: true });
     expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
@@ -323,14 +325,29 @@ describe('summary-vector-index-archive-service pending 归档', () => {
       targetMessageIndex: 0,
       mode: 'sync',
       sourceTableKey: 'sheet_summary',
-      excludedRowIds: ['2'],
+      excludedRowIds: ['3', '4'],
       removalOnly: true,
     })).resolves.toMatchObject({ success: true, reason: 'summary_vector_index_rows_removed' });
 
     expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
     const removalPersist = mockPersistSummaryVectorIndexSnapshot.mock.calls[1][0];
-    expect(removalPersist.rows).toEqual([expect.objectContaining({ rowId: '1' })]);
-    expect(removalPersist.removedRowKeys).toHaveLength(1);
+    expect(removalPersist.rows).toEqual([
+      expect.objectContaining({ rowId: '1' }),
+      expect.objectContaining({ rowId: '2' }),
+    ]);
+    expect(removalPersist.removedRowKeys).toHaveLength(2);
+
+    await expect(archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 })).resolves.toMatchObject({ success: true });
+
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(2);
+    expect(mockCreateEmbeddings.mock.calls[1][0].input).toHaveLength(2);
+    const rebuiltPersist = mockPersistSummaryVectorIndexSnapshot.mock.calls[2][0];
+    expect(rebuiltPersist.rows).toEqual([
+      expect.objectContaining({ rowId: '1' }),
+      expect.objectContaining({ rowId: '2' }),
+      expect.objectContaining({ rowId: '3' }),
+      expect.objectContaining({ rowId: '4' }),
+    ]);
   });
 
   it('部分 Embedding 响应只补齐缺失 chunk，并按局部 index 写回原始位置', async () => {
