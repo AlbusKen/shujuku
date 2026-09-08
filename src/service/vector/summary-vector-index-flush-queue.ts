@@ -429,13 +429,11 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
         } catch (_cooldownConfigError) {
             // config 不可用时不做 cooldown 检查，退回原路径（cooldown 是防重复扣费的增强，不阻断正常 flush）。
         }
-        // [spv3.6.9] force=true：填表完成后必须强制写入外部文件，跳过"无变更"检测
-        // 因为填表后数据已变化，但 fingerprint 比对可能误判为无变更
+        // archive 以 rowId 成员差分决定是否写入；普通 flush 不再用 force 绕过无变化短路。
         const result = await archiveSummaryVectorIndexNow_ACU({
             targetMessageIndex: task.targetMessageIndex,
             mode: task.mode,
             saveChatAfterWrite: true,
-            force: true,
             isolationKey: task.isolationKey,
             sourceTableKey: task.sourceTableKey,
             expectedFlushScopeKey: task.scopeKey,

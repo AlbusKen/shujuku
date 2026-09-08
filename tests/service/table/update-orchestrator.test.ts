@@ -4712,8 +4712,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(savePayload.operations.some((operation: any) => operation.kind === 'data_replace')).toBe(false);
     expect(mockSaveIndependentTable).not.toHaveBeenCalled();
     expect(mockRunTableUpdateApplyWithScopeLock).not.toHaveBeenCalled();
-    expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledTimes(1);
-    expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledWith(expect.objectContaining({ targetMessageIndex: 3, mode: 'sync', reason: 'unified_group_fill_complete' }));
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
     expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
     expect(baseSnapshot.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a']]);
     expect(baseSnapshot.sheet_1.content).toEqual([['row_id', '值'], ['1', 'base-b']]);
@@ -6098,7 +6097,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(result.success).toBe(true);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
-    expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
   });
 
   it('grouped 提交在基底 key 漂移时使用唯一重绑定后的目标 key，不扩大授权集合', async () => {

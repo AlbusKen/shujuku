@@ -125,6 +125,7 @@ import {
 function row_ACU(key: string, order: number, summary: string): any {
   return {
     rowKey: key,
+    rowId: key,
     rowOrder: order,
     timeSpan: `t-${order}`,
     location: `loc-${order}`,
@@ -279,8 +280,8 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
   it('实时纪要表纯新增行时同样判定索引过期，不使用缺行的旧索引', async () => {
     h.summaryTable = { summaryKey: 'summary-source', table: {} };
     h.preparedRows = [
-      ...h.rows.map((row: any) => ({ rowKey: row.rowKey })),
-      { rowKey: 'new-row', sourceFingerprint: 'new-row-fingerprint' },
+      ...h.rows.map((row: any) => ({ rowKey: row.rowKey, rowId: row.rowId })),
+      { rowKey: 'new-row', rowId: 'new-row', sourceFingerprint: 'new-row-fingerprint' },
     ];
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'stale-runtime-added-row' });
@@ -297,8 +298,8 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
   it('实时纪要表与索引不一致时交由 UI 走立即构建入口，不再绕过普通重建链路入队', async () => {
     h.summaryTable = { summaryKey: 'summary-source', table: {} };
     h.preparedRows = [
-      { rowKey: 'dense', sourceFingerprint: 'changed-dense' },
-      { rowKey: 'recent', sourceFingerprint: 'changed-recent' },
+      { rowKey: 'dense', rowId: 'dense', sourceFingerprint: 'changed-dense' },
+      { rowKey: 'recent', rowId: 'recent', sourceFingerprint: 'changed-recent' },
     ];
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'stale-runtime' });
@@ -311,23 +312,25 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     expect(h.enqueueFlush).not.toHaveBeenCalled();
   });
 
-  it('rowKey 集合相同但某行内容指纹不同（只改概要文本）时 fail-closed 拒绝注入旧文本', async () => {
-    // 修复前该场景被静默放行：索引行不带 sourceFingerprint，对账退化为纯 rowKey 比对。
+  it('rowId 集合相同但正文变化时复用向量并注入当前表显示文本', async () => {
     h.rows = h.rows.map((row: any) => ({ ...row, sourceFingerprint: `fp-${row.rowKey}` }));
     h.summaryTable = { summaryKey: 'summary-source', table: {} };
     h.preparedRows = h.rows.map((row: any) => ({
       rowKey: row.rowKey,
+      rowId: row.rowId,
+      rowOrder: row.rowOrder,
+      timeSpan: row.timeSpan,
+      location: row.location,
+      summary: row.rowKey === 'dense' ? 'dense summary edited' : row.summary,
+      indexCode: row.indexCode,
+      chronicleText: '',
       sourceFingerprint: row.rowKey === 'dense' ? 'fp-dense-edited' : row.sourceFingerprint,
     }));
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'fingerprint-mismatch' });
 
-    expect(result).toMatchObject({
-      success: false,
-      skipped: true,
-      reason: 'runtime_stale_rows_rebuild_required',
-    });
-    expect(h.createEmbeddings).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true });
+    expect(createdContent_ACU()).toContain('dense summary edited');
   });
 
   it('rowKey 集合与内容指纹全部一致时对账通过，正常召回注入', async () => {
@@ -335,6 +338,12 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.summaryTable = { summaryKey: 'summary-source', table: {} };
     h.preparedRows = h.rows.map((row: any) => ({
       rowKey: row.rowKey,
+      rowId: row.rowId,
+      rowOrder: row.rowOrder,
+      timeSpan: row.timeSpan,
+      location: row.location,
+      summary: row.summary,
+      indexCode: row.indexCode,
       sourceFingerprint: row.sourceFingerprint,
     }));
 
@@ -423,6 +432,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.summaryTable = { summaryKey: 'summary-source', table: {} };
     h.preparedRows = h.rows.map((row: any) => ({
       rowKey: row.rowKey,
+      rowId: row.rowId,
       summary: row.summary,
       chronicleText: `【正文】${row.rowKey} 的三百字纪要正文`,
     }));

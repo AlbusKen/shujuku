@@ -268,15 +268,16 @@ async function refreshVisualizerRuntimeFromReplay_ACU(isolationKey: string): Pro
     return replay.data;
 }
 
-export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; insertedRowIds?: Record<string, string>; canonicalData?: any; error?: string }> {
+export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; changedSheetKeys?: string[]; insertedRowIds?: Record<string, string>; canonicalData?: any; error?: string }> {
     const pending = ensurePendingOps_ACU(state);
     if (pending.committed) {
         try {
             const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
             const insertedRowIds = pending.committed.insertedRowIds;
+            const changedSheetKeys = Array.isArray((pending.committed as unknown as { changedSheetKeys?: unknown }).changedSheetKeys) ? (pending.committed as unknown as { changedSheetKeys: string[] }).changedSheetKeys : [];
             return Object.keys(insertedRowIds).length > 0
-                ? { success: true, changed: true, insertedRowIds, ...(canonicalData ? { canonicalData } : {}) }
-                : { success: true, changed: true, ...(canonicalData ? { canonicalData } : {}) };
+                ? { success: true, changed: true, changedSheetKeys, insertedRowIds, ...(canonicalData ? { canonicalData } : {}) }
+                : { success: true, changed: true, changedSheetKeys, ...(canonicalData ? { canonicalData } : {}) };
         } catch (error: any) {
             return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
         }
@@ -395,7 +396,7 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
                 transactionContext,
             });
             if (!saved.saved) throw new Error(saved.error || 'V2 行级增量持久化失败。');
-            return { afterData: data, insertedRowIds };
+            return { afterData: data, insertedRowIds, changedSheetKeys: Array.from(operationsBySheet.keys()) };
         });
         pending.committed = result;
         try {
@@ -435,7 +436,7 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
                 // 时回退既有整链 replay 刷新，保持与阶段 E 相同的冷路径语义。
                 canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
             }
-            const payload = { insertedRowIds: result.insertedRowIds, ...(canonicalData ? { canonicalData } : {}) };
+            const payload = { changedSheetKeys: result.changedSheetKeys, insertedRowIds: result.insertedRowIds, ...(canonicalData ? { canonicalData } : {}) };
             return Object.keys(result.insertedRowIds).length > 0
                 ? { success: true, changed: true, ...payload }
                 : { success: true, changed: true, ...payload };

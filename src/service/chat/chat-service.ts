@@ -3018,7 +3018,6 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
 
     const isolationKey = getCurrentIsolationKey_ACU();
     const targetAliases = resolveSheetIdentityAliasesForClear_ACU(chat, isolationKey, targetSheetKeys, '手动重填预清理');
-    const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(targetAliases.sheetKeys);
     let clearedCount = 0;
 
     const normalizedIndices = targetMessageIndices.filter((idx): idx is number => Number.isInteger(idx) && idx >= 0 && idx < chat.length);
@@ -3026,7 +3025,6 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
     normalizedIndices.forEach(idx => snapshots.set(idx, messageFieldSnapshot_ACU(chat[idx])));
     // 候选克隆上执行清理：strict save 失败时 live chat 保持原位，不产生半写清理。
     // 计划 §5.5：清理自身失败不半写；只有 strict save 成功才把候选改动 apply 到 live。
-    const vectorManifestsToDeleteAfterCommit: any[] = [];
 
     try {
         const candidateChat = cloneCandidateChat_ACU(chat);
@@ -3035,16 +3033,6 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
             if (!msg || msg.is_user) continue;
 
             const changed = purgeSheetKeysFromMessageForIsolation_ACU(msg, isolationKey, targetAliases.sheetKeys, targetAliases.sqlTableNames);
-            if (clearsSummaryOrOutline) {
-                const isolatedData = msg?.TavernDB_ACU_IsolatedData;
-                const tagData = isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)
-                    ? isolatedData[isolationKey]
-                    : null;
-                // 只剥离 tagData 上的引用并收集 manifest，strict save 成功后才删除外置文件。
-                if (tagData && await deleteVectorIndexManifestFromTagData_ACU(tagData, { deleteExternal: false, onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest) })) {
-                    logDebug_ACU(`[手动重填预清理] 已标记消息索引 ${idx} 上的交火向量索引外置文件引用待删除。`);
-                }
-            }
             if (changed) {
                 clearedCount++;
                 logDebug_ACU(`[手动重填预清理] 已清理消息索引 ${idx} 上选中表的范围内旧数据 (标签: ${isolationKey || '无'})`);
@@ -3056,8 +3044,6 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
             // 由调用方（orchestrator）把清理视为失败处理（保留删除语义，不恢复已删数据）。
             normalizedIndices.forEach(idx => applyCandidateMessageFields_ACU(chat[idx], candidateChat[idx]));
             await saveChatToHostStrict_ACU();
-            // strict save 成功后才删除外置向量文件；清理失败仅记录警告，不影响已提交清理。
-            await cleanupVectorIndexManifestsAfterCommit_ACU(vectorManifestsToDeleteAfterCommit);
             logDebug_ACU(`[手动重填预清理] 共清理 ${clearedCount} 条消息的选中表范围内旧数据，聊天已严格保存。`);
         }
         return clearedCount;

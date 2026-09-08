@@ -459,6 +459,7 @@ function findTableLatestFloor(_targetSheetKey: string, _tableName: string): numb
 
 async function syncSummaryVectorIndexAfterTableEdit_ACU(
     tableName: string,
+    sourceTableKey: string,
     methodName: string,
     tableLatestFloorIndex: number,
     skipSync?: boolean,
@@ -478,6 +479,7 @@ async function syncSummaryVectorIndexAfterTableEdit_ACU(
     try {
         const result = await enqueueSummaryVectorIndexFlush_ACU({
             targetMessageIndex: preferredTargetIndex,
+            sourceTableKey,
             mode: 'sync',
             reason: methodName,
         });
@@ -493,6 +495,7 @@ async function syncSummaryVectorIndexAfterTableEdit_ACU(
 
 async function finalizeTableEditAfterCommit_ACU(
     tableName: string,
+    sourceTableKey: string,
     methodName: string,
     tableLatestFloorIndex: number,
     options: TableCrudMutationOptions_ACU,
@@ -503,7 +506,7 @@ async function finalizeTableEditAfterCommit_ACU(
     await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify, notifyMeta });
     didNotifyThroughRefresh = !options.skipNotify;
     logDebug_ACU(`${methodName}: Worldbook refreshed after saving [${tableName}]`);
-    await syncSummaryVectorIndexAfterTableEdit_ACU(tableName, methodName, tableLatestFloorIndex, options.skipChatSave);
+    await syncSummaryVectorIndexAfterTableEdit_ACU(tableName, sourceTableKey, methodName, tableLatestFloorIndex, options.skipChatSave);
     if (!options.skipNotify && !didNotifyThroughRefresh) {
         (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate(notifyMeta);
     } else if (options.skipNotify) {
@@ -616,7 +619,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         mapValue: () => true,
                     });
                     if (!result.success) return false;
-                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'updateCell', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'updateCell', tableLatestFloorIndex, { skipChatSave, skipNotify });
                     return true;
                 } else {
                     const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, targetSheet.name);
@@ -667,7 +670,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         };
                     });
                     if (!commitResult.success || !commitResult.value) return false;
-                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'updateCell', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'updateCell', tableLatestFloorIndex, { skipChatSave, skipNotify });
                     return true;
                 }
             } catch (e) {
@@ -767,7 +770,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             mapValue: () => true,
                         });
                         if (!result.success) return false;
-                        await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'updateRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                        await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'updateRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
                         return true;
                 } else {
                     const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, targetSheet.name);
@@ -830,7 +833,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         };
                     });
                     if (!commitResult.success || !commitResult.value) return false;
-                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'updateRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'updateRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
                     return true;
                 }
 
@@ -915,7 +918,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             },
                         });
                         if (!result.success || typeof result.value !== 'number') return -1;
-                        await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'insertRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                        await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'insertRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
                         return result.value;
                 } else {
                     const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, targetSheet.name);
@@ -968,7 +971,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         };
                     });
                     if (!commitResult.success || typeof commitResult.value !== 'number') return -1;
-                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'insertRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'insertRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
                     return commitResult.value;
                 }
             } catch (e) {
@@ -1045,7 +1048,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             mapValue: () => true,
                         });
                         if (!result.success) return false;
-                        await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'deleteRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                        await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'deleteRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
                         return true;
                 } else {
                     const rowId = targetSheet.content[normalizedRowIndex]?.[0];
@@ -1091,7 +1094,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         };
                     });
                     if (!commitResult.success || !commitResult.value) return false;
-                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, 'deleteRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
+                    await finalizeTableEditAfterCommit_ACU(targetSheet.name, targetSheetKey, 'deleteRow', tableLatestFloorIndex, { skipChatSave, skipNotify });
                     return true;
                 }
 

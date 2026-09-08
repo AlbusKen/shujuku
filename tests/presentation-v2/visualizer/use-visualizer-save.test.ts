@@ -1675,6 +1675,7 @@ describe('useVisualizerSave', () => {
     expect(options.templateSource.sheet_summary_delete).toBeUndefined();
     expect(options.guideData.sheet_summary_keep).toBeDefined();
     expect(serviceMock.enqueueSummaryVectorIndexFlush_ACU).toHaveBeenCalledWith({
+      sourceTableKey: 'sheet_summary_keep',
       mode: 'sync',
       reason: 'visualizer_v2_template_sheet_delete',
     });

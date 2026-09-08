@@ -51,8 +51,14 @@ export type SummaryVectorIndexArchiveOptions_ACU = {
     mode?: SummaryVectorIndexArchiveMode_ACU;
     /** 仅允许 durable publish；延迟保存没有 publication handle，不能安全暴露。 */
     saveChatAfterWrite?: boolean;
-    /** 为 true 时跳过 "无变更" 检测，强制执行归档写入（含外置文件上传） */
+    /** 为 true 时跳过 "无变更" 检测，强制执行快照写入（不改变 rowId 复用规则）。 */
     force?: boolean;
+    /** 显式立即重建：忽略已有 rowId 映射，重建所有行向量。 */
+    fullRebuild?: boolean;
+    /** 仅移除 current index 中已不应保留的 rowId，不为其它当前行生成 embedding。 */
+    removalOnly?: boolean;
+    /** 仅在已严格保存表格清理后传入：从当前索引移除这些 rowId，不重新 embedding retained 行。 */
+    excludedRowIds?: string[];
     /**
      * 为 true 时只执行向量化阶段（embedding），不立即写入外置文件。
      * 向量化结果存入 pending state，由防抖定时器触发归档。
@@ -333,8 +339,8 @@ function resolveColumnIndexByAliases_ACU(headerRow: any[], aliases: string[], fa
     return index >= 0 ? index : fallbackIndex;
 }
 
-function buildStableSummaryRowKey_ACU(summaryKey: string, rowId: string, indexCode: string): string {
-    const source = `${summaryKey}:${rowId}:${indexCode}`;
+function buildStableSummaryRowKey_ACU(summaryKey: string, rowId: string): string {
+    const source = `${summaryKey}:${rowId}`;
     return `summary-row:${hashUserInput_ACU(source)}`;
 }
 
@@ -423,9 +429,15 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
 
     const dataRows = content.slice(1).filter((row: any) => Array.isArray(row));
     const preparedRows: SummaryVectorArchivePreparedRow_ACU[] = [];
+    const rowIds = new Set<string>();
+    let duplicateRowId = '';
     let skippedRowCount = 0;
     dataRows.forEach((row: any[], rowIndex: number) => {
-        const rowId = normalizeText_ACU(row?.[0]) || String(rowIndex + 1);
+        const rowId = normalizeText_ACU(row?.[0]);
+        if (!rowId) {
+            skippedRowCount += 1;
+            return;
+        }
         const timeSpan = timeSpanColIdx >= 0 ? normalizeText_ACU(row?.[timeSpanColIdx]) : '';
         const location = locationColIdx >= 0 ? normalizeText_ACU(row?.[locationColIdx]) : '';
         const summary = normalizeText_ACU(row?.[summaryColIdx]);
@@ -436,8 +448,13 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
             skippedRowCount += 1;
             return;
         }
+        if (rowIds.has(rowId)) {
+            duplicateRowId = rowId;
+            return;
+        }
+        rowIds.add(rowId);
         const preparedRow: SummaryVectorArchivePreparedRow_ACU = {
-            rowKey: buildStableSummaryRowKey_ACU(summaryKey, rowId, indexCode),
+            rowKey: buildStableSummaryRowKey_ACU(summaryKey, rowId),
             rowId,
             rowOrder: rowIndex,
             timeSpan,
@@ -453,6 +470,9 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
         preparedRows.push(preparedRow);
     });
 
+    if (duplicateRowId) {
+        return { rows: [], skippedRowCount, error: `纪要表存在重复 row_id=${duplicateRowId}，无法建立唯一向量身份。` };
+    }
     return { rows: preparedRows, skippedRowCount, error: '' };
 }
 
@@ -481,18 +501,6 @@ function cloneSummaryVectorIndexState_ACU(state: ChatSummaryVectorIndexState_ACU
     } catch (_error) {
         return null;
     }
-}
-
-function getSummaryRowFingerprintFromStateRow_ACU(row: ChatSummaryVectorIndexRow_ACU): string {
-    return buildSummaryRowFingerprint_ACU({
-        rowId: row.rowId,
-        timeSpan: row.timeSpan,
-        location: row.location,
-        summary: row.summary,
-        indexCode: row.indexCode,
-        vectorSourceText: row.vectorSourceText,
-        vectorSourceHash: row.vectorSourceHash,
-    });
 }
 
 /**
@@ -564,11 +572,14 @@ function areSummaryVectorActiveRowKeysSame_ACU(
     preparedRows: SummaryVectorArchivePreparedRow_ACU[],
     existingState: ChatSummaryVectorIndexState_ACU | null,
 ): boolean {
-    const preparedKeys = Array.from(new Set((Array.isArray(preparedRows) ? preparedRows : []).map((row) => String(row?.rowKey || '')).filter(Boolean))).sort();
-    const existingKeys = getSummaryVectorIndexActiveRowKeys_ACU(existingState).sort();
-    if (preparedKeys.length !== existingKeys.length) return false;
-    for (let index = 0; index < preparedKeys.length; index += 1) {
-        if (preparedKeys[index] !== existingKeys[index]) return false;
+    const preparedIds = Array.from(new Set((Array.isArray(preparedRows) ? preparedRows : []).map((row) => String(row?.rowId || '')).filter(Boolean))).sort();
+    const activeRowKeys = new Set(getSummaryVectorIndexActiveRowKeys_ACU(existingState));
+    const existingRows = (Array.isArray(existingState?.rows) ? existingState.rows : [])
+        .filter((row) => row && row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey)));
+    const existingIds = existingRows.map((row) => String(row.rowId || '')).filter(Boolean).sort();
+    if (preparedIds.length !== existingIds.length || new Set(existingIds).size !== existingIds.length) return false;
+    for (let index = 0; index < preparedIds.length; index += 1) {
+        if (preparedIds[index] !== existingIds[index]) return false;
     }
     return true;
 }
@@ -576,10 +587,36 @@ function areSummaryVectorActiveRowKeysSame_ACU(
 function buildExistingReusableRows_ACU(
     preparedRows: SummaryVectorArchivePreparedRow_ACU[],
     existingState: ChatSummaryVectorIndexState_ACU | null,
-): { reusableRows: ChatSummaryVectorIndexRow_ACU[]; reusableChunks: ChatSummaryVectorIndexChunk_ACU[]; rowsNeedingEmbedding: SummaryVectorArchivePreparedRow_ACU[] } {
-    const preparedByKey = new Map(preparedRows.map((row) => [row.rowKey, row]));
-    const existingRows = Array.isArray(existingState?.rows) ? existingState!.rows : [];
+): {
+    preparedRows: SummaryVectorArchivePreparedRow_ACU[];
+    reusableRows: ChatSummaryVectorIndexRow_ACU[];
+    reusableChunks: ChatSummaryVectorIndexChunk_ACU[];
+    rowsNeedingEmbedding: SummaryVectorArchivePreparedRow_ACU[];
+    retainedRowsChanged: boolean;
+    rowIdentityMigrationRequired: boolean;
+} {
+    const activeRowKeys = new Set(getSummaryVectorIndexActiveRowKeys_ACU(existingState));
+    const existingRows = (Array.isArray(existingState?.rows) ? existingState!.rows : [])
+        .filter((row) => row && row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey)));
     const existingChunks = Array.isArray(existingState?.chunks) ? existingState!.chunks : [];
+    const existingRowsById = new Map<string, ChatSummaryVectorIndexRow_ACU>();
+    let rowIdentityMigrationRequired = false;
+    existingRows.forEach((row) => {
+        if (!row || row.status === 'removed') return;
+        const rowId = String(row.rowId || '').trim();
+        if (!rowId || existingRowsById.has(rowId)) {
+            rowIdentityMigrationRequired = true;
+            return;
+        }
+        existingRowsById.set(rowId, row);
+    });
+    const normalizedPreparedRows = preparedRows.map((row) => {
+        const existing = existingRowsById.get(row.rowId);
+        // 存量 rowKey 可能包含旧 indexCode。只要 rowId 唯一且 chunks 完整，保留其物理身份，
+        // 不为切换生命周期规则重新 embedding。
+        return existing?.rowKey ? { ...row, rowKey: existing.rowKey } : row;
+    });
+    const preparedById = new Map(normalizedPreparedRows.map((row) => [row.rowId, row]));
     const existingChunksByRowKey = new Map<string, ChatSummaryVectorIndexChunk_ACU[]>();
     existingChunks.forEach((chunk) => {
         if (!chunk?.rowKey || !chunk?.chunkId
@@ -592,18 +629,27 @@ function buildExistingReusableRows_ACU(
 
     const reusableRows: ChatSummaryVectorIndexRow_ACU[] = [];
     const reusableChunks: ChatSummaryVectorIndexChunk_ACU[] = [];
-    const reusableKeySet = new Set<string>();
+    const reusableRowIds = new Set<string>();
+    let retainedRowsChanged = false;
     existingRows.forEach((existingRow) => {
-        const prepared = preparedByKey.get(existingRow.rowKey);
+        if (!existingRow || existingRow.status === 'removed') return;
+        const prepared = preparedById.get(String(existingRow.rowId || ''));
         const chunks = existingChunksByRowKey.get(existingRow.rowKey) || [];
-        const existingFingerprint = getSummaryRowFingerprintFromStateRow_ACU(existingRow);
-        if (!prepared || chunks.length === 0 || existingFingerprint !== prepared.sourceFingerprint) {
+        if (!prepared || chunks.length === 0) {
             return;
         }
         const chunkIds = chunks.map((chunk) => chunk.chunkId).filter(Boolean);
         if (chunkIds.length === 0) return;
+        if (existingRow.rowOrder !== prepared.rowOrder
+            || existingRow.timeSpan !== prepared.timeSpan
+            || existingRow.location !== prepared.location
+            || existingRow.summary !== prepared.summary
+            || existingRow.indexCode !== prepared.indexCode) {
+            retainedRowsChanged = true;
+        }
         reusableRows.push({
-            rowKey: prepared.rowKey,
+            ...existingRow,
+            rowKey: existingRow.rowKey,
             rowId: prepared.rowId,
             rowOrder: prepared.rowOrder,
             timeSpan: prepared.timeSpan,
@@ -612,18 +658,17 @@ function buildExistingReusableRows_ACU(
             indexCode: prepared.indexCode,
             // 行只落哈希不落原文：源文本含纪要正文，原文随 chunk 进外置文件即可。
             vectorSourceText: '',
-            vectorSourceHash: prepared.vectorSourceHash,
-            // 复用前提是现存内容重算指纹 === prepared.sourceFingerprint（上方判等），
-            // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）。
-            sourceFingerprint: prepared.sourceFingerprint,
+            // retained 行的向量来源保持旧值；当前表的显示字段已在上方更新。
+            vectorSourceHash: existingRow.vectorSourceHash,
+            sourceFingerprint: existingRow.sourceFingerprint,
             chunkIds,
         });
         chunks.forEach((chunk) => reusableChunks.push({ ...chunk }));
-        reusableKeySet.add(prepared.rowKey);
+        reusableRowIds.add(prepared.rowId);
     });
 
-    const rowsNeedingEmbedding = preparedRows.filter((row) => !reusableKeySet.has(row.rowKey));
-    return { reusableRows, reusableChunks, rowsNeedingEmbedding };
+    const rowsNeedingEmbedding = normalizedPreparedRows.filter((row) => !reusableRowIds.has(row.rowId));
+    return { preparedRows: normalizedPreparedRows, reusableRows, reusableChunks, rowsNeedingEmbedding, retainedRowsChanged, rowIdentityMigrationRequired };
 }
 
 async function buildChunksWithEmbeddings_ACU(
@@ -842,8 +887,8 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     const message = options.chat[options.targetMessageIndex];
     if (!message || message.is_user) return;
 
-    const preparedByKey = new Map(options.preparedRows.map((row) => [row.rowKey, row]));
     const finalRowsByKey = new Map(options.finalRows.map((row) => [row.rowKey, row]));
+    const finalRowKeys = new Set(options.finalRows.map((row) => row.rowKey).filter(Boolean));
     const previousState = cloneSummaryVectorIndexState_ACU(options.aggregatedSnapshot?.summaryVectorIndexState);
     const previousRows = Array.isArray(previousState?.rows) ? previousState!.rows.filter((row) => row.status !== 'removed') : [];
     const previousChunks = Array.isArray(previousState?.chunks) ? previousState!.chunks : [];
@@ -861,10 +906,10 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         previousChunks.forEach((chunk) => nextChunksById.set(chunk.chunkId, { ...chunk }));
     } else {
         previousRows.forEach((row) => {
-            if (preparedByKey.has(row.rowKey)) nextRowsByKey.set(row.rowKey, { ...row });
+            if (finalRowKeys.has(row.rowKey)) nextRowsByKey.set(row.rowKey, { ...row });
         });
         previousChunks.forEach((chunk) => {
-            if (preparedByKey.has(chunk.rowKey)) nextChunksById.set(chunk.chunkId, { ...chunk });
+            if (finalRowKeys.has(chunk.rowKey)) nextChunksById.set(chunk.chunkId, { ...chunk });
         });
     }
 
@@ -880,7 +925,7 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     const removedRowKeys: string[] = [];
     if (options.mode === 'sync') {
         previousRows.forEach((row) => {
-            if (!preparedByKey.has(row.rowKey)) {
+            if (!finalRowKeys.has(row.rowKey)) {
                 removedRowKeys.push(row.rowKey);
                 nextRowsByKey.delete(row.rowKey);
                 (previousChunksByRowKey.get(row.rowKey) || []).forEach((chunk) => nextChunksById.delete(chunk.chunkId));
@@ -890,7 +935,8 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     const replacedRowKeys = options.finalRows
         .filter((row) => {
             const previous = previousRows.find((item) => item.rowKey === row.rowKey);
-            return !!previous && getSummaryRowFingerprintFromStateRow_ACU(previous) !== getSummaryRowFingerprintFromStateRow_ACU(row);
+            return !!previous && !!previous.sourceFingerprint && !!row.sourceFingerprint
+                && previous.sourceFingerprint !== row.sourceFingerprint;
         })
         .map((row) => row.rowKey);
 
@@ -1309,6 +1355,10 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
     const snapshotMessageId = snapshotAnchor.anchor;
 
     const prepared = buildPreparedRows_ACU(selectedSummary.table, selectedSummary.summaryKey);
+    const excludedRowIds = new Set((options.excludedRowIds || []).map((rowId) => normalizeText_ACU(rowId)).filter(Boolean));
+    if (excludedRowIds.size > 0) {
+        prepared.rows = prepared.rows.filter((row) => !excludedRowIds.has(row.rowId));
+    }
     if (prepared.error) {
         return buildResult_ACU({
             success: false,
@@ -1365,6 +1415,63 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         logDebug_ACU(`[纪要向量索引] 本次归档模式: ${archiveMode}`);
         const aggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
         const existingState = cloneSummaryVectorIndexState_ACU(aggregatedSnapshot?.summaryVectorIndexState);
+        if (options.removalOnly) {
+            const activeRowKeys = new Set(getSummaryVectorIndexActiveRowKeys_ACU(existingState));
+            const retainedRows = (Array.isArray(existingState?.rows) ? existingState.rows : [])
+                .filter((row) => row && row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey)))
+                .filter((row) => !excludedRowIds.has(row.rowId));
+            if (retainedRows.length === 0) {
+                const cleared = await clearSummaryVectorIndexCheckpoint_ACU({
+                    chat,
+                    targetMessageIndex,
+                    isolationKey: tagIsolationKey,
+                    expectedFlushScopeKey: options.expectedFlushScopeKey,
+                    expectedFlushGeneration: options.expectedFlushGeneration,
+                });
+                return buildResult_ACU({
+                    success: true,
+                    skipped: !cleared,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    reason: cleared ? 'summary_vector_index_rows_removed' : 'summary_vector_index_rows_already_absent',
+                });
+            }
+            const retainedRowKeys = new Set(retainedRows.map((row) => row.rowKey));
+            const retainedChunkIds = new Set(retainedRows.flatMap((row) => row.chunkIds || []));
+            const retainedChunks = (Array.isArray(existingState?.chunks) ? existingState.chunks : [])
+                .filter((chunk) => retainedRowKeys.has(chunk.rowKey) && retainedChunkIds.has(chunk.chunkId));
+            const finalResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU(retainedRows, retainedChunks);
+            if (finalResult.rows.length !== retainedRows.length || finalResult.chunks.length === 0) {
+                return buildResult_ACU({
+                    success: false,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    reason: 'row_identity_migration_required',
+                    errors: ['当前交火索引缺少可验证的 retained rows/chunks，无法安全执行行级向量清理。'],
+                });
+            }
+            await writeSummaryVectorIndexCheckpoint_ACU({
+                chat,
+                aggregatedSnapshot,
+                embeddingModel: config.embeddingModel,
+                preparedRows: [],
+                finalRows: finalResult.rows,
+                finalChunks: finalResult.chunks,
+                targetMessageIndex,
+                snapshotMessageId,
+                sourceTableKey: selectedSummary.summaryKey,
+                sourceTableName: normalizeText_ACU(selectedSummary.table?.name) || '纪要表',
+                indexedAt: new Date().toISOString(),
+                skippedRowCount: prepared.skippedRowCount,
+                mode: 'sync',
+                isolationKey,
+                tagIsolationKey,
+                expectedFlushScopeKey: options.expectedFlushScopeKey,
+                expectedFlushGeneration: options.expectedFlushGeneration,
+                saveChatAfterWrite: true,
+            });
+            return buildResult_ACU({ success: true, summaryKey: selectedSummary.summaryKey, messageIndex: targetMessageIndex, indexedRowCount: finalResult.rows.length, chunkCount: finalResult.chunks.length, reason: 'summary_vector_index_rows_removed' });
+        }
         // T2：embedding 模型失效闸门。
         // 指纹公式不含模型身份（D1），若模型已变而静默复用旧行，召回会用旧模型向量打分。
         // 比对 existingState.manifest.embeddingModel 与当前 config；不一致则整个 scope 判不可复用、全量重算。
@@ -1383,14 +1490,34 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 error: `model=${String(existingManifestModel).trim()} → ${String(config.embeddingModel).trim()}`,
             });
         }
-        const reusable = embeddingIdentityChanged
-            ? { reusableRows: [] as ChatSummaryVectorIndexRow_ACU[], reusableChunks: [] as ChatSummaryVectorIndexChunk_ACU[], rowsNeedingEmbedding: prepared.rows }
+        const fullRebuild = embeddingIdentityChanged || options.fullRebuild === true;
+        const reusable = fullRebuild
+            ? {
+                preparedRows: prepared.rows,
+                reusableRows: [] as ChatSummaryVectorIndexRow_ACU[],
+                reusableChunks: [] as ChatSummaryVectorIndexChunk_ACU[],
+                rowsNeedingEmbedding: prepared.rows,
+                retainedRowsChanged: false,
+                rowIdentityMigrationRequired: false,
+            }
             : buildExistingReusableRows_ACU(prepared.rows, existingState);
-        const rowsNeedingEmbedding = reusable.rowsNeedingEmbedding;
-        const activeRowKeysUnchanged = areSummaryVectorActiveRowKeysSame_ACU(prepared.rows, existingState);
+        if (reusable.rowIdentityMigrationRequired && !fullRebuild) {
+            return buildResult_ACU({
+                success: false,
+                summaryKey: selectedSummary.summaryKey,
+                messageIndex: targetMessageIndex,
+                reason: 'row_identity_migration_required',
+                errors: ['当前交火索引缺少可验证的唯一 rowId 映射；请使用“立即构建”执行显式全量重建。'],
+            });
+        }
+        const preparedRows = reusable.preparedRows;
+        const rowsNeedingEmbedding = options.removalOnly
+            ? []
+            : reusable.rowsNeedingEmbedding;
+        const activeRowKeysUnchanged = areSummaryVectorActiveRowKeysSame_ACU(preparedRows, existingState);
         const existingActiveRowCount = existingState?.manifest?.snapshot?.activeRowKeys?.length || existingState?.rows?.length || 0;
         logDebug_ACU(`[纪要向量索引] 增量归档判定：operation=incremental_archive_eval, scope=${selectedSummary.summaryKey}, indexId=${existingState?.manifest?.indexId || ''}, changed=${!activeRowKeysUnchanged || rowsNeedingEmbedding.length > 0 || prepared.skippedRowCount > 0}`);
-        if (!options.force && rowsNeedingEmbedding.length === 0 && existingState?.manifest && activeRowKeysUnchanged) {
+        if (!options.force && rowsNeedingEmbedding.length === 0 && !reusable.retainedRowsChanged && existingState?.manifest && activeRowKeysUnchanged) {
             logDebug_ACU('[纪要向量索引] 当前纪要表未发现新增、变更或删除条目，跳过重复覆盖上传。');
             return buildResult_ACU({
                 success: true,
@@ -1510,7 +1637,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 chat,
                 aggregatedSnapshot,
                 embeddingModel: config.embeddingModel,
-                preparedRows: prepared.rows,
+                preparedRows,
                 finalRows: finalResult.rows,
                 finalChunks: finalResult.chunks,
                 targetMessageIndex,
@@ -1544,7 +1671,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
             chat,
             aggregatedSnapshot,
             embeddingModel: config.embeddingModel,
-            preparedRows: prepared.rows,
+            preparedRows,
             finalRows: finalResult.rows,
             finalChunks: finalResult.chunks,
             targetMessageIndex,

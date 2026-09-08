@@ -270,6 +270,69 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     });
   });
 
+  it('同 rowId 的正文与编码变化复用既有 chunks，不重复请求 embedding', async () => {
+    await expect(archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 })).resolves.toMatchObject({ success: true });
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
+    const firstChunk = mockPersistSummaryVectorIndexSnapshot.mock.calls[0][0].chunks[0];
+
+    mockCurrentJsonTableDataRef.value.sheet_summary.content = [
+      ['row_id', '时间跨度', '地点', '概要', '编码索引'],
+      ['1', '晚上', '乙地', '已编辑事件。', 'EV-0001'],
+    ];
+    await expect(archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 })).resolves.toMatchObject({ success: true });
+
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
+    const secondPersist = mockPersistSummaryVectorIndexSnapshot.mock.calls[1][0];
+    expect(secondPersist.rows).toEqual([expect.objectContaining({
+      rowId: '1',
+      summary: '已编辑事件。',
+      indexCode: 'EV-0001',
+      chunkIds: [firstChunk.chunkId],
+    })]);
+    expect(secondPersist.chunks).toEqual([expect.objectContaining({ chunkId: firstChunk.chunkId, text: firstChunk.text })]);
+  });
+
+  it('同步删除 rowId 时发布不含该行的新快照，且不请求 embedding', async () => {
+    mockCurrentJsonTableDataRef.value.sheet_summary.content = [
+      ['row_id', '时间跨度', '地点', '概要', '编码索引'],
+      ['1', '上午', '甲地', '事件一。', 'AM-0001'],
+      ['2', '下午', '乙地', '事件二。', 'PM-0002'],
+    ];
+    await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 });
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
+
+    mockCurrentJsonTableDataRef.value.sheet_summary.content.pop();
+    await expect(archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 })).resolves.toMatchObject({ success: true });
+
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
+    const secondPersist = mockPersistSummaryVectorIndexSnapshot.mock.calls[1][0];
+    expect(secondPersist.rows).toEqual([expect.objectContaining({ rowId: '1' })]);
+    expect(secondPersist.removedRowKeys).toHaveLength(1);
+  });
+
+  it('范围清理仅移除指定 rowId 的旧向量，不为 retained 行重新 embedding', async () => {
+    mockCurrentJsonTableDataRef.value.sheet_summary.content = [
+      ['row_id', '时间跨度', '地点', '概要', '编码索引'],
+      ['1', '上午', '甲地', '事件一。', 'AM-0001'],
+      ['2', '下午', '乙地', '事件二。', 'PM-0002'],
+    ];
+    await expect(archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0 })).resolves.toMatchObject({ success: true });
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
+
+    await expect(archiveSummaryVectorIndexNow_ACU({
+      targetMessageIndex: 0,
+      mode: 'sync',
+      sourceTableKey: 'sheet_summary',
+      excludedRowIds: ['2'],
+      removalOnly: true,
+    })).resolves.toMatchObject({ success: true, reason: 'summary_vector_index_rows_removed' });
+
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(1);
+    const removalPersist = mockPersistSummaryVectorIndexSnapshot.mock.calls[1][0];
+    expect(removalPersist.rows).toEqual([expect.objectContaining({ rowId: '1' })]);
+    expect(removalPersist.removedRowKeys).toHaveLength(1);
+  });
+
   it('部分 Embedding 响应只补齐缺失 chunk，并按局部 index 写回原始位置', async () => {
     mockCurrentJsonTableDataRef.value = {
       sheet_summary: {

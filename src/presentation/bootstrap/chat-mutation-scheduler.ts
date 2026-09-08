@@ -121,7 +121,7 @@ async function runMutationRound_ACU(): Promise<void> {
       const vectorModeEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
       const hasExistingIndex = !!getLatestSummaryVectorIndexSnapshotState_ACU()?.summaryVectorIndexState;
       if (vectorModeEnabled && hasExistingIndex) {
-        void enqueueSummaryVectorIndexFlush_ACU({ reason: realignDirtyReason, mode: 'sync' })
+        void enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey: summaryTable.summaryKey, reason: realignDirtyReason, mode: 'sync' })
           .then((queued) => {
             logDebug_ACU(`[交火向量索引] ${realignDirtyReason}: 已入队重新归档对齐，scope=${scopeKey}, queued=${queued.queued}, reason=${queued.reason || ''}`);
           })

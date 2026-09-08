@@ -308,6 +308,7 @@ describe('visualizer-data-ops V2 replay save', () => {
       expect(second).toEqual({
         success: true,
         changed: true,
+        changedSheetKeys: ['sheet_a'],
         insertedRowIds: { __acu_vis_tmp_row_x: '2' },
         canonicalData: expect.objectContaining({ sheet_a: expect.objectContaining({ name: 'A' }) }),
       });
@@ -349,7 +350,12 @@ describe('visualizer-data-ops V2 replay save', () => {
 
       const second = await applyVisualizerPendingDataOps_ACU(draft);
 
-      expect(second).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '2' } });
+      expect(second).toEqual({
+        success: true,
+        changed: true,
+        changedSheetKeys: ['sheet_a'],
+        insertedRowIds: { __acu_vis_tmp_row_x: '2' },
+      });
       expect(mocks.reload).toHaveBeenCalledTimes(1);
     });
 

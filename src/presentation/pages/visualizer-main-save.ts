@@ -212,17 +212,14 @@ function templateChangedRowsOnly_ACU(templateTable: any): void {
     }
 }
 
-async function runPostSaveRefresh_ACU(reason: string, targetMessageIndex?: number): Promise<void> {
+async function runPostSaveRefresh_ACU(reason: string, targetMessageIndex?: number, sourceTableKey?: string): Promise<void> {
     await refreshMergedDataAndNotifyWithUI_ACU();
-    const shouldSyncSummaryVectorIndexAfterSave = getSortedSheetKeys_ACU(currentJsonTableData_ACU).some((sheetKey: string) => {
-        const table = currentJsonTableData_ACU?.[sheetKey];
-        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
-    });
 
-    if (shouldSyncSummaryVectorIndexAfterSave && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+    if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
         try {
             const queueResult = await enqueueSummaryVectorIndexFlush_ACU({
                 targetMessageIndex,
+                sourceTableKey,
                 mode: 'sync',
                 reason,
             });
@@ -263,7 +260,11 @@ export async function saveVisualizerDataChanges_ACU(): Promise<void> {
     const isolationKey = getCurrentIsolationKey_ACU();
     const latestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
     const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(chat, isolationKey, settings_ACU);
-    await runPostSaveRefresh_ACU('visualizer_save_data', appendTargetIndex !== -1 ? appendTargetIndex : (latestAiIndex !== -1 ? latestAiIndex : undefined));
+    const sourceTableKey = (result.changedSheetKeys || []).find((sheetKey: string) => {
+        const table = currentJsonTableData_ACU?.[sheetKey];
+        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
+    });
+    await runPostSaveRefresh_ACU('visualizer_save_data', appendTargetIndex !== -1 ? appendTargetIndex : (latestAiIndex !== -1 ? latestAiIndex : undefined), sourceTableKey);
     replaceVisualizerTemporaryRowIds_ACU(_acuVisState, result.insertedRowIds || {});
     resetVisualizerPendingDataOps_ACU(_acuVisState);
     showToastr_ACU('success', '数据增量已通过 V2 回放保存到当前消息。');

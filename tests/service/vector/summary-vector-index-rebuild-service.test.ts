@@ -108,7 +108,7 @@ describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
       isolationKey: 'iso-a',
       sourceTableKey: 'sheet_summary',
     });
-    expect(h.archive).toHaveBeenCalledWith({ mode: 'sync' });
+    expect(h.archive).toHaveBeenCalledWith({ mode: 'sync', fullRebuild: true });
     expect(h.updateLorebook).toHaveBeenCalledWith(true);
     expect(result).toMatchObject({ success: true, skipped: false });
   });
