@@ -280,6 +280,16 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: (...args: any[]) => mockRunTableWriteTransaction(...args),
 }));
 
+const mockArchiveSummaryVectorIndexNow = vi.fn().mockResolvedValue({
+  success: true,
+  skipped: false,
+  indexedRowCount: 0,
+  skippedRowCount: 0,
+  chunkCount: 0,
+  errors: [],
+});
+vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () => ({ archiveSummaryVectorIndexNow_ACU: (...args: any[]) => mockArchiveSummaryVectorIndexNow(...args) }));
+
 const mockEnqueueSummaryVectorIndexFlush = vi.fn().mockResolvedValue({ queued: true, scopeKey: 'test-scope' });
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({ enqueueSummaryVectorIndexFlush_ACU: (...args: any[]) => mockEnqueueSummaryVectorIndexFlush(...args) }));
 
@@ -2634,9 +2644,10 @@ describe('orchestrateManualUpdate_ACU', () => {
   it('已有 V2 增量但无 full checkpoint 时直接清理并重填，不再要求二次确认', async () => {
     const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
       mate: { type: 'acu' },
-      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+      sheet_0: { name: '纪要表', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
     });
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
@@ -2670,14 +2681,19 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings.maxConcurrentGroups = 1;
     mockSettings.manualUpdateContextDepth = 0;
     mockSettings.manualUpdateBatchSize = 1;
+    mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
+    mockEnqueueSummaryVectorIndexFlush.mockClear();
+    mockArchiveSummaryVectorIndexNow.mockClear();
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
-      sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] },
     };
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
 
     const processBatch = vi.fn().mockResolvedValue({ success: true });
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], processBatch, mockRefreshData, { clearBeforeUpdate: true });
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
 
     expect(result.success).toBe(true);
     // 无 full checkpoint 也直接清理范围内选中表，让用户可以从头开始填表。
@@ -2686,6 +2702,16 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockReloadStorageProvider).toHaveBeenCalled();
     // 清理后必须补写完整单表 checkpoint，否则新增量将没有回放锚点。
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).toHaveBeenCalledTimes(1);
+    expect(mockArchiveSummaryVectorIndexNow).toHaveBeenCalledWith(expect.objectContaining({
+      sourceTableKey: 'sheet_0',
+      removalOnly: true,
+    }));
+    expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledWith({
+      targetMessageIndex: 0,
+      sourceTableKey: 'sheet_0',
+      mode: 'sync',
+      reason: 'manual_refill_complete',
+    });
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
   });
 

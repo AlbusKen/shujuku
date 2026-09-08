@@ -4551,6 +4551,7 @@ export async function orchestrateManualUpdate_ACU(
     // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
     // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
     let refillCleanupStarted = false;
+    let manualRefillSummarySourceTableKeys: string[] = [];
     // 手动重填失败语义（计划 §5.5 / §5.6，已删除旧 snapshot/rollback 机制）：
     // 破坏性清理不可逆，失败绝不回滚、绝不恢复已删数据；已提交的 bucket 成果保留，
     // 仅按聊天记录里的已提交事实重新对齐运行时快照，避免界面显示与持久化不一致。
@@ -4800,6 +4801,7 @@ export async function orchestrateManualUpdate_ACU(
 
             try {
                 const summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(targetKeys);
+                manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
                 // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                 refillCleanupStarted = true;
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
@@ -5155,6 +5157,16 @@ export async function orchestrateManualUpdate_ACU(
                 if (!snapshotResult.success) {
                     logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);
                     return await failManualRefillSession(snapshotResult.error || '手动重填完成后提交完整单表 checkpoint 失败。');
+                }
+                if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                    for (const sourceTableKey of manualRefillSummarySourceTableKeys) {
+                        await enqueueSummaryVectorIndexFlush_ACU({
+                            targetMessageIndex: snapshotResult.targetMessageIndex,
+                            sourceTableKey,
+                            mode: 'sync',
+                            reason: 'manual_refill_complete',
+                        });
+                    }
                 }
             } catch (error: any) {
                 const failureError = error?.message || String(error || '手动重填完成后提交完整单表 checkpoint 异常。');
