@@ -206,10 +206,20 @@ describe('向量镜像 17 项矩阵', () => {
     expect(chatHasSummaryVectorMirror_ACU([ai(fullFrame())])).toBe(true);
   });
 
-  it('当前环境只认当前 isolation 的 vector_full，其他槽不算已有数据', () => {
+  it('当前环境只认当前 isolation 且 rowCount>0 的 vector_full，其他槽和空镜像不算已有数据', () => {
     const current = ai(fullFrame());
     expect(currentEnvironmentHasSummaryVectorMirror_ACU(current ? [current] : [], '')).toBe(true);
     expect(currentEnvironmentHasSummaryVectorMirror_ACU([current], 'other-iso')).toBe(false);
+    const emptyMirror = ai({
+      ...fullFrame(),
+      summaryVectorIndexFrame: {
+        version: 3,
+        sourceTableKey: SOURCE,
+        checkpoint: checkpoint({ rowCount: 0 }),
+        logEntries: [],
+      },
+    });
+    expect(currentEnvironmentHasSummaryVectorMirror_ACU([emptyMirror], '')).toBe(false);
 
     const otherOnly = {
       is_user: false,

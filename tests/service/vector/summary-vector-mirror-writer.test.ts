@@ -51,6 +51,21 @@ describe('planUnmirroredEntryDeltasV2_ACU', () => {
     );
     expect(plans).toEqual([]);
   });
+
+  it('head 已有的 rowId 不再规划 row_add，避免 seed 当前表后链冲突', () => {
+    const plans = planUnmirroredEntryDeltasV2_ACU(
+      [
+        { messageIndex: 1, entryId: 'e1', commitRevision: 'r1', seq: 1, rowIdsAfter: ['1', '2', '3'] },
+        { messageIndex: 2, entryId: 'e2', commitRevision: 'r2', seq: 1, rowIdsAfter: ['1', '2', '3', '4'] },
+      ],
+      [],
+      [],
+      ['1', '2', '3'],
+    );
+    expect(plans).toEqual([
+      { messageIndex: 2, entryId: 'e2', commitRevision: 'r2', added: ['4'], removed: [] },
+    ]);
+  });
 });
 
 describe('findTouchedSummarySheetKey_ACU', () => {

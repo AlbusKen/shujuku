@@ -118,14 +118,18 @@ export function planUnmirroredEntryDeltasV2_ACU(
     timelineEntries: SummarySheetRowIdTimelineEntryV2_ACU[],
     appliedTableEntryIds: string[],
     rowIdsAtCheckpoint: string[],
+    alreadyMirroredRowIds: Iterable<string> = [],
 ): UnmirroredEntryDeltaPlanV2_ACU[] {
     const mirrored = new Set(appliedTableEntryIds);
+    const alreadyInHead = new Set(
+        [...alreadyMirroredRowIds].map((rowId) => String(rowId || '').trim()).filter(Boolean),
+    );
     const plans: UnmirroredEntryDeltaPlanV2_ACU[] = [];
     let before = new Set(rowIdsAtCheckpoint);
     for (const entry of timelineEntries) {
         const after = new Set(entry.rowIdsAfter);
         if (!mirrored.has(entry.entryId)) {
-            const added = [...after].filter((rowId) => !before.has(rowId)).sort();
+            const added = [...after].filter((rowId) => !before.has(rowId) && !alreadyInHead.has(rowId)).sort();
             const removed = [...before].filter((rowId) => !after.has(rowId)).sort();
             if (added.length > 0 || removed.length > 0) {
                 plans.push({
@@ -305,6 +309,7 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
         timeline.entries,
         head.appliedTableEntryIds,
         timeline.rowIdsAtCheckpoint,
+        head.head.keys(),
     );
     if (plans.length === 0) {
         return emptyResult_ACU({

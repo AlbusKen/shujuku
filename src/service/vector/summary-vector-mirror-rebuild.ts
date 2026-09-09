@@ -1,8 +1,9 @@
 /**
  * service/vector/summary-vector-mirror-rebuild.ts — 统一重建路径
  *
- * replay/checkpoint.data 取 C 时刻 rowId 集合 → pack+manifest → 写 checkpoint@C →
- * 清 C..H 旧 delta → strict save → 立刻 flush 补 C..H（当前纪要表里的新行）。
+ * replay/checkpoint.data 取 C 时刻 rowId 集合；与当前纪要表对得上则只索引 C。
+ * C 为空或对不上时把当前纪要表写入 vector_full（否则没有 table entry 可挂 delta）。
+ * 写 checkpoint@C → 清 C..H 旧 delta → strict save → 立刻 flush 补仍未镜像的 C..H。
  * rebuild_repair 复用当前 head 中读回校验通过的 refs；initial / rebuild_user 全量 embedding。
  */
 
@@ -71,12 +72,17 @@ function emptyResult_ACU(partial: Partial<SummaryVectorMirrorRebuildResult_ACU>)
 
 function inspectCheckpointRowIds_ACU(sheet: any): { rowIds: string[]; duplicates: string[]; emptyCount: number } {
     const content = Array.isArray(sheet?.content) ? sheet.content : [];
+    const header = Array.isArray(content[0]) ? content[0] : [];
+    const indexColIdx = header.findIndex((cell: unknown) => String(cell ?? '').trim() === '编码索引');
     const seen = new Set<string>();
     const rowIds: string[] = [];
     const duplicates: string[] = [];
     let emptyCount = 0;
     for (let index = 1; index < content.length; index += 1) {
-        const rowId = String(content[index]?.[0] ?? '').trim();
+        const row = content[index];
+        const physicalId = String(row?.[0] ?? '').trim();
+        const indexCode = indexColIdx >= 0 ? String(row?.[indexColIdx] ?? '').trim() : '';
+        const rowId = physicalId || indexCode;
         if (!rowId) {
             emptyCount += 1;
             continue;
@@ -89,6 +95,36 @@ function inspectCheckpointRowIds_ACU(sheet: any): { rowIds: string[]; duplicates
         rowIds.push(rowId);
     }
     return { rowIds, duplicates, emptyCount };
+}
+
+/**
+ * 重建纳入 vector_full 的 rowId 集合。
+ * C 与当前表能对上时只吃 C（V2 不变量）；对不上或 C 为空时，用当前纪要表 seed，
+ * 否则空 C + 看不到 table entry 的 H 行会永远变成 0 行索引。
+ */
+export function selectRebuildSourceRowIds_ACU(options: {
+    checkpointRowIds: string[];
+    preparedRowIds: string[];
+}): { rowIds: string[]; seededFromLiveTable: boolean } {
+    const prepared = options.preparedRowIds
+        .map((rowId) => String(rowId || '').trim())
+        .filter(Boolean);
+    const preparedSet = new Set(prepared);
+    const matched = options.checkpointRowIds
+        .map((rowId) => String(rowId || '').trim())
+        .filter((rowId) => rowId && preparedSet.has(rowId));
+    if (matched.length > 0) {
+        return { rowIds: matched, seededFromLiveTable: false };
+    }
+    if (prepared.length > 0) {
+        return { rowIds: prepared, seededFromLiveTable: true };
+    }
+    return { rowIds: [], seededFromLiveTable: false };
+}
+
+function frameHasUsableVectorMirror_ACU(tagData: unknown): boolean {
+    const checkpoint = (tagData as any)?.storageFrame?.summaryVectorIndexFrame?.checkpoint;
+    return checkpoint?.kind === 'vector_full' && Number(checkpoint.rowCount) > 0;
 }
 
 function clearLegacyVectorFields_ACU(chat: any[]): void {
@@ -137,12 +173,16 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     }
 
     const embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
-    // embedding 文本取当前纪要表：C 里可能只有 rowId、单元格已被后续填表更新。
-    // 纳入 checkpoint 的 rowId 集合仍只来自 C，不能把 H 的新行写进 C。
     const prepared = buildPreparedRows_ACU(selected.table, selected.summaryKey);
-    const currentInspect = inspectCheckpointRowIds_ACU(selected.table);
-    if (inspect.rowIds.length === 0 && currentInspect.rowIds.length > 0) {
-        logDebug_ACU(`[向量镜像] C 时刻纪要表无行、当前表有 ${currentInspect.rowIds.length} 行，重建后立即 flush 补 C..H。`);
+    if (prepared.error) {
+        return emptyResult_ACU({ reason: 'prepared_rows_invalid', errors: [prepared.error] });
+    }
+    const source = selectRebuildSourceRowIds_ACU({
+        checkpointRowIds: inspect.rowIds,
+        preparedRowIds: prepared.rows.map((row) => row.rowId),
+    });
+    if (source.seededFromLiveTable) {
+        logDebug_ACU(`[向量镜像] C 时刻纪要表无法对上当前表（C=${inspect.rowIds.length}，当前=${prepared.rows.length}），重建将当前纪要表 ${source.rowIds.length} 行写入 vector_full。`);
     }
     const preparedById = new Map(prepared.rows.map((row) => [row.rowId, row]));
     const reusable = new Map<string, SummaryVectorChunkRef_ACU[]>();
@@ -155,7 +195,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
         });
         if (head.status === 'ok') {
-            for (const rowId of inspect.rowIds) {
+            for (const rowId of source.rowIds) {
                 const refs = head.head.get(rowId);
                 if (!refs || refs.length === 0) continue;
                 let valid = true;
@@ -171,7 +211,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
         }
     }
 
-    const toEmbed = inspect.rowIds.filter((rowId) => !reusable.has(rowId) && preparedById.has(rowId));
+    const toEmbed = source.rowIds.filter((rowId) => !reusable.has(rowId) && preparedById.has(rowId));
     const chunkSources: Array<{ rowId: string; text: string; vectorSourceHash: string }> = [];
     for (const rowId of toEmbed) {
         const row = preparedById.get(rowId)!;
@@ -245,7 +285,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
         });
     }
 
-    const rows = inspect.rowIds.map((rowId) => ({
+    const rows = source.rowIds.map((rowId) => ({
         rowId,
         chunks: newRefsByRow.get(rowId) || [],
     })).filter((row) => row.chunks.length > 0);
@@ -376,13 +416,11 @@ export function chatHasSummaryVectorMirror_ACU(chat: any[] | null | undefined): 
     return chat.some((message) => {
         const isolated = message?.TavernDB_ACU_IsolatedData;
         if (!isolated || typeof isolated !== 'object') return false;
-        return Object.values(isolated).some((tagData: any) => (
-            tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'
-        ));
+        return Object.values(isolated).some((tagData) => frameHasUsableVectorMirror_ACU(tagData));
     });
 }
 
-/** 当前 isolation 槽是否已有 V2 向量 checkpoint。其他 isolation 的镜像不算当前环境。 */
+/** 当前 isolation 槽是否已有带行的 V2 向量 checkpoint。空 vector_full 不算已有数据。 */
 export function currentEnvironmentHasSummaryVectorMirror_ACU(
     chat: any[] | null | undefined,
     isolationKey: string,
@@ -392,8 +430,7 @@ export function currentEnvironmentHasSummaryVectorMirror_ACU(
     return chat.some((message) => {
         const isolated = message?.TavernDB_ACU_IsolatedData;
         if (!isolated || typeof isolated !== 'object') return false;
-        const tagData = (isolated as Record<string, any>)[key];
-        return tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full';
+        return frameHasUsableVectorMirror_ACU((isolated as Record<string, any>)[key]);
     });
 }
 

@@ -47389,6 +47389,663 @@ $CONTENT
         ].join('\n'));
     }
 
+    /**
+     * service/vector/summary-vector-mirror-resolver.ts — 纪要向量镜像的唯一读取入口
+     *
+     * 向量镜像与表格 V2 使用相同的楼层语义：
+     *   vector head = Vector checkpoint @ C（表格 full checkpoint 楼层，表示 C 层 logEntries 之前的状态）
+     *              + 按楼层序、frame 内按 seq 应用 C..H 全部 Vector delta（row_add / row_remove）
+     *
+     * 基底判定必须与 storage-frame-v2-replay.ts 的 replay 基底选择完全一致（含过渡根优先级），
+     * 否则 resolver 认为 C 在某层而 replay 用另一层做基底，vector head 与表格 head 静默错位。
+     *
+     * 一致性规则（设计文档 R2 / R6 / D17）：
+     * - delta 与来源 table entry 同生共死：sourceTableEntry.entryId 不在同 frame logEntries 中的 delta 是
+     *   orphan，直接丢弃并标记 stale；
+     * - delta 之间不维护 revision 链：删中间楼层会合法地移除一条 delta；
+     * - row_add 的 rowId 已在 head、或 row_remove 的 rowId 不在 head → 链冲突，整条 delta 丢弃，
+     *   由 rebuild_repair 修复；
+     * - resolver 不读实时纪要表；dirty 判定（head rowId 集合 vs 实时表 rowId 集合）由调用方完成。
+     *
+     * 外置 manifest 的读取通过 loadManifest 注入，本模块不依赖存储层。
+     */
+    // ─── frame 枚举与基底定位 ────────────────────────────────────────────────
+    /** 与 replay 的 getV2FrameRefs_ACU 一致：只看 AI 消息、按 chat 数组位置枚举。 */
+    function collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive) {
+        const refs = [];
+        if (!Array.isArray(chat))
+            return refs;
+        const upperExclusive = maxMessageIndexExclusive === undefined
+            ? chat.length
+            : Math.max(0, Math.min(chat.length, Math.floor(maxMessageIndexExclusive)));
+        for (let i = 0; i < upperExclusive; i += 1) {
+            const message = chat[i];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (isV2TagData_ACU(tagData)) {
+                refs.push({ messageIndex: i, frame: tagData.storageFrame });
+            }
+        }
+        return refs;
+    }
+    /**
+     * 定位表格 replay 的 full checkpoint 基底。返回 null 表示基底不是 full checkpoint
+     * （过渡根接管 / 无 full → replacement anchor 或 temporary baseline），镜像不支持。
+     *
+     * 表达式与 storage-frame-v2-replay.ts:2375-2380 保持一致。
+     */
+    function locateSummaryVectorMirrorBase_ACU(chat, isolationKey, maxMessageIndexExclusive) {
+        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
+        const checkpointRef = [...refs].reverse().find((ref) => ref.frame.checkpoint?.kind === 'full') ?? null;
+        const replayMaxInclusive = maxMessageIndexExclusive === undefined ? undefined : maxMessageIndexExclusive - 1;
+        const transition = findLatestTransitionCheckpoint_ACU(chat, isolationKey, replayMaxInclusive);
+        if (transition && (!checkpointRef || checkpointRef.messageIndex <= transition.checkpoint.cutoff.messageIndex)) {
+            return null;
+        }
+        return checkpointRef;
+    }
+    // ─── revision 计算（writer 与 resolver 共用同一公式）───────────────────────
+    function serializeChunkRefs_ACU(chunks) {
+        return chunks.map((chunk) => `${chunk.packHash}#${chunk.chunkIndex}`).join(',');
+    }
+    /** checkpoint.vectorRevision：对 rowId 排序后连同 chunk 引用做 sha256。 */
+    function computeSummaryVectorMirrorCheckpointRevision_ACU(rows) {
+        const lines = Array.from(rows)
+            .map((row) => `${row.rowId}\t${serializeChunkRefs_ACU(row.chunks)}`)
+            .sort();
+        return sha256Base64UrlSync_ACU(lines.join('\n'));
+    }
+    /** head vectorRevision：只由 checkpoint revision 与按序 applied delta entryId 决定，对 messageIndex 位移不敏感。 */
+    function computeSummaryVectorMirrorHeadRevision_ACU(checkpointRevision, appliedDeltaEntryIds) {
+        return sha256Base64UrlSync_ACU([checkpointRevision, ...appliedDeltaEntryIds].join('\n'));
+    }
+    // ─── 结构校验 ────────────────────────────────────────────────────────────
+    function isNonEmptyString_ACU(value) {
+        return typeof value === 'string' && value.length > 0;
+    }
+    function isPlainObject_ACU(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function isSummaryVectorEmbeddingIdentity_ACU(value) {
+        return isPlainObject_ACU(value)
+            && typeof value.endpointFingerprint === 'string'
+            && isNonEmptyString_ACU(value.model)
+            && Number.isInteger(value.dimension) && value.dimension > 0
+            && Number.isInteger(value.sourceTextVersion);
+    }
+    function summaryVectorEmbeddingIdentityEquals_ACU(left, right) {
+        return left.endpointFingerprint === right.endpointFingerprint
+            && left.model === right.model
+            && left.dimension === right.dimension
+            && left.sourceTextVersion === right.sourceTextVersion;
+    }
+    function isPackRef_ACU(value) {
+        return isPlainObject_ACU(value)
+            && isNonEmptyString_ACU(value.packHash)
+            && isNonEmptyString_ACU(value.path)
+            && Number.isInteger(value.chunkCount) && value.chunkCount >= 0
+            && Number.isFinite(value.byteLength) && value.byteLength >= 0;
+    }
+    function isChunkRef_ACU(value) {
+        return isPlainObject_ACU(value)
+            && isNonEmptyString_ACU(value.packHash)
+            && Number.isInteger(value.chunkIndex) && value.chunkIndex >= 0;
+    }
+    function isManifestRef_ACU(value) {
+        return isPlainObject_ACU(value)
+            && isNonEmptyString_ACU(value.manifestHash)
+            && isNonEmptyString_ACU(value.path)
+            && Number.isFinite(value.byteLength) && value.byteLength >= 0;
+    }
+    function isSummaryVectorMirrorCheckpoint_ACU(value) {
+        return isPlainObject_ACU(value)
+            && value.kind === 'vector_full'
+            && Number.isFinite(value.createdAt)
+            && isNonEmptyString_ACU(value.reason)
+            && isNonEmptyString_ACU(value.sourceTableKey)
+            && typeof value.tableCheckpointFingerprint === 'string'
+            && isSummaryVectorEmbeddingIdentity_ACU(value.embedding)
+            && Number.isInteger(value.rowCount) && value.rowCount >= 0
+            && isNonEmptyString_ACU(value.vectorRevision)
+            && isManifestRef_ACU(value.manifestRef)
+            && Array.isArray(value.packRefs) && value.packRefs.every(isPackRef_ACU);
+    }
+    /**
+     * delta 结构校验：operations 非空；row_add 必须带非空 chunks，且引用的 packHash 全部出现在
+     * 本 delta 的 packRefs 中（每条 delta 对 GC 自包含）。
+     * 返回 null 表示合法，否则返回原因。
+     */
+    function validateSummaryVectorMirrorDelta_ACU(value) {
+        if (!isPlainObject_ACU(value))
+            return 'delta 不是对象';
+        if (!Number.isFinite(value.seq))
+            return 'seq 不是有限数';
+        if (!isNonEmptyString_ACU(value.entryId))
+            return 'entryId 为空';
+        if (!Number.isFinite(value.createdAt))
+            return 'createdAt 不是有限数';
+        const source = value.sourceTableEntry;
+        if (!isPlainObject_ACU(source) || !isNonEmptyString_ACU(source.entryId))
+            return 'sourceTableEntry.entryId 为空';
+        if (source.commitRevision !== null && typeof source.commitRevision !== 'string')
+            return 'sourceTableEntry.commitRevision 类型非法';
+        if (!isSummaryVectorEmbeddingIdentity_ACU(value.embedding))
+            return 'embedding 身份非法';
+        if (!Array.isArray(value.packRefs) || !value.packRefs.every(isPackRef_ACU))
+            return 'packRefs 非法';
+        if (!Array.isArray(value.operations) || value.operations.length === 0)
+            return 'operations 为空';
+        const ownPackHashes = new Set(value.packRefs.map((ref) => ref.packHash));
+        for (const operation of value.operations) {
+            if (!isPlainObject_ACU(operation))
+                return 'operation 不是对象';
+            if (!isNonEmptyString_ACU(operation.rowId))
+                return 'operation.rowId 为空';
+            if (operation.kind === 'row_remove')
+                continue;
+            if (operation.kind !== 'row_add')
+                return `未知 operation kind=${String(operation.kind)}`;
+            if (!Array.isArray(operation.chunks) || operation.chunks.length === 0)
+                return `row_add rowId=${operation.rowId} 缺少 chunks`;
+            if (!operation.chunks.every(isChunkRef_ACU))
+                return `row_add rowId=${operation.rowId} 的 chunk 引用非法`;
+            if (typeof operation.vectorSourceHash !== 'string')
+                return `row_add rowId=${operation.rowId} 缺少 vectorSourceHash`;
+            for (const chunk of operation.chunks) {
+                if (!ownPackHashes.has(chunk.packHash)) {
+                    return `row_add rowId=${operation.rowId} 引用的 pack ${chunk.packHash} 不在本 delta 的 packRefs 中`;
+                }
+            }
+        }
+        return null;
+    }
+    function isSummaryVectorMirrorFrame_ACU(value) {
+        return isPlainObject_ACU(value)
+            && value.version === 3
+            && isNonEmptyString_ACU(value.sourceTableKey)
+            && Array.isArray(value.logEntries)
+            && (value.checkpoint === undefined || isSummaryVectorMirrorCheckpoint_ACU(value.checkpoint));
+    }
+    /**
+     * frame 级不变量断言（写入方在 strict save 前调用；与 assertSingleActiveFullCheckpointV2_ACU 同风格）：
+     * - 镜像 frame 结构合法；
+     * - vector checkpoint 只允许出现在表格 full checkpoint 所在 frame；
+     * - 同一隔离键至多一个 vector checkpoint；
+     * - 每条 delta 结构合法，同 frame 内 delta entryId 唯一。
+     * 命中不变量返回 null，否则返回可直接写入日志的违规描述。
+     */
+    function assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, context) {
+        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey);
+        const checkpointFrames = [];
+        for (const ref of refs) {
+            const mirror = ref.frame.summaryVectorIndexFrame;
+            if (mirror === undefined)
+                continue;
+            if (!isSummaryVectorMirrorFrame_ACU(mirror)) {
+                return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 的 summaryVectorIndexFrame 结构非法。`;
+            }
+            if (mirror.checkpoint) {
+                if (ref.frame.checkpoint?.kind !== 'full') {
+                    return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 没有表格 full checkpoint 却存在 vector checkpoint。`;
+                }
+                checkpointFrames.push(ref.messageIndex);
+            }
+            const seenEntryIds = new Set();
+            for (const delta of mirror.logEntries) {
+                const reason = validateSummaryVectorMirrorDelta_ACU(delta);
+                if (reason) {
+                    return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 的 vector delta 非法（${reason}）。`;
+                }
+                if (seenEntryIds.has(delta.entryId)) {
+                    return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 存在重复的 vector delta entryId=${delta.entryId}。`;
+                }
+                seenEntryIds.add(delta.entryId);
+            }
+        }
+        if (checkpointFrames.length > 1) {
+            return `V2 ${context} 违反向量镜像不变量：同一隔离键下存在 ${checkpointFrames.length} 个 vector checkpoint（${checkpointFrames.map((index) => `#${index}`).join('、')}）。`;
+        }
+        return null;
+    }
+    // ─── head 解析 ───────────────────────────────────────────────────────────
+    function buildEmptyResult_ACU(status, sourceTableKey, checkpointMessageIndex, checkpoint, diagnostics) {
+        return {
+            status,
+            sourceTableKey,
+            checkpointMessageIndex,
+            checkpoint,
+            head: new Map(),
+            vectorRevision: '',
+            packRefs: [],
+            appliedDeltaEntryIds: [],
+            appliedTableEntryIds: [],
+            stale: false,
+            chainConflict: false,
+            diagnostics,
+        };
+    }
+    function sortDeltasBySeq_ACU(deltas, messageIndex, diagnostics) {
+        const indexed = deltas.map((delta, index) => ({ delta, index }));
+        indexed.sort((left, right) => {
+            const seqDiff = Number(left.delta?.seq) - Number(right.delta?.seq);
+            if (Number.isFinite(seqDiff) && seqDiff !== 0)
+                return seqDiff;
+            return left.index - right.index;
+        });
+        const seenSeq = new Set();
+        for (const { delta } of indexed) {
+            const seq = Number(delta?.seq);
+            if (!Number.isFinite(seq))
+                continue;
+            if (seenSeq.has(seq)) {
+                diagnostics.push({
+                    code: 'duplicate_delta_seq',
+                    messageIndex,
+                    entryId: typeof delta?.entryId === 'string' ? delta.entryId : undefined,
+                    detail: `楼层 #${messageIndex} 存在重复的 vector delta seq=${seq}，按数组顺序应用。`,
+                });
+            }
+            seenSeq.add(seq);
+        }
+        return indexed.map((item) => item.delta);
+    }
+    /**
+     * 对单条 delta 做链一致性预检（R6）：
+     * - 同一 delta 内同 rowId 不得出现两次；
+     * - row_add 的 rowId 不得已在 head；row_remove 的 rowId 必须在 head。
+     * 返回 null 表示可应用，否则返回冲突描述与 rowId。
+     */
+    function checkDeltaChainConsistency_ACU(operations, head) {
+        const seen = new Set();
+        for (const operation of operations) {
+            if (seen.has(operation.rowId)) {
+                return { rowId: operation.rowId, detail: `同一 delta 内 rowId=${operation.rowId} 出现多次` };
+            }
+            seen.add(operation.rowId);
+            if (operation.kind === 'row_add' && head.has(operation.rowId)) {
+                return { rowId: operation.rowId, detail: `row_add 的 rowId=${operation.rowId} 已存在于 head（中间没有 row_remove）` };
+            }
+            if (operation.kind === 'row_remove' && !head.has(operation.rowId)) {
+                return { rowId: operation.rowId, detail: `row_remove 的 rowId=${operation.rowId} 不在 head 中` };
+            }
+        }
+        return null;
+    }
+    async function resolveSummaryVectorMirrorHead_ACU(options) {
+        const { chat, isolationKey, sourceTableKey, loadManifest, embedding, maxMessageIndexExclusive } = options;
+        const diagnostics = [];
+        const base = locateSummaryVectorMirrorBase_ACU(chat, isolationKey, maxMessageIndexExclusive);
+        if (!base || !base.frame.checkpoint) {
+            return buildEmptyResult_ACU('unsupported_replay_base', sourceTableKey, null, null, diagnostics);
+        }
+        const baseMirror = base.frame.summaryVectorIndexFrame;
+        if (!isSummaryVectorMirrorFrame_ACU(baseMirror) || !baseMirror.checkpoint) {
+            return buildEmptyResult_ACU('no_mirror', sourceTableKey, base.messageIndex, null, diagnostics);
+        }
+        const checkpoint = baseMirror.checkpoint;
+        if (baseMirror.sourceTableKey !== sourceTableKey || checkpoint.sourceTableKey !== sourceTableKey) {
+            return buildEmptyResult_ACU('source_table_changed', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
+        }
+        const actualFingerprint = getTableDataFingerprint_ACU(base.frame.checkpoint.data);
+        if (checkpoint.tableCheckpointFingerprint !== actualFingerprint) {
+            return buildEmptyResult_ACU('checkpoint_mismatch', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
+        }
+        if (embedding && !summaryVectorEmbeddingIdentityEquals_ACU(embedding, checkpoint.embedding)) {
+            return buildEmptyResult_ACU('embedding_identity_changed', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
+        }
+        let manifest = null;
+        try {
+            manifest = await loadManifest(checkpoint.manifestRef, checkpoint);
+        }
+        catch (error) {
+            diagnostics.push({
+                code: 'manifest_load_failed',
+                messageIndex: base.messageIndex,
+                detail: `读取 checkpoint manifest 失败：${error?.message || String(error || '未知错误')}`,
+            });
+            manifest = null;
+        }
+        if (!manifest || manifest.schema !== 'summary_vector_mirror_manifest' || !Array.isArray(manifest.rows)) {
+            if (manifest) {
+                diagnostics.push({
+                    code: 'manifest_load_failed',
+                    messageIndex: base.messageIndex,
+                    detail: 'checkpoint manifest 结构非法。',
+                });
+            }
+            return buildEmptyResult_ACU('manifest_unavailable', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
+        }
+        const head = new Map();
+        for (const row of manifest.rows) {
+            if (!isPlainObject_ACU(row) || !isNonEmptyString_ACU(row.rowId) || !Array.isArray(row.chunks))
+                continue;
+            if (head.has(row.rowId)) {
+                diagnostics.push({
+                    code: 'manifest_duplicate_row_id',
+                    messageIndex: base.messageIndex,
+                    rowId: row.rowId,
+                    detail: `checkpoint manifest 中 rowId=${row.rowId} 重复，后者覆盖前者。`,
+                });
+            }
+            head.set(row.rowId, row.chunks.filter(isChunkRef_ACU).map((chunk) => ({ ...chunk })));
+        }
+        const packRefsByHash = new Map();
+        checkpoint.packRefs.forEach((ref) => packRefsByHash.set(ref.packHash, { ...ref }));
+        const appliedDeltaEntryIds = [];
+        const appliedTableEntryIds = [];
+        let stale = false;
+        let chainConflict = false;
+        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
+        for (const ref of refs) {
+            if (ref.messageIndex < base.messageIndex)
+                continue;
+            const mirror = ref.frame.summaryVectorIndexFrame;
+            if (mirror === undefined)
+                continue;
+            if (!isSummaryVectorMirrorFrame_ACU(mirror)) {
+                diagnostics.push({
+                    code: 'invalid_delta',
+                    messageIndex: ref.messageIndex,
+                    detail: `楼层 #${ref.messageIndex} 的 summaryVectorIndexFrame 结构非法，本层 delta 全部跳过。`,
+                });
+                stale = true;
+                continue;
+            }
+            // 基底是最后一个 full checkpoint，之后的 frame 不可能再有 full checkpoint，
+            // 因此这里出现的 vector checkpoint 一定缺少表格锚点。
+            if (ref.messageIndex !== base.messageIndex && mirror.checkpoint) {
+                diagnostics.push({
+                    code: 'misplaced_checkpoint',
+                    messageIndex: ref.messageIndex,
+                    detail: `楼层 #${ref.messageIndex} 没有表格 full checkpoint 却存在 vector checkpoint，已忽略；只认基底楼层 #${base.messageIndex}。`,
+                });
+            }
+            if (mirror.sourceTableKey !== sourceTableKey) {
+                diagnostics.push({
+                    code: 'invalid_delta',
+                    messageIndex: ref.messageIndex,
+                    detail: `楼层 #${ref.messageIndex} 的镜像 sourceTableKey=${mirror.sourceTableKey} 与当前纪要表 ${sourceTableKey} 不一致，本层 delta 全部跳过。`,
+                });
+                stale = true;
+                continue;
+            }
+            const tableEntryIds = new Set((Array.isArray(ref.frame.logEntries) ? ref.frame.logEntries : [])
+                .map((entry) => entry?.entryId)
+                .filter((entryId) => typeof entryId === 'string' && entryId.length > 0));
+            const deltas = sortDeltasBySeq_ACU(mirror.logEntries, ref.messageIndex, diagnostics);
+            for (const delta of deltas) {
+                const invalidReason = validateSummaryVectorMirrorDelta_ACU(delta);
+                if (invalidReason) {
+                    diagnostics.push({
+                        code: 'invalid_delta',
+                        messageIndex: ref.messageIndex,
+                        entryId: typeof delta?.entryId === 'string' ? delta.entryId : undefined,
+                        detail: `楼层 #${ref.messageIndex} 的 vector delta 结构非法（${invalidReason}），已丢弃。`,
+                    });
+                    stale = true;
+                    continue;
+                }
+                if (!tableEntryIds.has(delta.sourceTableEntry.entryId)) {
+                    diagnostics.push({
+                        code: 'orphan_delta',
+                        messageIndex: ref.messageIndex,
+                        entryId: delta.entryId,
+                        detail: `楼层 #${ref.messageIndex} 的 vector delta 来源 table entry ${delta.sourceTableEntry.entryId} 已不存在，已丢弃。`,
+                    });
+                    stale = true;
+                    continue;
+                }
+                if (!summaryVectorEmbeddingIdentityEquals_ACU(delta.embedding, checkpoint.embedding)) {
+                    diagnostics.push({
+                        code: 'delta_embedding_mismatch',
+                        messageIndex: ref.messageIndex,
+                        entryId: delta.entryId,
+                        detail: `楼层 #${ref.messageIndex} 的 vector delta embedding 身份（${delta.embedding.model}/${delta.embedding.dimension}）与 checkpoint（${checkpoint.embedding.model}/${checkpoint.embedding.dimension}）不一致，已丢弃。`,
+                    });
+                    stale = true;
+                    continue;
+                }
+                const conflict = checkDeltaChainConsistency_ACU(delta.operations, head);
+                if (conflict) {
+                    diagnostics.push({
+                        code: 'chain_conflict',
+                        messageIndex: ref.messageIndex,
+                        entryId: delta.entryId,
+                        rowId: conflict.rowId,
+                        detail: `楼层 #${ref.messageIndex} 的 vector delta 链冲突：${conflict.detail}，整条 delta 已丢弃。`,
+                    });
+                    chainConflict = true;
+                    stale = true;
+                    continue;
+                }
+                for (const operation of delta.operations) {
+                    if (operation.kind === 'row_add') {
+                        head.set(operation.rowId, operation.chunks.map((chunk) => ({ ...chunk })));
+                    }
+                    else {
+                        head.delete(operation.rowId);
+                    }
+                }
+                delta.packRefs.forEach((packRef) => {
+                    if (!packRefsByHash.has(packRef.packHash))
+                        packRefsByHash.set(packRef.packHash, { ...packRef });
+                });
+                appliedDeltaEntryIds.push(delta.entryId);
+                appliedTableEntryIds.push(delta.sourceTableEntry.entryId);
+            }
+        }
+        return {
+            status: 'ok',
+            sourceTableKey,
+            checkpointMessageIndex: base.messageIndex,
+            checkpoint,
+            head,
+            vectorRevision: computeSummaryVectorMirrorHeadRevision_ACU(checkpoint.vectorRevision, appliedDeltaEntryIds),
+            packRefs: Array.from(packRefsByHash.values()),
+            appliedDeltaEntryIds,
+            appliedTableEntryIds,
+            stale,
+            chainConflict,
+            diagnostics,
+        };
+    }
+
+    /**
+     * service/vector/summary-vector-mirror-storage.ts — 镜像 pack / checkpoint manifest 的 content-addressed 读写
+     *
+     * pack 路径沿用现有族：TavernDB_ACU_vector_v2pack_<scopeToken>_<packKey>
+     * checkpoint manifest 新路径：TavernDB_ACU_vector_v2vcp_<scopeToken>_<sha256>
+     * 文件名保留 scope token，供 GC 按 scope 前缀筛选。写入走 prepared → published。
+     */
+    function encodeVectorToF32B64_ACU$1(vector) {
+        const bytes = new Uint8Array(vector.length * 4);
+        const view = new DataView(bytes.buffer);
+        for (let index = 0; index < vector.length; index += 1) {
+            const numeric = Number(vector[index]);
+            if (!Number.isFinite(numeric)) {
+                throw new Error(`镜像向量包含非有限数值，拒绝编码: index=${index}`);
+            }
+            view.setFloat32(index * 4, numeric, true);
+        }
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 1) {
+            binary += String.fromCharCode(bytes[offset]);
+        }
+        if (typeof globalThis.btoa !== 'function')
+            throw new Error('当前环境缺少 btoa，无法编码镜像向量。');
+        return globalThis.btoa(binary);
+    }
+    function encodeSummaryVectorMirrorVector_ACU(vector) {
+        return encodeVectorToF32B64_ACU$1(vector);
+    }
+    function decodeSummaryVectorMirrorVector_ACU(encoded) {
+        if (typeof globalThis.atob !== 'function')
+            throw new Error('当前环境缺少 atob，无法解码镜像向量。');
+        const binary = globalThis.atob(String(encoded || ''));
+        if (binary.length % 4 !== 0) {
+            throw new Error(`镜像向量 f32b64 字节长度非法: bytes=${binary.length}`);
+        }
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1)
+            bytes[i] = binary.charCodeAt(i) & 0xff;
+        const view = new DataView(bytes.buffer);
+        const vector = new Float32Array(bytes.length / 4);
+        for (let offset = 0; offset < bytes.length; offset += 4) {
+            vector[offset / 4] = view.getFloat32(offset, true);
+        }
+        return vector;
+    }
+    async function registerPrepared_ACU(file) {
+        await registerVectorIndexFiles_ACU([{ ...file, publicationState: 'prepared' }]);
+    }
+    async function finalizeSummaryVectorMirrorFiles_ACU(files) {
+        const published = files
+            .filter((file) => !!file?.path)
+            .map((file) => ({ ...file, publicationState: 'published' }));
+        if (published.length === 0)
+            return;
+        await registerVectorIndexFiles_ACU(published);
+    }
+    async function persistSummaryVectorMirrorPackPrepared_ACU(params) {
+        const scope = normalizeSummaryVectorIndexScope_ACU(params);
+        const packScope = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope);
+        const blobDraft = buildContentPackBlob_ACU({
+            packKey: '',
+            packScope,
+            embeddingModel: params.embeddingModel,
+            dimension: params.dimension,
+            chunks: params.chunks,
+        });
+        const packHash = await sha256Text_ACU(serializeContentPackForHash_ACU(blobDraft));
+        const path = buildVectorIndexContentPackPathV2_ACU({
+            ...scope,
+            packKey: packHash,
+        });
+        const blob = buildContentPackBlob_ACU({
+            packKey: packHash,
+            packScope,
+            embeddingModel: params.embeddingModel,
+            dimension: params.dimension,
+            chunks: params.chunks,
+        });
+        const existing = await readVectorIndexJsonFile_ACU(path);
+        if (existing.ok && existing.data) {
+            if (existing.data.schema !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU || String(existing.data.packKey || '') !== packHash) {
+                throw new Error(`镜像 pack 路径冲突：path=${path} 已存在但内容与 packHash=${packHash} 不一致。`);
+            }
+            const json = JSON.stringify(existing.data);
+            const file = {
+                role: 'vector_pack',
+                path,
+                byteSize: json.length,
+                checksum: await sha256Text_ACU(json),
+                chunkCount: blob.chunks.length,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                status: 'ready',
+                scope,
+                publicationState: 'prepared',
+            };
+            await registerPrepared_ACU(file);
+            return {
+                ref: { packHash, path, chunkCount: blob.chunks.length, byteLength: json.length },
+                file,
+            };
+        }
+        const uploaded = await uploadVectorIndexJsonFile_ACU({
+            path,
+            role: 'vector_pack',
+            data: blob,
+            chunkCount: blob.chunks.length,
+            rowCount: blob.chunks.length,
+            status: 'ready',
+        });
+        if (!uploaded.ok || !uploaded.ref) {
+            throw new Error(uploaded.error || `镜像 pack 上传失败: ${path}`);
+        }
+        uploaded.ref.scope = scope;
+        uploaded.ref.publicationState = 'prepared';
+        await registerPrepared_ACU(uploaded.ref);
+        return {
+            ref: {
+                packHash,
+                path,
+                chunkCount: blob.chunks.length,
+                byteLength: Number(uploaded.ref.byteSize) || JSON.stringify(blob).length,
+            },
+            file: uploaded.ref,
+        };
+    }
+    async function persistSummaryVectorMirrorManifestPrepared_ACU(params) {
+        const scope = normalizeSummaryVectorIndexScope_ACU(params);
+        const payload = {
+            schema: 'summary_vector_mirror_manifest',
+            version: 1,
+            sourceTableKey: scope.sourceTableKey,
+            rows: Array.isArray(params.rows.rows) ? params.rows.rows : [],
+        };
+        const manifestHash = await sha256Text_ACU(JSON.stringify(payload));
+        const path = buildVectorIndexMirrorManifestPathV2_ACU({
+            ...scope,
+            manifestHash,
+        });
+        const uploaded = await uploadVectorIndexJsonFile_ACU({
+            path,
+            role: 'manifest',
+            data: payload,
+            rowCount: payload.rows.length,
+            status: 'ready',
+        });
+        if (!uploaded.ok || !uploaded.ref) {
+            throw new Error(uploaded.error || `镜像 checkpoint manifest 上传失败: ${path}`);
+        }
+        uploaded.ref.scope = scope;
+        uploaded.ref.publicationState = 'prepared';
+        await registerPrepared_ACU(uploaded.ref);
+        return {
+            ref: {
+                manifestHash,
+                path,
+                byteLength: Number(uploaded.ref.byteSize) || JSON.stringify(payload).length,
+            },
+            file: uploaded.ref,
+        };
+    }
+    async function loadSummaryVectorMirrorPack_ACU(ref) {
+        if (!ref?.path)
+            return null;
+        const loaded = await readVectorIndexJsonFile_ACU(ref.path);
+        if (!loaded.ok || !loaded.data)
+            return null;
+        if (loaded.data.schema !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU || !Array.isArray(loaded.data.chunks)) {
+            return null;
+        }
+        if (ref.packHash && String(loaded.data.packKey || '') !== ref.packHash)
+            return null;
+        return loaded.data;
+    }
+    async function loadSummaryVectorMirrorManifest_ACU(ref) {
+        if (!ref?.path)
+            return null;
+        const loaded = await readVectorIndexJsonFile_ACU(ref.path);
+        if (!loaded.ok || !loaded.data)
+            return null;
+        if (loaded.data.schema !== 'summary_vector_mirror_manifest' || !Array.isArray(loaded.data.rows))
+            return null;
+        if (ref.manifestHash) {
+            const actualHash = await sha256Text_ACU(JSON.stringify({
+                schema: loaded.data.schema,
+                version: loaded.data.version,
+                sourceTableKey: loaded.data.sourceTableKey,
+                rows: loaded.data.rows,
+            }));
+            if (actualHash !== ref.manifestHash)
+                return null;
+        }
+        return loaded.data;
+    }
+
     const DEFAULT_SHARD_CHUNK_LIMIT_ACU = 128;
     const SUMMARY_VECTOR_INDEX_PACK_CHUNK_LIMIT_ACU = 64;
     // 第一版保守止血：不再按 retention 删除历史快照，避免回退到旧楼层时找不到外置文件。
@@ -47545,7 +48202,7 @@ $CONTENT
             return [];
         return Array.from(vector, (value) => Number(value)).filter((value) => Number.isFinite(value));
     }
-    function encodeVectorToF32B64_ACU$1(vector) {
+    function encodeVectorToF32B64_ACU(vector) {
         if (!isVectorLike_ACU(vector))
             return '';
         const bytes = new Uint8Array(vector.length * 4);
@@ -47587,7 +48244,7 @@ $CONTENT
         return vector;
     }
     function encodeChunkVectorForStorage_ACU(chunk) {
-        return { ...chunk, vector: encodeVectorToF32B64_ACU$1(chunk.vector), vectorEncoding: VECTOR_ENCODING_F32B64_ACU };
+        return { ...chunk, vector: encodeVectorToF32B64_ACU(chunk.vector), vectorEncoding: VECTOR_ENCODING_F32B64_ACU };
     }
     function decodeChunkVectorInPlace_ACU(chunk) {
         if (chunk.vectorEncoding === VECTOR_ENCODING_F32B64_ACU || typeof chunk.vector === 'string') {
@@ -49090,7 +49747,7 @@ $CONTENT
                             chunkId,
                             rowKey: chunk?.rowKey || '',
                             text: chunk?.text || '',
-                            vector: encodeVectorToF32B64_ACU$1(chunk?.vector || []),
+                            vector: encodeVectorToF32B64_ACU(chunk?.vector || []),
                             vectorEncoding: 'f32b64',
                             ...(row?.sourceFingerprint ? { sourceFingerprint: row.sourceFingerprint } : {}),
                             ...(chunk?.textHash ? { textHash: chunk.textHash } : {}),
@@ -50310,6 +50967,43 @@ $CONTENT
             issues,
         };
     }
+    async function tryReadV2MirrorDisplayStats_ACU() {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0)
+            return null;
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const base = locateSummaryVectorMirrorBase_ACU(chat, isolationKey);
+        const sourceTableKey = String(base?.frame?.summaryVectorIndexFrame?.sourceTableKey
+            || base?.frame?.summaryVectorIndexFrame?.checkpoint?.sourceTableKey
+            || '').trim();
+        if (!sourceTableKey)
+            return null;
+        try {
+            const head = await resolveSummaryVectorMirrorHead_ACU({
+                chat,
+                isolationKey,
+                sourceTableKey,
+                loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
+            });
+            if (head.status !== 'ok' || !head.checkpoint)
+                return null;
+            const chunkCount = [...head.head.values()].reduce((sum, refs) => sum + refs.length, 0);
+            return {
+                status: 'ready',
+                indexId: head.checkpoint.manifestRef?.manifestHash || head.vectorRevision || '',
+                backend: 'st-files',
+                rowCount: head.head.size,
+                chunkCount,
+                baseShardCount: head.packRefs.length,
+                deltaShardCount: head.appliedDeltaEntryIds.length,
+                updatedAt: head.checkpoint.createdAt ? new Date(head.checkpoint.createdAt).toISOString() : '',
+            };
+        }
+        catch (error) {
+            logWarn_ACU('[交火向量索引] 读取 V2 镜像状态失败，回退 legacy 空状态:', error?.message || error);
+            return null;
+        }
+    }
     async function getSummaryVectorIndexStats_ACU(manifest) {
         manifest = normalizeSummaryVectorIndexManifestForRead_ACU(manifest);
         const tempCache = await estimateVectorIndexTempCache_ACU(manifest?.indexId);
@@ -50329,6 +51023,21 @@ $CONTENT
             flushTaskLastError: flushTasks.lastError,
         };
         if (!manifest) {
+            const v2 = await tryReadV2MirrorDisplayStats_ACU();
+            if (v2) {
+                return {
+                    ...v2,
+                    tombstoneRowCount: 0,
+                    tombstoneChunkCount: 0,
+                    externalTotalBytes: 0,
+                    cacheTotalBytes,
+                    tempCacheBytes: tempCache.bytes,
+                    tempCacheCount: tempCache.count,
+                    hotCacheBytes: hotCache.bytes,
+                    hotCacheCount: hotCache.count,
+                    ...flushTaskFields,
+                };
+            }
             return {
                 status: 'none',
                 indexId: '',
@@ -50626,18 +51335,15 @@ $CONTENT
         let duplicateRowId = '';
         let skippedRowCount = 0;
         dataRows.forEach((row, rowIndex) => {
-            const rowId = normalizeText_ACU$2(row?.[0]);
-            if (!rowId) {
-                skippedRowCount += 1;
-                return;
-            }
             const timeSpan = timeSpanColIdx >= 0 ? normalizeText_ACU$2(row?.[timeSpanColIdx]) : '';
             const location = locationColIdx >= 0 ? normalizeText_ACU$2(row?.[locationColIdx]) : '';
             const summary = normalizeText_ACU$2(row?.[summaryColIdx]);
             const indexCode = normalizeText_ACU$2(row?.[indexColIdx]);
             const chronicleText = chronicleColIdx >= 0 && chronicleColIdx !== summaryColIdx ? normalizeText_ACU$2(row?.[chronicleColIdx]) : '';
             const vectorSourceText = buildSummaryVectorSourceText_ACU(summary, chronicleText);
-            if (!summary || !indexCode || !vectorSourceText) {
+            // SQL 表物理 [0] 是 row_id；个别路径清空了 row_id 时用编码索引保住身份，避免 3 行全被 skip。
+            const rowId = normalizeText_ACU$2(row?.[0]) || indexCode;
+            if (!rowId || !summary || !indexCode || !vectorSourceText) {
                 skippedRowCount += 1;
                 return;
             }
@@ -51844,468 +52550,6 @@ $CONTENT
     }
 
     /**
-     * service/vector/summary-vector-mirror-resolver.ts — 纪要向量镜像的唯一读取入口
-     *
-     * 向量镜像与表格 V2 使用相同的楼层语义：
-     *   vector head = Vector checkpoint @ C（表格 full checkpoint 楼层，表示 C 层 logEntries 之前的状态）
-     *              + 按楼层序、frame 内按 seq 应用 C..H 全部 Vector delta（row_add / row_remove）
-     *
-     * 基底判定必须与 storage-frame-v2-replay.ts 的 replay 基底选择完全一致（含过渡根优先级），
-     * 否则 resolver 认为 C 在某层而 replay 用另一层做基底，vector head 与表格 head 静默错位。
-     *
-     * 一致性规则（设计文档 R2 / R6 / D17）：
-     * - delta 与来源 table entry 同生共死：sourceTableEntry.entryId 不在同 frame logEntries 中的 delta 是
-     *   orphan，直接丢弃并标记 stale；
-     * - delta 之间不维护 revision 链：删中间楼层会合法地移除一条 delta；
-     * - row_add 的 rowId 已在 head、或 row_remove 的 rowId 不在 head → 链冲突，整条 delta 丢弃，
-     *   由 rebuild_repair 修复；
-     * - resolver 不读实时纪要表；dirty 判定（head rowId 集合 vs 实时表 rowId 集合）由调用方完成。
-     *
-     * 外置 manifest 的读取通过 loadManifest 注入，本模块不依赖存储层。
-     */
-    // ─── frame 枚举与基底定位 ────────────────────────────────────────────────
-    /** 与 replay 的 getV2FrameRefs_ACU 一致：只看 AI 消息、按 chat 数组位置枚举。 */
-    function collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive) {
-        const refs = [];
-        if (!Array.isArray(chat))
-            return refs;
-        const upperExclusive = maxMessageIndexExclusive === undefined
-            ? chat.length
-            : Math.max(0, Math.min(chat.length, Math.floor(maxMessageIndexExclusive)));
-        for (let i = 0; i < upperExclusive; i += 1) {
-            const message = chat[i];
-            if (!message || message.is_user)
-                continue;
-            const tagData = readIsolatedTagData_ACU(message, isolationKey);
-            if (isV2TagData_ACU(tagData)) {
-                refs.push({ messageIndex: i, frame: tagData.storageFrame });
-            }
-        }
-        return refs;
-    }
-    /**
-     * 定位表格 replay 的 full checkpoint 基底。返回 null 表示基底不是 full checkpoint
-     * （过渡根接管 / 无 full → replacement anchor 或 temporary baseline），镜像不支持。
-     *
-     * 表达式与 storage-frame-v2-replay.ts:2375-2380 保持一致。
-     */
-    function locateSummaryVectorMirrorBase_ACU(chat, isolationKey, maxMessageIndexExclusive) {
-        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
-        const checkpointRef = [...refs].reverse().find((ref) => ref.frame.checkpoint?.kind === 'full') ?? null;
-        const replayMaxInclusive = maxMessageIndexExclusive === undefined ? undefined : maxMessageIndexExclusive - 1;
-        const transition = findLatestTransitionCheckpoint_ACU(chat, isolationKey, replayMaxInclusive);
-        if (transition && (!checkpointRef || checkpointRef.messageIndex <= transition.checkpoint.cutoff.messageIndex)) {
-            return null;
-        }
-        return checkpointRef;
-    }
-    // ─── revision 计算（writer 与 resolver 共用同一公式）───────────────────────
-    function serializeChunkRefs_ACU(chunks) {
-        return chunks.map((chunk) => `${chunk.packHash}#${chunk.chunkIndex}`).join(',');
-    }
-    /** checkpoint.vectorRevision：对 rowId 排序后连同 chunk 引用做 sha256。 */
-    function computeSummaryVectorMirrorCheckpointRevision_ACU(rows) {
-        const lines = Array.from(rows)
-            .map((row) => `${row.rowId}\t${serializeChunkRefs_ACU(row.chunks)}`)
-            .sort();
-        return sha256Base64UrlSync_ACU(lines.join('\n'));
-    }
-    /** head vectorRevision：只由 checkpoint revision 与按序 applied delta entryId 决定，对 messageIndex 位移不敏感。 */
-    function computeSummaryVectorMirrorHeadRevision_ACU(checkpointRevision, appliedDeltaEntryIds) {
-        return sha256Base64UrlSync_ACU([checkpointRevision, ...appliedDeltaEntryIds].join('\n'));
-    }
-    // ─── 结构校验 ────────────────────────────────────────────────────────────
-    function isNonEmptyString_ACU(value) {
-        return typeof value === 'string' && value.length > 0;
-    }
-    function isPlainObject_ACU(value) {
-        return value !== null && typeof value === 'object' && !Array.isArray(value);
-    }
-    function isSummaryVectorEmbeddingIdentity_ACU(value) {
-        return isPlainObject_ACU(value)
-            && typeof value.endpointFingerprint === 'string'
-            && isNonEmptyString_ACU(value.model)
-            && Number.isInteger(value.dimension) && value.dimension > 0
-            && Number.isInteger(value.sourceTextVersion);
-    }
-    function summaryVectorEmbeddingIdentityEquals_ACU(left, right) {
-        return left.endpointFingerprint === right.endpointFingerprint
-            && left.model === right.model
-            && left.dimension === right.dimension
-            && left.sourceTextVersion === right.sourceTextVersion;
-    }
-    function isPackRef_ACU(value) {
-        return isPlainObject_ACU(value)
-            && isNonEmptyString_ACU(value.packHash)
-            && isNonEmptyString_ACU(value.path)
-            && Number.isInteger(value.chunkCount) && value.chunkCount >= 0
-            && Number.isFinite(value.byteLength) && value.byteLength >= 0;
-    }
-    function isChunkRef_ACU(value) {
-        return isPlainObject_ACU(value)
-            && isNonEmptyString_ACU(value.packHash)
-            && Number.isInteger(value.chunkIndex) && value.chunkIndex >= 0;
-    }
-    function isManifestRef_ACU(value) {
-        return isPlainObject_ACU(value)
-            && isNonEmptyString_ACU(value.manifestHash)
-            && isNonEmptyString_ACU(value.path)
-            && Number.isFinite(value.byteLength) && value.byteLength >= 0;
-    }
-    function isSummaryVectorMirrorCheckpoint_ACU(value) {
-        return isPlainObject_ACU(value)
-            && value.kind === 'vector_full'
-            && Number.isFinite(value.createdAt)
-            && isNonEmptyString_ACU(value.reason)
-            && isNonEmptyString_ACU(value.sourceTableKey)
-            && typeof value.tableCheckpointFingerprint === 'string'
-            && isSummaryVectorEmbeddingIdentity_ACU(value.embedding)
-            && Number.isInteger(value.rowCount) && value.rowCount >= 0
-            && isNonEmptyString_ACU(value.vectorRevision)
-            && isManifestRef_ACU(value.manifestRef)
-            && Array.isArray(value.packRefs) && value.packRefs.every(isPackRef_ACU);
-    }
-    /**
-     * delta 结构校验：operations 非空；row_add 必须带非空 chunks，且引用的 packHash 全部出现在
-     * 本 delta 的 packRefs 中（每条 delta 对 GC 自包含）。
-     * 返回 null 表示合法，否则返回原因。
-     */
-    function validateSummaryVectorMirrorDelta_ACU(value) {
-        if (!isPlainObject_ACU(value))
-            return 'delta 不是对象';
-        if (!Number.isFinite(value.seq))
-            return 'seq 不是有限数';
-        if (!isNonEmptyString_ACU(value.entryId))
-            return 'entryId 为空';
-        if (!Number.isFinite(value.createdAt))
-            return 'createdAt 不是有限数';
-        const source = value.sourceTableEntry;
-        if (!isPlainObject_ACU(source) || !isNonEmptyString_ACU(source.entryId))
-            return 'sourceTableEntry.entryId 为空';
-        if (source.commitRevision !== null && typeof source.commitRevision !== 'string')
-            return 'sourceTableEntry.commitRevision 类型非法';
-        if (!isSummaryVectorEmbeddingIdentity_ACU(value.embedding))
-            return 'embedding 身份非法';
-        if (!Array.isArray(value.packRefs) || !value.packRefs.every(isPackRef_ACU))
-            return 'packRefs 非法';
-        if (!Array.isArray(value.operations) || value.operations.length === 0)
-            return 'operations 为空';
-        const ownPackHashes = new Set(value.packRefs.map((ref) => ref.packHash));
-        for (const operation of value.operations) {
-            if (!isPlainObject_ACU(operation))
-                return 'operation 不是对象';
-            if (!isNonEmptyString_ACU(operation.rowId))
-                return 'operation.rowId 为空';
-            if (operation.kind === 'row_remove')
-                continue;
-            if (operation.kind !== 'row_add')
-                return `未知 operation kind=${String(operation.kind)}`;
-            if (!Array.isArray(operation.chunks) || operation.chunks.length === 0)
-                return `row_add rowId=${operation.rowId} 缺少 chunks`;
-            if (!operation.chunks.every(isChunkRef_ACU))
-                return `row_add rowId=${operation.rowId} 的 chunk 引用非法`;
-            if (typeof operation.vectorSourceHash !== 'string')
-                return `row_add rowId=${operation.rowId} 缺少 vectorSourceHash`;
-            for (const chunk of operation.chunks) {
-                if (!ownPackHashes.has(chunk.packHash)) {
-                    return `row_add rowId=${operation.rowId} 引用的 pack ${chunk.packHash} 不在本 delta 的 packRefs 中`;
-                }
-            }
-        }
-        return null;
-    }
-    function isSummaryVectorMirrorFrame_ACU(value) {
-        return isPlainObject_ACU(value)
-            && value.version === 3
-            && isNonEmptyString_ACU(value.sourceTableKey)
-            && Array.isArray(value.logEntries)
-            && (value.checkpoint === undefined || isSummaryVectorMirrorCheckpoint_ACU(value.checkpoint));
-    }
-    /**
-     * frame 级不变量断言（写入方在 strict save 前调用；与 assertSingleActiveFullCheckpointV2_ACU 同风格）：
-     * - 镜像 frame 结构合法；
-     * - vector checkpoint 只允许出现在表格 full checkpoint 所在 frame；
-     * - 同一隔离键至多一个 vector checkpoint；
-     * - 每条 delta 结构合法，同 frame 内 delta entryId 唯一。
-     * 命中不变量返回 null，否则返回可直接写入日志的违规描述。
-     */
-    function assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, context) {
-        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey);
-        const checkpointFrames = [];
-        for (const ref of refs) {
-            const mirror = ref.frame.summaryVectorIndexFrame;
-            if (mirror === undefined)
-                continue;
-            if (!isSummaryVectorMirrorFrame_ACU(mirror)) {
-                return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 的 summaryVectorIndexFrame 结构非法。`;
-            }
-            if (mirror.checkpoint) {
-                if (ref.frame.checkpoint?.kind !== 'full') {
-                    return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 没有表格 full checkpoint 却存在 vector checkpoint。`;
-                }
-                checkpointFrames.push(ref.messageIndex);
-            }
-            const seenEntryIds = new Set();
-            for (const delta of mirror.logEntries) {
-                const reason = validateSummaryVectorMirrorDelta_ACU(delta);
-                if (reason) {
-                    return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 的 vector delta 非法（${reason}）。`;
-                }
-                if (seenEntryIds.has(delta.entryId)) {
-                    return `V2 ${context} 违反向量镜像不变量：楼层 #${ref.messageIndex} 存在重复的 vector delta entryId=${delta.entryId}。`;
-                }
-                seenEntryIds.add(delta.entryId);
-            }
-        }
-        if (checkpointFrames.length > 1) {
-            return `V2 ${context} 违反向量镜像不变量：同一隔离键下存在 ${checkpointFrames.length} 个 vector checkpoint（${checkpointFrames.map((index) => `#${index}`).join('、')}）。`;
-        }
-        return null;
-    }
-    // ─── head 解析 ───────────────────────────────────────────────────────────
-    function buildEmptyResult_ACU(status, sourceTableKey, checkpointMessageIndex, checkpoint, diagnostics) {
-        return {
-            status,
-            sourceTableKey,
-            checkpointMessageIndex,
-            checkpoint,
-            head: new Map(),
-            vectorRevision: '',
-            packRefs: [],
-            appliedDeltaEntryIds: [],
-            appliedTableEntryIds: [],
-            stale: false,
-            chainConflict: false,
-            diagnostics,
-        };
-    }
-    function sortDeltasBySeq_ACU(deltas, messageIndex, diagnostics) {
-        const indexed = deltas.map((delta, index) => ({ delta, index }));
-        indexed.sort((left, right) => {
-            const seqDiff = Number(left.delta?.seq) - Number(right.delta?.seq);
-            if (Number.isFinite(seqDiff) && seqDiff !== 0)
-                return seqDiff;
-            return left.index - right.index;
-        });
-        const seenSeq = new Set();
-        for (const { delta } of indexed) {
-            const seq = Number(delta?.seq);
-            if (!Number.isFinite(seq))
-                continue;
-            if (seenSeq.has(seq)) {
-                diagnostics.push({
-                    code: 'duplicate_delta_seq',
-                    messageIndex,
-                    entryId: typeof delta?.entryId === 'string' ? delta.entryId : undefined,
-                    detail: `楼层 #${messageIndex} 存在重复的 vector delta seq=${seq}，按数组顺序应用。`,
-                });
-            }
-            seenSeq.add(seq);
-        }
-        return indexed.map((item) => item.delta);
-    }
-    /**
-     * 对单条 delta 做链一致性预检（R6）：
-     * - 同一 delta 内同 rowId 不得出现两次；
-     * - row_add 的 rowId 不得已在 head；row_remove 的 rowId 必须在 head。
-     * 返回 null 表示可应用，否则返回冲突描述与 rowId。
-     */
-    function checkDeltaChainConsistency_ACU(operations, head) {
-        const seen = new Set();
-        for (const operation of operations) {
-            if (seen.has(operation.rowId)) {
-                return { rowId: operation.rowId, detail: `同一 delta 内 rowId=${operation.rowId} 出现多次` };
-            }
-            seen.add(operation.rowId);
-            if (operation.kind === 'row_add' && head.has(operation.rowId)) {
-                return { rowId: operation.rowId, detail: `row_add 的 rowId=${operation.rowId} 已存在于 head（中间没有 row_remove）` };
-            }
-            if (operation.kind === 'row_remove' && !head.has(operation.rowId)) {
-                return { rowId: operation.rowId, detail: `row_remove 的 rowId=${operation.rowId} 不在 head 中` };
-            }
-        }
-        return null;
-    }
-    async function resolveSummaryVectorMirrorHead_ACU(options) {
-        const { chat, isolationKey, sourceTableKey, loadManifest, embedding, maxMessageIndexExclusive } = options;
-        const diagnostics = [];
-        const base = locateSummaryVectorMirrorBase_ACU(chat, isolationKey, maxMessageIndexExclusive);
-        if (!base || !base.frame.checkpoint) {
-            return buildEmptyResult_ACU('unsupported_replay_base', sourceTableKey, null, null, diagnostics);
-        }
-        const baseMirror = base.frame.summaryVectorIndexFrame;
-        if (!isSummaryVectorMirrorFrame_ACU(baseMirror) || !baseMirror.checkpoint) {
-            return buildEmptyResult_ACU('no_mirror', sourceTableKey, base.messageIndex, null, diagnostics);
-        }
-        const checkpoint = baseMirror.checkpoint;
-        if (baseMirror.sourceTableKey !== sourceTableKey || checkpoint.sourceTableKey !== sourceTableKey) {
-            return buildEmptyResult_ACU('source_table_changed', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
-        }
-        const actualFingerprint = getTableDataFingerprint_ACU(base.frame.checkpoint.data);
-        if (checkpoint.tableCheckpointFingerprint !== actualFingerprint) {
-            return buildEmptyResult_ACU('checkpoint_mismatch', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
-        }
-        if (embedding && !summaryVectorEmbeddingIdentityEquals_ACU(embedding, checkpoint.embedding)) {
-            return buildEmptyResult_ACU('embedding_identity_changed', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
-        }
-        let manifest = null;
-        try {
-            manifest = await loadManifest(checkpoint.manifestRef, checkpoint);
-        }
-        catch (error) {
-            diagnostics.push({
-                code: 'manifest_load_failed',
-                messageIndex: base.messageIndex,
-                detail: `读取 checkpoint manifest 失败：${error?.message || String(error || '未知错误')}`,
-            });
-            manifest = null;
-        }
-        if (!manifest || manifest.schema !== 'summary_vector_mirror_manifest' || !Array.isArray(manifest.rows)) {
-            if (manifest) {
-                diagnostics.push({
-                    code: 'manifest_load_failed',
-                    messageIndex: base.messageIndex,
-                    detail: 'checkpoint manifest 结构非法。',
-                });
-            }
-            return buildEmptyResult_ACU('manifest_unavailable', sourceTableKey, base.messageIndex, checkpoint, diagnostics);
-        }
-        const head = new Map();
-        for (const row of manifest.rows) {
-            if (!isPlainObject_ACU(row) || !isNonEmptyString_ACU(row.rowId) || !Array.isArray(row.chunks))
-                continue;
-            if (head.has(row.rowId)) {
-                diagnostics.push({
-                    code: 'manifest_duplicate_row_id',
-                    messageIndex: base.messageIndex,
-                    rowId: row.rowId,
-                    detail: `checkpoint manifest 中 rowId=${row.rowId} 重复，后者覆盖前者。`,
-                });
-            }
-            head.set(row.rowId, row.chunks.filter(isChunkRef_ACU).map((chunk) => ({ ...chunk })));
-        }
-        const packRefsByHash = new Map();
-        checkpoint.packRefs.forEach((ref) => packRefsByHash.set(ref.packHash, { ...ref }));
-        const appliedDeltaEntryIds = [];
-        const appliedTableEntryIds = [];
-        let stale = false;
-        let chainConflict = false;
-        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
-        for (const ref of refs) {
-            if (ref.messageIndex < base.messageIndex)
-                continue;
-            const mirror = ref.frame.summaryVectorIndexFrame;
-            if (mirror === undefined)
-                continue;
-            if (!isSummaryVectorMirrorFrame_ACU(mirror)) {
-                diagnostics.push({
-                    code: 'invalid_delta',
-                    messageIndex: ref.messageIndex,
-                    detail: `楼层 #${ref.messageIndex} 的 summaryVectorIndexFrame 结构非法，本层 delta 全部跳过。`,
-                });
-                stale = true;
-                continue;
-            }
-            // 基底是最后一个 full checkpoint，之后的 frame 不可能再有 full checkpoint，
-            // 因此这里出现的 vector checkpoint 一定缺少表格锚点。
-            if (ref.messageIndex !== base.messageIndex && mirror.checkpoint) {
-                diagnostics.push({
-                    code: 'misplaced_checkpoint',
-                    messageIndex: ref.messageIndex,
-                    detail: `楼层 #${ref.messageIndex} 没有表格 full checkpoint 却存在 vector checkpoint，已忽略；只认基底楼层 #${base.messageIndex}。`,
-                });
-            }
-            if (mirror.sourceTableKey !== sourceTableKey) {
-                diagnostics.push({
-                    code: 'invalid_delta',
-                    messageIndex: ref.messageIndex,
-                    detail: `楼层 #${ref.messageIndex} 的镜像 sourceTableKey=${mirror.sourceTableKey} 与当前纪要表 ${sourceTableKey} 不一致，本层 delta 全部跳过。`,
-                });
-                stale = true;
-                continue;
-            }
-            const tableEntryIds = new Set((Array.isArray(ref.frame.logEntries) ? ref.frame.logEntries : [])
-                .map((entry) => entry?.entryId)
-                .filter((entryId) => typeof entryId === 'string' && entryId.length > 0));
-            const deltas = sortDeltasBySeq_ACU(mirror.logEntries, ref.messageIndex, diagnostics);
-            for (const delta of deltas) {
-                const invalidReason = validateSummaryVectorMirrorDelta_ACU(delta);
-                if (invalidReason) {
-                    diagnostics.push({
-                        code: 'invalid_delta',
-                        messageIndex: ref.messageIndex,
-                        entryId: typeof delta?.entryId === 'string' ? delta.entryId : undefined,
-                        detail: `楼层 #${ref.messageIndex} 的 vector delta 结构非法（${invalidReason}），已丢弃。`,
-                    });
-                    stale = true;
-                    continue;
-                }
-                if (!tableEntryIds.has(delta.sourceTableEntry.entryId)) {
-                    diagnostics.push({
-                        code: 'orphan_delta',
-                        messageIndex: ref.messageIndex,
-                        entryId: delta.entryId,
-                        detail: `楼层 #${ref.messageIndex} 的 vector delta 来源 table entry ${delta.sourceTableEntry.entryId} 已不存在，已丢弃。`,
-                    });
-                    stale = true;
-                    continue;
-                }
-                if (!summaryVectorEmbeddingIdentityEquals_ACU(delta.embedding, checkpoint.embedding)) {
-                    diagnostics.push({
-                        code: 'delta_embedding_mismatch',
-                        messageIndex: ref.messageIndex,
-                        entryId: delta.entryId,
-                        detail: `楼层 #${ref.messageIndex} 的 vector delta embedding 身份（${delta.embedding.model}/${delta.embedding.dimension}）与 checkpoint（${checkpoint.embedding.model}/${checkpoint.embedding.dimension}）不一致，已丢弃。`,
-                    });
-                    stale = true;
-                    continue;
-                }
-                const conflict = checkDeltaChainConsistency_ACU(delta.operations, head);
-                if (conflict) {
-                    diagnostics.push({
-                        code: 'chain_conflict',
-                        messageIndex: ref.messageIndex,
-                        entryId: delta.entryId,
-                        rowId: conflict.rowId,
-                        detail: `楼层 #${ref.messageIndex} 的 vector delta 链冲突：${conflict.detail}，整条 delta 已丢弃。`,
-                    });
-                    chainConflict = true;
-                    stale = true;
-                    continue;
-                }
-                for (const operation of delta.operations) {
-                    if (operation.kind === 'row_add') {
-                        head.set(operation.rowId, operation.chunks.map((chunk) => ({ ...chunk })));
-                    }
-                    else {
-                        head.delete(operation.rowId);
-                    }
-                }
-                delta.packRefs.forEach((packRef) => {
-                    if (!packRefsByHash.has(packRef.packHash))
-                        packRefsByHash.set(packRef.packHash, { ...packRef });
-                });
-                appliedDeltaEntryIds.push(delta.entryId);
-                appliedTableEntryIds.push(delta.sourceTableEntry.entryId);
-            }
-        }
-        return {
-            status: 'ok',
-            sourceTableKey,
-            checkpointMessageIndex: base.messageIndex,
-            checkpoint,
-            head,
-            vectorRevision: computeSummaryVectorMirrorHeadRevision_ACU(checkpoint.vectorRevision, appliedDeltaEntryIds),
-            packRefs: Array.from(packRefsByHash.values()),
-            appliedDeltaEntryIds,
-            appliedTableEntryIds,
-            stale,
-            chainConflict,
-            diagnostics,
-        };
-    }
-
-    /**
      * service/table/summary-sheet-rowid-timeline.ts — 纪要表 rowId 集合的 entry 边界时间线
      *
      * 向量镜像只跟踪 rowId 的增减，不解释 SQL / sheet_replace / data_replace 的语义。
@@ -52454,201 +52698,6 @@ $CONTENT
     }
 
     /**
-     * service/vector/summary-vector-mirror-storage.ts — 镜像 pack / checkpoint manifest 的 content-addressed 读写
-     *
-     * pack 路径沿用现有族：TavernDB_ACU_vector_v2pack_<scopeToken>_<packKey>
-     * checkpoint manifest 新路径：TavernDB_ACU_vector_v2vcp_<scopeToken>_<sha256>
-     * 文件名保留 scope token，供 GC 按 scope 前缀筛选。写入走 prepared → published。
-     */
-    function encodeVectorToF32B64_ACU(vector) {
-        const bytes = new Uint8Array(vector.length * 4);
-        const view = new DataView(bytes.buffer);
-        for (let index = 0; index < vector.length; index += 1) {
-            const numeric = Number(vector[index]);
-            if (!Number.isFinite(numeric)) {
-                throw new Error(`镜像向量包含非有限数值，拒绝编码: index=${index}`);
-            }
-            view.setFloat32(index * 4, numeric, true);
-        }
-        let binary = '';
-        for (let offset = 0; offset < bytes.length; offset += 1) {
-            binary += String.fromCharCode(bytes[offset]);
-        }
-        if (typeof globalThis.btoa !== 'function')
-            throw new Error('当前环境缺少 btoa，无法编码镜像向量。');
-        return globalThis.btoa(binary);
-    }
-    function encodeSummaryVectorMirrorVector_ACU(vector) {
-        return encodeVectorToF32B64_ACU(vector);
-    }
-    function decodeSummaryVectorMirrorVector_ACU(encoded) {
-        if (typeof globalThis.atob !== 'function')
-            throw new Error('当前环境缺少 atob，无法解码镜像向量。');
-        const binary = globalThis.atob(String(encoded || ''));
-        if (binary.length % 4 !== 0) {
-            throw new Error(`镜像向量 f32b64 字节长度非法: bytes=${binary.length}`);
-        }
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1)
-            bytes[i] = binary.charCodeAt(i) & 0xff;
-        const view = new DataView(bytes.buffer);
-        const vector = new Float32Array(bytes.length / 4);
-        for (let offset = 0; offset < bytes.length; offset += 4) {
-            vector[offset / 4] = view.getFloat32(offset, true);
-        }
-        return vector;
-    }
-    async function registerPrepared_ACU(file) {
-        await registerVectorIndexFiles_ACU([{ ...file, publicationState: 'prepared' }]);
-    }
-    async function finalizeSummaryVectorMirrorFiles_ACU(files) {
-        const published = files
-            .filter((file) => !!file?.path)
-            .map((file) => ({ ...file, publicationState: 'published' }));
-        if (published.length === 0)
-            return;
-        await registerVectorIndexFiles_ACU(published);
-    }
-    async function persistSummaryVectorMirrorPackPrepared_ACU(params) {
-        const scope = normalizeSummaryVectorIndexScope_ACU(params);
-        const packScope = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope);
-        const blobDraft = buildContentPackBlob_ACU({
-            packKey: '',
-            packScope,
-            embeddingModel: params.embeddingModel,
-            dimension: params.dimension,
-            chunks: params.chunks,
-        });
-        const packHash = await sha256Text_ACU(serializeContentPackForHash_ACU(blobDraft));
-        const path = buildVectorIndexContentPackPathV2_ACU({
-            ...scope,
-            packKey: packHash,
-        });
-        const blob = buildContentPackBlob_ACU({
-            packKey: packHash,
-            packScope,
-            embeddingModel: params.embeddingModel,
-            dimension: params.dimension,
-            chunks: params.chunks,
-        });
-        const existing = await readVectorIndexJsonFile_ACU(path);
-        if (existing.ok && existing.data) {
-            if (existing.data.schema !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU || String(existing.data.packKey || '') !== packHash) {
-                throw new Error(`镜像 pack 路径冲突：path=${path} 已存在但内容与 packHash=${packHash} 不一致。`);
-            }
-            const json = JSON.stringify(existing.data);
-            const file = {
-                role: 'vector_pack',
-                path,
-                byteSize: json.length,
-                checksum: await sha256Text_ACU(json),
-                chunkCount: blob.chunks.length,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                status: 'ready',
-                scope,
-                publicationState: 'prepared',
-            };
-            await registerPrepared_ACU(file);
-            return {
-                ref: { packHash, path, chunkCount: blob.chunks.length, byteLength: json.length },
-                file,
-            };
-        }
-        const uploaded = await uploadVectorIndexJsonFile_ACU({
-            path,
-            role: 'vector_pack',
-            data: blob,
-            chunkCount: blob.chunks.length,
-            rowCount: blob.chunks.length,
-            status: 'ready',
-        });
-        if (!uploaded.ok || !uploaded.ref) {
-            throw new Error(uploaded.error || `镜像 pack 上传失败: ${path}`);
-        }
-        uploaded.ref.scope = scope;
-        uploaded.ref.publicationState = 'prepared';
-        await registerPrepared_ACU(uploaded.ref);
-        return {
-            ref: {
-                packHash,
-                path,
-                chunkCount: blob.chunks.length,
-                byteLength: Number(uploaded.ref.byteSize) || JSON.stringify(blob).length,
-            },
-            file: uploaded.ref,
-        };
-    }
-    async function persistSummaryVectorMirrorManifestPrepared_ACU(params) {
-        const scope = normalizeSummaryVectorIndexScope_ACU(params);
-        const payload = {
-            schema: 'summary_vector_mirror_manifest',
-            version: 1,
-            sourceTableKey: scope.sourceTableKey,
-            rows: Array.isArray(params.rows.rows) ? params.rows.rows : [],
-        };
-        const manifestHash = await sha256Text_ACU(JSON.stringify(payload));
-        const path = buildVectorIndexMirrorManifestPathV2_ACU({
-            ...scope,
-            manifestHash,
-        });
-        const uploaded = await uploadVectorIndexJsonFile_ACU({
-            path,
-            role: 'manifest',
-            data: payload,
-            rowCount: payload.rows.length,
-            status: 'ready',
-        });
-        if (!uploaded.ok || !uploaded.ref) {
-            throw new Error(uploaded.error || `镜像 checkpoint manifest 上传失败: ${path}`);
-        }
-        uploaded.ref.scope = scope;
-        uploaded.ref.publicationState = 'prepared';
-        await registerPrepared_ACU(uploaded.ref);
-        return {
-            ref: {
-                manifestHash,
-                path,
-                byteLength: Number(uploaded.ref.byteSize) || JSON.stringify(payload).length,
-            },
-            file: uploaded.ref,
-        };
-    }
-    async function loadSummaryVectorMirrorPack_ACU(ref) {
-        if (!ref?.path)
-            return null;
-        const loaded = await readVectorIndexJsonFile_ACU(ref.path);
-        if (!loaded.ok || !loaded.data)
-            return null;
-        if (loaded.data.schema !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU || !Array.isArray(loaded.data.chunks)) {
-            return null;
-        }
-        if (ref.packHash && String(loaded.data.packKey || '') !== ref.packHash)
-            return null;
-        return loaded.data;
-    }
-    async function loadSummaryVectorMirrorManifest_ACU(ref) {
-        if (!ref?.path)
-            return null;
-        const loaded = await readVectorIndexJsonFile_ACU(ref.path);
-        if (!loaded.ok || !loaded.data)
-            return null;
-        if (loaded.data.schema !== 'summary_vector_mirror_manifest' || !Array.isArray(loaded.data.rows))
-            return null;
-        if (ref.manifestHash) {
-            const actualHash = await sha256Text_ACU(JSON.stringify({
-                schema: loaded.data.schema,
-                version: loaded.data.version,
-                sourceTableKey: loaded.data.sourceTableKey,
-                rows: loaded.data.rows,
-            }));
-            if (actualHash !== ref.manifestHash)
-                return null;
-        }
-        return loaded.data;
-    }
-
-    /**
      * service/vector/summary-vector-mirror-writer.ts — 纪要向量镜像 flush runner
      *
      * 流程：resolver → rowId 时间线 → 未镜像 entry 集合差分 → 批量 embedding →
@@ -52699,14 +52748,15 @@ $CONTENT
         }
         return null;
     }
-    function planUnmirroredEntryDeltasV2_ACU(timelineEntries, appliedTableEntryIds, rowIdsAtCheckpoint) {
+    function planUnmirroredEntryDeltasV2_ACU(timelineEntries, appliedTableEntryIds, rowIdsAtCheckpoint, alreadyMirroredRowIds = []) {
         const mirrored = new Set(appliedTableEntryIds);
+        const alreadyInHead = new Set([...alreadyMirroredRowIds].map((rowId) => String(rowId || '').trim()).filter(Boolean));
         const plans = [];
         let before = new Set(rowIdsAtCheckpoint);
         for (const entry of timelineEntries) {
             const after = new Set(entry.rowIdsAfter);
             if (!mirrored.has(entry.entryId)) {
-                const added = [...after].filter((rowId) => !before.has(rowId)).sort();
+                const added = [...after].filter((rowId) => !before.has(rowId) && !alreadyInHead.has(rowId)).sort();
                 const removed = [...before].filter((rowId) => !after.has(rowId)).sort();
                 if (added.length > 0 || removed.length > 0) {
                     plans.push({
@@ -52862,7 +52912,7 @@ $CONTENT
                 retryability: 'retryable',
             });
         }
-        const plans = planUnmirroredEntryDeltasV2_ACU(timeline.entries, head.appliedTableEntryIds, timeline.rowIdsAtCheckpoint);
+        const plans = planUnmirroredEntryDeltasV2_ACU(timeline.entries, head.appliedTableEntryIds, timeline.rowIdsAtCheckpoint, head.head.keys());
         if (plans.length === 0) {
             return emptyResult_ACU$1({
                 success: true,
@@ -53211,8 +53261,9 @@ $CONTENT
     /**
      * service/vector/summary-vector-mirror-rebuild.ts — 统一重建路径
      *
-     * replay/checkpoint.data 取 C 时刻 rowId 集合 → pack+manifest → 写 checkpoint@C →
-     * 清 C..H 旧 delta → strict save → 立刻 flush 补 C..H（当前纪要表里的新行）。
+     * replay/checkpoint.data 取 C 时刻 rowId 集合；与当前纪要表对得上则只索引 C。
+     * C 为空或对不上时把当前纪要表写入 vector_full（否则没有 table entry 可挂 delta）。
+     * 写 checkpoint@C → 清 C..H 旧 delta → strict save → 立刻 flush 补仍未镜像的 C..H。
      * rebuild_repair 复用当前 head 中读回校验通过的 refs；initial / rebuild_user 全量 embedding。
      */
     function emptyResult_ACU(partial) {
@@ -53228,12 +53279,17 @@ $CONTENT
     }
     function inspectCheckpointRowIds_ACU(sheet) {
         const content = Array.isArray(sheet?.content) ? sheet.content : [];
+        const header = Array.isArray(content[0]) ? content[0] : [];
+        const indexColIdx = header.findIndex((cell) => String(cell ?? '').trim() === '编码索引');
         const seen = new Set();
         const rowIds = [];
         const duplicates = [];
         let emptyCount = 0;
         for (let index = 1; index < content.length; index += 1) {
-            const rowId = String(content[index]?.[0] ?? '').trim();
+            const row = content[index];
+            const physicalId = String(row?.[0] ?? '').trim();
+            const indexCode = indexColIdx >= 0 ? String(row?.[indexColIdx] ?? '').trim() : '';
+            const rowId = physicalId || indexCode;
             if (!rowId) {
                 emptyCount += 1;
                 continue;
@@ -53247,6 +53303,31 @@ $CONTENT
             rowIds.push(rowId);
         }
         return { rowIds, duplicates, emptyCount };
+    }
+    /**
+     * 重建纳入 vector_full 的 rowId 集合。
+     * C 与当前表能对上时只吃 C（V2 不变量）；对不上或 C 为空时，用当前纪要表 seed，
+     * 否则空 C + 看不到 table entry 的 H 行会永远变成 0 行索引。
+     */
+    function selectRebuildSourceRowIds_ACU(options) {
+        const prepared = options.preparedRowIds
+            .map((rowId) => String(rowId || '').trim())
+            .filter(Boolean);
+        const preparedSet = new Set(prepared);
+        const matched = options.checkpointRowIds
+            .map((rowId) => String(rowId || '').trim())
+            .filter((rowId) => rowId && preparedSet.has(rowId));
+        if (matched.length > 0) {
+            return { rowIds: matched, seededFromLiveTable: false };
+        }
+        if (prepared.length > 0) {
+            return { rowIds: prepared, seededFromLiveTable: true };
+        }
+        return { rowIds: [], seededFromLiveTable: false };
+    }
+    function frameHasUsableVectorMirror_ACU(tagData) {
+        const checkpoint = tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint;
+        return checkpoint?.kind === 'vector_full' && Number(checkpoint.rowCount) > 0;
     }
     function clearLegacyVectorFields_ACU(chat) {
         for (const message of chat) {
@@ -53290,12 +53371,16 @@ $CONTENT
             return emptyResult_ACU({ reason: 'summary_vector_index_config_invalid', errors: validation.errors });
         }
         const embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
-        // embedding 文本取当前纪要表：C 里可能只有 rowId、单元格已被后续填表更新。
-        // 纳入 checkpoint 的 rowId 集合仍只来自 C，不能把 H 的新行写进 C。
         const prepared = buildPreparedRows_ACU(selected.table, selected.summaryKey);
-        const currentInspect = inspectCheckpointRowIds_ACU(selected.table);
-        if (inspect.rowIds.length === 0 && currentInspect.rowIds.length > 0) {
-            logDebug_ACU(`[向量镜像] C 时刻纪要表无行、当前表有 ${currentInspect.rowIds.length} 行，重建后立即 flush 补 C..H。`);
+        if (prepared.error) {
+            return emptyResult_ACU({ reason: 'prepared_rows_invalid', errors: [prepared.error] });
+        }
+        const source = selectRebuildSourceRowIds_ACU({
+            checkpointRowIds: inspect.rowIds,
+            preparedRowIds: prepared.rows.map((row) => row.rowId),
+        });
+        if (source.seededFromLiveTable) {
+            logDebug_ACU(`[向量镜像] C 时刻纪要表无法对上当前表（C=${inspect.rowIds.length}，当前=${prepared.rows.length}），重建将当前纪要表 ${source.rowIds.length} 行写入 vector_full。`);
         }
         const preparedById = new Map(prepared.rows.map((row) => [row.rowId, row]));
         const reusable = new Map();
@@ -53307,7 +53392,7 @@ $CONTENT
                 loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
             });
             if (head.status === 'ok') {
-                for (const rowId of inspect.rowIds) {
+                for (const rowId of source.rowIds) {
                     const refs = head.head.get(rowId);
                     if (!refs || refs.length === 0)
                         continue;
@@ -53324,7 +53409,7 @@ $CONTENT
                 }
             }
         }
-        const toEmbed = inspect.rowIds.filter((rowId) => !reusable.has(rowId) && preparedById.has(rowId));
+        const toEmbed = source.rowIds.filter((rowId) => !reusable.has(rowId) && preparedById.has(rowId));
         const chunkSources = [];
         for (const rowId of toEmbed) {
             const row = preparedById.get(rowId);
@@ -53397,7 +53482,7 @@ $CONTENT
                 newRefsByRow.set(source.rowId, list);
             });
         }
-        const rows = inspect.rowIds.map((rowId) => ({
+        const rows = source.rowIds.map((rowId) => ({
             rowId,
             chunks: newRefsByRow.get(rowId) || [],
         })).filter((row) => row.chunks.length > 0);
@@ -53528,10 +53613,10 @@ $CONTENT
             const isolated = message?.TavernDB_ACU_IsolatedData;
             if (!isolated || typeof isolated !== 'object')
                 return false;
-            return Object.values(isolated).some((tagData) => (tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'));
+            return Object.values(isolated).some((tagData) => frameHasUsableVectorMirror_ACU(tagData));
         });
     }
-    /** 当前 isolation 槽是否已有 V2 向量 checkpoint。其他 isolation 的镜像不算当前环境。 */
+    /** 当前 isolation 槽是否已有带行的 V2 向量 checkpoint。空 vector_full 不算已有数据。 */
     function currentEnvironmentHasSummaryVectorMirror_ACU(chat, isolationKey) {
         if (!Array.isArray(chat))
             return false;
@@ -53540,8 +53625,7 @@ $CONTENT
             const isolated = message?.TavernDB_ACU_IsolatedData;
             if (!isolated || typeof isolated !== 'object')
                 return false;
-            const tagData = isolated[key];
-            return tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full';
+            return frameHasUsableVectorMirror_ACU(isolated[key]);
         });
     }
     function chatHasLegacySummaryVectorFields_ACU(chat) {

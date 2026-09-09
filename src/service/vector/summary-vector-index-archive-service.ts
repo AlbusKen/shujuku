@@ -433,18 +433,15 @@ export function buildPreparedRows_ACU(table: any, summaryKey: string): {
     let duplicateRowId = '';
     let skippedRowCount = 0;
     dataRows.forEach((row: any[], rowIndex: number) => {
-        const rowId = normalizeText_ACU(row?.[0]);
-        if (!rowId) {
-            skippedRowCount += 1;
-            return;
-        }
         const timeSpan = timeSpanColIdx >= 0 ? normalizeText_ACU(row?.[timeSpanColIdx]) : '';
         const location = locationColIdx >= 0 ? normalizeText_ACU(row?.[locationColIdx]) : '';
         const summary = normalizeText_ACU(row?.[summaryColIdx]);
         const indexCode = normalizeText_ACU(row?.[indexColIdx]);
         const chronicleText = chronicleColIdx >= 0 && chronicleColIdx !== summaryColIdx ? normalizeText_ACU(row?.[chronicleColIdx]) : '';
         const vectorSourceText = buildSummaryVectorSourceText_ACU(summary, chronicleText);
-        if (!summary || !indexCode || !vectorSourceText) {
+        // SQL 表物理 [0] 是 row_id；个别路径清空了 row_id 时用编码索引保住身份，避免 3 行全被 skip。
+        const rowId = normalizeText_ACU(row?.[0]) || indexCode;
+        if (!rowId || !summary || !indexCode || !vectorSourceText) {
             skippedRowCount += 1;
             return;
         }

@@ -74,6 +74,11 @@ import {
 import { getAllSummaryVectorIndexSnapshotLayers_ACU } from './summary-vector-index-state-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 import { buildSummaryRowFingerprint_ACU } from './summary-vector-row-fingerprint';
+import {
+    locateSummaryVectorMirrorBase_ACU,
+    resolveSummaryVectorMirrorHead_ACU,
+} from './summary-vector-mirror-resolver';
+import { loadSummaryVectorMirrorManifest_ACU } from './summary-vector-mirror-storage';
 
 const DEFAULT_SHARD_CHUNK_LIMIT_ACU = 128;
 const SUMMARY_VECTOR_INDEX_PACK_CHUNK_LIMIT_ACU = 64;
@@ -3282,6 +3287,51 @@ export async function inspectSummaryVectorIndexHealth_ACU(): Promise<SummaryVect
     };
 }
 
+async function tryReadV2MirrorDisplayStats_ACU(): Promise<{
+    status: 'ready';
+    indexId: string;
+    backend: 'st-files';
+    rowCount: number;
+    chunkCount: number;
+    baseShardCount: number;
+    deltaShardCount: number;
+    updatedAt: string;
+} | null> {
+    const chat = getChatArray_ACU();
+    if (!Array.isArray(chat) || chat.length === 0) return null;
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const base = locateSummaryVectorMirrorBase_ACU(chat, isolationKey);
+    const sourceTableKey = String(
+        base?.frame?.summaryVectorIndexFrame?.sourceTableKey
+        || base?.frame?.summaryVectorIndexFrame?.checkpoint?.sourceTableKey
+        || '',
+    ).trim();
+    if (!sourceTableKey) return null;
+    try {
+        const head = await resolveSummaryVectorMirrorHead_ACU({
+            chat,
+            isolationKey,
+            sourceTableKey,
+            loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
+        });
+        if (head.status !== 'ok' || !head.checkpoint) return null;
+        const chunkCount = [...head.head.values()].reduce((sum, refs) => sum + refs.length, 0);
+        return {
+            status: 'ready',
+            indexId: head.checkpoint.manifestRef?.manifestHash || head.vectorRevision || '',
+            backend: 'st-files',
+            rowCount: head.head.size,
+            chunkCount,
+            baseShardCount: head.packRefs.length,
+            deltaShardCount: head.appliedDeltaEntryIds.length,
+            updatedAt: head.checkpoint.createdAt ? new Date(head.checkpoint.createdAt).toISOString() : '',
+        };
+    } catch (error: any) {
+        logWarn_ACU('[交火向量索引] 读取 V2 镜像状态失败，回退 legacy 空状态:', error?.message || error);
+        return null;
+    }
+}
+
 export async function getSummaryVectorIndexStats_ACU(manifest: ChatSummaryVectorIndexManifest_ACU | null | undefined): Promise<SummaryVectorIndexStats_ACU> {
     manifest = normalizeSummaryVectorIndexManifestForRead_ACU(manifest);
     const tempCache = await estimateVectorIndexTempCache_ACU(manifest?.indexId);
@@ -3301,6 +3351,21 @@ export async function getSummaryVectorIndexStats_ACU(manifest: ChatSummaryVector
         flushTaskLastError: flushTasks.lastError,
     };
     if (!manifest) {
+        const v2 = await tryReadV2MirrorDisplayStats_ACU();
+        if (v2) {
+            return {
+                ...v2,
+                tombstoneRowCount: 0,
+                tombstoneChunkCount: 0,
+                externalTotalBytes: 0,
+                cacheTotalBytes,
+                tempCacheBytes: tempCache.bytes,
+                tempCacheCount: tempCache.count,
+                hotCacheBytes: hotCache.bytes,
+                hotCacheCount: hotCache.count,
+                ...flushTaskFields,
+            };
+        }
         return {
             status: 'none',
             indexId: '',

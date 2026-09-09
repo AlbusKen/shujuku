@@ -111,6 +111,21 @@ describe('buildPreparedRows_ACU 源文本含纪要正文', () => {
     expect(row.sourceFingerprint).toBe(buildSummaryRowFingerprint_ACU(row));
   });
 
+  it('row_id 为空时回退用编码索引作为行身份', () => {
+    const prepared = buildPreparedRows_ACU({
+      name: '纪要表',
+      content: [
+        ['row_id', '编码索引', '时间跨度', '概览', '纪要', '重要对话'],
+        ['', 'AM0001', '1184-11-15 17:55 ~ 1184-11-15 18:00', '江南急报', '师徒启程前往江南查案。', '对话'],
+      ],
+    }, 'sheet_summary');
+    expect(prepared.error).toBe('');
+    expect(prepared.rows).toHaveLength(1);
+    expect(prepared.rows[0].rowId).toBe('AM0001');
+    expect(prepared.rows[0].indexCode).toBe('AM0001');
+    expect(prepared.skippedRowCount).toBe(0);
+  });
+
   it('模板没有纪要列时回退为只用概览（旧模板兼容）', () => {
     const prepared = buildPreparedRows_ACU({
       name: '纪要表',
