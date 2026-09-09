@@ -17,6 +17,19 @@ export function normalizeSummaryVectorIsolationKey_ACU(value: unknown): string {
     return normalizeScopePart_ACU(value, 'default');
 }
 
+/**
+ * 把向量 scope 的 isolation token 映射回聊天 IsolatedData 槽键。
+ * 空运行时隔离的 scope token 是 default，槽键仍是 ''；两者规范化后相同则用运行时槽键。
+ */
+export function toChatIsolationSlotKey_ACU(scopeIsolationKey: unknown, runtimeIsolationKey: unknown): string {
+    const scopeKey = String(scopeIsolationKey ?? '');
+    const runtimeKey = String(runtimeIsolationKey ?? '');
+    if (normalizeSummaryVectorIsolationKey_ACU(scopeKey) === normalizeSummaryVectorIsolationKey_ACU(runtimeKey)) {
+        return runtimeKey;
+    }
+    return scopeKey;
+}
+
 export function normalizeSummaryVectorIndexScope_ACU(parts: {
     chatKey?: unknown;
     isolationKey?: unknown;

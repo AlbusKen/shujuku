@@ -28,7 +28,7 @@ import type {
     TableStorageFrameV2_ACU,
 } from '../table/storage-frame-v2-types';
 import { hashUserInput_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
-import { normalizeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
+import { normalizeSummaryVectorIndexScope_ACU, toChatIsolationSlotKey_ACU } from '../../shared/summary-vector-index-scope';
 import { buildPreparedRows_ACU, buildRowChunkTexts_ACU, findSummaryTable_ACU } from './summary-vector-index-archive-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU, validateSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 import { SUMMARY_VECTOR_SOURCE_TEXT_VERSION_ACU } from './summary-vector-row-fingerprint';
@@ -201,7 +201,10 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
     if (!selected?.summaryKey) {
         return emptyResult_ACU({ reason: 'summary_table_not_found', errors: ['纪要表不可用'], retryability: 'terminal' });
     }
-    const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+    const isolationKey = toChatIsolationSlotKey_ACU(
+        options.isolationKey ?? getCurrentIsolationKey_ACU(),
+        getCurrentIsolationKey_ACU(),
+    );
     const scope = normalizeSummaryVectorIndexScope_ACU({
         chatKey: currentChatFileIdentifier_ACU,
         isolationKey,

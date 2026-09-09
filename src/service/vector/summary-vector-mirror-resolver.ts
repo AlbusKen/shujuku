@@ -21,6 +21,8 @@
 
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { sha256Base64UrlSync_ACU } from '../../shared/sha256-sync';
+import { toChatIsolationSlotKey_ACU } from '../../shared/summary-vector-index-scope';
+import { getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { findLatestTransitionCheckpoint_ACU } from '../table/compat-transition-checkpoint';
 import { isV2TagData_ACU } from '../table/storage-strategy-resolver';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
@@ -73,13 +75,14 @@ export function collectSummaryVectorMirrorFrameRefs_ACU(
 ): SummaryVectorMirrorFrameRef_ACU[] {
     const refs: SummaryVectorMirrorFrameRef_ACU[] = [];
     if (!Array.isArray(chat)) return refs;
+    const slotKey = toChatIsolationSlotKey_ACU(isolationKey, getCurrentIsolationKey_ACU());
     const upperExclusive = maxMessageIndexExclusive === undefined
         ? chat.length
         : Math.max(0, Math.min(chat.length, Math.floor(maxMessageIndexExclusive)));
     for (let i = 0; i < upperExclusive; i += 1) {
         const message = chat[i];
         if (!message || message.is_user) continue;
-        const tagData = readIsolatedTagData_ACU(message, isolationKey);
+        const tagData = readIsolatedTagData_ACU(message, slotKey);
         if (isV2TagData_ACU(tagData)) {
             refs.push({ messageIndex: i, frame: tagData.storageFrame });
         }
@@ -98,10 +101,11 @@ export function locateSummaryVectorMirrorBase_ACU(
     isolationKey: string,
     maxMessageIndexExclusive?: number,
 ): SummaryVectorMirrorFrameRef_ACU | null {
-    const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
+    const slotKey = toChatIsolationSlotKey_ACU(isolationKey, getCurrentIsolationKey_ACU());
+    const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, slotKey, maxMessageIndexExclusive);
     const checkpointRef = [...refs].reverse().find((ref) => ref.frame.checkpoint?.kind === 'full') ?? null;
     const replayMaxInclusive = maxMessageIndexExclusive === undefined ? undefined : maxMessageIndexExclusive - 1;
-    const transition = findLatestTransitionCheckpoint_ACU(chat, isolationKey, replayMaxInclusive);
+    const transition = findLatestTransitionCheckpoint_ACU(chat, slotKey, replayMaxInclusive);
     if (transition && (!checkpointRef || checkpointRef.messageIndex <= transition.checkpoint.cutoff.messageIndex)) {
         return null;
     }

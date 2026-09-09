@@ -11,6 +11,8 @@
  */
 
 import type { Sheet_ACU } from '../../shared/models/table-data';
+import { toChatIsolationSlotKey_ACU } from '../../shared/summary-vector-index-scope';
+import { getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { locateSummaryVectorMirrorBase_ACU } from '../vector/summary-vector-mirror-resolver';
 import { loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import type { TableMutationLogEntryV2_ACU, TableMutationWriteSetV2_ACU } from './storage-frame-v2-types';
@@ -135,7 +137,8 @@ export async function collectSummarySheetRowIdTimelineV2_ACU(
     return emptyTimeline_ACU('replay_failed', null, `sheetKey 非法：${sheetKey || '<empty>'}`);
   }
 
-  const base = locateSummaryVectorMirrorBase_ACU(options.chat, options.isolationKey);
+  const isolationKey = toChatIsolationSlotKey_ACU(options.isolationKey, getCurrentIsolationKey_ACU());
+  const base = locateSummaryVectorMirrorBase_ACU(options.chat, isolationKey);
   if (!base || !base.frame.checkpoint || base.frame.checkpoint.kind !== 'full') {
     return emptyTimeline_ACU('unsupported_replay_base', null);
   }
@@ -150,7 +153,7 @@ export async function collectSummarySheetRowIdTimelineV2_ACU(
 
   let replay;
   try {
-    replay = await loadTableStateFromFramesV2Detailed_ACU(options.chat, options.isolationKey, {
+    replay = await loadTableStateFromFramesV2Detailed_ACU(options.chat, isolationKey, {
       updateRuntimeState: false,
       onEntryApplied: async (context) => {
         if (!tableEntryTouchesSheetV2_ACU(context.entry, sheetKey)) return;

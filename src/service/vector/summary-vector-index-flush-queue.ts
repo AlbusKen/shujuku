@@ -512,7 +512,7 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
             return { success: true, skipped: true, reason: 'bridge_active' };
         }
         const result = await flushSummaryVectorMirrorNow_ACU({
-            isolationKey: task.isolationKey,
+            isolationKey: getCurrentIsolationKey_ACU(),
             sourceTableKey: task.sourceTableKey,
             expectedFlushScopeKey: task.scopeKey,
             expectedFlushGeneration: expectedGeneration,

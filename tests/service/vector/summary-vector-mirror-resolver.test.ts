@@ -182,6 +182,11 @@ describe('locateSummaryVectorMirrorBase_ACU', () => {
     expect(locateSummaryVectorMirrorBase_ACU(chat, ISOLATION)?.messageIndex).toBe(1);
   });
 
+  it('flush scope token default 映射到空隔离槽，仍能定位 full checkpoint', () => {
+    const chat = [user(), ai(fullFrame()), user(), ai(logFrame([tableEntry('e1')]))];
+    expect(locateSummaryVectorMirrorBase_ACU(chat, 'default')?.messageIndex).toBe(1);
+  });
+
   it('过渡根 cutoff 覆盖 full checkpoint 时返回 null（基底不是 full）', () => {
     const chat = [ai(fullFrame()), ai(logFrame([tableEntry('e1')]))];
     h.transition = { messageIndex: 1, aiFloor: 2, source: 'compat', checkpoint: { cutoff: { messageIndex: 1, seq: 0, operationIndex: -1 } } };

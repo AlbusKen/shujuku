@@ -44450,6 +44450,18 @@ $CONTENT
     function normalizeSummaryVectorIsolationKey_ACU(value) {
         return normalizeScopePart_ACU$1(value, 'default');
     }
+    /**
+     * 把向量 scope 的 isolation token 映射回聊天 IsolatedData 槽键。
+     * 空运行时隔离的 scope token 是 default，槽键仍是 ''；两者规范化后相同则用运行时槽键。
+     */
+    function toChatIsolationSlotKey_ACU(scopeIsolationKey, runtimeIsolationKey) {
+        const scopeKey = String(scopeIsolationKey ?? '');
+        const runtimeKey = String(runtimeIsolationKey ?? '');
+        if (normalizeSummaryVectorIsolationKey_ACU(scopeKey) === normalizeSummaryVectorIsolationKey_ACU(runtimeKey)) {
+            return runtimeKey;
+        }
+        return scopeKey;
+    }
     function normalizeSummaryVectorIndexScope_ACU(parts) {
         return {
             chatKey: normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
@@ -47415,6 +47427,7 @@ $CONTENT
         const refs = [];
         if (!Array.isArray(chat))
             return refs;
+        const slotKey = toChatIsolationSlotKey_ACU(isolationKey, getCurrentIsolationKey_ACU());
         const upperExclusive = maxMessageIndexExclusive === undefined
             ? chat.length
             : Math.max(0, Math.min(chat.length, Math.floor(maxMessageIndexExclusive)));
@@ -47422,7 +47435,7 @@ $CONTENT
             const message = chat[i];
             if (!message || message.is_user)
                 continue;
-            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            const tagData = readIsolatedTagData_ACU(message, slotKey);
             if (isV2TagData_ACU(tagData)) {
                 refs.push({ messageIndex: i, frame: tagData.storageFrame });
             }
@@ -47436,10 +47449,11 @@ $CONTENT
      * 表达式与 storage-frame-v2-replay.ts:2375-2380 保持一致。
      */
     function locateSummaryVectorMirrorBase_ACU(chat, isolationKey, maxMessageIndexExclusive) {
-        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
+        const slotKey = toChatIsolationSlotKey_ACU(isolationKey, getCurrentIsolationKey_ACU());
+        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, slotKey, maxMessageIndexExclusive);
         const checkpointRef = [...refs].reverse().find((ref) => ref.frame.checkpoint?.kind === 'full') ?? null;
         const replayMaxInclusive = maxMessageIndexExclusive === undefined ? undefined : maxMessageIndexExclusive - 1;
-        const transition = findLatestTransitionCheckpoint_ACU(chat, isolationKey, replayMaxInclusive);
+        const transition = findLatestTransitionCheckpoint_ACU(chat, slotKey, replayMaxInclusive);
         if (transition && (!checkpointRef || checkpointRef.messageIndex <= transition.checkpoint.cutoff.messageIndex)) {
             return null;
         }
@@ -52632,7 +52646,8 @@ $CONTENT
         if (!sheetKey.startsWith('sheet_')) {
             return emptyTimeline_ACU('replay_failed', null, `sheetKey 非法：${sheetKey || '<empty>'}`);
         }
-        const base = locateSummaryVectorMirrorBase_ACU(options.chat, options.isolationKey);
+        const isolationKey = toChatIsolationSlotKey_ACU(options.isolationKey, getCurrentIsolationKey_ACU());
+        const base = locateSummaryVectorMirrorBase_ACU(options.chat, isolationKey);
         if (!base || !base.frame.checkpoint || base.frame.checkpoint.kind !== 'full') {
             return emptyTimeline_ACU('unsupported_replay_base', null);
         }
@@ -52645,7 +52660,7 @@ $CONTENT
         const entries = [];
         let replay;
         try {
-            replay = await loadTableStateFromFramesV2Detailed_ACU(options.chat, options.isolationKey, {
+            replay = await loadTableStateFromFramesV2Detailed_ACU(options.chat, isolationKey, {
                 updateRuntimeState: false,
                 onEntryApplied: async (context) => {
                     if (!tableEntryTouchesSheetV2_ACU(context.entry, sheetKey))
@@ -52818,7 +52833,7 @@ $CONTENT
         if (!selected?.summaryKey) {
             return emptyResult_ACU$1({ reason: 'summary_table_not_found', errors: ['纪要表不可用'], retryability: 'terminal' });
         }
-        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const isolationKey = toChatIsolationSlotKey_ACU(options.isolationKey ?? getCurrentIsolationKey_ACU(), getCurrentIsolationKey_ACU());
         const scope = normalizeSummaryVectorIndexScope_ACU({
             chatKey: currentChatFileIdentifier_ACU,
             isolationKey,
@@ -54297,7 +54312,7 @@ $CONTENT
                 return { success: true, skipped: true, reason: 'bridge_active' };
             }
             const result = await flushSummaryVectorMirrorNow_ACU({
-                isolationKey: task.isolationKey,
+                isolationKey: getCurrentIsolationKey_ACU(),
                 sourceTableKey: task.sourceTableKey,
                 expectedFlushScopeKey: task.scopeKey,
                 expectedFlushGeneration: expectedGeneration,

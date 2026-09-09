@@ -172,7 +172,7 @@ describe('summary-vector-index flush queue scope', () => {
       canonicalScopeKey: canonicalScope,
       isolationKey: 'default',
     }));
-    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default' }));
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: '' }));
     expect(h.logIdentityEvent).toHaveBeenCalledWith(
       'debug',
       'flush',
@@ -206,7 +206,7 @@ describe('summary-vector-index flush queue scope', () => {
       isolationKey: 'default',
     }));
     expect(h.remove).not.toHaveBeenCalled();
-    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default', expectedFlushGeneration: 8 }));
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: '', expectedFlushGeneration: 8 }));
   });
 
   it('执行时 active isolation 漂移会拒绝任务，不执行 archive', async () => {
