@@ -293,6 +293,16 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
 const mockEnqueueSummaryVectorIndexFlush = vi.fn().mockResolvedValue({ queued: true, scopeKey: 'test-scope' });
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({ enqueueSummaryVectorIndexFlush_ACU: (...args: any[]) => mockEnqueueSummaryVectorIndexFlush(...args) }));
 
+const mockEnsureSummaryVectorMirrorAfterTableFill = vi.fn().mockResolvedValue({
+  attempted: false,
+  skipped: true,
+  reason: 'vector_data_present',
+});
+vi.mock('../../../src/service/vector/summary-vector-index-rebuild-service', () => ({
+  rebuildCurrentSummaryVectorIndexNow_ACU: vi.fn(),
+  ensureSummaryVectorMirrorAfterTableFill_ACU: (...args: any[]) => mockEnsureSummaryVectorMirrorAfterTableFill(...args),
+}));
+
 // V2 恢复服务 mock：锚点预检自动收敛路径。默认无可用恢复计划（阻断语义），
 // 自愈用例显式提供 planId 并让 commit mock 修复 mock chat。
 const mockPrepareV2Recovery = vi.fn(async (options: any) => ({
@@ -363,6 +373,7 @@ import {
   collectGroupFillResponse_ACU,
   applyUnifiedGroupFillResponses_ACU,
   processGroupedRuntimeChunk_ACU,
+  runSummaryVectorFollowupAfterTableFill_ACU,
   type CardUpdateResult,
   type CardUpdateProgressEvent,
 } from '../../../src/service/table/update-orchestrator';
@@ -389,6 +400,11 @@ beforeEach(() => {
     return provider;
   });
   mockEnsureLegacyStorageMigratedBeforeWrite.mockReset().mockResolvedValue({ success: true, migrated: false });
+  mockEnsureSummaryVectorMirrorAfterTableFill.mockReset().mockResolvedValue({
+    attempted: false,
+    skipped: true,
+    reason: 'vector_data_present',
+  });
 });
 
 // staging boundary commit 默认 mock：默认成功。跨边界用例在各自 it 内覆写返回值，
@@ -1846,6 +1862,59 @@ describe('executeCardUpdateCore_ACU', () => {
     expect(result.success).toBe(true);
     expect(mockEnsureBoundaryCheckpoint).toHaveBeenCalledWith({ reason: 'auto_update', save: true });
     expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('边界 checkpoint 建立失败'));
+  });
+});
+
+describe('runSummaryVectorFollowupAfterTableFill_ACU', () => {
+  const summaryTableData = {
+    sheet_summary: { name: '纪要表', content: [['row_id', '纪要'], ['1', '内容']] },
+  };
+
+  beforeEach(() => {
+    mockEnqueueSummaryVectorIndexFlush.mockClear();
+    mockEnsureSummaryVectorMirrorAfterTableFill.mockReset().mockResolvedValue({
+      attempted: false,
+      skipped: true,
+      reason: 'vector_data_present',
+    });
+  });
+
+  it('当前环境无向量数据时直接重建，不再入队 flush', async () => {
+    mockEnsureSummaryVectorMirrorAfterTableFill.mockResolvedValueOnce({
+      attempted: true,
+      skipped: false,
+      reason: 'initial',
+      result: { success: true, skipped: false, errors: [] },
+    });
+
+    await runSummaryVectorFollowupAfterTableFill_ACU({
+      tableData: { sheet_0: { name: '角色表', content: [['row_id']] } },
+      modifiedKeys: ['sheet_0'],
+      reason: 'table_fill_complete',
+    });
+
+    expect(mockEnsureSummaryVectorMirrorAfterTableFill).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+  });
+
+  it('已有向量数据且改了纪要表时入队增量 flush', async () => {
+    const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
+    try {
+      await runSummaryVectorFollowupAfterTableFill_ACU({
+        tableData: summaryTableData,
+        modifiedKeys: ['sheet_summary'],
+        reason: 'table_fill_complete',
+      });
+
+      expect(mockEnsureSummaryVectorMirrorAfterTableFill).toHaveBeenCalledTimes(1);
+      expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledWith(expect.objectContaining({
+        sourceTableKey: 'sheet_summary',
+        reason: 'table_fill_complete',
+      }));
+    } finally {
+      vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
+    }
   });
 });
 

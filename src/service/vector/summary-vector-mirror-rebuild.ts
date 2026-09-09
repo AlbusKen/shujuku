@@ -368,6 +368,21 @@ export function chatHasSummaryVectorMirror_ACU(chat: any[] | null | undefined): 
     });
 }
 
+/** 当前 isolation 槽是否已有 V2 向量 checkpoint。其他 isolation 的镜像不算当前环境。 */
+export function currentEnvironmentHasSummaryVectorMirror_ACU(
+    chat: any[] | null | undefined,
+    isolationKey: string,
+): boolean {
+    if (!Array.isArray(chat)) return false;
+    const key = String(isolationKey ?? '');
+    return chat.some((message) => {
+        const isolated = message?.TavernDB_ACU_IsolatedData;
+        if (!isolated || typeof isolated !== 'object') return false;
+        const tagData = (isolated as Record<string, any>)[key];
+        return tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full';
+    });
+}
+
 export function chatHasLegacySummaryVectorFields_ACU(chat: any[] | null | undefined): boolean {
     if (!Array.isArray(chat)) return false;
     return chat.some((message) => {

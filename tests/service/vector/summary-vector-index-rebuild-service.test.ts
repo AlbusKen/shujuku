@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   data: { sheet_summary: { name: '纪要表', content: [['row_id', '纪要'], ['1', '内容']] } } as any,
+  isolationKey: '',
+  chat: [] as any[],
+  worldbook: { summaryVectorIndexModeEnabled: true, summaryVectorMirrorEnabled: true } as any,
+  hasMirror: false,
   load: vi.fn(),
   rebuild: vi.fn(),
   updateLorebook: vi.fn(),
@@ -10,6 +14,17 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return h.data; },
+  getCurrentIsolationKey_ACU: () => h.isolationKey,
+}));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => h.chat,
+}));
+vi.mock('../../../src/service/settings/settings-readers', () => ({
+  getCurrentWorldbookConfig_ACU: () => h.worldbook,
+}));
+vi.mock('../../../src/shared/utils', () => ({
+  logDebug_ACU: vi.fn(),
+  logWarn_ACU: vi.fn(),
 }));
 vi.mock('../../../src/service/table/table-service', () => ({ loadOrCreateJsonTableFromChatHistory_ACU: h.load }));
 vi.mock('../../../src/service/worldbook/pipeline', () => ({ updateReadableLorebookEntry_ACU: h.updateLorebook }));
@@ -18,14 +33,22 @@ vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
 }));
 vi.mock('../../../src/service/vector/summary-vector-mirror-rebuild', () => ({
   rebuildSummaryVectorMirror_ACU: (...args: any[]) => h.rebuild(...args),
+  currentEnvironmentHasSummaryVectorMirror_ACU: () => h.hasMirror,
 }));
 
-import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../../src/service/vector/summary-vector-index-rebuild-service';
+import {
+  ensureSummaryVectorMirrorAfterTableFill_ACU,
+  rebuildCurrentSummaryVectorIndexNow_ACU,
+} from '../../../src/service/vector/summary-vector-index-rebuild-service';
 
 describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     h.data = { sheet_summary: { name: '纪要表', content: [['row_id', '纪要'], ['1', '内容']] } };
+    h.isolationKey = '';
+    h.chat = [];
+    h.worldbook = { summaryVectorIndexModeEnabled: true, summaryVectorMirrorEnabled: true };
+    h.hasMirror = false;
     h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
     h.updateLorebook.mockResolvedValue(true);
   });
@@ -59,5 +82,84 @@ describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
     expect(result.success).toBe(false);
     expect(h.clearCooldown).not.toHaveBeenCalled();
     expect(h.updateLorebook).not.toHaveBeenCalled();
+  });
+});
+
+describe('ensureSummaryVectorMirrorAfterTableFill_ACU', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    h.data = { sheet_summary: { name: '纪要表', content: [['row_id', '纪要'], ['1', '内容']] } };
+    h.isolationKey = '';
+    h.chat = [];
+    h.worldbook = { summaryVectorIndexModeEnabled: true, summaryVectorMirrorEnabled: true };
+    h.hasMirror = false;
+    h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
+    h.updateLorebook.mockResolvedValue(true);
+  });
+
+  it('功能未开启时不重建', async () => {
+    h.worldbook.summaryVectorIndexModeEnabled = false;
+    await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
+      attempted: false,
+      skipped: true,
+      reason: 'feature_disabled',
+    });
+    expect(h.rebuild).not.toHaveBeenCalled();
+  });
+
+  it('镜像开关显式关闭时不重建', async () => {
+    h.worldbook.summaryVectorMirrorEnabled = false;
+    await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
+      attempted: false,
+      skipped: true,
+      reason: 'mirror_disabled',
+    });
+    expect(h.rebuild).not.toHaveBeenCalled();
+  });
+
+  it('当前环境已有向量镜像时不重建', async () => {
+    h.hasMirror = true;
+    await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
+      attempted: false,
+      skipped: true,
+      reason: 'vector_data_present',
+    });
+    expect(h.rebuild).not.toHaveBeenCalled();
+  });
+
+  it('功能开启且当前环境无向量数据时立刻 initial 重建', async () => {
+    await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
+      attempted: true,
+      skipped: false,
+      reason: 'initial',
+    });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'initial' });
+    expect(h.clearCooldown).toHaveBeenCalled();
+  });
+
+  it('rebuild 失败只返回结果，不抛给填表主流程', async () => {
+    h.rebuild.mockResolvedValue({
+      success: false,
+      skipped: false,
+      indexedRowCount: 0,
+      skippedRowCount: 0,
+      chunkCount: 0,
+      reason: 'unsupported_replay_base',
+      errors: ['表格基底不是 full checkpoint。'],
+    });
+    await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
+      attempted: true,
+      skipped: false,
+      reason: 'unsupported_replay_base',
+    });
+  });
+
+  it('rebuild 抛错时返回 rebuild_exception，不抛出', async () => {
+    h.data = null;
+    await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
+      attempted: true,
+      skipped: false,
+      reason: 'rebuild_exception',
+    });
   });
 });

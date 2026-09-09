@@ -16,6 +16,7 @@ import { planUnmirroredEntryDeltasV2_ACU } from '../../../src/service/vector/sum
 import {
   chatHasLegacySummaryVectorFields_ACU,
   chatHasSummaryVectorMirror_ACU,
+  currentEnvironmentHasSummaryVectorMirror_ACU,
 } from '../../../src/service/vector/summary-vector-mirror-rebuild';
 import { foldSummaryVectorMirrorAtBoundary_ACU } from '../../../src/service/vector/summary-vector-mirror-fold';
 import type {
@@ -203,6 +204,23 @@ describe('向量镜像 17 项矩阵', () => {
 
   it('8. 显式重建后的 checkpoint 身份可由 chatHasSummaryVectorMirror 识别', () => {
     expect(chatHasSummaryVectorMirror_ACU([ai(fullFrame())])).toBe(true);
+  });
+
+  it('当前环境只认当前 isolation 的 vector_full，其他槽不算已有数据', () => {
+    const current = ai(fullFrame());
+    expect(currentEnvironmentHasSummaryVectorMirror_ACU(current ? [current] : [], '')).toBe(true);
+    expect(currentEnvironmentHasSummaryVectorMirror_ACU([current], 'other-iso')).toBe(false);
+
+    const otherOnly = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        'other-iso': { storageFrame: fullFrame(), _acu_storage_version: 2 },
+      },
+    };
+    expect(chatHasSummaryVectorMirror_ACU([otherOnly])).toBe(true);
+    expect(currentEnvironmentHasSummaryVectorMirror_ACU([otherOnly], '')).toBe(false);
+    expect(currentEnvironmentHasSummaryVectorMirror_ACU([otherOnly], 'other-iso')).toBe(true);
+    expect(currentEnvironmentHasSummaryVectorMirror_ACU([], '')).toBe(false);
   });
 
   it('9. legacy 检测：旧三字段存在则提示重建', () => {

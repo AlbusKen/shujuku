@@ -53509,6 +53509,19 @@ $CONTENT
             return Object.values(isolated).some((tagData) => (tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'));
         });
     }
+    /** 当前 isolation 槽是否已有 V2 向量 checkpoint。其他 isolation 的镜像不算当前环境。 */
+    function currentEnvironmentHasSummaryVectorMirror_ACU(chat, isolationKey) {
+        if (!Array.isArray(chat))
+            return false;
+        const key = String(isolationKey ?? '');
+        return chat.some((message) => {
+            const isolated = message?.TavernDB_ACU_IsolatedData;
+            if (!isolated || typeof isolated !== 'object')
+                return false;
+            const tagData = isolated[key];
+            return tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full';
+        });
+    }
     function chatHasLegacySummaryVectorFields_ACU(chat) {
         if (!Array.isArray(chat))
             return false;
@@ -107717,6 +107730,69 @@ $CONTENT
             : normalizeNonNegativeInteger_ACU$1(settings_ACU.manualUpdateContextDepth, fallback);
     }
 
+    /**
+     * 立即重建当前聊天的纪要向量镜像。
+     * 显式按钮走 rebuild_user；发送前自愈走 rebuild_repair；legacy / 首次构建走 initial。
+     */
+    async function rebuildCurrentSummaryVectorIndexNow_ACU(options = {}) {
+        if (!currentJsonTableData_ACU) {
+            await loadOrCreateJsonTableFromChatHistory_ACU();
+        }
+        if (!currentJsonTableData_ACU) {
+            throw new Error('数据库未加载，无法重建交火索引快照。');
+        }
+        const result = await rebuildSummaryVectorMirror_ACU({
+            reason: options.reason || 'rebuild_user',
+        });
+        if (result.success && !result.skipped) {
+            clearSummaryVectorIndexCredentialCooldowns_ACU();
+            try {
+                await updateReadableLorebookEntry_ACU(true);
+            }
+            catch {
+                // 镜像已经 durable publish；世界书刷新失败不应把已完成构建报告为失败。
+            }
+        }
+        return result;
+    }
+    /**
+     * 填表完成后：功能开启且当前 isolation 没有任何 V2 向量镜像时，立刻 initial 重建。
+     * 不依赖 modifiedKeys 是否包含纪要表。失败只返回结果，不抛给填表主流程。
+     */
+    async function ensureSummaryVectorMirrorAfterTableFill_ACU() {
+        const worldbook = getCurrentWorldbookConfig_ACU();
+        if (worldbook.summaryVectorIndexModeEnabled !== true) {
+            return { attempted: false, skipped: true, reason: 'feature_disabled' };
+        }
+        if (worldbook.summaryVectorMirrorEnabled === false) {
+            return { attempted: false, skipped: true, reason: 'mirror_disabled' };
+        }
+        const isolationKey = getCurrentIsolationKey_ACU();
+        if (currentEnvironmentHasSummaryVectorMirror_ACU(getChatArray_ACU(), isolationKey)) {
+            return { attempted: false, skipped: true, reason: 'vector_data_present' };
+        }
+        try {
+            const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'initial' });
+            if (result.success) {
+                logDebug_ACU(`[交火模式纪要索引] 填表完成后已执行首次向量重建：reason=${result.reason || 'initial'}, skipped=${result.skipped}`);
+            }
+            else {
+                logWarn_ACU(`[交火模式纪要索引] 填表完成后首次向量重建失败：${result.errors.join('; ') || result.reason || 'unknown'}`);
+            }
+            return {
+                attempted: true,
+                skipped: result.skipped,
+                reason: result.reason || 'initial',
+                result,
+            };
+        }
+        catch (error) {
+            const message = error?.message || String(error || '首次向量重建异常');
+            logWarn_ACU('[交火模式纪要索引] 填表完成后首次向量重建异常:', message);
+            return { attempted: true, skipped: false, reason: 'rebuild_exception' };
+        }
+    }
+
     function normalizedPositiveInteger_ACU(value, fallback) {
         const numberValue = Number(value);
         return Number.isInteger(numberValue) && numberValue > 0 ? numberValue : fallback;
@@ -109670,11 +109746,32 @@ $CONTENT
             return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
         });
     }
-    async function enqueueSummaryVectorIndexFlushForModifiedSheets_ACU(options) {
-        const sourceTableKey = findModifiedSummaryTableKey_ACU(options.tableData, options.modifiedKeys);
-        if (!sourceTableKey || getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true)
+    /**
+     * 填表完成后的向量收尾：当前环境没有任何交火向量镜像时直接 initial 重建；
+     * 已有镜像时再按改动过的纪要表入队增量 flush。
+     */
+    async function runSummaryVectorFollowupAfterTableFill_ACU(options) {
+        const ensured = await ensureSummaryVectorMirrorAfterTableFill_ACU();
+        if (ensured.attempted)
             return;
-        return enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey, reason: options.reason });
+        if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true)
+            return;
+        const sourceTableKeys = options.sourceTableKeys?.length
+            ? [...new Set(options.sourceTableKeys.filter(Boolean))]
+            : [findModifiedSummaryTableKey_ACU(options.tableData, options.modifiedKeys)].filter((key) => !!key);
+        for (const sourceTableKey of sourceTableKeys) {
+            const result = await enqueueSummaryVectorIndexFlush_ACU({
+                sourceTableKey,
+                reason: options.reason,
+            });
+            if (result.skipped) {
+                logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}, scopeKey=${result.scopeKey || ''}`);
+                continue;
+            }
+            if (result.queued) {
+                logDebug_ACU(`[交火模式纪要索引] 填表完成后已入队防抖归档, scopeKey=${result.scopeKey}, debounceUntil=${result.debounceUntil}`);
+            }
+        }
     }
     async function settleStagedBoundaryAndPublish_ACU(stagingRun, originalFullIndex, session) {
         const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
@@ -111252,7 +111349,12 @@ $CONTENT
                         metrics: { targetMessageIndex: options.saveTargetIndex },
                     });
                     try {
-                        await enqueueSummaryVectorIndexFlushForModifiedSheets_ACU({ tableData: workingTableData, modifiedKeys, targetMessageIndex: options.saveTargetIndex, reason: 'unified_group_fill_complete' });
+                        await runSummaryVectorFollowupAfterTableFill_ACU({
+                            tableData: workingTableData,
+                            modifiedKeys,
+                            targetMessageIndex: options.saveTargetIndex,
+                            reason: 'unified_group_fill_complete',
+                        });
                         vectorSpan.end({ success: true });
                     }
                     catch (error) {
@@ -112357,28 +112459,16 @@ $CONTENT
                         logWarn_ACU(`[Auto Update] 自动更新完成，但 AI 楼层边界 checkpoint 建立异常: ${checkpointError?.message || checkpointError}`, checkpointError);
                     }
                 }
-                // [spv3.6.6] 填表完成后异步触发交火向量索引防抖归档
-                // 将 embedding + 归档写入从 saving 阶段移到 complete 之后，
-                // 避免 embedding API 调用阻塞"正在保存"提示框。
-                // 使用 flush queue 替代直接调用，由防抖定时器统一调度。
-                // [spv3.6.9] 增加诊断日志，记录入队结果（queued/skipped）
+                // 填表完成后异步收尾：当前环境无交火向量数据则立刻重建，
+                // 已有镜像再入队防抖增量 flush。不阻塞 complete 提示。
                 if (!isImportMode && success) {
-                    enqueueSummaryVectorIndexFlushForModifiedSheets_ACU({
+                    void runSummaryVectorFollowupAfterTableFill_ACU({
                         tableData: currentJsonTableData_ACU,
                         modifiedKeys,
                         targetMessageIndex: saveTargetIndex,
                         reason: 'table_fill_complete',
-                    }).then(result => {
-                        if (!result)
-                            return;
-                        if (result.skipped) {
-                            logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}, scopeKey=${result.scopeKey || ''}`);
-                        }
-                        else if (result.queued) {
-                            logDebug_ACU(`[交火模式纪要索引] 填表完成后已入队防抖归档, scopeKey=${result.scopeKey}, debounceUntil=${result.debounceUntil}`);
-                        }
                     }).catch(err => {
-                        logWarn_ACU('[交火模式纪要索引] 填表完成后防抖归档入队异常:', err);
+                        logWarn_ACU('[交火模式纪要索引] 填表完成后向量收尾异常:', err);
                     });
                 }
             }
@@ -114065,12 +114155,12 @@ $CONTENT
                         return await failManualRefillSession(snapshotResult.error || '手动重填完成后提交完整单表 checkpoint 失败。');
                     }
                     if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-                        for (const sourceTableKey of manualRefillSummarySourceTableKeys) {
-                            await enqueueSummaryVectorIndexFlush_ACU({
-                                sourceTableKey,
-                                reason: 'manual_refill_complete',
-                            });
-                        }
+                        await runSummaryVectorFollowupAfterTableFill_ACU({
+                            tableData: completedData,
+                            modifiedKeys: manualRefillSummarySourceTableKeys,
+                            sourceTableKeys: manualRefillSummarySourceTableKeys,
+                            reason: 'manual_refill_complete',
+                        });
                     }
                 }
                 catch (error) {
@@ -120119,32 +120209,6 @@ $CONTENT
         await upsertOriginalSummaryIndexEntry_ACU(content);
         logDebug_ACU(`[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个（关键词 AI ${keywordGenerationEnabled ? '开' : '关'}），rerank=${rerank.status}${rerank.documentCount ? `（${rerank.documentCount} 条 documents）` : ''}，输出顺序按纪要表原 rowOrder。`);
         return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error, rerankDocumentCount: rerank.documentCount, keywordGenerationEnabled };
-    }
-
-    /**
-     * 立即重建当前聊天的纪要向量镜像。
-     * 显式按钮走 rebuild_user；发送前自愈走 rebuild_repair；legacy / 首次构建走 initial。
-     */
-    async function rebuildCurrentSummaryVectorIndexNow_ACU(options = {}) {
-        if (!currentJsonTableData_ACU) {
-            await loadOrCreateJsonTableFromChatHistory_ACU();
-        }
-        if (!currentJsonTableData_ACU) {
-            throw new Error('数据库未加载，无法重建交火索引快照。');
-        }
-        const result = await rebuildSummaryVectorMirror_ACU({
-            reason: options.reason || 'rebuild_user',
-        });
-        if (result.success && !result.skipped) {
-            clearSummaryVectorIndexCredentialCooldowns_ACU();
-            try {
-                await updateReadableLorebookEntry_ACU(true);
-            }
-            catch {
-                // 镜像已经 durable publish；世界书刷新失败不应把已完成构建报告为失败。
-            }
-        }
-        return result;
     }
 
     /**
