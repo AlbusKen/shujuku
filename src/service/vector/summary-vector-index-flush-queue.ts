@@ -25,6 +25,10 @@ import {
     flushSummaryVectorMirrorNow_ACU,
     type SummaryVectorMirrorFlushResult_ACU,
 } from './summary-vector-mirror-writer';
+import {
+    rebuildSummaryVectorMirror_ACU,
+    type SummaryVectorMirrorRebuildReason_ACU,
+} from './summary-vector-mirror-rebuild';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import type { TableMutationWriteSetV2_ACU } from '../table/storage-frame-v2-types';
 import { hasActiveProvisionalBridgeAnywhere_ACU } from '../table/manual-catch-up-provisional-bridge';
@@ -173,6 +177,33 @@ function shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(
         return false;
     }
     return true;
+}
+
+/**
+ * writer 把「还没有镜像 / 链已损坏」标成 needsRebuild 后直接返回。
+ * 填表完成后的自动归档必须在这里补首次建库，否则新聊天永远停在 blocked。
+ * embedding 身份变化与换表仍留给确认 UI，不在 flush 里偷偷全量重嵌。
+ */
+function resolveAutomaticMirrorRebuildReason_ACU(
+    writerReason: string | undefined,
+): SummaryVectorMirrorRebuildReason_ACU | null {
+    if (writerReason === 'no_mirror') return 'initial';
+    if (
+        writerReason === 'chain_conflict'
+        || writerReason === 'checkpoint_mismatch'
+        || writerReason === 'manifest_unavailable'
+    ) {
+        return 'rebuild_repair';
+    }
+    return null;
+}
+
+function isAutomaticRebuildTerminalFailure_ACU(reason: string | undefined): boolean {
+    return reason === 'summary_vector_index_config_invalid'
+        || reason === 'unsupported_replay_base'
+        || reason === 'duplicate_row_id'
+        || reason === 'target_message_invalid'
+        || reason === 'target_message_not_found';
 }
 
 function clearFlushTimer_ACU(scopeKey: string): void {
@@ -501,6 +532,35 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
             return { success: true, skipped: true, reason: 'bridge_active', result };
         }
         if (result.needsRebuild) {
+            const automaticReason = resolveAutomaticMirrorRebuildReason_ACU(result.reason);
+            if (automaticReason) {
+                const rebuilt = await rebuildSummaryVectorMirror_ACU({ reason: automaticReason });
+                if (rebuilt.success) {
+                    const completed = await markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU(task.scopeKey, expectedGeneration);
+                    if (completed) {
+                        clearSummaryVectorIndexDirtyForRealign_ACU(task.scopeKey);
+                    }
+                    void runScopedRetentionGcAfterFlush_ACU({
+                        chatKey: task.chatKey,
+                        isolationKey: task.isolationKey,
+                        sourceTableKey: task.sourceTableKey,
+                    }).catch((error: any) => {
+                        logWarn_ACU('[交火向量索引] retention GC 执行失败（不影响归档结果）:', error?.message || error);
+                    });
+                    logDebug_ACU(`[交火向量索引] flush 因 ${result.reason} 已自动重建：scope=${task.scopeKey}, rebuildReason=${automaticReason}`);
+                    return {
+                        success: true,
+                        skipped: rebuilt.skipped,
+                        reason: rebuilt.reason || automaticReason,
+                        result,
+                    };
+                }
+                const rebuildError = rebuilt.errors.join('; ') || rebuilt.reason || 'automatic_rebuild_failed';
+                const isTerminalFailure = isAutomaticRebuildTerminalFailure_ACU(rebuilt.reason);
+                await markFlushTaskFailure_ACU(task, rebuildError, isTerminalFailure, { scheduleRetry: true });
+                logWarn_ACU(`[交火向量索引] flush 自动重建失败：scope=${task.scopeKey}, reason=${rebuilt.reason || ''}`, rebuildError);
+                return { success: false, reason: rebuilt.reason, result, error: rebuildError };
+            }
             const rebuildError = result.errors.join('; ') || result.reason || 'blocked_needs_rebuild';
             await upsertSummaryVectorFlushTask_ACU({
                 scopeKey: task.scopeKey,

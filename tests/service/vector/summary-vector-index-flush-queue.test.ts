@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   remove: vi.fn(),
   removeStrict: vi.fn(),
   archive: vi.fn(),
+  rebuild: vi.fn(),
   logIdentityEvent: vi.fn(),
   runScopeMutation: vi.fn(),
   retentionGc: vi.fn(),
@@ -52,6 +53,9 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
 vi.mock('../../../src/service/vector/summary-vector-mirror-writer', () => ({
   flushSummaryVectorMirrorNow_ACU: (...args: any[]) => h.archive(...args),
   findTouchedSummarySheetKey_ACU: () => h.summaryKey || null,
+}));
+vi.mock('../../../src/service/vector/summary-vector-mirror-rebuild', () => ({
+  rebuildSummaryVectorMirror_ACU: (...args: any[]) => h.rebuild(...args),
 }));
 vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: () => ({ summaryVectorIndexModeEnabled: true }),
@@ -108,6 +112,14 @@ describe('summary-vector-index flush queue scope', () => {
     h.reconcileLegacy.mockResolvedValue({ outcome: 'migrated', task: null });
     h.invalidate.mockImplementation(async (input: any) => ({ ...task(input.scopeKey), ...input, status: 'invalidated', generation: 1 }));
     h.archive.mockResolvedValue({ success: true, skipped: false, errors: [] });
+    h.rebuild.mockResolvedValue({
+      success: true,
+      skipped: false,
+      indexedRowCount: 1,
+      skippedRowCount: 0,
+      chunkCount: 1,
+      errors: [],
+    });
     h.runScopeMutation.mockImplementation(async (_scopeKey: string, operation: () => Promise<any>) => operation());
     h.retentionGc.mockResolvedValue(undefined);
   });
@@ -543,6 +555,160 @@ describe('summary-vector-index flush queue scope', () => {
     expect(h.archive).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(h.archive).not.toHaveBeenCalled();
+  });
+
+  it('no_mirror 时自动 initial 重建，填表后首轮归档不再 blocked', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    markSummaryVectorIndexDirtyForRealign_ACU(scope, 'runtime_stale_rows');
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'no_mirror',
+      errors: ['向量镜像需要重建：no_mirror'],
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: true,
+      reason: 'initial',
+    });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'initial' });
+    expect(h.markReadyIfGenerationMatches).toHaveBeenCalledWith(scope, 0);
+    expect(isSummaryVectorIndexDirtyForRealign_ACU(scope)).toBe(false);
+    expect(h.upsert.mock.calls.some((call: any[]) => call[0]?.status === 'blocked_needs_rebuild')).toBe(false);
+    expect(h.retentionGc).toHaveBeenCalledWith(expect.objectContaining({
+      chatKey: 'chat-a',
+      isolationKey: 'iso-a',
+      sourceTableKey: 'summary-a',
+    }));
+  });
+
+  it('chain_conflict 时自动 rebuild_repair，不弹确认', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'chain_conflict',
+      errors: ['向量镜像链冲突，需要自动修复重建。'],
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: true,
+      reason: 'rebuild_repair',
+    });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+    expect(h.markReadyIfGenerationMatches).toHaveBeenCalledWith(scope, 0);
+  });
+
+  it('embedding_identity_changed 仍 blocked，不自动重建', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'embedding_identity_changed',
+      errors: ['向量镜像需要重建：embedding_identity_changed'],
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: false,
+      reason: 'embedding_identity_changed',
+    });
+    expect(h.rebuild).not.toHaveBeenCalled();
+    expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      scopeKey: scope,
+      status: 'blocked_needs_rebuild',
+    }));
+    expect(h.markReadyIfGenerationMatches).not.toHaveBeenCalled();
+  });
+
+  it('source_table_changed 仍 blocked，不自动重建', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'source_table_changed',
+      errors: ['向量镜像需要重建：source_table_changed'],
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: false,
+      reason: 'source_table_changed',
+    });
+    expect(h.rebuild).not.toHaveBeenCalled();
+    expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked_needs_rebuild',
+    }));
+  });
+
+  it('checkpoint_mismatch 与 manifest_unavailable 走 rebuild_repair', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'checkpoint_mismatch',
+      errors: ['向量镜像需要重建：checkpoint_mismatch'],
+    });
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: true,
+      reason: 'rebuild_repair',
+    });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+
+    h.rebuild.mockClear();
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'manifest_unavailable',
+      errors: ['向量镜像需要重建：manifest_unavailable'],
+    });
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: true,
+      reason: 'rebuild_repair',
+    });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+  });
+
+  it('自动重建失败按配置类原因记 terminal，不标 ready', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      needsRebuild: true,
+      reason: 'no_mirror',
+      errors: ['向量镜像需要重建：no_mirror'],
+    });
+    h.rebuild.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      indexedRowCount: 0,
+      skippedRowCount: 0,
+      chunkCount: 0,
+      reason: 'summary_vector_index_config_invalid',
+      errors: ['embedding endpoint 无效'],
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: false,
+      reason: 'summary_vector_index_config_invalid',
+    });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'initial' });
+    expect(h.markReadyIfGenerationMatches).not.toHaveBeenCalled();
+    expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed_terminal',
+      lastError: 'embedding endpoint 无效',
+    }));
   });
 
   it('P7：flush 成功后触发按 scope 的 retention GC', async () => {

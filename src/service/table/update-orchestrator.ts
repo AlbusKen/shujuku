@@ -3371,6 +3371,7 @@ export async function executeCardUpdateCore_ACU(
                     targetMessageIndex: saveTargetIndex,
                     reason: 'table_fill_complete',
                 }).then(result => {
+                    if (!result) return;
                     if (result.skipped) {
                         logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}, scopeKey=${result.scopeKey || ''}`);
                     } else if (result.queued) {
