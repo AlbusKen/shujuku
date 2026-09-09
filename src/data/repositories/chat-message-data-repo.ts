@@ -661,6 +661,66 @@ function mergeKnownSqlTableNamesForPurge_ACU(targetSqlTableNames: Set<string>, k
     }
 }
 
+/**
+ * 纪要向量镜像随纪要表 sheetKey 一起删除：sheetKeys 含 summaryVectorIndexFrame.sourceTableKey
+ * 时整体移除镜像 frame（checkpoint + delta）。外置对象由 reachability GC 回收。
+ */
+function purgeSummaryVectorMirrorForDeletedSheetsV2_ACU(frame: any, sheetKeys: Set<string>): boolean {
+    if (!isObjectRecord_ACU(frame)) return false;
+    const mirror = frame.summaryVectorIndexFrame;
+    if (!isObjectRecord_ACU(mirror)) return false;
+    const sourceTableKey = typeof mirror.sourceTableKey === 'string' ? mirror.sourceTableKey : '';
+    if (!sourceTableKey || !sheetKeys.has(sourceTableKey)) return false;
+    delete frame.summaryVectorIndexFrame;
+    return true;
+}
+
+/**
+ * 表格 full checkpoint 被移除后 vector checkpoint 失去锚点（不变量：vector checkpoint 只允许存在于
+ * full checkpoint frame），必须同步删除；同层 delta 仍与各自 table entry 同生共死，保留。
+ */
+function purgeSummaryVectorCheckpointWithoutTableCheckpointV2_ACU(frame: any): boolean {
+    if (!isObjectRecord_ACU(frame)) return false;
+    const mirror = frame.summaryVectorIndexFrame;
+    if (!isObjectRecord_ACU(mirror) || mirror.checkpoint === undefined) return false;
+    if (frame.checkpoint?.kind === 'full') return false;
+    delete mirror.checkpoint;
+    return true;
+}
+
+/**
+ * vector delta 与来源 table entry 同生共死（R2）：logEntries 被裁剪后，sourceTableEntry.entryId
+ * 已不存在的 delta 是 orphan，直接移除。镜像 frame 既无 checkpoint 也无 delta 时整体删除，
+ * 避免残留空容器被误判为"已建立镜像"。
+ */
+function purgeOrphanSummaryVectorDeltasV2_ACU(frame: any): boolean {
+    if (!isObjectRecord_ACU(frame)) return false;
+    const mirror = frame.summaryVectorIndexFrame;
+    if (!isObjectRecord_ACU(mirror)) return false;
+    let changed = false;
+    if (Array.isArray(mirror.logEntries)) {
+        const tableEntryIds = new Set<string>(
+            (Array.isArray(frame.logEntries) ? frame.logEntries : [])
+                .map((entry: any) => entry?.entryId)
+                .filter((entryId: unknown): entryId is string => typeof entryId === 'string' && entryId.length > 0),
+        );
+        const nextDeltas = mirror.logEntries.filter((delta: any) => {
+            const sourceEntryId = delta?.sourceTableEntry?.entryId;
+            return typeof sourceEntryId === 'string' && tableEntryIds.has(sourceEntryId);
+        });
+        if (nextDeltas.length !== mirror.logEntries.length) {
+            mirror.logEntries = nextDeltas;
+            changed = true;
+        }
+    }
+    const hasDeltas = Array.isArray(mirror.logEntries) && mirror.logEntries.length > 0;
+    if (!hasDeltas && mirror.checkpoint === undefined) {
+        delete frame.summaryVectorIndexFrame;
+        changed = true;
+    }
+    return changed;
+}
+
 function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>, knownSqlTableNames?: Iterable<string>): boolean {
     if (!isObjectRecord_ACU(frame)) return false;
     let changed = false;
@@ -668,6 +728,9 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
     // 本帧可能没有目标表的定义（只有增量），物理表名要靠调用方从整条聊天/运行时收集后传入。
     const targetSqlTableNames = collectSqlTargetTableNamesFromStorageFrameV2_ACU(frame, sheetKeys);
     mergeKnownSqlTableNamesForPurge_ACU(targetSqlTableNames, knownSqlTableNames);
+
+    // 删除的是纪要表本身时，向量镜像整体随之消失。
+    if (purgeSummaryVectorMirrorForDeletedSheetsV2_ACU(frame, sheetKeys)) changed = true;
 
     const checkpoint = frame.checkpoint;
     if (isObjectRecord_ACU(checkpoint)) {
@@ -683,6 +746,8 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
         if (!hasSheetKeyInRecord_ACU(checkpoint.data) && checkpoint.manualRefillProgress === undefined) {
             delete frame.checkpoint;
             changed = true;
+            // 表格 full checkpoint 消失后 vector checkpoint 失去锚点，同步删除。
+            if (purgeSummaryVectorCheckpointWithoutTableCheckpointV2_ACU(frame)) changed = true;
         }
     }
 
@@ -749,6 +814,9 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
             changed = true;
         }
     }
+
+    // 来源 table entry 被裁掉的 vector delta 随之移除（R2）。
+    if (purgeOrphanSummaryVectorDeltasV2_ACU(frame)) changed = true;
 
     return changed;
 }
@@ -825,6 +893,9 @@ export function purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU(fram
         frame.logEntries = nextEntries;
         if (changed) normalizeManualRefillFrameHeadRevisionV2_ACU(frame, previousHeadRevision, previousEntryRevisions);
     }
+
+    // 手动重填预清除裁掉 table entry 后，其 vector delta 随之移除（R2）。
+    if (purgeOrphanSummaryVectorDeltasV2_ACU(frame)) changed = true;
 
     return changed;
 }

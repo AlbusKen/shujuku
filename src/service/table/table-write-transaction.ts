@@ -253,7 +253,7 @@ export function captureTableRuntimeRevisionForWriteSet_ACU(
 }
 
 export type TableWriteMaintenanceMode_ACU = 'shared' | 'exclusive';
-export type TableWriteTransactionSource_ACU = TableMutationSourceV2_ACU | 'system_cleanup' | 'system_reload';
+export type TableWriteTransactionSource_ACU = TableMutationSourceV2_ACU | 'system_cleanup' | 'system_reload' | 'vector_mirror';
 
 export function resolveTableWriteTargetMessageIndex_ACU(
   chat: any[] | null | undefined,

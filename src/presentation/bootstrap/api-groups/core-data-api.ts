@@ -60,9 +60,7 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                         if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
                             try {
                                 const queueResult = await enqueueSummaryVectorIndexFlush_ACU({
-                                    targetMessageIndex: targetMessageIndexForVectorSync >= 0 ? targetMessageIndexForVectorSync : undefined,
                                     sourceTableKey,
-                                    mode: 'sync',
                                     reason: 'importTableAsJson',
                                 });
                                 if (!queueResult.queued && !queueResult.skipped) {

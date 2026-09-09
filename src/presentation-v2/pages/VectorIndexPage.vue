@@ -39,6 +39,9 @@
                 vector.buildBusy.value ? "正在重建..." : "立即构建交火纪要索引"
               }}
             </AcuButton>
+            <p class="acu-v2-vector-index-page__hint">
+              检测到旧向量方案时会提示「向量方案已优化，需要重建」。链冲突与 checkpoint 指纹不匹配会自动修复，不弹确认。
+            </p>
             <AcuButton v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
               :disabled="vector.maintenanceBusy.value || vector.buildBusy.value"
               @click="vector.migrateLegacyIndex"

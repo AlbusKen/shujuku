@@ -1,4 +1,4 @@
-import { getChatArray_ACU } from '../chat/chat-service';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { readIsolatedDataContainer_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import type { IsolationTagData_ACU } from '../../data/models/chat-message-data';

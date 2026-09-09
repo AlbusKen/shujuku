@@ -6,7 +6,7 @@ const DB_VERSION_ACU = 3;
 const STORE_NAME_ACU = 'chunks';
 const FLUSH_TASK_STORE_NAME_ACU = 'flushTasks';
 
-export type SummaryVectorIndexFlushTaskStatus_ACU = 'dirty' | 'queued' | 'flushing' | 'ready' | 'failed_retryable' | 'failed_terminal' | 'invalidated';
+export type SummaryVectorIndexFlushTaskStatus_ACU = 'dirty' | 'queued' | 'flushing' | 'ready' | 'failed_retryable' | 'failed_terminal' | 'invalidated' | 'blocked_needs_rebuild';
 export type SummaryVectorIndexFlushTaskMode_ACU = 'append' | 'sync';
 
 export interface VectorIndexHotCacheScope_ACU {
@@ -592,6 +592,7 @@ function normalizeFlushTaskStatus_ACU(status: any): SummaryVectorIndexFlushTaskS
         || status === 'failed_retryable'
         || status === 'failed_terminal'
         || status === 'invalidated'
+        || status === 'blocked_needs_rebuild'
         ? status
         : 'dirty';
 }

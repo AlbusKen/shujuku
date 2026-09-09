@@ -327,6 +327,8 @@ export const defaultWorldbookConfig_ACU = {
   outlineEntryEnabled: true,
   zeroTkOccupyMode: false,
   summaryVectorIndexModeEnabled: false,
+  /** 纪要向量镜像协议开关。关闭只停召回与 flush，不拆已有镜像。 */
+  summaryVectorMirrorEnabled: true,
   // vectorMemory 保留引用以兼容旧数据迁移读取，但新数据写入 settings_ACU.vectorMemoryConfig
   vectorMemory: defaultVectorMemoryConfig_ACU,
 };

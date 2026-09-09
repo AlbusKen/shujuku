@@ -31,11 +31,11 @@ export interface IsolationTagData_ACU {
     spv79TransitionCheckpoint?: Spv79TransitionCheckpointV1_ACU;
     /** 通用兼容过渡回放根（spv7.9 语义全集的固化结果）。与 spv79 槽共存时取 cutoff 更新者。 */
     compatTransitionCheckpoint?: CompatTransitionCheckpointV1_ACU;
-    /** 旧版/兼容向量记忆状态。保留字段是为了不破坏已有聊天记录。 */
+    /** 旧版/兼容向量记忆状态。镜像协议不再写入，仅作 legacy 检测。 */
     vectorMemoryState?: any;
-    /** 交火模式纪要向量索引轻量状态。新外置模式下不应保存完整 vector 数组。 */
+    /** 旧版聚合索引状态。镜像协议不再写入，仅作 legacy 检测。 */
     summaryVectorIndexState?: ChatSummaryVectorIndexState_ACU | null;
-    /** 外置向量索引 manifest。聊天记录只保存定位和校验信息。 */
+    /** 旧版外置 manifest。镜像协议不再写入，仅作 legacy 检测。 */
     summaryVectorIndexManifest?: ChatSummaryVectorIndexManifest_ACU | null;
     /** 基底状态标记（首楼初始化时写入） */
     _acu_base_state?: string;

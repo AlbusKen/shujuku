@@ -342,6 +342,46 @@ describe('recoverLostCheckpointsAfterMessageDeletion_ACU', () => {
     expect(mockRunTableWriteTransaction).not.toHaveBeenCalled();
   });
 
+  it('删掉向量 checkpoint 楼层后嫁接到同一后继 frame，且不覆盖已有向量 checkpoint', async () => {
+    const vectorCheckpoint = {
+      kind: 'vector_full',
+      createdAt: 1111,
+      reason: 'initial',
+      sourceTableKey: 'sheet_summary',
+      tableCheckpointFingerprint: 'fp',
+      embedding: { provider: 'x', model: 'm', dimension: 2 },
+      rowCount: 1,
+      vectorRevision: 'rev-1',
+      manifestRef: { manifestHash: 'h', path: 'TavernDB_ACU_vector_v2vcp_x_h', byteLength: 1 },
+      packRefs: [],
+    };
+    const rootMsg = aiMsg('root', {
+      version: 2,
+      checkpoint: fullCheckpoint(),
+      logEntries: [],
+      summaryVectorIndexFrame: {
+        version: 3,
+        sourceTableKey: 'sheet_summary',
+        checkpoint: vectorCheckpoint,
+        logEntries: [],
+      },
+    });
+    const incMsg = aiMsg('inc', logFrame([{ seq: 5, operations: [] }]));
+    const chat = [userMsg('u'), rootMsg, incMsg];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(1, 1);
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result.recovered).toBe(true);
+    expect(result.graftedCount).toBeGreaterThanOrEqual(2);
+    const frame = incMsg.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.checkpoint).toEqual(fullCheckpoint());
+    expect(frame.summaryVectorIndexFrame.checkpoint).toEqual(vectorCheckpoint);
+    expect(frame.logEntries).toEqual([{ seq: 5, operations: [] }]);
+  });
+
   it('过渡根丢失时原样嫁接到后继楼层 tagData', async () => {
     const transition = { kind: 'spv79_duplicate_row_id_transition', cutoff: { messageIndex: 0 }, data: { sheet_0: {} } };
     const transitionMsg = aiMsg('transition', logFrame([]), { spv79TransitionCheckpoint: transition });

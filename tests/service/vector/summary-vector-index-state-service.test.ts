@@ -8,6 +8,9 @@ const h = vi.hoisted(() => ({
 vi.mock('../../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: () => h.chat,
 }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => h.chat,
+}));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));

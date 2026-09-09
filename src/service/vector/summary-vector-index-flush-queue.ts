@@ -15,12 +15,24 @@ import {
     type SummaryVectorIndexFlushTaskRecord_ACU,
 } from '../../data/storage/vector-index-hot-cache';
 import {
-    archiveSummaryVectorIndexNow_ACU,
     buildSummaryVectorIndexArchiveScopeKey_ACU,
     findSummaryTable_ACU,
     runSummaryVectorIndexArchiveScopeMutationExclusive_ACU,
     type SummaryVectorIndexArchiveResult_ACU,
 } from './summary-vector-index-archive-service';
+import {
+    findTouchedSummarySheetKey_ACU,
+    flushSummaryVectorMirrorNow_ACU,
+    type SummaryVectorMirrorFlushResult_ACU,
+} from './summary-vector-mirror-writer';
+import {
+    rebuildSummaryVectorMirror_ACU,
+    type SummaryVectorMirrorRebuildReason_ACU,
+} from './summary-vector-mirror-rebuild';
+import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import type { TableMutationWriteSetV2_ACU } from '../table/storage-frame-v2-types';
+import { hasActiveProvisionalBridgeAnywhere_ACU } from '../table/manual-catch-up-provisional-bridge';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { clearSummaryVectorIndexDirtyForRealign_ACU } from './summary-vector-index-realign-state';
 import { runScopedRetentionGcAfterFlush_ACU } from './summary-vector-index-chat-deletion-gc';
 import { logSummaryVectorIndexIdentityEvent_ACU } from './summary-vector-index-storage-service';
@@ -73,8 +85,32 @@ export interface SummaryVectorIndexFlushNowResult_ACU {
     success: boolean;
     skipped?: boolean;
     reason?: string;
-    result?: SummaryVectorIndexArchiveResult_ACU;
+    result?: SummaryVectorIndexArchiveResult_ACU | SummaryVectorMirrorFlushResult_ACU;
     error?: string;
+}
+
+export function scheduleSummaryVectorMirrorFlushAfterPersist_ACU(options: {
+    changedSheetKeys?: string[];
+    writeSet?: TableMutationWriteSetV2_ACU;
+    reason: string;
+}): void {
+    try {
+        const worldbook = getCurrentWorldbookConfig_ACU();
+        if (worldbook.summaryVectorIndexModeEnabled !== true || worldbook.summaryVectorMirrorEnabled === false) return;
+        const sourceTableKey = findTouchedSummarySheetKey_ACU({
+            changedSheetKeys: options.changedSheetKeys,
+            writeSet: options.writeSet,
+        });
+        if (!sourceTableKey) return;
+        void enqueueSummaryVectorIndexFlush_ACU({
+            sourceTableKey,
+            reason: options.reason,
+        }).catch((error: any) => {
+            logWarn_ACU('[向量镜像] persist 后入队失败（不影响表格保存）:', error?.message || error);
+        });
+    } catch (error: any) {
+        logWarn_ACU('[向量镜像] persist 后入队检查失败（不影响表格保存）:', error?.message || error);
+    }
 }
 
 /** 与 archive lock、realign state 复用同一三元 canonical scope。 */
@@ -133,12 +169,41 @@ async function reconcileLegacyDefaultFlushTask_ACU(
     return reconciliation.task;
 }
 
-function shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result: SummaryVectorIndexArchiveResult_ACU): boolean {
+function shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(
+    result: SummaryVectorIndexArchiveResult_ACU | SummaryVectorMirrorFlushResult_ACU,
+): boolean {
     if (!result.success) return false;
     if (result.skipped && result.reason === 'summary_table_not_found') {
         return false;
     }
     return true;
+}
+
+/**
+ * writer 把「还没有镜像 / 链已损坏」标成 needsRebuild 后直接返回。
+ * 填表完成后的自动归档必须在这里补首次建库，否则新聊天永远停在 blocked。
+ * embedding 身份变化与换表仍留给确认 UI，不在 flush 里偷偷全量重嵌。
+ */
+function resolveAutomaticMirrorRebuildReason_ACU(
+    writerReason: string | undefined,
+): SummaryVectorMirrorRebuildReason_ACU | null {
+    if (writerReason === 'no_mirror') return 'initial';
+    if (
+        writerReason === 'chain_conflict'
+        || writerReason === 'checkpoint_mismatch'
+        || writerReason === 'manifest_unavailable'
+    ) {
+        return 'rebuild_repair';
+    }
+    return null;
+}
+
+function isAutomaticRebuildTerminalFailure_ACU(reason: string | undefined): boolean {
+    return reason === 'summary_vector_index_config_invalid'
+        || reason === 'unsupported_replay_base'
+        || reason === 'duplicate_row_id'
+        || reason === 'target_message_invalid'
+        || reason === 'target_message_not_found';
 }
 
 function clearFlushTimer_ACU(scopeKey: string): void {
@@ -250,7 +315,8 @@ async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedG
         || current.generation === completedGeneration
         || current.status === 'invalidated'
         || current.status === 'ready'
-        || current.status === 'failed_terminal') {
+        || current.status === 'failed_terminal'
+        || current.status === 'blocked_needs_rebuild') {
         return;
     }
     if (current.status === 'queued' || current.status === 'dirty' || current.status === 'failed_retryable') {
@@ -260,6 +326,9 @@ async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedG
 }
 
 export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorIndexFlushQueueOptions_ACU = {}): Promise<SummaryVectorIndexFlushQueueResult_ACU> {
+    if (getCurrentWorldbookConfig_ACU().summaryVectorMirrorEnabled === false) {
+        return { queued: false, skipped: true, reason: 'summary_vector_mirror_disabled' };
+    }
     const selectedSummary = findSummaryTable_ACU();
     const rawChatKey = String(currentChatFileIdentifier_ACU || '').trim();
     if (!rawChatKey) {
@@ -300,9 +369,8 @@ export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorI
             chatKey,
             isolationKey,
             sourceTableKey,
-            targetMessageIndex: options.targetMessageIndex,
             generation,
-            mode: options.mode === 'append' ? 'append' : 'sync',
+            mode: 'sync',
             status: 'queued',
             requestedAt: now,
             debounceUntil: now + debounceMs,
@@ -429,16 +497,85 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
         } catch (_cooldownConfigError) {
             // config 不可用时不做 cooldown 检查，退回原路径（cooldown 是防重复扣费的增强，不阻断正常 flush）。
         }
-        // archive 以 rowId 成员差分决定是否写入；普通 flush 不再用 force 绕过无变化短路。
-        const result = await archiveSummaryVectorIndexNow_ACU({
-            targetMessageIndex: task.targetMessageIndex,
-            mode: task.mode,
-            saveChatAfterWrite: true,
-            isolationKey: task.isolationKey,
+        if (hasActiveProvisionalBridgeAnywhere_ACU(getChatArray_ACU())) {
+            await upsertSummaryVectorFlushTask_ACU({
+                scopeKey: task.scopeKey,
+                chatKey: task.chatKey,
+                isolationKey: task.isolationKey,
+                sourceTableKey: task.sourceTableKey,
+                generation: expectedGeneration,
+                mode: 'sync',
+                status: 'queued',
+                requestedAt: task.requestedAt,
+                debounceUntil: Date.now() + SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU,
+            });
+            return { success: true, skipped: true, reason: 'bridge_active' };
+        }
+        const result = await flushSummaryVectorMirrorNow_ACU({
+            isolationKey: getCurrentIsolationKey_ACU(),
             sourceTableKey: task.sourceTableKey,
             expectedFlushScopeKey: task.scopeKey,
             expectedFlushGeneration: expectedGeneration,
         });
+        if (result.reason === 'bridge_active') {
+            await upsertSummaryVectorFlushTask_ACU({
+                scopeKey: task.scopeKey,
+                chatKey: task.chatKey,
+                isolationKey: task.isolationKey,
+                sourceTableKey: task.sourceTableKey,
+                generation: expectedGeneration,
+                mode: 'sync',
+                status: 'queued',
+                requestedAt: task.requestedAt,
+                debounceUntil: Date.now() + SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU,
+            });
+            return { success: true, skipped: true, reason: 'bridge_active', result };
+        }
+        if (result.needsRebuild) {
+            const automaticReason = resolveAutomaticMirrorRebuildReason_ACU(result.reason);
+            if (automaticReason) {
+                const rebuilt = await rebuildSummaryVectorMirror_ACU({ reason: automaticReason });
+                if (rebuilt.success) {
+                    const completed = await markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU(task.scopeKey, expectedGeneration);
+                    if (completed) {
+                        clearSummaryVectorIndexDirtyForRealign_ACU(task.scopeKey);
+                    }
+                    void runScopedRetentionGcAfterFlush_ACU({
+                        chatKey: task.chatKey,
+                        isolationKey: task.isolationKey,
+                        sourceTableKey: task.sourceTableKey,
+                    }).catch((error: any) => {
+                        logWarn_ACU('[交火向量索引] retention GC 执行失败（不影响归档结果）:', error?.message || error);
+                    });
+                    logDebug_ACU(`[交火向量索引] flush 因 ${result.reason} 已自动重建：scope=${task.scopeKey}, rebuildReason=${automaticReason}`);
+                    return {
+                        success: true,
+                        skipped: rebuilt.skipped,
+                        reason: rebuilt.reason || automaticReason,
+                        result,
+                    };
+                }
+                const rebuildError = rebuilt.errors.join('; ') || rebuilt.reason || 'automatic_rebuild_failed';
+                const isTerminalFailure = isAutomaticRebuildTerminalFailure_ACU(rebuilt.reason);
+                await markFlushTaskFailure_ACU(task, rebuildError, isTerminalFailure, { scheduleRetry: true });
+                logWarn_ACU(`[交火向量索引] flush 自动重建失败：scope=${task.scopeKey}, reason=${rebuilt.reason || ''}`, rebuildError);
+                return { success: false, reason: rebuilt.reason, result, error: rebuildError };
+            }
+            const rebuildError = result.errors.join('; ') || result.reason || 'blocked_needs_rebuild';
+            await upsertSummaryVectorFlushTask_ACU({
+                scopeKey: task.scopeKey,
+                chatKey: task.chatKey,
+                isolationKey: task.isolationKey,
+                sourceTableKey: task.sourceTableKey,
+                generation: expectedGeneration,
+                mode: 'sync',
+                status: 'blocked_needs_rebuild',
+                requestedAt: task.requestedAt,
+                debounceUntil: task.debounceUntil,
+                lastError: rebuildError,
+            });
+            return { success: false, reason: result.reason, result, error: rebuildError };
+        }
         if (result.skipped && result.reason === 'flush_scope_invalidated') {
             return { success: true, skipped: true, reason: 'flush_scope_invalidated', result };
         }

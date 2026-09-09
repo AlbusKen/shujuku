@@ -63,6 +63,8 @@ function buildInflightReplayKey_ACU(
 ): string | null {
   if (options.updateRuntimeState) return null;
   if (Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0) return null;
+  // entry 观察回调是调用方私有副作用：共享 core 只会触发启动方的回调，不得去重。
+  if (typeof options.onEntryApplied === 'function') return null;
   if (options.replayEvidence) return null;
   if (options.signal) return null;
   if (Number(options.yieldBudgetMs) > 0) return null;
@@ -314,6 +316,34 @@ export interface LoadTableStateFromFramesV2Options_ACU {
    * 零额外成本）。外层多 boundary API 必须传入才能读回各 boundary 快照。
    */
   captureSink?: Map<number, TableReplayResultV2_ACU>;
+  /**
+   * entry 粒度只读观察回调（可选）。
+   *
+   * 每条 table entry 的 operations / patches 应用完毕、replay state 完整（未处于
+   * 单条 SQLite batch 或事务半执行状态）时调用一次。回调通过 context.readSheet
+   * 按 sheetKey 读取当前状态的单表深克隆：读取前 core 会 materialize SQL runtime，
+   * 随后 SQL op 重新 hydrate（与 captureBoundaries 同一代价模型），因此调用方应只对
+   * 真正需要观察的 entry 读取。
+   *
+   * 仅在 updateRuntimeState:false（只读路径）允许；副作用路径传入直接抛错。
+   * 传入回调的调用与 replayEvidence 复用、in-flight 去重严格互斥：命中复用会跳过
+   * core 导致回调一次都不触发；共享 core 只会触发启动方的回调。
+   *
+   * 被 transition cutoff / replacement anchor 整条跳过的 entry 不触发回调。
+   */
+  onEntryApplied?: (context: V2ReplayEntryAppliedContext_ACU) => void | Promise<void>;
+}
+
+/** onEntryApplied 回调上下文。 */
+export interface V2ReplayEntryAppliedContext_ACU {
+  messageIndex: number;
+  aiFloor: number;
+  entry: TableMutationLogEntryV2_ACU;
+  /**
+   * 读取当前 replay state 中的单表（经同名 sheetKey 身份重定向），返回深克隆；
+   * 该表不存在返回 null。
+   */
+  readSheet: (sheetKey: string) => Promise<Sheet_ACU | null>;
 }
 
 /**
@@ -2368,6 +2398,9 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   isolationKeyArg?: string,
   options: LoadTableStateFromFramesV2Options_ACU = {},
 ): Promise<TableReplayResultV2_ACU | null> {
+  if (typeof options.onEntryApplied === 'function' && options.updateRuntimeState !== false) {
+    throw new Error('[V2 Replay] onEntryApplied 仅在 updateRuntimeState:false 的只读路径下允许。');
+  }
   const chat = chatArg || getChatArray_ACU();
   if (!Array.isArray(chat) || chat.length === 0) return null;
 
@@ -2542,6 +2575,23 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
           pendingIntroductions.splice(pendingIntroductions.indexOf(checkpoint), 1);
         }
       };
+      const notifyEntryApplied_ACU = async (appliedEntry: TableMutationLogEntryV2_ACU): Promise<void> => {
+        if (typeof options.onEntryApplied !== 'function') return;
+        await options.onEntryApplied({
+          messageIndex: ref.messageIndex,
+          aiFloor: ref.aiFloor,
+          entry: appliedEntry,
+          readSheet: async (sheetKey: string) => {
+            const key = String(sheetKey || '').trim();
+            if (!key.startsWith('sheet_')) return null;
+            await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+            const resolved = redirectReplaySheetKey_ACU(identity, key);
+            const sheet = (state as Record<string, unknown>)[resolved] ?? (state as Record<string, unknown>)[key];
+            if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) return null;
+            return deepClone_ACU(sheet as Sheet_ACU);
+          },
+        });
+      };
       for (const entry of entries) {
         if (isAnchorFrame && entry.seq < replacementAnchorCursor!.seq) continue;
         // 取消检查放在 try 之前：try 的 catch 会把异常包装成「应用日志失败」并上报
@@ -2552,6 +2602,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         await yieldIfBudgetExceeded_ACU();
         try {
           await applyDueIntroductions(entry.seq);
+          let appliedAnyOperation = false;
           if (Array.isArray(entry.operations) && entry.operations.length > 0) {
             metrics.operationCount += entry.operations.length;
             for (const [operationIndex, operation] of entry.operations.entries()) {
@@ -2606,6 +2657,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                   aliasContext,
                   identity,
                 );
+                appliedAnyOperation = true;
               } catch (error) {
                 if (error instanceof V2ReplayAbortedError_ACU) throw error;
                 throw new V2ReplayOperationError_ACU({
@@ -2644,6 +2696,9 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
           );
           if (shouldReplayEntryEvent && options.updateRuntimeState !== false) {
             replayEventForState_ACU(entry, ref.aiFloor);
+          }
+          if (shouldReplayEntryEvent || appliedAnyOperation) {
+            await notifyEntryApplied_ACU(entry);
           }
         } catch (error) {
           logError_ACU(`[V2 Replay] 应用日志失败: messageIndex=${ref.messageIndex}, seq=${entry.seq}`, error);
@@ -2819,6 +2874,9 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   isolationKeyArg?: string,
   options: LoadTableStateFromFramesV2Options_ACU = {},
 ): Promise<TableReplayResultV2_ACU | null> {
+  if (typeof options.onEntryApplied === 'function' && options.updateRuntimeState !== false) {
+    throw new Error('[V2 Replay] onEntryApplied 仅在 updateRuntimeState:false 的只读路径下允许。');
+  }
   const chat = chatArg || getChatArray_ACU();
   const isolationKey = isolationKeyArg ?? getCurrentIsolationKey_ACU();
   // 阶段 E：仅内存 evidence 复用。同 chat 引用 + 同 isolationKey + 同 boundary +
@@ -2838,7 +2896,10 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   // 命中 evidence 直接 return 会绕过 core 导致 sink 为空（外层误判全部未命中而
   // 回退冷 replay）；且 capture 最终态（maxMessageIndex:undefined）若被写成
   // evidence，会命中普通加载的复用校验、污染语义。捕获路径与 evidence 严格互斥。
-  const captureMode = Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0;
+  // onEntryApplied 与 captureBoundaries 同属"必须真实跑完 core"的观察路径：命中 evidence
+  // 直接 return 会让回调一次都不触发；观察路径的结果也不得写成普通加载的复用证据。
+  const captureMode = (Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0)
+    || typeof options.onEntryApplied === 'function';
   const evidenceReusable = !!evidence
   && !options.updateRuntimeState
     && !captureMode

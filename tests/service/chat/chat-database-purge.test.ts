@@ -110,6 +110,28 @@ describe('purgeCurrentChatDatabaseState_ACU', () => {
     expect(mocks.saveStrict).toHaveBeenCalledTimes(1);
   });
 
+  it('只有镜像 frame、没有 legacy manifest 时仍收集 sourceTableKey 作为 GC scopeHint', async () => {
+    mocks.chat = [{
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            summaryVectorIndexFrame: { sourceTableKey: 'sheet_summary' },
+          },
+        },
+      },
+    }];
+
+    const result = await purgeCurrentChatDatabaseState_ACU();
+
+    expect(result.saved).toBe(true);
+    expect(mocks.deleteVector).not.toHaveBeenCalled();
+    const scope = { chatKey: 'chat-1', isolationKey: 'default', sourceTableKey: 'sheet_summary' };
+    expect(mocks.clearHotCache).toHaveBeenCalledWith(scope);
+    expect(mocks.clearFlushTasks).toHaveBeenCalledWith(scope);
+    expect(mocks.safeGc).toHaveBeenCalledWith({ scopeHints: [scope] });
+  });
+
   it('成功保存后按 manifest scope 清理热缓存、flush task 并运行安全 GC', async () => {
     const manifest = { indexId: 'v1', chatKey: 'chat-1', isolationKey: 'tag-A', sourceTableKey: 'sheet_summary' };
     mocks.chat = [{ TavernDB_ACU_IsolatedData: { a: { summaryVectorIndexManifest: manifest } } }];

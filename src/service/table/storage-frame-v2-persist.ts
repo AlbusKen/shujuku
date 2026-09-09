@@ -22,6 +22,8 @@ import { parseDDLColumnInfos_ACU } from '../../shared/ddl-utils';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 import { findLatestTransitionCheckpoint_ACU } from './compat-transition-checkpoint';
 import { reconcileRevealedSheetWithTemplate_ACU } from '../template/chat-template-reconciler';
+import { assertSummaryVectorMirrorFrameInvariantsV2_ACU } from '../vector/summary-vector-mirror-resolver';
+import { scheduleSummaryVectorMirrorFlushAfterPersist_ACU } from '../vector/summary-vector-index-flush-queue';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -929,6 +931,8 @@ export function writeInitFullCheckpointFrameV2_ACU(options: {
   };
   const violation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'init_reset');
   if (violation) throw new Error(violation);
+  const mirrorViolation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, 'init_reset');
+  if (mirrorViolation) throw new Error(mirrorViolation);
 }
 
 function findLatestFullCheckpoint_ACU(
@@ -1139,6 +1143,10 @@ function getOrInitV2Frame_ACU(isolatedData: Record<string, any>, isolationKey: s
   }
   if (tagData?.summaryVectorIndexManifest !== undefined) {
     nextTagData.summaryVectorIndexManifest = tagData.summaryVectorIndexManifest;
+  }
+  const existingMirror = tagData?.storageFrame?.summaryVectorIndexFrame;
+  if (existingMirror !== undefined && existingMirror !== null && typeof existingMirror === 'object') {
+    nextTagData.storageFrame.summaryVectorIndexFrame = existingMirror;
   }
 
   isolatedData[isolationKey] = nextTagData;
@@ -2673,6 +2681,15 @@ async function persistTableMutationLogV2Core_ACU(
     }
     options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_appended_operations_save');
   }
+  {
+    const persistCandidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
+    const mirrorViolation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(
+      persistCandidateChat,
+      isolationKey,
+      'persistTableMutationLogV2',
+    );
+    if (mirrorViolation) return { saved: false, error: mirrorViolation };
+  }
   const previousMessageState = [...replacementIsolatedDataByMessageIndex.keys()].map(messageIndex => {
     const message = chat[messageIndex];
     return {
@@ -2767,6 +2784,13 @@ export async function persistTableMutationLogV2_ACU(
       ? await persistTableMutationLogV2Core_ACU(coreOptions)
       : await options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(coreOptions), options.revisionWriteSet);
     performanceSpan.end({ success: result.saved });
+    if (result.saved && result.entry) {
+      scheduleSummaryVectorMirrorFlushAfterPersist_ACU({
+        changedSheetKeys: result.entry.changedSheetKeys,
+        writeSet: result.entry.writeSet,
+        reason: `persist:${result.entry.source || 'table_entry'}`,
+      });
+    }
     return result;
   } catch (error) {
     performanceSpan.end({ success: false });
@@ -2990,6 +3014,15 @@ async function persistTableMutationLogBatchV2Core_ACU(
     options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_appended_operations_save');
   }
 
+  {
+    const mirrorViolation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(
+      candidateChat,
+      isolationKey,
+      'persistTableMutationLogBatchV2',
+    );
+    if (mirrorViolation) return { saved: false, error: mirrorViolation };
+  }
+
   // convergence 会把锚点写入根帧（latestCheckpoint.index）；若根帧不是 batch target，
   // 必须把根帧一并纳入原子落盘集合，否则锚点只在内存候选里、落盘即丢失。
   const persistIndices = provisionalConvergenceReplay && !targetByIndex.has(latestCheckpoint.index)
@@ -3032,11 +3065,23 @@ export async function persistTableMutationLogBatchV2_ACU(
   if (!options.transactionContext) {
     return { saved: false, error: 'V2 batch operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
   }
-  if (options.assumeCommitLock) return persistTableMutationLogBatchV2Core_ACU(options);
-  return options.transactionContext.runCommit(
-    () => persistTableMutationLogBatchV2Core_ACU(options),
-    options.revisionWriteSet,
-  );
+  const result = options.assumeCommitLock
+    ? await persistTableMutationLogBatchV2Core_ACU(options)
+    : await options.transactionContext.runCommit(
+      () => persistTableMutationLogBatchV2Core_ACU(options),
+      options.revisionWriteSet,
+    );
+  if (result.saved) {
+    const changedSheetKeys = [...new Set(
+      (options.targets || []).flatMap((target) => Array.isArray(target.changedSheetKeys) ? target.changedSheetKeys : []),
+    )];
+    scheduleSummaryVectorMirrorFlushAfterPersist_ACU({
+      changedSheetKeys,
+      writeSet: options.transactionContext?.writeSet,
+      reason: `persist_batch:${options.source || 'table_entry'}`,
+    });
+  }
+  return result;
 }
 
 async function persistTableSheetCheckpointV2Core_ACU(

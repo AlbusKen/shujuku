@@ -43,6 +43,10 @@ interface CheckpointVaultFrameEntry_ACU {
     messageRef: any;
     fullCheckpoint: TableCheckpointV2_ACU | null;
     perSheetCheckpoints: Record<string, TableSheetCheckpointV2_ACU> | null;
+    summaryVectorCheckpoint: {
+        sourceTableKey: string;
+        checkpoint: import('../table/storage-frame-v2-types').SummaryVectorIndexMirrorCheckpointV2_ACU;
+    } | null;
     spv79TransitionCheckpoint: any | null;
     compatTransitionCheckpoint: any | null;
 }
@@ -75,6 +79,7 @@ function hasEntries_ACU(record: Record<string, unknown> | null | undefined): boo
 function entryHasArtifacts_ACU(entry: CheckpointVaultFrameEntry_ACU): boolean {
     return !!entry.fullCheckpoint
         || hasEntries_ACU(entry.perSheetCheckpoints)
+        || !!entry.summaryVectorCheckpoint
         || !!entry.spv79TransitionCheckpoint
         || !!entry.compatTransitionCheckpoint;
 }
@@ -104,11 +109,18 @@ export function captureCheckpointVaultForCurrentChat_ACU(chatArg?: any[]): void 
             const fullCheckpoint = frame?.checkpoint?.kind === 'full' ? deepClone_ACU(frame.checkpoint) : null;
             const perSheetCheckpoints = frame && hasEntries_ACU(frame.perSheetCheckpoints)
                 ? deepClone_ACU(frame.perSheetCheckpoints!) : null;
+            const vectorCheckpoint = frame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'
+                ? {
+                    sourceTableKey: String(frame.summaryVectorIndexFrame.sourceTableKey || ''),
+                    checkpoint: deepClone_ACU(frame.summaryVectorIndexFrame.checkpoint),
+                }
+                : null;
             const entries = entriesByIsolationKey.get(isolationKey) || [];
             entries.push({
                 messageRef: message,
                 fullCheckpoint,
                 perSheetCheckpoints,
+                summaryVectorCheckpoint: vectorCheckpoint,
                 spv79TransitionCheckpoint: spv79 ? deepClone_ACU(spv79) : null,
                 compatTransitionCheckpoint: compat ? deepClone_ACU(compat) : null,
             });
@@ -263,6 +275,25 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
                         frame.checkpoint = deepClone_ACU(entry.fullCheckpoint);
                         graftedCount += 1;
                         logWarn_ACU(`[删楼守卫] 被删楼层携带的回放根（reason=${entry.fullCheckpoint.reason}）已前移嫁接到楼层 #${targetIndex}（isolationKey=[${isolationKey || '无标签'}]）。`);
+                    }
+                }
+
+                if (entry.summaryVectorCheckpoint?.checkpoint) {
+                    if (!frame.summaryVectorIndexFrame || typeof frame.summaryVectorIndexFrame !== 'object') {
+                        frame.summaryVectorIndexFrame = {
+                            version: 3,
+                            sourceTableKey: entry.summaryVectorCheckpoint.sourceTableKey,
+                            logEntries: [],
+                        };
+                    }
+                    if (!frame.summaryVectorIndexFrame.checkpoint) {
+                        frame.summaryVectorIndexFrame.sourceTableKey = entry.summaryVectorCheckpoint.sourceTableKey
+                            || frame.summaryVectorIndexFrame.sourceTableKey;
+                        frame.summaryVectorIndexFrame.checkpoint = deepClone_ACU(entry.summaryVectorCheckpoint.checkpoint);
+                        graftedCount += 1;
+                        logWarn_ACU(`[删楼守卫] 被删楼层携带的向量 checkpoint 已前移嫁接到楼层 #${targetIndex}。`);
+                    } else {
+                        logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有向量 checkpoint，跳过嫁接。`);
                     }
                 }
 

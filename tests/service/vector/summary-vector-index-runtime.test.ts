@@ -20,6 +20,11 @@ const h = vi.hoisted(() => ({
   preparedRows: [] as any[],
   snapshot: null as any,
   registry: [] as any[],
+  mirrorStatus: 'ok' as string,
+  mirrorStale: false,
+  mirrorConflict: false,
+  rebuild: vi.fn(),
+  hasLegacy: false,
   readSnapshot: vi.fn(),
   validateSnapshot: vi.fn(),
   saveChatStrict: vi.fn(),
@@ -29,7 +34,10 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn(), logError_ACU: vi.fn() }));
 vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => h.chat }));
-vi.mock('../../../src/data/gateways/chat-gateway', () => ({ saveChatToHostStrict_ACU: (...a: any[]) => h.saveChatStrict(...a) }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => h.chat,
+  saveChatToHostStrict_ACU: (...a: any[]) => h.saveChatStrict(...a),
+}));
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   readIsolatedTagData_ACU: () => h.tagData,
   readIsolatedDataContainer_ACU: (msg: any) => {
@@ -110,10 +118,52 @@ vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => 
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
   enqueueSummaryVectorIndexFlush_ACU: (...a: any[]) => h.enqueueFlush(...a),
 }));
+vi.mock('../../../src/service/vector/summary-vector-mirror-resolver', () => ({
+  resolveSummaryVectorMirrorHead_ACU: async () => ({
+    status: h.mirrorStatus,
+    sourceTableKey: 'summary-source',
+    checkpointMessageIndex: 0,
+    checkpoint: { embedding: { model: 'model', dimension: 2 } },
+    head: new Map((h.rows || []).map((row: any) => [row.rowId, [{ packHash: `p-${row.rowId}`, chunkIndex: 0 }]])),
+    vectorRevision: 'rev-test',
+    packRefs: (h.rows || []).map((row: any) => ({ packHash: `p-${row.rowId}`, path: `path-${row.rowId}`, chunkCount: 1, byteLength: 1 })),
+    appliedDeltaEntryIds: [],
+    appliedTableEntryIds: [],
+    stale: h.mirrorStale,
+    chainConflict: h.mirrorConflict,
+    diagnostics: [],
+  }),
+}));
+vi.mock('../../../src/service/vector/summary-vector-mirror-storage', () => ({
+  loadSummaryVectorMirrorManifest_ACU: async () => ({ schema: 'summary_vector_mirror_manifest', version: 1, sourceTableKey: 'summary-source', rows: [] }),
+  loadSummaryVectorMirrorPack_ACU: async (ref: any) => {
+    const chunk = (h.chunks || []).find((item: any) => `p-${item.rowKey}` === ref.packHash);
+    if (!chunk) return null;
+    return {
+      schema: 'content_addressed_vector_pack',
+      chunks: [{ text: chunk.text, vector: JSON.stringify(Array.from(chunk.vector || [])), textHash: chunk.textHash }],
+    };
+  },
+  decodeSummaryVectorMirrorVector_ACU: (encoded: string) => {
+    try {
+      return Float32Array.from(JSON.parse(encoded));
+    } catch {
+      return new Float32Array([0, 1]);
+    }
+  },
+}));
+vi.mock('../../../src/service/vector/summary-vector-mirror-rebuild', () => ({
+  chatHasLegacySummaryVectorFields_ACU: () => h.hasLegacy,
+  rebuildSummaryVectorMirror_ACU: (...a: any[]) => h.rebuild(...a),
+}));
+vi.mock('../../../src/service/vector/summary-vector-mirror-writer', () => ({
+  buildCurrentSummaryVectorEmbeddingIdentity_ACU: () => ({ endpointFingerprint: 'ep', model: 'model', dimension: 2, sourceTextVersion: 2 }),
+}));
 // P3：runtime 去重签名使用 currentChatFileIdentifier_ACU，mock 掉 state-manager
 // 避免加载真实的重量级运行时状态模块。
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: 'chat-a',
+  getCurrentIsolationKey_ACU: () => 'iso-source',
 }));
 
 import {
@@ -205,8 +255,11 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
     h.missingError = false;
     h.invalidError = false;
-    h.summaryTable = null;
-    h.preparedRows = [];
+    h.mirrorStatus = 'ok';
+    h.mirrorStale = false;
+    h.mirrorConflict = false;
+    h.hasLegacy = false;
+    h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
     h.snapshot = null;
     h.registry = [];
     h.readSnapshot.mockReset();
@@ -216,6 +269,17 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.writeTagData.mockReset();
     vi.stubGlobal('fetch', vi.fn());
     setFixture_ACU();
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = h.rows.map((row: any) => ({
+      rowKey: row.rowKey,
+      rowId: row.rowId,
+      rowOrder: row.rowOrder,
+      timeSpan: row.timeSpan,
+      location: row.location,
+      summary: row.summary,
+      indexCode: row.indexCode,
+      chronicleText: '',
+    }));
   });
 
   it('hybrid 开启时 BM25 能补足 dense 阈值过滤掉的候选', async () => {
@@ -286,13 +350,12 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'stale-runtime-added-row' });
 
-    expect(result).toMatchObject({
-      success: false,
-      skipped: true,
-      reason: 'runtime_stale_rows_rebuild_required',
-    });
-    expect(h.createEmbeddings).not.toHaveBeenCalled();
-    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({
+      sourceTableKey: 'summary-source',
+      reason: 'runtime_stale_intersection',
+    }));
+    expect(createdContent_ACU()).not.toContain('new-row');
   });
 
   it('实时纪要表与索引不一致时交由 UI 走立即构建入口，不再绕过普通重建链路入队', async () => {
@@ -304,12 +367,9 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'stale-runtime' });
 
-    expect(result).toMatchObject({
-      success: false,
-      skipped: true,
-      reason: 'runtime_stale_rows_rebuild_required',
-    });
-    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({ reason: 'runtime_stale_intersection' }));
+    expect(createdContent_ACU()).not.toContain('old sparse summary');
   });
 
   it('rowId 集合相同但正文变化时复用向量并注入当前表显示文本', async () => {
@@ -471,6 +531,13 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     const rows = Array.from({ length: 25 }, (_, index) => row_ACU(`row-${index}`, index + 1, `summary ${index}`));
     h.rows = rows;
     h.chunks = rows.map((row, index) => chunk_ACU(row, `relic candidate ${index}`, [1, 0]));
+    h.preparedRows = rows.map((row) => ({
+      rowKey: row.rowKey,
+      rowId: row.rowId,
+      rowOrder: row.rowOrder,
+      summary: row.summary,
+      chronicleText: '',
+    }));
     // 分数与全局 index 反向：只有跨批合并正确时，最后一批的行才会成为 top。
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));
@@ -593,7 +660,54 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
 
 });
 
-describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recovery', () => {
+describe('processSummaryVectorIndexBeforeGeneration_ACU mirror protocol recovery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetSummaryVectorIndexRuntimeDedupeState_ACU();
+    h.chat = [{ is_user: false, mes: 'assistant' } as any];
+    h.rows = [row_ACU('r1', 1, 'summary')];
+    h.chunks = [chunk_ACU(h.rows[0], 'secret relic', [1, 0])];
+    h.config = defaultConfig_ACU();
+    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
+    h.mirrorStatus = 'ok';
+    h.mirrorStale = false;
+    h.mirrorConflict = false;
+    h.hasLegacy = false;
+    h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = [{ rowKey: 'r1', rowId: 'r1', rowOrder: 1, summary: 'summary', chronicleText: '' }];
+    h.createEmbeddings.mockResolvedValue([{ index: 0, embedding: [1, 0] }]);
+    h.createEntries.mockResolvedValue(undefined);
+  });
+
+  it('no_mirror 且存在 legacy 字段时要求确认重建', async () => {
+    h.mirrorStatus = 'no_mirror';
+    h.hasLegacy = true;
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-legacy', source: 'legacy-test' });
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'legacy_vector_scheme_rebuild_required' });
+    expect(h.rebuild).not.toHaveBeenCalled();
+  });
+
+  it('embedding 身份变化时确认前不召回', async () => {
+    h.mirrorStatus = 'embedding_identity_changed';
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-identity', source: 'identity-test' });
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'embedding_identity_changed_rebuild_required' });
+  });
+
+  it('chainConflict 时自动 rebuild_repair', async () => {
+    h.mirrorConflict = true;
+    await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-conflict', source: 'conflict-test' });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+  });
+
+  it('checkpoint_mismatch 时自动 rebuild_repair', async () => {
+    h.mirrorStatus = 'checkpoint_mismatch';
+    await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-mismatch', source: 'mismatch-test' });
+    expect(h.rebuild).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+  });
+});
+
+describe.skip('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recovery（旧 snapshot 路径已由镜像协议取代）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetSummaryVectorIndexRuntimeDedupeState_ACU();
@@ -688,7 +802,7 @@ function realignBlob_ACU(manifest: any): any {
   };
 }
 
-describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recovery', () => {
+describe.skip('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recovery（旧 snapshot 路径已由镜像协议取代）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetSummaryVectorIndexRuntimeDedupeState_ACU();

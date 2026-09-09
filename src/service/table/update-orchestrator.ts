@@ -14,11 +14,17 @@ import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMerg
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
-import { archiveSummaryVectorIndexNow_ACU } from '../vector/summary-vector-index-archive-service';
 import {
     enqueueSummaryVectorIndexFlush_ACU,
-    type SummaryVectorIndexFlushQueueResult_ACU,
 } from '../vector/summary-vector-index-flush-queue';
+import {
+    ensureSummaryVectorMirrorAfterTableFill_ACU,
+    publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU,
+    rebuildCurrentSummaryVectorIndexNow_ACU,
+    snapshotSummaryVectorMirrorExcludingRowsNow_ACU,
+    type SummaryVectorMirrorRowRemovalSnapshot_ACU,
+} from '../vector/summary-vector-index-rebuild-service';
+import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../vector/summary-vector-index-state-service';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
@@ -79,7 +85,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSchemaStaleError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractRowIdsFromSqlSheetBatch_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSchemaStaleError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
 import { hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -94,35 +100,99 @@ import { getCurrentFlightModeState_ACU, stageFlightModeHiddenRowIds_ACU } from '
 
 interface ManualRefillSummaryVectorCleanup_ACU {
     sourceTableKey: string;
-    rowIds: string[];
+    removedRowIds: string[];
 }
 
-function collectManualRefillSummaryVectorCleanup_ACU(targetSheetKeys: string[]): ManualRefillSummaryVectorCleanup_ACU[] {
+function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: number[], targetSheetKeys: string[]): ManualRefillSummaryVectorCleanup_ACU[] {
     const tableData = currentJsonTableData_ACU || {};
-    return [...new Set(targetSheetKeys)].flatMap((sheetKey) => {
+    const summarySourceTableKeys = [...new Set(targetSheetKeys)].filter((sheetKey) => {
         const table = (tableData as any)[sheetKey];
-        if (!table || !isSummaryOrOutlineTable_ACU(String(table.name || ''))) return [];
-        const rows = Array.isArray(table.content) ? table.content.slice(1) : [];
-        const rowIds = rows.map((row: any): string => String(Array.isArray(row) ? row[0] ?? '' : '').trim());
-        const missingRowIndex = rowIds.findIndex((rowId: string) => !rowId);
-        if (missingRowIndex >= 0) {
-            throw new Error(`手动重填清理前无法确认纪要表 ${sheetKey} 的 row_id（数据行 ${missingRowIndex + 1}）。`);
+        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
+    });
+    if (summarySourceTableKeys.length === 0) return [];
+
+    const sourceTableKeySet = new Set(summarySourceTableKeys);
+    const removedRowIdsBySourceTable = new Map(summarySourceTableKeys.map((sheetKey) => [sheetKey, new Set<string>()]));
+    const chat = getChatArray_ACU();
+    for (const messageIndex of targetMessageIndices) {
+        const message = chat?.[messageIndex];
+        const frame = readIsolatedTagData_ACU(message, getCurrentIsolationKey_ACU())?.storageFrame;
+        for (const entry of Array.isArray(frame?.logEntries) ? frame.logEntries : []) {
+            for (const operation of Array.isArray(entry?.operations) ? entry.operations : []) {
+                const rowOperation = operation as { kind?: string; sheetKey?: string; rowId?: string };
+                const kind = String(rowOperation.kind || '');
+                const sheetKey = String(rowOperation.sheetKey || '');
+                if (kind === 'row_upsert' || kind === 'row_delete') {
+                    if (!sourceTableKeySet.has(sheetKey)) continue;
+                    const rowId = String(rowOperation.rowId || '').trim();
+                    if (!rowId) {
+                        throw new Error(`手动重填清理前无法确认纪要表 ${sheetKey} 的历史 row_id。`);
+                    }
+                    removedRowIdsBySourceTable.get(sheetKey)!.add(rowId);
+                    continue;
+                }
+                if (kind === 'meta_update') continue;
+                if (kind === 'sql_sheet_batch') {
+                    if (!sourceTableKeySet.has(sheetKey)) continue;
+                    const extracted = extractRowIdsFromSqlSheetBatch_ACU(operation);
+                    if (!extracted.ok) {
+                        throw new Error(`手动重填清理前无法精确识别纪要表 ${sheetKey} 的 sql_sheet_batch 操作历史 row_id。`);
+                    }
+                    extracted.rowIds.forEach((rowId) => removedRowIdsBySourceTable.get(sheetKey)!.add(rowId));
+                    continue;
+                }
+                if (kind === 'data_replace' || kind === 'sql_batch' || kind === 'table_edit_dsl') {
+                    throw new Error(`手动重填清理前无法精确识别操作 ${kind} 影响的纪要表历史 row_id。`);
+                }
+                if (sourceTableKeySet.has(sheetKey)) {
+                    throw new Error(`手动重填清理前无法精确识别纪要表 ${sheetKey} 的 ${kind || 'unknown'} 操作历史 row_id。`);
+                }
+                if (!kind || !sheetKey) {
+                    throw new Error(`手动重填清理前无法确认目标范围内操作 ${kind || 'unknown'} 是否影响纪要表。`);
+                }
+            }
         }
-        return [{ sourceTableKey: sheetKey, rowIds }];
+    }
+
+
+    const currentIndex = getAggregatedSummaryVectorIndexSnapshot_ACU()?.summaryVectorIndexState || null;
+    return summarySourceTableKeys.flatMap((sourceTableKey) => {
+        const removedRowIds = Array.from(removedRowIdsBySourceTable.get(sourceTableKey) || []).sort();
+        const hasCurrentIndex = currentIndex?.sourceTableKey === sourceTableKey
+            && Array.isArray(currentIndex.rows)
+            && currentIndex.rows.some((row) => row.status !== 'removed');
+        if (hasCurrentIndex && removedRowIds.length === 0) {
+            throw new Error(`手动重填清理前无法从目标范围识别纪要表 ${sourceTableKey} 的历史 row_id。`);
+        }
+        return [{ sourceTableKey, removedRowIds }];
     });
 }
 
-async function removeManualRefillSummaryVectors_ACU(cleanups: ManualRefillSummaryVectorCleanup_ACU[]): Promise<void> {
-    for (const cleanup of cleanups) {
-        const result = await archiveSummaryVectorIndexNow_ACU({
-            mode: 'sync',
-            sourceTableKey: cleanup.sourceTableKey,
-            excludedRowIds: cleanup.rowIds,
-            removalOnly: true,
-        });
-        if (!result.success) {
-            throw new Error(result.errors.join('; ') || result.reason || `纪要表 ${cleanup.sourceTableKey} 的旧向量清理失败。`);
-        }
+function collectManualRefillExcludedSummaryRowIds_ACU(cleanups: ManualRefillSummaryVectorCleanup_ACU[]): string[] {
+    return [...new Set(cleanups.flatMap((cleanup) => cleanup.removedRowIds.map((rowId) => String(rowId || '').trim()).filter(Boolean)))].sort();
+}
+
+async function snapshotManualRefillSummaryVectors_ACU(
+    cleanups: ManualRefillSummaryVectorCleanup_ACU[],
+): Promise<SummaryVectorMirrorRowRemovalSnapshot_ACU | null> {
+    const excludedRowIds = collectManualRefillExcludedSummaryRowIds_ACU(cleanups);
+    if (excludedRowIds.length === 0) return null;
+    const worldbook = getCurrentWorldbookConfig_ACU();
+    if (worldbook.summaryVectorIndexModeEnabled !== true) return null;
+    if (worldbook.summaryVectorMirrorEnabled === false) return null;
+    return snapshotSummaryVectorMirrorExcludingRowsNow_ACU({
+        excludedRowIds,
+        sourceTableKey: cleanups[0]?.sourceTableKey,
+    });
+}
+
+async function publishManualRefillSummaryVectors_ACU(
+    snapshot: SummaryVectorMirrorRowRemovalSnapshot_ACU | null,
+): Promise<void> {
+    if (!snapshot) return;
+    const result = await publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot);
+    if (!result.success) {
+        throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引发布失败。');
     }
 }
 
@@ -133,10 +203,55 @@ function findModifiedSummaryTableKey_ACU(tableData: Record<string, any>, modifie
     });
 }
 
-async function enqueueSummaryVectorIndexFlushForModifiedSheets_ACU(options: { tableData: Record<string, any>; modifiedKeys: string[]; targetMessageIndex?: number; reason: string }): Promise<SummaryVectorIndexFlushQueueResult_ACU | undefined> {
-    const sourceTableKey = findModifiedSummaryTableKey_ACU(options.tableData, options.modifiedKeys);
-    if (!sourceTableKey || getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
-    return enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.targetMessageIndex, sourceTableKey, mode: 'sync', reason: options.reason });
+/**
+ * 填表完成后的向量收尾：
+ * - 手动重填完成必须按当前纪要表 rebuild_repair。清楼层后 head 仍可能带着旧 rowId，
+ *   ensure 会因 vector_data_present 跳过，flush 又把这些 id 当成 alreadyMirrored，快照不会更新。
+ * - 自动填表：当前环境没有任何交火向量镜像时直接 initial 重建；已有镜像时再按改动过的纪要表入队增量 flush。
+ */
+export async function runSummaryVectorFollowupAfterTableFill_ACU(options: {
+    tableData: Record<string, any>;
+    modifiedKeys: string[];
+    sourceTableKeys?: string[];
+    targetMessageIndex?: number;
+    reason: string;
+}): Promise<void> {
+    if (options.reason === 'manual_refill_complete') {
+        const worldbook = getCurrentWorldbookConfig_ACU();
+        if (worldbook.summaryVectorIndexModeEnabled !== true) return;
+        if (worldbook.summaryVectorMirrorEnabled === false) return;
+        try {
+            const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
+            if (!result.success) {
+                logWarn_ACU(`[交火模式纪要索引] 手动重填完成后交火索引重建失败：${result.errors.join('; ') || result.reason || 'unknown'}`);
+            }
+        } catch (error: any) {
+            logWarn_ACU('[交火模式纪要索引] 手动重填完成后交火索引重建异常:', error?.message || error);
+        }
+        return;
+    }
+
+    const ensured = await ensureSummaryVectorMirrorAfterTableFill_ACU();
+    if (ensured.attempted) return;
+    if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
+
+    const sourceTableKeys = options.sourceTableKeys?.length
+        ? [...new Set(options.sourceTableKeys.filter(Boolean))]
+        : [findModifiedSummaryTableKey_ACU(options.tableData, options.modifiedKeys)].filter((key): key is string => !!key);
+
+    for (const sourceTableKey of sourceTableKeys) {
+        const result = await enqueueSummaryVectorIndexFlush_ACU({
+            sourceTableKey,
+            reason: options.reason,
+        });
+        if (result.skipped) {
+            logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}, scopeKey=${result.scopeKey || ''}`);
+            continue;
+        }
+        if (result.queued) {
+            logDebug_ACU(`[交火模式纪要索引] 填表完成后已入队防抖归档, scopeKey=${result.scopeKey}, debounceUntil=${result.debounceUntil}`);
+        }
+    }
 }
 
 // ============================================================
@@ -2030,7 +2145,12 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     metrics: { targetMessageIndex: options.saveTargetIndex },
                 });
                 try {
-                    await enqueueSummaryVectorIndexFlushForModifiedSheets_ACU({ tableData: workingTableData as Record<string, any>, modifiedKeys, targetMessageIndex: options.saveTargetIndex, reason: 'unified_group_fill_complete' });
+                    await runSummaryVectorFollowupAfterTableFill_ACU({
+                        tableData: workingTableData as Record<string, any>,
+                        modifiedKeys,
+                        targetMessageIndex: options.saveTargetIndex,
+                        reason: 'unified_group_fill_complete',
+                    });
                     vectorSpan.end({ success: true });
                 } catch (error) {
                     vectorSpan.end({ success: false });
@@ -3316,25 +3436,16 @@ export async function executeCardUpdateCore_ACU(
                 }
             }
 
-            // [spv3.6.6] 填表完成后异步触发交火向量索引防抖归档
-            // 将 embedding + 归档写入从 saving 阶段移到 complete 之后，
-            // 避免 embedding API 调用阻塞"正在保存"提示框。
-            // 使用 flush queue 替代直接调用，由防抖定时器统一调度。
-            // [spv3.6.9] 增加诊断日志，记录入队结果（queued/skipped）
+            // 填表完成后异步收尾：当前环境无交火向量数据则立刻重建，
+            // 已有镜像再入队防抖增量 flush。不阻塞 complete 提示。
             if (!isImportMode && success) {
-                enqueueSummaryVectorIndexFlushForModifiedSheets_ACU({
+                void runSummaryVectorFollowupAfterTableFill_ACU({
                     tableData: currentJsonTableData_ACU as Record<string, any>,
                     modifiedKeys,
                     targetMessageIndex: saveTargetIndex,
                     reason: 'table_fill_complete',
-                }).then(result => {
-                    if (result.skipped) {
-                        logWarn_ACU(`[交火模式纪要索引] 填表完成后防抖归档被跳过：${result.reason || 'unknown'}, scopeKey=${result.scopeKey || ''}`);
-                    } else if (result.queued) {
-                        logDebug_ACU(`[交火模式纪要索引] 填表完成后已入队防抖归档, scopeKey=${result.scopeKey}, debounceUntil=${result.debounceUntil}`);
-                    }
                 }).catch(err => {
-                    logWarn_ACU('[交火模式纪要索引] 填表完成后防抖归档入队异常:', err);
+                    logWarn_ACU('[交火模式纪要索引] 填表完成后向量收尾异常:', err);
                 });
             }
 
@@ -4551,6 +4662,7 @@ export async function orchestrateManualUpdate_ACU(
     // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
     // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
     let refillCleanupStarted = false;
+    let manualRefillSummarySourceTableKeys: string[] = [];
     // 手动重填失败语义（计划 §5.5 / §5.6，已删除旧 snapshot/rollback 机制）：
     // 破坏性清理不可逆，失败绝不回滚、绝不恢复已删数据；已提交的 bucket 成果保留，
     // 仅按聊天记录里的已提交事实重新对齐运行时快照，避免界面显示与持久化不一致。
@@ -4798,13 +4910,16 @@ export async function orchestrateManualUpdate_ACU(
                 }
             }
 
+            let summaryVectorCleanups: ManualRefillSummaryVectorCleanup_ACU[] = [];
+            let summaryVectorRemovalSnapshot: SummaryVectorMirrorRowRemovalSnapshot_ACU | null = null;
             try {
-                const summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(targetKeys);
+                summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
+                manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
+                // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
+                summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
                 // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                 refillCleanupStarted = true;
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
-                // 表格清理已严格保存后，发布不再引用清理 rowId 的新快照；该路径绝不重嵌入保留行。
-                await removeManualRefillSummaryVectors_ACU(summaryVectorCleanups);
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
                 const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
@@ -4845,6 +4960,15 @@ export async function orchestrateManualUpdate_ACU(
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                 const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                 return { success: false, error: failureError };
+            }
+
+            // 按清表前拍下的 head 发布剩余行。禁止按 reload 后的空模板表重建，
+            // 否则会写出 dimension=0 的非法 vector_full，后续 persist 在 #0 失败。
+            try {
+                await publishManualRefillSummaryVectors_ACU(summaryVectorRemovalSnapshot);
+            } catch (error: any) {
+                logError_ACU('[Manual Refill] 清理后发布交火索引失败:', error);
+                return await failManualRefillSession(error?.message || '手动重填清理后发布交火索引失败。');
             }
 
             // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）
@@ -5155,6 +5279,14 @@ export async function orchestrateManualUpdate_ACU(
                 if (!snapshotResult.success) {
                     logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);
                     return await failManualRefillSession(snapshotResult.error || '手动重填完成后提交完整单表 checkpoint 失败。');
+                }
+                if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                    await runSummaryVectorFollowupAfterTableFill_ACU({
+                        tableData: completedData as Record<string, any>,
+                        modifiedKeys: manualRefillSummarySourceTableKeys,
+                        sourceTableKeys: manualRefillSummarySourceTableKeys,
+                        reason: 'manual_refill_complete',
+                    });
                 }
             } catch (error: any) {
                 const failureError = error?.message || String(error || '手动重填完成后提交完整单表 checkpoint 异常。');

@@ -16,11 +16,15 @@ const h = vi.hoisted(() => ({
   config: { value: { summaryIndexRollingDeltaEnabled: false } as any },
   snapshot: { value: null as any },
   isolationKey: 'iso-a',
+  chat: [] as any[],
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: 'chat-a',
   getCurrentIsolationKey_ACU: () => h.isolationKey,
+}));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => h.chat,
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getAllSummaryVectorIndexSnapshotLayers_ACU: () => h.snapshot.value?.layers || [],
@@ -41,6 +45,8 @@ vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   buildVectorIndexSingleSnapshotV2FilePath_ACU: (parts: any) => `TavernDB_ACU_vector_v2_scope:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}_${parts.indexId}_${parts.writeGeneration}_snapshot`,
   decodeVectorIndexScopeFromPath_ACU: (...args: any[]) => h.decodeScope(...args),
   isVectorIndexContentPackPathV2_ACU: (path: any) => String(path || '').startsWith('TavernDB_ACU_vector_v2pack_'),
+  isVectorIndexMirrorManifestPathV2_ACU: (path: any) => String(path || '').startsWith('TavernDB_ACU_vector_v2vcp_'),
+  VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU: 'TavernDB_ACU_vector_v2vcp_',
   VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU: 'TavernDB_ACU_vector_v2_',
   buildVectorIndexFileName_ACU: vi.fn(), buildVectorIndexSnapshotFilePath_ACU: vi.fn(),
   buildVectorIndexStableDirectory_ACU: vi.fn(), buildVectorIndexStableFilePath_ACU: vi.fn(),
@@ -350,6 +356,7 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
     h.remove.mockResolvedValue({ ok: true });
     h.unregister.mockResolvedValue(undefined);
     h.snapshot.value = null;
+    h.chat = [];
     h.flush.mockResolvedValue({ total: 0, dirty: 0, queued: 0, flushing: 0, failedRetryable: 0, failedTerminal: 0, lastError: '' });
   });
 
@@ -694,6 +701,39 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
     expect(result.deletedPaths).toEqual([]);
     expect(result.blockedByReachability).toContain(path);
     expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('仅有 V2 镜像 checkpoint 时 health 不把 v2vcp 当旧 snapshot 读取', async () => {
+    h.chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        'iso-a': {
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: {} },
+            summaryVectorIndexFrame: {
+              version: 3,
+              sourceTableKey: 'summary',
+              checkpoint: {
+                kind: 'vector_full',
+                manifestRef: { path: 'TavernDB_ACU_vector_v2vcp_scope_mf', checksum: 'mf' },
+                packRefs: [],
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    }];
+    h.read.mockResolvedValue({
+      ok: true,
+      data: { schema: 'summary_vector_mirror_manifest', version: 1, rows: [] },
+    });
+
+    await expect(inspectSummaryVectorIndexHealth_ACU()).resolves.toEqual(expect.objectContaining({
+      missingFileCount: 0,
+    }));
+    expect(h.logWarn).not.toHaveBeenCalled();
   });
 
   it('legacy single-file snapshot 在 health 中标记为待迁移，但保持兼容可读', async () => {

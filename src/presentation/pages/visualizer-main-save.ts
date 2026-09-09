@@ -217,12 +217,10 @@ async function runPostSaveRefresh_ACU(reason: string, targetMessageIndex?: numbe
 
     if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
         try {
-            const queueResult = await enqueueSummaryVectorIndexFlush_ACU({
-                targetMessageIndex,
-                sourceTableKey,
-                mode: 'sync',
-                reason,
-            });
+                const queueResult = await enqueueSummaryVectorIndexFlush_ACU({
+                    sourceTableKey,
+                    reason,
+                });
             if (!queueResult.queued && !queueResult.skipped) {
                 logWarn_ACU('[VisualizerVectorIndex] 交火索引防抖归档入队失败:', queueResult.reason);
                 showToastr_ACU('warning', `表格已保存，但交火索引防抖归档入队失败：${queueResult.reason || 'unknown'}`);

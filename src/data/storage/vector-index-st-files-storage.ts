@@ -133,6 +133,7 @@ export function buildVectorIndexSnapshotFilePath_ACU(parts: {
 
 export const VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2_';
 export const VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2pack_';
+export const VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2vcp_';
 
 /** SHA-256 base64url（无 padding）恒为 43 字符；路径解析与预算断言都依赖这个定长。 */
 export const VECTOR_INDEX_SCOPE_FINGERPRINT_LENGTH_ACU = 43;
@@ -237,6 +238,29 @@ export function isVectorIndexContentPackPathV2_ACU(path: string): boolean {
     return String(path || '').startsWith(VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU);
 }
 
+export function buildVectorIndexMirrorManifestPathV2_ACU(parts: {
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+    manifestHash: string;
+}): string {
+    const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts);
+    const manifestHash = normalizePathSegment_ACU(parts.manifestHash || 'manifest_unknown');
+    const path = `${VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU}${scopeToken}_${manifestHash}`;
+    if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
+        throw new Error(
+            `[纪要向量索引] 镜像 checkpoint manifest 对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}，`
+            + `scopeToken 占用 ${scopeToken.length} 字符，manifestHash 占用 ${manifestHash.length} 字符。`
+            + '禁止截断任何路径段后继续写入。',
+        );
+    }
+    return path;
+}
+
+export function isVectorIndexMirrorManifestPathV2_ACU(path: string): boolean {
+    return String(path || '').startsWith(VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU);
+}
+
 export interface VectorIndexDecodedScope_ACU {
     chatKey: string;
     isolationKey: string;
@@ -268,8 +292,12 @@ function tryDecodeVectorIndexScopeToken_ACU(token: string): VectorIndexDecodedSc
 
 function stripVectorIndexV2PathPrefix_ACU(path: string): string | null {
     const normalized = String(path || '');
-    // pack 前缀是 snapshot 前缀的超集（v2pack_ 以 v2 开头），必须先判 pack。
-    for (const prefix of [VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU, VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU]) {
+    // pack / v2vcp 前缀都是 snapshot 前缀的超集（都以 v2 开头），必须先于 v2_ 判断。
+    for (const prefix of [
+        VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU,
+        VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU,
+        VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU,
+    ]) {
         if (normalized.startsWith(prefix)) return normalized.slice(prefix.length);
     }
     return null;
