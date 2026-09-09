@@ -2540,11 +2540,20 @@ export function validateSingleFileSnapshotIdentity_ACU(
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.snapshot.revision/storageIdentity.revision', expectedIdentity.revision, embeddedManifest.snapshot?.revision);
 }
 
-function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManifest_ACU): boolean {
+function isSingleFileSnapshotManifest_ACU(
+    manifest: ChatSummaryVectorIndexManifest_ACU | null | undefined,
+): boolean {
+    if (!manifest || typeof manifest !== 'object') return false;
     const explicitMode = manifest.snapshot?.mode;
     if (explicitMode) return explicitMode === 'single_file_snapshot';
     const manifestPath = String(manifest.manifestFile || '').trim();
     return !!manifestPath && manifest.rowsFile === manifestPath && manifest.tombstoneFile === manifestPath;
+}
+
+function isLegacySingleFileHealthTarget_ACU(file: SummaryVectorIndexReachableFile_ACU): boolean {
+    if (file.role !== 'manifest') return false;
+    if (isVectorIndexMirrorManifestPathV2_ACU(file.path)) return false;
+    return isSingleFileSnapshotManifest_ACU(file.manifest);
 }
 
 async function loadChunksFromSingleFileSnapshot_ACU(
@@ -2902,7 +2911,7 @@ export async function inspectSummaryVectorIndexHealth_ACU(): Promise<SummaryVect
                 message: 'registry checksum 与实际文件内容不一致',
             });
         }
-        if (file.role === 'manifest' && isSingleFileSnapshotManifest_ACU(file.manifest) && !file.manifest.storageIdentity
+        if (isLegacySingleFileHealthTarget_ACU(file) && !file.manifest.storageIdentity
             && !seenLegacyManifestIndexes.has(file.manifest.indexId)) {
             seenLegacyManifestIndexes.add(file.manifest.indexId);
             issues.push({
@@ -2915,7 +2924,7 @@ export async function inspectSummaryVectorIndexHealth_ACU(): Promise<SummaryVect
                 message: '旧 single-file 快照仍可读取，但尚未具备 V2 immutable identity，等待显式迁移或重建。',
             });
         }
-        if (file.role === 'manifest' && isSingleFileSnapshotManifest_ACU(file.manifest)) {
+        if (isLegacySingleFileHealthTarget_ACU(file)) {
             const snapshot = loaded.data as VectorIndexSingleSnapshotBlob_ACU;
             try {
                 if (snapshot.schema !== 'single_file_snapshot') {

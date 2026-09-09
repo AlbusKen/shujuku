@@ -2,7 +2,7 @@
  * service/vector/summary-vector-mirror-rebuild.ts — 统一重建路径
  *
  * replay/checkpoint.data 取 C 时刻 rowId 集合 → pack+manifest → 写 checkpoint@C →
- * 清 C..H 旧 delta → strict save → 入队 flush 补 C..H。
+ * 清 C..H 旧 delta → strict save → 立刻 flush 补 C..H（当前纪要表里的新行）。
  * rebuild_repair 复用当前 head 中读回校验通过的 refs；initial / rebuild_user 全量 embedding。
  */
 
@@ -20,7 +20,7 @@ import type {
     SummaryVectorIndexMirrorFrameV2_ACU,
     TableStorageFrameV2_ACU,
 } from '../table/storage-frame-v2-types';
-import { hashUserInput_ACU, logWarn_ACU } from '../../shared/utils';
+import { hashUserInput_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
 import { buildPreparedRows_ACU, buildRowChunkTexts_ACU, findSummaryTable_ACU } from './summary-vector-index-archive-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU, validateSummaryVectorIndexConfig_ACU } from './vector-memory-config';
@@ -38,8 +38,10 @@ import {
     persistSummaryVectorMirrorManifestPrepared_ACU,
     persistSummaryVectorMirrorPackPrepared_ACU,
 } from './summary-vector-mirror-storage';
-import { buildCurrentSummaryVectorEmbeddingIdentity_ACU } from './summary-vector-mirror-writer';
-import { enqueueSummaryVectorIndexFlush_ACU } from './summary-vector-index-flush-queue';
+import {
+    buildCurrentSummaryVectorEmbeddingIdentity_ACU,
+    flushSummaryVectorMirrorNow_ACU,
+} from './summary-vector-mirror-writer';
 import { runScopedRetentionGcAfterFlush_ACU } from './summary-vector-index-chat-deletion-gc';
 import type { SummaryVectorIndexContentPackChunk_ACU, SummaryVectorIndexExternalFileRef_ACU } from './summary-vector-index-types';
 
@@ -135,7 +137,13 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     }
 
     const embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
-    const prepared = buildPreparedRows_ACU(sheet, selected.summaryKey);
+    // embedding 文本取当前纪要表：C 里可能只有 rowId、单元格已被后续填表更新。
+    // 纳入 checkpoint 的 rowId 集合仍只来自 C，不能把 H 的新行写进 C。
+    const prepared = buildPreparedRows_ACU(selected.table, selected.summaryKey);
+    const currentInspect = inspectCheckpointRowIds_ACU(selected.table);
+    if (inspect.rowIds.length === 0 && currentInspect.rowIds.length > 0) {
+        logDebug_ACU(`[向量镜像] C 时刻纪要表无行、当前表有 ${currentInspect.rowIds.length} 行，重建后立即 flush 补 C..H。`);
+    }
     const preparedById = new Map(prepared.rows.map((row) => [row.rowId, row]));
     const reusable = new Map<string, SummaryVectorChunkRef_ACU[]>();
 
@@ -335,25 +343,31 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
         logWarn_ACU('[向量镜像] 重建已写入聊天，registry published 失败:', error?.message || error);
     }
 
-    void enqueueSummaryVectorIndexFlush_ACU({
+    const flushed = await flushSummaryVectorMirrorNow_ACU({
+        isolationKey,
         sourceTableKey: selected.summaryKey,
-        reason: `rebuild_${options.reason}`,
-    }).catch((error: any) => {
-        logWarn_ACU('[向量镜像] 重建后入队 flush 失败:', error?.message || error);
     });
+    if (!flushed.success) {
+        logWarn_ACU(`[向量镜像] 重建后立刻 flush 失败：${flushed.errors.join('; ') || flushed.reason || 'unknown'}`);
+    } else if (!flushed.skipped) {
+        logDebug_ACU(`[向量镜像] 重建后立刻 flush 完成：rows=${flushed.indexedRowCount}, chunks=${flushed.chunkCount}`);
+    }
     void runScopedRetentionGcAfterFlush_ACU({
         chatKey: scope.chatKey,
         isolationKey: scope.isolationKey,
         sourceTableKey: scope.sourceTableKey,
     }).catch((): void => undefined);
 
+    const flushedRows = flushed.success ? (flushed.indexedRowCount || 0) : 0;
+    const flushedChunks = flushed.success ? (flushed.chunkCount || 0) : 0;
     return {
         success: true,
         skipped: false,
-        indexedRowCount: rows.length,
-        skippedRowCount: inspect.emptyCount + prepared.skippedRowCount,
-        chunkCount: chunkSources.length,
-        errors: [],
+        indexedRowCount: rows.length + flushedRows,
+        skippedRowCount: inspect.emptyCount + prepared.skippedRowCount + (flushed.skippedRowCount || 0),
+        chunkCount: chunkSources.length + flushedChunks,
+        errors: flushed.success ? [] : [...flushed.errors],
+        reason: flushed.success ? undefined : flushed.reason,
     };
 }
 

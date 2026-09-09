@@ -49573,11 +49573,20 @@ $CONTENT
         assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.snapshot.revision/storageIdentity.revision', expectedIdentity.revision, embeddedManifest.snapshot?.revision);
     }
     function isSingleFileSnapshotManifest_ACU$1(manifest) {
+        if (!manifest || typeof manifest !== 'object')
+            return false;
         const explicitMode = manifest.snapshot?.mode;
         if (explicitMode)
             return explicitMode === 'single_file_snapshot';
         const manifestPath = String(manifest.manifestFile || '').trim();
         return !!manifestPath && manifest.rowsFile === manifestPath && manifest.tombstoneFile === manifestPath;
+    }
+    function isLegacySingleFileHealthTarget_ACU(file) {
+        if (file.role !== 'manifest')
+            return false;
+        if (isVectorIndexMirrorManifestPathV2_ACU(file.path))
+            return false;
+        return isSingleFileSnapshotManifest_ACU$1(file.manifest);
     }
     async function loadChunksFromSingleFileSnapshot_ACU(manifest, options = {}) {
         const snapshotPath = String(manifest.manifestFile || manifest.files?.[0]?.path || '').trim();
@@ -49924,7 +49933,7 @@ $CONTENT
                     message: 'registry checksum 与实际文件内容不一致',
                 });
             }
-            if (file.role === 'manifest' && isSingleFileSnapshotManifest_ACU$1(file.manifest) && !file.manifest.storageIdentity
+            if (isLegacySingleFileHealthTarget_ACU(file) && !file.manifest.storageIdentity
                 && !seenLegacyManifestIndexes.has(file.manifest.indexId)) {
                 seenLegacyManifestIndexes.add(file.manifest.indexId);
                 issues.push({
@@ -49937,7 +49946,7 @@ $CONTENT
                     message: '旧 single-file 快照仍可读取，但尚未具备 V2 immutable identity，等待显式迁移或重建。',
                 });
             }
-            if (file.role === 'manifest' && isSingleFileSnapshotManifest_ACU$1(file.manifest)) {
+            if (isLegacySingleFileHealthTarget_ACU(file)) {
                 const snapshot = loaded.data;
                 try {
                     if (snapshot.schema !== 'single_file_snapshot') {
@@ -53203,7 +53212,7 @@ $CONTENT
      * service/vector/summary-vector-mirror-rebuild.ts — 统一重建路径
      *
      * replay/checkpoint.data 取 C 时刻 rowId 集合 → pack+manifest → 写 checkpoint@C →
-     * 清 C..H 旧 delta → strict save → 入队 flush 补 C..H。
+     * 清 C..H 旧 delta → strict save → 立刻 flush 补 C..H（当前纪要表里的新行）。
      * rebuild_repair 复用当前 head 中读回校验通过的 refs；initial / rebuild_user 全量 embedding。
      */
     function emptyResult_ACU(partial) {
@@ -53281,7 +53290,13 @@ $CONTENT
             return emptyResult_ACU({ reason: 'summary_vector_index_config_invalid', errors: validation.errors });
         }
         const embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
-        const prepared = buildPreparedRows_ACU(sheet, selected.summaryKey);
+        // embedding 文本取当前纪要表：C 里可能只有 rowId、单元格已被后续填表更新。
+        // 纳入 checkpoint 的 rowId 集合仍只来自 C，不能把 H 的新行写进 C。
+        const prepared = buildPreparedRows_ACU(selected.table, selected.summaryKey);
+        const currentInspect = inspectCheckpointRowIds_ACU(selected.table);
+        if (inspect.rowIds.length === 0 && currentInspect.rowIds.length > 0) {
+            logDebug_ACU(`[向量镜像] C 时刻纪要表无行、当前表有 ${currentInspect.rowIds.length} 行，重建后立即 flush 补 C..H。`);
+        }
         const preparedById = new Map(prepared.rows.map((row) => [row.rowId, row]));
         const reusable = new Map();
         if (options.reason === 'rebuild_repair') {
@@ -53479,24 +53494,31 @@ $CONTENT
         catch (error) {
             logWarn_ACU('[向量镜像] 重建已写入聊天，registry published 失败:', error?.message || error);
         }
-        void enqueueSummaryVectorIndexFlush_ACU({
+        const flushed = await flushSummaryVectorMirrorNow_ACU({
+            isolationKey,
             sourceTableKey: selected.summaryKey,
-            reason: `rebuild_${options.reason}`,
-        }).catch((error) => {
-            logWarn_ACU('[向量镜像] 重建后入队 flush 失败:', error?.message || error);
         });
+        if (!flushed.success) {
+            logWarn_ACU(`[向量镜像] 重建后立刻 flush 失败：${flushed.errors.join('; ') || flushed.reason || 'unknown'}`);
+        }
+        else if (!flushed.skipped) {
+            logDebug_ACU(`[向量镜像] 重建后立刻 flush 完成：rows=${flushed.indexedRowCount}, chunks=${flushed.chunkCount}`);
+        }
         void runScopedRetentionGcAfterFlush_ACU({
             chatKey: scope.chatKey,
             isolationKey: scope.isolationKey,
             sourceTableKey: scope.sourceTableKey,
         }).catch(() => undefined);
+        const flushedRows = flushed.success ? (flushed.indexedRowCount || 0) : 0;
+        const flushedChunks = flushed.success ? (flushed.chunkCount || 0) : 0;
         return {
             success: true,
             skipped: false,
-            indexedRowCount: rows.length,
-            skippedRowCount: inspect.emptyCount + prepared.skippedRowCount,
-            chunkCount: chunkSources.length,
-            errors: [],
+            indexedRowCount: rows.length + flushedRows,
+            skippedRowCount: inspect.emptyCount + prepared.skippedRowCount + (flushed.skippedRowCount || 0),
+            chunkCount: chunkSources.length + flushedChunks,
+            errors: flushed.success ? [] : [...flushed.errors],
+            reason: flushed.success ? undefined : flushed.reason,
         };
     }
     function chatHasSummaryVectorMirror_ACU(chat) {

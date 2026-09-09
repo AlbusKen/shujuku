@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   config: { value: { summaryIndexRollingDeltaEnabled: false } as any },
   snapshot: { value: null as any },
   isolationKey: 'iso-a',
+  chat: [] as any[],
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -23,7 +24,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
-  getChatArray_ACU: () => [],
+  getChatArray_ACU: () => h.chat,
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getAllSummaryVectorIndexSnapshotLayers_ACU: () => h.snapshot.value?.layers || [],
@@ -355,6 +356,7 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
     h.remove.mockResolvedValue({ ok: true });
     h.unregister.mockResolvedValue(undefined);
     h.snapshot.value = null;
+    h.chat = [];
     h.flush.mockResolvedValue({ total: 0, dirty: 0, queued: 0, flushing: 0, failedRetryable: 0, failedTerminal: 0, lastError: '' });
   });
 
@@ -699,6 +701,39 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
     expect(result.deletedPaths).toEqual([]);
     expect(result.blockedByReachability).toContain(path);
     expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('仅有 V2 镜像 checkpoint 时 health 不把 v2vcp 当旧 snapshot 读取', async () => {
+    h.chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        'iso-a': {
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: {} },
+            summaryVectorIndexFrame: {
+              version: 3,
+              sourceTableKey: 'summary',
+              checkpoint: {
+                kind: 'vector_full',
+                manifestRef: { path: 'TavernDB_ACU_vector_v2vcp_scope_mf', checksum: 'mf' },
+                packRefs: [],
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    }];
+    h.read.mockResolvedValue({
+      ok: true,
+      data: { schema: 'summary_vector_mirror_manifest', version: 1, rows: [] },
+    });
+
+    await expect(inspectSummaryVectorIndexHealth_ACU()).resolves.toEqual(expect.objectContaining({
+      missingFileCount: 0,
+    }));
+    expect(h.logWarn).not.toHaveBeenCalled();
   });
 
   it('legacy single-file snapshot 在 health 中标记为待迁移，但保持兼容可读', async () => {
