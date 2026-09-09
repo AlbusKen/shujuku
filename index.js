@@ -53325,6 +53325,205 @@ $CONTENT
         }
         return { rowIds: [], seededFromLiveTable: false };
     }
+    /** 从当前 head 去掉清理范围内的 rowId，保留仍有 chunk 的行。 */
+    function selectRetainedVectorMirrorRows_ACU(head, excludedRowIds) {
+        const excluded = new Set([...excludedRowIds].map((rowId) => String(rowId || '').trim()).filter(Boolean));
+        return [...head]
+            .map(([rowId, chunks]) => ({
+            rowId: String(rowId || '').trim(),
+            chunks: Array.isArray(chunks) ? chunks.map((chunk) => ({ ...chunk })) : [],
+        }))
+            .filter((row) => row.rowId && !excluded.has(row.rowId) && row.chunks.length > 0)
+            .sort((left, right) => left.rowId.localeCompare(right.rowId));
+    }
+    /**
+     * 清表前拍摄 V2 head。reload / 模板临时根之后旧 fingerprint 对不上，不能再 resolve。
+     */
+    async function snapshotSummaryVectorMirrorExcludingRows_ACU(options) {
+        const chat = getChatArray_ACU();
+        const sourceTableKey = String(options.sourceTableKey || findSummaryTable_ACU()?.summaryKey || '').trim();
+        if (!Array.isArray(chat) || !sourceTableKey)
+            return { kind: 'none' };
+        const head = await resolveSummaryVectorMirrorHead_ACU({
+            chat,
+            isolationKey: getCurrentIsolationKey_ACU(),
+            sourceTableKey,
+            loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
+        });
+        if (head.status !== 'ok' || !head.checkpoint || !isSummaryVectorEmbeddingIdentity_ACU(head.checkpoint.embedding)) {
+            return { kind: 'none' };
+        }
+        const rows = selectRetainedVectorMirrorRows_ACU(head.head, options.excludedRowIds);
+        const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
+        return {
+            kind: 'ready',
+            sourceTableKey,
+            embedding: { ...head.checkpoint.embedding },
+            rows,
+            packRefs: head.packRefs.filter((ref) => usedPackHashes.has(ref.packHash)).map((ref) => ({ ...ref })),
+        };
+    }
+    async function stripSummaryVectorMirrorFrames_ACU(chat, isolationKey, sourceTableKey) {
+        await runTableWriteTransaction_ACU({
+            source: 'vector_mirror',
+            reason: 'summary_vector_mirror_strip',
+            isolationKey,
+            writeSet: [{ kind: 'sheet', sheetKey: sourceTableKey }],
+            workingDataMode: 'none',
+        }, async (ctx) => {
+            ctx.assertFresh?.('vector_mirror_strip:before_write');
+            await ctx.runCommit(async () => {
+                for (const ref of collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey)) {
+                    if (ref.frame.summaryVectorIndexFrame) {
+                        delete ref.frame.summaryVectorIndexFrame;
+                    }
+                }
+                await saveChatToHostStrict_ACU();
+            });
+        });
+    }
+    /**
+     * reload 之后把清表前拍下的剩余行发布到当前 C。
+     * 剩余可以为空，但必须沿用旧 embedding（dimension>0），禁止写出非法空 checkpoint。
+     */
+    async function publishSummaryVectorMirrorRowRemovalSnapshot_ACU(snapshot) {
+        if (!snapshot || snapshot.kind === 'none') {
+            return emptyResult_ACU({ success: true, skipped: true, reason: 'no_mirror' });
+        }
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return emptyResult_ACU({ success: true, skipped: true, reason: 'chat_empty' });
+        }
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const base = locateSummaryVectorMirrorBase_ACU(chat, isolationKey);
+        if (!base || base.frame.checkpoint?.kind !== 'full') {
+            return emptyResult_ACU({ reason: 'unsupported_replay_base', errors: ['表格基底不是 full checkpoint。'] });
+        }
+        if (!isSummaryVectorEmbeddingIdentity_ACU(snapshot.embedding)) {
+            try {
+                await stripSummaryVectorMirrorFrames_ACU(chat, isolationKey, snapshot.sourceTableKey);
+                return emptyResult_ACU({ success: true, skipped: false, reason: 'invalid_embedding_stripped' });
+            }
+            catch (error) {
+                return emptyResult_ACU({
+                    reason: 'rebuild_commit_failed',
+                    errors: [error?.message || String(error || '非法 embedding 时清理镜像失败')],
+                });
+            }
+        }
+        const scope = normalizeSummaryVectorIndexScope_ACU({
+            chatKey: currentChatFileIdentifier_ACU,
+            isolationKey,
+            sourceTableKey: snapshot.sourceTableKey,
+        });
+        const rows = snapshot.rows.filter((row) => row.rowId && row.chunks.length > 0);
+        let manifestPersist;
+        try {
+            manifestPersist = await persistSummaryVectorMirrorManifestPrepared_ACU({
+                chatKey: scope.chatKey,
+                isolationKey: scope.isolationKey,
+                sourceTableKey: scope.sourceTableKey,
+                rows: {
+                    schema: 'summary_vector_mirror_manifest',
+                    version: 1,
+                    sourceTableKey: snapshot.sourceTableKey,
+                    rows: rows.map((row) => ({ rowId: row.rowId, chunks: row.chunks })),
+                },
+            });
+        }
+        catch (error) {
+            return emptyResult_ACU({
+                reason: 'rebuild_commit_failed',
+                errors: [error?.message || String(error || '剩余行 manifest 上传失败')],
+            });
+        }
+        const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
+        const packRefs = snapshot.packRefs.filter((ref) => (usedPackHashes.has(ref.packHash)
+            && ref.path
+            && Number.isInteger(ref.chunkCount)
+            && ref.chunkCount >= 0
+            && Number.isFinite(ref.byteLength)
+            && ref.byteLength >= 0));
+        const checkpoint = {
+            kind: 'vector_full',
+            createdAt: Date.now(),
+            reason: 'rebuild_repair',
+            sourceTableKey: snapshot.sourceTableKey,
+            tableCheckpointFingerprint: getTableDataFingerprint_ACU(base.frame.checkpoint.data),
+            embedding: snapshot.embedding,
+            rowCount: rows.length,
+            vectorRevision: computeSummaryVectorMirrorCheckpointRevision_ACU(rows),
+            manifestRef: manifestPersist.ref,
+            packRefs,
+        };
+        const snapshots = chat.map((message) => ({
+            message,
+            existed: !!message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
+            value: message?.TavernDB_ACU_IsolatedData,
+        }));
+        try {
+            await runTableWriteTransaction_ACU({
+                source: 'vector_mirror',
+                reason: 'summary_vector_mirror_row_removal',
+                isolationKey,
+                writeSet: [{ kind: 'sheet', sheetKey: snapshot.sourceTableKey }],
+                workingDataMode: 'none',
+            }, async (ctx) => {
+                ctx.assertFresh?.('vector_mirror_row_removal:before_write');
+                await ctx.runCommit(async () => {
+                    for (const ref of collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey)) {
+                        if (ref.frame.summaryVectorIndexFrame) {
+                            delete ref.frame.summaryVectorIndexFrame;
+                        }
+                    }
+                    const tagData = chat[base.messageIndex]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                    if (!isV2TagData_ACU(tagData))
+                        throw new Error('发布剩余交火索引失败：C 层不是 V2 frame。');
+                    const frame = tagData.storageFrame;
+                    const mirror = {
+                        version: 3,
+                        sourceTableKey: snapshot.sourceTableKey,
+                        checkpoint,
+                        logEntries: [],
+                    };
+                    frame.summaryVectorIndexFrame = mirror;
+                    const violation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, 'publishSummaryVectorMirrorRowRemoval');
+                    if (violation)
+                        throw new Error(violation);
+                    await saveChatToHostStrict_ACU();
+                });
+            });
+        }
+        catch (error) {
+            for (const item of snapshots) {
+                if (!item.message)
+                    continue;
+                if (item.existed)
+                    item.message.TavernDB_ACU_IsolatedData = item.value;
+                else
+                    delete item.message.TavernDB_ACU_IsolatedData;
+            }
+            return emptyResult_ACU({
+                reason: 'rebuild_commit_failed',
+                errors: [error?.message || String(error || '剩余行镜像落盘失败')],
+            });
+        }
+        try {
+            await finalizeSummaryVectorMirrorFiles_ACU([manifestPersist.file]);
+        }
+        catch (error) {
+            logWarn_ACU('[向量镜像] 剩余行镜像已写入聊天，registry published 失败:', error?.message || error);
+        }
+        logDebug_ACU(`[向量镜像] 清楼层后已按原 head 发布剩余 ${rows.length} 行，未按空表重建。`);
+        return {
+            success: true,
+            skipped: false,
+            indexedRowCount: rows.length,
+            skippedRowCount: 0,
+            chunkCount: rows.reduce((sum, row) => sum + row.chunks.length, 0),
+            errors: [],
+        };
+    }
     function frameHasUsableVectorMirror_ACU(tagData) {
         const checkpoint = tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint;
         return checkpoint?.kind === 'vector_full' && Number(checkpoint.rowCount) > 0;
@@ -53370,7 +53569,7 @@ $CONTENT
         if (!validation.valid) {
             return emptyResult_ACU({ reason: 'summary_vector_index_config_invalid', errors: validation.errors });
         }
-        const embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
+        let embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
         const prepared = buildPreparedRows_ACU(selected.table, selected.summaryKey);
         if (prepared.error) {
             return emptyResult_ACU({ reason: 'prepared_rows_invalid', errors: [prepared.error] });
@@ -53486,6 +53685,33 @@ $CONTENT
             rowId,
             chunks: newRefsByRow.get(rowId) || [],
         })).filter((row) => row.chunks.length > 0);
+        if (!isSummaryVectorEmbeddingIdentity_ACU(embedding)) {
+            const existingHead = await resolveSummaryVectorMirrorHead_ACU({
+                chat,
+                isolationKey,
+                sourceTableKey: selected.summaryKey,
+                loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
+            });
+            if (existingHead.status === 'ok' && existingHead.checkpoint && isSummaryVectorEmbeddingIdentity_ACU(existingHead.checkpoint.embedding)) {
+                embedding = { ...existingHead.checkpoint.embedding };
+            }
+            else {
+                try {
+                    await stripSummaryVectorMirrorFrames_ACU(chat, isolationKey, selected.summaryKey);
+                    return emptyResult_ACU({
+                        success: true,
+                        skipped: false,
+                        reason: 'empty_rebuild_stripped_illegal_embedding',
+                    });
+                }
+                catch (error) {
+                    return emptyResult_ACU({
+                        reason: 'rebuild_commit_failed',
+                        errors: [error?.message || String(error || '空重建清理非法 embedding 失败')],
+                    });
+                }
+            }
+        }
         const manifestPersist = await persistSummaryVectorMirrorManifestPrepared_ACU({
             chatKey: scope.chatKey,
             isolationKey: scope.isolationKey,
@@ -53555,6 +53781,9 @@ $CONTENT
                     };
                     frame.summaryVectorIndexFrame = mirror;
                     clearLegacyVectorFields_ACU(chat);
+                    const violation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, 'rebuildSummaryVectorMirror');
+                    if (violation)
+                        throw new Error(violation);
                     await saveChatToHostStrict_ACU();
                 });
             });
@@ -108008,6 +108237,22 @@ $CONTENT
         }
         return result;
     }
+    async function snapshotSummaryVectorMirrorExcludingRowsNow_ACU(options) {
+        return snapshotSummaryVectorMirrorExcludingRows_ACU(options);
+    }
+    async function publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot) {
+        const result = await publishSummaryVectorMirrorRowRemovalSnapshot_ACU(snapshot);
+        if (result.success && !result.skipped) {
+            clearSummaryVectorIndexCredentialCooldowns_ACU();
+            try {
+                await updateReadableLorebookEntry_ACU(true);
+            }
+            catch {
+                // 镜像已经 durable publish；世界书刷新失败不应把已完成发布报告为失败。
+            }
+        }
+        return result;
+    }
     /**
      * 填表完成后：功能开启且当前 isolation 没有任何 V2 向量镜像时，立刻 initial 重建。
      * 不依赖 modifiedKeys 是否包含纪要表。失败只返回结果，不抛给填表主流程。
@@ -109988,19 +110233,29 @@ $CONTENT
             return [{ sourceTableKey, removedRowIds }];
         });
     }
-    async function removeManualRefillSummaryVectors_ACU(cleanups) {
-        if (!cleanups.some((cleanup) => cleanup.removedRowIds.length > 0))
-            return;
+    function collectManualRefillExcludedSummaryRowIds_ACU(cleanups) {
+        return [...new Set(cleanups.flatMap((cleanup) => cleanup.removedRowIds.map((rowId) => String(rowId || '').trim()).filter(Boolean)))].sort();
+    }
+    async function snapshotManualRefillSummaryVectors_ACU(cleanups) {
+        const excludedRowIds = collectManualRefillExcludedSummaryRowIds_ACU(cleanups);
+        if (excludedRowIds.length === 0)
+            return null;
         const worldbook = getCurrentWorldbookConfig_ACU();
         if (worldbook.summaryVectorIndexModeEnabled !== true)
-            return;
+            return null;
         if (worldbook.summaryVectorMirrorEnabled === false)
+            return null;
+        return snapshotSummaryVectorMirrorExcludingRowsNow_ACU({
+            excludedRowIds,
+            sourceTableKey: cleanups[0]?.sourceTableKey,
+        });
+    }
+    async function publishManualRefillSummaryVectors_ACU(snapshot) {
+        if (!snapshot)
             return;
-        // reload 之后按当前纪要表发布 V2 vector_full。rebuild_repair 复用仍在表内的 head refs，
-        // 不重嵌保留行；被清掉的 rowId 不在 prepared 中，快照不再包含它们。
-        const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
+        const result = await publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot);
         if (!result.success) {
-            throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引重建失败。');
+            throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引发布失败。');
         }
     }
     function findModifiedSummaryTableKey_ACU(tableData, modifiedKeys) {
@@ -114090,9 +114345,12 @@ $CONTENT
                     }
                 }
                 let summaryVectorCleanups = [];
+                let summaryVectorRemovalSnapshot = null;
                 try {
                     summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
                     manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
+                    // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
+                    summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
                     // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                     refillCleanupStarted = true;
                     await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
@@ -114137,14 +114395,14 @@ $CONTENT
                     const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                     return { success: false, error: failureError };
                 }
-                // V2 交火快照只能按当前纪要表重建。table entry 已删，无法再挂 row_remove；
-                // reload 之后 currentJsonTableData 才是清楼层后的表。rebuild_repair 复用保留行 embedding。
+                // 按清表前拍下的 head 发布剩余行。禁止按 reload 后的空模板表重建，
+                // 否则会写出 dimension=0 的非法 vector_full，后续 persist 在 #0 失败。
                 try {
-                    await removeManualRefillSummaryVectors_ACU(summaryVectorCleanups);
+                    await publishManualRefillSummaryVectors_ACU(summaryVectorRemovalSnapshot);
                 }
                 catch (error) {
-                    logError_ACU('[Manual Refill] 清理后重建交火索引失败:', error);
-                    return await failManualRefillSession(error?.message || '手动重填清理后重建交火索引失败。');
+                    logError_ACU('[Manual Refill] 清理后发布交火索引失败:', error);
+                    return await failManualRefillSession(error?.message || '手动重填清理后发布交火索引失败。');
                 }
                 // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）
                 // 之后建立：此时冻结的原 full 根指纹才等于边界汇合时 live frame 应有的指纹，

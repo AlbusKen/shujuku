@@ -306,9 +306,20 @@ const mockRebuildCurrentSummaryVectorIndexNow = vi.fn().mockResolvedValue({
   chunkCount: 0,
   errors: [],
 });
+const mockSnapshotSummaryVectorMirrorExcludingRowsNow = vi.fn().mockResolvedValue({ kind: 'none' });
+const mockPublishSummaryVectorMirrorRowRemovalSnapshotNow = vi.fn().mockResolvedValue({
+  success: true,
+  skipped: false,
+  indexedRowCount: 0,
+  skippedRowCount: 0,
+  chunkCount: 0,
+  errors: [],
+});
 vi.mock('../../../src/service/vector/summary-vector-index-rebuild-service', () => ({
   rebuildCurrentSummaryVectorIndexNow_ACU: (...args: any[]) => mockRebuildCurrentSummaryVectorIndexNow(...args),
   ensureSummaryVectorMirrorAfterTableFill_ACU: (...args: any[]) => mockEnsureSummaryVectorMirrorAfterTableFill(...args),
+  snapshotSummaryVectorMirrorExcludingRowsNow_ACU: (...args: any[]) => mockSnapshotSummaryVectorMirrorExcludingRowsNow(...args),
+  publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU: (...args: any[]) => mockPublishSummaryVectorMirrorRowRemovalSnapshotNow(...args),
 }));
 
 // V2 恢复服务 mock：锚点预检自动收敛路径。默认无可用恢复计划（阻断语义），
@@ -414,6 +425,15 @@ beforeEach(() => {
     reason: 'vector_data_present',
   });
   mockRebuildCurrentSummaryVectorIndexNow.mockReset().mockResolvedValue({
+    success: true,
+    skipped: false,
+    indexedRowCount: 0,
+    skippedRowCount: 0,
+    chunkCount: 0,
+    errors: [],
+  });
+  mockSnapshotSummaryVectorMirrorExcludingRowsNow.mockReset().mockResolvedValue({ kind: 'none' });
+  mockPublishSummaryVectorMirrorRowRemovalSnapshotNow.mockReset().mockResolvedValue({
     success: true,
     skipped: false,
     indexedRowCount: 0,
@@ -2840,6 +2860,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockEnqueueSummaryVectorIndexFlush.mockClear();
     mockArchiveSummaryVectorIndexNow.mockClear();
     mockRebuildCurrentSummaryVectorIndexNow.mockClear();
+    mockSnapshotSummaryVectorMirrorExcludingRowsNow.mockClear();
+    mockPublishSummaryVectorMirrorRowRemovalSnapshotNow.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
       sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧1'], ['2', '旧2'], ['3', '旧3'], ['4', '旧4']] },
@@ -2860,13 +2882,18 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).toHaveBeenCalledTimes(1);
     expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
     expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
-    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(2);
-    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(1, { reason: 'rebuild_repair' });
-    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(2, { reason: 'rebuild_repair' });
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow).toHaveBeenCalledWith({
+      excludedRowIds: ['3', '4'],
+      sourceTableKey: 'sheet_0',
+    });
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow.mock.invocationCallOrder[0])
+      .toBeLessThan(mockClearManualRefillSheetDataInRange.mock.invocationCallOrder[0]);
     expect(mockReloadStorageProvider.mock.invocationCallOrder[0])
-      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[0]);
+      .toBeLessThan(mockPublishSummaryVectorMirrorRowRemovalSnapshotNow.mock.invocationCallOrder[0]);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(1);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU.mock.invocationCallOrder[0])
-      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[1]);
+      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[0]);
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
   });
 
@@ -2902,6 +2929,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
     mockArchiveSummaryVectorIndexNow.mockClear();
     mockRebuildCurrentSummaryVectorIndexNow.mockClear();
+    mockSnapshotSummaryVectorMirrorExcludingRowsNow.mockClear();
+    mockPublishSummaryVectorMirrorRowRemovalSnapshotNow.mockClear();
     mockClearManualRefillSheetDataInRange.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
@@ -2916,6 +2945,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
     expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
     expect(mockRebuildCurrentSummaryVectorIndexNow).not.toHaveBeenCalled();
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow).not.toHaveBeenCalled();
+    expect(mockPublishSummaryVectorMirrorRowRemovalSnapshotNow).not.toHaveBeenCalled();
   });
 
   it('手动重填范围含 sql_sheet_batch 纪要表 INSERT 时，按语句里的 row_id 清理向量', async () => {
@@ -2960,6 +2991,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
     mockArchiveSummaryVectorIndexNow.mockClear();
     mockRebuildCurrentSummaryVectorIndexNow.mockClear();
+    mockSnapshotSummaryVectorMirrorExcludingRowsNow.mockClear();
+    mockPublishSummaryVectorMirrorRowRemovalSnapshotNow.mockClear();
     mockClearManualRefillSheetDataInRange.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
@@ -2975,11 +3008,16 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(result.success, result.error).toBe(true);
     expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([1], ['sheet_0']);
     expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
-    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(2);
-    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(1, { reason: 'rebuild_repair' });
-    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(2, { reason: 'rebuild_repair' });
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow).toHaveBeenCalledWith({
+      excludedRowIds: ['1', '2'],
+      sourceTableKey: 'sheet_0',
+    });
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow.mock.invocationCallOrder[0])
+      .toBeLessThan(mockClearManualRefillSheetDataInRange.mock.invocationCallOrder[0]);
     expect(mockReloadStorageProvider.mock.invocationCallOrder[0])
-      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[0]);
+      .toBeLessThan(mockPublishSummaryVectorMirrorRowRemovalSnapshotNow.mock.invocationCallOrder[0]);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(1);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
   });
 
   it('范围末端 full checkpoint 被目标表全覆盖时禁用跨根 staging：清理后建模板临时根，各层普通 persist', async () => {

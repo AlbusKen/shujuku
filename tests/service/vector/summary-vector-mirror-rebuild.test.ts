@@ -7,6 +7,7 @@ import {
   chatHasSummaryVectorMirror_ACU,
   currentEnvironmentHasSummaryVectorMirror_ACU,
   selectRebuildSourceRowIds_ACU,
+  selectRetainedVectorMirrorRows_ACU,
 } from '../../../src/service/vector/summary-vector-mirror-rebuild';
 
 function vectorMessage(rowCount: number, isolationKey = '') {
@@ -51,6 +52,30 @@ describe('selectRebuildSourceRowIds_ACU', () => {
       checkpointRowIds: ['1'],
       preparedRowIds: [],
     })).toEqual({ rowIds: [], seededFromLiveTable: false });
+  });
+});
+
+describe('selectRetainedVectorMirrorRows_ACU', () => {
+  const head: Array<[string, Array<{ packHash: string; chunkIndex: number }>]> = [
+    ['1', [{ packHash: 'p1', chunkIndex: 0 }]],
+    ['2', [{ packHash: 'p2', chunkIndex: 0 }]],
+    ['3', [{ packHash: 'p3', chunkIndex: 0 }]],
+  ];
+
+  it('去掉清理范围内的行，保留未清理行', () => {
+    expect(selectRetainedVectorMirrorRows_ACU(head, ['1', '2'])).toEqual([
+      { rowId: '3', chunks: [{ packHash: 'p3', chunkIndex: 0 }] },
+    ]);
+  });
+
+  it('范围内覆盖全部行时剩余为空，而不是误用空表重建', () => {
+    expect(selectRetainedVectorMirrorRows_ACU(head, ['1', '2', '3'])).toEqual([]);
+  });
+
+  it('没有 chunk 的行不会被当成可发布剩余行', () => {
+    expect(selectRetainedVectorMirrorRows_ACU([['1', []], ['2', [{ packHash: 'p2', chunkIndex: 0 }]]], ['1'])).toEqual([
+      { rowId: '2', chunks: [{ packHash: 'p2', chunkIndex: 0 }] },
+    ]);
   });
 });
 

@@ -19,7 +19,10 @@ import {
 } from '../vector/summary-vector-index-flush-queue';
 import {
     ensureSummaryVectorMirrorAfterTableFill_ACU,
+    publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU,
     rebuildCurrentSummaryVectorIndexNow_ACU,
+    snapshotSummaryVectorMirrorExcludingRowsNow_ACU,
+    type SummaryVectorMirrorRowRemovalSnapshot_ACU,
 } from '../vector/summary-vector-index-rebuild-service';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../vector/summary-vector-index-state-service';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
@@ -165,16 +168,31 @@ function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: numbe
     });
 }
 
-async function removeManualRefillSummaryVectors_ACU(cleanups: ManualRefillSummaryVectorCleanup_ACU[]): Promise<void> {
-    if (!cleanups.some((cleanup) => cleanup.removedRowIds.length > 0)) return;
+function collectManualRefillExcludedSummaryRowIds_ACU(cleanups: ManualRefillSummaryVectorCleanup_ACU[]): string[] {
+    return [...new Set(cleanups.flatMap((cleanup) => cleanup.removedRowIds.map((rowId) => String(rowId || '').trim()).filter(Boolean)))].sort();
+}
+
+async function snapshotManualRefillSummaryVectors_ACU(
+    cleanups: ManualRefillSummaryVectorCleanup_ACU[],
+): Promise<SummaryVectorMirrorRowRemovalSnapshot_ACU | null> {
+    const excludedRowIds = collectManualRefillExcludedSummaryRowIds_ACU(cleanups);
+    if (excludedRowIds.length === 0) return null;
     const worldbook = getCurrentWorldbookConfig_ACU();
-    if (worldbook.summaryVectorIndexModeEnabled !== true) return;
-    if (worldbook.summaryVectorMirrorEnabled === false) return;
-    // reload 之后按当前纪要表发布 V2 vector_full。rebuild_repair 复用仍在表内的 head refs，
-    // 不重嵌保留行；被清掉的 rowId 不在 prepared 中，快照不再包含它们。
-    const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
+    if (worldbook.summaryVectorIndexModeEnabled !== true) return null;
+    if (worldbook.summaryVectorMirrorEnabled === false) return null;
+    return snapshotSummaryVectorMirrorExcludingRowsNow_ACU({
+        excludedRowIds,
+        sourceTableKey: cleanups[0]?.sourceTableKey,
+    });
+}
+
+async function publishManualRefillSummaryVectors_ACU(
+    snapshot: SummaryVectorMirrorRowRemovalSnapshot_ACU | null,
+): Promise<void> {
+    if (!snapshot) return;
+    const result = await publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot);
     if (!result.success) {
-        throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引重建失败。');
+        throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引发布失败。');
     }
 }
 
@@ -4893,9 +4911,12 @@ export async function orchestrateManualUpdate_ACU(
             }
 
             let summaryVectorCleanups: ManualRefillSummaryVectorCleanup_ACU[] = [];
+            let summaryVectorRemovalSnapshot: SummaryVectorMirrorRowRemovalSnapshot_ACU | null = null;
             try {
                 summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
                 manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
+                // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
+                summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
                 // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                 refillCleanupStarted = true;
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
@@ -4941,13 +4962,13 @@ export async function orchestrateManualUpdate_ACU(
                 return { success: false, error: failureError };
             }
 
-            // V2 交火快照只能按当前纪要表重建。table entry 已删，无法再挂 row_remove；
-            // reload 之后 currentJsonTableData 才是清楼层后的表。rebuild_repair 复用保留行 embedding。
+            // 按清表前拍下的 head 发布剩余行。禁止按 reload 后的空模板表重建，
+            // 否则会写出 dimension=0 的非法 vector_full，后续 persist 在 #0 失败。
             try {
-                await removeManualRefillSummaryVectors_ACU(summaryVectorCleanups);
+                await publishManualRefillSummaryVectors_ACU(summaryVectorRemovalSnapshot);
             } catch (error: any) {
-                logError_ACU('[Manual Refill] 清理后重建交火索引失败:', error);
-                return await failManualRefillSession(error?.message || '手动重填清理后重建交火索引失败。');
+                logError_ACU('[Manual Refill] 清理后发布交火索引失败:', error);
+                return await failManualRefillSession(error?.message || '手动重填清理后发布交火索引失败。');
             }
 
             // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）

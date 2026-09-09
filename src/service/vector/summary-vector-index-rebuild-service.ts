@@ -8,9 +8,14 @@ import { clearSummaryVectorIndexCredentialCooldowns_ACU } from './summary-vector
 import type { SummaryVectorIndexArchiveResult_ACU } from './summary-vector-index-archive-service';
 import {
     currentEnvironmentHasSummaryVectorMirror_ACU,
+    publishSummaryVectorMirrorRowRemovalSnapshot_ACU,
     rebuildSummaryVectorMirror_ACU,
+    snapshotSummaryVectorMirrorExcludingRows_ACU,
     type SummaryVectorMirrorRebuildReason_ACU,
+    type SummaryVectorMirrorRowRemovalSnapshot_ACU,
 } from './summary-vector-mirror-rebuild';
+
+export type { SummaryVectorMirrorRowRemovalSnapshot_ACU };
 
 export interface EnsureSummaryVectorMirrorAfterTableFillResult_ACU {
     attempted: boolean;
@@ -42,6 +47,28 @@ export async function rebuildCurrentSummaryVectorIndexNow_ACU(
             await updateReadableLorebookEntry_ACU(true);
         } catch {
             // 镜像已经 durable publish；世界书刷新失败不应把已完成构建报告为失败。
+        }
+    }
+    return result;
+}
+
+export async function snapshotSummaryVectorMirrorExcludingRowsNow_ACU(options: {
+    excludedRowIds: string[];
+    sourceTableKey?: string;
+}): Promise<SummaryVectorMirrorRowRemovalSnapshot_ACU> {
+    return snapshotSummaryVectorMirrorExcludingRows_ACU(options);
+}
+
+export async function publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(
+    snapshot: SummaryVectorMirrorRowRemovalSnapshot_ACU | null | undefined,
+): Promise<SummaryVectorIndexArchiveResult_ACU> {
+    const result = await publishSummaryVectorMirrorRowRemovalSnapshot_ACU(snapshot);
+    if (result.success && !result.skipped) {
+        clearSummaryVectorIndexCredentialCooldowns_ACU();
+        try {
+            await updateReadableLorebookEntry_ACU(true);
+        } catch {
+            // 镜像已经 durable publish；世界书刷新失败不应把已完成发布报告为失败。
         }
     }
     return result;

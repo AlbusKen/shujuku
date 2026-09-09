@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   hasMirror: false,
   load: vi.fn(),
   rebuild: vi.fn(),
+  snapshot: vi.fn(),
+  publish: vi.fn(),
   updateLorebook: vi.fn(),
   clearCooldown: vi.fn(),
 }));
@@ -33,12 +35,16 @@ vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
 }));
 vi.mock('../../../src/service/vector/summary-vector-mirror-rebuild', () => ({
   rebuildSummaryVectorMirror_ACU: (...args: any[]) => h.rebuild(...args),
+  snapshotSummaryVectorMirrorExcludingRows_ACU: (...args: any[]) => h.snapshot(...args),
+  publishSummaryVectorMirrorRowRemovalSnapshot_ACU: (...args: any[]) => h.publish(...args),
   currentEnvironmentHasSummaryVectorMirror_ACU: () => h.hasMirror,
 }));
 
 import {
   ensureSummaryVectorMirrorAfterTableFill_ACU,
+  publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU,
   rebuildCurrentSummaryVectorIndexNow_ACU,
+  snapshotSummaryVectorMirrorExcludingRowsNow_ACU,
 } from '../../../src/service/vector/summary-vector-index-rebuild-service';
 
 describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
@@ -80,6 +86,42 @@ describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
     h.rebuild.mockResolvedValue({ success: false, skipped: false, indexedRowCount: 0, skippedRowCount: 0, chunkCount: 0, reason: 'unsupported_replay_base', errors: ['表格基底不是 full checkpoint。'] });
     const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
     expect(result.success).toBe(false);
+    expect(h.clearCooldown).not.toHaveBeenCalled();
+    expect(h.updateLorebook).not.toHaveBeenCalled();
+  });
+});
+
+describe('snapshot / publish remaining rows after refill clear', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    h.snapshot.mockResolvedValue({ kind: 'ready', sourceTableKey: 'sheet_summary', rows: [], packRefs: [] });
+    h.publish.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
+    h.updateLorebook.mockResolvedValue(true);
+  });
+
+  it('snapshot 直接委托给镜像层', async () => {
+    await snapshotSummaryVectorMirrorExcludingRowsNow_ACU({ excludedRowIds: ['1', '2'], sourceTableKey: 'sheet_summary' });
+    expect(h.snapshot).toHaveBeenCalledWith({ excludedRowIds: ['1', '2'], sourceTableKey: 'sheet_summary' });
+  });
+
+  it('publish 成功后清 cooldown 并刷新世界书', async () => {
+    const snapshot = {
+      kind: 'ready' as const,
+      sourceTableKey: 'sheet_summary',
+      rows: [],
+      packRefs: [],
+      embedding: { endpointFingerprint: 'ep', model: 'm', dimension: 4, sourceTextVersion: 2 },
+    };
+    const result = await publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot);
+    expect(h.publish).toHaveBeenCalledWith(snapshot);
+    expect(h.clearCooldown).toHaveBeenCalled();
+    expect(h.updateLorebook).toHaveBeenCalledWith(true);
+    expect(result.success).toBe(true);
+  });
+
+  it('publish 跳过时不刷新世界书', async () => {
+    h.publish.mockResolvedValue({ success: true, skipped: true, indexedRowCount: 0, skippedRowCount: 0, chunkCount: 0, errors: [], reason: 'no_mirror' });
+    await publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU({ kind: 'none' });
     expect(h.clearCooldown).not.toHaveBeenCalled();
     expect(h.updateLorebook).not.toHaveBeenCalled();
   });

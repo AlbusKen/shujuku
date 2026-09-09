@@ -515,4 +515,22 @@ describe('assertSummaryVectorMirrorFrameInvariantsV2_ACU', () => {
     });
     expect(assertSummaryVectorMirrorFrameInvariantsV2_ACU([ai(fullFrame()), ai(broken)], ISOLATION, 'test')).toMatch(/结构非法/);
   });
+
+  it('rowCount=0 但 embedding.dimension>0 的 vector_full 合法', () => {
+    const emptyLegal = fullFrame({
+      vectorCheckpoint: checkpoint({ rowCount: 0, packRefs: [], vectorRevision: computeSummaryVectorMirrorCheckpointRevision_ACU([]) }),
+    });
+    expect(assertSummaryVectorMirrorFrameInvariantsV2_ACU([ai(emptyLegal)], ISOLATION, 'test')).toBeNull();
+  });
+
+  it('embedding.dimension=0 的 vector_full 结构非法', () => {
+    const illegal = fullFrame({
+      vectorCheckpoint: checkpoint({
+        rowCount: 0,
+        packRefs: [],
+        embedding: { ...EMB, dimension: 0 },
+      }),
+    });
+    expect(assertSummaryVectorMirrorFrameInvariantsV2_ACU([ai(illegal)], ISOLATION, 'test')).toMatch(/结构非法/);
+  });
 });
