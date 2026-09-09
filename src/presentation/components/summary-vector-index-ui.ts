@@ -16,12 +16,11 @@ import { globalMeta_ACU } from '../../data/repositories/profile-repo';
 import { showToastr_ACU } from '../theme/toast';
 
 const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
-  'external_vector_files_missing_rebuild_required',
-  'external_files_missing_state_cleared_rebuild_required',
-  'external_files_identity_invalid_rebuild_required',
-  'external_vector_identity_invalid_rebuild_required',
-  'runtime_stale_rows_rebuild_required',
+  'legacy_vector_scheme_rebuild_required',
+  'embedding_identity_changed_rebuild_required',
 ]);
+
+const SUMMARY_VECTOR_SCHEME_REBUILD_CONFIRM_ACU = '向量方案已优化，需要重建';
 
 function clearToastElement_ACU($toast: JQuery<HTMLElement> | null) {
   try { if ($toast) toastr_API_ACU?.clear?.($toast); } catch (e) {}
@@ -157,6 +156,10 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
   }
 
   if (shouldRebuildSummaryVectorIndexWithUI_ACU(result.reason)) {
+    const confirmed = typeof window !== 'undefined' && typeof window.confirm === 'function'
+      ? window.confirm(SUMMARY_VECTOR_SCHEME_REBUILD_CONFIRM_ACU)
+      : true;
+    if (!confirmed) return result;
     let rebuilt = false;
     try {
       const rebuildResult = await rebuildCurrentSummaryVectorIndexWithUI_ACU();

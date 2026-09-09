@@ -6114,3 +6114,71 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
   });
 
 });
+
+describe('onEntryApplied', () => {
+  it('副作用路径传入回调直接抛错', async () => {
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    ];
+    await expect(loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: true,
+      onEntryApplied: () => undefined,
+    })).rejects.toThrow('onEntryApplied 仅在 updateRuntimeState:false');
+  });
+
+  it('只读路径按应用顺序回调，readSheet 返回该 entry 之后的单表快照', async () => {
+    const observed: Array<{ entryId: string; names: string[] }> = [];
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+              logEntries: [
+                {
+                  seq: 1,
+                  entryId: 'add-row',
+                  createdAt: 2,
+                  source: 'auto_fill',
+                  targetMessageIndex: 0,
+                  aiFloor: 1,
+                  filledSheetKeys: ['sheet_0'],
+                  changedSheetKeys: ['sheet_0'],
+                  groupKeys: [],
+                  operations: [
+                    { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '木盾'] },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    ];
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      onEntryApplied: async (context) => {
+        const sheet = await context.readSheet('sheet_0');
+        const names = (sheet?.content || []).slice(1).map((row) => String(row?.[1] || ''));
+        observed.push({ entryId: context.entry.entryId, names });
+      },
+    });
+    expect(result?.data.sheet_0.content.map((row: any[]) => row[1])).toEqual(['name', '铁剑', '木盾']);
+    expect(observed).toEqual([{ entryId: 'add-row', names: ['铁剑', '木盾'] }]);
+  });
+});

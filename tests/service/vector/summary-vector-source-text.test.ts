@@ -11,7 +11,11 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: {},
 }));
 vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => [] }));
-vi.mock('../../../src/data/gateways/chat-gateway', () => ({ saveChatToHost_ACU: vi.fn(), saveChatToHostStrict_ACU: vi.fn() }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => [],
+  saveChatToHost_ACU: vi.fn(),
+  saveChatToHostStrict_ACU: vi.fn(),
+}));
 vi.mock('../../../src/data/gateways/vector-embedding-gateway', () => ({
   createEmbeddings_ACU: vi.fn(),
   isVectorEmbeddingError_ACU: () => false,

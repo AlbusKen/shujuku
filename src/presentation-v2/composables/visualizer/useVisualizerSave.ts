@@ -421,9 +421,7 @@ async function saveCurrentDataToChat(
   if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
     try {
       await enqueueSummaryVectorIndexFlush_ACU({
-        targetMessageIndex: latestAiIndex !== -1 ? latestAiIndex : undefined,
         sourceTableKey,
-        mode: 'sync',
         reason: 'visualizer_v2_save',
       });
     } catch (error) {
@@ -520,9 +518,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       });
       if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
         await enqueueSummaryVectorIndexFlush_ACU({
-          targetMessageIndex: getLatestAiMessageIndexFromChat_ACU(getChatArray_ACU()) >= 0 ? getLatestAiMessageIndexFromChat_ACU(getChatArray_ACU()) : undefined,
           sourceTableKey,
-          mode: 'sync',
           reason: 'visualizer_v2_save',
         });
       }
@@ -1059,7 +1055,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
             return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
           });
           if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-            await enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey, mode: 'sync', reason: 'visualizer_v2_template_sheet_delete' });
+            await enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey, reason: 'visualizer_v2_template_sheet_delete' });
           } else if (!hasRemainingSummarySheet) {
             await deleteCurrentSummaryVectorIndexFromChat_ACU();
           }

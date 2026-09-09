@@ -53,6 +53,7 @@ describe('deleteCurrentSummaryVectorIndexFromChat_ACU', () => {
       saveChatToHost_ACU: saveChat,
     }));
     vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
+      getChatArray_ACU: () => chat,
       saveChatToHost_ACU: saveChat,
       saveChatToHostStrict_ACU: saveStrict,
     }));
@@ -138,6 +139,7 @@ describe('clearSummaryVectorIndexLayerFromChat_ACU', () => {
       saveChatToHost_ACU: vi.fn(),
     }));
     vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
+      getChatArray_ACU: () => chat,
       saveChatToHost_ACU: vi.fn(),
       saveChatToHostStrict_ACU: saveStrict,
     }));
@@ -172,6 +174,7 @@ describe('clearSummaryVectorIndexLayerFromChat_ACU', () => {
       saveChatToHost_ACU: vi.fn(),
     }));
     vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
+      getChatArray_ACU: () => chat,
       saveChatToHost_ACU: vi.fn(),
       saveChatToHostStrict_ACU: saveStrict,
     }));
@@ -199,6 +202,7 @@ describe('clearSummaryVectorIndexLayerFromChat_ACU', () => {
       saveChatToHost_ACU: vi.fn(),
     }));
     vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
+      getChatArray_ACU: () => chat,
       saveChatToHost_ACU: vi.fn(),
       saveChatToHostStrict_ACU: vi.fn(async () => { throw saveError; }),
     }));

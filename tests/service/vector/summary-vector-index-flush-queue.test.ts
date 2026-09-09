@@ -49,6 +49,19 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
   archiveSummaryVectorIndexNow_ACU: (...args: any[]) => h.archive(...args),
   runSummaryVectorIndexArchiveScopeMutationExclusive_ACU: (...args: any[]) => h.runScopeMutation(...args),
 }));
+vi.mock('../../../src/service/vector/summary-vector-mirror-writer', () => ({
+  flushSummaryVectorMirrorNow_ACU: (...args: any[]) => h.archive(...args),
+  findTouchedSummarySheetKey_ACU: () => h.summaryKey || null,
+}));
+vi.mock('../../../src/service/settings/settings-readers', () => ({
+  getCurrentWorldbookConfig_ACU: () => ({ summaryVectorIndexModeEnabled: true }),
+}));
+vi.mock('../../../src/service/table/manual-catch-up-provisional-bridge', () => ({
+  hasActiveProvisionalBridgeAnywhere_ACU: () => false,
+}));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => [],
+}));
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   logSummaryVectorIndexIdentityEvent_ACU: (...args: any[]) => h.logIdentityEvent(...args),
 }));

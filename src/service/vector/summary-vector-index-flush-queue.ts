@@ -15,12 +15,20 @@ import {
     type SummaryVectorIndexFlushTaskRecord_ACU,
 } from '../../data/storage/vector-index-hot-cache';
 import {
-    archiveSummaryVectorIndexNow_ACU,
     buildSummaryVectorIndexArchiveScopeKey_ACU,
     findSummaryTable_ACU,
     runSummaryVectorIndexArchiveScopeMutationExclusive_ACU,
     type SummaryVectorIndexArchiveResult_ACU,
 } from './summary-vector-index-archive-service';
+import {
+    findTouchedSummarySheetKey_ACU,
+    flushSummaryVectorMirrorNow_ACU,
+    type SummaryVectorMirrorFlushResult_ACU,
+} from './summary-vector-mirror-writer';
+import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import type { TableMutationWriteSetV2_ACU } from '../table/storage-frame-v2-types';
+import { hasActiveProvisionalBridgeAnywhere_ACU } from '../table/manual-catch-up-provisional-bridge';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { clearSummaryVectorIndexDirtyForRealign_ACU } from './summary-vector-index-realign-state';
 import { runScopedRetentionGcAfterFlush_ACU } from './summary-vector-index-chat-deletion-gc';
 import { logSummaryVectorIndexIdentityEvent_ACU } from './summary-vector-index-storage-service';
@@ -73,8 +81,32 @@ export interface SummaryVectorIndexFlushNowResult_ACU {
     success: boolean;
     skipped?: boolean;
     reason?: string;
-    result?: SummaryVectorIndexArchiveResult_ACU;
+    result?: SummaryVectorIndexArchiveResult_ACU | SummaryVectorMirrorFlushResult_ACU;
     error?: string;
+}
+
+export function scheduleSummaryVectorMirrorFlushAfterPersist_ACU(options: {
+    changedSheetKeys?: string[];
+    writeSet?: TableMutationWriteSetV2_ACU;
+    reason: string;
+}): void {
+    try {
+        const worldbook = getCurrentWorldbookConfig_ACU();
+        if (worldbook.summaryVectorIndexModeEnabled !== true || worldbook.summaryVectorMirrorEnabled === false) return;
+        const sourceTableKey = findTouchedSummarySheetKey_ACU({
+            changedSheetKeys: options.changedSheetKeys,
+            writeSet: options.writeSet,
+        });
+        if (!sourceTableKey) return;
+        void enqueueSummaryVectorIndexFlush_ACU({
+            sourceTableKey,
+            reason: options.reason,
+        }).catch((error: any) => {
+            logWarn_ACU('[向量镜像] persist 后入队失败（不影响表格保存）:', error?.message || error);
+        });
+    } catch (error: any) {
+        logWarn_ACU('[向量镜像] persist 后入队检查失败（不影响表格保存）:', error?.message || error);
+    }
 }
 
 /** 与 archive lock、realign state 复用同一三元 canonical scope。 */
@@ -133,7 +165,9 @@ async function reconcileLegacyDefaultFlushTask_ACU(
     return reconciliation.task;
 }
 
-function shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result: SummaryVectorIndexArchiveResult_ACU): boolean {
+function shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(
+    result: SummaryVectorIndexArchiveResult_ACU | SummaryVectorMirrorFlushResult_ACU,
+): boolean {
     if (!result.success) return false;
     if (result.skipped && result.reason === 'summary_table_not_found') {
         return false;
@@ -250,7 +284,8 @@ async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedG
         || current.generation === completedGeneration
         || current.status === 'invalidated'
         || current.status === 'ready'
-        || current.status === 'failed_terminal') {
+        || current.status === 'failed_terminal'
+        || current.status === 'blocked_needs_rebuild') {
         return;
     }
     if (current.status === 'queued' || current.status === 'dirty' || current.status === 'failed_retryable') {
@@ -260,6 +295,9 @@ async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedG
 }
 
 export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorIndexFlushQueueOptions_ACU = {}): Promise<SummaryVectorIndexFlushQueueResult_ACU> {
+    if (getCurrentWorldbookConfig_ACU().summaryVectorMirrorEnabled === false) {
+        return { queued: false, skipped: true, reason: 'summary_vector_mirror_disabled' };
+    }
     const selectedSummary = findSummaryTable_ACU();
     const rawChatKey = String(currentChatFileIdentifier_ACU || '').trim();
     if (!rawChatKey) {
@@ -300,9 +338,8 @@ export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorI
             chatKey,
             isolationKey,
             sourceTableKey,
-            targetMessageIndex: options.targetMessageIndex,
             generation,
-            mode: options.mode === 'append' ? 'append' : 'sync',
+            mode: 'sync',
             status: 'queued',
             requestedAt: now,
             debounceUntil: now + debounceMs,
@@ -429,16 +466,56 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
         } catch (_cooldownConfigError) {
             // config 不可用时不做 cooldown 检查，退回原路径（cooldown 是防重复扣费的增强，不阻断正常 flush）。
         }
-        // archive 以 rowId 成员差分决定是否写入；普通 flush 不再用 force 绕过无变化短路。
-        const result = await archiveSummaryVectorIndexNow_ACU({
-            targetMessageIndex: task.targetMessageIndex,
-            mode: task.mode,
-            saveChatAfterWrite: true,
+        if (hasActiveProvisionalBridgeAnywhere_ACU(getChatArray_ACU())) {
+            await upsertSummaryVectorFlushTask_ACU({
+                scopeKey: task.scopeKey,
+                chatKey: task.chatKey,
+                isolationKey: task.isolationKey,
+                sourceTableKey: task.sourceTableKey,
+                generation: expectedGeneration,
+                mode: 'sync',
+                status: 'queued',
+                requestedAt: task.requestedAt,
+                debounceUntil: Date.now() + SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU,
+            });
+            return { success: true, skipped: true, reason: 'bridge_active' };
+        }
+        const result = await flushSummaryVectorMirrorNow_ACU({
             isolationKey: task.isolationKey,
             sourceTableKey: task.sourceTableKey,
             expectedFlushScopeKey: task.scopeKey,
             expectedFlushGeneration: expectedGeneration,
         });
+        if (result.reason === 'bridge_active') {
+            await upsertSummaryVectorFlushTask_ACU({
+                scopeKey: task.scopeKey,
+                chatKey: task.chatKey,
+                isolationKey: task.isolationKey,
+                sourceTableKey: task.sourceTableKey,
+                generation: expectedGeneration,
+                mode: 'sync',
+                status: 'queued',
+                requestedAt: task.requestedAt,
+                debounceUntil: Date.now() + SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU,
+            });
+            return { success: true, skipped: true, reason: 'bridge_active', result };
+        }
+        if (result.needsRebuild) {
+            const rebuildError = result.errors.join('; ') || result.reason || 'blocked_needs_rebuild';
+            await upsertSummaryVectorFlushTask_ACU({
+                scopeKey: task.scopeKey,
+                chatKey: task.chatKey,
+                isolationKey: task.isolationKey,
+                sourceTableKey: task.sourceTableKey,
+                generation: expectedGeneration,
+                mode: 'sync',
+                status: 'blocked_needs_rebuild',
+                requestedAt: task.requestedAt,
+                debounceUntil: task.debounceUntil,
+                lastError: rebuildError,
+            });
+            return { success: false, reason: result.reason, result, error: rebuildError };
+        }
         if (result.skipped && result.reason === 'flush_scope_invalidated') {
             return { success: true, skipped: true, reason: 'flush_scope_invalidated', result };
         }

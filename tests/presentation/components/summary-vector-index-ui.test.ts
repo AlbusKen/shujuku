@@ -47,7 +47,8 @@ describe('summary vector index UI recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     h.toast.mockReturnValue({ closest: () => ({ remove: h.remove }) });
-    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_required' });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'legacy_vector_scheme_rebuild_required' });
     h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 6, chunkCount: 3, errors: [] });
   });
 
@@ -74,7 +75,7 @@ describe('summary vector index UI recovery', () => {
     expect(h.remove).toHaveBeenCalledTimes(1);
 
     pending.reject(new Error('rebuild failed'));
-    await expect(operation).resolves.toMatchObject({ reason: 'external_vector_files_missing_rebuild_required' });
+    await expect(operation).resolves.toMatchObject({ reason: 'legacy_vector_scheme_rebuild_required' });
     expect(h.toast).toHaveBeenCalledWith('error', '交火索引快照重建失败：rebuild failed');
     expect(h.clear).toHaveBeenCalledTimes(2);
     expect(h.remove).toHaveBeenCalledTimes(2);
@@ -82,7 +83,7 @@ describe('summary vector index UI recovery', () => {
 
 
   it('身份无效快照已安全删除时同样触发一次普通重建', async () => {
-    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'external_vector_identity_invalid_rebuild_required' });
+    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'embedding_identity_changed_rebuild_required' });
 
     await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
 
@@ -90,7 +91,7 @@ describe('summary vector index UI recovery', () => {
   });
 
   it('缓存预热返回身份无效重建原因时识别为立即构建入口', async () => {
-    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'external_files_identity_invalid_rebuild_required' });
+    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'legacy_vector_scheme_rebuild_required' });
 
     await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
 
@@ -98,7 +99,7 @@ describe('summary vector index UI recovery', () => {
   });
 
   it('运行时发现实时纪要表漂移时走立即构建普通重建入口', async () => {
-    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'runtime_stale_rows_rebuild_required' });
+    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'embedding_identity_changed_rebuild_required' });
 
     await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
 
@@ -115,7 +116,7 @@ describe('summary vector index UI recovery', () => {
 
   it('自愈重建成功后在同一次发送里绕过去重补跑一次召回，并返回补跑结果', async () => {
     h.process
-      .mockResolvedValueOnce({ success: false, skipped: true, reason: 'runtime_stale_rows_rebuild_required' })
+      .mockResolvedValueOnce({ success: false, skipped: true, reason: 'legacy_vector_scheme_rebuild_required' })
       .mockResolvedValueOnce({ success: true, injectedCount: 42, keywordCount: 3 });
 
     const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
@@ -128,13 +129,13 @@ describe('summary vector index UI recovery', () => {
   });
 
   it('自愈重建失败或被跳过时不补跑召回，沿用首轮结果', async () => {
-    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'runtime_stale_rows_rebuild_required' });
+    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'legacy_vector_scheme_rebuild_required' });
     h.rebuild.mockResolvedValue({ success: true, skipped: true, indexedRowCount: 0, chunkCount: 0, errors: [] });
 
     const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
 
     expect(h.process).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ reason: 'runtime_stale_rows_rebuild_required' });
+    expect(result).toMatchObject({ reason: 'legacy_vector_scheme_rebuild_required' });
   });
 });
 

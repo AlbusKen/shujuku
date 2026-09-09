@@ -2764,9 +2764,7 @@ describe('orchestrateManualUpdate_ACU', () => {
       removalOnly: true,
     });
     expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledWith({
-      targetMessageIndex: 6,
       sourceTableKey: 'sheet_0',
-      mode: 'sync',
       reason: 'manual_refill_complete',
     });
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU.mock.invocationCallOrder[0])

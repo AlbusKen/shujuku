@@ -70,6 +70,7 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
 
 // 真实导入 repository 与事务 helper；仅 mock 宿主保存与外部文件存储。
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: (...args: any[]) => h.save(...args),
   saveChatToHostStrict_ACU: (...args: any[]) => h.saveStrict(...args),
 }));

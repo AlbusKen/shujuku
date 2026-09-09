@@ -179,7 +179,7 @@ function findModifiedSummaryTableKey_ACU(tableData: Record<string, any>, modifie
 async function enqueueSummaryVectorIndexFlushForModifiedSheets_ACU(options: { tableData: Record<string, any>; modifiedKeys: string[]; targetMessageIndex?: number; reason: string }): Promise<SummaryVectorIndexFlushQueueResult_ACU | undefined> {
     const sourceTableKey = findModifiedSummaryTableKey_ACU(options.tableData, options.modifiedKeys);
     if (!sourceTableKey || getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
-    return enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.targetMessageIndex, sourceTableKey, mode: 'sync', reason: options.reason });
+    return enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey, reason: options.reason });
 }
 
 // ============================================================
@@ -5204,9 +5204,7 @@ export async function orchestrateManualUpdate_ACU(
                 if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
                     for (const sourceTableKey of manualRefillSummarySourceTableKeys) {
                         await enqueueSummaryVectorIndexFlush_ACU({
-                            targetMessageIndex: snapshotResult.targetMessageIndex,
                             sourceTableKey,
-                            mode: 'sync',
                             reason: 'manual_refill_complete',
                         });
                     }

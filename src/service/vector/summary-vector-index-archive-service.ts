@@ -17,7 +17,7 @@ import { createEmbeddings_ACU, isVectorEmbeddingError_ACU, VectorEmbeddingError_
 import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { buildVectorIndexSingleSnapshotV2FilePath_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
-import { getChatArray_ACU } from '../chat/chat-service';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getLatestAiMessageIndexFromChat_ACU } from '../table/table-history';
 import {
     persistRemoteMemorySnapshotAnchorIfNeeded_ACU,

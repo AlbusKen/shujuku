@@ -66,6 +66,7 @@ import {
     isWorldbookApiAvailable_ACU,
 } from '../worldbook/worldbook-service';
 import { getInjectionTargetLorebook_ACU } from '../worldbook/injection-engine';
+import { normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 
 // ════════════════════════════════════════════════════════════════
 // 类型
@@ -219,22 +220,34 @@ async function cleanupVectorManifestsFromSnapshots_ACU(
                 }
             }
             if (!isolated || typeof isolated !== 'object' || Array.isArray(isolated)) continue;
-            for (const tagData of Object.values(isolated)) {
+            for (const [tagKey, tagData] of Object.entries(isolated)) {
                 if (!tagData || typeof tagData !== 'object') continue;
                 const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
-                if (!manifest || typeof manifest !== 'object') continue;
-                const key = String(manifest.indexId ?? JSON.stringify(manifest));
-                if (seen.has(key)) continue;
-                seen.add(key);
-                manifests.push(manifest);
-                const isolationKey = String(manifest.isolationKey ?? '').trim();
-                const sourceTableKey = String(manifest.sourceTableKey ?? '').trim();
-                const chatKey = String(manifest.chatKey ?? '').trim();
-                // Safe GC 要求 isolation/sourceTable 双方可证明；不完整 manifest 只删其
-                // 明确引用的资源，不根据文件名猜测 scope。
-                if (isolationKey && sourceTableKey) {
-                    const hint = { chatKey, isolationKey, sourceTableKey };
-                    scopeHints.set(`${chatKey}\n${isolationKey}\n${sourceTableKey}`, hint);
+                if (manifest && typeof manifest === 'object') {
+                    const key = String(manifest.indexId ?? JSON.stringify(manifest));
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        manifests.push(manifest);
+                        const isolationKey = String(manifest.isolationKey ?? '').trim();
+                        const sourceTableKey = String(manifest.sourceTableKey ?? '').trim();
+                        const chatKey = String(manifest.chatKey ?? '').trim();
+                        // Safe GC 要求 isolation/sourceTable 双方可证明；不完整 manifest 只删其
+                        // 明确引用的资源，不根据文件名猜测 scope。
+                        if (isolationKey && sourceTableKey) {
+                            const hint = { chatKey, isolationKey, sourceTableKey };
+                            scopeHints.set(`${chatKey}\n${isolationKey}\n${sourceTableKey}`, hint);
+                        }
+                    }
+                }
+                const mirror = tagData.storageFrame?.summaryVectorIndexFrame;
+                const mirrorSourceTableKey = typeof mirror?.sourceTableKey === 'string' ? mirror.sourceTableKey.trim() : '';
+                if (mirrorSourceTableKey) {
+                    const chatKey = String(getActiveChatStorageIdentity_ACU(getChatArray_ACU()) || '').trim();
+                    const isolationKey = normalizeSummaryVectorIsolationKey_ACU(tagKey);
+                    const hintKey = `${chatKey}\n${isolationKey}\n${mirrorSourceTableKey}`;
+                    if (!scopeHints.has(hintKey)) {
+                        scopeHints.set(hintKey, { chatKey, isolationKey, sourceTableKey: mirrorSourceTableKey });
+                    }
                 }
             }
         }

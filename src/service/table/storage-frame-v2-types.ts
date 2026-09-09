@@ -560,6 +560,101 @@ export interface MixedStorageDecisionBackupV1_ACU {
   decisionKind: string;
 }
 
+// ─── 纪要向量镜像（summary vector mirror）─────────────────────────────────
+//
+// 向量索引是纪要表的派生镜像，与表格 V2 使用完全相同的楼层语义：
+// - Vector checkpoint 只允许存在于表格 full checkpoint 所在 frame，表示该 frame
+//   logEntries 之前时刻的纪要表 rowId 集合；每个隔离槽至多一个。
+// - 每层 Vector delta 只记录该层 table entry 导致的 rowId 增减（row_add / row_remove），
+//   与来源 entryId 同生共死：frame 被 swipe / 删楼 / 重填替换时 delta 随之消失。
+// - 引用身份是 content-addressed 的 { packHash, chunkIndex }；rowId 由 max+1 分配会复用，
+//   绝不能用 rowId 推导对象身份。
+// - delta 之间不维护 revision 链：删中间楼层会合法地移除一条 delta，链式校验会把合法
+//   状态判成损坏；一致性由 resolver 的 entryId 存在校验与 rowId 集合语义保证。
+
+/** 外置 pack 文件引用：文件名主体即内容 sha256。 */
+export interface SummaryVectorPackRef_ACU {
+  packHash: string;
+  path: string;
+  chunkCount: number;
+  byteLength: number;
+}
+
+/** 某一行的向量 chunk 在 pack 内的位置。 */
+export interface SummaryVectorChunkRef_ACU {
+  packHash: string;
+  chunkIndex: number;
+}
+
+/** embedding 身份：任一字段变化即旧向量不可与新向量混用。 */
+export interface SummaryVectorEmbeddingIdentity_ACU {
+  endpointFingerprint: string;
+  model: string;
+  dimension: number;
+  sourceTextVersion: number;
+}
+
+/** checkpoint manifest 外置文件引用：rowId → chunkRefs，不含向量本体。 */
+export interface SummaryVectorManifestRef_ACU {
+  manifestHash: string;
+  path: string;
+  byteLength: number;
+}
+
+export type SummaryVectorMirrorCheckpointReason_ACU = 'initial' | 'fold' | 'rebuild_user' | 'rebuild_repair';
+
+export interface SummaryVectorIndexMirrorCheckpointV2_ACU {
+  kind: 'vector_full';
+  createdAt: number;
+  reason: SummaryVectorMirrorCheckpointReason_ACU;
+  sourceTableKey: string;
+  /** 同 frame 表格 checkpoint.data 的指纹（getTableDataFingerprint_ACU），用于检测表格 checkpoint 被替换。 */
+  tableCheckpointFingerprint: string;
+  embedding: SummaryVectorEmbeddingIdentity_ACU;
+  rowCount: number;
+  /** sha256(排序后的 rowId + chunkRef 列表)，是 head vectorRevision 的起点。 */
+  vectorRevision: string;
+  manifestRef: SummaryVectorManifestRef_ACU;
+  /** manifest 引用的全部 pack，供 GC 不读文件即可判定可达。 */
+  packRefs: SummaryVectorPackRef_ACU[];
+}
+
+export type SummaryVectorIndexMirrorOperationV2_ACU =
+  | {
+    kind: 'row_add';
+    rowId: string;
+    chunks: SummaryVectorChunkRef_ACU[];
+    /** 仅诊断，不参与任何校验或比对。 */
+    vectorSourceHash: string;
+  }
+  | { kind: 'row_remove'; rowId: string };
+
+export interface SummaryVectorIndexMirrorLogEntryV2_ACU {
+  seq: number;
+  entryId: string;
+  createdAt: number;
+  sourceTableEntry: {
+    entryId: string;
+    commitRevision: string | null;
+    /** 仅诊断；删楼后会位移，不参与校验。 */
+    messageIndex: number;
+  };
+  embedding: SummaryVectorEmbeddingIdentity_ACU;
+  /** 本 delta 新增的 pack（row_add 的向量所在）。 */
+  packRefs: SummaryVectorPackRef_ACU[];
+  operations: SummaryVectorIndexMirrorOperationV2_ACU[];
+  skippedRowCount?: number;
+}
+
+/** 单槽：一个聊天只有一个纪要表。 */
+export interface SummaryVectorIndexMirrorFrameV2_ACU {
+  version: 3;
+  sourceTableKey: string;
+  /** 仅表格 full checkpoint 所在 frame 才允许存在。 */
+  checkpoint?: SummaryVectorIndexMirrorCheckpointV2_ACU;
+  logEntries: SummaryVectorIndexMirrorLogEntryV2_ACU[];
+}
+
 export interface TableStorageFrameV2_ACU {
   version: 2;
   headRevision?: string | null;
@@ -567,6 +662,11 @@ export interface TableStorageFrameV2_ACU {
   perSheetCheckpoints?: Record<string, TableSheetCheckpointV2_ACU>;
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   logEntries: TableMutationLogEntryV2_ACU[];
+  /**
+   * 纪要向量镜像（单槽）。未建立镜像的 frame 不写此字段。
+   * 与 frame 一同保存、克隆、purge、嫁接与 compaction；删除纪要表 sheetKey 时整体移除。
+   */
+  summaryVectorIndexFrame?: SummaryVectorIndexMirrorFrameV2_ACU;
 }
 
 /**

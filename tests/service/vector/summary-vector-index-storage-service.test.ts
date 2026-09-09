@@ -22,6 +22,9 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: 'chat-a',
   getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: () => [],
+}));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getAllSummaryVectorIndexSnapshotLayers_ACU: () => h.snapshot.value?.layers || [],
 }));
@@ -41,6 +44,8 @@ vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   buildVectorIndexSingleSnapshotV2FilePath_ACU: (parts: any) => `TavernDB_ACU_vector_v2_scope:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}_${parts.indexId}_${parts.writeGeneration}_snapshot`,
   decodeVectorIndexScopeFromPath_ACU: (...args: any[]) => h.decodeScope(...args),
   isVectorIndexContentPackPathV2_ACU: (path: any) => String(path || '').startsWith('TavernDB_ACU_vector_v2pack_'),
+  isVectorIndexMirrorManifestPathV2_ACU: (path: any) => String(path || '').startsWith('TavernDB_ACU_vector_v2vcp_'),
+  VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU: 'TavernDB_ACU_vector_v2vcp_',
   VECTOR_INDEX_SNAPSHOT_PATH_V2_PREFIX_ACU: 'TavernDB_ACU_vector_v2_',
   buildVectorIndexFileName_ACU: vi.fn(), buildVectorIndexSnapshotFilePath_ACU: vi.fn(),
   buildVectorIndexStableDirectory_ACU: vi.fn(), buildVectorIndexStableFilePath_ACU: vi.fn(),

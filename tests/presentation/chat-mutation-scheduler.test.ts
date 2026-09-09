@@ -45,6 +45,15 @@ vi.mock('../../src/service/vector/summary-vector-index-flush-queue', () => ({
 vi.mock('../../src/service/vector/summary-vector-index-state-service', () => ({
   getLatestSummaryVectorIndexSnapshotState_ACU: () => h.latestState,
 }));
+vi.mock('../../src/service/vector/summary-vector-mirror-rebuild', () => ({
+  chatHasSummaryVectorMirror_ACU: () => !!h.latestState?.summaryVectorIndexState,
+}));
+vi.mock('../../src/service/chat/chat-service', () => ({
+  getChatArray_ACU: () => [],
+}));
+vi.mock('../../src/service/vector/summary-vector-index-chat-deletion-gc', () => ({
+  runScopedRetentionGcAfterFlush_ACU: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../../src/data/repositories/profile-repo', () => ({
   globalMeta_ACU: { summaryVectorIndexModeGlobal: true },
 }));
@@ -139,7 +148,7 @@ describe('chat mutation scheduler', () => {
     await vi.advanceTimersByTimeAsync(1200);
     await vi.runAllTicks();
     expect(h.markDirty).toHaveBeenCalledWith('scope-1', 'chat_modified_deleted');
-    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({ reason: 'chat_modified_deleted', mode: 'sync' }));
+    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({ reason: 'chat_modified_deleted' }));
   });
 
   it('P2：尚无索引的聊天只标记 dirty，不入队（避免凭空首次建索引扣费）', async () => {

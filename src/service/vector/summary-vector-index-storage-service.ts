@@ -1,4 +1,5 @@
 import { getCurrentIsolationKey_ACU, currentChatFileIdentifier_ACU } from '../runtime/state-manager';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { hashUserInput_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import {
@@ -12,6 +13,8 @@ import {
     decodeVectorIndexScopeFromPath_ACU,
     deleteVectorIndexFile_ACU,
     isVectorIndexContentPackPathV2_ACU,
+    isVectorIndexMirrorManifestPathV2_ACU,
+    VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU,
     loadVectorIndexRegistry_ACU,
     readVectorIndexJsonFile_ACU,
     registerVectorIndexFiles_ACU,
@@ -61,6 +64,7 @@ import type {
     SummaryVectorIndexStats_ACU,
     SummaryVectorIndexStorageIdentity_ACU,
     SummaryVectorIndexTombstone_ACU,
+    SummaryVectorMirrorManifestRows_ACU,
 } from './summary-vector-index-types';
 import {
     SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU,
@@ -842,11 +846,64 @@ function buildReachableFileIdentityKey_ACU(file: SummaryVectorIndexReachableFile
     ]);
 }
 
+function collectMirrorFrameReachableFiles_ACU(
+    messageIndex: number,
+    isolationKey: string,
+    sourceTableKey: string,
+    mirror: any,
+): SummaryVectorIndexReachableFile_ACU[] {
+    const files: SummaryVectorIndexReachableFile_ACU[] = [];
+    const seen = new Set<string>();
+    const push = (path: string, role: SummaryVectorIndexReachableFile_ACU['role'], checksum?: string) => {
+        const normalized = String(path || '').trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        files.push({
+            path: normalized,
+            references: [{ messageIndex, isolationKey }],
+            role,
+            messageIndex,
+            isolationKey,
+            sourceTableKey,
+            manifestKey: normalized,
+            checksum,
+        });
+    };
+    const checkpoint = mirror?.checkpoint;
+    if (checkpoint?.manifestRef?.path) {
+        push(checkpoint.manifestRef.path, 'manifest', checkpoint.manifestRef.checksum);
+    }
+    for (const packRef of checkpoint?.packRefs || []) {
+        if (packRef?.path) push(packRef.path, 'vector_pack', packRef.checksum);
+    }
+    for (const entry of mirror?.logEntries || []) {
+        for (const packRef of entry?.packRefs || []) {
+            if (packRef?.path) push(packRef.path, 'vector_pack', packRef.checksum);
+        }
+    }
+    return files;
+}
+
 export async function collectSummaryVectorIndexReachability_ACU(): Promise<SummaryVectorIndexReachabilityReport_ACU> {
     const layers = getAllSummaryVectorIndexSnapshotLayers_ACU();
     const chatKey = normalizeChatKey_ACU();
     const reachabilityByIdentity = new Map<string, SummaryVectorIndexReachableFile_ACU>();
     let manifestCount = 0;
+    const mergeReachable = (file: SummaryVectorIndexReachableFile_ACU): void => {
+        const identityKey = buildReachableFileIdentityKey_ACU(file);
+        const existing = reachabilityByIdentity.get(identityKey);
+        if (!existing) {
+            reachabilityByIdentity.set(identityKey, file);
+            return;
+        }
+        const references = [...(existing.references || [{ messageIndex: existing.messageIndex, isolationKey: existing.isolationKey }])];
+        (file.references || []).forEach((reference) => {
+            if (!references.some((item) => item.messageIndex === reference.messageIndex && item.isolationKey === reference.isolationKey)) {
+                references.push(reference);
+            }
+        });
+        existing.references = references;
+    };
     layers.forEach((layer) => {
         // state.manifest 与 standalone manifest 都是持久化引用。正常 writer 会令二者一致，
         // 但历史中断或外部污染导致不一致时，GC 必须保护两者，不能擅自挑一份当权威。
@@ -859,19 +916,36 @@ export async function collectSummaryVectorIndexReachability_ACU(): Promise<Summa
             collectManifestReachableFiles_ACU(manifest, {
                 messageIndex: layer.messageIndex,
                 isolationKey: layer.isolationKey,
-            }).forEach((file) => {
-                const identityKey = buildReachableFileIdentityKey_ACU(file);
-                const existing = reachabilityByIdentity.get(identityKey);
-                if (!existing) {
-                    reachabilityByIdentity.set(identityKey, file);
-                    return;
-                }
-                const references = [...(existing.references || [{ messageIndex: existing.messageIndex, isolationKey: existing.isolationKey }])];
-                (file.references || []).forEach((reference) => {
-                    if (!references.some((item) => item.messageIndex === reference.messageIndex && item.isolationKey === reference.isolationKey)) references.push(reference);
-                });
-                existing.references = references;
+            }).forEach(mergeReachable);
+        });
+    });
+    const chat = getChatArray_ACU();
+    if (Array.isArray(chat)) {
+        chat.forEach((message, messageIndex) => {
+            const isolated = message?.TavernDB_ACU_IsolatedData;
+            if (!isolated || typeof isolated !== 'object' || Array.isArray(isolated)) return;
+            Object.entries(isolated).forEach(([isolationKey, tagData]) => {
+                const mirror = (tagData as any)?.storageFrame?.summaryVectorIndexFrame;
+                if (!mirror) return;
+                if (mirror.checkpoint?.manifestRef) manifestCount += 1;
+                collectMirrorFrameReachableFiles_ACU(
+                    messageIndex,
+                    isolationKey,
+                    String(mirror.sourceTableKey || mirror.checkpoint?.sourceTableKey || ''),
+                    mirror,
+                ).forEach(mergeReachable);
             });
+        });
+    }
+    pendingSummaryVectorIndexPublicationPaths_ACU.forEach((path) => {
+        mergeReachable({
+            path,
+            references: [],
+            role: 'vector_pack',
+            messageIndex: -1,
+            isolationKey: '',
+            sourceTableKey: '',
+            manifestKey: path,
         });
     });
     const reachableFiles = Array.from(reachabilityByIdentity.values());
@@ -1063,6 +1137,68 @@ export async function cleanupUnreachableSummaryVectorIndexFiles_ACU(options: Sum
                 deletedPaths.push(packDelete.path || path);
             } else {
                 failedDeletes.push({ path, error: packDelete.error || '删除失败' });
+            }
+            continue;
+        }
+        if (isVectorIndexMirrorManifestPathV2_ACU(path)) {
+            if (eligibleScopes.length === 0) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            if (String(file.publicationState || '') === 'prepared') {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            const candidateManifestScopes = eligibleScopes.filter((scope) => path.startsWith(
+                `${VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU}${buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope)}_`,
+            ));
+            if (candidateManifestScopes.length === 0) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            const registeredAt = Date.parse(String(file.createdAt || file.updatedAt || ''));
+            if (!Number.isFinite(registeredAt) || Date.now() - registeredAt < SUMMARY_VECTOR_INDEX_SAFE_GC_GRACE_PERIOD_MS_ACU) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            const loaded = await readVectorIndexJsonFile_ACU<SummaryVectorMirrorManifestRows_ACU>(path);
+            const data = loaded.ok ? loaded.data : null;
+            const scope = candidateManifestScopes[0];
+            const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope);
+            const hashFromPath = path.slice(`${VECTOR_INDEX_MIRROR_MANIFEST_PATH_V2_PREFIX_ACU}${scopeToken}_`.length);
+            const payloadHash = data
+                ? await sha256Text_ACU(JSON.stringify({
+                    schema: data.schema,
+                    version: data.version,
+                    sourceTableKey: data.sourceTableKey,
+                    rows: data.rows,
+                }))
+                : '';
+            const matches = !!data
+                && data.schema === 'summary_vector_mirror_manifest'
+                && Number(data.version) === 1
+                && String(data.sourceTableKey || '') === scope.sourceTableKey
+                && payloadHash === hashFromPath
+                && (!file.checksum || payloadHash === file.checksum || (await sha256Text_ACU(JSON.stringify(data))) === file.checksum);
+            if (!matches) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                logSummaryVectorIndexIdentityEvent_ACU('warn', 'gc', 'quarantined_identity_unverified', {
+                    path,
+                    scopeFingerprint: scopeToken,
+                });
+                continue;
+            }
+            const deleted = await deleteVectorIndexFile_ACU(path);
+            if (deleted.ok) {
+                pendingSummaryVectorIndexPublicationPaths_ACU.delete(path);
+                deletedPaths.push(deleted.path || path);
+            } else {
+                failedDeletes.push({ path, error: deleted.error || '删除失败' });
             }
             continue;
         }
@@ -2732,6 +2868,11 @@ export async function inspectSummaryVectorIndexHealth_ACU(): Promise<SummaryVect
     });
 
     for (const file of reachability.reachableFiles) {
+        // pending 发布窗口内的对象还没有 durable pointer / expectedIdentity，
+        // 不能按已发布对象做 identity 校验，否则会把 in-flight pack 误报成 mismatch。
+        if (!file.expectedIdentity && !file.manifest && file.messageIndex === -1) {
+            continue;
+        }
         const loaded = await readVectorIndexJsonFile_ACU<any>(file.path);
         if (!loaded.ok || !loaded.data) {
             issues.push({

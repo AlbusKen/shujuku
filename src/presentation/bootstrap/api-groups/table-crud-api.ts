@@ -470,17 +470,11 @@ async function syncSummaryVectorIndexAfterTableEdit_ACU(
     }
     if (!isSummaryOrOutlineTable_ACU(tableName)) return;
     if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
-
-    const chat = SillyTavern_API_ACU.chat as ACUMessage[];
-    const preferredTargetIndex = tableLatestFloorIndex >= 0 && chat?.[tableLatestFloorIndex] && !chat[tableLatestFloorIndex].is_user
-        ? tableLatestFloorIndex
-        : undefined;
+    void tableLatestFloorIndex;
 
     try {
         const result = await enqueueSummaryVectorIndexFlush_ACU({
-            targetMessageIndex: preferredTargetIndex,
             sourceTableKey,
-            mode: 'sync',
             reason: methodName,
         });
         if (!result.queued && !result.skipped) {

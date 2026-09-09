@@ -63,6 +63,7 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: vi.fn(() => mockChat),
   saveChatToHost_ACU: mockSaveChatToHost,
   saveChatToHostStrict_ACU: mockSaveChatToHostStrict,
 }));

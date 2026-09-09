@@ -14,7 +14,7 @@ import {
 } from '../../data/storage/vector-index-st-files-storage';
 import { getCurrentCharacterCardName_ACU } from '../../shared/template-preset-utils';
 import { isSummaryOrOutlineTable_ACU, logWarn_ACU } from '../../shared/utils';
-import { getChatArray_ACU } from '../chat/chat-service';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import {
     getAggregatedSummaryVectorIndexSnapshot_ACU,

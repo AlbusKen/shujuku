@@ -33,7 +33,9 @@ import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
 import { cleanupUnreachableSummaryVectorIndexFiles_ACU, deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
 import { assignSummaryVectorIndexStateToTagData_ACU, readSummaryVectorIndexStateFromTagData_ACU } from '../vector/summary-vector-index-state-service';
-import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
+import type { ChatSummaryVectorIndexManifest_ACU, SummaryVectorIndexExternalFileRef_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
+import { finalizeFoldedSummaryVectorMirrorFiles_ACU, foldSummaryVectorMirrorAtBoundary_ACU } from '../vector/summary-vector-mirror-fold';
+import { runScopedRetentionGcAfterFlush_ACU } from '../vector/summary-vector-index-chat-deletion-gc';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU } from '../table/storage-frame-v2-persist';
@@ -644,7 +646,7 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
             }
         });
         try {
-            const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
+            const { changed, foldFiles } = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
             const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
             const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
             // 单根不变量：降级后同一隔离键必须至多一个 full checkpoint，
@@ -657,6 +659,15 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
             }
             if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
                 await saveChatToHostStrict_ACU();
+            }
+            if (foldFiles.length > 0) {
+                await finalizeFoldedSummaryVectorMirrorFiles_ACU(foldFiles);
+                const foldScope = foldFiles[0]?.scope;
+                void runScopedRetentionGcAfterFlush_ACU({
+                    chatKey: String(foldScope?.chatKey || currentChatFileIdentifier_ACU || ''),
+                    isolationKey: String(foldScope?.isolationKey || getCurrentIsolationKey_ACU()),
+                    sourceTableKey: String(foldScope?.sourceTableKey || ''),
+                }).catch((): void => undefined);
             }
             return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
         } catch (error: any) {
@@ -757,127 +768,35 @@ export async function ensureV2BoundaryCheckpointForRetainedBuffer_ACU(
 }
 
 
-interface BoundaryVectorPointerCandidate_ACU {
-    messageIndex: number;
-    state: ChatSummaryVectorIndexState_ACU;
-    manifest: ChatSummaryVectorIndexManifest_ACU;
-}
-
-function getBoundaryVectorPointerRevision_ACU(manifest: ChatSummaryVectorIndexManifest_ACU): number {
-    const storageRevision = Number(manifest.storageIdentity?.revision || 0);
-    const snapshotRevision = Number(manifest.snapshot?.revision || 0);
-    if (storageRevision > 0 && snapshotRevision > 0 && storageRevision !== snapshotRevision) {
-        throw new Error(`边界向量指针身份不一致：indexId=${manifest.indexId}, storageRevision=${storageRevision}, snapshotRevision=${snapshotRevision}`);
-    }
-    return Math.max(storageRevision, snapshotRevision, 0);
-}
-
-function compareBoundaryVectorPointerCandidate_ACU(
-    left: BoundaryVectorPointerCandidate_ACU,
-    right: BoundaryVectorPointerCandidate_ACU,
-): number {
-    const revisionDiff = getBoundaryVectorPointerRevision_ACU(left.manifest) - getBoundaryVectorPointerRevision_ACU(right.manifest);
-    if (revisionDiff !== 0) return revisionDiff;
-    const leftTime = Date.parse(String(left.manifest.updatedAt || left.manifest.indexedAt || ''));
-    const rightTime = Date.parse(String(right.manifest.updatedAt || right.manifest.indexedAt || ''));
-    const timeDiff = (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
-    if (timeDiff !== 0) return timeDiff;
-    return left.messageIndex - right.messageIndex;
-}
-
-function relocateLatestSummaryVectorPointerToBoundary_ACU(
+async function foldVectorMirrorAfterBoundaryWrite_ACU(
     chat: any[],
-    boundaryAnchorIndex: number,
     isolationKey: string,
-): boolean {
-    const candidatesBySourceTable = new Map<string, BoundaryVectorPointerCandidate_ACU[]>();
-    const canonicalIsolationKey = normalizeSummaryVectorIsolationKey_ACU(isolationKey);
-    for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
-        const message = chat[messageIndex];
-        if (!message || message.is_user) continue;
-        const tagData = readIsolatedTagData_ACU(message, isolationKey);
-        const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
-        const manifests = [state?.manifest, tagData?.summaryVectorIndexManifest]
-            .filter((manifest): manifest is ChatSummaryVectorIndexManifest_ACU => !!manifest);
-        const seenManifestIdentities = new Set<string>();
-        for (const manifest of manifests) {
-            const identityKey = JSON.stringify([
-                manifest.indexId,
-                manifest.manifestFile,
-                manifest.storageIdentity?.writeGeneration,
-                manifest.storageIdentity?.revision ?? manifest.snapshot?.revision,
-            ]);
-            if (seenManifestIdentities.has(identityKey)) continue;
-            seenManifestIdentities.add(identityKey);
-            if (!state) continue;
-            if (manifest.status !== 'ready') {
-                if (messageIndex < boundaryAnchorIndex) {
-                    throw new Error(`边界向量指针不可迁移：indexId=${manifest.indexId}, status=${manifest.status}`);
-                }
-                continue;
-            }
-            if (normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey) !== canonicalIsolationKey) {
-                throw new Error(`边界向量指针 scope 不匹配：tagSlot=${isolationKey || '(default)'}, manifestIsolation=${manifest.isolationKey || '(empty)'}, indexId=${manifest.indexId}`);
-            }
-            getBoundaryVectorPointerRevision_ACU(manifest);
-            const sourceTableKey = String(manifest.sourceTableKey || state.sourceTableKey || '').trim();
-            if (!sourceTableKey) throw new Error(`边界向量指针缺少 sourceTableKey：indexId=${manifest.indexId}`);
-            const candidates = candidatesBySourceTable.get(sourceTableKey) || [];
-            candidates.push({ messageIndex, state: { ...state, manifest }, manifest });
-            candidatesBySourceTable.set(sourceTableKey, candidates);
-        }
-    }
-
-    const relocations = Array.from(candidatesBySourceTable.values())
-        .map((candidates) => {
-            const highestRevision = Math.max(...candidates.map((candidate) => getBoundaryVectorPointerRevision_ACU(candidate.manifest)));
-            const newestCandidates = candidates.filter((candidate) => getBoundaryVectorPointerRevision_ACU(candidate.manifest) === highestRevision);
-            const v2IdentityKeys = new Set(newestCandidates
-                .filter((candidate) => !!candidate.manifest.storageIdentity)
-                .map((candidate) => JSON.stringify([
-                    candidate.manifest.indexId,
-                    candidate.manifest.manifestFile,
-                    candidate.manifest.storageIdentity?.writeGeneration,
-                ])));
-            if (v2IdentityKeys.size > 1) {
-                throw new Error(`边界向量指针存在同 scope 同 revision 的多个 immutable generation，拒绝猜测迁移：sourceTableKey=${newestCandidates[0].manifest.sourceTableKey}, revision=${highestRevision}`);
-            }
-            return newestCandidates.reduce((latest, candidate) => (
-                compareBoundaryVectorPointerCandidate_ACU(candidate, latest) > 0 ? candidate : latest
-            ));
-        })
-        .filter((candidate) => candidate.messageIndex < boundaryAnchorIndex);
-    if (relocations.length === 0) return false;
-    if (relocations.length > 1) {
-        throw new Error(`边界向量指针存在多个待迁移 sourceTableKey，单一 tag slot 无法安全承载：isolationKey=${isolationKey || '(default)'}`);
-    }
-
-    const candidate = relocations[0];
-    const anchorMessage = chat[boundaryAnchorIndex];
-    const anchorContainer = readIsolatedDataContainer_ACU(anchorMessage);
-    const anchorTagData = anchorContainer?.[isolationKey];
-    if (!anchorTagData || typeof anchorTagData !== 'object') {
-        throw new Error(`边界向量指针迁移失败：anchor 缺少 isolationKey=[${isolationKey || '无标签'}] 的 tag slot`);
-    }
-    const anchorState = readSummaryVectorIndexStateFromTagData_ACU(anchorTagData);
-    if (anchorState?.manifest && anchorState.manifest.sourceTableKey !== candidate.manifest.sourceTableKey) {
-        throw new Error(`边界向量指针迁移会覆盖其他 sourceTableKey：anchor=${anchorState.manifest.sourceTableKey}, candidate=${candidate.manifest.sourceTableKey}`);
-    }
-    assignSummaryVectorIndexStateToTagData_ACU(anchorTagData, candidate.state, candidate.manifest);
-    logDebug_ACU(`[V2 Compaction] 已将交火向量 immutable pointer 迁移到边界楼层 #${boundaryAnchorIndex}：isolationKey=[${isolationKey || '无标签'}], indexId=${candidate.manifest.indexId}`);
-    return true;
+    boundaryAnchorIndex: number,
+    foldFiles: SummaryVectorIndexExternalFileRef_ACU[],
+): Promise<void> {
+    const tagData = chat[boundaryAnchorIndex]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const frame = isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
+    if (!frame?.checkpoint || frame.checkpoint.kind !== 'full') return;
+    const result = await foldSummaryVectorMirrorAtBoundary_ACU({
+        chat,
+        isolationKey,
+        boundaryAnchorIndex,
+        tableCheckpointFingerprint: getTableDataFingerprint_ACU(frame.checkpoint.data),
+    });
+    foldFiles.push(...result.files);
 }
 
 async function writeV2BoundaryCheckpointBeforePurge_ACU(
     chat: any[],
     boundaryAnchorIndex: number,
     checkpointReason: 'compaction' | 'periodic' = 'compaction',
-): Promise<boolean> {
+): Promise<{ changed: boolean; foldFiles: SummaryVectorIndexExternalFileRef_ACU[] }> {
     if (boundaryAnchorIndex < 0 || !chat[boundaryAnchorIndex] || chat[boundaryAnchorIndex].is_user) {
         throw new Error(`边界 checkpoint 写入失败：boundaryAnchorIndex=${boundaryAnchorIndex} 不是有效 AI 楼层。`);
     }
 
     let changed = false;
+    const foldFiles: SummaryVectorIndexExternalFileRef_ACU[] = [];
     const isolationConfig = {
         enabled: settings_ACU.dataIsolationEnabled,
         code: settings_ACU.dataIsolationCode,
@@ -919,11 +838,10 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             continue;
         }
 
-        const pointerRelocated = relocateLatestSummaryVectorPointerToBoundary_ACU(chat, boundaryAnchorIndex, isolationKey);
-        if (pointerRelocated) changed = true;
         const hasExistingBoundaryCheckpoint = hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex);
         if (hasExistingBoundaryCheckpoint && !transitionRef) {
             logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过 frame 重建。`);
+            await foldVectorMirrorAfterBoundaryWrite_ACU(chat, isolationKey, boundaryAnchorIndex, foldFiles);
             continue;
         }
 
@@ -968,6 +886,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             }
             changed = true;
             logDebug_ACU(`[V2 Compaction] 已验证既有边界 full 并移除 isolationKey=[${isolationKey || '无标签'}] 的过渡根。`);
+            await foldVectorMirrorAfterBoundaryWrite_ACU(chat, isolationKey, boundaryAnchorIndex, foldFiles);
             continue;
         }
 
@@ -1117,9 +1036,10 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         }
         changed = true;
         logDebug_ACU(`[V2 Compaction] 已在 AI 保留边界楼层 #${boundaryAnchorIndex} 写入 isolationKey=[${isolationKey || '无标签'}] 的 full checkpoint（reason=${checkpointReason}）。`);
+        await foldVectorMirrorAfterBoundaryWrite_ACU(chat, isolationKey, boundaryAnchorIndex, foldFiles);
     }
 
-    return changed;
+    return { changed, foldFiles };
 }
 
 /**

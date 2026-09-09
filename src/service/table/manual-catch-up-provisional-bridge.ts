@@ -30,6 +30,7 @@ import type {
   TableV2RecoveryBackup_ACU,
 } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
+import { scheduleSummaryVectorMirrorFlushAfterPersist_ACU } from '../vector/summary-vector-index-flush-queue';
 
 /** bridge 元数据所在 isolation tag 上的非 replay 字段名。 */
 export const MANUAL_CATCH_UP_BRIDGE_FIELD_ACU = 'manualCatchUpProvisionalBridge';
@@ -810,6 +811,10 @@ export async function finalizeProvisionalBridge_ACU(
       return { ok: false, error: `bridge finalize 严格保存失败：${error?.message ||String(error)}`, diagnosticCode: 'bridge_finalize_failed' };
     }
     logDebug_ACU(`[ManualCatchUpBridge] 已原子汇合：runId=${runId}, originalFull=${bridge.originalFullCheckpointIndex}, sheets=${bridge.selectedSheetKeys.join('、')}, cleanup=${cleanupEvidence.length}。`);
+    scheduleSummaryVectorMirrorFlushAfterPersist_ACU({
+      changedSheetKeys: [...bridge.selectedSheetKeys],
+      reason: 'provisional_bridge_finalize',
+    });
     return {
       ok: true,
       finalizeSummary: {
