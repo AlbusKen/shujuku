@@ -2887,6 +2887,69 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
   });
 
+  it('手动重填范围含 sql_sheet_batch 纪要表 INSERT 时，按语句里的 row_id 清理向量', async () => {
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSummaryOrOutlineTable_ACU, parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '纪要表', updateConfig: { groupId: 0 }, content: [['row_id', '编码索引', '概览']] },
+    });
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户0' },
+      {
+        is_user: false,
+        mes: 'AI回复1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: undefined,
+              logEntries: [{
+                seq: 1, entryId: 'sql-summary-1', createdAt: 1, source: 'auto_fill', targetMessageIndex: 1, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{
+                  kind: 'sql_sheet_batch',
+                  sheetKey: 'sheet_0',
+                  tableName: 'chronicle',
+                  reason: 'system',
+                  statements: [
+                    "INSERT INTO chronicle (row_id, code_index, summary) VALUES (1, 'AM0001', '江南急报')",
+                    "INSERT INTO chronicle (row_id, code_index, summary) VALUES (2, 'AM0002', '鬼船')",
+                  ],
+                }],
+              }],
+            },
+          },
+        },
+      },
+    ]);
+    mockSettings.manualUpdateContextDepth = 1;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
+    mockArchiveSummaryVectorIndexNow.mockClear();
+    mockClearManualRefillSheetDataInRange.mockClear();
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '编码索引', '概览'], ['1', 'AM0001', '江南急报'], ['2', 'AM0002', '鬼船']] },
+    };
+    vi.mocked(commitManualRefillSheetSnapshotInRangeAtomic_ACU).mockResolvedValueOnce({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 1 });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
+
+    expect(result.success, result.error).toBe(true);
+    expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([1], ['sheet_0']);
+    expect(mockArchiveSummaryVectorIndexNow).toHaveBeenCalledWith({
+      mode: 'sync',
+      sourceTableKey: 'sheet_0',
+      excludedRowIds: ['1', '2'],
+      removalOnly: true,
+    });
+  });
+
   it('范围末端 full checkpoint 被目标表全覆盖时禁用跨根 staging：清理后建模板临时根，各层普通 persist', async () => {
     const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');

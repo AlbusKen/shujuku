@@ -123,6 +123,7 @@ import {
   assertNoHiddenPhysicalColumnMutations_ACU,
   buildSqlSheetBatchOperations_ACU,
   captureSqlTableApplyScope_ACU,
+  extractRowIdsFromSqlSheetBatch_ACU,
   materializeSystemRowIdsForSqlInserts_ACU,
   rebindSqlMutationTableIdentifiers_ACU,
   SqlRuntimeSnapshotError_ACU,
@@ -1193,6 +1194,62 @@ describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
       "UPDATE inventory SET quantity = 4 WHERE row_id = 1",
       "UPDATE inventory SET legacy_note = '历史秘密' WHERE row_id = 1",
     ], tableData)).toThrow('不允许引用隐藏物理列');
+  });
+});
+
+describe('extractRowIdsFromSqlSheetBatch_ACU', () => {
+  it('从物化 INSERT VALUES 抽出全部 row_id', () => {
+    expect(extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: [
+        "INSERT INTO chronicle (row_id, code_index, summary) VALUES (1, 'AM0001', 'a'), (2, 'AM0002', 'b')",
+      ],
+    })).toEqual({ ok: true, rowIds: ['1', '2'] });
+  });
+
+  it('VALUES (?) 使用对应 params 绑定', () => {
+    expect(extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: ['INSERT INTO chronicle (row_id, summary) VALUES (?, ?)'],
+      params: [[7, '概览']],
+    })).toEqual({ ok: true, rowIds: ['7'] });
+  });
+
+  it('UPDATE SET 占位符不会抢 WHERE row_id 的绑定', () => {
+    expect(extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: ['UPDATE chronicle SET summary = ? WHERE row_id = ?'],
+      params: [['概览', 9]],
+    })).toEqual({ ok: true, rowIds: ['9'] });
+  });
+
+  it('DELETE/UPDATE 只接受单独的 row_id = / IN 谓词', () => {
+    expect(extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: [
+        'DELETE FROM chronicle WHERE row_id = 3',
+        "UPDATE chronicle SET summary = 'x' WHERE row_id IN (4, 5)",
+      ],
+    })).toEqual({ ok: true, rowIds: ['3', '4', '5'] });
+  });
+
+  it('INSERT 未列出 row_id 时 fail-closed', () => {
+    const result = extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: ["INSERT INTO chronicle (code_index, summary) VALUES ('AM0001', 'a')"],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('无 WHERE 的 DELETE 与复合 WHERE 都拒绝', () => {
+    expect(extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: ['DELETE FROM chronicle'],
+    }).ok).toBe(false);
+    expect(extractRowIdsFromSqlSheetBatch_ACU({
+      kind: 'sql_sheet_batch',
+      statements: ["DELETE FROM chronicle WHERE row_id = 1 AND summary = 'x'"],
+    }).ok).toBe(false);
   });
 });
 

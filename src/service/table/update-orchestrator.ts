@@ -80,7 +80,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSchemaStaleError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractRowIdsFromSqlSheetBatch_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSchemaStaleError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
 import { hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -127,6 +127,15 @@ function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: numbe
                     continue;
                 }
                 if (kind === 'meta_update') continue;
+                if (kind === 'sql_sheet_batch') {
+                    if (!sourceTableKeySet.has(sheetKey)) continue;
+                    const extracted = extractRowIdsFromSqlSheetBatch_ACU(operation);
+                    if (!extracted.ok) {
+                        throw new Error(`手动重填清理前无法精确识别纪要表 ${sheetKey} 的 sql_sheet_batch 操作历史 row_id。`);
+                    }
+                    extracted.rowIds.forEach((rowId) => removedRowIdsBySourceTable.get(sheetKey)!.add(rowId));
+                    continue;
+                }
                 if (kind === 'data_replace' || kind === 'sql_batch' || kind === 'table_edit_dsl') {
                     throw new Error(`手动重填清理前无法精确识别操作 ${kind} 影响的纪要表历史 row_id。`);
                 }

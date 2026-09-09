@@ -1113,6 +1113,163 @@ function canonicalizeTableAliasForHiddenProtection_ACU(value: unknown): string {
   return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
 
+function countSqlPlaceholdersOutsideStrings_ACU(sql: string): number {
+  let count = 0;
+  let inString = false;
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index];
+    if (char === "'") {
+      if (inString && sql[index + 1] === "'") {
+        index += 1;
+        continue;
+      }
+      inString = !inString;
+      continue;
+    }
+    if (!inString && char === '?') count += 1;
+  }
+  return count;
+}
+
+function decodeSqlScalarToRowId_ACU(
+  raw: string,
+  params: TableSqlBindValueV2_ACU[] | undefined,
+  paramCursor: { index: number },
+): string | null {
+  const value = String(raw ?? '').trim();
+  if (!value) return null;
+  if (value === '?') {
+    const bound = params?.[paramCursor.index++];
+    if (bound === null || bound === undefined) return null;
+    const text = String(bound).trim();
+    return text || null;
+  }
+  if (/^null$/i.test(value)) return null;
+  if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+    return value.slice(1, -1).replace(/''/g, "'").trim() || null;
+  }
+  if (/^-?\d+$/.test(value)) return value;
+  return null;
+}
+
+function extractRowIdsFromSqlWhereRowId_ACU(
+  statement: string,
+  tokens: SqlMutationIdentifierToken_ACU[],
+  params: TableSqlBindValueV2_ACU[] | undefined,
+): { ok: true; rowIds: string[] } | { ok: false; error: string } {
+  const whereIndex = tokens.findIndex((token) => token.quote === null && token.value.toUpperCase() === 'WHERE');
+  if (whereIndex < 0) {
+    return { ok: false, error: 'SQL 缺少 WHERE row_id 谓词，无法精确归属历史行。' };
+  }
+  const trailing = tokens.slice(whereIndex + 1);
+  if (trailing.some((token) => token.quote === null && (token.value.toUpperCase() === 'AND' || token.value.toUpperCase() === 'OR'))) {
+    return { ok: false, error: 'SQL WHERE 含复合谓词，无法精确归属历史行。' };
+  }
+  const rowIdToken = trailing[0];
+  if (!rowIdToken || decodeSqlIdentifier_ACU(rowIdToken.value).toLowerCase() !== 'row_id') {
+    return { ok: false, error: 'SQL WHERE 不是 row_id 谓词，无法精确归属历史行。' };
+  }
+  const predicate = statement.slice(rowIdToken.end).trim().replace(/;+\s*$/, '');
+  const placeholdersBeforeWhere = countSqlPlaceholdersOutsideStrings_ACU(statement.slice(0, tokens[whereIndex].start));
+  const paramCursor = { index: placeholdersBeforeWhere };
+  const eqMatch = predicate.match(/^=\s*(\?|-?\d+|'([^']|'')*')\s*$/);
+  if (eqMatch) {
+    const rowId = decodeSqlScalarToRowId_ACU(eqMatch[1], params, paramCursor);
+    return rowId
+      ? { ok: true, rowIds: [rowId] }
+      : { ok: false, error: 'SQL WHERE row_id 标量无法解析。' };
+  }
+  const inMatch = predicate.match(/^IN\s*\((.*)\)\s*$/is);
+  if (inMatch) {
+    const items = splitTopLevelSqlList_ACU(inMatch[1], 'WHERE row_id IN');
+    const rowIds: string[] = [];
+    for (const item of items) {
+      const rowId = decodeSqlScalarToRowId_ACU(item, params, paramCursor);
+      if (!rowId) return { ok: false, error: 'SQL WHERE row_id IN 含无法解析的项。' };
+      rowIds.push(rowId);
+    }
+    return rowIds.length > 0
+      ? { ok: true, rowIds }
+      : { ok: false, error: 'SQL WHERE row_id IN 为空。' };
+  }
+  return { ok: false, error: 'SQL WHERE 不是 row_id = / IN 谓词，无法精确归属历史行。' };
+}
+
+function extractRowIdsFromSqlMutationStatement_ACU(
+  statement: string,
+  params: TableSqlBindValueV2_ACU[] | undefined,
+): { ok: true; rowIds: string[] } | { ok: false; error: string } {
+  try {
+    const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
+    const actionIndex = getSqlMutationActionIndex_ACU(tokens);
+    const action = tokens[actionIndex];
+    const keyword = action?.quote === null ? action.value.toUpperCase() : '';
+    if (keyword === 'INSERT' || keyword === 'REPLACE') {
+      const target = getSqlMutationTargetToken_ACU(statement, tokens);
+      const columnList = extractSqlInsertColumns_ACU(statement, tokens, target, 'sql_sheet_batch');
+      const rowIdIndex = columnList.columns.findIndex((column) => column.normalized === 'row_id');
+      if (rowIdIndex < 0) {
+        return { ok: false, error: 'INSERT/REPLACE 未列出 row_id，无法精确归属历史行。' };
+      }
+      const payloadText = statement.slice(columnList.closingParenEnd).trim();
+      if (!/^VALUES\b/i.test(payloadText)) {
+        return { ok: false, error: 'INSERT/REPLACE 不是 VALUES 形态，无法精确归属历史行。' };
+      }
+      const tupleText = payloadText.slice('VALUES'.length).trim().replace(/;+\s*$/, '');
+      const rawTuples = splitTopLevelSqlList_ACU(tupleText, 'sql_sheet_batch VALUES');
+      const paramCursor = { index: 0 };
+      const rowIds: string[] = [];
+      for (const tuple of rawTuples) {
+        if (!tuple.startsWith('(') || findSqlClosingParen_ACU(tuple, 0, 'sql_sheet_batch VALUES') !== tuple.length - 1) {
+          return { ok: false, error: 'INSERT VALUES 不是括号行，无法精确归属历史行。' };
+        }
+        const values = splitTopLevelSqlList_ACU(tuple.slice(1, -1), 'sql_sheet_batch VALUES 行');
+        const decoded = values.map((value) => decodeSqlScalarToRowId_ACU(value, params, paramCursor));
+        const rowId = decoded[rowIdIndex] || null;
+        if (!rowId) return { ok: false, error: 'INSERT VALUES 的 row_id 无法解析。' };
+        rowIds.push(rowId);
+      }
+      return rowIds.length > 0
+        ? { ok: true, rowIds }
+        : { ok: false, error: 'INSERT VALUES 未解析到 row_id。' };
+    }
+    if (keyword === 'UPDATE' || keyword === 'DELETE') {
+      return extractRowIdsFromSqlWhereRowId_ACU(statement, tokens, params);
+    }
+    return { ok: false, error: `不支持从 ${keyword || 'unknown'} 语句精确归属 row_id。` };
+  } catch (error: any) {
+    return { ok: false, error: error?.message || String(error || 'SQL 解析失败') };
+  }
+}
+
+/** 从单表 sql_sheet_batch 精确抽出受影响 row_id；解不出则 fail-closed。 */
+export function extractRowIdsFromSqlSheetBatch_ACU(operation: {
+  kind?: string;
+  statements?: unknown;
+  params?: unknown;
+}): { ok: true; rowIds: string[] } | { ok: false; error: string } {
+  if (operation?.kind !== 'sql_sheet_batch') {
+    return { ok: false, error: '不是 sql_sheet_batch。' };
+  }
+  const statements = Array.isArray(operation.statements) ? operation.statements : [];
+  const params = Array.isArray(operation.params) ? operation.params : [];
+  const rowIds = new Set<string>();
+  let sawStatement = false;
+  for (let index = 0; index < statements.length; index += 1) {
+    const statement = String(statements[index] ?? '').trim();
+    if (!statement) continue;
+    sawStatement = true;
+    const statementParams = Array.isArray(params[index]) ? params[index] as TableSqlBindValueV2_ACU[] : undefined;
+    const extracted = extractRowIdsFromSqlMutationStatement_ACU(statement, statementParams);
+    if (!extracted.ok) return extracted;
+    extracted.rowIds.forEach((rowId) => rowIds.add(rowId));
+  }
+  if (!sawStatement || rowIds.size === 0) {
+    return { ok: false, error: 'sql_sheet_batch 没有可归属的 row_id。' };
+  }
+  return { ok: true, rowIds: [...rowIds] };
+}
+
 export function mapSqlTableNamesToSheetKeys_ACU(tableData: TableDataObject_ACU | null | undefined, tableNames: string[]): string[] {
   if (!tableData || !Array.isArray(tableNames) || tableNames.length === 0) return [];
   const { aliases, conflicts } = buildSheetTableAliasMap_ACU([tableData], { includeExtendedAliases: true });
