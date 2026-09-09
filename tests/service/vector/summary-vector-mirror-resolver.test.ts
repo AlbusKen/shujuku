@@ -14,6 +14,7 @@ import {
   computeSummaryVectorMirrorHeadRevision_ACU,
   locateSummaryVectorMirrorBase_ACU,
   resolveSummaryVectorMirrorHead_ACU,
+  summaryVectorEmbeddingIdentityEquals_ACU,
   validateSummaryVectorMirrorDelta_ACU,
 } from '../../../src/service/vector/summary-vector-mirror-resolver';
 import { getTableDataFingerprint_ACU } from '../../../src/service/table/table-data-upgrade-audit';
@@ -245,6 +246,20 @@ describe('resolveSummaryVectorMirrorHead_ACU 状态判定', () => {
     expect((await resolve(chat, { embedding: EMB_B })).status).toBe('embedding_identity_changed');
     expect((await resolve(chat, { embedding: EMB })).status).toBe('ok');
     expect((await resolve(chat)).status).toBe('ok');
+  });
+
+  it('当前身份 dimension=0 视为尚未观测，不把已归档的真实维度误判成换模型', async () => {
+    const chat = [ai(fullFrame())];
+    const unseen: SummaryVectorEmbeddingIdentity_ACU = { ...EMB, dimension: 0 };
+    expect(summaryVectorEmbeddingIdentityEquals_ACU(unseen, EMB)).toBe(true);
+    expect((await resolve(chat, { embedding: unseen })).status).toBe('ok');
+  });
+
+  it('双方 dimension 都大于 0 且不同时仍判定 embedding 身份变化', async () => {
+    const chat = [ai(fullFrame())];
+    const otherDim: SummaryVectorEmbeddingIdentity_ACU = { ...EMB, dimension: 8 };
+    expect(summaryVectorEmbeddingIdentityEquals_ACU(otherDim, EMB)).toBe(false);
+    expect((await resolve(chat, { embedding: otherDim })).status).toBe('embedding_identity_changed');
   });
 
   it('manifest 返回 null / 抛错 / 结构非法 → manifest_unavailable', async () => {

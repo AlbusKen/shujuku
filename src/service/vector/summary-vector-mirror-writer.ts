@@ -32,7 +32,7 @@ import { normalizeSummaryVectorIndexScope_ACU, toChatIsolationSlotKey_ACU } from
 import { buildPreparedRows_ACU, buildRowChunkTexts_ACU, findSummaryTable_ACU } from './summary-vector-index-archive-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU, validateSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 import { SUMMARY_VECTOR_SOURCE_TEXT_VERSION_ACU } from './summary-vector-row-fingerprint';
-import { resolveSummaryVectorMirrorHead_ACU } from './summary-vector-mirror-resolver';
+import { resolveSummaryVectorMirrorHead_ACU, summaryVectorEmbeddingIdentityEquals_ACU } from './summary-vector-mirror-resolver';
 import {
     encodeSummaryVectorMirrorVector_ACU,
     finalizeSummaryVectorMirrorFiles_ACU,
@@ -270,11 +270,7 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
     const checkpointEmbedding = head.checkpoint?.embedding;
     if (
         checkpointEmbedding
-        && (
-            checkpointEmbedding.endpointFingerprint !== currentEmbedding.endpointFingerprint
-            || checkpointEmbedding.model !== currentEmbedding.model
-            || checkpointEmbedding.sourceTextVersion !== currentEmbedding.sourceTextVersion
-        )
+        && !summaryVectorEmbeddingIdentityEquals_ACU(currentEmbedding, checkpointEmbedding)
     ) {
         return emptyResult_ACU({
             reason: 'embedding_identity_changed',

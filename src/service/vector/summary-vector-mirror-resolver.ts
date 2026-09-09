@@ -158,10 +158,17 @@ export function summaryVectorEmbeddingIdentityEquals_ACU(
     left: SummaryVectorEmbeddingIdentity_ACU,
     right: SummaryVectorEmbeddingIdentity_ACU,
 ): boolean {
-    return left.endpointFingerprint === right.endpointFingerprint
-        && left.model === right.model
-        && left.dimension === right.dimension
-        && left.sourceTextVersion === right.sourceTextVersion;
+    if (left.endpointFingerprint !== right.endpointFingerprint
+        || left.model !== right.model
+        || left.sourceTextVersion !== right.sourceTextVersion) {
+        return false;
+    }
+    // dimension=0 表示配置尚未观测到向量长度（settings 没有 embeddingDimension）。
+    // 落盘 checkpoint/delta 要求 dimension>0；发送前用 0 去比真实维度会把每次归档后的楼层误判成换模型。
+    if (left.dimension > 0 && right.dimension > 0 && left.dimension !== right.dimension) {
+        return false;
+    }
+    return true;
 }
 
 function isPackRef_ACU(value: unknown): value is SummaryVectorPackRef_ACU {

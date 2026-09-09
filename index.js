@@ -47489,10 +47489,17 @@ $CONTENT
             && Number.isInteger(value.sourceTextVersion);
     }
     function summaryVectorEmbeddingIdentityEquals_ACU(left, right) {
-        return left.endpointFingerprint === right.endpointFingerprint
-            && left.model === right.model
-            && left.dimension === right.dimension
-            && left.sourceTextVersion === right.sourceTextVersion;
+        if (left.endpointFingerprint !== right.endpointFingerprint
+            || left.model !== right.model
+            || left.sourceTextVersion !== right.sourceTextVersion) {
+            return false;
+        }
+        // dimension=0 表示配置尚未观测到向量长度（settings 没有 embeddingDimension）。
+        // 落盘 checkpoint/delta 要求 dimension>0；发送前用 0 去比真实维度会把每次归档后的楼层误判成换模型。
+        if (left.dimension > 0 && right.dimension > 0 && left.dimension !== right.dimension) {
+            return false;
+        }
+        return true;
     }
     function isPackRef_ACU(value) {
         return isPlainObject_ACU(value)
@@ -52894,9 +52901,7 @@ $CONTENT
         }
         const checkpointEmbedding = head.checkpoint?.embedding;
         if (checkpointEmbedding
-            && (checkpointEmbedding.endpointFingerprint !== currentEmbedding.endpointFingerprint
-                || checkpointEmbedding.model !== currentEmbedding.model
-                || checkpointEmbedding.sourceTextVersion !== currentEmbedding.sourceTextVersion)) {
+            && !summaryVectorEmbeddingIdentityEquals_ACU(currentEmbedding, checkpointEmbedding)) {
             return emptyResult_ACU$1({
                 reason: 'embedding_identity_changed',
                 needsRebuild: true,
