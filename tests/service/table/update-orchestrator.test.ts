@@ -298,8 +298,16 @@ const mockEnsureSummaryVectorMirrorAfterTableFill = vi.fn().mockResolvedValue({
   skipped: true,
   reason: 'vector_data_present',
 });
+const mockRebuildCurrentSummaryVectorIndexNow = vi.fn().mockResolvedValue({
+  success: true,
+  skipped: false,
+  indexedRowCount: 0,
+  skippedRowCount: 0,
+  chunkCount: 0,
+  errors: [],
+});
 vi.mock('../../../src/service/vector/summary-vector-index-rebuild-service', () => ({
-  rebuildCurrentSummaryVectorIndexNow_ACU: vi.fn(),
+  rebuildCurrentSummaryVectorIndexNow_ACU: (...args: any[]) => mockRebuildCurrentSummaryVectorIndexNow(...args),
   ensureSummaryVectorMirrorAfterTableFill_ACU: (...args: any[]) => mockEnsureSummaryVectorMirrorAfterTableFill(...args),
 }));
 
@@ -404,6 +412,14 @@ beforeEach(() => {
     attempted: false,
     skipped: true,
     reason: 'vector_data_present',
+  });
+  mockRebuildCurrentSummaryVectorIndexNow.mockReset().mockResolvedValue({
+    success: true,
+    skipped: false,
+    indexedRowCount: 0,
+    skippedRowCount: 0,
+    chunkCount: 0,
+    errors: [],
   });
 });
 
@@ -1877,6 +1893,7 @@ describe('runSummaryVectorFollowupAfterTableFill_ACU', () => {
       skipped: true,
       reason: 'vector_data_present',
     });
+    mockRebuildCurrentSummaryVectorIndexNow.mockClear();
   });
 
   it('当前环境无向量数据时直接重建，不再入队 flush', async () => {
@@ -1915,6 +1932,20 @@ describe('runSummaryVectorFollowupAfterTableFill_ACU', () => {
     } finally {
       vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
     }
+  });
+
+  it('手动重填完成时强制 rebuild_repair，不再走 ensure+flush', async () => {
+    await runSummaryVectorFollowupAfterTableFill_ACU({
+      tableData: summaryTableData,
+      modifiedKeys: ['sheet_summary'],
+      sourceTableKeys: ['sheet_summary'],
+      reason: 'manual_refill_complete',
+    });
+
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(1);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+    expect(mockEnsureSummaryVectorMirrorAfterTableFill).not.toHaveBeenCalled();
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
   });
 });
 
@@ -2808,6 +2839,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
     mockEnqueueSummaryVectorIndexFlush.mockClear();
     mockArchiveSummaryVectorIndexNow.mockClear();
+    mockRebuildCurrentSummaryVectorIndexNow.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
       sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧1'], ['2', '旧2'], ['3', '旧3'], ['4', '旧4']] },
@@ -2826,18 +2858,15 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([4, 6], ['sheet_0']);
     expect(mockReloadStorageProvider).toHaveBeenCalled();
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).toHaveBeenCalledTimes(1);
-    expect(mockArchiveSummaryVectorIndexNow).toHaveBeenCalledWith({
-      mode: 'sync',
-      sourceTableKey: 'sheet_0',
-      excludedRowIds: ['3', '4'],
-      removalOnly: true,
-    });
-    expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledWith({
-      sourceTableKey: 'sheet_0',
-      reason: 'manual_refill_complete',
-    });
+    expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(2);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(1, { reason: 'rebuild_repair' });
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(2, { reason: 'rebuild_repair' });
+    expect(mockReloadStorageProvider.mock.invocationCallOrder[0])
+      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[0]);
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU.mock.invocationCallOrder[0])
-      .toBeLessThan(mockEnqueueSummaryVectorIndexFlush.mock.invocationCallOrder[0]);
+      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[1]);
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
   });
 
@@ -2872,6 +2901,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings.manualUpdateBatchSize = 1;
     mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
     mockArchiveSummaryVectorIndexNow.mockClear();
+    mockRebuildCurrentSummaryVectorIndexNow.mockClear();
     mockClearManualRefillSheetDataInRange.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
@@ -2885,6 +2915,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(result.error).toContain('无法精确识别纪要表 sheet_0 的 sheet_replace 操作历史 row_id');
     expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
     expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
+    expect(mockRebuildCurrentSummaryVectorIndexNow).not.toHaveBeenCalled();
   });
 
   it('手动重填范围含 sql_sheet_batch 纪要表 INSERT 时，按语句里的 row_id 清理向量', async () => {
@@ -2928,6 +2959,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings.manualUpdateBatchSize = 1;
     mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
     mockArchiveSummaryVectorIndexNow.mockClear();
+    mockRebuildCurrentSummaryVectorIndexNow.mockClear();
     mockClearManualRefillSheetDataInRange.mockClear();
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
     mockCurrentJsonTableData = {
@@ -2942,12 +2974,12 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success, result.error).toBe(true);
     expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([1], ['sheet_0']);
-    expect(mockArchiveSummaryVectorIndexNow).toHaveBeenCalledWith({
-      mode: 'sync',
-      sourceTableKey: 'sheet_0',
-      excludedRowIds: ['1', '2'],
-      removalOnly: true,
-    });
+    expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledTimes(2);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(1, { reason: 'rebuild_repair' });
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenNthCalledWith(2, { reason: 'rebuild_repair' });
+    expect(mockReloadStorageProvider.mock.invocationCallOrder[0])
+      .toBeLessThan(mockRebuildCurrentSummaryVectorIndexNow.mock.invocationCallOrder[0]);
   });
 
   it('范围末端 full checkpoint 被目标表全覆盖时禁用跨根 staging：清理后建模板临时根，各层普通 persist', async () => {

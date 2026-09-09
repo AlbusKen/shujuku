@@ -14,11 +14,13 @@ import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMerg
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
-import { archiveSummaryVectorIndexNow_ACU } from '../vector/summary-vector-index-archive-service';
 import {
     enqueueSummaryVectorIndexFlush_ACU,
 } from '../vector/summary-vector-index-flush-queue';
-import { ensureSummaryVectorMirrorAfterTableFill_ACU } from '../vector/summary-vector-index-rebuild-service';
+import {
+    ensureSummaryVectorMirrorAfterTableFill_ACU,
+    rebuildCurrentSummaryVectorIndexNow_ACU,
+} from '../vector/summary-vector-index-rebuild-service';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../vector/summary-vector-index-state-service';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
@@ -164,17 +166,15 @@ function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: numbe
 }
 
 async function removeManualRefillSummaryVectors_ACU(cleanups: ManualRefillSummaryVectorCleanup_ACU[]): Promise<void> {
-    for (const cleanup of cleanups) {
-        if (cleanup.removedRowIds.length === 0) continue;
-        const result = await archiveSummaryVectorIndexNow_ACU({
-            mode: 'sync',
-            sourceTableKey: cleanup.sourceTableKey,
-            excludedRowIds: cleanup.removedRowIds,
-            removalOnly: true,
-        });
-        if (!result.success) {
-            throw new Error(result.errors.join('; ') || result.reason || `纪要表 ${cleanup.sourceTableKey} 的旧向量清理失败。`);
-        }
+    if (!cleanups.some((cleanup) => cleanup.removedRowIds.length > 0)) return;
+    const worldbook = getCurrentWorldbookConfig_ACU();
+    if (worldbook.summaryVectorIndexModeEnabled !== true) return;
+    if (worldbook.summaryVectorMirrorEnabled === false) return;
+    // reload 之后按当前纪要表发布 V2 vector_full。rebuild_repair 复用仍在表内的 head refs，
+    // 不重嵌保留行；被清掉的 rowId 不在 prepared 中，快照不再包含它们。
+    const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
+    if (!result.success) {
+        throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引重建失败。');
     }
 }
 
@@ -186,8 +186,10 @@ function findModifiedSummaryTableKey_ACU(tableData: Record<string, any>, modifie
 }
 
 /**
- * 填表完成后的向量收尾：当前环境没有任何交火向量镜像时直接 initial 重建；
- * 已有镜像时再按改动过的纪要表入队增量 flush。
+ * 填表完成后的向量收尾：
+ * - 手动重填完成必须按当前纪要表 rebuild_repair。清楼层后 head 仍可能带着旧 rowId，
+ *   ensure 会因 vector_data_present 跳过，flush 又把这些 id 当成 alreadyMirrored，快照不会更新。
+ * - 自动填表：当前环境没有任何交火向量镜像时直接 initial 重建；已有镜像时再按改动过的纪要表入队增量 flush。
  */
 export async function runSummaryVectorFollowupAfterTableFill_ACU(options: {
     tableData: Record<string, any>;
@@ -196,6 +198,21 @@ export async function runSummaryVectorFollowupAfterTableFill_ACU(options: {
     targetMessageIndex?: number;
     reason: string;
 }): Promise<void> {
+    if (options.reason === 'manual_refill_complete') {
+        const worldbook = getCurrentWorldbookConfig_ACU();
+        if (worldbook.summaryVectorIndexModeEnabled !== true) return;
+        if (worldbook.summaryVectorMirrorEnabled === false) return;
+        try {
+            const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
+            if (!result.success) {
+                logWarn_ACU(`[交火模式纪要索引] 手动重填完成后交火索引重建失败：${result.errors.join('; ') || result.reason || 'unknown'}`);
+            }
+        } catch (error: any) {
+            logWarn_ACU('[交火模式纪要索引] 手动重填完成后交火索引重建异常:', error?.message || error);
+        }
+        return;
+    }
+
     const ensured = await ensureSummaryVectorMirrorAfterTableFill_ACU();
     if (ensured.attempted) return;
     if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
@@ -4875,14 +4892,13 @@ export async function orchestrateManualUpdate_ACU(
                 }
             }
 
+            let summaryVectorCleanups: ManualRefillSummaryVectorCleanup_ACU[] = [];
             try {
-                const summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
+                summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
                 manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
                 // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                 refillCleanupStarted = true;
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
-                // 表格清理已严格保存后，发布不再引用清理 rowId 的新快照；该路径绝不重嵌入保留行。
-                await removeManualRefillSummaryVectors_ACU(summaryVectorCleanups);
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
                 const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
@@ -4923,6 +4939,15 @@ export async function orchestrateManualUpdate_ACU(
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                 const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                 return { success: false, error: failureError };
+            }
+
+            // V2 交火快照只能按当前纪要表重建。table entry 已删，无法再挂 row_remove；
+            // reload 之后 currentJsonTableData 才是清楼层后的表。rebuild_repair 复用保留行 embedding。
+            try {
+                await removeManualRefillSummaryVectors_ACU(summaryVectorCleanups);
+            } catch (error: any) {
+                logError_ACU('[Manual Refill] 清理后重建交火索引失败:', error);
+                return await failManualRefillSession(error?.message || '手动重填清理后重建交火索引失败。');
             }
 
             // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）
