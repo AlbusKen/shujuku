@@ -4067,7 +4067,10 @@ $CONTENT
         archiveTriggerCount: 9,
         archiveBatchSize: 3,
         archiveMaxConcurrency: 3,
+        // 单个 embedding HTTP 请求最多覆盖的 source rows。
         summaryIndexArchiveMaxConcurrency: 30,
+        // 本地字符预算，不等同于 provider token 限制。
+        summaryIndexArchiveMaxInputChars: 24000,
         summaryIndexArchiveEmbeddingConcurrency: 3,
         topK: 200,
         // 源文本为"概览 + 纪要正文"时的余弦门槛；比只用 30 字概览时的 0.45 略低（长文本相似度整体偏低）。
@@ -41061,6 +41064,7 @@ $CONTENT
         const chatKey = normalizeScopePart_ACU$2(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
         const isolationKey = normalizeScopePart_ACU$2(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
         const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
+        const revisionImpact = options.revisionImpact === 'derived_metadata' ? 'derived_metadata' : 'source_table';
         const maintenanceMode = options.maintenanceMode || 'shared';
         const releases = await acquireTransactionLocks_ACU({ chatKey, isolationKey, writeSet, maintenanceMode });
         const transactionId = generateTransactionId_ACU();
@@ -41075,6 +41079,7 @@ $CONTENT
                 chatKey,
                 isolationKey,
                 source: options.source,
+                revisionImpact,
                 baseRevision,
                 writeSet,
                 assertFresh: (reason) => {
@@ -41124,7 +41129,9 @@ $CONTENT
                     try {
                         const result = await commitTask();
                         const resolvedRevisionWriteSet = typeof revisionWriteSet === 'function' ? revisionWriteSet(result) : revisionWriteSet;
-                        bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+                        if (revisionImpact === 'source_table') {
+                            bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+                        }
                         effectiveBaseRevision = captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
                         return result;
                     }
@@ -45790,6 +45797,115 @@ $CONTENT
             }
         }
         throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Embedding 请求失败'));
+    }
+
+    class EmbeddingBatchExecutionError_ACU extends Error {
+        constructor(message, batch, cause) {
+            super(message);
+            this.name = 'EmbeddingBatchExecutionError_ACU';
+            this.batch = { index: batch.index, rowCount: batch.rowCount, chunkCount: batch.chunkCount, inputChars: batch.inputChars };
+            if (cause !== undefined)
+                this.cause = cause;
+        }
+    }
+    function planEmbeddingBatches_ACU(sources, limits) {
+        const maxRows = Math.max(1, Math.floor(Number(limits.maxRowsPerRequest) || 1));
+        const maxChars = Math.max(1, Math.floor(Number(limits.maxInputCharsPerRequest) || 1));
+        const normalized = Array.isArray(sources) ? sources.filter(source => typeof source?.text === 'string') : [];
+        const rowGroups = [];
+        for (const [sourceIndex, source] of normalized.entries()) {
+            const previous = rowGroups[rowGroups.length - 1];
+            if (previous && previous[0].source.rowKey === source.rowKey)
+                previous.push({ source, sourceIndex });
+            else
+                rowGroups.push([{ source, sourceIndex }]);
+        }
+        const batches = [];
+        let current = [];
+        let chars = 0;
+        const push = () => {
+            if (!current.length)
+                return;
+            const rowCount = new Set(current.map(item => item.source.rowKey)).size;
+            batches.push({ index: batches.length, sources: current, rowCount, chunkCount: current.length, inputChars: chars, singleRowOverBudget: rowCount === 1 && chars > maxChars });
+            current = [];
+            chars = 0;
+        };
+        for (const group of rowGroups) {
+            const groupChars = group.reduce((sum, item) => sum + item.source.text.length, 0);
+            const nextRows = new Set([...current.map(item => item.source.rowKey), group[0].source.rowKey]).size;
+            if (current.length && (nextRows > maxRows || chars + groupChars > maxChars))
+                push();
+            current.push(...group);
+            chars += groupChars;
+            if (groupChars > maxChars)
+                push();
+        }
+        push();
+        return { sources: normalized, batches };
+    }
+    async function executeEmbeddingBatchPlan_ACU(plan, options) {
+        const startedAt = Date.now();
+        const slots = new Array(plan.sources.length).fill(null);
+        let nextBatch = 0;
+        let completedBatchCount = 0;
+        let successfulBatchCount = 0;
+        let firstFailure = null;
+        const runBatch = async (batch) => {
+            try {
+                const fill = async (items) => {
+                    const results = await options.requestEmbeddings(items.map(item => item.source.text));
+                    for (const result of results) {
+                        if (!Number.isInteger(result?.index) || result.index < 0 || result.index >= items.length)
+                            continue;
+                        if (Array.isArray(result.embedding) && result.embedding.length > 0) {
+                            slots[items[result.index].sourceIndex] = result.embedding;
+                        }
+                    }
+                };
+                await fill(batch.sources);
+                let missing = batch.sources.filter(item => !slots[item.sourceIndex]);
+                if (missing.length > 0 && missing.length < batch.sources.length) {
+                    const recoverySize = Math.max(1, Math.min(batch.sources.length - missing.length, missing.length));
+                    for (let index = 0; index < missing.length; index += recoverySize) {
+                        await fill(missing.slice(index, index + recoverySize));
+                    }
+                    missing = batch.sources.filter(item => !slots[item.sourceIndex]);
+                }
+                if (missing.length > 0) {
+                    throw new Error(`Embedding 响应缺失 ${missing.length}/${batch.chunkCount} 条向量。`);
+                }
+                successfulBatchCount += 1;
+            }
+            catch (error) {
+                if (!firstFailure)
+                    firstFailure = { error, batch };
+            }
+            finally {
+                completedBatchCount += 1;
+            }
+        };
+        const workers = Array.from({ length: Math.max(1, Math.min(Math.floor(Number(options.maxConcurrentRequests) || 1), plan.batches.length)) }, async () => {
+            while (!firstFailure && nextBatch < plan.batches.length) {
+                const batch = plan.batches[nextBatch++];
+                await runBatch(batch);
+            }
+        });
+        await Promise.allSettled(workers);
+        const stats = {
+            plannedBatchCount: plan.batches.length,
+            completedBatchCount,
+            successfulBatchCount,
+            totalRows: new Set(plan.sources.map(source => source.rowKey)).size,
+            totalChunks: plan.sources.length,
+            maxInputChars: Math.max(0, ...plan.batches.map(batch => batch.inputChars)),
+            elapsedMs: Date.now() - startedAt,
+        };
+        if (firstFailure) {
+            const message = firstFailure.error instanceof Error ? firstFailure.error.message : String(firstFailure.error || 'Embedding 批次失败');
+            throw new EmbeddingBatchExecutionError_ACU(message, firstFailure.batch, firstFailure.error);
+        }
+        return { embeddings: slots.map(vector => vector || []), stats };
     }
 
     /**
@@ -51583,59 +51699,23 @@ $CONTENT
         if (chunkSources.length === 0) {
             return { rows: [], chunks: [] };
         }
-        const embeddings = await createEmbeddings_ACU({
-            endpoint: options.embeddingEndpoint,
-            apiKey: options.embeddingApiKey,
-            model: options.embeddingModel,
-            input: chunkSources.map((item) => item.text),
+        const plan = planEmbeddingBatches_ACU(chunkSources, {
+            maxRowsPerRequest: options.maxRowsPerRequest,
+            maxInputCharsPerRequest: options.maxInputCharsPerRequest,
         });
-        const embeddingMap = new Map();
-        embeddings.forEach((item) => {
-            if (Number.isInteger(item.index) && item.index >= 0 && item.index < chunkSources.length
-                && Array.isArray(item.embedding) && item.embedding.length > 0) {
-                embeddingMap.set(item.index, item.embedding);
-            }
-        });
-        let missingIndexes = chunkSources
-            .map((_source, index) => index)
-            .filter((index) => !embeddingMap.has(index));
-        // 首次响应已有部分有效向量时，只补齐缺失项；首次无有效向量仍按既有失败路径处理。
-        if (embeddingMap.size > 0 && missingIndexes.length > 0) {
-            const recoveryBatchSize = Math.min(embeddingMap.size, missingIndexes.length);
-            for (let start = 0; start < missingIndexes.length; start += recoveryBatchSize) {
-                const recoveryOriginalIndexes = missingIndexes.slice(start, start + recoveryBatchSize);
-                const recoveredEmbeddings = await createEmbeddings_ACU({
-                    endpoint: options.embeddingEndpoint,
-                    apiKey: options.embeddingApiKey,
-                    model: options.embeddingModel,
-                    input: recoveryOriginalIndexes.map((originalIndex) => chunkSources[originalIndex].text),
-                });
-                recoveredEmbeddings.forEach((item) => {
-                    if (!Number.isInteger(item.index) || item.index < 0 || item.index >= recoveryOriginalIndexes.length)
-                        return;
-                    const originalIndex = recoveryOriginalIndexes[item.index];
-                    if (!embeddingMap.has(originalIndex) && Array.isArray(item.embedding) && item.embedding.length > 0) {
-                        embeddingMap.set(originalIndex, item.embedding);
-                    }
-                });
-            }
-            missingIndexes = chunkSources
-                .map((_source, index) => index)
-                .filter((index) => !embeddingMap.has(index));
-        }
-        // 全部原始 chunk 均取得向量前不得构造结果，确保外层不发布部分索引。
-        if (missingIndexes.length > 0) {
-            throw new VectorEmbeddingError_ACU({
-                kind: 'retryable',
-                message: `Embedding 响应缺失 ${missingIndexes.length}/${chunkSources.length} 条向量（首个缺失原始索引 ${missingIndexes[0]}），为避免索引缺行已中止本批归档。`,
+        const { embeddings } = await executeEmbeddingBatchPlan_ACU(plan, {
+            maxConcurrentRequests: options.maxConcurrentRequests,
+            requestEmbeddings: (input) => createEmbeddings_ACU({
                 endpoint: options.embeddingEndpoint,
+                apiKey: options.embeddingApiKey,
                 model: options.embeddingModel,
-            });
-        }
+                input,
+            }),
+        });
         const chunks = [];
         const rowChunkIds = new Map();
         chunkSources.forEach((source, index) => {
-            const vector = embeddingMap.get(index) || [];
+            const vector = embeddings[index] || [];
             if (vector.length === 0)
                 return;
             chunks.push({
@@ -52381,63 +52461,19 @@ $CONTENT
             }
             const embeddedRows = [];
             const embeddedChunks = [];
-            // T9：归档 embedding 批次有界并发。
-            // 串行时批次 k 的 existingSequenceBase = 前 k 批的 chunk 总数；并发下无法等前批完成再算，
-            // 因此按批预分配 sequence 区间：批次 k 的 base = sum(前 k 批的 chunk 数)。
-            // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
-            // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
-            const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
-            const chunkOptions = {
+            const batchResult = await buildChunksWithEmbeddings_ACU(rowsNeedingEmbedding, {
+                snapshotMessageId,
                 sentenceCount: config.summaryIndexChunkSentenceCount,
                 chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
-            };
-            const batchChunkCounts = [];
-            const batchRowGroups = [];
-            for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
-                const rowBatch = rowsNeedingEmbedding.slice(startIndex, startIndex + maxRowsPerBatch);
-                if (rowBatch.length === 0)
-                    continue;
-                batchRowGroups.push(rowBatch);
-                let chunkCount = 0;
-                for (const row of rowBatch) {
-                    chunkCount += buildRowChunkTexts_ACU(row.vectorSourceText, chunkOptions).length;
-                }
-                batchChunkCounts.push(chunkCount);
-            }
-            // 有界并发：同时最多 batchConcurrency 个批次在飞。取批次 + 分配 sequence base 在同一同步块内完成
-            // （JS 单线程，nextBatchIndex++ / sequenceBase 读改写之间无 await），无竞争。
-            const batchResults = new Array(batchRowGroups.length).fill(null);
-            let nextBatchIndex = 0;
-            let sequenceBase = 0;
-            const workerCount = Math.max(1, Math.min(batchConcurrency, batchRowGroups.length));
-            const workers = Array.from({ length: workerCount }, async () => {
-                while (true) {
-                    const batchIndex = nextBatchIndex;
-                    if (batchIndex >= batchRowGroups.length)
-                        break;
-                    nextBatchIndex += 1;
-                    const mySequenceBase = sequenceBase;
-                    sequenceBase += batchChunkCounts[batchIndex];
-                    const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
-                        snapshotMessageId,
-                        sentenceCount: chunkOptions.sentenceCount,
-                        chunkBySentence: chunkOptions.chunkBySentence,
-                        embeddingEndpoint: config.embeddingEndpoint,
-                        embeddingApiKey: config.embeddingApiKey,
-                        embeddingModel: config.embeddingModel,
-                        existingSequenceBase: mySequenceBase,
-                    });
-                    batchResults[batchIndex] = batchResult;
-                }
+                embeddingEndpoint: config.embeddingEndpoint,
+                embeddingApiKey: config.embeddingApiKey,
+                embeddingModel: config.embeddingModel,
+                maxRowsPerRequest: maxRowsPerBatch,
+                maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
+                maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
             });
-            await Promise.all(workers);
-            // 按批号顺序合并，保证 embeddedRows / embeddedChunks 顺序与串行一致。
-            for (const batchResult of batchResults) {
-                if (!batchResult)
-                    continue;
-                embeddedRows.push(...batchResult.rows);
-                embeddedChunks.push(...batchResult.chunks);
-            }
+            embeddedRows.push(...batchResult.rows);
+            embeddedChunks.push(...batchResult.chunks);
             const finalResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU([...reusable.reusableRows, ...embeddedRows], [...reusable.reusableChunks, ...embeddedChunks]);
             if (finalResult.rows.length === 0 || finalResult.chunks.length === 0) {
                 return buildResult_ACU({
@@ -52533,7 +52569,9 @@ $CONTENT
             }
             // T4：识别结构化 embedding 错误，把 terminal / retryable 分类传导给 flush runner。
             // terminal（credential / request / provider-contract）→ 停止重排；retryable → 继续有限重试。
-            if (isVectorEmbeddingError_ACU(error)) {
+            const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? error.cause : error;
+            if (isVectorEmbeddingError_ACU(embeddingError)) {
+                const error = embeddingError;
                 const terminalKinds = new Set(['credential', 'request', 'provider-contract']);
                 const embeddingRetryability = terminalKinds.has(error.kind) ? 'terminal' : 'retryable';
                 const detail = error.providerMessage || error.message;
@@ -52948,6 +52986,7 @@ $CONTENT
                 retryability: 'terminal',
             });
         }
+        const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'sheet', sheetKey: selected.summaryKey }], { isolationKey });
         const rowsById = new Map(prepared.rows.map((row) => [row.rowId, row]));
         const addedRowIds = [...new Set(plans.flatMap((plan) => plan.added))];
         const missingAdded = addedRowIds.filter((rowId) => !rowsById.has(rowId));
@@ -52964,22 +53003,26 @@ $CONTENT
                 chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
             });
             texts.forEach((text) => {
-                chunkSources.push({ rowId, text, vectorSourceHash: row.vectorSourceHash });
+                chunkSources.push({ rowId, rowKey: rowId, text, vectorSourceHash: row.vectorSourceHash });
             });
         }
         let embeddings = [];
         if (chunkSources.length > 0) {
             try {
-                const results = await createEmbeddings_ACU({
-                    endpoint: config.embeddingEndpoint,
-                    apiKey: config.embeddingApiKey,
-                    model: config.embeddingModel,
-                    input: chunkSources.map((item) => item.text),
+                const plan = planEmbeddingBatches_ACU(chunkSources, {
+                    maxRowsPerRequest: config.summaryIndexArchiveMaxConcurrency,
+                    maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
                 });
-                embeddings = chunkSources.map((_item, index) => {
-                    const hit = results.find((item) => item.index === index);
-                    return Array.isArray(hit?.embedding) ? hit.embedding : [];
+                const executed = await executeEmbeddingBatchPlan_ACU(plan, {
+                    maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
+                    requestEmbeddings: (input) => createEmbeddings_ACU({
+                        endpoint: config.embeddingEndpoint,
+                        apiKey: config.embeddingApiKey,
+                        model: config.embeddingModel,
+                        input,
+                    }),
                 });
+                embeddings = executed.embeddings;
                 if (embeddings.some((vector) => vector.length === 0)) {
                     return emptyResult_ACU$1({
                         reason: 'embedding_incomplete',
@@ -52999,9 +53042,10 @@ $CONTENT
                 embedding.dimension = actualDimension;
             }
             catch (error) {
+                const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? error.cause : error;
                 const message = error?.message || String(error || 'embedding 失败');
-                const credential = isVectorEmbeddingError_ACU(error)
-                    && (Number(error.httpStatus) === 401 || Number(error.httpStatus) === 403);
+                const credential = isVectorEmbeddingError_ACU(embeddingError)
+                    && (Number(embeddingError.httpStatus) === 401 || Number(embeddingError.httpStatus) === 403);
                 return emptyResult_ACU$1({
                     reason: credential ? 'embedding_unauthorized' : 'embedding_failed',
                     errors: [message],
@@ -53048,8 +53092,10 @@ $CONTENT
             await runTableWriteTransaction_ACU({
                 source: 'vector_mirror',
                 reason: 'summary_vector_mirror_flush',
+                revisionImpact: 'derived_metadata',
                 isolationKey,
                 writeSet: [{ kind: 'sheet', sheetKey: selected.summaryKey }],
+                baseRevision,
                 workingDataMode: 'none',
             }, async (ctx) => {
                 ctx.assertFresh?.('vector_mirror:before_delta_write');
@@ -53387,6 +53433,7 @@ $CONTENT
         await runTableWriteTransaction_ACU({
             source: 'vector_mirror',
             reason: 'summary_vector_mirror_strip',
+            revisionImpact: 'derived_metadata',
             isolationKey,
             writeSet: [{ kind: 'sheet', sheetKey: sourceTableKey }],
             workingDataMode: 'none',
@@ -53485,6 +53532,7 @@ $CONTENT
             await runTableWriteTransaction_ACU({
                 source: 'vector_mirror',
                 reason: 'summary_vector_mirror_row_removal',
+                revisionImpact: 'derived_metadata',
                 isolationKey,
                 writeSet: [{ kind: 'sheet', sheetKey: snapshot.sourceTableKey }],
                 workingDataMode: 'none',
@@ -53594,6 +53642,7 @@ $CONTENT
         if (prepared.error) {
             return emptyResult_ACU({ reason: 'prepared_rows_invalid', errors: [prepared.error] });
         }
+        const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'sheet', sheetKey: selected.summaryKey }], { isolationKey });
         const source = selectRebuildSourceRowIds_ACU({
             checkpointRowIds: inspect.rowIds,
             preparedRowIds: prepared.rows.map((row) => row.rowId),
@@ -53636,29 +53685,36 @@ $CONTENT
                 sentenceCount: config.summaryChunkSentenceCount,
                 chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
             });
-            texts.forEach((text) => chunkSources.push({ rowId, text, vectorSourceHash: row.vectorSourceHash }));
+            texts.forEach((text) => chunkSources.push({ rowId, rowKey: rowId, text, vectorSourceHash: row.vectorSourceHash }));
         }
         let embeddings = [];
         if (chunkSources.length > 0) {
             try {
-                const results = await createEmbeddings_ACU({
-                    endpoint: config.embeddingEndpoint,
-                    apiKey: config.embeddingApiKey,
-                    model: config.embeddingModel,
-                    input: chunkSources.map((item) => item.text),
+                const plan = planEmbeddingBatches_ACU(chunkSources, {
+                    maxRowsPerRequest: config.summaryIndexArchiveMaxConcurrency,
+                    maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
                 });
-                embeddings = chunkSources.map((_item, index) => {
-                    const hit = results.find((item) => item.index === index);
-                    return Array.isArray(hit?.embedding) ? hit.embedding : [];
+                const executed = await executeEmbeddingBatchPlan_ACU(plan, {
+                    maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
+                    requestEmbeddings: (input) => createEmbeddings_ACU({
+                        endpoint: config.embeddingEndpoint,
+                        apiKey: config.embeddingApiKey,
+                        model: config.embeddingModel,
+                        input,
+                    }),
                 });
+                embeddings = executed.embeddings;
                 if (embeddings.some((vector) => vector.length === 0)) {
                     return emptyResult_ACU({ reason: 'embedding_incomplete', errors: ['重建 embedding 结果不完整'] });
                 }
                 embedding.dimension = embeddings[0].length;
             }
             catch (error) {
+                const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? error.cause : error;
+                const credential = isVectorEmbeddingError_ACU(embeddingError)
+                    && (Number(embeddingError.httpStatus) === 401 || Number(embeddingError.httpStatus) === 403);
                 return emptyResult_ACU({
-                    reason: isVectorEmbeddingError_ACU(error) ? 'embedding_failed' : 'embedding_failed',
+                    reason: credential ? 'embedding_unauthorized' : 'embedding_failed',
                     errors: [error?.message || String(error || 'embedding 失败')],
                 });
             }
@@ -53776,8 +53832,10 @@ $CONTENT
             await runTableWriteTransaction_ACU({
                 source: 'vector_mirror',
                 reason: `summary_vector_mirror_rebuild:${options.reason}`,
+                revisionImpact: 'derived_metadata',
                 isolationKey,
                 writeSet: [{ kind: 'sheet', sheetKey: selected.summaryKey }],
+                baseRevision,
                 workingDataMode: 'none',
             }, async (ctx) => {
                 ctx.assertFresh?.('vector_mirror_rebuild:before_write');
@@ -97633,6 +97691,9 @@ $CONTENT
             summaryIndexKeywordMinRows: normalizePositiveInteger_ACU$2(source.summaryIndexKeywordMinRows, defaults.summaryIndexKeywordMinRows || 100),
             summaryChunkSentenceCount: normalizePositiveInteger_ACU$2(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
             summaryIndexChunkChronicleBySentence: source.summaryIndexChunkChronicleBySentence === true,
+            summaryIndexArchiveMaxConcurrency: normalizePositiveInteger_ACU$2(source.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30),
+            summaryIndexArchiveMaxInputChars: normalizePositiveInteger_ACU$2(source.summaryIndexArchiveMaxInputChars, Number(defaults.summaryIndexArchiveMaxInputChars) || 24000),
+            summaryIndexArchiveEmbeddingConcurrency: normalizePositiveInteger_ACU$2(source.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3),
             summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
             archiveWithoutSummary: source.archiveWithoutSummary === true,
             summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, defaults.summaryPromptGroup || []),
@@ -97790,6 +97851,7 @@ $CONTENT
         const recallCandidateLimit = Math.max(topK, normalizePositiveInteger_ACU$2(config.recallCandidateLimit, defaults.recallCandidateLimit || topK));
         const summaryChunkSentenceCount = normalizePositiveInteger_ACU$2(config.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount || 2);
         const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30);
+        const summaryIndexArchiveMaxInputChars = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveMaxInputChars, Number(defaults.summaryIndexArchiveMaxInputChars) || 24000);
         // T9：归档 embedding 批次的有界并发度（同时进行中的批次上限）。独立于 summaryIndexArchiveMaxConcurrency（批大小）。
         const summaryIndexArchiveEmbeddingConcurrency = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3);
         const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU$2(config.summaryIndexKeywordMinRows, Number(defaults.summaryIndexKeywordMinRows) || 100);
@@ -97808,6 +97870,7 @@ $CONTENT
             summaryIndexCandidateLimit: recallCandidateLimit,
             summaryIndexChunkSentenceCount: summaryChunkSentenceCount,
             summaryIndexArchiveMaxConcurrency,
+            summaryIndexArchiveMaxInputChars,
             summaryIndexArchiveEmbeddingConcurrency,
             summaryIndexKeywordMinRows,
             summaryIndexRecentFixedInjectCount: recentFixedInjectCount,
@@ -98484,7 +98547,10 @@ $CONTENT
                 fillMissing_ACU('archiveTriggerCount', defaultVectorMemoryConfig_ACU.archiveTriggerCount);
                 fillMissing_ACU('archiveBatchSize', defaultVectorMemoryConfig_ACU.archiveBatchSize);
                 fillMissing_ACU('archiveMaxConcurrency', defaultVectorMemoryConfig_ACU.archiveMaxConcurrency);
+                // 每请求行数、字符预算和在飞请求数共同限定 embedding 成本。
                 fillMissing_ACU('summaryIndexArchiveMaxConcurrency', defaultVectorMemoryConfig_ACU.summaryIndexArchiveMaxConcurrency || 30);
+                fillMissing_ACU('summaryIndexArchiveMaxInputChars', defaultVectorMemoryConfig_ACU.summaryIndexArchiveMaxInputChars || 24000);
+                fillMissing_ACU('summaryIndexArchiveEmbeddingConcurrency', defaultVectorMemoryConfig_ACU.summaryIndexArchiveEmbeddingConcurrency || 3);
                 // [spv3.5.21] 一次性覆盖：topK / recallCandidateLimit / summaryIndexKeywordMinRows 强制更新到新默认值
                 const forceOverride_ACU = (key, newValue, legacyValues) => {
                     const current = vectorConfig[key];
@@ -181976,6 +182042,8 @@ Expected function or array of functions, received type ${typeof value}.`
             summaryChunkSentenceCount: defaults.summaryChunkSentenceCount,
             summaryIndexChunkChronicleBySentence: defaults.summaryIndexChunkChronicleBySentence === true,
             summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
+            summaryIndexArchiveMaxInputChars: defaults.summaryIndexArchiveMaxInputChars ?? 24000,
+            summaryIndexArchiveEmbeddingConcurrency: defaults.summaryIndexArchiveEmbeddingConcurrency ?? 3,
             summaryIndexRollingDeltaEnabled: defaults.summaryIndexRollingDeltaEnabled === true,
             summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
             summaryIndexV2WriteEnabled: defaults.summaryIndexV2WriteEnabled === true,
@@ -182064,6 +182132,8 @@ Expected function or array of functions, received type ${typeof value}.`
             form.summaryChunkSentenceCount = config.summaryChunkSentenceCount;
             form.summaryIndexChunkChronicleBySentence = config.summaryIndexChunkChronicleBySentence === true;
             form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
+            form.summaryIndexArchiveMaxInputChars = config.summaryIndexArchiveMaxInputChars;
+            form.summaryIndexArchiveEmbeddingConcurrency = config.summaryIndexArchiveEmbeddingConcurrency;
             form.summaryIndexRollingDeltaEnabled = config.summaryIndexRollingDeltaEnabled === true;
             form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
             form.summaryIndexV2WriteEnabled = config.summaryIndexV2WriteEnabled === true;
@@ -182594,8 +182664,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-84c42d53] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-84c42d53] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-84c42d53] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-84c42d53] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-84c42d53] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 18px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-84c42d53]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-84c42d53] {\r\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-84c42d53] {\r\n  width: 100%;\r\n  margin: 0 0 2px;\r\n  padding: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-84c42d53] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-84c42d53] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  color: var(--acu-text-3);\r\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-84c42d53] {\r\n  flex: 1 1 auto;\r\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-84c42d53] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-84c42d53] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-84c42d53] {\r\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-84c42d53] {\r\n  width: 100%;\r\n  min-height: 60px;\r\n  padding: 6px 8px;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\r\n  border-radius: 4px;\r\n  background: var(--acu-bg-2, transparent);\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.5;\r\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-84c42d53] {\r\n  width: 100%;\r\n  min-height: 72px;\r\n  padding: 6px 8px;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\r\n  border-radius: 4px;\r\n  background: var(--acu-bg-2, transparent);\r\n  color: var(--acu-text-1);\r\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\r\n  font-size: var(--acu-font-size-small, 11px);\r\n  line-height: 1.5;\r\n  resize: vertical;\n}\r\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-84c42d53");
-    var VectorIndexPage_vue_vue_type_style_index_0_scoped_84c42d53_lang = null;
+    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-91f12786] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-91f12786] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-91f12786] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-91f12786] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-91f12786] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-91f12786]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-91f12786] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-91f12786] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-91f12786] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-91f12786] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-91f12786] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-91f12786] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-91f12786] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-91f12786] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-91f12786] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-91f12786] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-91f12786");
+    var VectorIndexPage_vue_vue_type_style_index_0_scoped_91f12786_lang = null;
 
     const _hoisted_1$h = { class: "acu-v2-vector-index-page" };
     const _hoisted_2$g = { class: "acu-v2-vector-index-page__panel-stack" };
@@ -182628,14 +182698,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["variant"])]),
 				default: withCtx(() => [
 					createVNode($setup["AcuStatsList"], { items: $setup.vector.statusStatsItems.value }, null, 8, ["items"]),
-					_cache[33] || (_cache[33] = createBaseVNode(
+					_cache[35] || (_cache[35] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-vector-index-page__hint" },
 						" 发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → \"概览 + 纪要正文\"向量与 BM25 混合召回 → 可选 Rerank（按纪要正文分批精排，候选不多于 TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。 ",
 						-1
 						/* CACHED */
 					)),
-					_cache[34] || (_cache[34] = createBaseVNode(
+					_cache[36] || (_cache[36] = createBaseVNode(
 						"div",
 						{
 							class: "acu-v2-vector-index-page__maintenance-spacer",
@@ -182651,7 +182721,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
 							onClick: $setup.vector.buildNow
 						}, {
-							default: withCtx(() => [_cache[28] || (_cache[28] = createBaseVNode(
+							default: withCtx(() => [_cache[30] || (_cache[30] = createBaseVNode(
 								"i",
 								{ class: "fa-solid fa-brain" },
 								null,
@@ -182664,7 +182734,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)]),
 							_: 1
 						}, 8, ["disabled", "onClick"]),
-						_cache[32] || (_cache[32] = createBaseVNode(
+						_cache[34] || (_cache[34] = createBaseVNode(
 							"p",
 							{ class: "acu-v2-vector-index-page__hint" },
 							" 检测到旧向量方案时会提示「向量方案已优化，需要重建」。链冲突与 checkpoint 指纹不匹配会自动修复，不弹确认。 ",
@@ -182676,7 +182746,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.vector.migrateLegacyIndex
 						}, {
-							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
+							default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
 								" 非破坏迁移旧索引 ",
 								-1
 								/* CACHED */
@@ -182687,7 +182757,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.vector.clearIndexCache
 						}, {
-							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
+							default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
 								" 清空临时缓存 ",
 								-1
 								/* CACHED */
@@ -182699,7 +182769,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.onDeleteCurrentIndex
 						}, {
-							default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+							default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
 								" 删除当前索引 ",
 								-1
 								/* CACHED */
@@ -182782,7 +182852,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					},
 					[
 						createBaseVNode("fieldset", _hoisted_6$a, [
-							_cache[35] || (_cache[35] = createBaseVNode(
+							_cache[37] || (_cache[37] = createBaseVNode(
 								"legend",
 								null,
 								"Embedding",
@@ -182818,7 +182888,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							})
 						]),
 						createBaseVNode("fieldset", _hoisted_7$8, [
-							_cache[36] || (_cache[36] = createBaseVNode(
+							_cache[38] || (_cache[38] = createBaseVNode(
 								"legend",
 								null,
 								"Rerank",
@@ -182914,7 +182984,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							variant: "primary",
 							"native-type": "submit"
 						}, {
-							default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
+							default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
 								"保存",
 								-1
 								/* CACHED */
@@ -182943,7 +183013,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: 0,
 					kind: "warning"
 				}, {
-					default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
+					default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
 						" 关键词生成提示词为空，发送前会直接用用户输入参与召回；建议载入默认提示词后保存。 ",
 						-1
 						/* CACHED */
@@ -182953,7 +183023,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					variant: "primary",
 					onClick: _cache[12] || (_cache[12] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
-					default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
+					default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
 						"编辑提示词",
 						-1
 						/* CACHED */
@@ -183088,8 +183158,8 @@ Expected function or array of functions, received type ${typeof value}.`
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], {
-							label: "归档批次",
-							hint: "每次处理的行数，影响批量速度。"
+							label: "单请求最多行数",
+							hint: "单个 embedding 请求最多覆盖的纪要行数；与字符预算共同限制请求大小。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								"model-value": $setup.vector.form.summaryIndexArchiveMaxConcurrency,
@@ -183097,6 +183167,32 @@ Expected function or array of functions, received type ${typeof value}.`
 								min: 1,
 								step: 1,
 								onChange: _cache[22] || (_cache[22] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxConcurrency", $event))
+							}, null, 8, ["model-value"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
+							label: "单请求字符预算",
+							hint: "单个 embedding 请求的本地输入字符上限，不等同于服务商 token 限制。单行超出时会单独请求并记录诊断。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								"model-value": $setup.vector.form.summaryIndexArchiveMaxInputChars,
+								type: "number",
+								min: 1,
+								step: 1,
+								onChange: _cache[23] || (_cache[23] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxInputChars", $event))
+							}, null, 8, ["model-value"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
+							label: "同时请求数",
+							hint: "最多同时进行的 embedding HTTP 请求；设为 1 可获得串行兼容行为。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								"model-value": $setup.vector.form.summaryIndexArchiveEmbeddingConcurrency,
+								type: "number",
+								min: 1,
+								step: 1,
+								onChange: _cache[24] || (_cache[24] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveEmbeddingConcurrency", $event))
 							}, null, 8, ["model-value"])]),
 							_: 1
 						}),
@@ -183135,7 +183231,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						default: withCtx(() => [createVNode($setup["AcuToggle"], {
 							"model-value": $setup.vector.form.summaryIndexV2WriteEnabled,
 							label: "允许 V2 快照写入",
-							"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.vector.setBooleanField("summaryIndexV2WriteEnabled", $event))
+							"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.vector.setBooleanField("summaryIndexV2WriteEnabled", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
@@ -183150,7 +183246,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							rows: "4",
 							spellcheck: "false",
 							placeholder: "每行一个 scope fingerprint",
-							onChange: _cache[24] || (_cache[24] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
+							onChange: _cache[26] || (_cache[26] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
 						}, null, 40, _hoisted_12$7)]),
 						_: 1
 					})) : createCommentVNode("v-if", true)
@@ -183165,11 +183261,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			dirty: $setup.vector.promptDirty.value,
 			message: $setup.vector.message.value,
 			"role-options": $setup.ROLE_OPTIONS,
-			onClose: _cache[25] || (_cache[25] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[27] || (_cache[27] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.vector.savePromptGroup,
 			onReset: $setup.vector.resetPromptGroup,
-			onAdd: _cache[26] || (_cache[26] = ($event) => $setup.vector.addPromptSegment($event)),
-			onDelete: _cache[27] || (_cache[27] = ($event) => $setup.vector.deletePromptSegment($event)),
+			onAdd: _cache[28] || (_cache[28] = ($event) => $setup.vector.addPromptSegment($event)),
+			onDelete: _cache[29] || (_cache[29] = ($event) => $setup.vector.deletePromptSegment($event)),
 			onUpdate: $setup.onPromptUpdate
 		}, null, 8, [
 			"is-open",
@@ -183181,7 +183277,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-84c42d53"]]);
+    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-91f12786"]]);
 
     const dataMgmtCopy = {
         panels: {

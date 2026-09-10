@@ -681,7 +681,10 @@ export   function loadSettings_ACU() {
               fillMissing_ACU('archiveTriggerCount', defaultVectorMemoryConfig_ACU.archiveTriggerCount);
               fillMissing_ACU('archiveBatchSize', defaultVectorMemoryConfig_ACU.archiveBatchSize);
               fillMissing_ACU('archiveMaxConcurrency', defaultVectorMemoryConfig_ACU.archiveMaxConcurrency);
+              // 每请求行数、字符预算和在飞请求数共同限定 embedding 成本。
               fillMissing_ACU('summaryIndexArchiveMaxConcurrency', (defaultVectorMemoryConfig_ACU as any).summaryIndexArchiveMaxConcurrency || 30);
+              fillMissing_ACU('summaryIndexArchiveMaxInputChars', (defaultVectorMemoryConfig_ACU as any).summaryIndexArchiveMaxInputChars || 24000);
+              fillMissing_ACU('summaryIndexArchiveEmbeddingConcurrency', (defaultVectorMemoryConfig_ACU as any).summaryIndexArchiveEmbeddingConcurrency || 3);
               // [spv3.5.21] 一次性覆盖：topK / recallCandidateLimit / summaryIndexKeywordMinRows 强制更新到新默认值
               const forceOverride_ACU = (key: string, newValue: any, legacyValues: any[]) => {
                   const current = vectorConfig[key];

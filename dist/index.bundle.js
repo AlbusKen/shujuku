@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      9.2.4
+// @version      9.2.5
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -4067,7 +4067,10 @@ $CONTENT
         archiveTriggerCount: 9,
         archiveBatchSize: 3,
         archiveMaxConcurrency: 3,
+        // 单个 embedding HTTP 请求最多覆盖的 source rows。
         summaryIndexArchiveMaxConcurrency: 30,
+        // 本地字符预算，不等同于 provider token 限制。
+        summaryIndexArchiveMaxInputChars: 24000,
         summaryIndexArchiveEmbeddingConcurrency: 3,
         topK: 200,
         // 源文本为"概览 + 纪要正文"时的余弦门槛；比只用 30 字概览时的 0.45 略低（长文本相似度整体偏低）。
@@ -41061,6 +41064,7 @@ $CONTENT
         const chatKey = normalizeScopePart_ACU$2(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
         const isolationKey = normalizeScopePart_ACU$2(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
         const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
+        const revisionImpact = options.revisionImpact === 'derived_metadata' ? 'derived_metadata' : 'source_table';
         const maintenanceMode = options.maintenanceMode || 'shared';
         const releases = await acquireTransactionLocks_ACU({ chatKey, isolationKey, writeSet, maintenanceMode });
         const transactionId = generateTransactionId_ACU();
@@ -41075,6 +41079,7 @@ $CONTENT
                 chatKey,
                 isolationKey,
                 source: options.source,
+                revisionImpact,
                 baseRevision,
                 writeSet,
                 assertFresh: (reason) => {
@@ -41124,7 +41129,9 @@ $CONTENT
                     try {
                         const result = await commitTask();
                         const resolvedRevisionWriteSet = typeof revisionWriteSet === 'function' ? revisionWriteSet(result) : revisionWriteSet;
-                        bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+                        if (revisionImpact === 'source_table') {
+                            bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+                        }
                         effectiveBaseRevision = captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
                         return result;
                     }
@@ -44450,6 +44457,18 @@ $CONTENT
     function normalizeSummaryVectorIsolationKey_ACU(value) {
         return normalizeScopePart_ACU$1(value, 'default');
     }
+    /**
+     * 把向量 scope 的 isolation token 映射回聊天 IsolatedData 槽键。
+     * 空运行时隔离的 scope token 是 default，槽键仍是 ''；两者规范化后相同则用运行时槽键。
+     */
+    function toChatIsolationSlotKey_ACU(scopeIsolationKey, runtimeIsolationKey) {
+        const scopeKey = String(scopeIsolationKey ?? '');
+        const runtimeKey = String(runtimeIsolationKey ?? '');
+        if (normalizeSummaryVectorIsolationKey_ACU(scopeKey) === normalizeSummaryVectorIsolationKey_ACU(runtimeKey)) {
+            return runtimeKey;
+        }
+        return scopeKey;
+    }
     function normalizeSummaryVectorIndexScope_ACU(parts) {
         return {
             chatKey: normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
@@ -45778,6 +45797,115 @@ $CONTENT
             }
         }
         throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Embedding 请求失败'));
+    }
+
+    class EmbeddingBatchExecutionError_ACU extends Error {
+        constructor(message, batch, cause) {
+            super(message);
+            this.name = 'EmbeddingBatchExecutionError_ACU';
+            this.batch = { index: batch.index, rowCount: batch.rowCount, chunkCount: batch.chunkCount, inputChars: batch.inputChars };
+            if (cause !== undefined)
+                this.cause = cause;
+        }
+    }
+    function planEmbeddingBatches_ACU(sources, limits) {
+        const maxRows = Math.max(1, Math.floor(Number(limits.maxRowsPerRequest) || 1));
+        const maxChars = Math.max(1, Math.floor(Number(limits.maxInputCharsPerRequest) || 1));
+        const normalized = Array.isArray(sources) ? sources.filter(source => typeof source?.text === 'string') : [];
+        const rowGroups = [];
+        for (const [sourceIndex, source] of normalized.entries()) {
+            const previous = rowGroups[rowGroups.length - 1];
+            if (previous && previous[0].source.rowKey === source.rowKey)
+                previous.push({ source, sourceIndex });
+            else
+                rowGroups.push([{ source, sourceIndex }]);
+        }
+        const batches = [];
+        let current = [];
+        let chars = 0;
+        const push = () => {
+            if (!current.length)
+                return;
+            const rowCount = new Set(current.map(item => item.source.rowKey)).size;
+            batches.push({ index: batches.length, sources: current, rowCount, chunkCount: current.length, inputChars: chars, singleRowOverBudget: rowCount === 1 && chars > maxChars });
+            current = [];
+            chars = 0;
+        };
+        for (const group of rowGroups) {
+            const groupChars = group.reduce((sum, item) => sum + item.source.text.length, 0);
+            const nextRows = new Set([...current.map(item => item.source.rowKey), group[0].source.rowKey]).size;
+            if (current.length && (nextRows > maxRows || chars + groupChars > maxChars))
+                push();
+            current.push(...group);
+            chars += groupChars;
+            if (groupChars > maxChars)
+                push();
+        }
+        push();
+        return { sources: normalized, batches };
+    }
+    async function executeEmbeddingBatchPlan_ACU(plan, options) {
+        const startedAt = Date.now();
+        const slots = new Array(plan.sources.length).fill(null);
+        let nextBatch = 0;
+        let completedBatchCount = 0;
+        let successfulBatchCount = 0;
+        let firstFailure = null;
+        const runBatch = async (batch) => {
+            try {
+                const fill = async (items) => {
+                    const results = await options.requestEmbeddings(items.map(item => item.source.text));
+                    for (const result of results) {
+                        if (!Number.isInteger(result?.index) || result.index < 0 || result.index >= items.length)
+                            continue;
+                        if (Array.isArray(result.embedding) && result.embedding.length > 0) {
+                            slots[items[result.index].sourceIndex] = result.embedding;
+                        }
+                    }
+                };
+                await fill(batch.sources);
+                let missing = batch.sources.filter(item => !slots[item.sourceIndex]);
+                if (missing.length > 0 && missing.length < batch.sources.length) {
+                    const recoverySize = Math.max(1, Math.min(batch.sources.length - missing.length, missing.length));
+                    for (let index = 0; index < missing.length; index += recoverySize) {
+                        await fill(missing.slice(index, index + recoverySize));
+                    }
+                    missing = batch.sources.filter(item => !slots[item.sourceIndex]);
+                }
+                if (missing.length > 0) {
+                    throw new Error(`Embedding 响应缺失 ${missing.length}/${batch.chunkCount} 条向量。`);
+                }
+                successfulBatchCount += 1;
+            }
+            catch (error) {
+                if (!firstFailure)
+                    firstFailure = { error, batch };
+            }
+            finally {
+                completedBatchCount += 1;
+            }
+        };
+        const workers = Array.from({ length: Math.max(1, Math.min(Math.floor(Number(options.maxConcurrentRequests) || 1), plan.batches.length)) }, async () => {
+            while (!firstFailure && nextBatch < plan.batches.length) {
+                const batch = plan.batches[nextBatch++];
+                await runBatch(batch);
+            }
+        });
+        await Promise.allSettled(workers);
+        const stats = {
+            plannedBatchCount: plan.batches.length,
+            completedBatchCount,
+            successfulBatchCount,
+            totalRows: new Set(plan.sources.map(source => source.rowKey)).size,
+            totalChunks: plan.sources.length,
+            maxInputChars: Math.max(0, ...plan.batches.map(batch => batch.inputChars)),
+            elapsedMs: Date.now() - startedAt,
+        };
+        if (firstFailure) {
+            const message = firstFailure.error instanceof Error ? firstFailure.error.message : String(firstFailure.error || 'Embedding 批次失败');
+            throw new EmbeddingBatchExecutionError_ACU(message, firstFailure.batch, firstFailure.error);
+        }
+        return { embeddings: slots.map(vector => vector || []), stats };
     }
 
     /**
@@ -47415,6 +47543,7 @@ $CONTENT
         const refs = [];
         if (!Array.isArray(chat))
             return refs;
+        const slotKey = toChatIsolationSlotKey_ACU(isolationKey, getCurrentIsolationKey_ACU());
         const upperExclusive = maxMessageIndexExclusive === undefined
             ? chat.length
             : Math.max(0, Math.min(chat.length, Math.floor(maxMessageIndexExclusive)));
@@ -47422,7 +47551,7 @@ $CONTENT
             const message = chat[i];
             if (!message || message.is_user)
                 continue;
-            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            const tagData = readIsolatedTagData_ACU(message, slotKey);
             if (isV2TagData_ACU(tagData)) {
                 refs.push({ messageIndex: i, frame: tagData.storageFrame });
             }
@@ -47436,10 +47565,11 @@ $CONTENT
      * 表达式与 storage-frame-v2-replay.ts:2375-2380 保持一致。
      */
     function locateSummaryVectorMirrorBase_ACU(chat, isolationKey, maxMessageIndexExclusive) {
-        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey, maxMessageIndexExclusive);
+        const slotKey = toChatIsolationSlotKey_ACU(isolationKey, getCurrentIsolationKey_ACU());
+        const refs = collectSummaryVectorMirrorFrameRefs_ACU(chat, slotKey, maxMessageIndexExclusive);
         const checkpointRef = [...refs].reverse().find((ref) => ref.frame.checkpoint?.kind === 'full') ?? null;
         const replayMaxInclusive = maxMessageIndexExclusive === undefined ? undefined : maxMessageIndexExclusive - 1;
-        const transition = findLatestTransitionCheckpoint_ACU(chat, isolationKey, replayMaxInclusive);
+        const transition = findLatestTransitionCheckpoint_ACU(chat, slotKey, replayMaxInclusive);
         if (transition && (!checkpointRef || checkpointRef.messageIndex <= transition.checkpoint.cutoff.messageIndex)) {
             return null;
         }
@@ -47475,10 +47605,17 @@ $CONTENT
             && Number.isInteger(value.sourceTextVersion);
     }
     function summaryVectorEmbeddingIdentityEquals_ACU(left, right) {
-        return left.endpointFingerprint === right.endpointFingerprint
-            && left.model === right.model
-            && left.dimension === right.dimension
-            && left.sourceTextVersion === right.sourceTextVersion;
+        if (left.endpointFingerprint !== right.endpointFingerprint
+            || left.model !== right.model
+            || left.sourceTextVersion !== right.sourceTextVersion) {
+            return false;
+        }
+        // dimension=0 表示配置尚未观测到向量长度（settings 没有 embeddingDimension）。
+        // 落盘 checkpoint/delta 要求 dimension>0；发送前用 0 去比真实维度会把每次归档后的楼层误判成换模型。
+        if (left.dimension > 0 && right.dimension > 0 && left.dimension !== right.dimension) {
+            return false;
+        }
+        return true;
     }
     function isPackRef_ACU(value) {
         return isPlainObject_ACU(value)
@@ -51562,59 +51699,23 @@ $CONTENT
         if (chunkSources.length === 0) {
             return { rows: [], chunks: [] };
         }
-        const embeddings = await createEmbeddings_ACU({
-            endpoint: options.embeddingEndpoint,
-            apiKey: options.embeddingApiKey,
-            model: options.embeddingModel,
-            input: chunkSources.map((item) => item.text),
+        const plan = planEmbeddingBatches_ACU(chunkSources, {
+            maxRowsPerRequest: options.maxRowsPerRequest,
+            maxInputCharsPerRequest: options.maxInputCharsPerRequest,
         });
-        const embeddingMap = new Map();
-        embeddings.forEach((item) => {
-            if (Number.isInteger(item.index) && item.index >= 0 && item.index < chunkSources.length
-                && Array.isArray(item.embedding) && item.embedding.length > 0) {
-                embeddingMap.set(item.index, item.embedding);
-            }
-        });
-        let missingIndexes = chunkSources
-            .map((_source, index) => index)
-            .filter((index) => !embeddingMap.has(index));
-        // 首次响应已有部分有效向量时，只补齐缺失项；首次无有效向量仍按既有失败路径处理。
-        if (embeddingMap.size > 0 && missingIndexes.length > 0) {
-            const recoveryBatchSize = Math.min(embeddingMap.size, missingIndexes.length);
-            for (let start = 0; start < missingIndexes.length; start += recoveryBatchSize) {
-                const recoveryOriginalIndexes = missingIndexes.slice(start, start + recoveryBatchSize);
-                const recoveredEmbeddings = await createEmbeddings_ACU({
-                    endpoint: options.embeddingEndpoint,
-                    apiKey: options.embeddingApiKey,
-                    model: options.embeddingModel,
-                    input: recoveryOriginalIndexes.map((originalIndex) => chunkSources[originalIndex].text),
-                });
-                recoveredEmbeddings.forEach((item) => {
-                    if (!Number.isInteger(item.index) || item.index < 0 || item.index >= recoveryOriginalIndexes.length)
-                        return;
-                    const originalIndex = recoveryOriginalIndexes[item.index];
-                    if (!embeddingMap.has(originalIndex) && Array.isArray(item.embedding) && item.embedding.length > 0) {
-                        embeddingMap.set(originalIndex, item.embedding);
-                    }
-                });
-            }
-            missingIndexes = chunkSources
-                .map((_source, index) => index)
-                .filter((index) => !embeddingMap.has(index));
-        }
-        // 全部原始 chunk 均取得向量前不得构造结果，确保外层不发布部分索引。
-        if (missingIndexes.length > 0) {
-            throw new VectorEmbeddingError_ACU({
-                kind: 'retryable',
-                message: `Embedding 响应缺失 ${missingIndexes.length}/${chunkSources.length} 条向量（首个缺失原始索引 ${missingIndexes[0]}），为避免索引缺行已中止本批归档。`,
+        const { embeddings } = await executeEmbeddingBatchPlan_ACU(plan, {
+            maxConcurrentRequests: options.maxConcurrentRequests,
+            requestEmbeddings: (input) => createEmbeddings_ACU({
                 endpoint: options.embeddingEndpoint,
+                apiKey: options.embeddingApiKey,
                 model: options.embeddingModel,
-            });
-        }
+                input,
+            }),
+        });
         const chunks = [];
         const rowChunkIds = new Map();
         chunkSources.forEach((source, index) => {
-            const vector = embeddingMap.get(index) || [];
+            const vector = embeddings[index] || [];
             if (vector.length === 0)
                 return;
             chunks.push({
@@ -52360,63 +52461,19 @@ $CONTENT
             }
             const embeddedRows = [];
             const embeddedChunks = [];
-            // T9：归档 embedding 批次有界并发。
-            // 串行时批次 k 的 existingSequenceBase = 前 k 批的 chunk 总数；并发下无法等前批完成再算，
-            // 因此按批预分配 sequence 区间：批次 k 的 base = sum(前 k 批的 chunk 数)。
-            // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
-            // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
-            const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
-            const chunkOptions = {
+            const batchResult = await buildChunksWithEmbeddings_ACU(rowsNeedingEmbedding, {
+                snapshotMessageId,
                 sentenceCount: config.summaryIndexChunkSentenceCount,
                 chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
-            };
-            const batchChunkCounts = [];
-            const batchRowGroups = [];
-            for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
-                const rowBatch = rowsNeedingEmbedding.slice(startIndex, startIndex + maxRowsPerBatch);
-                if (rowBatch.length === 0)
-                    continue;
-                batchRowGroups.push(rowBatch);
-                let chunkCount = 0;
-                for (const row of rowBatch) {
-                    chunkCount += buildRowChunkTexts_ACU(row.vectorSourceText, chunkOptions).length;
-                }
-                batchChunkCounts.push(chunkCount);
-            }
-            // 有界并发：同时最多 batchConcurrency 个批次在飞。取批次 + 分配 sequence base 在同一同步块内完成
-            // （JS 单线程，nextBatchIndex++ / sequenceBase 读改写之间无 await），无竞争。
-            const batchResults = new Array(batchRowGroups.length).fill(null);
-            let nextBatchIndex = 0;
-            let sequenceBase = 0;
-            const workerCount = Math.max(1, Math.min(batchConcurrency, batchRowGroups.length));
-            const workers = Array.from({ length: workerCount }, async () => {
-                while (true) {
-                    const batchIndex = nextBatchIndex;
-                    if (batchIndex >= batchRowGroups.length)
-                        break;
-                    nextBatchIndex += 1;
-                    const mySequenceBase = sequenceBase;
-                    sequenceBase += batchChunkCounts[batchIndex];
-                    const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
-                        snapshotMessageId,
-                        sentenceCount: chunkOptions.sentenceCount,
-                        chunkBySentence: chunkOptions.chunkBySentence,
-                        embeddingEndpoint: config.embeddingEndpoint,
-                        embeddingApiKey: config.embeddingApiKey,
-                        embeddingModel: config.embeddingModel,
-                        existingSequenceBase: mySequenceBase,
-                    });
-                    batchResults[batchIndex] = batchResult;
-                }
+                embeddingEndpoint: config.embeddingEndpoint,
+                embeddingApiKey: config.embeddingApiKey,
+                embeddingModel: config.embeddingModel,
+                maxRowsPerRequest: maxRowsPerBatch,
+                maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
+                maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
             });
-            await Promise.all(workers);
-            // 按批号顺序合并，保证 embeddedRows / embeddedChunks 顺序与串行一致。
-            for (const batchResult of batchResults) {
-                if (!batchResult)
-                    continue;
-                embeddedRows.push(...batchResult.rows);
-                embeddedChunks.push(...batchResult.chunks);
-            }
+            embeddedRows.push(...batchResult.rows);
+            embeddedChunks.push(...batchResult.chunks);
             const finalResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU([...reusable.reusableRows, ...embeddedRows], [...reusable.reusableChunks, ...embeddedChunks]);
             if (finalResult.rows.length === 0 || finalResult.chunks.length === 0) {
                 return buildResult_ACU({
@@ -52512,7 +52569,9 @@ $CONTENT
             }
             // T4：识别结构化 embedding 错误，把 terminal / retryable 分类传导给 flush runner。
             // terminal（credential / request / provider-contract）→ 停止重排；retryable → 继续有限重试。
-            if (isVectorEmbeddingError_ACU(error)) {
+            const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? error.cause : error;
+            if (isVectorEmbeddingError_ACU(embeddingError)) {
+                const error = embeddingError;
                 const terminalKinds = new Set(['credential', 'request', 'provider-contract']);
                 const embeddingRetryability = terminalKinds.has(error.kind) ? 'terminal' : 'retryable';
                 const detail = error.providerMessage || error.message;
@@ -52632,7 +52691,8 @@ $CONTENT
         if (!sheetKey.startsWith('sheet_')) {
             return emptyTimeline_ACU('replay_failed', null, `sheetKey 非法：${sheetKey || '<empty>'}`);
         }
-        const base = locateSummaryVectorMirrorBase_ACU(options.chat, options.isolationKey);
+        const isolationKey = toChatIsolationSlotKey_ACU(options.isolationKey, getCurrentIsolationKey_ACU());
+        const base = locateSummaryVectorMirrorBase_ACU(options.chat, isolationKey);
         if (!base || !base.frame.checkpoint || base.frame.checkpoint.kind !== 'full') {
             return emptyTimeline_ACU('unsupported_replay_base', null);
         }
@@ -52645,7 +52705,7 @@ $CONTENT
         const entries = [];
         let replay;
         try {
-            replay = await loadTableStateFromFramesV2Detailed_ACU(options.chat, options.isolationKey, {
+            replay = await loadTableStateFromFramesV2Detailed_ACU(options.chat, isolationKey, {
                 updateRuntimeState: false,
                 onEntryApplied: async (context) => {
                     if (!tableEntryTouchesSheetV2_ACU(context.entry, sheetKey))
@@ -52818,7 +52878,7 @@ $CONTENT
         if (!selected?.summaryKey) {
             return emptyResult_ACU$1({ reason: 'summary_table_not_found', errors: ['纪要表不可用'], retryability: 'terminal' });
         }
-        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const isolationKey = toChatIsolationSlotKey_ACU(options.isolationKey ?? getCurrentIsolationKey_ACU(), getCurrentIsolationKey_ACU());
         const scope = normalizeSummaryVectorIndexScope_ACU({
             chatKey: currentChatFileIdentifier_ACU,
             isolationKey,
@@ -52879,9 +52939,7 @@ $CONTENT
         }
         const checkpointEmbedding = head.checkpoint?.embedding;
         if (checkpointEmbedding
-            && (checkpointEmbedding.endpointFingerprint !== currentEmbedding.endpointFingerprint
-                || checkpointEmbedding.model !== currentEmbedding.model
-                || checkpointEmbedding.sourceTextVersion !== currentEmbedding.sourceTextVersion)) {
+            && !summaryVectorEmbeddingIdentityEquals_ACU(currentEmbedding, checkpointEmbedding)) {
             return emptyResult_ACU$1({
                 reason: 'embedding_identity_changed',
                 needsRebuild: true,
@@ -52928,6 +52986,7 @@ $CONTENT
                 retryability: 'terminal',
             });
         }
+        const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'sheet', sheetKey: selected.summaryKey }], { isolationKey });
         const rowsById = new Map(prepared.rows.map((row) => [row.rowId, row]));
         const addedRowIds = [...new Set(plans.flatMap((plan) => plan.added))];
         const missingAdded = addedRowIds.filter((rowId) => !rowsById.has(rowId));
@@ -52944,22 +53003,26 @@ $CONTENT
                 chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
             });
             texts.forEach((text) => {
-                chunkSources.push({ rowId, text, vectorSourceHash: row.vectorSourceHash });
+                chunkSources.push({ rowId, rowKey: rowId, text, vectorSourceHash: row.vectorSourceHash });
             });
         }
         let embeddings = [];
         if (chunkSources.length > 0) {
             try {
-                const results = await createEmbeddings_ACU({
-                    endpoint: config.embeddingEndpoint,
-                    apiKey: config.embeddingApiKey,
-                    model: config.embeddingModel,
-                    input: chunkSources.map((item) => item.text),
+                const plan = planEmbeddingBatches_ACU(chunkSources, {
+                    maxRowsPerRequest: config.summaryIndexArchiveMaxConcurrency,
+                    maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
                 });
-                embeddings = chunkSources.map((_item, index) => {
-                    const hit = results.find((item) => item.index === index);
-                    return Array.isArray(hit?.embedding) ? hit.embedding : [];
+                const executed = await executeEmbeddingBatchPlan_ACU(plan, {
+                    maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
+                    requestEmbeddings: (input) => createEmbeddings_ACU({
+                        endpoint: config.embeddingEndpoint,
+                        apiKey: config.embeddingApiKey,
+                        model: config.embeddingModel,
+                        input,
+                    }),
                 });
+                embeddings = executed.embeddings;
                 if (embeddings.some((vector) => vector.length === 0)) {
                     return emptyResult_ACU$1({
                         reason: 'embedding_incomplete',
@@ -52979,9 +53042,10 @@ $CONTENT
                 embedding.dimension = actualDimension;
             }
             catch (error) {
+                const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? error.cause : error;
                 const message = error?.message || String(error || 'embedding 失败');
-                const credential = isVectorEmbeddingError_ACU(error)
-                    && (Number(error.httpStatus) === 401 || Number(error.httpStatus) === 403);
+                const credential = isVectorEmbeddingError_ACU(embeddingError)
+                    && (Number(embeddingError.httpStatus) === 401 || Number(embeddingError.httpStatus) === 403);
                 return emptyResult_ACU$1({
                     reason: credential ? 'embedding_unauthorized' : 'embedding_failed',
                     errors: [message],
@@ -53028,8 +53092,10 @@ $CONTENT
             await runTableWriteTransaction_ACU({
                 source: 'vector_mirror',
                 reason: 'summary_vector_mirror_flush',
+                revisionImpact: 'derived_metadata',
                 isolationKey,
                 writeSet: [{ kind: 'sheet', sheetKey: selected.summaryKey }],
+                baseRevision,
                 workingDataMode: 'none',
             }, async (ctx) => {
                 ctx.assertFresh?.('vector_mirror:before_delta_write');
@@ -53325,6 +53391,207 @@ $CONTENT
         }
         return { rowIds: [], seededFromLiveTable: false };
     }
+    /** 从当前 head 去掉清理范围内的 rowId，保留仍有 chunk 的行。 */
+    function selectRetainedVectorMirrorRows_ACU(head, excludedRowIds) {
+        const excluded = new Set([...excludedRowIds].map((rowId) => String(rowId || '').trim()).filter(Boolean));
+        return [...head]
+            .map(([rowId, chunks]) => ({
+            rowId: String(rowId || '').trim(),
+            chunks: Array.isArray(chunks) ? chunks.map((chunk) => ({ ...chunk })) : [],
+        }))
+            .filter((row) => row.rowId && !excluded.has(row.rowId) && row.chunks.length > 0)
+            .sort((left, right) => left.rowId.localeCompare(right.rowId));
+    }
+    /**
+     * 清表前拍摄 V2 head。reload / 模板临时根之后旧 fingerprint 对不上，不能再 resolve。
+     */
+    async function snapshotSummaryVectorMirrorExcludingRows_ACU(options) {
+        const chat = getChatArray_ACU();
+        const sourceTableKey = String(options.sourceTableKey || findSummaryTable_ACU()?.summaryKey || '').trim();
+        if (!Array.isArray(chat) || !sourceTableKey)
+            return { kind: 'none' };
+        const head = await resolveSummaryVectorMirrorHead_ACU({
+            chat,
+            isolationKey: getCurrentIsolationKey_ACU(),
+            sourceTableKey,
+            loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
+        });
+        if (head.status !== 'ok' || !head.checkpoint || !isSummaryVectorEmbeddingIdentity_ACU(head.checkpoint.embedding)) {
+            return { kind: 'none' };
+        }
+        const rows = selectRetainedVectorMirrorRows_ACU(head.head, options.excludedRowIds);
+        const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
+        return {
+            kind: 'ready',
+            sourceTableKey,
+            embedding: { ...head.checkpoint.embedding },
+            rows,
+            packRefs: head.packRefs.filter((ref) => usedPackHashes.has(ref.packHash)).map((ref) => ({ ...ref })),
+        };
+    }
+    async function stripSummaryVectorMirrorFrames_ACU(chat, isolationKey, sourceTableKey) {
+        await runTableWriteTransaction_ACU({
+            source: 'vector_mirror',
+            reason: 'summary_vector_mirror_strip',
+            revisionImpact: 'derived_metadata',
+            isolationKey,
+            writeSet: [{ kind: 'sheet', sheetKey: sourceTableKey }],
+            workingDataMode: 'none',
+        }, async (ctx) => {
+            ctx.assertFresh?.('vector_mirror_strip:before_write');
+            await ctx.runCommit(async () => {
+                for (const ref of collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey)) {
+                    if (ref.frame.summaryVectorIndexFrame) {
+                        delete ref.frame.summaryVectorIndexFrame;
+                    }
+                }
+                await saveChatToHostStrict_ACU();
+            });
+        });
+    }
+    /**
+     * reload 之后把清表前拍下的剩余行发布到当前 C。
+     * 剩余可以为空，但必须沿用旧 embedding（dimension>0），禁止写出非法空 checkpoint。
+     */
+    async function publishSummaryVectorMirrorRowRemovalSnapshot_ACU(snapshot) {
+        if (!snapshot || snapshot.kind === 'none') {
+            return emptyResult_ACU({ success: true, skipped: true, reason: 'no_mirror' });
+        }
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return emptyResult_ACU({ success: true, skipped: true, reason: 'chat_empty' });
+        }
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const base = locateSummaryVectorMirrorBase_ACU(chat, isolationKey);
+        if (!base || base.frame.checkpoint?.kind !== 'full') {
+            return emptyResult_ACU({ reason: 'unsupported_replay_base', errors: ['表格基底不是 full checkpoint。'] });
+        }
+        if (!isSummaryVectorEmbeddingIdentity_ACU(snapshot.embedding)) {
+            try {
+                await stripSummaryVectorMirrorFrames_ACU(chat, isolationKey, snapshot.sourceTableKey);
+                return emptyResult_ACU({ success: true, skipped: false, reason: 'invalid_embedding_stripped' });
+            }
+            catch (error) {
+                return emptyResult_ACU({
+                    reason: 'rebuild_commit_failed',
+                    errors: [error?.message || String(error || '非法 embedding 时清理镜像失败')],
+                });
+            }
+        }
+        const scope = normalizeSummaryVectorIndexScope_ACU({
+            chatKey: currentChatFileIdentifier_ACU,
+            isolationKey,
+            sourceTableKey: snapshot.sourceTableKey,
+        });
+        const rows = snapshot.rows.filter((row) => row.rowId && row.chunks.length > 0);
+        let manifestPersist;
+        try {
+            manifestPersist = await persistSummaryVectorMirrorManifestPrepared_ACU({
+                chatKey: scope.chatKey,
+                isolationKey: scope.isolationKey,
+                sourceTableKey: scope.sourceTableKey,
+                rows: {
+                    schema: 'summary_vector_mirror_manifest',
+                    version: 1,
+                    sourceTableKey: snapshot.sourceTableKey,
+                    rows: rows.map((row) => ({ rowId: row.rowId, chunks: row.chunks })),
+                },
+            });
+        }
+        catch (error) {
+            return emptyResult_ACU({
+                reason: 'rebuild_commit_failed',
+                errors: [error?.message || String(error || '剩余行 manifest 上传失败')],
+            });
+        }
+        const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
+        const packRefs = snapshot.packRefs.filter((ref) => (usedPackHashes.has(ref.packHash)
+            && ref.path
+            && Number.isInteger(ref.chunkCount)
+            && ref.chunkCount >= 0
+            && Number.isFinite(ref.byteLength)
+            && ref.byteLength >= 0));
+        const checkpoint = {
+            kind: 'vector_full',
+            createdAt: Date.now(),
+            reason: 'rebuild_repair',
+            sourceTableKey: snapshot.sourceTableKey,
+            tableCheckpointFingerprint: getTableDataFingerprint_ACU(base.frame.checkpoint.data),
+            embedding: snapshot.embedding,
+            rowCount: rows.length,
+            vectorRevision: computeSummaryVectorMirrorCheckpointRevision_ACU(rows),
+            manifestRef: manifestPersist.ref,
+            packRefs,
+        };
+        const snapshots = chat.map((message) => ({
+            message,
+            existed: !!message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
+            value: message?.TavernDB_ACU_IsolatedData,
+        }));
+        try {
+            await runTableWriteTransaction_ACU({
+                source: 'vector_mirror',
+                reason: 'summary_vector_mirror_row_removal',
+                revisionImpact: 'derived_metadata',
+                isolationKey,
+                writeSet: [{ kind: 'sheet', sheetKey: snapshot.sourceTableKey }],
+                workingDataMode: 'none',
+            }, async (ctx) => {
+                ctx.assertFresh?.('vector_mirror_row_removal:before_write');
+                await ctx.runCommit(async () => {
+                    for (const ref of collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey)) {
+                        if (ref.frame.summaryVectorIndexFrame) {
+                            delete ref.frame.summaryVectorIndexFrame;
+                        }
+                    }
+                    const tagData = chat[base.messageIndex]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                    if (!isV2TagData_ACU(tagData))
+                        throw new Error('发布剩余交火索引失败：C 层不是 V2 frame。');
+                    const frame = tagData.storageFrame;
+                    const mirror = {
+                        version: 3,
+                        sourceTableKey: snapshot.sourceTableKey,
+                        checkpoint,
+                        logEntries: [],
+                    };
+                    frame.summaryVectorIndexFrame = mirror;
+                    const violation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, 'publishSummaryVectorMirrorRowRemoval');
+                    if (violation)
+                        throw new Error(violation);
+                    await saveChatToHostStrict_ACU();
+                });
+            });
+        }
+        catch (error) {
+            for (const item of snapshots) {
+                if (!item.message)
+                    continue;
+                if (item.existed)
+                    item.message.TavernDB_ACU_IsolatedData = item.value;
+                else
+                    delete item.message.TavernDB_ACU_IsolatedData;
+            }
+            return emptyResult_ACU({
+                reason: 'rebuild_commit_failed',
+                errors: [error?.message || String(error || '剩余行镜像落盘失败')],
+            });
+        }
+        try {
+            await finalizeSummaryVectorMirrorFiles_ACU([manifestPersist.file]);
+        }
+        catch (error) {
+            logWarn_ACU('[向量镜像] 剩余行镜像已写入聊天，registry published 失败:', error?.message || error);
+        }
+        logDebug_ACU(`[向量镜像] 清楼层后已按原 head 发布剩余 ${rows.length} 行，未按空表重建。`);
+        return {
+            success: true,
+            skipped: false,
+            indexedRowCount: rows.length,
+            skippedRowCount: 0,
+            chunkCount: rows.reduce((sum, row) => sum + row.chunks.length, 0),
+            errors: [],
+        };
+    }
     function frameHasUsableVectorMirror_ACU(tagData) {
         const checkpoint = tagData?.storageFrame?.summaryVectorIndexFrame?.checkpoint;
         return checkpoint?.kind === 'vector_full' && Number(checkpoint.rowCount) > 0;
@@ -53370,11 +53637,12 @@ $CONTENT
         if (!validation.valid) {
             return emptyResult_ACU({ reason: 'summary_vector_index_config_invalid', errors: validation.errors });
         }
-        const embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
+        let embedding = buildCurrentSummaryVectorEmbeddingIdentity_ACU();
         const prepared = buildPreparedRows_ACU(selected.table, selected.summaryKey);
         if (prepared.error) {
             return emptyResult_ACU({ reason: 'prepared_rows_invalid', errors: [prepared.error] });
         }
+        const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'sheet', sheetKey: selected.summaryKey }], { isolationKey });
         const source = selectRebuildSourceRowIds_ACU({
             checkpointRowIds: inspect.rowIds,
             preparedRowIds: prepared.rows.map((row) => row.rowId),
@@ -53417,29 +53685,36 @@ $CONTENT
                 sentenceCount: config.summaryChunkSentenceCount,
                 chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
             });
-            texts.forEach((text) => chunkSources.push({ rowId, text, vectorSourceHash: row.vectorSourceHash }));
+            texts.forEach((text) => chunkSources.push({ rowId, rowKey: rowId, text, vectorSourceHash: row.vectorSourceHash }));
         }
         let embeddings = [];
         if (chunkSources.length > 0) {
             try {
-                const results = await createEmbeddings_ACU({
-                    endpoint: config.embeddingEndpoint,
-                    apiKey: config.embeddingApiKey,
-                    model: config.embeddingModel,
-                    input: chunkSources.map((item) => item.text),
+                const plan = planEmbeddingBatches_ACU(chunkSources, {
+                    maxRowsPerRequest: config.summaryIndexArchiveMaxConcurrency,
+                    maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
                 });
-                embeddings = chunkSources.map((_item, index) => {
-                    const hit = results.find((item) => item.index === index);
-                    return Array.isArray(hit?.embedding) ? hit.embedding : [];
+                const executed = await executeEmbeddingBatchPlan_ACU(plan, {
+                    maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
+                    requestEmbeddings: (input) => createEmbeddings_ACU({
+                        endpoint: config.embeddingEndpoint,
+                        apiKey: config.embeddingApiKey,
+                        model: config.embeddingModel,
+                        input,
+                    }),
                 });
+                embeddings = executed.embeddings;
                 if (embeddings.some((vector) => vector.length === 0)) {
                     return emptyResult_ACU({ reason: 'embedding_incomplete', errors: ['重建 embedding 结果不完整'] });
                 }
                 embedding.dimension = embeddings[0].length;
             }
             catch (error) {
+                const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? error.cause : error;
+                const credential = isVectorEmbeddingError_ACU(embeddingError)
+                    && (Number(embeddingError.httpStatus) === 401 || Number(embeddingError.httpStatus) === 403);
                 return emptyResult_ACU({
-                    reason: isVectorEmbeddingError_ACU(error) ? 'embedding_failed' : 'embedding_failed',
+                    reason: credential ? 'embedding_unauthorized' : 'embedding_failed',
                     errors: [error?.message || String(error || 'embedding 失败')],
                 });
             }
@@ -53486,6 +53761,33 @@ $CONTENT
             rowId,
             chunks: newRefsByRow.get(rowId) || [],
         })).filter((row) => row.chunks.length > 0);
+        if (!isSummaryVectorEmbeddingIdentity_ACU(embedding)) {
+            const existingHead = await resolveSummaryVectorMirrorHead_ACU({
+                chat,
+                isolationKey,
+                sourceTableKey: selected.summaryKey,
+                loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
+            });
+            if (existingHead.status === 'ok' && existingHead.checkpoint && isSummaryVectorEmbeddingIdentity_ACU(existingHead.checkpoint.embedding)) {
+                embedding = { ...existingHead.checkpoint.embedding };
+            }
+            else {
+                try {
+                    await stripSummaryVectorMirrorFrames_ACU(chat, isolationKey, selected.summaryKey);
+                    return emptyResult_ACU({
+                        success: true,
+                        skipped: false,
+                        reason: 'empty_rebuild_stripped_illegal_embedding',
+                    });
+                }
+                catch (error) {
+                    return emptyResult_ACU({
+                        reason: 'rebuild_commit_failed',
+                        errors: [error?.message || String(error || '空重建清理非法 embedding 失败')],
+                    });
+                }
+            }
+        }
         const manifestPersist = await persistSummaryVectorMirrorManifestPrepared_ACU({
             chatKey: scope.chatKey,
             isolationKey: scope.isolationKey,
@@ -53530,8 +53832,10 @@ $CONTENT
             await runTableWriteTransaction_ACU({
                 source: 'vector_mirror',
                 reason: `summary_vector_mirror_rebuild:${options.reason}`,
+                revisionImpact: 'derived_metadata',
                 isolationKey,
                 writeSet: [{ kind: 'sheet', sheetKey: selected.summaryKey }],
+                baseRevision,
                 workingDataMode: 'none',
             }, async (ctx) => {
                 ctx.assertFresh?.('vector_mirror_rebuild:before_write');
@@ -53555,6 +53859,9 @@ $CONTENT
                     };
                     frame.summaryVectorIndexFrame = mirror;
                     clearLegacyVectorFields_ACU(chat);
+                    const violation = assertSummaryVectorMirrorFrameInvariantsV2_ACU(chat, isolationKey, 'rebuildSummaryVectorMirror');
+                    if (violation)
+                        throw new Error(violation);
                     await saveChatToHostStrict_ACU();
                 });
             });
@@ -54068,7 +54375,7 @@ $CONTENT
                 return { success: true, skipped: true, reason: 'bridge_active' };
             }
             const result = await flushSummaryVectorMirrorNow_ACU({
-                isolationKey: task.isolationKey,
+                isolationKey: getCurrentIsolationKey_ACU(),
                 sourceTableKey: task.sourceTableKey,
                 expectedFlushScopeKey: task.scopeKey,
                 expectedFlushGeneration: expectedGeneration,
@@ -91502,7 +91809,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2.4" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.2.5" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -97384,6 +97691,9 @@ $CONTENT
             summaryIndexKeywordMinRows: normalizePositiveInteger_ACU$2(source.summaryIndexKeywordMinRows, defaults.summaryIndexKeywordMinRows || 100),
             summaryChunkSentenceCount: normalizePositiveInteger_ACU$2(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
             summaryIndexChunkChronicleBySentence: source.summaryIndexChunkChronicleBySentence === true,
+            summaryIndexArchiveMaxConcurrency: normalizePositiveInteger_ACU$2(source.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30),
+            summaryIndexArchiveMaxInputChars: normalizePositiveInteger_ACU$2(source.summaryIndexArchiveMaxInputChars, Number(defaults.summaryIndexArchiveMaxInputChars) || 24000),
+            summaryIndexArchiveEmbeddingConcurrency: normalizePositiveInteger_ACU$2(source.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3),
             summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
             archiveWithoutSummary: source.archiveWithoutSummary === true,
             summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, defaults.summaryPromptGroup || []),
@@ -97541,6 +97851,7 @@ $CONTENT
         const recallCandidateLimit = Math.max(topK, normalizePositiveInteger_ACU$2(config.recallCandidateLimit, defaults.recallCandidateLimit || topK));
         const summaryChunkSentenceCount = normalizePositiveInteger_ACU$2(config.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount || 2);
         const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30);
+        const summaryIndexArchiveMaxInputChars = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveMaxInputChars, Number(defaults.summaryIndexArchiveMaxInputChars) || 24000);
         // T9：归档 embedding 批次的有界并发度（同时进行中的批次上限）。独立于 summaryIndexArchiveMaxConcurrency（批大小）。
         const summaryIndexArchiveEmbeddingConcurrency = normalizePositiveInteger_ACU$2(config.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3);
         const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU$2(config.summaryIndexKeywordMinRows, Number(defaults.summaryIndexKeywordMinRows) || 100);
@@ -97559,6 +97870,7 @@ $CONTENT
             summaryIndexCandidateLimit: recallCandidateLimit,
             summaryIndexChunkSentenceCount: summaryChunkSentenceCount,
             summaryIndexArchiveMaxConcurrency,
+            summaryIndexArchiveMaxInputChars,
             summaryIndexArchiveEmbeddingConcurrency,
             summaryIndexKeywordMinRows,
             summaryIndexRecentFixedInjectCount: recentFixedInjectCount,
@@ -98235,7 +98547,10 @@ $CONTENT
                 fillMissing_ACU('archiveTriggerCount', defaultVectorMemoryConfig_ACU.archiveTriggerCount);
                 fillMissing_ACU('archiveBatchSize', defaultVectorMemoryConfig_ACU.archiveBatchSize);
                 fillMissing_ACU('archiveMaxConcurrency', defaultVectorMemoryConfig_ACU.archiveMaxConcurrency);
+                // 每请求行数、字符预算和在飞请求数共同限定 embedding 成本。
                 fillMissing_ACU('summaryIndexArchiveMaxConcurrency', defaultVectorMemoryConfig_ACU.summaryIndexArchiveMaxConcurrency || 30);
+                fillMissing_ACU('summaryIndexArchiveMaxInputChars', defaultVectorMemoryConfig_ACU.summaryIndexArchiveMaxInputChars || 24000);
+                fillMissing_ACU('summaryIndexArchiveEmbeddingConcurrency', defaultVectorMemoryConfig_ACU.summaryIndexArchiveEmbeddingConcurrency || 3);
                 // [spv3.5.21] 一次性覆盖：topK / recallCandidateLimit / summaryIndexKeywordMinRows 强制更新到新默认值
                 const forceOverride_ACU = (key, newValue, legacyValues) => {
                     const current = vectorConfig[key];
@@ -108008,6 +108323,22 @@ $CONTENT
         }
         return result;
     }
+    async function snapshotSummaryVectorMirrorExcludingRowsNow_ACU(options) {
+        return snapshotSummaryVectorMirrorExcludingRows_ACU(options);
+    }
+    async function publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot) {
+        const result = await publishSummaryVectorMirrorRowRemovalSnapshot_ACU(snapshot);
+        if (result.success && !result.skipped) {
+            clearSummaryVectorIndexCredentialCooldowns_ACU();
+            try {
+                await updateReadableLorebookEntry_ACU(true);
+            }
+            catch {
+                // 镜像已经 durable publish；世界书刷新失败不应把已完成发布报告为失败。
+            }
+        }
+        return result;
+    }
     /**
      * 填表完成后：功能开启且当前 isolation 没有任何 V2 向量镜像时，立刻 initial 重建。
      * 不依赖 modifiedKeys 是否包含纪要表。失败只返回结果，不抛给填表主流程。
@@ -109988,19 +110319,29 @@ $CONTENT
             return [{ sourceTableKey, removedRowIds }];
         });
     }
-    async function removeManualRefillSummaryVectors_ACU(cleanups) {
-        if (!cleanups.some((cleanup) => cleanup.removedRowIds.length > 0))
-            return;
+    function collectManualRefillExcludedSummaryRowIds_ACU(cleanups) {
+        return [...new Set(cleanups.flatMap((cleanup) => cleanup.removedRowIds.map((rowId) => String(rowId || '').trim()).filter(Boolean)))].sort();
+    }
+    async function snapshotManualRefillSummaryVectors_ACU(cleanups) {
+        const excludedRowIds = collectManualRefillExcludedSummaryRowIds_ACU(cleanups);
+        if (excludedRowIds.length === 0)
+            return null;
         const worldbook = getCurrentWorldbookConfig_ACU();
         if (worldbook.summaryVectorIndexModeEnabled !== true)
-            return;
+            return null;
         if (worldbook.summaryVectorMirrorEnabled === false)
+            return null;
+        return snapshotSummaryVectorMirrorExcludingRowsNow_ACU({
+            excludedRowIds,
+            sourceTableKey: cleanups[0]?.sourceTableKey,
+        });
+    }
+    async function publishManualRefillSummaryVectors_ACU(snapshot) {
+        if (!snapshot)
             return;
-        // reload 之后按当前纪要表发布 V2 vector_full。rebuild_repair 复用仍在表内的 head refs，
-        // 不重嵌保留行；被清掉的 rowId 不在 prepared 中，快照不再包含它们。
-        const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
+        const result = await publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(snapshot);
         if (!result.success) {
-            throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引重建失败。');
+            throw new Error(result.errors.join('; ') || result.reason || '纪要表清理后交火索引发布失败。');
         }
     }
     function findModifiedSummaryTableKey_ACU(tableData, modifiedKeys) {
@@ -114090,9 +114431,12 @@ $CONTENT
                     }
                 }
                 let summaryVectorCleanups = [];
+                let summaryVectorRemovalSnapshot = null;
                 try {
                     summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
                     manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
+                    // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
+                    summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
                     // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
                     refillCleanupStarted = true;
                     await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
@@ -114137,14 +114481,14 @@ $CONTENT
                     const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                     return { success: false, error: failureError };
                 }
-                // V2 交火快照只能按当前纪要表重建。table entry 已删，无法再挂 row_remove；
-                // reload 之后 currentJsonTableData 才是清楼层后的表。rebuild_repair 复用保留行 embedding。
+                // 按清表前拍下的 head 发布剩余行。禁止按 reload 后的空模板表重建，
+                // 否则会写出 dimension=0 的非法 vector_full，后续 persist 在 #0 失败。
                 try {
-                    await removeManualRefillSummaryVectors_ACU(summaryVectorCleanups);
+                    await publishManualRefillSummaryVectors_ACU(summaryVectorRemovalSnapshot);
                 }
                 catch (error) {
-                    logError_ACU('[Manual Refill] 清理后重建交火索引失败:', error);
-                    return await failManualRefillSession(error?.message || '手动重填清理后重建交火索引失败。');
+                    logError_ACU('[Manual Refill] 清理后发布交火索引失败:', error);
+                    return await failManualRefillSession(error?.message || '手动重填清理后发布交火索引失败。');
                 }
                 // 跨根 staging 的 run 上下文在本任务全部前置改写（清理、模板临时根、reload）
                 // 之后建立：此时冻结的原 full 根指纹才等于边界汇合时 live frame 应有的指纹，
@@ -181698,6 +182042,8 @@ Expected function or array of functions, received type ${typeof value}.`
             summaryChunkSentenceCount: defaults.summaryChunkSentenceCount,
             summaryIndexChunkChronicleBySentence: defaults.summaryIndexChunkChronicleBySentence === true,
             summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
+            summaryIndexArchiveMaxInputChars: defaults.summaryIndexArchiveMaxInputChars ?? 24000,
+            summaryIndexArchiveEmbeddingConcurrency: defaults.summaryIndexArchiveEmbeddingConcurrency ?? 3,
             summaryIndexRollingDeltaEnabled: defaults.summaryIndexRollingDeltaEnabled === true,
             summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
             summaryIndexV2WriteEnabled: defaults.summaryIndexV2WriteEnabled === true,
@@ -181786,6 +182132,8 @@ Expected function or array of functions, received type ${typeof value}.`
             form.summaryChunkSentenceCount = config.summaryChunkSentenceCount;
             form.summaryIndexChunkChronicleBySentence = config.summaryIndexChunkChronicleBySentence === true;
             form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
+            form.summaryIndexArchiveMaxInputChars = config.summaryIndexArchiveMaxInputChars;
+            form.summaryIndexArchiveEmbeddingConcurrency = config.summaryIndexArchiveEmbeddingConcurrency;
             form.summaryIndexRollingDeltaEnabled = config.summaryIndexRollingDeltaEnabled === true;
             form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
             form.summaryIndexV2WriteEnabled = config.summaryIndexV2WriteEnabled === true;
@@ -182316,8 +182664,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-84c42d53] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-84c42d53] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-84c42d53] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-84c42d53] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-84c42d53] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 18px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-84c42d53]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-84c42d53] {\r\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-84c42d53] {\r\n  width: 100%;\r\n  margin: 0 0 2px;\r\n  padding: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-84c42d53] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-84c42d53] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  color: var(--acu-text-3);\r\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-84c42d53] {\r\n  flex: 1 1 auto;\r\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-84c42d53] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-84c42d53] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-84c42d53] {\r\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-84c42d53] {\r\n  width: 100%;\r\n  min-height: 60px;\r\n  padding: 6px 8px;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\r\n  border-radius: 4px;\r\n  background: var(--acu-bg-2, transparent);\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.5;\r\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-84c42d53] {\r\n  width: 100%;\r\n  min-height: 72px;\r\n  padding: 6px 8px;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\r\n  border-radius: 4px;\r\n  background: var(--acu-bg-2, transparent);\r\n  color: var(--acu-text-1);\r\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\r\n  font-size: var(--acu-font-size-small, 11px);\r\n  line-height: 1.5;\r\n  resize: vertical;\n}\r\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-84c42d53");
-    var VectorIndexPage_vue_vue_type_style_index_0_scoped_84c42d53_lang = null;
+    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-91f12786] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-91f12786] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-91f12786] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-91f12786] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-91f12786] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-91f12786]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-91f12786] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-91f12786] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-91f12786] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-91f12786] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-91f12786] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-91f12786] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-91f12786] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-91f12786] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-91f12786] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-91f12786] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-91f12786");
+    var VectorIndexPage_vue_vue_type_style_index_0_scoped_91f12786_lang = null;
 
     const _hoisted_1$h = { class: "acu-v2-vector-index-page" };
     const _hoisted_2$g = { class: "acu-v2-vector-index-page__panel-stack" };
@@ -182350,14 +182698,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["variant"])]),
 				default: withCtx(() => [
 					createVNode($setup["AcuStatsList"], { items: $setup.vector.statusStatsItems.value }, null, 8, ["items"]),
-					_cache[33] || (_cache[33] = createBaseVNode(
+					_cache[35] || (_cache[35] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-vector-index-page__hint" },
 						" 发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → \"概览 + 纪要正文\"向量与 BM25 混合召回 → 可选 Rerank（按纪要正文分批精排，候选不多于 TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。 ",
 						-1
 						/* CACHED */
 					)),
-					_cache[34] || (_cache[34] = createBaseVNode(
+					_cache[36] || (_cache[36] = createBaseVNode(
 						"div",
 						{
 							class: "acu-v2-vector-index-page__maintenance-spacer",
@@ -182373,7 +182721,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
 							onClick: $setup.vector.buildNow
 						}, {
-							default: withCtx(() => [_cache[28] || (_cache[28] = createBaseVNode(
+							default: withCtx(() => [_cache[30] || (_cache[30] = createBaseVNode(
 								"i",
 								{ class: "fa-solid fa-brain" },
 								null,
@@ -182386,7 +182734,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)]),
 							_: 1
 						}, 8, ["disabled", "onClick"]),
-						_cache[32] || (_cache[32] = createBaseVNode(
+						_cache[34] || (_cache[34] = createBaseVNode(
 							"p",
 							{ class: "acu-v2-vector-index-page__hint" },
 							" 检测到旧向量方案时会提示「向量方案已优化，需要重建」。链冲突与 checkpoint 指纹不匹配会自动修复，不弹确认。 ",
@@ -182398,7 +182746,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.vector.migrateLegacyIndex
 						}, {
-							default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
+							default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
 								" 非破坏迁移旧索引 ",
 								-1
 								/* CACHED */
@@ -182409,7 +182757,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.vector.clearIndexCache
 						}, {
-							default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
+							default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
 								" 清空临时缓存 ",
 								-1
 								/* CACHED */
@@ -182421,7 +182769,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: $setup.vector.maintenanceBusy.value || $setup.vector.buildBusy.value,
 							onClick: $setup.onDeleteCurrentIndex
 						}, {
-							default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+							default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
 								" 删除当前索引 ",
 								-1
 								/* CACHED */
@@ -182504,7 +182852,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					},
 					[
 						createBaseVNode("fieldset", _hoisted_6$a, [
-							_cache[35] || (_cache[35] = createBaseVNode(
+							_cache[37] || (_cache[37] = createBaseVNode(
 								"legend",
 								null,
 								"Embedding",
@@ -182540,7 +182888,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							})
 						]),
 						createBaseVNode("fieldset", _hoisted_7$8, [
-							_cache[36] || (_cache[36] = createBaseVNode(
+							_cache[38] || (_cache[38] = createBaseVNode(
 								"legend",
 								null,
 								"Rerank",
@@ -182636,7 +182984,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							variant: "primary",
 							"native-type": "submit"
 						}, {
-							default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
+							default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
 								"保存",
 								-1
 								/* CACHED */
@@ -182665,7 +183013,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: 0,
 					kind: "warning"
 				}, {
-					default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
+					default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
 						" 关键词生成提示词为空，发送前会直接用用户输入参与召回；建议载入默认提示词后保存。 ",
 						-1
 						/* CACHED */
@@ -182675,7 +183023,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					variant: "primary",
 					onClick: _cache[12] || (_cache[12] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
-					default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
+					default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
 						"编辑提示词",
 						-1
 						/* CACHED */
@@ -182810,8 +183158,8 @@ Expected function or array of functions, received type ${typeof value}.`
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], {
-							label: "归档批次",
-							hint: "每次处理的行数，影响批量速度。"
+							label: "单请求最多行数",
+							hint: "单个 embedding 请求最多覆盖的纪要行数；与字符预算共同限制请求大小。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								"model-value": $setup.vector.form.summaryIndexArchiveMaxConcurrency,
@@ -182819,6 +183167,32 @@ Expected function or array of functions, received type ${typeof value}.`
 								min: 1,
 								step: 1,
 								onChange: _cache[22] || (_cache[22] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxConcurrency", $event))
+							}, null, 8, ["model-value"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
+							label: "单请求字符预算",
+							hint: "单个 embedding 请求的本地输入字符上限，不等同于服务商 token 限制。单行超出时会单独请求并记录诊断。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								"model-value": $setup.vector.form.summaryIndexArchiveMaxInputChars,
+								type: "number",
+								min: 1,
+								step: 1,
+								onChange: _cache[23] || (_cache[23] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveMaxInputChars", $event))
+							}, null, 8, ["model-value"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
+							label: "同时请求数",
+							hint: "最多同时进行的 embedding HTTP 请求；设为 1 可获得串行兼容行为。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								"model-value": $setup.vector.form.summaryIndexArchiveEmbeddingConcurrency,
+								type: "number",
+								min: 1,
+								step: 1,
+								onChange: _cache[24] || (_cache[24] = ($event) => $setup.vector.setNumberField("summaryIndexArchiveEmbeddingConcurrency", $event))
 							}, null, 8, ["model-value"])]),
 							_: 1
 						}),
@@ -182857,7 +183231,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						default: withCtx(() => [createVNode($setup["AcuToggle"], {
 							"model-value": $setup.vector.form.summaryIndexV2WriteEnabled,
 							label: "允许 V2 快照写入",
-							"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.vector.setBooleanField("summaryIndexV2WriteEnabled", $event))
+							"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.vector.setBooleanField("summaryIndexV2WriteEnabled", $event))
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
@@ -182872,7 +183246,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							rows: "4",
 							spellcheck: "false",
 							placeholder: "每行一个 scope fingerprint",
-							onChange: _cache[24] || (_cache[24] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
+							onChange: _cache[26] || (_cache[26] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
 						}, null, 40, _hoisted_12$7)]),
 						_: 1
 					})) : createCommentVNode("v-if", true)
@@ -182887,11 +183261,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			dirty: $setup.vector.promptDirty.value,
 			message: $setup.vector.message.value,
 			"role-options": $setup.ROLE_OPTIONS,
-			onClose: _cache[25] || (_cache[25] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[27] || (_cache[27] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.vector.savePromptGroup,
 			onReset: $setup.vector.resetPromptGroup,
-			onAdd: _cache[26] || (_cache[26] = ($event) => $setup.vector.addPromptSegment($event)),
-			onDelete: _cache[27] || (_cache[27] = ($event) => $setup.vector.deletePromptSegment($event)),
+			onAdd: _cache[28] || (_cache[28] = ($event) => $setup.vector.addPromptSegment($event)),
+			onDelete: _cache[29] || (_cache[29] = ($event) => $setup.vector.deletePromptSegment($event)),
 			onUpdate: $setup.onPromptUpdate
 		}, null, 8, [
 			"is-open",
@@ -182903,7 +183277,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-84c42d53"]]);
+    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-91f12786"]]);
 
     const dataMgmtCopy = {
         panels: {

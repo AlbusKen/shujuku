@@ -38,12 +38,9 @@ import { useToastStore } from '../stores/toast-store';
 
 type MessageKind = 'info' | 'success' | 'warning' | 'error';
 type BadgeVariant = 'neutral' | 'accent' | 'success' | 'warning' | 'danger';
-type VectorMemoryConfigWithSummaryConcurrency = VectorMemoryConfig_ACU & {
-  summaryIndexArchiveMaxConcurrency?: number;
-};
 
-function getDefaultVectorMemoryConfigForV2(): VectorMemoryConfigWithSummaryConcurrency {
-  return defaultVectorMemoryConfig_ACU as VectorMemoryConfigWithSummaryConcurrency;
+function getDefaultVectorMemoryConfigForV2(): VectorMemoryConfig_ACU {
+  return defaultVectorMemoryConfig_ACU as VectorMemoryConfig_ACU;
 }
 
 function getDefaultRecentFixedInjectCount(): number {
@@ -81,6 +78,8 @@ export interface VectorIndexForm {
   summaryChunkSentenceCount: number;
   summaryIndexChunkChronicleBySentence: boolean;
   summaryIndexArchiveMaxConcurrency: number;
+  summaryIndexArchiveMaxInputChars: number;
+  summaryIndexArchiveEmbeddingConcurrency: number;
   summaryIndexRollingDeltaEnabled: boolean;
   summaryIndexRollingDeltaFoldThreshold: number;
   summaryIndexV2WriteEnabled: boolean;
@@ -148,6 +147,8 @@ function createEmptyForm(): VectorIndexForm {
     summaryChunkSentenceCount: defaults.summaryChunkSentenceCount,
     summaryIndexChunkChronicleBySentence: (defaults as any).summaryIndexChunkChronicleBySentence === true,
     summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
+    summaryIndexArchiveMaxInputChars: defaults.summaryIndexArchiveMaxInputChars ?? 24000,
+    summaryIndexArchiveEmbeddingConcurrency: defaults.summaryIndexArchiveEmbeddingConcurrency ?? 3,
     summaryIndexRollingDeltaEnabled: defaults.summaryIndexRollingDeltaEnabled === true,
     summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
     summaryIndexV2WriteEnabled: defaults.summaryIndexV2WriteEnabled === true,
@@ -232,7 +233,7 @@ export function useVectorIndexConfig() {
   }
 
   function readFromConfig(): void {
-    const config = getCurrentVectorMemoryConfig_ACU() as VectorMemoryConfigWithSummaryConcurrency;
+    const config = getCurrentVectorMemoryConfig_ACU();
     form.embeddingEndpoint = config.embeddingEndpoint || '';
     form.embeddingModel = config.embeddingModel || '';
     form.embeddingApiKey = config.embeddingApiKey || '';
@@ -248,6 +249,8 @@ export function useVectorIndexConfig() {
     form.summaryChunkSentenceCount = config.summaryChunkSentenceCount;
     form.summaryIndexChunkChronicleBySentence = config.summaryIndexChunkChronicleBySentence === true;
     form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
+    form.summaryIndexArchiveMaxInputChars = config.summaryIndexArchiveMaxInputChars;
+    form.summaryIndexArchiveEmbeddingConcurrency = config.summaryIndexArchiveEmbeddingConcurrency;
     form.summaryIndexRollingDeltaEnabled = config.summaryIndexRollingDeltaEnabled === true;
     form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
     form.summaryIndexV2WriteEnabled = config.summaryIndexV2WriteEnabled === true;
@@ -295,7 +298,8 @@ export function useVectorIndexConfig() {
   function setNumberField<
     K extends 'summaryIndexKeywordMinRows' | 'topK' | 'recallCandidateLimit'
       | 'recentFixedInjectCount' | 'summaryChunkSentenceCount'
-      | 'summaryIndexArchiveMaxConcurrency' | 'keywordContextPairCount'
+      | 'summaryIndexArchiveMaxConcurrency' | 'summaryIndexArchiveMaxInputChars'
+      | 'summaryIndexArchiveEmbeddingConcurrency' | 'keywordContextPairCount'
       | 'keywordGenerationMaxAttempts'
       | 'summaryIndexRollingDeltaFoldThreshold',
   >(key: K, raw: number | string): void {

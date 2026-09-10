@@ -7,6 +7,12 @@
  */
 
 import { createEmbeddings_ACU, isVectorEmbeddingError_ACU } from '../../data/gateways/vector-embedding-gateway';
+import {
+    executeEmbeddingBatchPlan_ACU,
+    planEmbeddingBatches_ACU,
+} from './summary-vector-embedding-batches';
+import { EmbeddingBatchExecutionError_ACU } from './summary-vector-embedding-batches';
+
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
@@ -15,7 +21,7 @@ import {
     tableEntryTouchesSheetV2_ACU,
     type SummarySheetRowIdTimelineEntryV2_ACU,
 } from '../table/summary-sheet-rowid-timeline';
-import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
+import { captureTableRuntimeRevisionForWriteSet_ACU, runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { isV2TagData_ACU } from '../table/storage-strategy-resolver';
 import type {
     SummaryVectorChunkRef_ACU,
@@ -326,6 +332,10 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
             retryability: 'terminal',
         });
     }
+    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
+        [{ kind: 'sheet', sheetKey: selected.summaryKey }],
+        { isolationKey },
+    );
     const rowsById = new Map(prepared.rows.map((row) => [row.rowId, row]));
     const addedRowIds = [...new Set(plans.flatMap((plan) => plan.added))];
     const missingAdded = addedRowIds.filter((rowId) => !rowsById.has(rowId));
@@ -333,7 +343,7 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
         logWarn_ACU(`[向量镜像] 新增 rowId 在实时纪要表中找不到，本轮跳过这些行：${missingAdded.join(',')}`);
     }
 
-    const chunkSources: Array<{ rowId: string; text: string; vectorSourceHash: string }> = [];
+    const chunkSources: Array<{ rowId: string; rowKey: string; text: string; vectorSourceHash: string }> = [];
     for (const rowId of addedRowIds) {
         const row = rowsById.get(rowId);
         if (!row) continue;
@@ -342,23 +352,27 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
             chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
         });
         texts.forEach((text) => {
-            chunkSources.push({ rowId, text, vectorSourceHash: row.vectorSourceHash });
+            chunkSources.push({ rowId, rowKey: rowId, text, vectorSourceHash: row.vectorSourceHash });
         });
     }
 
     let embeddings: number[][] = [];
     if (chunkSources.length > 0) {
         try {
-            const results = await createEmbeddings_ACU({
-                endpoint: config.embeddingEndpoint,
-                apiKey: config.embeddingApiKey,
-                model: config.embeddingModel,
-                input: chunkSources.map((item) => item.text),
+            const plan = planEmbeddingBatches_ACU(chunkSources, {
+                maxRowsPerRequest: config.summaryIndexArchiveMaxConcurrency,
+                maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
             });
-            embeddings = chunkSources.map((_item, index) => {
-                const hit = results.find((item) => item.index === index);
-                return Array.isArray(hit?.embedding) ? hit!.embedding : [];
+            const executed = await executeEmbeddingBatchPlan_ACU(plan, {
+                maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
+                requestEmbeddings: (input) => createEmbeddings_ACU({
+                    endpoint: config.embeddingEndpoint,
+                    apiKey: config.embeddingApiKey,
+                    model: config.embeddingModel,
+                    input,
+                }),
             });
+            embeddings = executed.embeddings;
             if (embeddings.some((vector) => vector.length === 0)) {
                 return emptyResult_ACU({
                     reason: 'embedding_incomplete',
@@ -377,9 +391,10 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
             }
             embedding.dimension = actualDimension;
         } catch (error: any) {
+            const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? (error as any).cause : error;
             const message = error?.message || String(error || 'embedding 失败');
-            const credential = isVectorEmbeddingError_ACU(error)
-                && (Number((error as any).httpStatus) === 401 || Number((error as any).httpStatus) === 403);
+            const credential = isVectorEmbeddingError_ACU(embeddingError)
+                && (Number((embeddingError as any).httpStatus) === 401 || Number((embeddingError as any).httpStatus) === 403);
             return emptyResult_ACU({
                 reason: credential ? 'embedding_unauthorized' : 'embedding_failed',
                 errors: [message],
@@ -428,8 +443,10 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
         await runTableWriteTransaction_ACU({
             source: 'vector_mirror',
             reason: 'summary_vector_mirror_flush',
+            revisionImpact: 'derived_metadata',
             isolationKey,
             writeSet: [{ kind: 'sheet', sheetKey: selected.summaryKey }],
+            baseRevision,
             workingDataMode: 'none',
         }, async (ctx) => {
             ctx.assertFresh?.('vector_mirror:before_delta_write');

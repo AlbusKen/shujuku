@@ -254,6 +254,7 @@ export function captureTableRuntimeRevisionForWriteSet_ACU(
 
 export type TableWriteMaintenanceMode_ACU = 'shared' | 'exclusive';
 export type TableWriteTransactionSource_ACU = TableMutationSourceV2_ACU | 'system_cleanup' | 'system_reload' | 'vector_mirror';
+export type TableWriteRevisionImpact_ACU = 'source_table' | 'derived_metadata';
 
 export function resolveTableWriteTargetMessageIndex_ACU(
   chat: any[] | null | undefined,
@@ -277,6 +278,7 @@ export interface TableWriteTransactionContext_ACU {
   readonly chatKey: string;
   readonly isolationKey: string;
   readonly source: TableWriteTransactionSource_ACU;
+  readonly revisionImpact: TableWriteRevisionImpact_ACU;
   readonly baseRevision: string | null;
   readonly writeSet: TableWriteConflictUnitV2_ACU[];
   assertFresh?(reason?: string): void;
@@ -289,6 +291,11 @@ export interface RunTableWriteTransactionOptions_ACU {
   chatKey?: string;
   isolationKey?: string;
   writeSet: TableWriteConflictUnitV2_ACU[];
+  /**
+   * source_table advances the runtime baseline observed by assertFresh.
+   * derived_metadata is restricted to artifacts anchored to a table but not table data.
+   */
+  revisionImpact?: TableWriteRevisionImpact_ACU;
   maintenanceMode?: TableWriteMaintenanceMode_ACU;
   baseRevision?: string | null;
   initialData?: TableDataObject_ACU | null;
@@ -420,6 +427,7 @@ export async function runTableWriteTransaction_ACU<T>(
   const chatKey = normalizeScopePart_ACU(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
   const isolationKey = normalizeScopePart_ACU(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
   const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
+  const revisionImpact: TableWriteRevisionImpact_ACU = options.revisionImpact === 'derived_metadata' ? 'derived_metadata' : 'source_table';
   const maintenanceMode = options.maintenanceMode || 'shared';
   const releases = await acquireTransactionLocks_ACU({ chatKey, isolationKey, writeSet, maintenanceMode });
   const transactionId = generateTransactionId_ACU();
@@ -435,6 +443,7 @@ export async function runTableWriteTransaction_ACU<T>(
       chatKey,
       isolationKey,
       source: options.source,
+      revisionImpact,
       baseRevision,
       writeSet,
       assertFresh: (reason?: string): void => {
@@ -489,7 +498,9 @@ export async function runTableWriteTransaction_ACU<T>(
         try {
           const result = await commitTask();
           const resolvedRevisionWriteSet = typeof revisionWriteSet === 'function' ? revisionWriteSet(result) : revisionWriteSet;
-          bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+          if (revisionImpact === 'source_table') {
+            bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+          }
           effectiveBaseRevision = captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
           return result;
         } finally {

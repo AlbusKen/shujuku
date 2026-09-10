@@ -34,6 +34,8 @@ function createConfig() {
     archiveBatchSize: 3,
     archiveMaxConcurrency: 30,
     summaryIndexArchiveMaxConcurrency: 30,
+    summaryIndexArchiveMaxInputChars: 24000,
+    summaryIndexArchiveEmbeddingConcurrency: 3,
     topK: 10,
     minScore: 0.4,
     embeddingEndpoint: 'https://emb',
@@ -326,7 +328,9 @@ describe('VectorIndexPage', () => {
     expect(text).toContain('召回参数');
     expect(text).toContain('归档与分块');
     expect(text).toContain('触发阈值');
-    expect(text).toContain('归档批次');
+    expect(text).toContain('单请求最多行数');
+    expect(text).toContain('单请求字符预算');
+    expect(text).toContain('同时请求数');
     expect(text).not.toContain('滚动增量写入暂不可用');
     expect(text).not.toContain('折叠阈值 K');
     expect(text).not.toContain('V2 写入闸门');
@@ -566,11 +570,11 @@ describe('VectorIndexPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('每批归档行数写入交火索引实际读取的 summaryIndexArchiveMaxConcurrency 字段', async () => {
+  it('批处理上限写入交火索引实际读取的三个字段', async () => {
     const { mount, config, saveSettings } = await mountVectorIndexPage({ devOptions: { vectorIndexAdvanced: true } });
 
     const row = Array.from(document.querySelectorAll('.acu-v2-vector-index-page .acu-form-row'))
-      .find(el => /归档批次/.test(el.textContent || ''));
+      .find(el => /单请求最多行数/.test(el.textContent || ''));
     const input = row?.querySelector('input') as HTMLInputElement | null;
     expect(input).not.toBeNull();
 
@@ -581,6 +585,24 @@ describe('VectorIndexPage', () => {
     expect(config.summaryIndexArchiveMaxConcurrency).toBe(42);
     expect(config.archiveMaxConcurrency).toBe(30);
     expect(saveSettings).toHaveBeenCalled();
+
+    const charRow = Array.from(document.querySelectorAll('.acu-v2-vector-index-page .acu-form-row'))
+      .find(el => /单请求字符预算/.test(el.textContent || ''));
+    const charInput = charRow?.querySelector('input') as HTMLInputElement | null;
+    expect(charInput).not.toBeNull();
+    charInput!.value = '1234';
+    charInput!.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const concurrencyRow = Array.from(document.querySelectorAll('.acu-v2-vector-index-page .acu-form-row'))
+      .find(el => /同时请求数/.test(el.textContent || ''));
+    const concurrencyInput = concurrencyRow?.querySelector('input') as HTMLInputElement | null;
+    expect(concurrencyInput).not.toBeNull();
+    concurrencyInput!.value = '2';
+    concurrencyInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(config.summaryIndexArchiveMaxInputChars).toBe(1234);
+    expect(config.summaryIndexArchiveEmbeddingConcurrency).toBe(2);
 
     mount.__resetAcuV2MountForTests();
   });

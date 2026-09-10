@@ -271,6 +271,52 @@ describe('table-write-transaction', () => {
     })).rejects.toThrow(/runtime revision conflict/i);
   });
 
+  it('derived_metadata 提交不使同表 source_table 基线陈旧', async () => {
+    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(sheetWrite('sheet_0'));
+
+    await runTableWriteTransaction_ACU({
+      source: 'vector_mirror',
+      reason: 'mirror metadata commit',
+      revisionImpact: 'derived_metadata',
+      writeSet: sheetWrite('sheet_0'),
+    }, async (ctx) => {
+      expect(ctx.revisionImpact).toBe('derived_metadata');
+      await ctx.runCommit(async () => 'ok');
+    });
+
+    await expect(runTableWriteTransaction_ACU({
+      source: 'group_fill',
+      reason: 'source result remains fresh',
+      writeSet: sheetWrite('sheet_0'),
+      baseRevision,
+    }, async (ctx) => {
+      ctx.assertFresh?.('test:derived_metadata_does_not_stale');
+      await ctx.runCommit(async () => 'ok');
+    })).resolves.toBeUndefined();
+  });
+
+  it('source_table 默认值仍使同表基线陈旧', async () => {
+    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(sheetWrite('sheet_0'));
+
+    await runTableWriteTransaction_ACU({
+      source: 'manual_crud',
+      reason: 'source commit',
+      writeSet: sheetWrite('sheet_0'),
+    }, async (ctx) => {
+      expect(ctx.revisionImpact).toBe('source_table');
+      await ctx.runCommit(async () => 'ok');
+    });
+
+    await expect(runTableWriteTransaction_ACU({
+      source: 'group_fill',
+      reason: 'source baseline stale',
+      writeSet: sheetWrite('sheet_0'),
+      baseRevision,
+    }, async (ctx) => {
+      ctx.assertFresh?.('test:source_table_stales');
+    })).rejects.toThrow(/runtime revision conflict/i);
+  });
+
   it('同一事务多次 runCommit 后 assertFresh 不被自身 bump 误判', async () => {
     const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(sheetWrite('sheet_0'));
     const events: string[] = [];
@@ -467,3 +513,37 @@ describe('table-write-transaction', () => {
     expect(events).toEqual(['first:mutation', 'first:commit', 'second:mutation', 'second:commit', 'third:same-sheet']);
   });
 });
+
+
+  it('拒绝在 source_table 变更后以过期基线提交 derived_metadata', async () => {
+    const {
+      captureTableRuntimeRevisionForWriteSet_ACU,
+      runTableWriteTransaction_ACU,
+    } = await import('../../../src/service/table/table-write-transaction');
+    const isolationKey = 'derived-metadata-stale-baseline';
+    const writeSet = [{ kind: 'sheet' as const, sheetKey: 'sheet_summary' }];
+    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(writeSet, { isolationKey });
+
+    await runTableWriteTransaction_ACU({
+      source: 'vector_mirror',
+      reason: 'source_table_change_for_stale_baseline_test',
+      isolationKey,
+      writeSet,
+      workingDataMode: 'none',
+    }, async (ctx) => {
+      await ctx.runCommit(async () => undefined);
+    });
+
+    await expect(runTableWriteTransaction_ACU({
+      source: 'vector_mirror',
+      reason: 'derived_metadata_rejects_stale_baseline_test',
+      revisionImpact: 'derived_metadata',
+      isolationKey,
+      writeSet,
+      baseRevision,
+      workingDataMode: 'none',
+    }, async (ctx) => {
+      ctx.assertFresh?.('derived_metadata:before_write');
+      await ctx.runCommit(async () => undefined);
+    })).rejects.toThrow('runtime revision conflict');
+  });

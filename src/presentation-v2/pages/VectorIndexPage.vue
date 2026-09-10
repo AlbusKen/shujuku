@@ -367,7 +367,7 @@
               "
             />
           </AcuFormRow>
-          <AcuFormRow label="归档批次" hint="每次处理的行数，影响批量速度。">
+          <AcuFormRow label="单请求最多行数" hint="单个 embedding 请求最多覆盖的纪要行数；与字符预算共同限制请求大小。">
             <AcuInput
               :model-value="vector.form.summaryIndexArchiveMaxConcurrency"
               type="number"
@@ -379,6 +379,24 @@
                   $event,
                 )
               "
+            />
+          </AcuFormRow>
+          <AcuFormRow label="单请求字符预算" hint="单个 embedding 请求的本地输入字符上限，不等同于服务商 token 限制。单行超出时会单独请求并记录诊断。">
+            <AcuInput
+              :model-value="vector.form.summaryIndexArchiveMaxInputChars"
+              type="number"
+              :min="1"
+              :step="1"
+              @change="vector.setNumberField('summaryIndexArchiveMaxInputChars', $event)"
+            />
+          </AcuFormRow>
+          <AcuFormRow label="同时请求数" hint="最多同时进行的 embedding HTTP 请求；设为 1 可获得串行兼容行为。">
+            <AcuInput
+              :model-value="vector.form.summaryIndexArchiveEmbeddingConcurrency"
+              type="number"
+              :min="1"
+              :step="1"
+              @change="vector.setNumberField('summaryIndexArchiveEmbeddingConcurrency', $event)"
             />
           </AcuFormRow>
           <AcuFormRow v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"

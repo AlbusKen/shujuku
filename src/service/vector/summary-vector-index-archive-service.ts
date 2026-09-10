@@ -14,7 +14,11 @@ import {
     SummaryVectorFlushGenerationInvalidatedError_ACU,
 } from '../../data/storage/vector-index-hot-cache';
 import { createEmbeddings_ACU, isVectorEmbeddingError_ACU, VectorEmbeddingError_ACU } from '../../data/gateways/vector-embedding-gateway';
-import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
+import {
+    EmbeddingBatchExecutionError_ACU,
+    executeEmbeddingBatchPlan_ACU,
+    planEmbeddingBatches_ACU,
+} from './summary-vector-embedding-batches';
 import { buildVectorIndexSingleSnapshotV2FilePath_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
@@ -678,6 +682,9 @@ async function buildChunksWithEmbeddings_ACU(
         embeddingApiKey: string;
         embeddingModel: string;
         existingSequenceBase?: number;
+        maxRowsPerRequest: number;
+        maxInputCharsPerRequest: number;
+        maxConcurrentRequests: number;
     },
 ): Promise<{ rows: ChatSummaryVectorIndexRow_ACU[]; chunks: ChatSummaryVectorIndexChunk_ACU[] }> {
     const sequenceBase = Math.max(0, Math.floor(Number(options.existingSequenceBase) || 0));
@@ -699,63 +706,24 @@ async function buildChunksWithEmbeddings_ACU(
         return { rows: [], chunks: [] };
     }
 
-    const embeddings: VectorEmbeddingResult_ACU[] = await createEmbeddings_ACU({
-        endpoint: options.embeddingEndpoint,
-        apiKey: options.embeddingApiKey,
-        model: options.embeddingModel,
-        input: chunkSources.map((item) => item.text),
+    const plan = planEmbeddingBatches_ACU(chunkSources, {
+        maxRowsPerRequest: options.maxRowsPerRequest,
+        maxInputCharsPerRequest: options.maxInputCharsPerRequest,
     });
-
-    const embeddingMap = new Map<number, number[]>();
-    embeddings.forEach((item: VectorEmbeddingResult_ACU): void => {
-        if (Number.isInteger(item.index) && item.index >= 0 && item.index < chunkSources.length
-            && Array.isArray(item.embedding) && item.embedding.length > 0) {
-            embeddingMap.set(item.index, item.embedding);
-        }
-    });
-
-    let missingIndexes = chunkSources
-        .map((_source, index) => index)
-        .filter((index) => !embeddingMap.has(index));
-
-    // 首次响应已有部分有效向量时，只补齐缺失项；首次无有效向量仍按既有失败路径处理。
-    if (embeddingMap.size > 0 && missingIndexes.length > 0) {
-        const recoveryBatchSize = Math.min(embeddingMap.size, missingIndexes.length);
-        for (let start = 0; start < missingIndexes.length; start += recoveryBatchSize) {
-            const recoveryOriginalIndexes = missingIndexes.slice(start, start + recoveryBatchSize);
-            const recoveredEmbeddings = await createEmbeddings_ACU({
-                endpoint: options.embeddingEndpoint,
-                apiKey: options.embeddingApiKey,
-                model: options.embeddingModel,
-                input: recoveryOriginalIndexes.map((originalIndex) => chunkSources[originalIndex].text),
-            });
-            recoveredEmbeddings.forEach((item: VectorEmbeddingResult_ACU): void => {
-                if (!Number.isInteger(item.index) || item.index < 0 || item.index >= recoveryOriginalIndexes.length) return;
-                const originalIndex = recoveryOriginalIndexes[item.index];
-                if (!embeddingMap.has(originalIndex) && Array.isArray(item.embedding) && item.embedding.length > 0) {
-                    embeddingMap.set(originalIndex, item.embedding);
-                }
-            });
-        }
-        missingIndexes = chunkSources
-            .map((_source, index) => index)
-            .filter((index) => !embeddingMap.has(index));
-    }
-
-    // 全部原始 chunk 均取得向量前不得构造结果，确保外层不发布部分索引。
-    if (missingIndexes.length > 0) {
-        throw new VectorEmbeddingError_ACU({
-            kind: 'retryable',
-            message: `Embedding 响应缺失 ${missingIndexes.length}/${chunkSources.length} 条向量（首个缺失原始索引 ${missingIndexes[0]}），为避免索引缺行已中止本批归档。`,
+    const { embeddings } = await executeEmbeddingBatchPlan_ACU(plan, {
+        maxConcurrentRequests: options.maxConcurrentRequests,
+        requestEmbeddings: (input) => createEmbeddings_ACU({
             endpoint: options.embeddingEndpoint,
+            apiKey: options.embeddingApiKey,
             model: options.embeddingModel,
-        });
-    }
+            input,
+        }),
+    });
 
     const chunks: ChatSummaryVectorIndexChunk_ACU[] = [];
     const rowChunkIds = new Map<string, string[]>();
     chunkSources.forEach((source, index) => {
-        const vector = embeddingMap.get(index) || [];
+        const vector = embeddings[index] || [];
         if (vector.length === 0) return;
         chunks.push({
             chunkId: source.chunkId,
@@ -1553,61 +1521,19 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         const embeddedRows: ChatSummaryVectorIndexRow_ACU[] = [];
         const embeddedChunks: ChatSummaryVectorIndexChunk_ACU[] = [];
 
-        // T9：归档 embedding 批次有界并发。
-        // 串行时批次 k 的 existingSequenceBase = 前 k 批的 chunk 总数；并发下无法等前批完成再算，
-        // 因此按批预分配 sequence 区间：批次 k 的 base = sum(前 k 批的 chunk 数)。
-        // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
-        // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
-        const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
-        const chunkOptions = {
+        const batchResult = await buildChunksWithEmbeddings_ACU(rowsNeedingEmbedding, {
+            snapshotMessageId,
             sentenceCount: config.summaryIndexChunkSentenceCount,
             chunkBySentence: config.summaryIndexChunkChronicleBySentence === true,
-        };
-        const batchChunkCounts: number[] = [];
-        const batchRowGroups: SummaryVectorArchivePreparedRow_ACU[][] = [];
-        for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
-            const rowBatch = rowsNeedingEmbedding.slice(startIndex, startIndex + maxRowsPerBatch);
-            if (rowBatch.length === 0) continue;
-            batchRowGroups.push(rowBatch);
-            let chunkCount = 0;
-            for (const row of rowBatch) {
-                chunkCount += buildRowChunkTexts_ACU(row.vectorSourceText, chunkOptions).length;
-            }
-            batchChunkCounts.push(chunkCount);
-        }
-        // 有界并发：同时最多 batchConcurrency 个批次在飞。取批次 + 分配 sequence base 在同一同步块内完成
-        // （JS 单线程，nextBatchIndex++ / sequenceBase 读改写之间无 await），无竞争。
-        const batchResults: Array<{ rows: ChatSummaryVectorIndexRow_ACU[]; chunks: ChatSummaryVectorIndexChunk_ACU[] } | null> =
-            new Array(batchRowGroups.length).fill(null);
-        let nextBatchIndex = 0;
-        let sequenceBase = 0;
-        const workerCount = Math.max(1, Math.min(batchConcurrency, batchRowGroups.length));
-        const workers = Array.from({ length: workerCount }, async () => {
-            while (true) {
-                const batchIndex = nextBatchIndex;
-                if (batchIndex >= batchRowGroups.length) break;
-                nextBatchIndex += 1;
-                const mySequenceBase = sequenceBase;
-                sequenceBase += batchChunkCounts[batchIndex];
-                const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
-                    snapshotMessageId,
-                    sentenceCount: chunkOptions.sentenceCount,
-                    chunkBySentence: chunkOptions.chunkBySentence,
-                    embeddingEndpoint: config.embeddingEndpoint,
-                    embeddingApiKey: config.embeddingApiKey,
-                    embeddingModel: config.embeddingModel,
-                    existingSequenceBase: mySequenceBase,
-                });
-                batchResults[batchIndex] = batchResult;
-            }
+            embeddingEndpoint: config.embeddingEndpoint,
+            embeddingApiKey: config.embeddingApiKey,
+            embeddingModel: config.embeddingModel,
+            maxRowsPerRequest: maxRowsPerBatch,
+            maxInputCharsPerRequest: Number(config.summaryIndexArchiveMaxInputChars) || 24000,
+            maxConcurrentRequests: config.summaryIndexArchiveEmbeddingConcurrency,
         });
-        await Promise.all(workers);
-        // 按批号顺序合并，保证 embeddedRows / embeddedChunks 顺序与串行一致。
-        for (const batchResult of batchResults) {
-            if (!batchResult) continue;
-            embeddedRows.push(...batchResult.rows);
-            embeddedChunks.push(...batchResult.chunks);
-        }
+        embeddedRows.push(...batchResult.rows);
+        embeddedChunks.push(...batchResult.chunks);
 
         const finalResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU(
             [...reusable.reusableRows, ...embeddedRows],
@@ -1709,7 +1635,9 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         }
         // T4：识别结构化 embedding 错误，把 terminal / retryable 分类传导给 flush runner。
         // terminal（credential / request / provider-contract）→ 停止重排；retryable → 继续有限重试。
-        if (isVectorEmbeddingError_ACU(error)) {
+        const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? (error as any).cause : error;
+        if (isVectorEmbeddingError_ACU(embeddingError)) {
+            const error = embeddingError;
             const terminalKinds = new Set(['credential', 'request', 'provider-contract']);
             const embeddingRetryability: 'retryable' | 'terminal' = terminalKinds.has(error.kind) ? 'terminal' : 'retryable';
             const detail = error.providerMessage || error.message;
