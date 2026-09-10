@@ -180,7 +180,7 @@ function snapshotIsolatedData_ACU(chat: any[], messageIndices: number[]): Array<
         return {
             message,
             existed,
-            value: existed ? message.TavernDB_ACU_IsolatedData : undefined,
+            value: existed ? JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData)) : undefined,
         };
     });
 }

@@ -31,6 +31,7 @@ function setParent(parent: any): void {
   });
 }
 
+// 每个用例都会 resetModules 后冷启动完整 V2 模块图；仅放宽本夹具的初始化预算。
 beforeEach(async () => {
   vi.resetModules();
   setParent(window);
@@ -40,7 +41,7 @@ beforeEach(async () => {
   localStorage.clear();
   const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
   bridge.installAutoCardUpdaterV2Api_ACU();
-});
+}, 60_000);
 
 describe('openVisualizerSurface_ACU', () => {
   it('外部调用会打开 v2 shell 并进入 visualizer surface，关闭后隐藏 shell', async () => {

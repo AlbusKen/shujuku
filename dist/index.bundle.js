@@ -52855,7 +52855,7 @@ $CONTENT
             return {
                 message,
                 existed,
-                value: existed ? message.TavernDB_ACU_IsolatedData : undefined,
+                value: existed ? JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData)) : undefined,
             };
         });
     }
@@ -53484,6 +53484,23 @@ $CONTENT
             sourceTableKey: snapshot.sourceTableKey,
         });
         const rows = snapshot.rows.filter((row) => row.rowId && row.chunks.length > 0);
+        const requiredPackHashes = [...new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)))];
+        const packRefsByHash = new Map(snapshot.packRefs
+            .filter((ref) => (ref.packHash
+            && ref.path
+            && Number.isInteger(ref.chunkCount)
+            && ref.chunkCount >= 0
+            && Number.isFinite(ref.byteLength)
+            && ref.byteLength >= 0))
+            .map((ref) => [ref.packHash, { ...ref }]));
+        const missingPackRefs = requiredPackHashes.filter((packHash) => !packRefsByHash.has(packHash));
+        if (missingPackRefs.length > 0) {
+            return emptyResult_ACU({
+                reason: 'rebuild_repair_pack_reference_missing',
+                errors: [`剩余行镜像引用的 pack 缺少可达路径：${missingPackRefs.join(',')}`],
+            });
+        }
+        const packRefs = requiredPackHashes.map((packHash) => ({ ...packRefsByHash.get(packHash) }));
         let manifestPersist;
         try {
             manifestPersist = await persistSummaryVectorMirrorManifestPrepared_ACU({
@@ -53504,13 +53521,6 @@ $CONTENT
                 errors: [error?.message || String(error || '剩余行 manifest 上传失败')],
             });
         }
-        const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
-        const packRefs = snapshot.packRefs.filter((ref) => (usedPackHashes.has(ref.packHash)
-            && ref.path
-            && Number.isInteger(ref.chunkCount)
-            && ref.chunkCount >= 0
-            && Number.isFinite(ref.byteLength)
-            && ref.byteLength >= 0));
         const checkpoint = {
             kind: 'vector_full',
             createdAt: Date.now(),
@@ -53526,7 +53536,7 @@ $CONTENT
         const snapshots = chat.map((message) => ({
             message,
             existed: !!message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-            value: message?.TavernDB_ACU_IsolatedData,
+            value: message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData') ? JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData)) : undefined,
         }));
         try {
             await runTableWriteTransaction_ACU({
@@ -53652,6 +53662,7 @@ $CONTENT
         }
         const preparedById = new Map(prepared.rows.map((row) => [row.rowId, row]));
         const reusable = new Map();
+        const reusablePackRefsByHash = new Map();
         if (options.reason === 'rebuild_repair') {
             const head = await resolveSummaryVectorMirrorHead_ACU({
                 chat,
@@ -53660,20 +53671,28 @@ $CONTENT
                 loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
             });
             if (head.status === 'ok') {
+                const headPackRefsByHash = new Map(head.packRefs.map((ref) => [ref.packHash, ref]));
                 for (const rowId of source.rowIds) {
                     const refs = head.head.get(rowId);
                     if (!refs || refs.length === 0)
                         continue;
                     let valid = true;
                     for (const ref of refs) {
-                        const pack = await loadSummaryVectorMirrorPack_ACU({ packHash: ref.packHash, path: head.packRefs.find((item) => item.packHash === ref.packHash)?.path || '', chunkCount: 0, byteLength: 0 });
+                        const packRef = headPackRefsByHash.get(ref.packHash);
+                        const pack = await loadSummaryVectorMirrorPack_ACU({ packHash: ref.packHash, path: packRef?.path || '', chunkCount: 0, byteLength: 0 });
                         if (!pack || !pack.chunks[ref.chunkIndex]) {
                             valid = false;
                             break;
                         }
                     }
-                    if (valid)
-                        reusable.set(rowId, refs);
+                    if (valid) {
+                        reusable.set(rowId, refs.map((ref) => ({ ...ref })));
+                        for (const ref of refs) {
+                            const packRef = headPackRefsByHash.get(ref.packHash);
+                            if (packRef)
+                                reusablePackRefsByHash.set(ref.packHash, { ...packRef });
+                        }
+                    }
                 }
             }
         }
@@ -53731,6 +53750,7 @@ $CONTENT
         });
         const files = [];
         const newRefsByRow = new Map();
+        const packRefsByHash = new Map(reusablePackRefsByHash);
         reusable.forEach((refs, rowId) => newRefsByRow.set(rowId, refs));
         if (chunkSources.length > 0) {
             const packChunks = chunkSources.map((source, index) => ({
@@ -53751,6 +53771,7 @@ $CONTENT
                 chunks: packChunks,
             });
             files.push(packPersist.file);
+            packRefsByHash.set(packPersist.ref.packHash, { ...packPersist.ref });
             chunkSources.forEach((source, index) => {
                 const list = newRefsByRow.get(source.rowId) || [];
                 list.push({ packHash: packPersist.ref.packHash, chunkIndex: index });
@@ -53761,6 +53782,15 @@ $CONTENT
             rowId,
             chunks: newRefsByRow.get(rowId) || [],
         })).filter((row) => row.chunks.length > 0);
+        const requiredPackHashes = [...new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)))];
+        const missingPackRefs = requiredPackHashes.filter((packHash) => !packRefsByHash.has(packHash));
+        if (missingPackRefs.length > 0) {
+            return emptyResult_ACU({
+                reason: 'rebuild_repair_pack_reference_missing',
+                errors: [`重建引用的 pack 缺少可达路径：${missingPackRefs.join(',')}`],
+            });
+        }
+        const packRefs = requiredPackHashes.map((packHash) => ({ ...packRefsByHash.get(packHash) }));
         if (!isSummaryVectorEmbeddingIdentity_ACU(embedding)) {
             const existingHead = await resolveSummaryVectorMirrorHead_ACU({
                 chat,
@@ -53800,17 +53830,6 @@ $CONTENT
             },
         });
         files.push(manifestPersist.file);
-        const packRefs = [...new Map(rows.flatMap((row) => row.chunks.map((chunk) => [chunk.packHash, chunk.packHash]))).keys()]
-            .map((packHash) => {
-            const file = files.find((item) => item.path.includes(packHash));
-            return {
-                packHash,
-                path: file?.path || '',
-                chunkCount: rows.reduce((sum, row) => sum + row.chunks.filter((chunk) => chunk.packHash === packHash).length, 0),
-                byteLength: Number(file?.byteSize) || 0,
-            };
-        })
-            .filter((ref) => ref.path);
         const checkpoint = {
             kind: 'vector_full',
             createdAt: Date.now(),
@@ -53826,7 +53845,7 @@ $CONTENT
         const snapshots = chat.map((message) => ({
             message,
             existed: !!message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-            value: message?.TavernDB_ACU_IsolatedData,
+            value: message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData') ? JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData)) : undefined,
         }));
         try {
             await runTableWriteTransaction_ACU({
@@ -101332,10 +101351,16 @@ $CONTENT
                     snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
                 }
             });
+            let changed = false;
+            let downgradedCount = 0;
+            let obsoleteInitDowngradedCount = 0;
+            let foldFiles = [];
             try {
-                const { changed, foldFiles } = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
-                const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
-                const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
+                const boundaryWrite = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
+                changed = boundaryWrite.changed;
+                foldFiles = boundaryWrite.foldFiles;
+                downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
+                obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
                 // 单根不变量：降级后同一隔离键必须至多一个 full checkpoint，
                 // 否则写新边界基线前就把历史搞成多根，回放只认最后一个，之前增量全部失效。
                 for (const isolationKey of collectIsolationKeysWithV2Frames_ACU(chat)) {
@@ -101347,16 +101372,6 @@ $CONTENT
                 if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
                     await saveChatToHostStrict_ACU();
                 }
-                if (foldFiles.length > 0) {
-                    await finalizeFoldedSummaryVectorMirrorFiles_ACU(foldFiles);
-                    const foldScope = foldFiles[0]?.scope;
-                    void runScopedRetentionGcAfterFlush_ACU({
-                        chatKey: String(foldScope?.chatKey || currentChatFileIdentifier_ACU || ''),
-                        isolationKey: String(foldScope?.isolationKey || getCurrentIsolationKey_ACU()),
-                        sourceTableKey: String(foldScope?.sourceTableKey || ''),
-                    }).catch(() => undefined);
-                }
-                return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
             }
             catch (error) {
                 snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));
@@ -101368,6 +101383,21 @@ $CONTENT
                     anchorIndex,
                 };
             }
+            if (foldFiles.length > 0) {
+                try {
+                    await finalizeFoldedSummaryVectorMirrorFiles_ACU(foldFiles);
+                }
+                catch (error) {
+                    logWarn_ACU('[V2 Compaction] 聊天边界 checkpoint 已严格保存，但折叠镜像文件转 published 失败；保留 prepared 供后续 GC/重试:', error);
+                }
+                const foldScope = foldFiles[0]?.scope;
+                void runScopedRetentionGcAfterFlush_ACU({
+                    chatKey: String(foldScope?.chatKey || currentChatFileIdentifier_ACU || ''),
+                    isolationKey: String(foldScope?.isolationKey || getCurrentIsolationKey_ACU()),
+                    sourceTableKey: String(foldScope?.sourceTableKey || ''),
+                }).catch(() => undefined);
+            }
+            return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
         }
         const purgeEndIndex = boundary.indicesToPurge[boundary.indicesToPurge.length - 1];
         if (collectIsolationKeysWithV2Frames_ACU(chat, { maxMessageIndex: purgeEndIndex }).length > 0) {

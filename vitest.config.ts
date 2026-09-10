@@ -55,10 +55,10 @@ export default defineConfig({
     include: ['tests/**/*.test.ts'],
     globals: true,
     testTimeout: 15000,
-    // 全量套件超过 5000 个用例、326 个文件。vitest 按文件隔离（forks 池），文件级并行
-    // 不会引入跨文件状态污染；8 个 worker 各自峰值按最重的 jsdom+SQLite 场景估 1-1.5GB，
-    // 总峰值约 8-12GB，兼顾速度与内存有界。内存受限的机器用 `--maxWorkers=1` 降级串行。
-    maxWorkers: 8,
+    // 全量套件按文件隔离（forks 池），文件级并行不会引入跨文件状态污染。
+    // 8 worker 已复现 vitest onTaskUpdate RPC 超时；4 worker 已完整通过 373 files / 7937 tests。
+    // 因此默认采用 4 worker；资源受限环境可用 `--maxWorkers=1` 降级串行。
+    maxWorkers: 4,
     fileParallelism: true,
     maxConcurrency: 1,
     typecheck: {

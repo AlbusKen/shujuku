@@ -254,6 +254,27 @@ export async function publishSummaryVectorMirrorRowRemovalSnapshot_ACU(
         sourceTableKey: snapshot.sourceTableKey,
     });
     const rows = snapshot.rows.filter((row) => row.rowId && row.chunks.length > 0);
+    const requiredPackHashes = [...new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)))];
+    const packRefsByHash = new Map(
+        snapshot.packRefs
+            .filter((ref) => (
+                ref.packHash
+                && ref.path
+                && Number.isInteger(ref.chunkCount)
+                && ref.chunkCount >= 0
+                && Number.isFinite(ref.byteLength)
+                && ref.byteLength >= 0
+            ))
+            .map((ref) => [ref.packHash, { ...ref }]),
+    );
+    const missingPackRefs = requiredPackHashes.filter((packHash) => !packRefsByHash.has(packHash));
+    if (missingPackRefs.length > 0) {
+        return emptyResult_ACU({
+            reason: 'rebuild_repair_pack_reference_missing',
+            errors: [`剩余行镜像引用的 pack 缺少可达路径：${missingPackRefs.join(',')}`],
+        });
+    }
+    const packRefs = requiredPackHashes.map((packHash) => ({ ...packRefsByHash.get(packHash)! }));
     let manifestPersist: Awaited<ReturnType<typeof persistSummaryVectorMirrorManifestPrepared_ACU>>;
     try {
         manifestPersist = await persistSummaryVectorMirrorManifestPrepared_ACU({
@@ -274,15 +295,6 @@ export async function publishSummaryVectorMirrorRowRemovalSnapshot_ACU(
         });
     }
 
-    const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
-    const packRefs = snapshot.packRefs.filter((ref) => (
-        usedPackHashes.has(ref.packHash)
-        && ref.path
-        && Number.isInteger(ref.chunkCount)
-        && ref.chunkCount >= 0
-        && Number.isFinite(ref.byteLength)
-        && ref.byteLength >= 0
-    ));
     const checkpoint: SummaryVectorIndexMirrorCheckpointV2_ACU = {
         kind: 'vector_full',
         createdAt: Date.now(),
@@ -299,7 +311,7 @@ export async function publishSummaryVectorMirrorRowRemovalSnapshot_ACU(
     const snapshots = chat.map((message) => ({
         message,
         existed: !!message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-        value: message?.TavernDB_ACU_IsolatedData,
+        value: message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData') ? JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData)) : undefined,
     }));
 
     try {
@@ -434,6 +446,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     }
     const preparedById = new Map(prepared.rows.map((row) => [row.rowId, row]));
     const reusable = new Map<string, SummaryVectorChunkRef_ACU[]>();
+    const reusablePackRefsByHash = new Map<string, SummaryVectorPackRef_ACU>();
 
     if (options.reason === 'rebuild_repair') {
         const head = await resolveSummaryVectorMirrorHead_ACU({
@@ -443,18 +456,26 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
         });
         if (head.status === 'ok') {
+            const headPackRefsByHash = new Map(head.packRefs.map((ref) => [ref.packHash, ref]));
             for (const rowId of source.rowIds) {
                 const refs = head.head.get(rowId);
                 if (!refs || refs.length === 0) continue;
                 let valid = true;
                 for (const ref of refs) {
-                    const pack = await loadSummaryVectorMirrorPack_ACU({ packHash: ref.packHash, path: head.packRefs.find((item) => item.packHash === ref.packHash)?.path || '', chunkCount: 0, byteLength: 0 });
+                    const packRef = headPackRefsByHash.get(ref.packHash);
+                    const pack = await loadSummaryVectorMirrorPack_ACU({ packHash: ref.packHash, path: packRef?.path || '', chunkCount: 0, byteLength: 0 });
                     if (!pack || !pack.chunks[ref.chunkIndex]) {
                         valid = false;
                         break;
                     }
                 }
-                if (valid) reusable.set(rowId, refs);
+                if (valid) {
+                    reusable.set(rowId, refs.map((ref) => ({ ...ref })));
+                    for (const ref of refs) {
+                        const packRef = headPackRefsByHash.get(ref.packHash);
+                        if (packRef) reusablePackRefsByHash.set(ref.packHash, { ...packRef });
+                    }
+                }
             }
         }
     }
@@ -512,6 +533,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     });
     const files: SummaryVectorIndexExternalFileRef_ACU[] = [];
     const newRefsByRow = new Map<string, SummaryVectorChunkRef_ACU[]>();
+    const packRefsByHash = new Map(reusablePackRefsByHash);
     reusable.forEach((refs, rowId) => newRefsByRow.set(rowId, refs));
 
     if (chunkSources.length > 0) {
@@ -533,6 +555,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             chunks: packChunks,
         });
         files.push(packPersist.file);
+        packRefsByHash.set(packPersist.ref.packHash, { ...packPersist.ref });
         chunkSources.forEach((source, index) => {
             const list = newRefsByRow.get(source.rowId) || [];
             list.push({ packHash: packPersist.ref.packHash, chunkIndex: index });
@@ -544,6 +567,16 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
         rowId,
         chunks: newRefsByRow.get(rowId) || [],
     })).filter((row) => row.chunks.length > 0);
+
+    const requiredPackHashes = [...new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)))];
+    const missingPackRefs = requiredPackHashes.filter((packHash) => !packRefsByHash.has(packHash));
+    if (missingPackRefs.length > 0) {
+        return emptyResult_ACU({
+            reason: 'rebuild_repair_pack_reference_missing',
+            errors: [`重建引用的 pack 缺少可达路径：${missingPackRefs.join(',')}`],
+        });
+    }
+    const packRefs = requiredPackHashes.map((packHash) => ({ ...packRefsByHash.get(packHash)! }));
 
     if (!isSummaryVectorEmbeddingIdentity_ACU(embedding)) {
         const existingHead = await resolveSummaryVectorMirrorHead_ACU({
@@ -584,18 +617,6 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     });
     files.push(manifestPersist.file);
 
-    const packRefs = [...new Map(rows.flatMap((row) => row.chunks.map((chunk) => [chunk.packHash, chunk.packHash]))).keys()]
-        .map((packHash) => {
-            const file = files.find((item) => item.path.includes(packHash));
-            return {
-                packHash,
-                path: file?.path || '',
-                chunkCount: rows.reduce((sum, row) => sum + row.chunks.filter((chunk) => chunk.packHash === packHash).length, 0),
-                byteLength: Number(file?.byteSize) || 0,
-            };
-        })
-        .filter((ref) => ref.path);
-
     const checkpoint: SummaryVectorIndexMirrorCheckpointV2_ACU = {
         kind: 'vector_full',
         createdAt: Date.now(),
@@ -612,7 +633,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     const snapshots = chat.map((message) => ({
         message,
         existed: !!message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-        value: message?.TavernDB_ACU_IsolatedData,
+        value: message && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData') ? JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData)) : undefined,
     }));
 
     try {

@@ -645,10 +645,16 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
                 snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
             }
         });
+        let changed = false;
+        let downgradedCount = 0;
+        let obsoleteInitDowngradedCount = 0;
+        let foldFiles: SummaryVectorIndexExternalFileRef_ACU[] = [];
         try {
-            const { changed, foldFiles } = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
-            const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
-            const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
+            const boundaryWrite = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
+            changed = boundaryWrite.changed;
+            foldFiles = boundaryWrite.foldFiles;
+            downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
+            obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
             // 单根不变量：降级后同一隔离键必须至多一个 full checkpoint，
             // 否则写新边界基线前就把历史搞成多根，回放只认最后一个，之前增量全部失效。
             for (const isolationKey of collectIsolationKeysWithV2Frames_ACU(chat)) {
@@ -660,16 +666,6 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
             if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
                 await saveChatToHostStrict_ACU();
             }
-            if (foldFiles.length > 0) {
-                await finalizeFoldedSummaryVectorMirrorFiles_ACU(foldFiles);
-                const foldScope = foldFiles[0]?.scope;
-                void runScopedRetentionGcAfterFlush_ACU({
-                    chatKey: String(foldScope?.chatKey || currentChatFileIdentifier_ACU || ''),
-                    isolationKey: String(foldScope?.isolationKey || getCurrentIsolationKey_ACU()),
-                    sourceTableKey: String(foldScope?.sourceTableKey || ''),
-                }).catch((): void => undefined);
-            }
-            return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
         } catch (error: any) {
             snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));
             return {
@@ -680,6 +676,20 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
                 anchorIndex,
             };
         }
+        if (foldFiles.length > 0) {
+            try {
+                await finalizeFoldedSummaryVectorMirrorFiles_ACU(foldFiles);
+            } catch (error) {
+                logWarn_ACU('[V2 Compaction] 聊天边界 checkpoint 已严格保存，但折叠镜像文件转 published 失败；保留 prepared 供后续 GC/重试:', error);
+            }
+            const foldScope = foldFiles[0]?.scope;
+            void runScopedRetentionGcAfterFlush_ACU({
+                chatKey: String(foldScope?.chatKey || currentChatFileIdentifier_ACU || ''),
+                isolationKey: String(foldScope?.isolationKey || getCurrentIsolationKey_ACU()),
+                sourceTableKey: String(foldScope?.sourceTableKey || ''),
+            }).catch((): void => undefined);
+        }
+        return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
     }
 
     const purgeEndIndex = boundary.indicesToPurge[boundary.indicesToPurge.length - 1];

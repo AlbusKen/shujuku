@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockLoadTableStateFromFramesV2Detailed, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal, mockCleanupUnreachable, mockDeriveSheetLifecycleFromFramesV2 } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockLoadTableStateFromFramesV2Detailed, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal, mockCleanupUnreachable, mockDeriveSheetLifecycleFromFramesV2, mockFoldVectorMirror, mockFinalizeFoldedVectorMirror } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -40,6 +40,8 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockDeriveSheetLifecycleFromFramesV2: vi.fn(() => ({ statusBySheetKey: {}, activeSheetKeys: [], hiddenSheetKeys: [], indeterminateSheetKeys: [], neverSeenSheetKeys: [] })),
   mockDeleteSummaryVectorIndexExternal: vi.fn(),
   mockCleanupUnreachable: vi.fn(),
+  mockFoldVectorMirror: vi.fn(),
+  mockFinalizeFoldedVectorMirror: vi.fn(),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -107,6 +109,10 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
   deleteSummaryVectorIndexExternal_ACU: mockDeleteSummaryVectorIndexExternal,
   cleanupUnreachableSummaryVectorIndexFiles_ACU: mockCleanupUnreachable,
 }));
+vi.mock('../../../src/service/vector/summary-vector-mirror-fold', () => ({
+  foldSummaryVectorMirrorAtBoundary_ACU: (...args: any[]) => mockFoldVectorMirror(...args),
+  finalizeFoldedSummaryVectorMirrorFiles_ACU: (...args: any[]) => mockFinalizeFoldedVectorMirror(...args),
+}));
 
 import {
   replaceChatMessage_ACU,
@@ -173,6 +179,8 @@ beforeEach(() => {
   mockDeriveSheetLifecycleFromFramesV2.mockReturnValue({ statusBySheetKey: {}, activeSheetKeys: [], hiddenSheetKeys: [], indeterminateSheetKeys: [], neverSeenSheetKeys: [] });
   mockDeleteSummaryVectorIndexExternal.mockResolvedValue(undefined);
   mockCleanupUnreachable.mockResolvedValue({ deletedPaths: [], retainedPaths: [], failedDeletes: [] });
+  mockFoldVectorMirror.mockResolvedValue({ folded: false, files: [] });
+  mockFinalizeFoldedVectorMirror.mockResolvedValue(undefined);
 });
 
 // ═══ replaceChatMessage_ACU ═══
@@ -658,6 +666,51 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     }));
     expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content[1][1]).toBe('剑');
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('fold 文件 finalize 在 strict save 成功后失败时保留已提交的边界 checkpoint', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? {
+              checkpoint: {
+                kind: 'full', createdAt: 1, reason: 'init',
+                data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } },
+              },
+            } : {}),
+            logEntries: [],
+          },
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+    const foldedFile = {
+      path: 'folded-pack-path',
+      scope: { chatKey: 'chat-test', isolationKey: '', sourceTableKey: 'sheet_0' },
+    };
+    mockFoldVectorMirror.mockImplementation(async (params: any) => {
+      params.chat[params.boundaryAnchorIndex].TavernDB_ACU_IsolatedData[''].storageFrame.summaryVectorIndexFrame = {
+        version: 3,
+        sourceTableKey: 'sheet_0',
+        checkpoint: { kind: 'vector_full', marker: 'folded' },
+        logEntries: [],
+      };
+      return { folded: true, files: [foldedFile] };
+    });
+    mockFinalizeFoldedVectorMirror.mockRejectedValueOnce(new Error('fold finalize failed'));
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeFoldedVectorMirror).toHaveBeenCalledWith([foldedFile]);
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'compaction' });
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.summaryVectorIndexFrame?.checkpoint).toMatchObject({ marker: 'folded' });
   });
 
   it('将兼容 replay 已重映射的旧 row_id 固化到边界 checkpoint，并无损降级旧 init 锚点', async () => {
