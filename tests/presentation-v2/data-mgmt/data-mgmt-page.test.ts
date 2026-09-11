@@ -85,6 +85,13 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     const index = isolationHistory.indexOf(code);
     if (index >= 0) isolationHistory.splice(index, 1);
   });
+  const cleanupLegacyIsolation = vi.fn(async () => {
+    const removedCodes = [...isolationHistory];
+    isolationHistory.splice(0, isolationHistory.length);
+    settings.dataIsolationCode = '';
+    settings.dataIsolationEnabled = false;
+    return { removedCodes, failedCodes: [], switchedToDefault: true };
+  });
   const deleteGenerated = vi.fn(async () => undefined);
   const deleteLocalDataWithScope = vi.fn(async (_mode: string, _start: number | null, _end: number | null, expectedPath?: 'purge' | 'range') => {
     if (expectedPath === 'purge') {
@@ -217,6 +224,9 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     switchIsolationProfile_ACU: switchIsolation,
     applyCombinedSettingsImport_ACU: vi.fn(() => ['charCardPrompt']),
   }));
+  vi.doMock('../../../src/service/settings/legacy-isolation-cleanup-service', () => ({
+    cleanupLegacyIsolationProfiles_ACU: cleanupLegacyIsolation,
+  }));
   vi.doMock('../../../src/service/chat/chat-service', async () => {
     const actual = await vi.importActual<any>('../../../src/service/chat/chat-service');
     return {
@@ -284,6 +294,7 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     saveSettings,
     switchIsolation,
     removeHistory,
+    cleanupLegacyIsolation,
     deleteGenerated,
     deleteLocalDataWithScope,
     cleanupWorldbook,
@@ -361,6 +372,7 @@ describe('DataMgmtPage', () => {
     expect(text).not.toContain('交火模式索引管理');
     expect(text).not.toContain('删除当前交火索引');
     expect(text).not.toContain('清空临时缓存');
+    expect(text).toContain('全局旧隔离标签清理');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -413,6 +425,41 @@ describe('DataMgmtPage', () => {
     expect(cleanupPanel.textContent || '').toContain('保留数据层数');
     expect(cleanupPanel.textContent || '').not.toContain('删除当前标识本地数据');
     expect(cleanupPanel.textContent || '').toContain('恢复默认配置');
+    expect(cleanupPanel.textContent || '').toContain('全局旧隔离标签清理');
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('全局旧隔离标签清理确认前取消不会执行删除', async () => {
+    const { mount, cleanupLegacyIsolation } = await mountDataMgmtPage();
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('全局旧隔离标签清理'));
+    expect(button).not.toBeUndefined();
+    button!.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('alpha、beta');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('不会删除聊天正文');
+
+    await clickDialogButton('取消');
+    expect(cleanupLegacyIsolation).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('全局旧隔离标签清理确认后删除全部 Profile 并切换到默认数据', async () => {
+    const { mount, cleanupLegacyIsolation, settings } = await mountDataMgmtPage();
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('全局旧隔离标签清理'));
+    button!.click();
+    await clickDialogButton('清理旧隔离标签');
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(cleanupLegacyIsolation).toHaveBeenCalledOnce();
+    expect(settings.dataIsolationCode).toBe('');
+    expect(settings.dataIsolationEnabled).toBe(false);
+    expect(document.querySelector('.acu-v2-toast--success')?.textContent).toContain('已清理 2 个旧隔离标签');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1086,11 +1133,11 @@ describe('DataMgmtPage', () => {
 
 
 
-  it('全页只保留删除所有本地数据为红色危险按钮', async () => {
+  it('全页危险按钮仅包含删除所有本地数据和全局旧隔离标签清理', async () => {
     const { mount } = await mountDataMgmtPage();
 
     const dangerButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page button.acu-btn--danger'));
-    expect(dangerButtons.map(button => button.textContent?.trim())).toEqual(['删除所有本地数据']);
+    expect(dangerButtons.map(button => button.textContent?.trim())).toEqual(['删除所有本地数据', '全局旧隔离标签清理']);
 
     mount.__resetAcuV2MountForTests();
   });
