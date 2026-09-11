@@ -438,7 +438,19 @@
             >
               恢复默认配置
             </AcuButton>
+            <AcuButton
+              block
+              variant="danger"
+              :disabled="runtimeDiagnostic.busy.value || !!flow.busyAction.value"
+              :loading="flow.busyAction.value === 'cleanup-legacy-isolation'"
+              @click="onCleanupLegacyIsolationProfiles"
+            >
+              全局旧隔离标签清理
+            </AcuButton>
           </div>
+          <p class="acu-v2-data-mgmt-page__meta">
+            清理全部退役隔离标签及其全局设置/表格模板，并切回默认数据；不会删除聊天正文或各聊天已保存的历史表格数据。当前发现 {{ flow.legacyIsolationCount.value }} 个旧隔离标签。
+          </p>
         </AcuPanel>
       </div>
     </AcuPanelGrid>
@@ -659,6 +671,27 @@ async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
   }))) return;
   if (runtimeDiagnostic.busy.value) return;
   void flow.deleteLocalData("all");
+}
+
+async function onCleanupLegacyIsolationProfiles(): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
+  const codes = flow.legacyIsolationCodes.value;
+  const codeText = codes.length > 0 ? `：${codes.join("、")}` : "";
+  const confirmed = await dialogStore.confirm({
+    title: "全局旧隔离标签清理",
+    message:
+      `将清理全部 ${codes.length} 个旧隔离标签${codeText}。\n` +
+      "· 如有当前激活标识，会切回默认数据；\n" +
+      "· 删除这些标签对应的全局设置与表格模板；\n" +
+      "· 不会删除聊天正文，也不会改写各聊天里已保存的历史表格数据；\n" +
+      "· 若单个标签删除失败，会保留登记供重试。\n" +
+      "此操作不可恢复。确认继续？",
+    confirmLabel: "清理旧隔离标签",
+    confirmVariant: "danger",
+  });
+  if (!confirmed) return;
+  if (runtimeDiagnostic.busy.value) return;
+  await flow.cleanupLegacyIsolationProfiles();
 }
 
 
