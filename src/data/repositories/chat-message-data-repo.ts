@@ -1272,6 +1272,48 @@ export function writeIsolatedTagData_ACU(msg: any, isolationKey: string, tagData
 }
 
 /**
+ * Replaces only the worldSimulation extension inside one isolation slot.
+ *
+ * This intentionally does not use the metadata-patch API: that API rejects
+ * unknown extensions by contract. It also avoids writeIsolatedTagData_ACU,
+ * whose Legacy-V1 barrier correctly rejects an unchanged slot that happens to
+ * contain legacy table data. The existing slot is cloned as a whole, so table
+ * fields remain byte-for-byte JSON-equivalent while only worldSimulation moves.
+ */
+export function writeIsolatedTagWorldSimulation_ACU(
+    msg: any,
+    isolationKey: string,
+    worldSimulation: import('../../service/simulation/model').WorldSimulationPersistedValue_ACU,
+): void {
+    if (!msg) return;
+    if (!isUsableIsolationSlotKey_ACU(isolationKey)) {
+        throw new Error(`worldSimulation isolationKey 非法：${String(isolationKey)}`);
+    }
+    const rawContainer = msg.TavernDB_ACU_IsolatedData;
+    const currentContainer = readIsolatedDataContainer_ACU(msg);
+    if (rawContainer !== undefined && !currentContainer) {
+        throw new Error('worldSimulation 隔离数据容器无法解析');
+    }
+    const currentSlot = currentContainer?.[isolationKey];
+    if (currentSlot !== undefined && !isObjectRecord_ACU(currentSlot)) {
+        throw new Error(`worldSimulation 隔离数据槽格式非法：${isolationKey}`);
+    }
+    const nextSlot = {
+        ...(currentSlot ? safeClone(currentSlot) : {}),
+        worldSimulation: safeClone(worldSimulation),
+    };
+    const nextContainer = isObjectRecord_ACU(currentContainer)
+        ? { ...currentContainer, [isolationKey]: nextSlot }
+        : { [isolationKey]: nextSlot };
+    // Preserve the host's original container representation. Some persisted
+    // chats use JSON strings, and silently changing them to objects makes an
+    // unrelated table-storage representation observable to other consumers.
+    msg.TavernDB_ACU_IsolatedData = typeof rawContainer === 'string'
+        ? JSON.stringify(nextContainer)
+        : nextContainer;
+}
+
+/**
  * 根据隔离配置设置或删除 Identity 字段。
  * - 隔离启用：设置 Identity 为隔离代码
  * - 隔离关闭：删除 Identity 字段

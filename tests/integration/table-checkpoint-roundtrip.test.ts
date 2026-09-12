@@ -24,7 +24,7 @@ vi.mock('../../src/data/storage/chat-history', () => ({
   setChatScopedConfigContainer_ACU: (_chat: any[], value: any) => { h.scope = value; },
   setChatSheetGuideContainer_ACU: (_chat: any[], value: any) => { h.guide = value; },
 }));
-vi.mock('../../src/data/gateways/chat-gateway', () => ({ saveChatToHostStrict_ACU: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: () => h.chat, saveChatToHostStrict_ACU: vi.fn().mockResolvedValue(undefined), emitMessageUpdated_ACU: vi.fn() }));
 vi.mock('../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: () => h.chat,
   clearAllAiTableDataForCheckpointRestore_ACU: async () => ({ clearedCount: 1, vectorManifestsToDeleteAfterCommit: [] }),

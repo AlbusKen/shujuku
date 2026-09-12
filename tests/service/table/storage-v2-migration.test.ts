@@ -22,6 +22,7 @@ const { mockChatRef, mockSaveChatToHost, mockRuntimeScope } = vi.hoisted(() => (
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: vi.fn(() => mockChatRef.value),
   saveChatToHostStrict_ACU: mockSaveChatToHost,
+  emitMessageUpdated_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({

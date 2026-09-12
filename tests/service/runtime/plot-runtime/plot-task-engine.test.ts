@@ -62,6 +62,7 @@ const {
   mockLogDebug,
   mockLogError,
   mockLogWarn,
+  mockRenderWorldSimulation,
 } = vi.hoisted(() => {
   const mockAbortControllerRef = { value: null as any };
   const mockCurrentJsonTableDataRef = {
@@ -149,6 +150,7 @@ const {
     mockLogDebug: vi.fn(),
     mockLogError: vi.fn(),
     mockLogWarn: vi.fn(),
+    mockRenderWorldSimulation: vi.fn(),
   };
 });
 
@@ -340,6 +342,12 @@ vi.mock('../../../../src/service/agent/agent-worldbook-skill-meta', () => ({
   hasUsableWorldbookSkillMeta_ACU: vi.fn((comment: unknown) => String(comment || '').includes('ACU_SKILL_META_START')),
 }));
 
+vi.mock('../../../../src/service/simulation/injection-provider', () => ({
+  WorldSimulationHiddenContextProvider_ACU: class {
+    render = mockRenderWorldSimulation;
+  },
+}));
+
 import {
   willPlotUseMainApiGenerateRaw_ACU,
   runPlotTasksRuntime_ACU,
@@ -485,6 +493,7 @@ beforeEach(() => {
     bookNames: [],
     skillMetas: [],
   });
+  mockRenderWorldSimulation.mockReturnValue('');
 });
 
 describe('willPlotUseMainApiGenerateRaw_ACU', () => {
@@ -980,6 +989,23 @@ describe('getAgentControlledWorldbookEntriesForFinalPrompt_ACU', () => {
 });
 
 describe('runPlotTasksRuntime_ACU', () => {
+  it('移除公开 $W，并将 hidden 世界状态作为独立 system 消息附加到任务', async () => {
+    mockRenderWorldSimulation.mockReturnValue('<WORLD_SIMULATION_HIDDEN_CONTEXT>\n暗部行动\n</WORLD_SIMULATION_HIDDEN_CONTEXT>');
+    await runPlotTasksRuntime_ACU({
+      enabled: true,
+      tasks: [{
+        id: 'world-simulation-hidden', name: '世界推演 hidden 注入', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '上下文：公开历史由 AI 楼层自然提供' }],
+      }],
+    }, '当前输入');
+
+    expect(mockRenderWorldSimulation).toHaveBeenCalledWith({ plotEnabled: true });
+    expect(mockCallApiWithPlotPreset.mock.calls[0]![0]).toEqual([
+      { role: 'user', content: '上下文：公开历史由 AI 楼层自然提供' },
+      { role: 'system', content: '<WORLD_SIMULATION_HIDDEN_CONTEXT>\n暗部行动\n</WORLD_SIMULATION_HIDDEN_CONTEXT>' },
+    ]);
+  });
+
   it('清绿灯读取失败时在任何任务 AI 调用前阻断本轮剧情推进', async () => {
     mockClearFinalGenerationGreenlights.mockRejectedValue(new Error('Lorebook permission denied'));
     const plotSettings = {

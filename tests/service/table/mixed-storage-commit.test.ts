@@ -8,7 +8,7 @@ const { chatRef, saveStrict, scope, reload, storageMode, didFallback } = vi.hois
   storageMode: { current: 'native' as 'native' | 'sqlite' },
   didFallback: vi.fn(() => false),
 }));
-vi.mock('../../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: vi.fn(() => chatRef.value), saveChatToHostStrict_ACU: saveStrict }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: vi.fn(() => chatRef.value), saveChatToHostStrict_ACU: saveStrict, emitMessageUpdated_ACU: vi.fn() }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: { dataIsolationEnabled: false, dataIsolationCode: '', storageMode: 'native' },
   get currentChatFileIdentifier_ACU() { return scope.chatIdentifier; },

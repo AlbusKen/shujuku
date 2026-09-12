@@ -7,6 +7,8 @@
  * 直接输出完整 JSON，或只续写预填充之后的部分。
  */
 
+import { extractAgentKernelJsonObjects_ACU } from '../../agent-kernel/json-payload';
+
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
 import {
@@ -97,22 +99,7 @@ export function extractFirstJsonObject_ACU(text: string): string | null {
  * @returns 提取到的 JSON 子串列表，最多 6 个
  */
 export function extractJsonObjects_ACU(text: string): string[] {
-  if (typeof text !== 'string') return [];
-  const objects: string[] = [];
-  let cursor = 0;
-  while (objects.length < JSON_OBJECT_SCAN_LIMIT_ACU) {
-    const start = text.indexOf('{', cursor);
-    if (start < 0) break;
-    const balanced = balancedObjectFrom_ACU(text, start);
-    if (!balanced) {
-      // 从该花括号起无法配平（多半是散文里的孤立花括号），跳过它继续找。
-      cursor = start + 1;
-      continue;
-    }
-    objects.push(balanced.json);
-    cursor = balanced.end;
-  }
-  return objects;
+  return extractAgentKernelJsonObjects_ACU(text, JSON_OBJECT_SCAN_LIMIT_ACU);
 }
 
 function stripMarkdownFences_ACU(text: string): string {

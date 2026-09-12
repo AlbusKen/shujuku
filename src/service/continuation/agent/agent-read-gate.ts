@@ -19,6 +19,7 @@
  * 门禁统一作用于三条注入路径：主 Agent 工具批次、子代理工具轮次、派工种子材料。
  */
 
+import { decideAgentKernelReadBatch_ACU, resolveAgentKernelReadBudget_ACU } from '../../agent-kernel/read-gate';
 import { AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU } from './agent-model';
 import { countAgentTokens_ACU, type TokenCounter_ACU } from './agent-token-budget';
 
@@ -62,26 +63,11 @@ export interface AgentReadBudgetResolution_ACU {
  * @returns 有效 M / F 与解析依据
  */
 export function resolveAgentReadBudget_ACU(config: AgentReadGateConfig_ACU): AgentReadBudgetResolution_ACU {
-  const percentBase = config.historyTokenBudget > 0 ? config.historyTokenBudget : AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU;
-  let effectiveMaxReadTokens = 0;
-  let basis: AgentReadBudgetResolution_ACU['basis'] = 'history-budget-percent';
-  const raw = config.readTokenBudget;
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 1) {
-    effectiveMaxReadTokens = Math.floor(raw);
-    basis = 'fixed';
-  } else if (typeof raw === 'string' && raw.trim().endsWith('%')) {
-    const percent = parseFloat(raw.trim());
-    if (Number.isFinite(percent) && percent >= 1 && percent <= 100) {
-      effectiveMaxReadTokens = Math.floor(percentBase * (percent / 100));
-    }
-  }
-  if (!Number.isFinite(effectiveMaxReadTokens) || effectiveMaxReadTokens < 1) {
-    // 损坏配置回退默认 20%，与设置校验层的默认一致。
-    effectiveMaxReadTokens = Math.floor(percentBase * 0.2);
-    basis = 'history-budget-percent';
-  }
-  const configuredFallback = Number.isFinite(config.fallbackTokens) && config.fallbackTokens >= 1 ? Math.floor(config.fallbackTokens) : 6000;
-  return { effectiveMaxReadTokens, effectiveFallbackTokens: Math.min(configuredFallback, effectiveMaxReadTokens), basis };
+  return resolveAgentKernelReadBudget_ACU({
+    ...config,
+    defaultHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
+    defaultFallbackTokens: 6000,
+  });
 }
 
 export type AgentReadGateRejectReason_ACU = 'read-batch-too-large' | 'near-compaction-overflow';
@@ -141,25 +127,21 @@ export async function gateAgentReadBatch_ACU(
   contextTokens: number,
   count: TokenCounter_ACU = countAgentTokens_ACU,
 ): Promise<AgentReadGateDecision_ACU> {
-  const itemTokens = await Promise.all(items.map(item => count(item.text)));
-  const batchTokens = itemTokens.reduce((sum, tokens) => sum + tokens, 0);
-  if (!items.length) return { allowed: true, batchTokens: 0, itemTokens: [], report: '' };
-
-  const budget = resolveAgentReadBudget_ACU(config);
-  const decide = (reason: AgentReadGateRejectReason_ACU): AgentReadGateDecision_ACU => ({
-    allowed: false,
-    reason,
-    batchTokens,
-    itemTokens,
-    report: buildRejectionReport_ACU(reason, items, itemTokens, batchTokens, state, budget, config.historyTokenBudget, contextTokens),
-  });
-
-  // 每个工具批次独立判定：不存在跨批次累计额度。
-  if (batchTokens > budget.effectiveMaxReadTokens) return decide('read-batch-too-large');
-  if (config.historyTokenBudget > 0 && contextTokens > 0 && contextTokens + batchTokens > config.historyTokenBudget
-    && batchTokens > budget.effectiveFallbackTokens) {
-    return decide('near-compaction-overflow');
+  const decision = await decideAgentKernelReadBatch_ACU(items.map(item => item.text), {
+    ...config,
+    defaultHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
+    defaultFallbackTokens: 6000,
+  }, contextTokens, count);
+  if (!decision.allowed) {
+    const reason = decision.reason as AgentReadGateRejectReason_ACU;
+    return {
+      ...decision,
+      report: buildRejectionReport_ACU(
+        reason, items, decision.itemTokens, decision.batchTokens, state,
+        resolveAgentReadBudget_ACU(config), config.historyTokenBudget, contextTokens,
+      ),
+    };
   }
   void state;
-  return { allowed: true, batchTokens, itemTokens, report: '' };
+  return { ...decision, report: '' };
 }

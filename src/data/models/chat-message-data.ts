@@ -11,6 +11,7 @@ import type {
     ChatSummaryVectorIndexManifest_ACU,
     ChatSummaryVectorIndexState_ACU,
 } from '../../service/vector/summary-vector-index-types';
+import type { WorldSimulationPersistedValue_ACU } from '../../service/simulation/model';
 
 // ── 新版按标签分组存储 ──
 
@@ -45,6 +46,8 @@ export interface IsolationTagData_ACU {
     _acu_storage_mode?: TableStorageMode_ACU;
     /** 存储格式版本号（便于后续升级） */
     _acu_storage_version?: number;
+    /** 世界推演独立账本记录或 per-swipe envelope；不属于表格 storageFrame/incrementalData。 */
+    worldSimulation?: WorldSimulationPersistedValue_ACU;
 }
 
 // ── 增量存储类型 ──

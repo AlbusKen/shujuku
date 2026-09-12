@@ -28,6 +28,7 @@ import { normalizeAgentContextSettings_ACU } from '../../agent/agent-prompt-temp
 import { getWorldbookEntryKeywordsForSkillify_ACU, isDatabaseGeneratedWorldbookEntryForAgent_ACU } from '../../agent/agent-skillify-service';
 import { clearFinalGenerationGreenlights_ACU, resolvePreTakeoverWorldbookSnapshot_ACU, writeFinalGenerationGreenlights_ACU } from '../../agent/agent-worldbook-takeover';
 import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailability_ACU } from '../../agent/agent-worldbook-skill-meta';
+import { WorldSimulationHiddenContextProvider_ACU } from '../../simulation/injection-provider';
 
   type PlotWorldbookAgentMode_ACU = 'normal' | 'agent-controlled';
 
@@ -360,6 +361,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       charInfoContent_Plot = '';
     }
 
+    const hiddenSystemContext = new WorldSimulationHiddenContextProvider_ACU().render({ plotEnabled: plotSettings.enabled === true });
     const replacements: Record<string, any> = {
       sulv1: plotSettings.rateMain,
       sulv2: plotSettings.ratePersonal,
@@ -436,6 +438,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       performReplacements,
       resolveTableWorldbookTokens,
       finalSystemDirectiveContent,
+      hiddenSystemContext,
       seedContentForConditional,
       recentContextMessages: Array.isArray(agentContextMessages) ? agentContextMessages : [],
       allTablesJson: currentJsonTableData_ACU,
@@ -472,9 +475,12 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       seg.__renderedContent = c;
     }
 
-    return messagesToUse
+    const rendered = messagesToUse
       .filter(seg => seg && typeof seg.__renderedContent === 'string' && seg.__renderedContent.trim().length > 0)
       .map(seg => ({ role: getNormalizedPlotMessageRole_ACU(seg.role), content: seg.__renderedContent }));
+    const hiddenSystemContext = typeof sharedContext.hiddenSystemContext === 'string' ? sharedContext.hiddenSystemContext.trim() : '';
+    if (hiddenSystemContext) rendered.push({ role: 'system', content: hiddenSystemContext });
+    return rendered;
   }
 
   function getPlotPromptGroupForWorldbookTrigger_ACU(promptGroup: any[]): any[] {

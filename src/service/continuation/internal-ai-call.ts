@@ -1,4 +1,5 @@
 import { callAIWithResolvedPreset_ACU, type AiUsageMetadata_ACU } from '../ai/api-call';
+import { buildAgentKernelPromptCacheKey_ACU, executeAgentKernelRequest_ACU, retryAgentKernelRequest_ACU } from '../agent-kernel/internal-ai-call';
 import type { ContinuationResolvedApiPreset_ACU } from './api-preset';
 import { ContinuationValidationError_ACU, type ContinuationAgentApiPresetRole_ACU, type ContinuationInternalAiRequestIdentity_ACU } from './model';
 import {
@@ -47,44 +48,7 @@ export const CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU: Readonly<Record<Continua
   webResearcher: 8192,
 };
 
-/**
- * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
- * 输入可能含中文与路径分隔符，哈希后得到纯 [0-9a-f] 串，满足请求体注入通道的字符白名单。
- */
-function fnv1aHex_ACU(input: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
-}
-
 const PROMPT_CACHE_KEY_NAMESPACE_ACU = 'acu-cont-v2';
-const PROMPT_CACHE_KEY_MAX_LENGTH_ACU = 64;
-
-/**
- * 组装本次调用的 prompt_cache_key。只含版本、聊天身份、调用 scope 与模型路由四类稳定因子；
- * 不含任何随请求、迭代或轮次变化的内容，也不暴露原始聊天身份、scope、模型或 URL。
- */
-function buildPromptCacheKey_ACU(
-  identity: ContinuationInternalAiRequestIdentity_ACU,
-  scope: string,
-  preset: ContinuationResolvedApiPreset_ACU,
-): string {
-  const chatHash = fnv1aHex_ACU(identity.chatIdentity);
-  const scopeHash = fnv1aHex_ACU(scope);
-  const routeHash = fnv1aHex_ACU(JSON.stringify([
-    preset.apiMode,
-    preset.apiConfig.model,
-    preset.apiConfig.url,
-  ]));
-  const key = `${PROMPT_CACHE_KEY_NAMESPACE_ACU}-${chatHash}-${scopeHash}-${routeHash}`;
-  if (key.length > PROMPT_CACHE_KEY_MAX_LENGTH_ACU || !/^[A-Za-z0-9_-]+$/.test(key)) {
-    throw new Error('内部 AI 缓存路由键不符合长度或字符约束。');
-  }
-  return key;
-}
 
 /**
  * 把一次调用的用量渲染成会话流条目里的紧凑标签。
@@ -116,14 +80,23 @@ export async function callContinuationInternalAi_ACU(
   signal?: AbortSignal | null,
   options?: ContinuationInternalAiCallOptions_ACU,
 ): Promise<string | null> {
-  beginContinuationInternalAiRequest_ACU(identity);
   const cacheEnabled = options?.promptCacheEnabled === true;
   const extras = {
-    ...(cacheEnabled ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source, preset) } : {}),
+    ...(cacheEnabled ? {
+      promptCacheKey: buildAgentKernelPromptCacheKey_ACU(identity, {
+        namespace: PROMPT_CACHE_KEY_NAMESPACE_ACU,
+        scope: options?.cacheScope || identity.source,
+        apiMode: preset.apiMode,
+        model: preset.apiConfig.model,
+        url: preset.apiConfig.url,
+      }),
+    } : {}),
     ...(options?.minOutputTokens ? { minOutputTokens: options.minOutputTokens } : {}),
   };
-  try {
-    return await callAIWithResolvedPreset_ACU(
+  return executeAgentKernelRequest_ACU({
+    before: () => beginContinuationInternalAiRequest_ACU(identity),
+    settle: () => settleContinuationInternalAiRequest_ACU(identity.requestId),
+    invoke: () => callAIWithResolvedPreset_ACU(
       messages,
       preset,
       signal,
@@ -133,12 +106,8 @@ export async function callContinuationInternalAi_ACU(
         ...(options?.onUsage ? { onUsage: options.onUsage } : {}),
       },
       Object.keys(extras).length ? extras : undefined,
-    );
-  } finally {
-    // A bound host lifecycle remains registered until its matching ended event.
-    // An unbound request is removed, so later unrelated events are never claimed.
-    settleContinuationInternalAiRequest_ACU(identity.requestId);
-  }
+    ),
+  });
 }
 
 /** 传输错误延时重试的配置。wait 可注入：生产用 setTimeout，测试用假计时器。 */
@@ -184,19 +153,11 @@ export async function callContinuationInternalAiWithRetry_ACU<T>(
   invoke: () => Promise<T>,
   options: ContinuationInternalAiRetryOptions_ACU,
 ): Promise<T> {
-  const wait = options.wait ?? defaultWait_ACU;
-  const retries = Math.max(0, Math.floor(options.transportRetries));
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      return await invoke();
-    } catch (error) {
-      lastError = error;
-      if (attempt >= retries || !isRetryableContinuationTransportError_ACU(error)) throw error;
-      await wait(Math.max(0, options.retryDelaySeconds) * 1000);
-      // 等待期间任务可能已被停止/换轮：先查存活再决定是否重打，不做无谓请求。
-      if (options.isCurrent && !options.isCurrent()) throw error;
-    }
-  }
-  throw lastError;
+  return retryAgentKernelRequest_ACU(invoke, {
+    retries: options.transportRetries,
+    delayMs: options.retryDelaySeconds * 1000,
+    wait: options.wait ?? defaultWait_ACU,
+    shouldRetry: isRetryableContinuationTransportError_ACU,
+    isCurrent: options.isCurrent,
+  });
 }

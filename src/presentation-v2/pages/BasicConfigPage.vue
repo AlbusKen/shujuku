@@ -20,6 +20,10 @@
         id="basic-config-plot-panel"
         class="acu-v2-basic-config-page__plot"
       />
+      <WorldSimulationSettingsPanel
+        id="basic-config-world-simulation-panel"
+        class="acu-v2-basic-config-page__world-simulation"
+      />
     </AcuPanelGrid>
   </section>
 </template>
@@ -31,6 +35,7 @@ import ApiConfigPanel from '../components/ApiConfigPanel.vue';
 import FormFillUpdateSettingsPanel from '../components/FormFillUpdateSettingsPanel.vue';
 import PlotPresetPanel from '../components/PlotPresetPanel.vue';
 import TableTemplatePresetPanel from '../components/TableTemplatePresetPanel.vue';
+import WorldSimulationSettingsPanel from '../components/WorldSimulationSettingsPanel.vue';
 import { basicConfigCopy } from '../copy/basic-config-copy';
 
 const panelNavItems = [
@@ -38,6 +43,7 @@ const panelNavItems = [
   { id: 'basic-config-update-panel', label: basicConfigCopy.nav.update },
   { id: 'basic-config-table-panel', label: basicConfigCopy.nav.table },
   { id: 'basic-config-plot-panel', label: basicConfigCopy.nav.plot },
+  { id: 'basic-config-world-simulation-panel', label: '世界推演' },
 ];
 </script>
 
@@ -55,7 +61,8 @@ const panelNavItems = [
   grid-template-areas:
     "api update"
     "api table"
-    "api plot";
+    "api plot"
+    "api world-simulation";
 }
 
 .acu-v2-basic-config-page__api {
@@ -74,6 +81,10 @@ const panelNavItems = [
   grid-area: plot;
 }
 
+.acu-v2-basic-config-page__world-simulation {
+  grid-area: world-simulation;
+}
+
 @media (max-width: 860px) {
   .acu-v2-basic-config-page {
     padding: 14px;
@@ -84,7 +95,8 @@ const panelNavItems = [
       "api"
       "update"
       "table"
-      "plot";
+      "plot"
+      "world-simulation";
   }
 }
 </style>

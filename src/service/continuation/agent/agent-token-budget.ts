@@ -12,6 +12,7 @@
  * 是有损压缩，还会新增一条失败路径与额外延迟。
  */
 
+import { createAgentKernelTokenCounter_ACU } from '../../agent-kernel/token-budget';
 import { countTextTokens_ACU } from '../../ai/token-counter';
 import {
   AGENT_HISTORY_EMERGENCY_FACTOR_ACU,
@@ -61,15 +62,7 @@ export type TokenCounter_ACU = (text: string) => Promise<number>;
  * @returns 记忆化计数器；同一段文本只向宿主问一次
  */
 export function createAgentTokenCounter_ACU(count: TokenCounter_ACU = countAgentTokens_ACU): TokenCounter_ACU {
-  const cache = new Map<string, number>();
-  return async (text: string) => {
-    const key = String(text ?? '');
-    const cached = cache.get(key);
-    if (cached !== undefined) return cached;
-    const counted = await count(key);
-    cache.set(key, counted);
-    return counted;
-  };
+  return createAgentKernelTokenCounter_ACU(count);
 }
 
 async function measureMessages_ACU(messages: readonly AgentConversationMessage_ACU[], count: TokenCounter_ACU): Promise<number[]> {

@@ -35,6 +35,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: vi.fn(() => mocks.chat),
   saveChatToHost_ACU: mocks.saveChat,
   saveChatToHostStrict_ACU: mocks.saveChatStrict,
+  emitMessageUpdated_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/data/repositories/chat-message-data-repo', async importOriginal => ({

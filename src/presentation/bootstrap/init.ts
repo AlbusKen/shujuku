@@ -38,6 +38,10 @@ import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
+import { WorldSimulationHiddenContextInjector_ACU } from '../../service/simulation/hidden-context-injector';
+import { getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime-registry';
+import { consumeWorldSimulationProjectionEmit_ACU } from '../../service/simulation/simulation-commit-guard';
+import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeUnattributedWorldSimulationInternalAiEnded_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, discardUnattributedWorldSimulationInternalAiRequests_ACU, hasActiveWorldSimulationInternalAiMainApiInvocation_ACU } from '../../service/simulation/simulation-internal-ai-events';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -139,6 +143,37 @@ function installSendIntentCaptureHooks_ACU() {
   }
 }
 
+/**
+ * [世界推演] 交火纪要索引与剧情推进前的有界 join：只等待已经存在的快速回结算
+ * （candidate_pending / checking / committing），绝不阻断宿主生成，也绝不用伪超时取消
+ * 不可取消的宿主保存。窗口耗尽后由 runtime 按阶段决定：可撤销的作废旧目标（零提交），
+ * 已进入联合提交的则等该次提交真实跑完后放行。
+ */
+async function awaitWorldSimulationSettlementBeforePlotStart_ACU(reason: string): Promise<void> {
+  try {
+    const result = await getWorldSimulationRuntime_ACU().awaitBeforePlotStart();
+    if (result.kind === 'failed') {
+      // The settlement rejected inside the bounded window. This is neither a timeout nor a zero
+      // commit, and must not be logged as a clean joined release.
+      logWarn_ACU(`[世界推演] ${reason} 前等待结算失败，继续宿主生成:`, result.settlementFailure?.error);
+    } else if (result.kind === 'timeout') {
+      if (result.revoked === true) {
+        // 只有 beginCommit 之前的 candidate_pending/checking 才能被真正作废：这是零提交。
+        logDebug_ACU(`[世界推演] ${reason} 前等待结算超时，已作废旧目标租约（零提交）。`);
+      } else if (result.settlementFailure) {
+        // committing 的宿主保存不可取消：本次等到的是一次失败的联合提交。必须与“提交成功后放行”
+        // 分离成两条日志，否则 join 门会把一次失败的保存读成干净放行。
+        logWarn_ACU(`[世界推演] ${reason} 前等待结算窗口耗尽：目标已在不可撤销的联合提交中，且该次提交失败后已放行；不得记为“零提交”。`, result.settlementFailure.error);
+      } else {
+        // committing 的宿主保存不可取消：本次等到该次联合提交成功结束后才放行，故不声称零提交。
+        logDebug_ACU(`[世界推演] ${reason} 前等待结算窗口耗尽（windowElapsed=${String(result.windowElapsed)}）：目标已在不可撤销的联合提交中，已等到该次提交结束才放行；不得记为“零提交”。`);
+      }
+    }
+  } catch (error) {
+    logWarn_ACU(`[世界推演] ${reason} 前等待结算失败，继续宿主生成:`, error);
+  }
+}
+
 export   function mainInitialize_ACU() {
 
     console.log('ACU_INIT_DEBUG: mainInitialize_ACU called.');
@@ -225,6 +260,14 @@ export   function mainInitialize_ACU() {
             if (isSqliteMode()) logDebug_ACU('[SQLite] CHAT_CHANGED: 立即销毁旧数据库实例');
           }
 
+          // [世界推演] 换聊天会回收其他聊天的在飞候选。世界推演的 chat 身份取自宿主 live
+          // chatId，切聊天后旧键再也观测不到，只靠租约比较无法发现（空账本 lineage 恒定），
+          // 因此必须按“非当前聊天”整体回收；committing 的宿主保存已发起，仍交由它自己跑完。
+          try {
+            const reclaimed = getWorldSimulationRuntime_ACU().discardInFlightSettlementsForOtherChats();
+            if (reclaimed > 0) logDebug_ACU(`[世界推演] CHAT_CHANGED 已回收其他聊天的在飞候选：count=${reclaimed}`);
+          } catch (_) {}
+
           await resetScriptStateForNewChat_ACU(chatFileName, { reason: 'chat_changed' });
 
           // [触发门控] generationGate 重置已搬到 service 层的 resetScriptStateForNewChat_ACU 中
@@ -249,6 +292,9 @@ export   function mainInitialize_ACU() {
                 if (userInputForInitialSeed) {
                   await ensureInitialSeedCheckpointBeforeGeneration_ACU('tavernhelper_generate_before_ai', { allowPendingFirstUserMessage: true });
                 }
+
+                // [世界推演] 交火纪要索引/剧情推进之前的有界 join；与本文件 GENERATION_AFTER_COMMANDS 入口共用同一实现。
+                await awaitWorldSimulationSettlementBeforePlotStart_ACU('tavernhelper_generate');
 
                 if (shouldProcessSummaryVectorIndexForGeneration_ACU('tavernhelper', { quiet_prompt: options.quiet_prompt, automatic_trigger: options.automatic_trigger }, false)) {
                   const userInput = String(options.user_input || options.prompt || getSendTextareaValue_ACU() || '').trim();
@@ -282,6 +328,8 @@ export   function mainInitialize_ACU() {
                   // 'passthrough', 'skipped', 'aborted' — 不做额外操作，直接透传
                 }
 
+                // Append, never overwrite: existing injects may carry the caller's user/system request data.
+                new WorldSimulationHiddenContextInjector_ACU().appendToGenerateOptions(options, { plotEnabled: settings_ACU.plotSettings?.enabled === true });
                 return await (window as any).original_TavernHelper_generate_ACU.apply(this, args);
               };
               logDebug_ACU('[剧情推进] TavernHelper.generate hook registered.');
@@ -430,6 +478,8 @@ export   function mainInitialize_ACU() {
               _set_wasStoppedByUser_ACU(false);
               const context = recordGenerationContext_ACU(type, params, dryRun);
               bindContinuationInternalAiGenerationStarted_ACU(context.seq);
+              // [世界推演] 与 continuation 各自独立归属同一次宿主生成，两个注册表互不共享。
+              bindWorldSimulationInternalAiGenerationStarted_ACU(context.seq);
               // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
               // 对非 quiet/非 dryRun/非自动触发的生成开放宽松认领（spv8.9.2 状态法），桥内部只在
               // 存在未绑定序列号的等待轮时才会认领。
@@ -447,6 +497,9 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
               const discarded = discardLatestGenerationContext_ACU();
+              // [世界推演] 被中止的生成同样不会再有 GENERATION_ENDED：已进主 API 但未绑定 seq 的
+              // 内部请求必须现在就丢弃，否则它会在 TTL 内吞掉紧随其后的一条真实用户 AI 楼层事件。
+              discardUnattributedWorldSimulationInternalAiRequests_ACU();
               // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
               void getContinuationHostGenerationBridge_ACU()?.onGenerationStopped(discarded?.seq);
             } catch (e) {}
@@ -459,6 +512,29 @@ export   function mainInitialize_ACU() {
                 const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (internalRequest) {
                   logDebug_ACU(`ACU 忽略 continuation 内部 ${internalRequest.source} GENERATION_ENDED: ${internalRequest.requestId}`);
+                  return;
+                }
+                // [世界推演] 与 continuation 逻辑独立：世界推演内部 AI 的生成同样按 seq 排除，
+                // 绝不落入常规派发与自动填表（否则世界推演会自己触发自己）。
+                const worldSimInternalRequest = consumeWorldSimulationInternalAiGenerationEnded_ACU(generationContext?.seq);
+                if (worldSimInternalRequest) {
+                  logDebug_ACU(`ACU 忽略世界推演内部 ${worldSimInternalRequest.source} GENERATION_ENDED: ${worldSimInternalRequest.requestId}`);
+                  return;
+                }
+                // [世界推演] fail-closed 兜底：宿主未给 seq、事件乱序或多请求并发都会让上面的
+                // 按 seq 归属失败。此时若有世界推演内部主 API 调用正开着，该 GENERATION_ENDED
+                // 绝不能进入常规派发——否则世界推演会把自己的内部调用当成新 AI 楼层并自触发。
+                if (hasActiveWorldSimulationInternalAiMainApiInvocation_ACU()) {
+                  logWarn_ACU('ACU 世界推演内部主 API 调用窗口内收到无法归属的 GENERATION_ENDED，按内部生成丢弃。');
+                  return;
+                }
+                // [世界推演] 同步窗口关闭后仍有残余：宿主若未在 generateRaw 同步栈内送达
+                // GENERATION_STARTED，归属永远拿不到 seq，而 afterMainApiCall 早已把窗口关掉。
+                // 这种“内部调用已进主 API、却没有对应结束事件”的记录在这里被消费一次，
+                // 避免把世界推演自己的内部生成当作普通 AI 楼层反向触发。
+                const unattributedWorldSim = consumeUnattributedWorldSimulationInternalAiEnded_ACU();
+                if (unattributedWorldSim) {
+                  logWarn_ACU(`ACU 无法归属的世界推演内部 ${unattributedWorldSim.source} GENERATION_ENDED，按内部生成丢弃。`);
                   return;
                 }
                 const continuationBridge = getContinuationHostGenerationBridge_ACU();
@@ -513,6 +589,18 @@ export   function mainInitialize_ACU() {
                     lastGenerationType: generationGate_ACU.lastGeneration?.type,
                   });
                 }
+                // [世界推演] AI 楼层完成后独立异步触发：与填表门控解耦，但仍必须排除
+                // quiet/dryRun/自动触发等不产生正文楼层的生成；无 generationContext 时无法证明
+                // 这是普通用户生成，同样 fail-closed 不触发。
+                const worldSimGenerationEligible = Boolean(generationContext)
+                  && generationContext!.dryRun !== true
+                  && !quietLike
+                  && !automaticTrigger;
+                if (autoFillIntent && worldSimGenerationEligible) {
+                  void getWorldSimulationRuntime_ACU().onAiFloorCompleted(autoFillIntent).catch((error: any) => {
+                    logWarn_ACU('[世界推演] AI 楼层完成后触发失败:', error);
+                  });
+                }
             };
             if (typeof SillyTavern_API_ACU.eventSource.makeFirst === 'function') {
               SillyTavern_API_ACU.eventSource.makeFirst(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, onGenerationEnded);
@@ -536,7 +624,13 @@ export   function mainInitialize_ACU() {
             if (shouldEnsureInitialSeed) {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
             }
+            if (!dryRun && type !== 'regenerate' && !params?.automatic_trigger && !isQuietLikeGeneration_ACU(type, params)) {
+              // The host applies once:true injections to the pending generation; failures stay fail-closed in the adapter.
+              new WorldSimulationHiddenContextInjector_ACU().injectForNextHostGeneration({ plotEnabled: settings_ACU.plotSettings?.enabled === true });
+            }
             if (!shouldProcessSummaryVectorIndex && !shouldProcessPlot) return;
+            // [世界推演] 交火纪要索引与剧情推进之前的有界 join；与 TavernHelper.generate 入口共用同一实现。
+            await awaitWorldSimulationSettlementBeforePlotStart_ACU('generation_after_commands');
             if (shouldProcessSummaryVectorIndex) {
               try {
                 const chatForSummaryIndex = SillyTavern_API_ACU.chat;
@@ -647,9 +741,26 @@ export   function mainInitialize_ACU() {
                 SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes], async (data: any) => {
                     logDebug_ACU(`ACU ${evName} event detected. Triggering data reload and merge from chat history.`);
                     scheduleChatMutationRefresh_ACU(evName === 'MESSAGE_DELETED' ? 'chat_modified_deleted' : 'chat_modified_swiped');
+                    // [世界推演] 用户改写分支后，在飞候选已不属于当前分支，必须整体丢弃；
+                    // 只靠租约比较无法发现“同长度换 swipe”（空账本 lineage 恒定），
+                    // 让旧候选重定锚到新分支会写错分支。此处失败不影响既有刷新流程。
+                    try {
+                        getWorldSimulationRuntime_ACU().discardInFlightSettlementForCurrentChat();
+                    } catch (_) {}
                 });
             }
         });
+        // [世界推演] 用户编辑 AI 楼层正文（含改写末端系统投影块）后，旧候选的正文基底已失效。
+        // 系统联合提交自己 emit 的 MESSAGE_UPDATED 必须先消费自己的 token，否则该次提交会立刻
+        // 作废刚刚结算成功的候选。token 一次消费，用户的下一次编辑仍会正常失效。
+        if (SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED) {
+            SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, async (messageIndex: any) => {
+                try {
+                    if (consumeWorldSimulationProjectionEmit_ACU(messageIndex)) return;
+                    getWorldSimulationRuntime_ACU().discardInFlightSettlementForCurrentChat();
+                } catch (_) {}
+            });
+        }
         logDebug_ACU('ACU: All event listeners attached using eventSource.');
       } else {
         logWarn_ACU('ACU: Could not attach event listeners because eventSource or eventTypes are missing.');

@@ -12,6 +12,8 @@ const {
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: mockGetChatArray,
+  saveChatToHostStrict_ACU: vi.fn().mockResolvedValue(undefined),
+  emitMessageUpdated_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/defaults-json.js', () => ({

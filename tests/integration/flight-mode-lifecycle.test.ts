@@ -16,6 +16,7 @@ vi.mock('../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: h.save,
   saveChatToHostStrict_ACU: h.strictSave,
+  emitMessageUpdated_ACU: vi.fn(),
 }));
 vi.mock('../../src/data/storage/chat-history', () => ({
   getActiveChatStorageIdentity_ACU: () => 'flight-mode-lifecycle',

@@ -17,6 +17,7 @@ vi.mock('../../../src/service/table/table-storage-strategy', () => ({
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHostStrict_ACU: h.save,
+  emitMessageUpdated_ACU: vi.fn(),
 }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: { dataIsolationEnabled: false, dataIsolationCode: '', storageMode: 'native' },
