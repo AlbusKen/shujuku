@@ -14,11 +14,14 @@ import {
   type WorldSimulationTransaction_ACU,
   type WorldStateSnapshot_ACU,
   type WorldThread_ACU,
+  type WorldVisibilityPolicy_ACU,
+  type WorldVisibility_ACU,
 } from './model';
 
 type Retirable_ACU = { id: string; retired: boolean; retiredReason?: string; updatedIndex: number };
 type TransactionItem_ACU<T extends Retirable_ACU> = { action: 'upsert'; value: T } | { action: 'retire'; id: string; reason: string };
 
+const VISIBILITY_POLICIES_ACU: readonly WorldVisibilityPolicy_ACU[] = ['agent', 'always_hidden', 'always_revealed'];
 const MODULES_ACU: readonly WorldSimulationModule_ACU[] = ['entities', 'events', 'threads'];
 
 function isRecord_ACU(value: unknown): value is Record<string, unknown> {
@@ -128,6 +131,42 @@ function assertStableIds_ACU(entries: readonly Retirable_ACU[], label: string): 
     if (!isWorldStableId_ACU(entry.id) || ids.has(entry.id)) reject_ACU('WORLD_SIM_PROTOCOL_INVALID', `${label} 模块存在非法或重复稳定 id`, { id: entry.id });
     ids.add(entry.id);
   }
+}
+
+function normalizedVisibility_ACU(policy: WorldVisibilityPolicy_ACU, anchorMessageIndex: number, current: WorldVisibility_ACU): WorldVisibility_ACU {
+  if (policy === 'agent') return clone_ACU(current);
+  if (policy === 'always_hidden') return { mode: 'hidden' };
+  return { mode: 'revealed', revealedIndex: anchorMessageIndex };
+}
+
+function normalizeVisibilityItems_ACU<T extends Retirable_ACU & { visibility: WorldVisibility_ACU }>(
+  items: readonly TransactionItem_ACU<T>[],
+  policy: WorldVisibilityPolicy_ACU,
+  anchorMessageIndex: number,
+): TransactionItem_ACU<T>[] {
+  return items.map(item => {
+    if (item.action === 'retire') return { ...item };
+    if (item.value.retired) return { action: 'upsert', value: clone_ACU(item.value) };
+    return { action: 'upsert', value: { ...clone_ACU(item.value), visibility: normalizedVisibility_ACU(policy, anchorMessageIndex, item.value.visibility) } };
+  });
+}
+
+/**
+ * Applies the saved visibility policy to a final candidate write set before transaction validation.
+ * Retire operations and untouched ledger entries deliberately retain their existing visibility.
+ */
+export function normalizeWorldSimulationTransactionVisibility_ACU(
+  transaction: WorldSimulationTransaction_ACU,
+  policy: WorldVisibilityPolicy_ACU = 'agent',
+): WorldSimulationTransaction_ACU {
+  if (!VISIBILITY_POLICIES_ACU.includes(policy)) reject_ACU('WORLD_SIM_PROTOCOL_INVALID', '世界推演 visibilityPolicy 非法', { policy });
+  return {
+    ...transaction,
+    expectedRevisions: { ...transaction.expectedRevisions },
+    entities: normalizeVisibilityItems_ACU(transaction.entities, policy, transaction.anchorMessageIndex),
+    events: normalizeVisibilityItems_ACU(transaction.events, policy, transaction.anchorMessageIndex),
+    threads: normalizeVisibilityItems_ACU(transaction.threads, policy, transaction.anchorMessageIndex),
+  };
 }
 
 /**

@@ -118,6 +118,23 @@ describe('WorldSimulationRuntime_ACU.onAiFloorCompleted', () => {
     expect(trigger.mock.calls[0]![0]).toBe(1);
   });
 
+  it('continues the automatic gate after a queued manual request completes with no_change', async () => {
+    const trigger = vi.fn(async () => ({}));
+    const runPendingForAnchor = vi.fn(async () => 'no_change');
+    const owned = vi.fn(async () => gateReply(1));
+    const { runtime } = createRuntime({
+      getChat: aiChat,
+      runOwnedAi: owned,
+      orchestrator: createPort({ trigger }),
+      agentSession: { isRunning: () => false, runPendingForAnchor } as any,
+    });
+    await runtime.onAiFloorCompleted(intent(1, 2, 1));
+    await flush();
+    expect(runPendingForAnchor).toHaveBeenCalledWith(1, expect.any(Array));
+    expect(owned).toHaveBeenCalledTimes(1);
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
   it('never calls the gate for a pending or ambiguous floor resolution', async () => {
     const onlyUser = [{ is_user: true, mes: 'u' }];
     const { runtime, runOwnedAi } = createRuntime({ getChat: () => onlyUser });

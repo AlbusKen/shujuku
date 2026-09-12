@@ -70,6 +70,10 @@ describe('AgentPage', () => {
     await Promise.resolve();
 
     expect(el.textContent).toContain('Agent 世界书');
+    expect(el.textContent).toContain('世界推演 Agent 会话');
+    expect(el.textContent).toContain('当前 active swipe 世界账本资料');
+    expect(el.textContent).toContain('世界推演 Agent 设置');
+    expect(el.textContent).toContain('四角色伪 Role 提示词');
     expect(el.textContent).toContain('Skill 全选');
     const toolbarButtons = Array.from(el.querySelectorAll<HTMLButtonElement>('.acu-v2-wb-entry-toolbar .acu-btn'))
       .map(button => button.textContent?.trim());

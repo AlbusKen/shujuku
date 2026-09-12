@@ -1,6 +1,6 @@
 import type { WorldSimulationModule_ACU, WorldSimulationScale_ACU } from '../model';
-
-export type WorldSimulationAgentName_ACU = 'world-director' | 'entity-movement' | 'faction-events' | 'thread-weaver';
+export type { WorldSimulationAgentName_ACU } from '../model';
+import type { WorldSimulationAgentName_ACU } from '../model';
 
 export interface WorldSimulationAgentDefinition_ACU {
   name: WorldSimulationAgentName_ACU;

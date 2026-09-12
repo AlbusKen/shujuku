@@ -173,17 +173,16 @@ describe('BasicConfigPage', () => {
     expect(text).toContain('表格模板预设');
     expect(text).toContain('打开可视化表格编辑器');
     expect(text).toContain('剧情推进预设');
-    expect(text).toContain('世界推演');
+    expect(text).not.toContain('世界推演');
     expect(text).not.toContain('通常只有 API 连接需要你确认');
     const panelTitles = Array.from(page!.querySelectorAll('.acu-v2-basic-config-page__grid > .acu-panel .acu-panel__title'))
       .map(title => (title.textContent || '').trim());
-    expect(panelTitles).toEqual(['API 预设', '自动更新设置', '表格模板预设', '剧情推进预设', '世界推演']);
+    expect(panelTitles).toEqual(['API 预设', '自动更新设置', '表格模板预设', '剧情推进预设']);
     const mobileNavItems = Array.from(page!.querySelectorAll('.acu-mobile-panel-nav__item'))
       .map(item => (item.textContent || '').trim());
-    expect(mobileNavItems).toEqual(['API 预设', '更新设置', '表格模板', '剧情推进', '世界推演']);
+    expect(mobileNavItems).toEqual(['API 预设', '更新设置', '表格模板', '剧情推进']);
     expect(document.getElementById('basic-config-update-panel')).not.toBeNull();
-    expect(document.getElementById('basic-config-world-simulation-panel')).not.toBeNull();
-    // The panel only snapshots defaults for its local draft. Mounting must never create a persisted setting.
+    expect(document.getElementById('basic-config-world-simulation-panel')).toBeNull();
     expect(settings.worldSimulation).toBeUndefined();
 
     const sidebarText = document.querySelector('.acu-v2-sidebar')?.textContent || '';
@@ -192,27 +191,6 @@ describe('BasicConfigPage', () => {
     expect(sidebarText).not.toContain('仪表盘');
     expect(sidebarText).not.toContain('更新参数');
 
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('世界推演面板只在用户明确保存后调用写通路', async () => {
-    const { mount, settings } = await mountBasicConfigPage();
-    const panel = document.getElementById('basic-config-world-simulation-panel') as HTMLElement;
-    const toggle = panel.querySelector<HTMLButtonElement>('[role="switch"]');
-    const save = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.trim() === '保存世界推演设置');
-    expect(toggle).not.toBeNull();
-    expect(save).not.toBeNull();
-    expect(settings.worldSimulation).toBeUndefined();
-
-    toggle!.click();
-    await Promise.resolve();
-    expect(settings.worldSimulation).toBeUndefined();
-    save!.click();
-    await Promise.resolve();
-
-    expect(settings.worldSimulation).toMatchObject({ enabled: true, joinWaitMs: 30_000 });
-    expect(panel.textContent).toContain('世界推演设置已保存。');
     mount.__resetAcuV2MountForTests();
   });
 
@@ -238,7 +216,7 @@ describe('BasicConfigPage', () => {
     const { mount } = await mountBasicConfigPage();
 
     const panels = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-basic-config-page .acu-panel'));
-    expect(panels).toHaveLength(5);
+    expect(panels).toHaveLength(4);
     for (const panel of panels) {
       expect(panel.querySelector('.acu-panel__description-region .acu-info-banner')).not.toBeNull();
     }

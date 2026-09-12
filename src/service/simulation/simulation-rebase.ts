@@ -12,11 +12,12 @@ import {
   type WorldEventTransactionItem_ACU,
   type WorldSimulationModule_ACU,
   type WorldSimulationTransaction_ACU,
+  type WorldVisibilityPolicy_ACU,
   type WorldStateSnapshot_ACU,
   type WorldStoryClock_ACU,
   type WorldThreadTransactionItem_ACU,
 } from './model';
-import { applyWorldSimulationTransaction_ACU } from './simulation-transaction';
+import { applyWorldSimulationTransaction_ACU, normalizeWorldSimulationTransactionVisibility_ACU } from './simulation-transaction';
 
 export type WorldSimulationRebaseOp_ACU =
   | { op: 'keep'; module: WorldSimulationModule_ACU; id: string }
@@ -34,6 +35,7 @@ export interface WorldSimulationRebaseInput_ACU {
   coverageEndMessageIndex: number;
   rebaseStoryClock: WorldStoryClock_ACU;
   maxTrackedEntities: number;
+  visibilityPolicy?: WorldVisibilityPolicy_ACU;
   rawDecision: string | null | undefined;
   isCurrent?: () => boolean;
 }
@@ -221,6 +223,7 @@ function assertRebaseInput_ACU(input: WorldSimulationRebaseInput_ACU): void {
     || !Number.isInteger(input.coverageStartMessageIndex) || input.coverageStartMessageIndex !== input.sourceAnchorMessageIndex
     || !Number.isInteger(input.coverageEndMessageIndex) || input.coverageEndMessageIndex !== input.targetAnchorMessageIndex
     || input.rebaseStoryClock.updatedIndex !== input.targetAnchorMessageIndex || input.targetAnchorMessageIndex < input.current.anchorMessageIndex
+    || (input.visibilityPolicy !== undefined && !['agent', 'always_hidden', 'always_revealed'].includes(input.visibilityPolicy))
     || !Number.isInteger(input.maxTrackedEntities) || input.maxTrackedEntities < 1) {
     failRebase_ACU('重锚定输入、coverage 或新故事时钟非法');
   }
@@ -297,7 +300,8 @@ function buildRebasedResult_ACU(
   if (results.entities.length) expectedRevisions.entities = input.current.revisions.entities;
   if (results.events.length) expectedRevisions.events = input.current.revisions.events;
   if (results.threads.length) expectedRevisions.threads = input.current.revisions.threads;
-  const transaction: WorldSimulationTransaction_ACU = { anchorMessageIndex: input.targetAnchorMessageIndex, storyClock: input.rebaseStoryClock, expectedRevisions, ...results };
+  const rawTransaction: WorldSimulationTransaction_ACU = { anchorMessageIndex: input.targetAnchorMessageIndex, storyClock: input.rebaseStoryClock, expectedRevisions, ...results };
+  const transaction = normalizeWorldSimulationTransactionVisibility_ACU(rawTransaction, input.visibilityPolicy ?? 'agent');
   let state: WorldStateSnapshot_ACU;
   try { state = applyWorldSimulationTransaction_ACU(input.current, transaction, input.maxTrackedEntities); }
   catch (error) {

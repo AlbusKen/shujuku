@@ -41,6 +41,9 @@
           @delete-skill="onDeleteSkill"
         />
       </AcuPanel>
+      <WorldSimulationAgentChat />
+      <WorldSimulationAgentPreview :show-hidden="worldSimulationSettings.showHiddenInUi" />
+      <WorldSimulationSettingsPanel @saved="onWorldSimulationSettingsSaved" />
     </AcuPanelGrid>
   </section>
 </template>
@@ -53,6 +56,12 @@ import WorldbookAgentControlBar from '../components/WorldbookAgentControlBar.vue
 import WorldbookEntryList from '../components/WorldbookEntryList.vue';
 import WorldbookEntryToolbar from '../components/WorldbookEntryToolbar.vue';
 import WorldbookSourcePicker from '../components/WorldbookSourcePicker.vue';
+import WorldSimulationAgentChat from '../components/WorldSimulationAgentChat.vue';
+import WorldSimulationAgentPreview from '../components/WorldSimulationAgentPreview.vue';
+import WorldSimulationSettingsPanel from '../components/WorldSimulationSettingsPanel.vue';
+import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
+import type { WorldSimulationSettings_ACU } from '../../service/simulation/model';
+import { readWorldSimulationSettings_ACU } from '../../service/simulation/simulation-settings';
 import { useAgentWorldbookEntries } from '../composables/useAgentWorldbookEntries';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { usePlotWorldbookAgentControl } from '../composables/usePlotWorldbookAgentControl';
@@ -70,6 +79,7 @@ const entries = useAgentWorldbookEntries({
 });
 const entryFilter = ref('');
 const entryEmptyText = ref('当前 Agent 世界书范围内无可 Skill 化的条目。');
+const worldSimulationSettings = ref<WorldSimulationSettings_ACU>(readWorldSimulationSettings_ACU() ?? buildDefaultWorldSimulationSettings_ACU());
 
 const currentScopeLabel = computed(() => {
   if (agentControl.worldbookScope.value.source === 'character') {
@@ -123,6 +133,10 @@ async function onDeleteSkill(bookName: string, uid: number): Promise<void> {
     return;
   }
   await refreshEntries();
+}
+
+function onWorldSimulationSettingsSaved(settings: WorldSimulationSettings_ACU): void {
+  worldSimulationSettings.value = settings;
 }
 
 onMounted(() => { void refreshAll(); });

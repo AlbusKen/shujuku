@@ -1,5 +1,5 @@
-import { buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU } from './defaults';
-import type { WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from './model';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU } from './defaults';
+import type { WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptRole_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from './model';
 import { settings_ACU } from '../runtime/state-manager';
 
 /** In-memory normalization result: `upgraded` means a successful write should persist the upgrade. */
@@ -11,7 +11,9 @@ export interface WorldSimulationSettingsUpgrade_ACU {
 const VISIBILITY_POLICIES_ACU: readonly WorldVisibilityPolicy_ACU[] = ['agent', 'always_hidden', 'always_revealed'];
 const SCALES_ACU = ['light', 'normal', 'deep'] as const satisfies readonly (keyof WorldSimulationSettings_ACU['budgets'])[];
 const READ_TIERS_ACU = ['low', 'medium', 'high'] as const;
-const SETTINGS_KEYS_ACU: readonly (keyof WorldSimulationSettings_ACU)[] = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'budgets'];
+const AGENT_NAMES_ACU: readonly WorldSimulationAgentName_ACU[] = ['world-director', 'entity-movement', 'faction-events', 'thread-weaver'];
+const PROMPT_ROLES_ACU: readonly WorldSimulationPromptRole_ACU[] = ['system', 'user', 'assistant'];
+const SETTINGS_KEYS_ACU: readonly (keyof WorldSimulationSettings_ACU)[] = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'budgets', 'agentPrompts'];
 const BUDGET_KEYS_ACU: readonly (keyof WorldSimulationSettings_ACU['budgets']['light'])[] = ['maxIterations', 'maxDelegations', 'maxReads', 'readTokenBudget'];
 
 function isRecord_ACU(value: unknown): value is Record<string, unknown> {
@@ -62,6 +64,29 @@ function isCompleteBudgets_ACU(value: unknown): value is WorldSimulationSettings
     && SCALES_ACU.every(scale => isCompleteBudget_ACU(value[scale]));
 }
 
+function isPromptSegment_ACU(value: unknown): boolean {
+  if (!isRecord_ACU(value) || !hasExactKeys_ACU(value, ['role', 'content', 'enabled', 'deletable'])) return false;
+  return PROMPT_ROLES_ACU.includes(value.role as WorldSimulationPromptRole_ACU)
+    && typeof value.content === 'string' && value.content.trim().length > 0
+    && typeof value.enabled === 'boolean' && typeof value.deletable === 'boolean';
+}
+
+function isPartialAgentPrompts_ACU(value: unknown): value is Partial<WorldSimulationAgentPrompts_ACU> {
+  if (!isRecord_ACU(value) || !hasOnlyKnownKeys_ACU(value, AGENT_NAMES_ACU)) return false;
+  return AGENT_NAMES_ACU.every(name => !Object.prototype.hasOwnProperty.call(value, name)
+    || (Array.isArray(value[name]) && value[name].every(isPromptSegment_ACU)));
+}
+
+function isCompleteAgentPrompts_ACU(value: unknown): value is WorldSimulationAgentPrompts_ACU {
+  return isPartialAgentPrompts_ACU(value) && hasExactKeys_ACU(value, AGENT_NAMES_ACU)
+    && AGENT_NAMES_ACU.every(name => Array.isArray(value[name]) && value[name].some(segment => segment.enabled));
+}
+
+function mergeAgentPrompts_ACU(raw: Partial<WorldSimulationAgentPrompts_ACU> | undefined): WorldSimulationAgentPrompts_ACU {
+  const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+  return Object.fromEntries(AGENT_NAMES_ACU.map(name => [name, raw?.[name] ?? defaults[name]])) as WorldSimulationAgentPrompts_ACU;
+}
+
 /** True only for a complete, in-range settings object. Never normalizes and never guesses. */
 export function isWorldSimulationSettings_ACU(value: unknown): value is WorldSimulationSettings_ACU {
   if (!isRecord_ACU(value) || !hasExactKeys_ACU(value, SETTINGS_KEYS_ACU)) return false;
@@ -73,10 +98,10 @@ export function isWorldSimulationSettings_ACU(value: unknown): value is WorldSim
   if (!isIntAtLeast_ACU(value.maxTrackedEntities, 1)) return false;
   if (!VISIBILITY_POLICIES_ACU.includes(String(value.visibilityPolicy) as WorldVisibilityPolicy_ACU)) return false;
   if (typeof value.showHiddenInUi !== 'boolean') return false;
-  return isCompleteBudgets_ACU(value.budgets);
+  return isCompleteBudgets_ACU(value.budgets) && isCompleteAgentPrompts_ACU(value.agentPrompts);
 }
 
-const TOP_LEVEL_FIELD_VALIDATORS_ACU: Omit<Record<keyof WorldSimulationSettings_ACU, (value: unknown) => boolean>, 'budgets'> = {
+const TOP_LEVEL_FIELD_VALIDATORS_ACU: Omit<Record<keyof WorldSimulationSettings_ACU, (value: unknown) => boolean>, 'budgets' | 'agentPrompts'> = {
   enabled: value => typeof value === 'boolean',
   joinWaitMs: value => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU,
   minFloorGap: value => isIntAtLeast_ACU(value, 1),
@@ -99,9 +124,10 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
     .filter(key => Object.prototype.hasOwnProperty.call(raw, key));
   if (present.length === 0) return null;
   for (const key of present) {
-    if (key !== 'budgets' && !TOP_LEVEL_FIELD_VALIDATORS_ACU[key](raw[key])) return null;
+    if (key !== 'budgets' && key !== 'agentPrompts' && !TOP_LEVEL_FIELD_VALIDATORS_ACU[key](raw[key])) return null;
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'budgets') && !isPartialBudgets_ACU(raw.budgets)) return null;
+  if (Object.prototype.hasOwnProperty.call(raw, 'agentPrompts') && !isPartialAgentPrompts_ACU(raw.agentPrompts)) return null;
   if (isWorldSimulationSettings_ACU(raw)) return { settings: raw, upgraded: false };
 
   const defaults = buildDefaultWorldSimulationSettings_ACU();
@@ -111,10 +137,12 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
     normal: { ...defaults.budgets.normal, ...(rawBudgets.normal ?? {}) },
     deep: { ...defaults.budgets.deep, ...(rawBudgets.deep ?? {}) },
   };
+  const agentPrompts = mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU> | undefined);
   const merged: WorldSimulationSettings_ACU = {
     ...defaults,
     ...raw,
     budgets,
+    agentPrompts,
   };
   // This should hold because all present fields were validated and every missing field is copied
   // from the complete defaults. Keep the fail-closed guard in case this contract changes.
@@ -132,9 +160,9 @@ export function readWorldSimulationSettings_ACU(): WorldSimulationSettings_ACU |
  * Persistence is injected rather than imported, so this module never drags the settings service into
  * the module graph of every simulation test. Production uses a lazy import; tests inject a spy.
  */
-let persistSettings_ACU: (() => void) | null = null;
+let persistSettings_ACU: (() => unknown) | null = null;
 
-export function setWorldSimulationSettingsPersistence_ACU(persist: (() => void) | null): void {
+export function setWorldSimulationSettingsPersistence_ACU(persist: (() => unknown) | null): void {
   persistSettings_ACU = persist;
 }
 
@@ -158,6 +186,44 @@ function persistInBackground(): void {
 export type WriteWorldSimulationSettingsResult_ACU =
   | { ok: true; upgraded: boolean }
   | { ok: false; reason: 'invalid' | 'store_unavailable' };
+
+export type WriteWorldSimulationSettingsStrictResult_ACU =
+  | { ok: true; upgraded: boolean; storageType: 'tavern' | 'indexeddb' }
+  | { ok: false; reason: 'invalid' | 'store_unavailable' | 'persist_failed' };
+
+function clonePersistedValue_ACU(value: unknown): unknown {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function isReliableSaveResult_ACU(value: unknown): value is { saved: true; storageType: 'tavern' | 'indexeddb' } {
+  return isRecord_ACU(value) && value.saved === true
+    && (value.storageType === 'tavern' || value.storageType === 'indexeddb');
+}
+
+/**
+ * Explicit UI save: wait for a real persistence result and restore the previous in-memory value on
+ * failure. Unlike the legacy sync write, a memory-only fallback is not presented as a saved setting.
+ */
+export async function writeWorldSimulationSettingsStrict_ACU(raw: unknown): Promise<WriteWorldSimulationSettingsStrictResult_ACU> {
+  const normalized = normalizeWorldSimulationSettings_ACU(raw);
+  if (!normalized) return { ok: false, reason: 'invalid' };
+  if (!isRecord_ACU(settings_ACU)) return { ok: false, reason: 'store_unavailable' };
+  const store = settings_ACU as Record<string, unknown>;
+  const had = Object.prototype.hasOwnProperty.call(store, 'worldSimulation');
+  const previous = clonePersistedValue_ACU(store.worldSimulation);
+  store.worldSimulation = normalized.settings;
+  try {
+    const result = persistSettings_ACU
+      ? await persistSettings_ACU()
+      : (await import('../settings/settings-service')).saveSettings_ACU();
+    if (!isReliableSaveResult_ACU(result)) throw new Error('世界推演设置未获得可靠持久化确认');
+    return { ok: true, upgraded: normalized.upgraded, storageType: result.storageType };
+  } catch (_) {
+    if (had) store.worldSimulation = previous;
+    else delete store.worldSimulation;
+    return { ok: false, reason: 'persist_failed' };
+  }
+}
 
 /** The write path: validate strictly, then persist. An invalid value never reaches the store. */
 export function writeWorldSimulationSettings_ACU(raw: unknown): WriteWorldSimulationSettingsResult_ACU {

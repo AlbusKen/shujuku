@@ -38,6 +38,17 @@ describe('world simulation agent loop', () => {
     expect(base.entities[0].situation).toBe('等待');
   });
 
+  it('applies visibilityPolicy to the final specialist transaction before candidate state is built', async () => {
+    const base = state();
+    const result = await runWorldSimulationAgentLoop_ACU({
+      ...input(base),
+      visibilityPolicy: 'always_revealed',
+    }, { countTokens: async () => 1, runAgent: async request => entityOutput(request.snapshot) });
+    expect(result.transactions[0]).toMatchObject({ entities: [{ action: 'upsert', value: { visibility: { mode: 'revealed', revealedIndex: 5 } } }] });
+    expect(result.snapshot.entities[0]).toMatchObject({ visibility: { mode: 'revealed', revealedIndex: 5 } });
+    expect(base.entities[0]).toMatchObject({ visibility: { mode: 'hidden' } });
+  });
+
   it('fails closed for read, iteration, delegation, and protocol budgets', async () => {
     const deps = { countTokens: async (text: string) => text.length, runAgent: async (request: any) => entityOutput(request.snapshot) };
     await expectCode(() => runWorldSimulationAgentLoop_ACU({ ...input(), readTexts: ['a', 'b'] }, deps), 'WORLD_SIM_BUDGET_EXCEEDED');

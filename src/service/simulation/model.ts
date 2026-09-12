@@ -6,6 +6,10 @@ export type WorldReadBudgetTier_ACU = 'low' | 'medium' | 'high';
 export type WorldVisibilityPolicy_ACU = 'agent' | 'always_hidden' | 'always_revealed';
 export type WorldClockPrecision_ACU = 'exact' | 'approximate' | 'unknown';
 export type WorldEntityImportance_ACU = 'core' | 'active' | 'background';
+export type WorldSimulationAgentName_ACU = 'world-director' | 'entity-movement' | 'faction-events' | 'thread-weaver';
+export type WorldSimulationPromptRole_ACU = 'system' | 'user' | 'assistant';
+export interface WorldSimulationPromptSegment_ACU { role: WorldSimulationPromptRole_ACU; content: string; enabled: boolean; deletable: boolean; }
+export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
 
 export interface WorldSimulationBudget_ACU {
   maxIterations: number;
@@ -160,6 +164,7 @@ export interface WorldSimulationSettings_ACU {
   visibilityPolicy: WorldVisibilityPolicy_ACU;
   showHiddenInUi: boolean;
   budgets: Record<WorldSimulationScale_ACU, WorldSimulationBudget_ACU>;
+  agentPrompts: WorldSimulationAgentPrompts_ACU;
 }
 
 export interface WorldSimulationEnvelope_ACU {

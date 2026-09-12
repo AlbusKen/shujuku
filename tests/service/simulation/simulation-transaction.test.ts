@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { WorldSimulationValidationError_ACU, type WorldSimulationTransaction_ACU, type WorldStateSnapshot_ACU } from '../../../src/service/simulation/model';
-import { applyWorldSimulationTransaction_ACU } from '../../../src/service/simulation/simulation-transaction';
+import { applyWorldSimulationTransaction_ACU, normalizeWorldSimulationTransactionVisibility_ACU } from '../../../src/service/simulation/simulation-transaction';
 
 const clock = (index: number) => ({ anchorText: `第${index}日`, elapsedSinceLastRun: '一日', precision: 'approximate' as const, evidenceIndexes: [index], updatedIndex: index });
 function entity(id: string, importance: 'core' | 'active' | 'background' = 'active') {
@@ -31,6 +31,26 @@ describe('world simulation transaction', () => {
     expect(result.events.find(item => item.id === 'v2')).toMatchObject({ updatedIndex: 2 });
     expect(result.threads.find(item => item.id === 't2')).toMatchObject({ updatedIndex: 2 });
     expect(result.revisions).toEqual({ entities: 4, events: 5, threads: 6 });
+  });
+
+  it('normalizes only non-retired upserts according to the configured visibility policy', () => {
+    const raw = transaction({
+      expectedRevisions: { entities: 3, events: 4 },
+      entities: [{ action: 'upsert', value: { ...entity('e2'), visibility: { mode: 'rumored' } } }],
+      events: [{ action: 'upsert', value: { id: 'v2', summary: '新事件', actorIds: ['e2'], occurredIndex: 2, occurredAt: '第二日', visibility: { mode: 'hidden' }, retired: false, updatedIndex: 0 } }],
+    });
+    const agent = normalizeWorldSimulationTransactionVisibility_ACU(raw, 'agent');
+    const hidden = normalizeWorldSimulationTransactionVisibility_ACU(raw, 'always_hidden');
+    const revealed = normalizeWorldSimulationTransactionVisibility_ACU(raw, 'always_revealed');
+    expect(agent.entities[0]).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'rumored' } } });
+    expect(agent.events[0]).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'hidden' } } });
+    for (const item of [...hidden.entities, ...hidden.events]) expect(item).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'hidden' } } });
+    for (const item of [...revealed.entities, ...revealed.events]) expect(item).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'revealed', revealedIndex: 2 } } });
+    expect(raw.entities[0]).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'rumored' } } });
+
+    const retire = transaction({ expectedRevisions: { entities: 3 }, entities: [{ action: 'retire', id: 'e2', reason: '离场' }] });
+    expect(normalizeWorldSimulationTransactionVisibility_ACU(retire, 'always_revealed').entities).toEqual(retire.entities);
+    expectCode(() => normalizeWorldSimulationTransactionVisibility_ACU(raw, 'invalid' as any), 'WORLD_SIM_PROTOCOL_INVALID');
   });
 
   it('rejects missing or stale expected revisions without mutating the source', () => {

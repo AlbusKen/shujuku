@@ -38,6 +38,7 @@ import {
   settleWorldSimulationInternalAiRequest_ACU,
 } from './simulation-internal-ai-events';
 import type { WorldSimulationInternalAiRequestIdentity_ACU } from './simulation-internal-ai-events';
+import { WorldSimulationAgentSession_ACU } from './world-simulation-agent-session';
 import { settleWorldSimulationRebase_ACU } from './simulation-rebase';
 import { replayWorldSimulationFromChat_ACU } from './simulation-replay';
 import type { WorldSimulationReplay_ACU } from './simulation-replay';
@@ -93,8 +94,9 @@ export interface WorldSimulationRuntimeDependencies_ACU {
   countTokens: (text: string) => Promise<number>;
   isFlightModeActive: () => boolean;
   /** One world-sim-owned internal AI turn; its host generation must never reach the plot pipeline. */
-  runOwnedAi: (input: { source: string; chatIdentity: string; prompt: string; signal?: AbortSignal | null }) => Promise<string | null>;
+  runOwnedAi: (input: { source: string; chatIdentity: string; prompt: string; messages?: Array<{ role: string; content: string }>; signal?: AbortSignal | null }) => Promise<string | null>;
   store: WorldSimulationStore_ACU;
+  agentSession?: WorldSimulationAgentSession_ACU;
   waitForSettlement?: (settlement: Promise<void>, timeoutMs: number) => Promise<WorldSimulationSettlementWaitOutcome_ACU>;
   /** Bounded wait used by the materialization retry loop; injectable so tests never sleep. */
   wait?: (ms: number) => Promise<void>;
@@ -195,6 +197,7 @@ function waitForSettlementByTimer_ACU(settlement: Promise<void>, timeoutMs: numb
  */
 export class WorldSimulationRuntime_ACU {
   private readonly orchestrator: WorldSimulationOrchestratorPort_ACU;
+  private readonly agentSession: WorldSimulationAgentSession_ACU | null;
   private readonly waitForSettlement: (settlement: Promise<void>, timeoutMs: number) => Promise<WorldSimulationSettlementWaitOutcome_ACU>;
   private readonly wait_ACU: (ms: number) => Promise<void>;
 
@@ -205,7 +208,13 @@ export class WorldSimulationRuntime_ACU {
     });
     this.waitForSettlement = dependencies.waitForSettlement ?? waitForSettlementByTimer_ACU;
     this.wait_ACU = dependencies.wait ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+    this.agentSession = dependencies.agentSession ?? null;
   }
+
+  async submitAgentMessage(text: string): Promise<import('./world-simulation-agent-session').WorldSimulationAgentSubmitResult_ACU> { if (!this.agentSession) rejectStale_ACU('世界推演 Agent 会话未初始化'); return this.agentSession.submit(text); }
+  stopAgentSession(): import('./world-simulation-agent-session').WorldSimulationAgentStopResult_ACU { return this.agentSession?.stop() ?? 'idle'; }
+  isAgentSessionRunning(): boolean { return this.agentSession?.isRunning() === true; }
+  isAgentSessionCommitting(): boolean { return this.agentSession?.isCommitting() === true; }
 
   getPhase(chatIdentity: string): WorldSimulationPhase_ACU {
     return this.orchestrator.getPhase(chatIdentity);
@@ -255,8 +264,41 @@ export class WorldSimulationRuntime_ACU {
     if (!resolved) return;
     const { chat, anchorMessageIndex, chatIdentity } = resolved;
 
+    if (this.agentSession?.isRunning()) {
+      // A manual request owns the current AI floor. Do not lose the automatic completion event:
+      // after it leaves, resolve this intent again against the live chat so a switch/delete or a
+      // newer floor cannot make us run the stale captured anchor.
+      void this.agentSession.waitForIdle().then(
+        () => this.onAiFloorCompleted(intent),
+        error => logWarn_ACU('[世界推演] 等待 Agent 会话结束失败。', error),
+      );
+      return;
+    }
+    try {
+      const pendingResult = await this.agentSession?.runPendingForAnchor(anchorMessageIndex, chat);
+      // A queued manual request may legitimately decide there is nothing to write. Only an actual
+      // projection commit covers this generated floor; no-change must continue into the auto gate.
+      if (pendingResult === 'committed' || pendingResult === 'committed_with_audit_warning') return;
+    } catch (error) {
+      logWarn_ACU('[世界推演] 执行已排队 Agent 请求失败。', error);
+      return;
+    }
+
     const settledTip = this.orchestrator.getSettledTip(chatIdentity);
-    if (settledTip !== null && anchorMessageIndex <= settledTip) return;
+    // A manual Agent session commits directly through the store rather than the automatic
+    // orchestrator, so its settled tip is not present in the orchestrator's in-memory state.
+    // Re-read the authoritative replay before starting an automatic flight for the same event.
+    let persistedTip: number | null = null;
+    try {
+      const replay = this.dependencies.store.read();
+      persistedTip = replay
+        ? (replay.deltaMessageIndices.length ? replay.deltaMessageIndices[replay.deltaMessageIndices.length - 1] : replay.checkpointMessageIndex)
+        : null;
+    } catch (error) {
+      logWarn_ACU('[世界推演] 重读账本以确认 Agent 会话提交结果失败。', error);
+      return;
+    }
+    if ((settledTip !== null && anchorMessageIndex <= settledTip) || (persistedTip !== null && anchorMessageIndex <= persistedTip)) return;
 
     if (this.orchestrator.getPhase(chatIdentity) !== 'idle') {
       // An existing flight already owns this chat. Only fold the newer floor into it; the
@@ -454,12 +496,15 @@ export class WorldSimulationRuntime_ACU {
         readTexts: renderRecentStory_ACU(input.chat, sourceAnchorMessageIndex, budget.maxReads),
         readGateConfig: readGateConfig_ACU(budget),
         contextTokens: 0,
+        agentPrompts: input.settings.agentPrompts,
+        visibilityPolicy: input.settings.visibilityPolicy,
       }, {
         countTokens: this.dependencies.countTokens,
         runAgent: async request => this.dependencies.runOwnedAi({
           source: `world-sim-agent:${request.agent.name}`,
           chatIdentity: input.chatIdentity,
           prompt: request.prompt,
+          messages: [...request.messages],
         }),
       });
       if (!loop.transactions.length) throw new WorldSimulationNoCandidateError_ACU('世界推演主推演没有产生任何写集');
@@ -529,6 +574,7 @@ export class WorldSimulationRuntime_ACU {
         coverageEndMessageIndex: targetAnchorMessageIndex,
         rebaseStoryClock,
         maxTrackedEntities: input.settings.maxTrackedEntities,
+        visibilityPolicy: input.settings.visibilityPolicy,
         isCurrent: () => lease.isCurrent(),
         decide: () => this.dependencies.runOwnedAi({
           source: 'world-sim-rebase',
@@ -601,6 +647,8 @@ export function createWorldSimulationRuntime_ACU(
   const getChat = overrides.getChat ?? (() => getChatArray_ACU());
   const getChatIdentity = overrides.getChatIdentity ?? ((chat: unknown[]) => getActiveChatStorageIdentity_ACU(chat));
   const store = overrides.store ?? new WorldSimulationStore_ACU();
+  const readSettings = overrides.readSettings ?? readPersistedWorldSimulationSettings_ACU;
+  let runtime: WorldSimulationRuntime_ACU | null = null;
   const readLeaseSnapshot: () => WorldSimulationLeaseSnapshot_ACU = overrides.readLeaseSnapshot ?? (() => {
     const chat = getChat();
     const chatIdentity = getChatIdentity(chat);
@@ -629,7 +677,7 @@ export function createWorldSimulationRuntime_ACU(
       before: () => beginWorldSimulationInternalAiRequest_ACU(identity),
       settle: () => settleWorldSimulationInternalAiRequest_ACU(identity.requestId),
       invoke: () => callAIWithResolvedPreset_ACU(
-        [{ role: 'user', content: request.prompt }],
+        request.messages ?? [{ role: 'user', content: request.prompt }],
         resolved,
         request.signal ?? null,
         {
@@ -639,18 +687,30 @@ export function createWorldSimulationRuntime_ACU(
       ),
     });
   });
-  return new WorldSimulationRuntime_ACU({
+  const agentSession = overrides.agentSession ?? new WorldSimulationAgentSession_ACU({
     getChat,
     getChatIdentity,
-    readSettings: overrides.readSettings ?? readPersistedWorldSimulationSettings_ACU,
+    readSettings,
+    store,
+    countTokens: overrides.countTokens ?? countTextTokens_ACU,
+    runOwnedAi: async request => runOwnedAi(request),
+    createRecordId: () => `world-sim-manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    canRun: chatIdentity => runtime?.getPhase(chatIdentity) === 'idle',
+  });
+  runtime = new WorldSimulationRuntime_ACU({
+    getChat,
+    getChatIdentity,
+    readSettings,
     readLeaseSnapshot,
     createRunId: overrides.createRunId ?? (() => `world-sim-run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`),
     countTokens: overrides.countTokens ?? countTextTokens_ACU,
     isFlightModeActive: overrides.isFlightModeActive ?? isFlightModeActive_ACU,
     runOwnedAi,
     store,
+    agentSession,
     ...(overrides.waitForSettlement ? { waitForSettlement: overrides.waitForSettlement } : {}),
     ...(overrides.wait ? { wait: overrides.wait } : {}),
     ...(overrides.orchestrator ? { orchestrator: overrides.orchestrator } : {}),
   });
+  return runtime;
 }

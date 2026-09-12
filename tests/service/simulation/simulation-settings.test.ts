@@ -7,6 +7,7 @@ import {
   readWorldSimulationSettings_ACU,
   setWorldSimulationSettingsPersistence_ACU,
   writeWorldSimulationSettings_ACU,
+  writeWorldSimulationSettingsStrict_ACU,
 } from '../../../src/service/simulation/simulation-settings';
 
 function enabled() {
@@ -110,5 +111,23 @@ describe('world simulation settings read/write', () => {
     };
     expect(writeWorldSimulationSettings_ACU(custom)).toEqual({ ok: true, upgraded: false });
     expect(readWorldSimulationSettings_ACU()).toEqual(custom);
+  });
+
+  it('strict UI persistence confirms only a reliable save and restores the prior snapshot on failure', async () => {
+    const prior = enabled();
+    _set_settings_ACU({ worldSimulation: prior } as any);
+    persist.mockReturnValueOnce({ saved: true, storageType: 'tavern' });
+    const saved = { ...enabled(), joinWaitMs: 12_000 };
+    await expect(writeWorldSimulationSettingsStrict_ACU(saved)).resolves.toEqual({ ok: true, upgraded: false, storageType: 'tavern' });
+    expect(readWorldSimulationSettings_ACU()).toEqual(saved);
+
+    persist.mockImplementationOnce(() => { throw new Error('host save failed'); });
+    const rejected = { ...enabled(), joinWaitMs: 13_000 };
+    await expect(writeWorldSimulationSettingsStrict_ACU(rejected)).resolves.toEqual({ ok: false, reason: 'persist_failed' });
+    expect(readWorldSimulationSettings_ACU()).toEqual(saved);
+
+    persist.mockReturnValueOnce({ saved: true, storageType: 'memory' });
+    await expect(writeWorldSimulationSettingsStrict_ACU(rejected)).resolves.toEqual({ ok: false, reason: 'persist_failed' });
+    expect(readWorldSimulationSettings_ACU()).toEqual(saved);
   });
 });

@@ -28,6 +28,22 @@ describe('world simulation rebase', () => {
     expect(result.state.events.find(item => item.id === 'evt-pending')).toMatchObject({ updatedIndex: 7 });
   });
 
+  it('normalizes compatible and adjusted final transactions with the configured visibility policy', () => {
+    const revealed = rebaseWorldSimulationCandidate_ACU({ ...input(compatibleDecision()), visibilityPolicy: 'always_revealed' });
+    for (const item of [...revealed.transaction.entities, ...revealed.transaction.events, ...revealed.transaction.threads]) {
+      expect(item).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'revealed', revealedIndex: 7 } } });
+    }
+    const hidden = rebaseWorldSimulationCandidate_ACU({
+      ...input(adjustDecision([
+        { op: 'keep', module: 'entities', id: 'ent-pending' },
+        { op: 'keep', module: 'events', id: 'evt-pending' },
+        { op: 'keep', module: 'threads', id: 'thr-pending' },
+      ])),
+      visibilityPolicy: 'always_hidden',
+    });
+    for (const item of [...hidden.transaction.entities, ...hidden.transaction.events, ...hidden.transaction.threads]) expect(item).toMatchObject({ action: 'upsert', value: { visibility: { mode: 'hidden' } } });
+  });
+
   it('adjusts with keep, modify, drop, insert and retire at the target', () => {
     const result = rebaseWorldSimulationCandidate_ACU(input(adjustDecision([
       { op: 'keep', module: 'entities', id: 'ent-pending' },
