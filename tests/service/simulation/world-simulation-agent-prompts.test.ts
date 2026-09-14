@@ -36,7 +36,7 @@ describe('world simulation Agent messages and delegation protocol', () => {
 
     const master = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts, snapshot, storyClock: clock, reads: [] });
     expect(master[0].content).toContain('你可以输出 maintain_requirements、tools、delegate、finalize 或 block');
-    expect(master.find(message => message.content.includes('【行动规则】'))?.role).toBe('user');
+    expect(master.find(message => message.content.includes('【行动规则】'))?.role).toBe('system');
     expect(master.find(message => message.content.includes('materialGrants'))?.content).not.toContain('expectedRevisions');
   });
 
@@ -93,8 +93,8 @@ describe('world simulation Agent messages and delegation protocol', () => {
     expect(entity.find(message => message.content.includes('【实体推演规则】'))?.role).toBe('system');
     expect(faction.find(message => message.content.includes('【事件推演规则】'))?.role).toBe('system');
     expect(thread.find(message => message.content.includes('【线索推演规则】'))?.role).toBe('system');
-    expect(entity.find(message => message.content.includes('【输出协议】'))).toMatchObject({ role: 'user' });
-    expect(entity.find(message => message.content.includes('"scope":["story|ledger|tables|worldbook"]'))?.role).toBe('user');
+    expect(entity.find(message => message.content.includes('【输出协议】'))).toMatchObject({ role: 'system' });
+    expect(entity.find(message => message.content.includes('"scope":["story|ledger|tables|worldbook"]'))?.role).toBe('system');
     const context = entity.find(message => message.content.includes('【本次运行上下文】'))!;
     expect(context).toMatchObject({ role: 'user' });
     for (const tag of ['UNTRUSTED_CURRENT_REQUIREMENTS', 'UNTRUSTED_AGENT_WORLD_BOOK_GRANTS', 'UNTRUSTED_PREVIOUS_SPECIALIST_CANDIDATES']) expect(context.content).toContain(`<${tag}>`);

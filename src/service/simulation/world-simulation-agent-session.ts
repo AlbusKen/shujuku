@@ -17,6 +17,8 @@ import { runWorldSimulationManualAgentExecution_ACU } from './world-simulation-a
 import type { WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
 import { isAiMessage_ACU } from '../runtime/message-handler';
 import { captureWorldSimulationMaterialLease_ACU, refreshWorldSimulationMaterialLease_ACU, sameWorldSimulationMaterialLease_ACU, withWorldSimulationMaterialLeaseGrants_ACU, type WorldSimulationMaterialLease_ACU } from './world-simulation-material-lease';
+import { captureSummaryOverviewText_ACU } from './world-simulation-shared-context';
+
 
 export interface WorldSimulationAgentSessionDependencies_ACU {
   getChat: () => any[];
@@ -29,6 +31,10 @@ export interface WorldSimulationAgentSessionDependencies_ACU {
   canRun: (chatIdentity: string) => boolean;
   requirementsStore?: WorldSimulationRequirementsStorePort_ACU;
   onIdle?: () => void;
+  /** 共享冻结表格快照（缺省取运行时表格数据快照）。 */
+  getTableData?: () => unknown;
+  /** 测试注入：跳过共享纪要概览装配。 */
+  summaryOverviewOverride?: string;
   buildStoryContext?: (input: { chat: readonly unknown[]; anchorMessageIndex: number; chatIdentity: string; runId: string; settledThroughIndex: number }) => Promise<AgentStoryContextSnapshot_ACU>;
   loadWorldbook?: () => Promise<import('../continuation/agent/agent-worldbook-read').AgentWorldbookSnapshot_ACU>;
 }
@@ -189,6 +195,9 @@ export class WorldSimulationAgentSession_ACU {
         settledThroughIndex,
       });
       if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演正文快照装配后来源或目标 swipe 已变化');
+      // 本飞行起点一次性冻结共享表格快照与纪要概览；维持循环与子代理共享同一对象。
+      const sharedTableData = this.dependencies.getTableData?.() ?? undefined;
+      const sharedSummaryOverview = this.dependencies.summaryOverviewOverride ?? captureSummaryOverviewText_ACU(sharedTableData);
       let baseMaterialLease = captureWorldSimulationMaterialLease_ACU({ requirementsSnapshot, storyContext, settledThroughIndex });
       let masterCallsUsed = 0;
       let masterHistory: WorldSimulationPromptMessage_ACU[] = [];
@@ -196,6 +205,7 @@ export class WorldSimulationAgentSession_ACU {
       for (;;) {
         execution = await runWorldSimulationManualAgentExecution_ACU({
           runId: `manual:${ref.messageIndex}:${ref.id}`, snapshot: before, anchorMessageIndex: anchor, storyClock: manualClock(base?.state ?? null, anchor), settings, reads: [], storyContext,
+          tableData: sharedTableData, summaryOverview: sharedSummaryOverview,
           requirementsSnapshot, pendingRequirementSourceIds, masterCallsUsed, history: masterHistory,
           readGateConfig: readGateConfig(settings.budgets.deep), userInstruction: ref.text, isCurrent,
         }, { countTokens: this.dependencies.countTokens, runAgent: async request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: identity, prompt: request.prompt, messages: [...request.messages], signal: this.abort?.signal }) });

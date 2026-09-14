@@ -62,6 +62,7 @@ import { WorldSimulationStore_ACU } from './simulation-store';
 import { resolveActiveWorldSimulationSwipe_ACU } from './simulation-swipe';
 import { buildWorldSimulationStoryContext_ACU, readWorldSimulationStoryBranchIdentity_ACU } from './world-simulation-story-context';
 import { captureWorldSimulationMaterialLease_ACU, refreshWorldSimulationMaterialLease_ACU, sameWorldSimulationMaterialLease_ACU, withWorldSimulationMaterialLeaseGrants_ACU, type WorldSimulationMaterialLease_ACU } from './world-simulation-material-lease';
+import { captureSummaryOverviewText_ACU } from './world-simulation-shared-context';
 
 export interface WorldSimulationRuntimeJoinResult_ACU {
   kind: 'skipped' | 'joined' | 'timeout' | 'failed';
@@ -109,6 +110,10 @@ export interface WorldSimulationRuntimeDependencies_ACU {
   agentSession?: WorldSimulationAgentSession_ACU;
   requirementsStore?: WorldSimulationRequirementsStorePort_ACU;
   loadWorldbook?: () => Promise<import('../continuation/agent/agent-worldbook-read').AgentWorldbookSnapshot_ACU>;
+  /** 共享冻结表格快照（缺省取运行时表格数据快照）；gate/主控/子代理同一份。 */
+  getTableData?: () => unknown;
+  /** 测试注入：跳过共享纪要概览装配。 */
+  summaryOverviewOverride?: string;
   buildStoryContext?: (input: { chat: readonly unknown[]; anchorMessageIndex: number; chatIdentity: string; runId: string; settledThroughIndex: number }) => Promise<AgentStoryContextSnapshot_ACU>;
   waitForSettlement?: (settlement: Promise<void>, timeoutMs: number) => Promise<WorldSimulationSettlementWaitOutcome_ACU>;
   /** Bounded wait used by the materialization retry loop; injectable so tests never sleep. */
@@ -474,6 +479,9 @@ export class WorldSimulationRuntime_ACU {
         this.finishAutomaticFlight_ACU(chatIdentity, controller);
         return;
       }
+      // 运行起点一次性冻结：同一份表格快照与纪要概览覆盖 gate 与主控/子代理，窗口不漂移。
+      const sharedTableData = this.dependencies.getTableData?.();
+      const sharedSummaryOverview = this.dependencies.summaryOverviewOverride ?? captureSummaryOverviewText_ACU(sharedTableData);
       const floorGap = anchorMessageIndex - (settledTip === null ? 0 : settledTip);
       let decision;
       try {
@@ -491,6 +499,7 @@ export class WorldSimulationRuntime_ACU {
           },
           realtimePacing: 'normal',
           recentStoryTail: renderRecentStory_ACU(chat, anchorMessageIndex, 8).join('\n'),
+          summaryOverview: sharedSummaryOverview,
           activeEntitySummaries: replay
             ? replay.state.entities.filter(entity => !entity.retired).slice(0, 12).map(entity => `${entity.name}：${entity.situation}`)
             : [],
@@ -509,6 +518,7 @@ export class WorldSimulationRuntime_ACU {
 
       const runner = this.createRunner_ACU({
         chatIdentity, anchorMessageIndex, chat, storyClock: decision.storyTime, scale: decision.scale, focusHints: decision.focusHints, settings, signal: controller.signal,
+        sharedTableData, sharedSummaryOverview,
       });
       const settler = this.createSettler_ACU({ chatIdentity, storyClockAtSource: decision.storyTime, settings, signal: controller.signal });
       try {
@@ -597,6 +607,8 @@ export class WorldSimulationRuntime_ACU {
     focusHints: readonly string[];
     settings: WorldSimulationSettings_ACU;
     signal: AbortSignal;
+    sharedTableData?: unknown;
+    sharedSummaryOverview?: string;
   }): WorldSimulationCandidateRunner_ACU {
     return async lease => {
       const sourceAnchorMessageIndex = lease.getMetadata().initialAnchorMessageIndex;
@@ -638,8 +650,11 @@ export class WorldSimulationRuntime_ACU {
       let worldbook;
       try { worldbook = await this.loadWorldbook(); }
       catch (_) { worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false); }
+      // 共享冻结上下文：gate 决策时捕获的同一份表格快照与纪要概览，不得在 runner 内重新读表。
+      const sharedTableData = input.sharedTableData;
+      const sharedSummaryOverview = input.sharedSummaryOverview;
       const baseMaterialLease = captureWorldSimulationMaterialLease_ACU({ requirementsSnapshot, storyContext, settledThroughIndex });
-      const runSpecialists = async (plan: import('./world-simulation-agent-interaction').WorldSimulationDelegationPlan_ACU, grantsByAgent: ReadonlyMap<string, readonly import('../agent-kernel/material-grants').AgentMaterialGrant_ACU[]>, specialistModelTurns: number, frozenWorldbook: typeof worldbook, legacy: boolean) => runWorldSimulationAgentLoop_ACU({
+      const runSpecialists = async (plan: import('./world-simulation-agent-interaction').WorldSimulationDelegationPlan_ACU, grantsByAgent: ReadonlyMap<string, readonly import('../agent-kernel/material-grants').AgentMaterialGrant_ACU[]>, specialistModelTurns: number, frozenWorldbook: typeof worldbook, legacy: boolean, shared: { tableData?: unknown; summaryOverview?: string } = {}) => runWorldSimulationAgentLoop_ACU({
         snapshot,
         anchorMessageIndex: sourceAnchorMessageIndex,
         storyClock: input.storyClock,
@@ -650,6 +665,8 @@ export class WorldSimulationRuntime_ACU {
         // 正文事实由 fixed storyContext 提供；readTexts 留给后续受控补读，避免重复注入旧尾楼。
         readTexts: [],
         storyContext,
+        tableData: shared.tableData,
+        summaryOverview: shared.summaryOverview,
         readGateConfig: readGateConfig_ACU(budget),
         contextTokens: 0, toolsEnabled: input.settings.toolsEnabled,
         agentPrompts: input.settings.agentPrompts,
@@ -677,14 +694,14 @@ export class WorldSimulationRuntime_ACU {
         candidateLoop = await runWorldSimulationAgentLoop_ACU({
           snapshot, anchorMessageIndex: sourceAnchorMessageIndex, storyClock: input.storyClock, isCurrent: isStoryContextCurrent,
           scale: 'light', budget: { ...budget, maxDelegations: Math.max(1, budget.maxDelegations) }, maxTrackedEntities: input.settings.maxTrackedEntities,
-          readTexts: [], storyContext, readGateConfig: readGateConfig_ACU(budget), contextTokens: 0, toolsEnabled: input.settings.toolsEnabled, agentPrompts: input.settings.agentPrompts,
+          readTexts: [], storyContext, readGateConfig: readGateConfig_ACU(budget), contextTokens: 0, toolsEnabled: input.settings.toolsEnabled, agentPrompts: input.settings.agentPrompts, tableData: sharedTableData, summaryOverview: sharedSummaryOverview,
           agents: [lightSpecialist], requirementsSnapshot, worldbook, specialistRuntime: new WorldSimulationSpecialistRuntime_ACU(), visibilityPolicy: input.settings.visibilityPolicy,
         }, { countTokens: this.dependencies.countTokens, runAgent: async request => this.dependencies.runOwnedAi({ source: `world-sim-agent:${request.agent.name}`, chatIdentity: input.chatIdentity, prompt: request.prompt, messages: [...request.messages], signal: input.signal }) });
         grants = [];
       } else {
         const director = await new WorldSimulationDirectorRuntime_ACU().run({
           runId: lease.runId, snapshot, storyClock: input.storyClock, settings: input.settings, budget,
-          reads: [], storyContext, requirementsSnapshot, worldbook, isCurrent: isStoryContextCurrent, userInstruction: '',
+          reads: [], storyContext, requirementsSnapshot, worldbook, isCurrent: isStoryContextCurrent, userInstruction: '', tableData: sharedTableData, summaryOverview: sharedSummaryOverview,
         }, {
           runMaster: request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: input.chatIdentity, prompt: request.prompt, messages: [...request.messages], signal: input.signal }),
           runSpecialists,

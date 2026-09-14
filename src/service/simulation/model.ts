@@ -138,6 +138,8 @@ export interface WorldSimulationGateInput_ACU {
   local: WorldSimulationGateLocalState_ACU;
   realtimePacing: WorldSimulationRealtimePacing_ACU;
   recentStoryTail: string;
+  /** 冻结纪要概览文本（共享上下文产出）；仅用于定位，不作为时间证据。 */
+  summaryOverview?: string;
   activeEntitySummaries: readonly string[];
   lastSimulation?: {
     anchorMessageIndex: number;

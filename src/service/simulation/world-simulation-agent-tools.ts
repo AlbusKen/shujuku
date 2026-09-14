@@ -1,6 +1,7 @@
 import type { AgentKernelToolCall_ACU } from '../agent-kernel/agent-tools';
 import type { AgentStoryContextSnapshot_ACU } from '../agent-kernel/story-context';
 import { renderAgentWorldbookEntries_ACU, resolveAgentWorldbookGrantEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
+import { renderAgentTableByName_ACU, type AgentTableRowRange_ACU } from '../continuation/agent/agent-tables';
 import type { WorldStateSnapshot_ACU } from './model';
 
 export interface WorldSimulationAgentToolsInput_ACU {
@@ -8,6 +9,8 @@ export interface WorldSimulationAgentToolsInput_ACU {
   snapshot: WorldStateSnapshot_ACU;
   storyContext?: AgentStoryContextSnapshot_ACU;
   worldbook: AgentWorldbookSnapshot_ACU;
+  /** 冻结表格快照：$TABLE 读取与 tables 搜索的唯一数据源。 */
+  tableData?: unknown;
 }
 export interface WorldSimulationAgentToolsResult_ACU { text: string; successfulReadRefs: string[]; }
 
@@ -17,6 +20,22 @@ function stateText_ACU(snapshot: WorldStateSnapshot_ACU): string {
 function worldbookParts_ACU(token: string): [string, string[]] {
   const body = token.slice('$WORLDBOOK:'.length); const separator = body.lastIndexOf(':');
   return [body.slice(0, separator), body.slice(separator + 1).split(/[,，]/).map(item => item.trim()).filter(Boolean)];
+}
+const TABLE_ROW_RANGE_PATTERN_ACU = /^(\d+)-(\d+)$/;
+
+/** 解析 `$TABLE:表名` 或 `$TABLE:表名:起始行-结束行`（1 基含两端）。 */
+export function parseTableAddress_ACU(token: string): { name: string; range: AgentTableRowRange_ACU | null } | null {
+  const body = token.slice('$TABLE:'.length).trim();
+  if (!body) return null;
+  const lastColon = body.lastIndexOf(':');
+  const rangeCandidate = lastColon >= 0 ? TABLE_ROW_RANGE_PATTERN_ACU.exec(body.slice(lastColon + 1).trim()) : null;
+  if (lastColon >= 0 && !rangeCandidate) return null;
+  const name = rangeCandidate ? body.slice(0, lastColon).trim() : body;
+  if (!name) return null;
+  return {
+    name,
+    range: rangeCandidate ? { start: Number.parseInt(rangeCandidate[1]!, 10), end: Number.parseInt(rangeCandidate[2]!, 10) } : null,
+  };
 }
 function storyRead_ACU(address: '$STORY_OVERVIEW' | '$STORY_PENDING' | '$STORY_BRIDGE' | '$STORY_CATALOG', input: WorldSimulationAgentToolsInput_ACU): { text: string; ref: string | null } {
   const context = input.storyContext;
@@ -38,6 +57,13 @@ function read_ACU(address: string, input: WorldSimulationAgentToolsInput_ACU): {
     if (!entries.length) return { text: `读取 ${address} 被拒绝：地址不在本轮冻结的已启用世界书快照中。`, ref: null };
     return { text: renderAgentWorldbookEntries_ACU(input.worldbook, ...worldbookParts_ACU(address)), ref: address };
   }
+  if (address.startsWith('$TABLE:')) {
+    const parsed = parseTableAddress_ACU(address);
+    if (!parsed) return { text: `读取 ${address} 被拒绝：写法为 $TABLE:表名 或 $TABLE:表名:起始行-结束行（1 基含两端）。`, ref: null };
+    const text = renderAgentTableByName_ACU(parsed.name, input.tableData, parsed.range ?? undefined);
+    if (text.includes('不存在名为') || text.includes('读集里的表名为空')) return { text: `读取 ${address} 被拒绝：${text}`, ref: null };
+    return { text: `### ${address}\n${text}`, ref: address };
+  }
   return { text: `读取 ${address} 被拒绝：不在世界推演子代理可读目录中。`, ref: null };
 }
 function searchSource_ACU(scope: readonly string[], input: WorldSimulationAgentToolsInput_ACU): string {
@@ -45,7 +71,8 @@ function searchSource_ACU(scope: readonly string[], input: WorldSimulationAgentT
   if (scope.includes('story')) sections.push(input.storyContext?.overview.text ?? '', input.storyContext?.pending.text ?? '', input.storyContext?.bridge.text ?? '', input.storyContext?.catalog.text ?? '');
   if (scope.includes('ledger')) sections.push(stateText_ACU(input.snapshot));
   if (scope.includes('worldbook')) sections.push(input.worldbook.entries.map(entry => `${entry.title}｜${entry.keys.join('、')}｜$WORLDBOOK:${entry.bookName}:${entry.uid}`).join('\n'));
-  if (scope.includes('tables') || scope.includes('proposals')) sections.push('该运行没有可读取的表格或提案资料。');
+  if (scope.includes('tables')) sections.push(input.tableData ? '表格数据可搜索；按表名或概览定位后用 read 精读。' : '该运行没有可读取的表格资料。');
+  if (scope.includes('proposals')) sections.push('该运行没有可读取的提案资料。');
   return sections.join('\n');
 }
 

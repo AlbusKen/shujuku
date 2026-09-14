@@ -83,7 +83,7 @@ export async function buildWorldSimulationStoryContext_ACU(
     profile: 'world-director',
     overview: { state: overview.state, text: overview.content, digest: overview.digest, diagnostic: overview.diagnostic },
     settledThroughIndex: input.settledThroughIndex,
-    bridgeFloorCount: input.bridgeFloorCount ?? 2,
+    bridgeFloorCount: input.bridgeFloorCount ?? 3,
     floors,
   });
 }

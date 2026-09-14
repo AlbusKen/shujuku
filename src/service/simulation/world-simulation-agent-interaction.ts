@@ -49,9 +49,14 @@ const SPECIALIST_SEED_READ_ADDRESSES_ACU = new Set([
   '$STORY_CATALOG',
 ]);
 
+/** v6: 派工 reads 白名单放行冻结表格快照地址（$TABLE:表名[:a-b]）；世界书仍走 materialGrants。 */
+function isAllowedSeedReadAddress_ACU(address: string): boolean {
+  return SPECIALIST_SEED_READ_ADDRESSES_ACU.has(address) || address.startsWith('$TABLE:');
+}
+
 function parseSpecialistSeedReads_ACU(reads: readonly string[]): string[] {
-  if (reads.some(address => !SPECIALIST_SEED_READ_ADDRESSES_ACU.has(address))) {
-    fail('世界推演子代理种子读取必须是固定目录中的非世界书地址');
+  if (reads.some(address => !isAllowedSeedReadAddress_ACU(address))) {
+    fail('世界推演子代理种子读取必须是固定目录中的非世界书地址或 $TABLE: 冻结表格地址');
   }
   return [...reads];
 }

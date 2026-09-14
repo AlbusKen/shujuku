@@ -12,6 +12,10 @@ export interface WorldSimulationSpecialistRuntimeInput_ACU {
   agent: WorldSimulationAgentDefinition_ACU; snapshot: WorldStateSnapshot_ACU; anchorMessageIndex: number; storyClock: WorldStoryClock_ACU;
   storyContext?: AgentStoryContextSnapshot_ACU; requirementsSnapshot?: AgentRequirementSnapshot_ACU | null; materialGrants: readonly AgentMaterialGrant_ACU[];
   seedReadRefs: readonly string[]; fixedReads: readonly string[]; worldbook: AgentWorldbookSnapshot_ACU; previousCandidateSummaries: readonly string[];
+  /** 冻结表格快照：$TABLE 读取与 tables 搜索的唯一数据源（与主控/gate 同一份）。 */
+  tableData?: unknown;
+  /** 冻结纪要概览文本（共享上下文产出）；进入 runtime context 的 UNTRUSTED_SUMMARY_OVERVIEW。 */
+  summaryOverview?: string;
   maxCalls: number; prompts?: WorldSimulationAgentPrompts_ACU; delegationInstruction?: string; toolsEnabled?: boolean; isCurrent: () => boolean;
 }
 export interface WorldSimulationSpecialistRuntimeDependencies_ACU {
@@ -25,13 +29,13 @@ function flatten_ACU(messages: readonly WorldSimulationPromptMessage_ACU[]): str
 export class WorldSimulationSpecialistRuntime_ACU {
   async run(input: WorldSimulationSpecialistRuntimeInput_ACU, dependencies: WorldSimulationSpecialistRuntimeDependencies_ACU): Promise<WorldSimulationSpecialistRuntimeResult_ACU> {
     if (!input.agent.delegated || input.maxCalls < 1 || !input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '世界推演子代理运行身份、角色或预算非法');
-    const seed = executeWorldSimulationAgentTools_ACU({ calls: input.seedReadRefs.length ? [{ kind: 'read', reads: [...input.seedReadRefs] }] : [], snapshot: input.snapshot, storyContext: input.storyContext, worldbook: input.worldbook });
+    const seed = executeWorldSimulationAgentTools_ACU({ calls: input.seedReadRefs.length ? [{ kind: 'read', reads: [...input.seedReadRefs] }] : [], snapshot: input.snapshot, storyContext: input.storyContext, worldbook: input.worldbook, tableData: input.tableData });
     const refs = new Set([...input.materialGrants.map(grant => grant.grantId), ...seed.successfulReadRefs]);
     const materials = [...input.fixedReads, ...(seed.text === '（空工具结果）' ? [] : [seed.text])];
     const history: WorldSimulationPromptMessage_ACU[] = []; let callsUsed = 0;
     while (callsUsed < input.maxCalls) {
       if (!input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '世界推演子代理调用前租约已失效');
-      const messages = renderWorldSimulationAgentMessages_ACU({ agent: input.agent, prompts: input.prompts, history, delegationInstruction: input.delegationInstruction, toolsEnabled: input.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: materials, storyContext: input.storyContext, requirementsSnapshot: input.requirementsSnapshot, materialGrants: input.materialGrants, previousCandidateSummaries: input.previousCandidateSummaries });
+      const messages = renderWorldSimulationAgentMessages_ACU({ agent: input.agent, prompts: input.prompts, history, delegationInstruction: input.delegationInstruction, toolsEnabled: input.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: materials, storyContext: input.storyContext, summaryOverview: input.summaryOverview, requirementsSnapshot: input.requirementsSnapshot, materialGrants: input.materialGrants, previousCandidateSummaries: input.previousCandidateSummaries });
       const runtimeContext = messages.find(message => message.role === 'user' && message.content.includes('【本次运行上下文】'));
       if (runtimeContext) history.push({ ...runtimeContext });
       callsUsed += 1;
@@ -41,7 +45,7 @@ export class WorldSimulationSpecialistRuntime_ACU {
       if (!input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '世界推演子代理返回后租约已失效');
       if (output.kind === 'candidate') return { candidate: output, callsUsed, successfulReadRefs: [...refs] };
       if (input.toolsEnabled === false) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '世界推演子代理工具能力已由设置关闭');
-      const result = executeWorldSimulationAgentTools_ACU({ calls: output.calls, snapshot: input.snapshot, storyContext: input.storyContext, worldbook: input.worldbook });
+      const result = executeWorldSimulationAgentTools_ACU({ calls: output.calls, snapshot: input.snapshot, storyContext: input.storyContext, worldbook: input.worldbook, tableData: input.tableData });
       result.successfulReadRefs.forEach(ref => refs.add(ref));
       history.push({ role: 'user', content: `【工具结果】\n${renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_TOOL_RESULTS', result.text)}` });
     }

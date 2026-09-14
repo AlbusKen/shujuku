@@ -38,6 +38,10 @@ export interface WorldSimulationAgentLoopInput_ACU {
   agentPrompts?: WorldSimulationAgentPrompts_ACU;
   delegationInstructions?: ReadonlyMap<string, string>;
   storyContext?: AgentStoryContextSnapshot_ACU;
+  /** 冻结表格快照（共享上下文产出）；$TABLE 读取与 tables 搜索的唯一数据源。 */
+  tableData?: unknown;
+  /** 冻结纪要概览文本（共享上下文产出）；进入 runtime context 的 UNTRUSTED_SUMMARY_OVERVIEW。 */
+  summaryOverview?: string;
   userInstruction?: string;
   agents?: readonly WorldSimulationAgentDefinition_ACU[];
   materialGrantsByAgent?: ReadonlyMap<string, readonly AgentMaterialGrant_ACU[]>;
@@ -136,6 +140,7 @@ export async function runWorldSimulationAgentLoop_ACU(input: WorldSimulationAgen
         agent, snapshot: input.snapshot, anchorMessageIndex: input.anchorMessageIndex, storyClock: input.storyClock,
         storyContext: input.storyContext, requirementsSnapshot: input.requirementsSnapshot, materialGrants: input.materialGrantsByAgent?.get(agent.name) ?? [],
         seedReadRefs: seedReads, fixedReads: input.readTexts, worldbook: input.worldbook, previousCandidateSummaries: candidateSummaries, prompts: input.agentPrompts, delegationInstruction: input.delegationInstructions?.get(agent.name), toolsEnabled: input.toolsEnabled,
+        tableData: input.tableData, summaryOverview: input.summaryOverview,
         maxCalls: callBudget, isCurrent,
       }, { runAgent: request => dependencies.runAgent({ agent, prompt: request.prompt, messages: request.messages, snapshot: input.snapshot, storyClock: input.storyClock, reads: request.reads, isCurrent }) });
       callsUsed += result.callsUsed;

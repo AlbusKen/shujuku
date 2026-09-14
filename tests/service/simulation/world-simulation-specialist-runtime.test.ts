@@ -40,6 +40,19 @@ describe('WorldSimulationSpecialistRuntime_ACU', () => {
     expect(messages.findIndex((message: any) => message === priorAction)).toBeLessThan(messages.findIndex((message: any) => message === toolResults));
   });
 
+  it('accepts a successful $TABLE read as specialist evidence but not a failed address', async () => {
+    const tableData = { sheet1: { name: '纪要表', content: [['轮次', '概要'], ['第 1 轮', '主角抵达港口']] } };
+    const outputs = ['{"thought":"读取纪要","action":"tools","calls":[{"kind":"read","reads":["$TABLE:纪要表:1-1"]}]}', entityCandidate(['$TABLE:纪要表:1-1'])];
+    const runAgent = vi.fn(async () => outputs.shift() ?? null);
+    const result = await new WorldSimulationSpecialistRuntime_ACU().run({ agent: findWorldSimulationAgent_ACU('entity-movement')!, snapshot: snapshot(), anchorMessageIndex: 5, storyClock: clock, tableData, materialGrants: [], seedReadRefs: [], fixedReads: [], worldbook, previousCandidateSummaries: [], maxCalls: 2, isCurrent: () => true }, { runAgent });
+    expect(result.successfulReadRefs).toContain('$TABLE:纪要表:1-1');
+    expect(result.candidate.evidenceRefs).toEqual(['$TABLE:纪要表:1-1']);
+
+    const missing = ['{"thought":"读取缺失表","action":"tools","calls":[{"kind":"read","reads":["$TABLE:不存在的表"]}]}', entityCandidate(['$TABLE:不存在的表'])];
+    await expect(new WorldSimulationSpecialistRuntime_ACU().run({ agent: findWorldSimulationAgent_ACU('entity-movement')!, snapshot: snapshot(), anchorMessageIndex: 5, storyClock: clock, tableData, materialGrants: [], seedReadRefs: [], fixedReads: [], worldbook, previousCandidateSummaries: [], maxCalls: 2, isCurrent: () => true }, { runAgent: async () => missing.shift() ?? null })).rejects.toBeInstanceOf(WorldSimulationValidationError_ACU);
+  });
+
+
   it('counts a tools output as one of the specialist model turns', async () => {
     const outputs = ['{"thought":"核对状态","action":"tools","calls":[{"kind":"read","reads":["$WORLD_STATE"]}]}'];
     await expect(new WorldSimulationSpecialistRuntime_ACU().run({

@@ -31,13 +31,30 @@
     </section>
     <section class="world-simulation-settings__prompts">
       <div class="world-simulation-settings__prompt-heading">
-        <div><strong>四角色 Prompt Segments</strong><p>可调整段的位置、启用状态与静态文本。运行时占位符会按当前位置注入；正文、要求、世界书、工具结果和委派始终作为独立 user-role UNTRUSTED 消息。</p></div>
+        <div><strong>四角色提示词布局（v6 具名块）</strong><p>五层结构：系统宪章 → 真实 run 历史锚点 → 单一运行时上下文 → assistant 确认 → 执行边界。锁定块只可移动位置；用户自定义段保持完整编辑。正文、要求、世界书、工具结果和委派始终作为独立 user-role UNTRUSTED 消息。</p></div>
         <div class="world-simulation-settings__actions"><AcuButton size="sm" @click="restoreDefaultPrompts">恢复默认提示词</AcuButton><AcuButton size="sm" @click="exportPrompts">导出到文本</AcuButton></div>
       </div>
       <details v-for="agent in agents" :key="agent.name" class="world-simulation-settings__prompt-agent" :open="agent.name === 'world-director'">
         <summary>{{ agent.label }} · {{ agent.hint }}</summary>
-        <AcuPromptSegments :segments="draft.agentPrompts[agent.name]" :role-options="promptRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" :rows="4"
-          @add="position => addPrompt(agent.name, position)" @delete="index => deletePrompt(agent.name, index)" @move="(index, delta) => movePrompt(agent.name, index, delta)" @update="(index, patch) => updatePrompt(agent.name, index, patch)" />
+        <ol class="world-simulation-settings__prompt-blocks">
+          <li v-for="block in blockViews[agent.name]" :key="block.index" :class="{ 'is-locked': block.locked }">
+            <div class="world-simulation-settings__prompt-block-head">
+              <strong>{{ block.name }}</strong>
+              <span class="world-simulation-settings__prompt-block-role">[{{ block.role.toUpperCase() }}]</span>
+              <span v-if="block.locked" class="world-simulation-settings__prompt-block-badge">锁定</span>
+              <span class="world-simulation-settings__prompt-block-kind">{{ block.kind === 'placeholder' ? '引擎占位符' : block.kind === 'anchor' ? '引擎静态' : '自定义' }}</span>
+            </div>
+            <p class="world-simulation-settings__prompt-block-desc">{{ block.description }}</p>
+            <textarea v-if="!block.locked" :value="block.editableContent" rows="4" @input="updatePrompt(agent.name, block.index, { content: ($event.target as HTMLTextAreaElement).value })"></textarea>
+            <pre v-else-if="block.token" class="world-simulation-settings__prompt-block-token">{{ block.token }}</pre>
+            <div class="world-simulation-settings__actions">
+              <AcuButton size="sm" :disabled="block.index === 0" @click="movePrompt(agent.name, block.index, -1)">上移</AcuButton>
+              <AcuButton size="sm" :disabled="block.index === draft.agentPrompts[agent.name].length - 1" @click="movePrompt(agent.name, block.index, 1)">下移</AcuButton>
+              <AcuButton size="sm" :disabled="block.locked" @click="deletePrompt(agent.name, block.index)">删除</AcuButton>
+            </div>
+          </li>
+        </ol>
+        <div class="world-simulation-settings__actions"><AcuButton size="sm" @click="addPrompt(agent.name, 'bottom')">添加自定义段</AcuButton></div>
       </details>
       <details class="world-simulation-settings__prompt-transfer">
         <summary>导入 / 导出 Prompt Segments JSON</summary>
@@ -60,7 +77,8 @@
 import { computed, ref } from 'vue';
 import { WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, findWorldSimulationAgent_ACU } from '../../service/simulation/agent/agent-catalog';
 import { buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
-import type { WorldReadBudgetTier_ACU, WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptRole_ACU, WorldSimulationPromptSegment_ACU, WorldSimulationScale_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from '../../service/simulation/model';
+import type { WorldReadBudgetTier_ACU, WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptSegment_ACU, WorldSimulationScale_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from '../../service/simulation/model';
+import { buildWorldSimulationPromptBlocks_ACU, type WorldSimulationPromptBlockView_ACU } from '../composables/useWorldSimulationPromptBlocks';
 import { isWorldSimulationSettings_ACU, readWorldSimulationSettings_ACU, readWorldSimulationSettingsUpgrade_ACU, writeWorldSimulationSettingsStrict_ACU } from '../../service/simulation/simulation-settings';
 import { renderWorldSimulationAgentMessages_ACU } from '../../service/simulation/world-simulation-agent-prompts';
 import AcuButton from './_lib/AcuButton.vue';
@@ -68,7 +86,6 @@ import AcuFormRow from './_lib/AcuFormRow.vue';
 import AcuInput from './_lib/AcuInput.vue';
 import AcuMessage from './_lib/AcuMessage.vue';
 import AcuPanel from './_lib/AcuPanel.vue';
-import AcuPromptSegments from './_lib/AcuPromptSegments.vue';
 import AcuSelect from './_lib/AcuSelect.vue';
 import AcuTextarea from './_lib/AcuTextarea.vue';
 import AcuToggle from './_lib/AcuToggle.vue';
@@ -87,7 +104,6 @@ const budgetNumberFields = [
 ] as const;
 const visibilityOptions = [{ value: 'agent', label: '由 Agent 决定' }, { value: 'always_hidden', label: '始终隐藏' }, { value: 'always_revealed', label: '始终公开' }];
 const tierOptions = [{ value: 'low', label: '低' }, { value: 'medium', label: '中' }, { value: 'high', label: '高' }];
-const promptRoleOptions = [{ value: 'system', label: 'SYSTEM' }, { value: 'user', label: 'USER' }, { value: 'assistant', label: 'ASSISTANT' }];
 const agents: ReadonlyArray<{ name: WorldSimulationAgentName_ACU; label: string; hint: string }> = [
   { name: 'world-director', label: '主 Agent（world-director）', hint: '只能选择子代理，不能直接写账本。' },
   { name: 'entity-movement', label: '实体子代理（entity-movement）', hint: '仅 entities。' },
@@ -95,6 +111,9 @@ const agents: ReadonlyArray<{ name: WorldSimulationAgentName_ACU; label: string;
   { name: 'thread-weaver', label: '线索子代理（thread-weaver）', hint: '仅 threads。' },
 ];
 const previewAgentOptions = agents.map(agent => ({ value: agent.name, label: agent.label }));
+const blockViews = computed<Record<WorldSimulationAgentName_ACU, WorldSimulationPromptBlockView_ACU[]>>(() => Object.fromEntries(
+  agents.map(agent => [agent.name, buildWorldSimulationPromptBlocks_ACU(agent.name, draft.value.agentPrompts[agent.name])]),
+) as Record<WorldSimulationAgentName_ACU, WorldSimulationPromptBlockView_ACU[]>);
 const previewSnapshot = {
   anchorMessageIndex: 0,
   storyClock: { anchorText: '预览锚点', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 },
@@ -147,11 +166,21 @@ function restoreDefaultPrompts(): void {
   message.value = { kind: 'success', text: '已恢复本地默认提示词；尚未保存。' };
 }
 function exportPrompts(): void { promptsTransfer.value = JSON.stringify(draft.value.agentPrompts, null, 2); message.value = { kind: 'success', text: '已导出到下方文本框；尚未保存。' }; }
+/** v6 必需引擎锚点：导入布局不可缺失；缺失即整体拒绝（fail-closed）。 */
+const REQUIRED_PROMPT_ANCHORS_ACU = ['$WORLD_SIMULATION_ROOT', '$WORLD_SIMULATION_HISTORY', '$WORLD_SIMULATION_RUNTIME_CONTEXT', '$WORLD_SIMULATION_EXECUTION_BOUNDARY'] as const;
+function promptsKeepRequiredAnchors_ACU(prompts: WorldSimulationAgentPrompts_ACU): boolean {
+  return agents.every(agent => {
+    const contents = prompts[agent.name].map(segment => segment.content.trim());
+    return REQUIRED_PROMPT_ANCHORS_ACU.every(anchor => contents.includes(anchor))
+      && (agent.name === 'world-director' || contents.includes('$WORLD_SIMULATION_SPECIALIST_RULES'));
+  });
+}
 function importPrompts(): void {
   try {
     const imported = JSON.parse(promptsTransfer.value);
     const candidate = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: imported };
     if (!isWorldSimulationSettings_ACU(candidate)) throw new Error('JSON 不是完整的四角色 Prompt Segments 配置');
+    if (!promptsKeepRequiredAnchors_ACU(candidate.agentPrompts)) throw new Error('导入布局缺失 v6 必需引擎锚点（宪章/历史/运行时上下文/执行边界等），已拒绝');
     draft.value.agentPrompts = clonePrompts(candidate.agentPrompts);
     message.value = { kind: 'success', text: 'Prompt Segments 已导入本地草稿；尚未保存。' };
   } catch (error) { message.value = { kind: 'error', text: `导入失败：${error instanceof Error ? error.message : String(error)}` }; }

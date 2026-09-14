@@ -42,6 +42,32 @@ describe('WorldSimulationDirectorRuntime_ACU', () => {
     expect(master).toHaveBeenCalledTimes(1); expect(specialists).toHaveBeenCalledTimes(1);
   });
 
+  it('registers a $TABLE grant only after a successful frozen-table read and grants it to specialists via materialGrants', async () => {
+    const tableData = { 'sheet1': { name: '纪要表', content: [['轮次', '概要'], ['第 1 轮', '主角抵达港口']] } };
+    const master = vi.fn()
+      .mockResolvedValueOnce('{"action":"tools","thought":"读取纪要","calls":[{"kind":"read","reads":["$TABLE:纪要表:1-1"]}]}')
+      .mockResolvedValueOnce('{"action":"delegate","thought":"核验纪要","delegations":[{"agentName":"entity-movement","task":"核对到达","materialGrants":["W1"],"reads":["$TABLE:纪要表:1-1"]}]}')
+      .mockResolvedValueOnce('{"action":"finalize","thought":"采用候选","decision":"commit","acceptedAgents":["entity-movement"],"summary":"可提交","unresolved":[]}');
+    const specialists = vi.fn(async (_plan, grants) => {
+      expect(grants.get('entity-movement')).toMatchObject([{ grantId: 'W1', content: expect.stringContaining('1. 第 1 轮 | 主角抵达港口') }]);
+      return loop;
+    });
+    const result = await new WorldSimulationDirectorRuntime_ACU().run({ ...input(), tableData }, { runMaster: master, runSpecialists: specialists });
+    expect(result.grants).toHaveLength(1);
+    expect(result.grants[0]!.source.address).toBe('$TABLE:纪要表:1-1');
+    expect(specialists).toHaveBeenCalledTimes(1);
+  });
+
+  it('never registers a grant for a failed $TABLE read and rejects unknown grant ids at delegation', async () => {
+    const tableData = { 'sheet1': { name: '纪要表', content: [['轮次', '概要'], ['第 1 轮', '主角抵达港口']] } };
+    const master = vi.fn()
+      .mockResolvedValueOnce('{"action":"tools","thought":"读取不存在的表","calls":[{"kind":"read","reads":["$TABLE:不存在的表"]}]}')
+      .mockResolvedValueOnce('{"action":"delegate","thought":"引用未授权 grant","delegations":[{"agentName":"entity-movement","task":"x","materialGrants":["W1"],"reads":[]}]}');
+    await expect(new WorldSimulationDirectorRuntime_ACU().run({ ...input(), tableData }, { runMaster: master, runSpecialists: vi.fn() }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIM_PROTOCOL_INVALID' } });
+  });
+
+
   it('counts tools against the director model-turn cap but never spends specialist turns', async () => {
     const settings = buildDefaultWorldSimulationSettings_ACU();
     settings.budgets.deep.maxMasterModelTurns = 1;

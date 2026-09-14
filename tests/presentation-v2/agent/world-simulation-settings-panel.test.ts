@@ -29,27 +29,31 @@ async function flushSave(nextTick: () => Promise<void>): Promise<void> {
 afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); });
 
 describe('WorldSimulationSettingsPanel', () => {
-  it('mounts a four-role local prompt draft, reorders segments, and saves only explicitly', async () => {
+  it('mounts the v6 named-block draft with locked anchors and an editable guidance block, and saves only explicitly', async () => {
     const { app, el, settings, received, nextTick } = await mountPanel();
     expect(settings.worldSimulation).toBeUndefined();
-    expect(el.textContent).toContain('四角色 Prompt Segments');
+    expect(el.textContent).toContain('四角色提示词布局（v6 具名块）');
     expect(el.textContent).toContain('主 Agent（world-director）');
     expect(el.textContent).toContain('实体子代理（entity-movement）');
     expect(el.textContent).toContain('事件子代理（faction-events）');
     expect(el.textContent).toContain('线索子代理（thread-weaver）');
-
-    const prompts = el.querySelectorAll<HTMLTextAreaElement>('.world-simulation-settings__prompt-agent textarea');
-    expect(prompts.length).toBeGreaterThan(2);
-    prompts[1]!.value = '只选择所需子代理，不直接写账本。';
-    prompts[1]!.dispatchEvent(new Event('input', { bubbles: true }));
-    const down = el.querySelector<HTMLButtonElement>('.world-simulation-settings__prompt-agent button[title="下移该段"]');
-    down!.click();
+    // v6 named blocks: engine anchors display as locked badges, not raw tokens.
+    expect(el.textContent).toContain('世界推演宪章');
+    expect(el.textContent).toContain('真实 run 历史锚点');
+    expect(el.textContent).toContain('运行时上下文');
+    expect(el.textContent).toContain('执行边界');
+    expect(el.textContent).toContain('锁定');
+    // Guidance blocks stay editable.
+    const textareas = el.querySelectorAll<HTMLTextAreaElement>('.world-simulation-settings__prompt-agent textarea');
+    expect(textareas.length).toBe(4);
+    textareas[0]!.value = '只选择所需子代理，不直接写账本。';
+    textareas[0]!.dispatchEvent(new Event('input', { bubbles: true }));
     await nextTick();
     expect(settings.worldSimulation).toBeUndefined();
 
     const save = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存世界推演设置');
     save!.click(); await flushSave(nextTick);
-    expect(settings.worldSimulation.agentPrompts['world-director'][0].content).toBe('只选择所需子代理，不直接写账本。');
+    expect(settings.worldSimulation.agentPrompts['world-director'].some((segment: any) => segment.content === '只选择所需子代理，不直接写账本。')).toBe(true);
     expect(settings.worldSimulation.agentGuidance).toBeUndefined();
     expect(received).toHaveBeenCalledTimes(1);
     app.unmount();
