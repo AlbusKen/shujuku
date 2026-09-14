@@ -139482,6 +139482,8 @@ $CONTENT
             enabled: false, joinWaitMs: WORLD_SIMULATION_DEFAULT_JOIN_WAIT_MS_ACU, minFloorGap: WORLD_SIMULATION_DEFAULT_MIN_FLOOR_GAP_ACU,
             checkpointInterval: WORLD_SIMULATION_DEFAULT_CHECKPOINT_INTERVAL_ACU, maxTrackedEntities: WORLD_SIMULATION_DEFAULT_MAX_TRACKED_ENTITIES_ACU,
             visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true,
+            apiPresetMode: 'current',
+            fixedApiPresetName: '',
             budgets: { light: { ...WORLD_SIMULATION_DEFAULT_BUDGETS_ACU.light }, normal: { ...WORLD_SIMULATION_DEFAULT_BUDGETS_ACU.normal }, deep: { ...WORLD_SIMULATION_DEFAULT_BUDGETS_ACU.deep } },
             agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(),
             promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU,
@@ -142144,7 +142146,7 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
     const READ_TIERS_ACU = ['low', 'medium', 'high'];
     const AGENT_NAMES_ACU = ['world-director', 'entity-movement', 'faction-events', 'thread-weaver'];
     const PROMPT_ROLES_ACU = ['system', 'user', 'assistant'];
-    const BASE_SETTINGS_KEYS_ACU = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'toolsEnabled', 'budgets'];
+    const BASE_SETTINGS_KEYS_ACU = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'toolsEnabled', 'apiPresetMode', 'fixedApiPresetName', 'budgets'];
     const SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentPrompts', 'promptForceDefaultVersion'];
     const GUIDANCE_LEGACY_SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentGuidance', 'promptForceDefaultVersion'];
     const PRE_KERNEL_PROMPT_SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentPrompts'];
@@ -142368,6 +142370,10 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
             return false;
         if (typeof value.toolsEnabled !== 'boolean')
             return false;
+        if (value.apiPresetMode !== 'current' && value.apiPresetMode !== 'fixed')
+            return false;
+        if (typeof value.fixedApiPresetName !== 'string')
+            return false;
         return isCompleteBudgets_ACU(value.budgets)
             && isPartialAgentPrompts_ACU(value.agentPrompts) && hasExactKeys_ACU(value.agentPrompts, AGENT_NAMES_ACU)
             && hasEnabledPromptSegments_ACU(value.agentPrompts)
@@ -142382,6 +142388,8 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
         visibilityPolicy: value => VISIBILITY_POLICIES_ACU.includes(String(value)),
         showHiddenInUi: value => typeof value === 'boolean',
         toolsEnabled: value => typeof value === 'boolean',
+        apiPresetMode: value => value === 'current' || value === 'fixed',
+        fixedApiPresetName: value => typeof value === 'string',
     };
     /**
      * Strict-then-normalize: a recognized field that is present but out of range is a real invalid value,
@@ -142442,6 +142450,8 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
             budgets,
             agentPrompts,
             toolsEnabled: Object.prototype.hasOwnProperty.call(raw, 'toolsEnabled') ? raw.toolsEnabled : defaults.toolsEnabled,
+            apiPresetMode: Object.prototype.hasOwnProperty.call(raw, 'apiPresetMode') ? raw.apiPresetMode : defaults.apiPresetMode,
+            fixedApiPresetName: Object.prototype.hasOwnProperty.call(raw, 'fixedApiPresetName') ? String(raw.fixedApiPresetName ?? '') : defaults.fixedApiPresetName,
             promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU,
         };
         // This should hold because all present fields were validated and every missing field is copied
@@ -143284,7 +143294,18 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
             };
         });
         const runOwnedAi = overrides.runOwnedAi ?? (async (request) => {
-            const resolved = resolveApiConfigByPreset_ACU(String(settings_ACU?.plotApiPreset ?? ''));
+            // 用户自选渠道：跟随世界推演设置解析预设，而不是借用剧情推进的 plotApiPreset。
+            const current = readWorldSimulationSettings_ACU();
+            const resolution = current?.apiPresetMode === 'fixed'
+                ? { presetName: current.fixedApiPresetName.trim(), current: false }
+                : { presetName: '', current: true };
+            if (resolution.current === false && !resolution.presetName) {
+                throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU('WORLD_SIM_PROTOCOL_INVALID', 'agent', '世界推演固定 API 预设名称为空，已拒绝调用（fail-closed）', false));
+            }
+            const resolved = resolveApiConfigByPreset_ACU(resolution.presetName);
+            if (resolution.current === false && !resolved.resolved) {
+                throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU('WORLD_SIM_PROTOCOL_INVALID', 'agent', `世界推演固定 API 预设 "${resolution.presetName}" 不存在，已拒绝调用（fail-closed）`, false));
+            }
             const identity = {
                 requestId: `world-sim-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
                 chatIdentity: request.chatIdentity,
@@ -184416,6 +184437,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 { name: 'thread-weaver', label: '线索子代理（thread-weaver）', hint: '仅 threads。' },
             ];
             const previewAgentOptions = agents.map(agent => ({ value: agent.name, label: agent.label }));
+            const { apiStore, apiPresetSelectOptions, followActiveApiLabel } = useApiPresetSelectOptions();
+            // Panel may be mounted without the page-level store refresh; keep the preset options live.
+            apiStore.refreshFromSettings();
+            const apiPresetValue = computed(() => draft.value.apiPresetMode === 'fixed' ? draft.value.fixedApiPresetName : '');
+            function setApiPreset(value) {
+                const trimmed = String(value || '').trim();
+                draft.value.apiPresetMode = trimmed ? 'fixed' : 'current';
+                draft.value.fixedApiPresetName = trimmed;
+            }
             const promptRoleOptions = [
                 { value: 'system', label: 'SYSTEM' },
                 { value: 'user', label: 'USER' },
@@ -184521,14 +184551,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 emit('saved', clone(saved));
                 message.value = { kind: 'success', text: result.upgraded ? '设置已保存并升级旧格式。' : '世界推演设置已保存。' };
             }
-            const __returned__ = { scales, numberFields, budgetNumberFields, visibilityOptions, tierOptions, agents, previewAgentOptions, promptRoleOptions, previewSnapshot, clonePrompts, clone, emit, loaded, draft, message, promptsTransfer, previewAgent, previewMessages, asNumber, setBudgetNumber, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, onPromptUpdate, restoreDefaultPrompts, exportPrompts, importPrompts, save, AcuPromptSegments, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuPanel, AcuSelect, AcuTextarea, AcuToggle };
+            const __returned__ = { scales, numberFields, budgetNumberFields, visibilityOptions, tierOptions, agents, previewAgentOptions, apiStore, apiPresetSelectOptions, followActiveApiLabel, apiPresetValue, setApiPreset, promptRoleOptions, previewSnapshot, clonePrompts, clone, emit, loaded, draft, message, promptsTransfer, previewAgent, previewMessages, asNumber, setBudgetNumber, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, onPromptUpdate, restoreDefaultPrompts, exportPrompts, importPrompts, save, AcuPromptSegments, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuPanel, AcuSelect, AcuTextarea, AcuToggle };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.world-simulation-settings__numbers[data-v-2a28694a]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.world-simulation-settings__budget[data-v-2a28694a],.world-simulation-settings__prompts[data-v-2a28694a]{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent)}.world-simulation-settings__prompt-heading[data-v-2a28694a],.world-simulation-settings__actions[data-v-2a28694a]{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.world-simulation-settings__prompt-heading>div[data-v-2a28694a]:first-child{flex:1 1 340px}.world-simulation-settings__prompt-heading p[data-v-2a28694a],.world-simulation-settings__prompt-transfer p[data-v-2a28694a]{margin:5px 0 0;color:var(--acu-text-3);font-size:12px}.world-simulation-settings__prompt-agent[data-v-2a28694a],.world-simulation-settings__prompt-transfer[data-v-2a28694a],.world-simulation-settings__prompt-preview[data-v-2a28694a]{display:grid;gap:10px;padding:10px;border:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent);border-radius:7px}.world-simulation-settings__prompt-agent summary[data-v-2a28694a],.world-simulation-settings__prompt-transfer summary[data-v-2a28694a],.world-simulation-settings__prompt-preview summary[data-v-2a28694a]{cursor:pointer;font-size:13px}.world-simulation-settings__message-preview[data-v-2a28694a]{display:grid;gap:8px;margin:0;padding:0;list-style:none}.world-simulation-settings__message-preview li[data-v-2a28694a]{padding:8px;border-radius:6px;background:var(--acu-bg-2)}.world-simulation-settings__message-preview pre[data-v-2a28694a]{margin:5px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:12px;color:var(--acu-text-2)}@media (max-width:640px){.world-simulation-settings__numbers[data-v-2a28694a]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationSettingsPanel.vue#style-0-2a28694a");
-    var WorldSimulationSettingsPanel_vue_vue_type_style_index_0_scoped_2a28694a_lang = null;
+    injectSfcStyle("\n.world-simulation-settings__numbers[data-v-ee162003]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.world-simulation-settings__budget[data-v-ee162003],.world-simulation-settings__prompts[data-v-ee162003]{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent)}.world-simulation-settings__prompt-heading[data-v-ee162003],.world-simulation-settings__actions[data-v-ee162003]{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.world-simulation-settings__prompt-heading>div[data-v-ee162003]:first-child{flex:1 1 340px}.world-simulation-settings__prompt-heading p[data-v-ee162003],.world-simulation-settings__prompt-transfer p[data-v-ee162003]{margin:5px 0 0;color:var(--acu-text-3);font-size:12px}.world-simulation-settings__prompt-agent[data-v-ee162003],.world-simulation-settings__prompt-transfer[data-v-ee162003],.world-simulation-settings__prompt-preview[data-v-ee162003]{display:grid;gap:10px;padding:10px;border:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent);border-radius:7px}.world-simulation-settings__prompt-agent summary[data-v-ee162003],.world-simulation-settings__prompt-transfer summary[data-v-ee162003],.world-simulation-settings__prompt-preview summary[data-v-ee162003]{cursor:pointer;font-size:13px}.world-simulation-settings__message-preview[data-v-ee162003]{display:grid;gap:8px;margin:0;padding:0;list-style:none}.world-simulation-settings__message-preview li[data-v-ee162003]{padding:8px;border-radius:6px;background:var(--acu-bg-2)}.world-simulation-settings__message-preview pre[data-v-ee162003]{margin:5px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:12px;color:var(--acu-text-2)}@media (max-width:640px){.world-simulation-settings__numbers[data-v-ee162003]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationSettingsPanel.vue#style-0-ee162003");
+    var WorldSimulationSettingsPanel_vue_vue_type_style_index_0_scoped_ee162003_lang = null;
 
     const _hoisted_1$q = { class: "world-simulation-settings__numbers" };
     const _hoisted_2$o = { class: "world-simulation-settings__numbers" };
@@ -184613,6 +184643,22 @@ Expected function or array of functions, received type ${typeof value}.`
 					"model-value": $setup.draft.toolsEnabled,
 					"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.draft.toolsEnabled = $event)
 				}, null, 8, ["model-value"])]),
+				_: 1
+			}),
+			createVNode($setup["AcuFormRow"], {
+				label: "API 预设",
+				hint: "所有世界推演 Agent 默认走这个预设；空值表示跟随当前活动 API。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuSelect"], {
+					options: $setup.apiPresetSelectOptions,
+					"model-value": $setup.apiPresetValue,
+					placeholder: $setup.followActiveApiLabel,
+					"onUpdate:modelValue": $setup.setApiPreset
+				}, null, 8, [
+					"options",
+					"model-value",
+					"placeholder"
+				])]),
 				_: 1
 			}),
 			(openBlock(), createElementBlock(
@@ -184851,7 +184897,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	});
     }
-    var WorldSimulationSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-2a28694a"]]);
+    var WorldSimulationSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-ee162003"]]);
 
     function getEntryLabel_ACU(entry) {
         return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);

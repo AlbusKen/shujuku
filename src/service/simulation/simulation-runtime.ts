@@ -878,7 +878,18 @@ export function createWorldSimulationRuntime_ACU(
     };
   });
   const runOwnedAi = overrides.runOwnedAi ?? (async request => {
-    const resolved = resolveApiConfigByPreset_ACU(String(settings_ACU?.plotApiPreset ?? ''));
+    // 用户自选渠道：跟随世界推演设置解析预设，而不是借用剧情推进的 plotApiPreset。
+    const current = readWorldSimulationSettings_ACU();
+    const resolution = current?.apiPresetMode === 'fixed'
+      ? { presetName: current.fixedApiPresetName.trim(), current: false }
+      : { presetName: '', current: true };
+    if (resolution.current === false && !resolution.presetName) {
+      throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU('WORLD_SIM_PROTOCOL_INVALID', 'agent', '世界推演固定 API 预设名称为空，已拒绝调用（fail-closed）', false));
+    }
+    const resolved = resolveApiConfigByPreset_ACU(resolution.presetName);
+    if (resolution.current === false && !resolved.resolved) {
+      throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU('WORLD_SIM_PROTOCOL_INVALID', 'agent', `世界推演固定 API 预设 "${resolution.presetName}" 不存在，已拒绝调用（fail-closed）`, false));
+    }
     const identity: WorldSimulationInternalAiRequestIdentity_ACU = {
       requestId: `world-sim-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
       chatIdentity: request.chatIdentity,

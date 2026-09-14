@@ -62,6 +62,7 @@ describe('world simulation settings read/write', () => {
     const result = normalizeWorldSimulationSettings_ACU({ enabled: true, joinWaitMs: 1_000 });
     expect(result?.upgraded).toBe(true);
     expect(result?.settings).toEqual({ ...buildDefaultWorldSimulationSettings_ACU(), enabled: true, joinWaitMs: 1_000 });
+    expect(result?.settings.apiPresetMode).toBe('current');
     _set_settings_ACU({ worldSimulation: { enabled: true } } as any);
     expect(readWorldSimulationSettings_ACU()?.joinWaitMs).toBe(buildDefaultWorldSimulationSettings_ACU().joinWaitMs);
   });
@@ -256,6 +257,13 @@ describe('world simulation settings read/write', () => {
     expect(prompts.some(segment => segment.content === '$WORLD_SIMULATION_ROOT')).toBe(false);
     expect(prompts.some(segment => segment.content === '用户保留的主控补充')).toBe(true);
     expect(prompts.some(segment => segment.content.includes('$WORLD_SIMULATION_HISTORY') && segment.content.includes('真实对话历史'))).toBe(true);
+  });
+
+  it('keeps a user-fixed API preset across normalization and rejects an invalid mode', () => {
+    const fixed = { ...enabled(), apiPresetMode: 'fixed' as const, fixedApiPresetName: '预设A' };
+    expect(isWorldSimulationSettings_ACU(fixed)).toBe(true);
+    expect(normalizeWorldSimulationSettings_ACU(fixed)?.upgraded).toBe(false);
+    expect(normalizeWorldSimulationSettings_ACU({ ...enabled(), apiPresetMode: 'sometimes' })).toBeNull();
   });
 
   it('keeps an already-guided v6.1 layout unchanged on read', () => {

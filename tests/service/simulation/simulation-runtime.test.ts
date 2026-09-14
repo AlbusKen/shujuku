@@ -72,6 +72,9 @@ describe('isWorldSimulationSettings_ACU', () => {
     expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), visibilityPolicy: 'sometimes' })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), showHiddenInUi: 'true' })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), budgets: { light: { maxMasterModelTurns: 0, maxSpecialistModelTurns: 1, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' } } })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), apiPresetMode: 'other' })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), fixedApiPresetName: 123 })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), apiPresetMode: 'fixed', fixedApiPresetName: '预设A' })).toBe(true);
   });
 });
 

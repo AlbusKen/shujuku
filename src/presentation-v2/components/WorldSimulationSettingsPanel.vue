@@ -17,6 +17,10 @@
     <AcuFormRow label="允许 Agent 使用 read/search" hint="关闭后主/子 Agent 只能依据固定正文、账本、当前要求与已分配资料收敛；不会隐式恢复工具。">
       <AcuToggle :model-value="draft.toolsEnabled" @update:model-value="draft.toolsEnabled = $event" />
     </AcuFormRow>
+    <AcuFormRow label="API 预设" hint="所有世界推演 Agent 默认走这个预设；空值表示跟随当前活动 API。">
+      <AcuSelect :options="apiPresetSelectOptions" :model-value="apiPresetValue" :placeholder="followActiveApiLabel"
+        @update:model-value="setApiPreset" />
+    </AcuFormRow>
     <section v-for="scale in scales" :key="scale" class="world-simulation-settings__budget">
       <strong>{{ scale }} 预算</strong>
       <div class="world-simulation-settings__numbers">
@@ -75,6 +79,7 @@ import type { WorldReadBudgetTier_ACU, WorldSimulationAgentName_ACU, WorldSimula
 import AcuPromptSegments, { type PromptSegment } from './_lib/AcuPromptSegments.vue';
 import { isWorldSimulationSettings_ACU, readWorldSimulationSettings_ACU, readWorldSimulationSettingsUpgrade_ACU, writeWorldSimulationSettingsStrict_ACU } from '../../service/simulation/simulation-settings';
 import { renderWorldSimulationAgentMessages_ACU } from '../../service/simulation/world-simulation-agent-prompts';
+import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import AcuButton from './_lib/AcuButton.vue';
 import AcuFormRow from './_lib/AcuFormRow.vue';
 import AcuInput from './_lib/AcuInput.vue';
@@ -105,6 +110,15 @@ const agents: ReadonlyArray<{ name: WorldSimulationAgentName_ACU; label: string;
   { name: 'thread-weaver', label: '线索子代理（thread-weaver）', hint: '仅 threads。' },
 ];
 const previewAgentOptions = agents.map(agent => ({ value: agent.name, label: agent.label }));
+const { apiStore, apiPresetSelectOptions, followActiveApiLabel } = useApiPresetSelectOptions();
+// Panel may be mounted without the page-level store refresh; keep the preset options live.
+apiStore.refreshFromSettings();
+const apiPresetValue = computed(() => draft.value.apiPresetMode === 'fixed' ? draft.value.fixedApiPresetName : '');
+function setApiPreset(value: string): void {
+  const trimmed = String(value || '').trim();
+  draft.value.apiPresetMode = trimmed ? 'fixed' : 'current';
+  draft.value.fixedApiPresetName = trimmed;
+}
 const promptRoleOptions = [
   { value: 'system', label: 'SYSTEM' },
   { value: 'user', label: 'USER' },

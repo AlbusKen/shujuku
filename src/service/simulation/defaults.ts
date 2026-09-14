@@ -115,6 +115,8 @@ export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettin
     enabled: false, joinWaitMs: WORLD_SIMULATION_DEFAULT_JOIN_WAIT_MS_ACU, minFloorGap: WORLD_SIMULATION_DEFAULT_MIN_FLOOR_GAP_ACU,
     checkpointInterval: WORLD_SIMULATION_DEFAULT_CHECKPOINT_INTERVAL_ACU, maxTrackedEntities: WORLD_SIMULATION_DEFAULT_MAX_TRACKED_ENTITIES_ACU,
     visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true,
+    apiPresetMode: 'current',
+    fixedApiPresetName: '',
     budgets: { light: { ...WORLD_SIMULATION_DEFAULT_BUDGETS_ACU.light }, normal: { ...WORLD_SIMULATION_DEFAULT_BUDGETS_ACU.normal }, deep: { ...WORLD_SIMULATION_DEFAULT_BUDGETS_ACU.deep } },
     agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(),
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU,

@@ -6,16 +6,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 async function mountPanel(saveResult: unknown = { saved: true, storageType: 'tavern' }) {
   vi.resetModules();
   document.body.innerHTML = '';
-  const settings: any = {};
+  const settings: any = { apiPresets: [], apiPresetBindingsByChat: {}, apiMode: 'custom', apiConfig: { url: '', model: '' }, defaultApiPresetName: '', streamingEnabled: false, tavernProfile: '' };
   const persist = vi.fn(() => saveResult);
-  vi.doMock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: settings }));
+  vi.doMock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: settings, currentChatFileIdentifier_ACU: 'test-chat' }));
+  vi.doMock('../../../src/service/settings/api-preset-service', async importOriginal => ({
+    ...(await importOriginal()),
+    ensureApiSettingsShape_ACU: () => {},
+  }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({ saveSettings_ACU: persist }));
   const { createApp, defineComponent, nextTick } = await import('vue');
+  const { createPinia } = await import('pinia');
   const Panel = (await import('../../../src/presentation-v2/components/WorldSimulationSettingsPanel.vue')).default;
   const received = vi.fn();
   const Root = defineComponent({ components: { Panel }, setup: () => ({ received }), template: '<Panel @saved="received" />' });
   const el = document.createElement('div'); document.body.appendChild(el);
-  const app = createApp(Root); app.mount(el); await nextTick();
+  const app = createApp(Root); app.use(createPinia()); app.mount(el); await nextTick();
   return { app, el, settings, persist, received, nextTick };
 }
 

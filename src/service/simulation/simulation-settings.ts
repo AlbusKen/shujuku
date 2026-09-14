@@ -13,7 +13,7 @@ const SCALES_ACU = ['light', 'normal', 'deep'] as const satisfies readonly (keyo
 const READ_TIERS_ACU = ['low', 'medium', 'high'] as const;
 const AGENT_NAMES_ACU: readonly WorldSimulationAgentName_ACU[] = ['world-director', 'entity-movement', 'faction-events', 'thread-weaver'];
 const PROMPT_ROLES_ACU: readonly WorldSimulationPromptRole_ACU[] = ['system', 'user', 'assistant'];
-const BASE_SETTINGS_KEYS_ACU = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'toolsEnabled', 'budgets'] as const;
+const BASE_SETTINGS_KEYS_ACU = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'toolsEnabled', 'apiPresetMode', 'fixedApiPresetName', 'budgets'] as const;
 const SETTINGS_KEYS_ACU: readonly (keyof WorldSimulationSettings_ACU)[] = [...BASE_SETTINGS_KEYS_ACU, 'agentPrompts', 'promptForceDefaultVersion'];
 const GUIDANCE_LEGACY_SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentGuidance', 'promptForceDefaultVersion'] as const;
 const PRE_KERNEL_PROMPT_SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentPrompts'] as const;
@@ -225,6 +225,8 @@ export function isWorldSimulationSettings_ACU(value: unknown): value is WorldSim
   if (!VISIBILITY_POLICIES_ACU.includes(String(value.visibilityPolicy) as WorldVisibilityPolicy_ACU)) return false;
   if (typeof value.showHiddenInUi !== 'boolean') return false;
   if (typeof value.toolsEnabled !== 'boolean') return false;
+  if (value.apiPresetMode !== 'current' && value.apiPresetMode !== 'fixed') return false;
+  if (typeof value.fixedApiPresetName !== 'string') return false;
   return isCompleteBudgets_ACU(value.budgets)
     && isPartialAgentPrompts_ACU(value.agentPrompts) && hasExactKeys_ACU(value.agentPrompts, AGENT_NAMES_ACU)
     && hasEnabledPromptSegments_ACU(value.agentPrompts)
@@ -240,6 +242,8 @@ const TOP_LEVEL_FIELD_VALIDATORS_ACU: Omit<Record<keyof WorldSimulationSettings_
   visibilityPolicy: value => VISIBILITY_POLICIES_ACU.includes(String(value) as WorldVisibilityPolicy_ACU),
   showHiddenInUi: value => typeof value === 'boolean',
   toolsEnabled: value => typeof value === 'boolean',
+  apiPresetMode: value => value === 'current' || value === 'fixed',
+  fixedApiPresetName: value => typeof value === 'string',
 };
 
 /**
@@ -292,6 +296,8 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
     budgets,
     agentPrompts,
     toolsEnabled: Object.prototype.hasOwnProperty.call(raw, 'toolsEnabled') ? raw.toolsEnabled as boolean : defaults.toolsEnabled,
+    apiPresetMode: Object.prototype.hasOwnProperty.call(raw, 'apiPresetMode') ? raw.apiPresetMode as WorldSimulationSettings_ACU['apiPresetMode'] : defaults.apiPresetMode,
+    fixedApiPresetName: Object.prototype.hasOwnProperty.call(raw, 'fixedApiPresetName') ? String(raw.fixedApiPresetName ?? '') : defaults.fixedApiPresetName,
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU,
   };
   // This should hold because all present fields were validated and every missing field is copied

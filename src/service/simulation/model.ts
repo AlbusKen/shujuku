@@ -177,6 +177,10 @@ export interface WorldSimulationSettings_ACU {
   showHiddenInUi: boolean;
   /** Enables the model-facing read/search protocol; fixed story context remains available either way. */
   toolsEnabled: boolean;
+  /** 'current' follows the active global API preset; 'fixed' pins a named preset (fail-closed). */
+  apiPresetMode: 'current' | 'fixed';
+  /** Preset name for apiPresetMode='fixed'; must be non-empty in that mode. */
+  fixedApiPresetName: string;
   budgets: Record<WorldSimulationScale_ACU, WorldSimulationBudget_ACU>;
   /** The only persisted prompt layout; segments determine fixed injection placement. */
   agentPrompts: WorldSimulationAgentPrompts_ACU;
