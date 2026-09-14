@@ -74,7 +74,7 @@ describe('AgentPage', () => {
     expect(el.textContent).toContain('当前 active swipe 世界账本资料');
     expect(el.textContent).toContain('世界推演资料维护');
     expect(el.textContent).toContain('世界推演 Agent 设置');
-    expect(el.textContent).toContain('四角色提示词布局（v6 具名块）');
+    expect(el.textContent).toContain('四角色提示词（可自由编辑）');
     expect(el.textContent).toContain('Skill 全选');
     const toolbarButtons = Array.from(el.querySelectorAll<HTMLButtonElement>('.acu-v2-wb-entry-toolbar .acu-btn'))
       .map(button => button.textContent?.trim());

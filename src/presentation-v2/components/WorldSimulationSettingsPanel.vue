@@ -31,30 +31,24 @@
     </section>
     <section class="world-simulation-settings__prompts">
       <div class="world-simulation-settings__prompt-heading">
-        <div><strong>四角色提示词布局（v6 具名块）</strong><p>五层结构：系统宪章 → 真实 run 历史锚点 → 单一运行时上下文 → assistant 确认 → 执行边界。锁定块只可移动位置；用户自定义段保持完整编辑。正文、要求、世界书、工具结果和委派始终作为独立 user-role UNTRUSTED 消息。</p></div>
+        <div><strong>四角色提示词（可自由编辑）</strong><p>每一段都可以编辑正文、角色、启用状态、顺序，并可删除或新增；默认提示词中的 $WORLD_SIMULATION_* 占位符只是运行时注入点，可以像普通文本一样改写或删除。运行时把静态占位符原位替换为引擎内容；$WORLD_SIMULATION_HISTORY 位置会保留真实历史的角色与顺序；$WORLD_SIMULATION_RUNTIME_CONTEXT 保持单一 user 消息。正文、要求、世界书、工具结果和委派始终作为独立 user-role UNTRUSTED 消息。</p></div>
         <div class="world-simulation-settings__actions"><AcuButton size="sm" @click="restoreDefaultPrompts">恢复默认提示词</AcuButton><AcuButton size="sm" @click="exportPrompts">导出到文本</AcuButton></div>
       </div>
       <details v-for="agent in agents" :key="agent.name" class="world-simulation-settings__prompt-agent" :open="agent.name === 'world-director'">
         <summary>{{ agent.label }} · {{ agent.hint }}</summary>
-        <ol class="world-simulation-settings__prompt-blocks">
-          <li v-for="block in blockViews[agent.name]" :key="block.index" :class="{ 'is-locked': block.locked }">
-            <div class="world-simulation-settings__prompt-block-head">
-              <strong>{{ block.name }}</strong>
-              <span class="world-simulation-settings__prompt-block-role">[{{ block.role.toUpperCase() }}]</span>
-              <span v-if="block.locked" class="world-simulation-settings__prompt-block-badge">锁定</span>
-              <span class="world-simulation-settings__prompt-block-kind">{{ block.kind === 'placeholder' ? '引擎占位符' : block.kind === 'anchor' ? '引擎静态' : '自定义' }}</span>
-            </div>
-            <p class="world-simulation-settings__prompt-block-desc">{{ block.description }}</p>
-            <textarea v-if="!block.locked" :value="block.editableContent" rows="4" @input="updatePrompt(agent.name, block.index, { content: ($event.target as HTMLTextAreaElement).value })"></textarea>
-            <pre v-else-if="block.token" class="world-simulation-settings__prompt-block-token">{{ block.token }}</pre>
-            <div class="world-simulation-settings__actions">
-              <AcuButton size="sm" :disabled="block.index === 0" @click="movePrompt(agent.name, block.index, -1)">上移</AcuButton>
-              <AcuButton size="sm" :disabled="block.index === draft.agentPrompts[agent.name].length - 1" @click="movePrompt(agent.name, block.index, 1)">下移</AcuButton>
-              <AcuButton size="sm" :disabled="block.locked" @click="deletePrompt(agent.name, block.index)">删除</AcuButton>
-            </div>
-          </li>
-        </ol>
-        <div class="world-simulation-settings__actions"><AcuButton size="sm" @click="addPrompt(agent.name, 'bottom')">添加自定义段</AcuButton></div>
+        <AcuPromptSegments
+          :segments="draft.agentPrompts[agent.name]"
+          :role-options="promptRoleOptions"
+          :show-slot="false"
+          :show-enabled="true"
+          :allow-move="true"
+          :rows="5"
+          empty-text="暂无提示词段。"
+          @add="position => addPrompt(agent.name, position)"
+          @delete="index => deletePrompt(agent.name, index)"
+          @move="(index, delta) => movePrompt(agent.name, index, delta)"
+          @update="(index, patch) => onPromptUpdate(agent.name, index, patch)"
+        />
       </details>
       <details class="world-simulation-settings__prompt-transfer">
         <summary>导入 / 导出 Prompt Segments JSON</summary>
@@ -78,7 +72,7 @@ import { computed, ref } from 'vue';
 import { WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, findWorldSimulationAgent_ACU } from '../../service/simulation/agent/agent-catalog';
 import { buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
 import type { WorldReadBudgetTier_ACU, WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptSegment_ACU, WorldSimulationScale_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from '../../service/simulation/model';
-import { buildWorldSimulationPromptBlocks_ACU, type WorldSimulationPromptBlockView_ACU } from '../composables/useWorldSimulationPromptBlocks';
+import AcuPromptSegments, { type PromptSegment } from './_lib/AcuPromptSegments.vue';
 import { isWorldSimulationSettings_ACU, readWorldSimulationSettings_ACU, readWorldSimulationSettingsUpgrade_ACU, writeWorldSimulationSettingsStrict_ACU } from '../../service/simulation/simulation-settings';
 import { renderWorldSimulationAgentMessages_ACU } from '../../service/simulation/world-simulation-agent-prompts';
 import AcuButton from './_lib/AcuButton.vue';
@@ -111,9 +105,11 @@ const agents: ReadonlyArray<{ name: WorldSimulationAgentName_ACU; label: string;
   { name: 'thread-weaver', label: '线索子代理（thread-weaver）', hint: '仅 threads。' },
 ];
 const previewAgentOptions = agents.map(agent => ({ value: agent.name, label: agent.label }));
-const blockViews = computed<Record<WorldSimulationAgentName_ACU, WorldSimulationPromptBlockView_ACU[]>>(() => Object.fromEntries(
-  agents.map(agent => [agent.name, buildWorldSimulationPromptBlocks_ACU(agent.name, draft.value.agentPrompts[agent.name])]),
-) as Record<WorldSimulationAgentName_ACU, WorldSimulationPromptBlockView_ACU[]>);
+const promptRoleOptions = [
+  { value: 'system', label: 'SYSTEM' },
+  { value: 'user', label: 'USER' },
+  { value: 'assistant', label: 'ASSISTANT' },
+];
 const previewSnapshot = {
   anchorMessageIndex: 0,
   storyClock: { anchorText: '预览锚点', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 },
@@ -158,29 +154,25 @@ function movePrompt(agent: WorldSimulationAgentName_ACU, index: number, delta: -
   if (target >= 0 && target < prompts.length) [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
 }
 function updatePrompt(agent: WorldSimulationAgentName_ACU, index: number, patch: Partial<WorldSimulationPromptSegment_ACU>): void {
-  const current = promptList(agent)[index];
-  if (current) promptList(agent)[index] = { ...current, ...patch };
+  const prompts = promptList(agent);
+  const current = prompts[index];
+  if (current) prompts[index] = { ...current, ...patch };
+  else if (prompts.length === 0 && typeof patch.content === 'string') prompts.push({ role: 'user', content: patch.content, enabled: true, deletable: true });
+  else if (prompts.length > 0) prompts[prompts.length - 1] = { ...prompts[prompts.length - 1], ...patch };
+}
+function onPromptUpdate(agent: WorldSimulationAgentName_ACU, index: number, patch: Partial<PromptSegment>): void {
+  updatePrompt(agent, index, patch as Partial<WorldSimulationPromptSegment_ACU>);
 }
 function restoreDefaultPrompts(): void {
   draft.value.agentPrompts = clonePrompts(buildDefaultWorldSimulationAgentPrompts_ACU());
   message.value = { kind: 'success', text: '已恢复本地默认提示词；尚未保存。' };
 }
 function exportPrompts(): void { promptsTransfer.value = JSON.stringify(draft.value.agentPrompts, null, 2); message.value = { kind: 'success', text: '已导出到下方文本框；尚未保存。' }; }
-/** v6 必需引擎锚点：导入布局不可缺失；缺失即整体拒绝（fail-closed）。 */
-const REQUIRED_PROMPT_ANCHORS_ACU = ['$WORLD_SIMULATION_ROOT', '$WORLD_SIMULATION_HISTORY', '$WORLD_SIMULATION_RUNTIME_CONTEXT', '$WORLD_SIMULATION_EXECUTION_BOUNDARY'] as const;
-function promptsKeepRequiredAnchors_ACU(prompts: WorldSimulationAgentPrompts_ACU): boolean {
-  return agents.every(agent => {
-    const contents = prompts[agent.name].map(segment => segment.content.trim());
-    return REQUIRED_PROMPT_ANCHORS_ACU.every(anchor => contents.includes(anchor))
-      && (agent.name === 'world-director' || contents.includes('$WORLD_SIMULATION_SPECIALIST_RULES'));
-  });
-}
 function importPrompts(): void {
   try {
     const imported = JSON.parse(promptsTransfer.value);
     const candidate = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: imported };
     if (!isWorldSimulationSettings_ACU(candidate)) throw new Error('JSON 不是完整的四角色 Prompt Segments 配置');
-    if (!promptsKeepRequiredAnchors_ACU(candidate.agentPrompts)) throw new Error('导入布局缺失 v6 必需引擎锚点（宪章/历史/运行时上下文/执行边界等），已拒绝');
     draft.value.agentPrompts = clonePrompts(candidate.agentPrompts);
     message.value = { kind: 'success', text: 'Prompt Segments 已导入本地草稿；尚未保存。' };
   } catch (error) { message.value = { kind: 'error', text: `导入失败：${error instanceof Error ? error.message : String(error)}` }; }

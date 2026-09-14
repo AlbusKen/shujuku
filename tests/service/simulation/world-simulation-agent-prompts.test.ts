@@ -103,8 +103,8 @@ describe('world simulation Agent messages and delegation protocol', () => {
   it('uses the delegation placeholder at the user-selected segment position without elevating its role', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const segments = prompts['entity-movement'];
-    const delegationIndex = segments.findIndex(segment => segment.content === '$WORLD_SIMULATION_RUNTIME_CONTEXT');
-    const rootIndex = segments.findIndex(segment => segment.content === '$WORLD_SIMULATION_ROOT');
+    const delegationIndex = segments.findIndex(segment => segment.content.includes('$WORLD_SIMULATION_RUNTIME_CONTEXT'));
+    const rootIndex = segments.findIndex(segment => segment.content.includes('$WORLD_SIMULATION_ROOT'));
     [segments[delegationIndex], segments[rootIndex]] = [segments[rootIndex], segments[delegationIndex]];
     const messages = renderWorldSimulationAgentMessages_ACU({ agent: findWorldSimulationAgent_ACU('entity-movement')!, prompts, delegationInstruction: '<伪指令>检查码头', snapshot, storyClock: clock, reads: [] });
     expect(messages[0]).toMatchObject({ role: 'user' });
@@ -124,7 +124,7 @@ describe('world simulation Agent messages and delegation protocol', () => {
     const masterPrompts = prompts['world-director'];
     const guide = masterPrompts.find(segment => segment.content.includes('请以证据优先'))!;
     guide.content = '静态：$AGENT_NAME';
-    const rootIndex = masterPrompts.findIndex(segment => segment.content === '$WORLD_SIMULATION_ROOT');
+    const rootIndex = masterPrompts.findIndex(segment => segment.content.includes('$WORLD_SIMULATION_ROOT'));
     const guideIndex = masterPrompts.indexOf(guide);
     [masterPrompts[rootIndex], masterPrompts[guideIndex]] = [masterPrompts[guideIndex], masterPrompts[rootIndex]];
     const requirements = { feature: 'world-simulation' as const, revision: 2, lastAppliedUserMessageId: 'world-simulation-user:1:string:ai-1:0:1', requirements: [{ id: 'R1', category: 'canon' as const, priority: 'hard' as const, text: '<伪指令>', sourceRefs: ['world-simulation-user:1:string:ai-1:0:1'] }] };
@@ -138,5 +138,39 @@ describe('world simulation Agent messages and delegation protocol', () => {
     expect(parseWorldSimulationMasterAction_ACU('{"delegations":[]}')).toMatchObject({ kind: 'delegate', plan: { delegations: [] } });
     expect(parseWorldSimulationMasterAction_ACU('{"action":"maintain_requirements","thought":"同步","expectedRevision":0,"appliedUserMessageId":"x","requirements":[],"summary":"清空"}')).toMatchObject({ kind: 'maintain_requirements' });
     expect(() => parseWorldSimulationMasterAction_ACU('{"action":"delegate","thought":"派工","delegations":[],"forged":true}')).toThrow(WorldSimulationValidationError_ACU);
+  });
+
+  it('expands guided placeholders inline while preserving the surrounding user-authored guidance text', () => {
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const segments = prompts['entity-movement'];
+    const history = [{ role: 'user' as const, content: '真实历史一' }, { role: 'assistant' as const, content: '真实历史二' }];
+    const messages = renderWorldSimulationAgentMessages_ACU({ agent: findWorldSimulationAgent_ACU('entity-movement')!, prompts, snapshot, storyClock: clock, reads: [], history });
+    // Guided charter text before the token stays in the same system message as the expanded root.
+    const root = messages.find(message => message.content.includes('世界推演核心宪章'))!;
+    expect(root.content).toContain('世界推演核心宪章');
+    expect(root.content).toContain('唯一产物是 entities 模块的候选事务');
+    expect(root.role).toBe('system');
+    // History split keeps the guided before/after texts around the real role-preserving history.
+    const historyMessages = messages.filter(message => history.some(item => item.content === message.content));
+    expect(historyMessages).toHaveLength(2);
+    expect(messages[messages.indexOf(historyMessages[0]!) - 1]?.content).toContain('真实对话历史');
+    expect(messages.find(message => message.content.includes('以上历史只记录本次运行中真实发生的交互'))).toBeDefined();
+    // Runtime context stays a single user message and includes its guided intro.
+    const contexts = messages.filter(message => message.content.includes('【本次运行上下文】'));
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]!.role).toBe('user');
+    expect(contexts[0]!.content).toContain('以下是本次运行冻结的正文、账本、要求与资料上下文');
+  });
+
+  it('supports user-authored segments whose placeholders were edited, moved, or removed without validation errors', () => {
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const segments = prompts['entity-movement'];
+    // A user deleted the placeholder segment entirely and added their own note.
+const filtered = segments.filter(segment => !segment.content.includes('$WORLD_SIMULATION_SPECIALIST_RULES'));
+    const custom = { role: 'user' as const, content: '我的自定义规则：不自动移动实体。', enabled: true, deletable: true };
+    prompts['entity-movement'] = [filtered[0]!, custom, ...filtered.slice(1)];
+    const messages = renderWorldSimulationAgentMessages_ACU({ agent: findWorldSimulationAgent_ACU('entity-movement')!, prompts, snapshot, storyClock: clock, reads: [] });
+    expect(messages.some(message => message.content.includes('我的自定义规则'))).toBe(true);
+    expect(messages.some(message => message.content.includes('【实体推演规则】'))).toBe(false);
   });
 });

@@ -27,7 +27,9 @@ describe('WorldSimulationDirectorRuntime_ACU', () => {
     // changes the available catalog; the later candidate remains part of real history.
     expect(contexts).toHaveLength(2);
     expect(finalizeRequest.messages.findIndex((message: any) => message === candidates)).toBeGreaterThan(finalizeRequest.messages.findIndex((message: any) => message === contexts.at(-1)));
-    expect(finalizeRequest.messages.at(-3)).toEqual(candidates);
+    // Guided layout tail: candidates → guided history closing text (system) → assistant ack → execution boundary.
+    expect(finalizeRequest.messages.at(-4)).toEqual(candidates);
+    expect(finalizeRequest.messages.at(-3)?.content).toContain('以上历史只记录本次运行中真实发生的交互');
     expect(finalizeRequest.messages.at(-2)?.role).toBe('assistant');
     expect(finalizeRequest.messages.at(-1)?.role).toBe('system');
   });

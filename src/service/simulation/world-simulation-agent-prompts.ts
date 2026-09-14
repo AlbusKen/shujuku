@@ -19,6 +19,8 @@ function replaceAll(value: string, values: Record<string, string>): string {
   return Object.entries(values).reduce((text, [token, replacement]) => text.split(token).join(replacement), value);
 }
 
+function joinPromptParts_ACU(...parts: readonly string[]): string { return parts.map(part => part.trim()).filter(Boolean).join('\n\n'); }
+
 /** Dynamic content cannot terminate its own prompt boundary or introduce look-alike markup. */
 function escapeUntrustedText_ACU(value: unknown): string {
   return String(value ?? '').replace(/</g, '＜').replace(/>/g, '＞');
@@ -128,21 +130,37 @@ export function renderWorldSimulationAgentMessages_ACU(input: {
     '$WORLD_SIMULATION_EXECUTION_BOUNDARY': WORLD_SIMULATION_EXECUTION_BOUNDARY_PROMPT_ACU,
   };
   const history = input.history ?? [];
-  const latestRuntimeContext = [...history].reverse().find(message => message.role === 'user' && message.content.startsWith('【本次运行上下文】'));
-  const runtimeContextAlreadyInHistory = latestRuntimeContext?.content === runtimeContext;
   const segments = (input.prompts ?? buildDefaultWorldSimulationAgentPrompts_ACU())[input.agent.name];
-  const knownPlaceholders = new Set<string>(WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU);
+  const renderStatic_ACU = (content: string): string => replaceAll(replaceAll(content, staticPlaceholders as Record<string, string>), staticValues);
   return segments
     .filter(segment => segment.enabled)
     .flatMap(segment => {
-      const placeholder = segment.content.trim();
-      if (knownPlaceholders.has(placeholder)) {
-        if (placeholder === '$WORLD_SIMULATION_HISTORY') return history.map(message => ({ ...message }));
-        if (placeholder === '$WORLD_SIMULATION_RUNTIME_CONTEXT') return runtimeContextAlreadyInHistory ? [] : [{ role: 'user' as const, content: runtimeContext }];
-        const content = staticPlaceholders[placeholder as keyof typeof staticPlaceholders] ?? '';
-        return content ? [{ role: segment.role, content }] : [];
+      const content = segment.content.trim();
+      if (!content) return [];
+
+      if (content.includes('$WORLD_SIMULATION_HISTORY')) {
+        const [before = '', ...afterParts] = content.split('$WORLD_SIMULATION_HISTORY');
+        const after = afterParts.join('$WORLD_SIMULATION_HISTORY');
+        const messages: WorldSimulationPromptMessage_ACU[] = [];
+        const renderedBefore = renderStatic_ACU(before);
+        const renderedAfter = renderStatic_ACU(after);
+        if (renderedBefore.trim()) messages.push({ role: segment.role, content: renderedBefore.trim() });
+        messages.push(...history.map(message => ({ ...message })));
+        if (renderedAfter.trim()) messages.push({ role: segment.role, content: renderedAfter.trim() });
+        return messages;
       }
-      return segment.content.trim() ? [{ role: segment.role, content: replaceAll(segment.content, staticValues) }] : [];
+
+      if (content.includes('$WORLD_SIMULATION_RUNTIME_CONTEXT')) {
+        const rendered = joinPromptParts_ACU(...content.split('$WORLD_SIMULATION_RUNTIME_CONTEXT').flatMap((part, index, parts) => (
+          index < parts.length - 1 ? [renderStatic_ACU(part), runtimeContext] : [renderStatic_ACU(part)]
+        )));
+        const runtimeContextAlreadyInHistory = history.some(message => message.role === 'user' && message.content === rendered);
+        if (runtimeContextAlreadyInHistory) return [];
+        return rendered ? [{ role: segment.role, content: rendered }] : [];
+      }
+
+      const rendered = renderStatic_ACU(content);
+      return rendered.trim() ? [{ role: segment.role, content: rendered.trim() }] : [];
     });
 }
 

@@ -169,9 +169,22 @@ function migratePromptsToV6_ACU(prompts: Partial<WorldSimulationAgentPrompts_ACU
   for (const name of AGENT_NAMES_ACU) {
     const previous = prompts?.[name];
     if (!previous) continue;
+    // Preserve user-authored guidance around an engine seam. Historical bare tokens receive the
+    // new readable default shell; only non-bare, uniquely owned seams carry their surrounding text.
+    for (const placeholder of WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU) {
+      if (placeholder === '$WORLD_SIMULATION_SPECIALIST_RULES' && name === 'world-director') continue;
+      const owners = previous.filter(segment => segment.content.includes(placeholder));
+      if (owners.length !== 1 || owners[0]!.content.trim() === placeholder) continue;
+      const defaultOwner = defaults[name].find(segment => segment.content.includes(placeholder));
+      if (defaultOwner) {
+        defaultOwner.content = owners[0]!.content;
+        defaultOwner.enabled = true;
+      }
+    }
     const customStatic = previous.filter(segment => {
       const content = segment.content.trim();
       if (legacyFixed.has(content)) return false;
+      if (WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU.some(placeholder => content.includes(placeholder))) return false;
       // 已知引擎默认静态（v5.1 旧确认、v5.2 assistant 确认、默认 guidance）不是用户自定义。
       if (name === 'world-director' && content.startsWith('我会先区分真实正文、当前有效要求')) return false;
       if (name !== 'world-director' && content.startsWith('我会先核对正文、当前要求和已分配资料')) return false;
@@ -184,7 +197,7 @@ function migratePromptsToV6_ACU(prompts: Partial<WorldSimulationAgentPrompts_ACU
     });
     if (!customStatic.length) continue;
     // 用户自定义静态段插到 HISTORY 锚点之前（即宪章层 user 指导区之后的位置保持相对顺序）。
-    const historyIndex = defaults[name].findIndex(segment => segment.content === '$WORLD_SIMULATION_HISTORY');
+    const historyIndex = defaults[name].findIndex(segment => segment.content.includes('$WORLD_SIMULATION_HISTORY'));
     const insertAt = historyIndex > 0 ? historyIndex : defaults[name].length;
     defaults[name].splice(insertAt, 0, ...customStatic.map(segment => ({ ...segment })));
   }
@@ -268,7 +281,9 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
   const agentPrompts = hasGuidance
     ? guidanceToCurrentPrompts_ACU(raw.agentGuidance as Partial<WorldSimulationAgentGuidance_ACU>)
     : hasPrompts
-      ? migratePromptsToV6_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
+      ? raw.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU
+        ? mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
+        : migratePromptsToV6_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
       : mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU> | undefined);
   const { budgets: _budgets, agentGuidance: _guidance, agentPrompts: _prompts, promptForceDefaultVersion: _version, ...top } = raw;
   const merged: WorldSimulationSettings_ACU = {
