@@ -500,12 +500,13 @@ describe('mainInitialize_ACU 世界推演接线', () => {
     expect(m.worldSimRuntime.onAiFloorCompleted).not.toHaveBeenCalled();
   });
 
-  it('缺少 generationContext 时不为世界推演触发，避免无法证明来源的楼层', () => {
-    // 事件进入时生成上下文已被消费：无法证明是普通用户生成，必须 fail-closed。
+  it('缺少 generationContext 时仍交给 runtime 唯一解析正文楼层', () => {
+    // 部分宿主不会提供可配对的 GENERATION_STARTED；runtime 仍会按唯一候选和有界物化
+    // fail-closed 解析目标，因此 bootstrap 不得在这里静默漏掉真实正文生成。
     m.consumeGeneration.mockReturnValueOnce(null);
     m.generationEnded!(42);
 
-    expect(m.worldSimRuntime.onAiFloorCompleted).not.toHaveBeenCalled();
+    expect(m.worldSimRuntime.onAiFloorCompleted).toHaveBeenCalledWith(expect.objectContaining({ eventMessageId: 42 }));
   });
 
   it('AI 楼层完成后独立异步触发世界推演，不受自动填表门控否决影响', () => {

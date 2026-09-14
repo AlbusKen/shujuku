@@ -195,7 +195,7 @@ describe('replaceChatMessage_ACU', () => {
     const result = await replaceChatMessage_ACU(1, '新内容');
     expect(result).toBe(true);
     expect(mockSetChatMessages).toHaveBeenCalledWith(
-      [expect.objectContaining({ message_id: 'msg1', mes: '新内容' })],
+      [expect.objectContaining({ message_id: 'msg1', message: '新内容' })],
       { refresh: 'affected' },
     );
   });
@@ -206,15 +206,16 @@ describe('replaceChatMessage_ACU', () => {
     expect(result).toBe(false);
   });
 
-  it('setChatMessages 不可用时使用降级方案', async () => {
+  it('setChatMessages 不可用时同步更新 mes 与当前 active swipe', async () => {
     const chat = [
-      { is_user: false, mes: '原始内容', message_id: 'msg1', extra: {} },
+      { is_user: false, mes: '第二页', message_id: 'msg1', swipe_id: 1, swipes: ['第一页', '第二页'], extra: {} },
     ];
     mockGetChatArray.mockReturnValue(chat);
     mockSetChatMessages.mockResolvedValue(false);
     const result = await replaceChatMessage_ACU(0, '新内容');
     expect(result).toBe(true);
     expect(chat[0].mes).toBe('新内容');
+    expect(chat[0].swipes).toEqual(['第一页', '新内容']);
     expect(mockSaveChatToHost).toHaveBeenCalled();
   });
 

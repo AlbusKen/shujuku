@@ -590,12 +590,14 @@ export   function mainInitialize_ACU() {
                   });
                 }
                 // [世界推演] AI 楼层完成后独立异步触发：与填表门控解耦，但仍必须排除
-                // quiet/dryRun/自动触发等不产生正文楼层的生成；无 generationContext 时无法证明
-                // 这是普通用户生成，同样 fail-closed 不触发。
-                const worldSimGenerationEligible = Boolean(generationContext)
-                  && generationContext!.dryRun !== true
+                // 已明确识别的 quiet/dryRun/自动触发。部分宿主不会提供可配对的
+                // GENERATION_STARTED；此时仍把 intent 交给 runtime 的唯一候选 + 有界物化解析，
+                // 而不是在 bootstrap 静默漏掉真实正文楼层。
+                const worldSimGenerationEligible = !generationContext || (
+                  generationContext.dryRun !== true
                   && !quietLike
-                  && !automaticTrigger;
+                  && !automaticTrigger
+                );
                 if (autoFillIntent && worldSimGenerationEligible) {
                   void getWorldSimulationRuntime_ACU().onAiFloorCompleted(autoFillIntent).catch((error: any) => {
                     logWarn_ACU('[世界推演] AI 楼层完成后触发失败:', error);

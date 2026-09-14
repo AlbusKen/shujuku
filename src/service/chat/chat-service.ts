@@ -1086,7 +1086,7 @@ export async function replaceChatMessage_ACU(messageIndex: number, newContent: s
 
         // 使用酒馆的 setChatMessages API 来更新消息内容，确保渲染及时生效
         const success = await setChatMessages_ACU(
-            [{ message_id: chat[messageIndex].message_id, mes: newContent, extra: extra }],
+            [{ message_id: chat[messageIndex].message_id, message: newContent, extra: extra }],
             { refresh: 'affected' }
         );
         if (success) {
@@ -1095,8 +1095,16 @@ export async function replaceChatMessage_ACU(messageIndex: number, newContent: s
             // 降级方案：如果 setChatMessages 不可用，使用原有逻辑
             logDebug_ACU('[正文优化] setChatMessages API 不可用，使用降级方案...');
 
-            chat[messageIndex].mes = newContent;
-            chat[messageIndex].extra = extra;
+            const message = chat[messageIndex];
+            message.mes = newContent;
+            message.extra = extra;
+            const activeSwipeIndex = message.swipe_id === undefined
+                ? (Array.isArray(message.swipes) && message.swipes.length === 1 ? 0 : -1)
+                : message.swipe_id;
+            if (Array.isArray(message.swipes) && Number.isInteger(activeSwipeIndex)
+                && activeSwipeIndex >= 0 && activeSwipeIndex < message.swipes.length) {
+                message.swipes[activeSwipeIndex] = newContent;
+            }
 
             const verifyContent = chat[messageIndex].mes;
             logDebug_ACU(`[正文优化] 修改后验证 - 内容长度: ${verifyContent?.length || 0}, 是否匹配: ${verifyContent === newContent}`);

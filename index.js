@@ -102916,15 +102916,23 @@ $CONTENT
                 baseContent: extra._acu_original_content || options.originalContent || oldContent || ''
             });
             // 使用酒馆的 setChatMessages API 来更新消息内容，确保渲染及时生效
-            const success = await setChatMessages_ACU([{ message_id: chat[messageIndex].message_id, mes: newContent, extra: extra }], { refresh: 'affected' });
+            const success = await setChatMessages_ACU([{ message_id: chat[messageIndex].message_id, message: newContent, extra: extra }], { refresh: 'affected' });
             if (success) {
                 logDebug_ACU('[正文优化] 消息已通过 setChatMessages API 更新');
             }
             else {
                 // 降级方案：如果 setChatMessages 不可用，使用原有逻辑
                 logDebug_ACU('[正文优化] setChatMessages API 不可用，使用降级方案...');
-                chat[messageIndex].mes = newContent;
-                chat[messageIndex].extra = extra;
+                const message = chat[messageIndex];
+                message.mes = newContent;
+                message.extra = extra;
+                const activeSwipeIndex = message.swipe_id === undefined
+                    ? (Array.isArray(message.swipes) && message.swipes.length === 1 ? 0 : -1)
+                    : message.swipe_id;
+                if (Array.isArray(message.swipes) && Number.isInteger(activeSwipeIndex)
+                    && activeSwipeIndex >= 0 && activeSwipeIndex < message.swipes.length) {
+                    message.swipes[activeSwipeIndex] = newContent;
+                }
                 const verifyContent = chat[messageIndex].mes;
                 logDebug_ACU(`[正文优化] 修改后验证 - 内容长度: ${verifyContent?.length || 0}, 是否匹配: ${verifyContent === newContent}`);
                 await saveChatToHost_ACU();
@@ -143897,12 +143905,12 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                             });
                         }
                         // [世界推演] AI 楼层完成后独立异步触发：与填表门控解耦，但仍必须排除
-                        // quiet/dryRun/自动触发等不产生正文楼层的生成；无 generationContext 时无法证明
-                        // 这是普通用户生成，同样 fail-closed 不触发。
-                        const worldSimGenerationEligible = Boolean(generationContext)
-                            && generationContext.dryRun !== true
+                        // 已明确识别的 quiet/dryRun/自动触发。部分宿主不会提供可配对的
+                        // GENERATION_STARTED；此时仍把 intent 交给 runtime 的唯一候选 + 有界物化解析，
+                        // 而不是在 bootstrap 静默漏掉真实正文楼层。
+                        const worldSimGenerationEligible = !generationContext || (generationContext.dryRun !== true
                             && !quietLike
-                            && !automaticTrigger;
+                            && !automaticTrigger);
                         if (autoFillIntent && worldSimGenerationEligible) {
                             void getWorldSimulationRuntime_ACU().onAiFloorCompleted(autoFillIntent).catch((error) => {
                                 logWarn_ACU('[世界推演] AI 楼层完成后触发失败:', error);
