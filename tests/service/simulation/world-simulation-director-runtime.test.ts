@@ -19,10 +19,17 @@ describe('WorldSimulationDirectorRuntime_ACU', () => {
     const result = await new WorldSimulationDirectorRuntime_ACU().run(input(), { runMaster: master, runSpecialists: specialists });
     expect(result.loop).toBe(loop); expect(result.grants).toHaveLength(1); expect(master).toHaveBeenCalledTimes(3); expect(specialists).toHaveBeenCalledTimes(1);
     const finalizeRequest = master.mock.calls[2]![0];
-    const readMaterial = finalizeRequest.messages.find((message: any) => message.content.includes('<UNTRUSTED_READ_MATERIAL>'));
-    expect(readMaterial).toMatchObject({ role: 'user' });
-    expect(readMaterial.content).toContain('＜UNTRUSTED_SPECIALIST_CANDIDATES＞');
-    expect(readMaterial.content).toContain('expectedRevisions');
+    const candidates = finalizeRequest.messages.find((message: any) => message.content.includes('<UNTRUSTED_SPECIALIST_CANDIDATES>'));
+    expect(candidates).toMatchObject({ role: 'user' });
+    expect(candidates.content).toContain('expectedRevisions');
+    const contexts = finalizeRequest.messages.filter((message: any) => message.content.includes('【本次运行上下文】'));
+    // The second snapshot is legitimately appended after the worldbook read grants W1 and
+    // changes the available catalog; the later candidate remains part of real history.
+    expect(contexts).toHaveLength(2);
+    expect(finalizeRequest.messages.findIndex((message: any) => message === candidates)).toBeGreaterThan(finalizeRequest.messages.findIndex((message: any) => message === contexts.at(-1)));
+    expect(finalizeRequest.messages.at(-3)).toEqual(candidates);
+    expect(finalizeRequest.messages.at(-2)?.role).toBe('assistant');
+    expect(finalizeRequest.messages.at(-1)?.role).toBe('system');
   });
 
   it('keeps a tight-budget legacy bare delegation executable without reserving a nonexistent finalize call', async () => {

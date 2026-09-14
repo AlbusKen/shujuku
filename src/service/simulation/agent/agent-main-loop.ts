@@ -147,14 +147,18 @@ export async function runWorldSimulationAgentLoop_ACU(input: WorldSimulationAgen
     }
     let lastProtocolError: unknown;
     let succeeded = false;
+    const history: WorldSimulationPromptMessage_ACU[] = [];
     const allowedAttempts = Math.min(MAX_PROTOCOL_ATTEMPTS_ACU, input.budget.maxSpecialistModelTurns);
     for (let attempt = 1; attempt <= allowedAttempts; attempt += 1) {
       callsUsed += 1;
       const currentReadGate = await decideAgentKernelReadBatch_ACU([renderState_ACU(candidate), ...storyMaterials, ...agentReads], input.readGateConfig, input.contextTokens, countTokens);
       if (!currentReadGate.allowed) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '世界推演候选状态超出读取 token 预算', false, { reason: currentReadGate.reason, batchTokens: currentReadGate.batchTokens });
       if (!isCurrent()) stale_ACU('世界推演租约在 AI 调用前已失效');
-      const messages = renderWorldSimulationAgentMessages_ACU({ agent, prompts: input.agentPrompts, delegationInstruction: input.delegationInstructions?.get(agent.name), toolsEnabled: input.toolsEnabled, snapshot: candidate, storyClock: input.storyClock, reads: agentReads, storyContext: input.storyContext, userInstruction: input.userInstruction, materialGrants: input.materialGrantsByAgent?.get(agent.name) });
+      const messages = renderWorldSimulationAgentMessages_ACU({ agent, prompts: input.agentPrompts, history, delegationInstruction: input.delegationInstructions?.get(agent.name), toolsEnabled: input.toolsEnabled, snapshot: candidate, storyClock: input.storyClock, reads: agentReads, storyContext: input.storyContext, userInstruction: input.userInstruction, materialGrants: input.materialGrantsByAgent?.get(agent.name) });
+      const runtimeContext = messages.find(message => message.role === 'user' && message.content.includes('【本次运行上下文】'));
+      if (runtimeContext) history.push({ ...runtimeContext });
       const raw = await dependencies.runAgent({ agent, prompt: flattenMessages_ACU(messages), messages, snapshot: candidate, storyClock: input.storyClock, reads: agentReads, isCurrent });
+      history.push({ role: 'assistant', content: raw ?? '（模型未返回动作）' });
       if (!isCurrent()) stale_ACU('世界推演租约在 AI 响应返回后已失效');
       try {
         const parsed = parseWorldSimulationAgentOutput_ACU({ raw, agent, snapshot: candidate, anchorMessageIndex: input.anchorMessageIndex, storyClock: input.storyClock });
@@ -170,6 +174,7 @@ export async function runWorldSimulationAgentLoop_ACU(input: WorldSimulationAgen
       } catch (error) {
         if (!(error instanceof WorldSimulationValidationError_ACU) || error.error.code !== 'WORLD_SIM_PROTOCOL_INVALID') throw error;
         lastProtocolError = error;
+        history.push({ role: 'user', content: `【协议校验结果】\n${error.error.message}` });
       }
     }
     if (succeeded) continue;

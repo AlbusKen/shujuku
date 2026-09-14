@@ -13,7 +13,7 @@ export interface WorldSimulationDirectorRuntimeInput_ACU {
   runId: string; snapshot: WorldStateSnapshot_ACU; storyClock: WorldStoryClock_ACU; settings: WorldSimulationSettings_ACU;
   reads: readonly string[]; storyContext?: AgentStoryContextSnapshot_ACU; requirementsSnapshot?: AgentRequirementSnapshot_ACU | null;
   pendingRequirementSourceIds?: readonly string[]; masterCallsUsed?: number; isCurrent: () => boolean; userInstruction: string;
-  worldbook?: AgentWorldbookSnapshot_ACU; budget?: WorldSimulationSettings_ACU['budgets']['deep'];
+  worldbook?: AgentWorldbookSnapshot_ACU; budget?: WorldSimulationSettings_ACU['budgets']['deep']; history?: readonly WorldSimulationPromptMessage_ACU[];
 }
 export interface WorldSimulationDirectorRuntimeDependencies_ACU {
   runMaster: (request: { source: string; messages: readonly WorldSimulationPromptMessage_ACU[]; prompt: string }) => Promise<string | null>;
@@ -22,7 +22,7 @@ export interface WorldSimulationDirectorRuntimeDependencies_ACU {
 }
 export interface WorldSimulationDirectorRuntimeResult_ACU {
   action: WorldSimulationMasterAction_ACU; plan: WorldSimulationDelegationPlan_ACU; loop: WorldSimulationAgentLoopResult_ACU | null;
-  grants: readonly AgentMaterialGrant_ACU[];
+  grants: readonly AgentMaterialGrant_ACU[]; history: readonly WorldSimulationPromptMessage_ACU[];
 }
 function fail_ACU(code: 'WORLD_SIM_PROTOCOL_INVALID' | 'WORLD_SIM_BUDGET_EXCEEDED', message: string): never {
   throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU(code, 'agent', message, false));
@@ -41,22 +41,29 @@ export class WorldSimulationDirectorRuntime_ACU {
     try { worldbook = input.worldbook ?? await (dependencies.loadWorldbook ?? loadAgentWorldbookSnapshot_ACU)(); }
     catch (_) { worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false); }
     const table: AgentMaterialGrantTable_ACU = { feature: 'world-simulation', runId: input.runId, grants: [] };
-    const materials = [...input.reads];
+    // Keep real conversation history separate from the stable runtime snapshot. Re-rendering a
+    // changing tool result inside the prompt prefix defeats natural provider prefix caching.
+    const history: WorldSimulationPromptMessage_ACU[] = (input.history ?? []).map(message => ({ ...message }));
     let candidate: WorldSimulationAgentLoopResult_ACU | null = null;
     let candidatePlan = emptyPlan_ACU();
     for (; callsUsed < budget.maxMasterModelTurns; callsUsed += 1) {
       if (!input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'world-director 调用前租约已失效');
       const worldbookScan = [input.userInstruction, input.storyContext?.overview.text ?? '', input.storyContext?.pending.text ?? '', input.storyContext?.bridge.text ?? ''].join('\n');
-      const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts: input.settings.agentPrompts, toolsEnabled: input.settings.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: materials, storyContext: input.storyContext, userInstruction: input.userInstruction, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds, worldbookCatalog: renderAgentWorldbookCatalog_ACU(worldbook), worldbookHits: renderAgentWorldbookHits_ACU(worldbook, worldbookScan) });
-      const action = parseWorldSimulationMasterAction_ACU(await dependencies.runMaster({ source: 'world-sim-master', messages, prompt: flatten_ACU(messages) }));
+      const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts: input.settings.agentPrompts, history, toolsEnabled: input.settings.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: input.reads, storyContext: input.storyContext, userInstruction: input.userInstruction, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds, worldbookCatalog: renderAgentWorldbookCatalog_ACU(worldbook), worldbookHits: renderAgentWorldbookHits_ACU(worldbook, worldbookScan) });
+      const runtimeContext = messages.find(message => message.role === 'user' && message.content.includes('【本次运行上下文】'));
+      if (runtimeContext) history.push({ ...runtimeContext });
+      const raw = await dependencies.runMaster({ source: 'world-sim-master', messages, prompt: flatten_ACU(messages) });
+      history.push({ role: 'assistant', content: raw ?? '（模型未返回动作）' });
+      const action = parseWorldSimulationMasterAction_ACU(raw);
       if (!input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'world-director 返回后租约已失效');
       const pending = input.pendingRequirementSourceIds ?? [];
       if (pending.length && action.kind !== 'maintain_requirements') fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '存在尚未吸收的用户输入时主 Agent 只能输出 maintain_requirements');
       if (!pending.length && action.kind === 'maintain_requirements') fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '当前没有尚未吸收的用户输入，主 Agent 不得自发维护要求');
-      if (action.kind === 'maintain_requirements') return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants };
+      if (action.kind === 'maintain_requirements') return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants, history };
       if (action.kind === 'tools') {
         if (!input.settings.toolsEnabled) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'world-director 工具能力已由设置关闭');
-        materials.push(this.executeTools_ACU(action.calls, input, worldbook, table));
+        const result = this.executeTools_ACU(action.calls, input, worldbook, table);
+        history.push({ role: 'user', content: `【工具结果】\n${result}` });
         continue;
       }
       if (action.kind === 'delegate') {
@@ -70,15 +77,15 @@ export class WorldSimulationDirectorRuntime_ACU {
         // one later director call for finalize/block; legacy bare delegation returns immediately.
         if (!action.legacy && callsUsed + 1 >= budget.maxMasterModelTurns) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '派工后未保留主 Agent 收敛轮次');
         candidate = await dependencies.runSpecialists(action.plan, grantsByAgent, budget.maxSpecialistModelTurns, worldbook, action.legacy); candidatePlan = action.plan;
-        if (action.legacy) return { action, plan: candidatePlan, loop: candidate, grants: table.grants };
-        materials.push(renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_SPECIALIST_CANDIDATES', JSON.stringify({ agents: candidate.agentsRun, transactions: candidate.transactions })));
+        if (action.legacy) return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
+        history.push({ role: 'user', content: `【子代理候选】\n${renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_SPECIALIST_CANDIDATES', JSON.stringify({ agents: candidate.agentsRun, transactions: candidate.transactions }))}` });
         continue;
       }
 
       if (action.kind === 'finalize') {
         if (action.decision === 'no_change') {
           if (action.acceptedAgents.length) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'no_change finalize 不得采用子代理候选');
-          return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants };
+          return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants, history };
         }
         if (!candidate) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'commit finalize 只能采用本次已返回的候选');
         if (!candidate.transactions.length) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '空候选不得 finalize 为 commit；应输出 no_change 或 block');
@@ -87,9 +94,9 @@ export class WorldSimulationDirectorRuntime_ACU {
           fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'finalize.acceptedAgents 必须且只能引用本次已返回的子代理候选');
         }
         if (!input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'world-director 收敛前租约已失效');
-        return { action, plan: candidatePlan, loop: candidate, grants: table.grants };
+        return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
       }
-      return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants };
+      return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants, history };
     }
     fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', 'world-director 在模型轮次内未收敛');
   }

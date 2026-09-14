@@ -14,6 +14,7 @@ import { WorldSimulationStore_ACU } from './simulation-store';
 import { WorldSimulationRequirementsStore_ACU } from './simulation-requirements-store';
 import { appendWorldSimulationConversation_ACU, readNextPendingWorldSimulationInstruction_ACU, updateWorldSimulationConversationStatus_ACU, type WorldSimulationConversationRef_ACU } from './world-simulation-agent-conversation';
 import { runWorldSimulationManualAgentExecution_ACU } from './world-simulation-agent-execution';
+import type { WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
 import { isAiMessage_ACU } from '../runtime/message-handler';
 import { captureWorldSimulationMaterialLease_ACU, refreshWorldSimulationMaterialLease_ACU, sameWorldSimulationMaterialLease_ACU, withWorldSimulationMaterialLeaseGrants_ACU, type WorldSimulationMaterialLease_ACU } from './world-simulation-material-lease';
 
@@ -190,13 +191,15 @@ export class WorldSimulationAgentSession_ACU {
       if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演正文快照装配后来源或目标 swipe 已变化');
       let baseMaterialLease = captureWorldSimulationMaterialLease_ACU({ requirementsSnapshot, storyContext, settledThroughIndex });
       let masterCallsUsed = 0;
+      let masterHistory: WorldSimulationPromptMessage_ACU[] = [];
       let execution: Awaited<ReturnType<typeof runWorldSimulationManualAgentExecution_ACU>>;
       for (;;) {
         execution = await runWorldSimulationManualAgentExecution_ACU({
           runId: `manual:${ref.messageIndex}:${ref.id}`, snapshot: before, anchorMessageIndex: anchor, storyClock: manualClock(base?.state ?? null, anchor), settings, reads: [], storyContext,
-          requirementsSnapshot, pendingRequirementSourceIds, masterCallsUsed,
+          requirementsSnapshot, pendingRequirementSourceIds, masterCallsUsed, history: masterHistory,
           readGateConfig: readGateConfig(settings.budgets.deep), userInstruction: ref.text, isCurrent,
         }, { countTokens: this.dependencies.countTokens, runAgent: async request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: identity, prompt: request.prompt, messages: [...request.messages], signal: this.abort?.signal }) });
+        masterHistory = execution.history.map(message => ({ ...message }));
         masterCallsUsed += 1;
         if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演主 Agent 返回后来源或目标 swipe 已变化');
         if (execution.action.kind !== 'maintain_requirements') break;

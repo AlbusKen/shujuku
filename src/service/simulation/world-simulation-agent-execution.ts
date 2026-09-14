@@ -15,13 +15,13 @@ export interface WorldSimulationManualAgentExecutionInput_ACU {
   runId: string; snapshot: WorldStateSnapshot_ACU; anchorMessageIndex: number; storyClock: WorldStoryClock_ACU;
   settings: WorldSimulationSettings_ACU; reads: readonly string[]; storyContext?: AgentStoryContextSnapshot_ACU;
   requirementsSnapshot?: AgentRequirementSnapshot_ACU | null; pendingRequirementSourceIds?: readonly string[];
-  masterCallsUsed?: number; isCurrent: () => boolean; userInstruction: string; readGateConfig: AgentKernelReadGateConfig_ACU;
+  masterCallsUsed?: number; history?: readonly WorldSimulationPromptMessage_ACU[]; isCurrent: () => boolean; userInstruction: string; readGateConfig: AgentKernelReadGateConfig_ACU;
 }
 export interface WorldSimulationManualAgentExecutionDependencies_ACU {
   countTokens: (text: string) => Promise<number>;
   runAgent: (request: { source: string; messages: readonly WorldSimulationPromptMessage_ACU[]; prompt: string }) => Promise<string | null>;
 }
-export interface WorldSimulationManualAgentExecutionResult_ACU { action: WorldSimulationMasterAction_ACU; plan: WorldSimulationDelegationPlan_ACU; loop: WorldSimulationAgentLoopResult_ACU | null; grants: readonly AgentMaterialGrant_ACU[]; }
+export interface WorldSimulationManualAgentExecutionResult_ACU { action: WorldSimulationMasterAction_ACU; plan: WorldSimulationDelegationPlan_ACU; loop: WorldSimulationAgentLoopResult_ACU | null; grants: readonly AgentMaterialGrant_ACU[]; history: readonly WorldSimulationPromptMessage_ACU[]; }
 function fail_ACU(code: 'WORLD_SIM_PROTOCOL_INVALID' | 'WORLD_SIM_BUDGET_EXCEEDED', message: string): never { throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU(code, 'agent', message, false)); }
 
 /** Main Agent selects specialists; only selected role-bound specialists may produce transactions. */
@@ -41,8 +41,8 @@ export async function runWorldSimulationManualAgentExecution_ACU(input: WorldSim
   const result = await new WorldSimulationDirectorRuntime_ACU().run({
     runId: input.runId, snapshot: input.snapshot, storyClock: input.storyClock, settings: input.settings, reads: input.reads,
     storyContext: input.storyContext, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds,
-    masterCallsUsed: input.masterCallsUsed, isCurrent: input.isCurrent, userInstruction: input.userInstruction,
+    masterCallsUsed: input.masterCallsUsed, history: input.history, isCurrent: input.isCurrent, userInstruction: input.userInstruction,
   }, { runMaster: dependencies.runAgent, runSpecialists });
   if (result.action.kind === 'block') fail_ACU('WORLD_SIM_PROTOCOL_INVALID', `world-director 阻断本轮：${result.action.reason}`);
-  return { action: result.action, plan: result.plan, loop: result.loop, grants: result.grants };
+  return { action: result.action, plan: result.plan, loop: result.loop, grants: result.grants, history: result.history };
 }

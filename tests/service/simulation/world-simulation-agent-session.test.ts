@@ -69,7 +69,13 @@ describe('world simulation Agent session', () => {
     const firstMaster = runOwnedAi.mock.calls[0][0].messages;
     expect(firstMaster.find((message: any) => message.content.includes('<UNTRUSTED_PENDING_REQUIREMENT_SOURCES>'))).toMatchObject({ role: 'user' });
     const secondMaster = runOwnedAi.mock.calls[1][0].messages;
-    expect(secondMaster.find((message: any) => message.content.includes('<UNTRUSTED_CURRENT_REQUIREMENTS>'))?.content).toContain('"revision":1');
+    const firstAction = secondMaster.find((message: any) => message.role === 'assistant' && message.content.includes('"action":"maintain_requirements"'));
+    expect(firstAction).toBeDefined();
+    const contexts = secondMaster.filter((message: any) => message.content.includes('【本次运行上下文】'));
+    expect(contexts).toHaveLength(2);
+    expect(contexts.at(-1)?.content).toContain('"revision":1');
+    expect(secondMaster.findIndex((message: any) => message === contexts.at(-1))).toBeGreaterThan(secondMaster.findIndex((message: any) => message === firstAction));
+    expect(secondMaster.findIndex((message: any) => message.role === 'system' && message.content.includes('【执行边界】'))).toBeGreaterThan(secondMaster.findIndex((message: any) => message === contexts.at(-1)));
     expect(commitProjection).toHaveBeenCalledTimes(1);
   });
 

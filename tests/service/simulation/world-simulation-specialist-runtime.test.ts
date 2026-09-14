@@ -31,9 +31,13 @@ describe('WorldSimulationSpecialistRuntime_ACU', () => {
     expect(result.callsUsed).toBe(2);
     expect(result.successfulReadRefs).toContain('$WORLD_STATE');
     expect(result.candidate.evidenceRefs).toEqual(['$WORLD_STATE']);
-    const toolResults = runAgent.mock.calls[1]![0].messages.find((message: any) => message.content.includes('<UNTRUSTED_TOOL_RESULTS>'));
+    const messages = runAgent.mock.calls[1]![0].messages;
+    const toolResults = messages.find((message: any) => message.content.includes('<UNTRUSTED_TOOL_RESULTS>'));
     expect(toolResults).toMatchObject({ role: 'user' });
     expect(toolResults.content).toContain('### $WORLD_STATE');
+    const priorAction = messages.find((message: any) => message.role === 'assistant' && message.content.includes('"action":"tools"'));
+    expect(priorAction).toBeDefined();
+    expect(messages.findIndex((message: any) => message === priorAction)).toBeLessThan(messages.findIndex((message: any) => message === toolResults));
   });
 
   it('counts a tools output as one of the specialist model turns', async () => {

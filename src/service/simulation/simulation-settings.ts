@@ -1,4 +1,4 @@
-import { buildDefaultWorldSimulationAgentGuidance_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU } from './defaults';
+import { buildDefaultWorldSimulationAgentGuidance_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V4_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, WORLD_SIMULATION_V4_DYNAMIC_PLACEHOLDERS_ACU } from './defaults';
 import type { WorldSimulationAgentGuidance_ACU, WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptRole_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from './model';
 import { settings_ACU } from '../runtime/state-manager';
 
@@ -161,6 +161,36 @@ function legacyPromptsToCurrentPrompts_ACU(prompts: Partial<WorldSimulationAgent
   return defaults;
 }
 
+function migrateV4PromptsToV51_ACU(prompts: Partial<WorldSimulationAgentPrompts_ACU>): WorldSimulationAgentPrompts_ACU {
+  const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+  const legacyFixed = new Set<string>([
+    '$WORLD_SIMULATION_ROOT', '$WORLD_SIMULATION_SPECIALIST_RULES', '$WORLD_SIMULATION_PROTOCOL',
+    ...WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU,
+    ...WORLD_SIMULATION_V4_DYNAMIC_PLACEHOLDERS_ACU,
+  ]);
+  const legacyGuidance = buildDefaultWorldSimulationAgentGuidance_ACU();
+  for (const name of AGENT_NAMES_ACU) {
+    const previous = prompts[name];
+    if (!previous) continue;
+    const customStatic = previous.filter(segment => {
+      const content = segment.content.trim();
+      if (legacyFixed.has(content) || content === legacyGuidance[name]) return false;
+      // v5.1's default acknowledgement moved behind runtime context in v5.2. It is a known
+      // default, not a user addition, so it must not be copied into the stable prefix.
+      if (name === 'world-director' && content.startsWith('我会先区分真实正文、当前有效要求')) return false;
+      if (name !== 'world-director' && content.startsWith('我会先核对正文、当前要求和已分配资料')) return false;
+      const currentStatic = defaults[name].map(segment => segment.content);
+      return !currentStatic.includes(segment.content);
+    });
+    if (!customStatic.length) continue;
+    const guideIndex = defaults[name].findIndex(segment => segment.content === legacyGuidance[name]);
+    // A v4 custom guidance/addition belongs in the stable rule group, before the assistant
+    // acknowledgement and execution boundary. Its relative order remains intact.
+    defaults[name].splice(guideIndex, 1, ...customStatic.map(segment => ({ ...segment })));
+  }
+  return defaults;
+}
+
 function guidanceToCurrentPrompts_ACU(guidance: Partial<WorldSimulationAgentGuidance_ACU>): WorldSimulationAgentPrompts_ACU {
   return buildDefaultWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentGuidance_ACU(), ...guidance });
 }
@@ -238,8 +268,10 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
   const version = raw.promptForceDefaultVersion;
   const agentPrompts = hasGuidance
     ? guidanceToCurrentPrompts_ACU(raw.agentGuidance as Partial<WorldSimulationAgentGuidance_ACU>)
-    : hasPrompts && version !== WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU
-      ? legacyPromptsToCurrentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
+    : hasPrompts && (version === WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V4_ACU || version === WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU)
+      ? migrateV4PromptsToV51_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
+      : hasPrompts && version !== WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU
+        ? legacyPromptsToCurrentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
       : mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU> | undefined);
   const { budgets: _budgets, agentGuidance: _guidance, agentPrompts: _prompts, promptForceDefaultVersion: _version, ...top } = raw;
   const merged: WorldSimulationSettings_ACU = {

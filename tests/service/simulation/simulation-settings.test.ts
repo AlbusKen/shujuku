@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU } from '../../../src/service/simulation/defaults';
+import { buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V4_ACU } from '../../../src/service/simulation/defaults';
 import { settings_ACU, _set_settings_ACU } from '../../../src/service/runtime/state-manager';
 import {
   isWorldSimulationSettings_ACU,
@@ -141,6 +141,27 @@ describe('world simulation settings read/write', () => {
     await expect(writeWorldSimulationSettingsStrict_ACU(upgrade!.settings)).resolves.toMatchObject({ ok: true, upgraded: false });
     expect((settings_ACU as any).worldSimulation).toMatchObject({ agentPrompts: upgrade!.settings.agentPrompts });
     expect((settings_ACU as any).worldSimulation.agentGuidance).toBeUndefined();
+  });
+
+  it('migrates v4 prompt layouts to one runtime-context/history seam while preserving custom static segments', () => {
+    const v4 = buildDefaultWorldSimulationSettings_ACU() as any;
+    v4.promptForceDefaultVersion = WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V4_ACU;
+    v4.agentPrompts['world-director'] = [
+      { role: 'system', content: '$WORLD_SIMULATION_ROOT', enabled: true, deletable: true },
+      { role: 'user', content: '用户保留的主控补充', enabled: true, deletable: true },
+      { role: 'user', content: '$WORLD_SIMULATION_PROTOCOL', enabled: true, deletable: true },
+      { role: 'user', content: '$WORLD_SIMULATION_STORY_PENDING', enabled: true, deletable: true },
+      { role: 'user', content: '$WORLD_SIMULATION_TOOL_RESULTS', enabled: true, deletable: true },
+    ];
+    const upgrade = normalizeWorldSimulationSettings_ACU(v4)!;
+    const prompts = upgrade.settings.agentPrompts['world-director'];
+    expect(upgrade.upgraded).toBe(true);
+    expect(prompts.some(segment => segment.content === '$WORLD_SIMULATION_RUNTIME_CONTEXT')).toBe(true);
+    expect(prompts.some(segment => segment.content === '$WORLD_SIMULATION_HISTORY')).toBe(true);
+    expect(prompts.some(segment => segment.content === '用户保留的主控补充')).toBe(true);
+    expect(prompts.some(segment => segment.content === '$WORLD_SIMULATION_STORY_PENDING')).toBe(false);
+    const boundaryIndex = prompts.findIndex(segment => segment.content === '$WORLD_SIMULATION_EXECUTION_BOUNDARY');
+    expect(prompts[boundaryIndex - 1]?.role).toBe('assistant');
   });
 
   it('writes through to the shared settings store and reads the value back', () => {
