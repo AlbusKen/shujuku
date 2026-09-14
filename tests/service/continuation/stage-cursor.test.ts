@@ -65,6 +65,20 @@ function completed(stageId: string, turnId: string, messageIndex: number, id: st
   return { id, at: 1, kind: 'turn_completed', stageId, turnId, messageIndex };
 }
 
+function chatForAdoption_ACU(): any[] {
+  return [0, 1, 2, 3].map(index => ({ message_id: index, mes: `外部正文 ${index}`, is_user: false }));
+}
+
+function externalProgress(stageId: string, turnIds: string[]): ContinuationTask_ACU['timeline'][number] {
+  return {
+    id: 'adopt-1', at: 2, kind: 'external_progress_adopted', stageId, revision: 1,
+    adoptionChatIdentity: 'chat-a', targetMessageIndex: 3, targetMessageId: 3, targetSwipeIndex: 0,
+    sourceStartMessageIndex: 1, sourceEndMessageIndex: 3,
+    satisfiedTurnIds: turnIds, evidenceMessageIndexes: [2],
+    takeoverDisposition: 'continue_current_stage', requiresStoryArcRevision: false, reason: '外部正文已满足连续轮次。',
+  };
+}
+
 describe('reconcileTaskCursorFromChat_ACU', () => {
   it('把已确认楼层被删掉的轮次回退，并保持硬游标与存活楼层对齐', () => {
     const stage = stageOf(1, 6, 3, 'running');
@@ -117,5 +131,22 @@ describe('reconcileTaskCursorFromChat_ACU', () => {
     );
 
     expect(reconcileTaskCursorFromChat_ACU(task, 1)).toBe(task);
+  });
+
+  it('replays a live external adoption only as the next contiguous turn prefix, then naturally rolls back when its target floor disappears', () => {
+    const stage = stageOf(1, 4, 0, 'running');
+    const chat = chatForAdoption_ACU();
+    const task = taskOf([stage], [externalProgress('stage-1', ['s1-t1', 's1-t2'])], 'stage-1');
+
+    expect(reconcileTaskCursorFromChat_ACU(task, chat, 'chat-a').stages[0]).toMatchObject({ completedTurns: 2, activeTurnIndex: 2 });
+    expect(reconcileTaskCursorFromChat_ACU(task, chat.slice(0, 3), 'chat-a').stages[0]).toMatchObject({ completedTurns: 0, activeTurnIndex: 0 });
+  });
+
+  it('never converts an external floor count into progress when assessed turn IDs skip the next prefix', () => {
+    const stage = stageOf(1, 4, 0, 'running');
+    const chat = chatForAdoption_ACU();
+    const task = taskOf([stage], [externalProgress('stage-1', ['s1-t2'])], 'stage-1');
+
+    expect(reconcileTaskCursorFromChat_ACU(task, chat, 'chat-a').stages[0].completedTurns).toBe(0);
   });
 });

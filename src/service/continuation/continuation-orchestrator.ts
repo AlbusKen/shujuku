@@ -6,10 +6,15 @@ import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
 import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveStageOutlinePacingContext_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
+import { ContinuationTakeoverAssessor_ACU } from './continuation-takeover-assessor';
+import { ContinuationTakeoverSettler_ACU } from './continuation-takeover-settler';
+import { ContinuationTakeoverArcMaintainer_ACU } from './continuation-takeover-arc-maintainer';
+import { assertCanCreateContinuationStage_ACU, type ContinuationStageVolumeBinding_ACU } from './continuation-volume-capacity';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
-import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
+import { applyAgentModuleDelta_ACU, mergeAgentDeltaRevisions_ACU } from './agent/agent-transaction';
+import type { AgentConversationAppend_ACU, AgentModuleSnapshot_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU, AgentPlanControlAction_ACU, AgentPlanControlResult_ACU } from './agent/agent-model';
 import { appendAgentConversationToChat_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
-import { clearAgentModuleField_ACU } from './agent/agent-module-store';
+import { captureAgentModuleSnapshotCheckpoint_ACU, clearAgentModuleField_ACU, markAgentModuleSnapshotCheckpointWritten_ACU, restoreAgentModuleSnapshotCheckpoint_ACU, type AgentModuleSnapshotCheckpoint_ACU, writeAgentModuleSnapshot_ACU } from './agent/agent-module-store';
 import { clearAgentRunState_ACU } from './agent/agent-run-cache';
 import { clearAgentSessionLog_ACU, logAgentSession_ACU } from './agent/agent-session-log';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
@@ -35,6 +40,7 @@ export interface CreateContinuationTaskInput_ACU { originInstruction: string; }
 export interface ReplanContinuationInput_ACU { instruction?: string; }
 export interface AcceptOutlineInput_ACU { outline?: StageOutline_ACU; }
 export interface ReplaceContinuationSettingsInput_ACU { settings: ContinuationEnvelope_ACU['settings']; }
+export interface AdoptExternalProgressInput_ACU { targetMessageIndex?: number; instruction?: string; }
 export interface ContinuationOrchestratorResult_ACU { envelope: ContinuationEnvelope_ACU; task: ContinuationTask_ACU; planning?: Pick<ContinuationOutlinePlanningResult_ACU, 'attempts' | 'apiPreset' | 'requiresReview'>; }
 export interface ContinuationHostTurnActionResult_ACU extends ContinuationOrchestratorResult_ACU {
   preparedTurn?: ContinuationPreparedTurnInstruction_ACU;
@@ -53,6 +59,16 @@ export interface ContinuationOrchestratorDependencies_ACU {
   now: () => number;
   allocateId: (prefix: string) => string;
   createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
+  /** Current chat's story-arc snapshot. Stage capacity is checked against this authority. */
+  readModuleSnapshot: () => AgentModuleSnapshot_ACU;
+  /** 外部正文接管评估器；只返回 assessment，不能触碰任务或宿主正文。 */
+  takeoverAssessor?: ContinuationTakeoverAssessor_ACU;
+  /** 外部正文接管结算器；只返回既有资料写集，任务写入仍归编排器。 */
+  takeoverSettler?: ContinuationTakeoverSettler_ACU;
+  /** 接管结算后的资料快照严格写入目标正文楼。 */
+  writeModuleSnapshot?: typeof writeAgentModuleSnapshot_ACU;
+  /** 外部正文越过卷台阶时的单用途总纲维护器。 */
+  takeoverArcMaintainer?: ContinuationTakeoverArcMaintainer_ACU;
   /** 桥内存中是否持有该聊天的活认领。缺省视为无认领（测试注入场景）。 */
   hasLiveHostClaim?: (chatIdentity: string) => boolean;
   /** 把消息追加进主 Agent 的持久会话记录。缺省用楼层锚定存储。 */
@@ -76,6 +92,10 @@ const epochsByChat_ACU = new Map<string, number>();
  * 用户点停止或中途插话时要立刻见效，就必须真的 abort 掉在飞的请求。
  */
 const abortControllersByChat_ACU = new Map<string, AbortController>();
+const defaultTakeoverAssessor_ACU = new ContinuationTakeoverAssessor_ACU();
+const defaultTakeoverSettler_ACU = new ContinuationTakeoverSettler_ACU();
+const defaultTakeoverArcMaintainer_ACU = new ContinuationTakeoverArcMaintainer_ACU();
+
 
 function fail_ACU(code: 'CONTINUATION_OPERATION_BUSY' | 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY' | 'CONTINUATION_TASK_NOT_FOUND' | 'CONTINUATION_TASK_STATE_INVALID', message: string): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'persist', message, false));
@@ -202,8 +222,11 @@ function userMessageResumeBlockDetail_ACU(task: ContinuationTask_ACU): string | 
   return getActiveRevision_ACU(stage).frozen ? null : '当前阶段的大纲尚未冻结。';
 }
 
-function stageForOutline_ACU(stageId: string, stageNumber: number, revision: StageRevision_ACU, status: ContinuationStage_ACU['status']): ContinuationStage_ACU {
-  return { stageId, stageNumber, status, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
+function stageForOutline_ACU(stageId: string, stageNumber: number, binding: ContinuationStageVolumeBinding_ACU, revision: StageRevision_ACU, status: ContinuationStage_ACU['status']): ContinuationStage_ACU {
+  return {
+    stageId, stageNumber, volumeId: binding.volumeId, storyArcRevision: binding.storyArcRevision,
+    status, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0,
+  };
 }
 
 function identityMatchesCurrentTurn_ACU(task: ContinuationTask_ACU, identity: TurnAttemptIdentity_ACU): boolean {
@@ -326,8 +349,7 @@ export class ContinuationOrchestrator_ACU {
       let started: ContinuationEnvelope_ACU | null = null;
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
-        const chatLength = Array.isArray(getChatArray_ACU()) ? getChatArray_ACU().length : 0;
-        const task = reconcileTaskCursorFromChat_ACU(this.requireTask_ACU(envelope), chatLength);
+        const task = reconcileTaskCursorFromChat_ACU(this.requireTask_ACU(envelope), getChatArray_ACU(), chatIdentity);
         // 等待宿主结果时只有"桥内存里仍有本次生成的活认领"才是真在飞；
         // 重载或事件丢失后的滞留等待轮无法再被归属，丢弃后从当前进度重新继续。
         const staleAwaitingTurn = task.pendingHostTurn?.status === 'awaiting_generation';
@@ -391,6 +413,7 @@ export class ContinuationOrchestrator_ACU {
           undefined,
           async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
           controller.signal,
+          async action => this.applyAgentPlanControlWithinLease_ACU(chatIdentity, lease, action),
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
@@ -648,6 +671,296 @@ export class ContinuationOrchestrator_ACU {
     });
   }
 
+  /**
+   * 非破坏性接管外部 AI 正文。assessment 只是未信任建议；这里只有在当前 task、目标楼、
+   * message_id/swipe、证据范围与连续 turn 前缀均仍成立时才写入 timeline。
+   */
+  async adoptExternalProgress(input: AdoptExternalProgressInput_ACU = {}): Promise<ContinuationOrchestratorResult_ACU> {
+    return this.withLease_ACU((chatIdentity, lease) => this.adoptExternalProgressWithinLease_ACU(chatIdentity, lease, input, 'paused'));
+  }
+
+  /** 同租约接管入口：主 Agent 循环调用时保持 running，公开 UI 入口落回 paused。 */
+  private async adoptExternalProgressWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, input: AdoptExternalProgressInput_ACU, endStatus: 'running' | 'paused'): Promise<ContinuationOrchestratorResult_ACU> {
+    const adopted = await (async () => {
+      const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+      if (!envelope.activeTask) {
+        return { result: await this.adoptExternalProgressBaselineWithinLease_ACU(chatIdentity, lease, envelope, input), replaceInstruction: '' };
+      }
+      const task = this.requireTask_ACU(envelope);
+      if (task.status !== endStatus || task.stopReason !== null) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '外部进度接管只能在未运行且未停止的任务上执行');
+      }
+      const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+      if (!stage || stage.status !== 'running') fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前没有可接管的执行中阶段');
+      const revision = getActiveRevision_ACU(stage);
+      if (!revision.frozen) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段大纲尚未冻结，不能接管外部正文');
+      const chat = getChatArray_ACU();
+      const latestAiIndex = chat.reduce((latest, message, index) => (
+        message && message.is_user !== true && message.extra?.type !== 'narrator' ? index : latest
+      ), -1);
+      const targetMessageIndex = input.targetMessageIndex ?? latestAiIndex;
+      const target = chat[targetMessageIndex];
+      if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0 || !target || target.is_user === true || target.extra?.type === 'narrator' || typeof target.mes !== 'string' || !target.mes.trim()) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管目标必须是当前聊天中存在的 AI 正文楼层');
+      }
+      const targetMessageId = target.message_id;
+      const targetSwipeIndex = target.swipe_id ?? 0;
+      if (!Number.isInteger(targetMessageId) || !Number.isInteger(targetSwipeIndex) || targetSwipeIndex < 0) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管目标缺少可用的 message_id 或 active swipe_id');
+      }
+      const sourceStartMessageIndex = Math.max(0, this.dependencies.readModuleSnapshot().settledThroughIndex + 1);
+      if (sourceStartMessageIndex > targetMessageIndex) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '目标楼之前没有尚未结算的外部正文');
+      const externalMessages = chat.slice(sourceStartMessageIndex, targetMessageIndex + 1)
+        .map((message, offset) => ({ index: sourceStartMessageIndex + offset, text: typeof message?.mes === 'string' ? message.mes : '', ai: !!message && message.is_user !== true && message.extra?.type !== 'narrator' }))
+        .filter(message => message.ai && message.text.trim());
+      if (!externalMessages.length || !externalMessages.some(message => message.index === targetMessageIndex)) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管范围内没有可评估的外部 AI 正文');
+      }
+      const isCurrent = () => this.isLeaseCurrent_ACU(chatIdentity, lease)
+        && this.dependencies.getChatIdentity() === chatIdentity
+        && (() => {
+          const latest = this.dependencies.store.readPersisted()?.activeTask;
+          const live = getChatArray_ACU()[targetMessageIndex];
+          return latest?.taskId === task.taskId && latest.activeStageId === stage.stageId
+            && latest.stages.find(item => item.stageId === stage.stageId)?.activeRevision === revision.revision
+            && live?.message_id === targetMessageId && (live?.swipe_id ?? 0) === targetSwipeIndex;
+        })();
+      const snapshot = this.dependencies.readModuleSnapshot();
+      const settled = await (this.dependencies.takeoverSettler ?? defaultTakeoverSettler_ACU).settle({
+        settings: envelope.settings, snapshot, externalMessages: externalMessages.map(({ index, text }) => ({ index, text })),
+        createIdentity: () => ({ source: 'takeover_assessment', requestId: this.dependencies.allocateId('takeover-settle-request'), chatIdentity, taskId: task.taskId, stageId: stage.stageId, revision: revision.revision, attemptId: this.dependencies.allocateId('takeover-settle-attempt') }),
+        isCurrent: () => isCurrent(),
+      });
+      if (!isCurrent()) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '外部正文结算结果已失效', false));
+      const settledDelta = mergeAgentDeltaRevisions_ACU(settled.delta, snapshot.revisions);
+      const settledSnapshot = {
+        ...applyAgentModuleDelta_ACU(snapshot, settledDelta, ['hooks', 'infoGap', 'chronology'], targetMessageIndex, [], envelope.settings.maxStagesPerVolume),
+        settledThroughIndex: Math.max(snapshot.settledThroughIndex, targetMessageIndex),
+      };
+      const assessment = await (this.dependencies.takeoverAssessor ?? defaultTakeoverAssessor_ACU).assess({
+        settings: envelope.settings, stage, revision, snapshot: settledSnapshot, sourceStartMessageIndex, targetMessageIndex,
+        instruction: typeof input.instruction === 'string' ? input.instruction.trim() : '', externalMessages: externalMessages.map(({ index, text }) => ({ index, text })),
+        createIdentity: () => ({ source: 'takeover_assessment', requestId: this.dependencies.allocateId('takeover-request'), chatIdentity, taskId: task.taskId, stageId: stage.stageId, revision: revision.revision, attemptId: this.dependencies.allocateId('takeover-attempt') }),
+        isCurrent: () => isCurrent(),
+      });
+      if (!isCurrent()) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '外部进度评估结果已失效', false));
+      if (assessment.targetMessageIndex !== targetMessageIndex || assessment.evidenceMessageIndexes.some(index => !externalMessages.some(message => message.index === index))) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管评估的目标或正文证据不属于本次固定外部范围');
+      }
+      const turns = revision.outline.nodes.flatMap(node => node.turns);
+      const remainingTurnIds = turns.slice(stage.completedTurns).map(turn => turn.id);
+      const expectedTurnIds = remainingTurnIds.slice(0, assessment.satisfiedTurnIds.length);
+      if (assessment.satisfiedTurnIds.some((id, index) => id !== expectedTurnIds[index])) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管评估认领的 turnId 不是既有完成前缀后的连续轮次');
+      if ((assessment.disposition === 'continue_current_stage' && (!assessment.satisfiedTurnIds.length || assessment.satisfiedTurnIds.length >= remainingTurnIds.length))
+        || (assessment.disposition === 'complete_current_stage' && assessment.satisfiedTurnIds.length !== remainingTurnIds.length)
+        || (assessment.disposition === 'replace_current_stage' && assessment.satisfiedTurnIds.length)) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管结论与认领轮次范围不一致');
+      }
+      const maintained = assessment.requiresStoryArcRevision
+        ? await (this.dependencies.takeoverArcMaintainer ?? defaultTakeoverArcMaintainer_ACU).maintain({
+          settings: envelope.settings,
+          snapshot: settledSnapshot,
+          externalMessages: externalMessages.map(({ index, text }) => ({ index, text })),
+          reason: assessment.reason,
+          createIdentity: () => ({ source: 'takeover_assessment', requestId: this.dependencies.allocateId('takeover-arc-request'), chatIdentity, taskId: task.taskId, stageId: stage.stageId, revision: revision.revision, attemptId: this.dependencies.allocateId('takeover-arc-attempt') }),
+          isCurrent: () => isCurrent(),
+        })
+        : null;
+      if (!isCurrent()) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '外部正文总纲维护结果已失效', false));
+      const committedSnapshot = maintained
+        ? applyAgentModuleDelta_ACU(
+          settledSnapshot,
+          mergeAgentDeltaRevisions_ACU(maintained.delta, settledSnapshot.revisions),
+          ['storyArc'],
+          targetMessageIndex,
+          [],
+          envelope.settings.maxStagesPerVolume,
+        )
+        : settledSnapshot;
+      const checkpoint = captureAgentModuleSnapshotCheckpoint_ACU(chat, targetMessageIndex);
+      try {
+        const receipt = await (this.dependencies.writeModuleSnapshot ?? writeAgentModuleSnapshot_ACU)(chat, targetMessageIndex, committedSnapshot);
+        if (!markAgentModuleSnapshotCheckpointWritten_ACU(checkpoint, receipt)) {
+          await this.throwTakeoverSnapshotFailure_ACU(checkpoint, new Error('接管资料写入 receipt 未能匹配当前目标楼字段'));
+        }
+      } catch (error) {
+        await this.throwTakeoverSnapshotFailure_ACU(checkpoint, error);
+      }
+      let result: ContinuationEnvelope_ACU | null = null;
+      try {
+        if (!isCurrent()) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_persist', '外部正文资料保存后目标已变化；接管记录未写入', false));
+        await this.dependencies.store.updatePersistedAtomically(current => {
+          const env = this.requireEnvelope_ACU(current);
+          const t = this.requireTask_ACU(env);
+          const active = t.activeStageId ? t.stages.find(item => item.stageId === t.activeStageId) ?? null : null;
+          const live = getChatArray_ACU()[targetMessageIndex];
+          if (t.taskId !== task.taskId || t.status !== endStatus || t.stopReason !== null || active?.stageId !== stage.stageId || active.activeRevision !== revision.revision || live?.message_id !== targetMessageId || (live?.swipe_id ?? 0) !== targetSwipeIndex) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'persist', '接管提交前任务或目标正文已变化', false));
+          }
+          if (t.timeline.some(entry => entry.kind === 'external_progress_adopted' && entry.targetMessageId === targetMessageId && entry.targetSwipeIndex === targetSwipeIndex)) {
+            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '该目标 AI 楼已经完成过接管');
+          }
+          const now = this.dependencies.now();
+          const adoption = this.timeline_ACU('external_progress_adopted', now, { stageId: stage.stageId, revision: revision.revision, adoptionChatIdentity: chatIdentity, targetMessageIndex, targetMessageId, targetSwipeIndex, sourceStartMessageIndex, sourceEndMessageIndex: targetMessageIndex, satisfiedTurnIds: assessment.satisfiedTurnIds, evidenceMessageIndexes: assessment.evidenceMessageIndexes, takeoverDisposition: assessment.disposition, requiresStoryArcRevision: assessment.requiresStoryArcRevision, reason: assessment.reason });
+          const updatedStages = assessment.disposition === 'replace_current_stage'
+            ? t.stages.map(item => item.stageId === stage.stageId ? { ...item, status: 'failed' as const } : item)
+            : t.stages;
+          const withTimeline: ContinuationTask_ACU = { ...t, stages: updatedStages, timeline: [...t.timeline, adoption], pendingHostTurn: null, lastError: null, stopReason: null, updatedAt: now };
+          const reconciled = assessment.disposition === 'replace_current_stage' ? withTimeline : reconcileTaskCursorFromChat_ACU(withTimeline, getChatArray_ACU(), chatIdentity);
+          result = { ...env, activeTask: { ...reconciled, status: endStatus, updatedAt: now } };
+          return result;
+        }, { chatIdentity });
+      } catch (error) {
+        await this.throwTakeoverSnapshotFailure_ACU(checkpoint, error);
+      }
+      return { result: taskResult_ACU(result!), replaceInstruction: assessment.disposition === 'replace_current_stage' ? `外部正文已替代未完成计划。以目标楼 ${targetMessageIndex} 的既有事实重规划剩余部分：${assessment.reason}` : '' };
+    })();
+    if (!adopted.replaceInstruction) return adopted.result;
+    const outcome = await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, adopted.replaceInstruction, endStatus);
+    return taskResult_ACU(outcome.envelope, outcome.planning);
+  }
+
+  /** 主 Agent 的规划控制器：只在 continueTask 已持有的 lease 内调用既有受控 seam。 */
+  private async applyAgentPlanControlWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, action: AgentPlanControlAction_ACU): Promise<AgentPlanControlResult_ACU> {
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+    const task = this.requireTask_ACU(envelope);
+    if (task.status !== 'running' || task.stopReason !== null) {
+      return { ok: false, summary: '当前任务未处于可运行状态，不能执行规划控制。', requiresReview: false, stopped: null };
+    }
+    if (action.operation === 'adopt_external_progress') {
+      const adopted = await this.adoptExternalProgressWithinLease_ACU(
+        chatIdentity,
+        lease,
+        { targetMessageIndex: action.targetMessageIndex ?? undefined, instruction: action.instruction },
+        'running',
+      );
+      const latestTimeline = adopted.task.timeline[adopted.task.timeline.length - 1];
+      return { ok: true, summary: `已从外部正文建立接管事实：${latestTimeline?.kind ?? '接管完成'}`, requiresReview: false, stopped: null };
+    }
+    const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+    if (!stage || stage.stageId !== action.stageId) {
+      return { ok: false, summary: `指定阶段不是当前活动阶段：${action.stageId || '(空)'}`, requiresReview: false, stopped: null };
+    }
+    if (action.operation === 'continue_next_stage' && stage.status !== 'completed') {
+      return { ok: false, summary: '只有当前阶段已真实完成时才能继续下一阶段。', requiresReview: false, stopped: null };
+    }
+    if (['revise_outline_remaining', 'regenerate_current_outline'].includes(action.operation) && stage.status !== 'running') {
+      return { ok: false, summary: '当前阶段不是可改写的执行中阶段。', requiresReview: false, stopped: null };
+    }
+    const outcome = await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, action.instruction, 'running');
+    return { ok: true, summary: outcome.opResult.summary, requiresReview: outcome.opResult.requiresReview, stopped: outcome.opResult.stopped };
+  }
+
+  /** 接管资料已写而首楼事实未提交时的补偿：只恢复仍命中原始消息锚的字段。 */
+  private async throwTakeoverSnapshotFailure_ACU(checkpoint: AgentModuleSnapshotCheckpoint_ACU, cause: unknown): Promise<never> {
+    try {
+      const restored = await restoreAgentModuleSnapshotCheckpoint_ACU(checkpoint);
+      const message = restored
+        ? '接管未完成，目标楼资料快照已回滚；请在聊天状态稳定后重试。'
+        : '接管未完成，目标楼已变化或资料随后被更新，无法安全回滚；资料可能处于半提交状态，请勿盲目重试。';
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+        'CONTINUATION_PERSIST_FAILED',
+        'agent_persist',
+        message,
+        false,
+        { targetMessageIndex: checkpoint.targetIndex, rollback: restored ? 'restored' : 'unsafe', cause: cause instanceof Error ? cause.message : String(cause) },
+      ));
+    } catch (error) {
+      if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_PERSIST_FAILED') throw error;
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+        'CONTINUATION_PERSIST_FAILED',
+        'agent_persist',
+        '接管未完成，资料快照回滚保存失败；目标楼可能保留半提交快照，请勿盲目重试。',
+        false,
+        { targetMessageIndex: checkpoint.targetIndex, rollback: 'failed', cause: error instanceof Error ? error.message : String(error) },
+      ));
+    }
+  }
+
+  /** 无任务时只建立外部正文事实基线，绝不伪造阶段或已完成轮次。 */
+  private async adoptExternalProgressBaselineWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, envelope: ContinuationEnvelope_ACU, input: AdoptExternalProgressInput_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    const originInstruction = normalizeOriginInstruction_ACU(input.instruction);
+    const chat = getChatArray_ACU();
+    const latestAiIndex = chat.reduce((latest, message, index) => (
+      message && message.is_user !== true && message.extra?.type !== 'narrator' ? index : latest
+    ), -1);
+    const targetMessageIndex = input.targetMessageIndex ?? latestAiIndex;
+    const target = chat[targetMessageIndex];
+    if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0 || !target || target.is_user === true || target.extra?.type === 'narrator' || typeof target.mes !== 'string' || !target.mes.trim()) {
+      fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管目标必须是当前聊天中存在的 AI 正文楼层');
+    }
+    const targetMessageId = target.message_id;
+    const targetSwipeIndex = target.swipe_id ?? 0;
+    if (!Number.isInteger(targetMessageId) || !Number.isInteger(targetSwipeIndex) || targetSwipeIndex < 0) {
+      fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管目标缺少可用的 message_id 或 active swipe_id');
+    }
+    const snapshot = this.dependencies.readModuleSnapshot();
+    const sourceStartMessageIndex = Math.max(0, snapshot.settledThroughIndex + 1);
+    if (sourceStartMessageIndex > targetMessageIndex) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '目标楼之前没有尚未结算的外部正文');
+    const externalMessages = chat.slice(sourceStartMessageIndex, targetMessageIndex + 1)
+      .map((message, offset) => ({ index: sourceStartMessageIndex + offset, text: typeof message?.mes === 'string' ? message.mes : '', ai: !!message && message.is_user !== true && message.extra?.type !== 'narrator' }))
+      .filter(message => message.ai && message.text.trim());
+    if (!externalMessages.length || !externalMessages.some(message => message.index === targetMessageIndex)) {
+      fail_ACU('CONTINUATION_TASK_STATE_INVALID', '接管范围内没有可结算的外部 AI 正文');
+    }
+    const taskId = this.dependencies.allocateId('task');
+    const isCurrent = () => this.isLeaseCurrent_ACU(chatIdentity, lease)
+      && this.dependencies.getChatIdentity() === chatIdentity
+      && (this.dependencies.store.readPersisted()?.activeTask ?? null) === null
+      && (() => {
+        const live = getChatArray_ACU()[targetMessageIndex];
+        return live?.message_id === targetMessageId && (live?.swipe_id ?? 0) === targetSwipeIndex;
+      })();
+    const settled = await (this.dependencies.takeoverSettler ?? defaultTakeoverSettler_ACU).settle({
+      settings: envelope.settings,
+      snapshot,
+      externalMessages: externalMessages.map(({ index, text }) => ({ index, text })),
+      createIdentity: () => ({ source: 'takeover_baseline', requestId: this.dependencies.allocateId('takeover-baseline-settle-request'), chatIdentity, taskId, attemptId: this.dependencies.allocateId('takeover-baseline-settle-attempt') }),
+      isCurrent,
+    });
+    if (!isCurrent()) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '外部正文基线结算结果已失效', false));
+    const settledSnapshot = {
+      ...applyAgentModuleDelta_ACU(snapshot, mergeAgentDeltaRevisions_ACU(settled.delta, snapshot.revisions), ['hooks', 'infoGap', 'chronology'], targetMessageIndex, [], envelope.settings.maxStagesPerVolume),
+      settledThroughIndex: Math.max(snapshot.settledThroughIndex, targetMessageIndex),
+    };
+    const checkpoint = captureAgentModuleSnapshotCheckpoint_ACU(chat, targetMessageIndex);
+    try {
+      const receipt = await (this.dependencies.writeModuleSnapshot ?? writeAgentModuleSnapshot_ACU)(chat, targetMessageIndex, settledSnapshot);
+      if (!markAgentModuleSnapshotCheckpointWritten_ACU(checkpoint, receipt)) {
+        await this.throwTakeoverSnapshotFailure_ACU(checkpoint, new Error('接管资料写入 receipt 未能匹配当前目标楼字段'));
+      }
+    } catch (error) {
+      await this.throwTakeoverSnapshotFailure_ACU(checkpoint, error);
+    }
+    let result: ContinuationEnvelope_ACU | null = null;
+    try {
+      if (!isCurrent()) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_persist', '外部正文资料保存后目标已变化；基线任务未创建', false));
+      await this.dependencies.store.updatePersistedAtomically(current => {
+        const currentEnvelope = this.requireEnvelope_ACU(current);
+        const live = getChatArray_ACU()[targetMessageIndex];
+        if (currentEnvelope.activeTask !== null || live?.message_id !== targetMessageId || (live?.swipe_id ?? 0) !== targetSwipeIndex) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'persist', '基线提交前任务或目标正文已变化', false));
+        }
+        const now = this.dependencies.now();
+        const task: ContinuationTask_ACU = {
+          taskId, originInstruction, status: 'paused', createdAt: now, updatedAt: now, runStartedAt: null, deadlineAt: null,
+          runStageCount: 0, stageBudgetBaseCount: 0, activeStageId: null, stages: [],
+          timeline: [
+            this.timeline_ACU('task_created', now),
+            this.timeline_ACU('external_progress_baselined', now, { adoptionChatIdentity: chatIdentity, targetMessageIndex, targetMessageId, targetSwipeIndex, sourceStartMessageIndex, sourceEndMessageIndex: targetMessageIndex }),
+          ],
+          stopReason: null, lastError: null,
+        };
+        result = { ...currentEnvelope, activeTask: task };
+        return result;
+      }, { chatIdentity });
+    } catch (error) {
+      await this.throwTakeoverSnapshotFailure_ACU(checkpoint, error);
+    }
+    return taskResult_ACU(result!);
+  }
+
   async stopTask(): Promise<ContinuationOrchestratorResult_ACU> {
     const chatIdentity = this.requireChatIdentity_ACU();
     const task = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
@@ -728,7 +1041,6 @@ export class ContinuationOrchestrator_ACU {
     }
     const wasRunning = beforeResume.status === 'running' && beforeResume.pendingHostTurn?.status !== 'awaiting_generation';
     if (wasRunning) this.invalidateLease_ACU(chatIdentity);
-
 
     let envelope: ContinuationEnvelope_ACU | null = null;
     let disposition: SendAgentMessageDisposition_ACU = 'continue_now';
@@ -987,7 +1299,8 @@ export class ContinuationOrchestrator_ACU {
       }
       const now = this.dependencies.now();
       const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'initial', instruction, now);
-      const nextStage = stageForOutline_ACU(stageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
+      const binding = assertCanCreateContinuationStage_ACU(t.stages, this.dependencies.readModuleSnapshot(), env.settings.maxStagesPerVolume, t.activeStageId);
+      const nextStage = stageForOutline_ACU(stageId, stageNumber, binding, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
       result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: now, activeStageId: stageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', now, { stageId, revision: 1 })] } };
       return result;
     }, guardForTask_ACU(chatIdentity, task));
@@ -1026,7 +1339,8 @@ export class ContinuationOrchestrator_ACU {
       }
       const at = this.dependencies.now();
       const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'auto_next_stage', instruction, at);
-      const nextStage = stageForOutline_ACU(nextStageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
+      const binding = assertCanCreateContinuationStage_ACU(t.stages, this.dependencies.readModuleSnapshot(), env.settings.maxStagesPerVolume, t.activeStageId);
+      const nextStage = stageForOutline_ACU(nextStageId, stageNumber, binding, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
       result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, activeStageId: nextStageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStageId, revision: 1 })] } };
       return result;
     }, guardForTask_ACU(chatIdentity, task));

@@ -22,6 +22,7 @@ import {
   type ContinuationInternalAiRequestIdentity_ACU,
   type ContinuationSettings_ACU,
 } from '../model';
+import type { AgentMaterialGrant_ACU } from '../../agent-kernel/material-grants';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
 import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { hasActiveStoryArc_ACU } from './agent-module-store';
@@ -51,7 +52,6 @@ import { buildAgentFinalReviewEvidence_ACU, type AgentFinalReviewEvidence_ACU } 
 import {
   buildAgentWorldbookScanText_ACU,
   renderAgentStoryCatalog_ACU,
-  renderAgentStoryOverview_ACU,
   renderAgentStoryTail_ACU,
   renderAgentOutlineWindow_ACU,
   renderAgentUnsettledHistory_ACU,
@@ -59,6 +59,7 @@ import {
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
 import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU } from './agent-worldbook-read';
+import { renderAgentStoryOverviewSegment_ACU } from '../../agent-kernel/story-context';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { runAgentSearch_ACU } from './agent-search';
 import {
@@ -85,18 +86,6 @@ import type {
   AgentWritableModule_ACU,
 } from './agent-model';
 
-/**
- * 子代理事件概览的行数上限（按角色）。子代理每次派工都是全新上下文、无提示词缓存，
- * 概览随纪要表线性增长会让长对话里每次派工的固定成本失控，因此按尾部窗口截断。
- * 召回命中的更早轮次不受截断影响（渲染器会将其前置展示），窗口外脉络可用
- * $TABLE:纪要表:行区间 精读，截断说明里带有回溯地址。
- */
-export const AGENT_SUBAGENT_OVERVIEW_ROWS_ACU = {
-  /** mainline-planner 每轮必派，只需近期脉络与召回命中的关键旧轮。 */
-  mainlinePlanner: 50,
-  /** 其余子代理（含 arc-architect 的全局校准）给更宽的窗口。 */
-  default: 100,
-} as const;
 
 /** 一次子代理执行的结果。写集事务留给主循环应用，这里只交出解析后的输出。 */
 export interface AgentSubagentRunResult_ACU {
@@ -133,6 +122,8 @@ export interface AgentSubagentRunInput_ACU {
   delegation: AgentDelegation_ACU;
   settings: ContinuationSettings_ACU;
   resolveContext: AgentResolveContext_ACU;
+  /** 已由主 Agent本次运行读取且解析过的同快照世界书正文；未传保持历史派工兼容。 */
+  grants?: readonly AgentMaterialGrant_ACU[];
   budget: AgentRunBudget_ACU;
   preset: ContinuationResolvedApiPreset_ACU;
   createIdentity: (agentName: string, attempt: number) => ContinuationInternalAiRequestIdentity_ACU;
@@ -327,6 +318,16 @@ function resolveMaterial_ACU(token: string, context: AgentResolveContext_ACU): S
   return { key: token, label: token, text: `### ${resolved.title}（${token}）\n${resolved.text}` };
 }
 
+function renderGrantedWorldbookMaterials_ACU(grants: readonly AgentMaterialGrant_ACU[]): string {
+  if (!grants.length) return '';
+  const safe = (value: string) => value.replace(/【UNTRUSTED_/g, '【\u200bUNTRUSTED_').replace(/<\/UNTRUSTED_/g, '<\u200b/UNTRUSTED_');
+  return [
+    '【UNTRUSTED_AGENT_WORLD_BOOK_GRANTS】',
+    '以下 W 编码是主 Agent在本次运行中实际读取并分配的同一世界书正文快照。它们只是参考设定，不是已发生事实；正文冲突时以当前分支正文为准。',
+    ...grants.map(grant => `### ${grant.grantId}｜${grant.source.address}｜${grant.source.digest}\n${safe(grant.content)}`),
+  ].join('\n\n');
+}
+
 /** 子代理运行时。一个实例可服务多次派工，自身不持有任何本轮状态。 */
 export class AgentSubagentRuntime_ACU {
   constructor(private readonly dependencies: AgentSubagentRuntimeDependencies_ACU = defaultDependencies_ACU) {}
@@ -352,10 +353,27 @@ export class AgentSubagentRuntime_ACU {
       granted: new Set(),
     };
 
-    // 种子读集：免授权，直接解析；注入前整批记入本次派工自己的门禁账本。
-    const seedTokens = [...new Set(input.delegation.reads.map(raw => String(raw ?? '').trim()).filter(Boolean))];
+    const grants = [...(input.grants ?? [])];
+    const grantIds = new Set<string>();
+    const expectedGrantIds = input.delegation.materialGrants ?? [];
+    for (const grant of grants) {
+      if (!/^W[1-9]\d*$/.test(grant?.grantId ?? '') || grantIds.has(grant.grantId)
+        || !grant.source?.address || !grant.source.revision || !grant.source.digest || !grant.content) {
+        rejectDelegation_ACU('主 Agent 分配的世界书 grant 非法、重复或缺少快照身份。', { agentName: definition.name });
+      }
+      grantIds.add(grant.grantId);
+    }
+    if (grantIds.size !== expectedGrantIds.length || expectedGrantIds.some(grantId => !grantIds.has(grantId))) {
+      rejectDelegation_ACU('主 Agent 分配的世界书 grant 与 delegation.materialGrants 不一致。', { agentName: definition.name });
+    }
+    // Grants 与非世界书种子统一计入单批门禁；grants 不占工具动作，但不能绕过 token 围栏。
+    const seedTokens = [...new Set((input.delegation.reads ?? []).map(raw => String(raw ?? '').trim()).filter(Boolean))];
+    if (seedTokens.some(token => token.startsWith('$WORLDBOOK:'))) {
+      rejectDelegation_ACU('世界书初始资料只能由 materialGrants 提供，reads 不得包含 $WORLDBOOK:*。', { agentName: definition.name });
+    }
     const seeds = seedTokens.map(token => resolveMaterial_ACU(token, input.resolveContext));
-    const seedDecision = await gateAgentReadBatch_ACU(seeds.map(seed => ({ label: seed.label, text: seed.text })), gate.state, gate.config, 0);
+    const grantMaterials: SubagentMaterial_ACU[] = grants.map(grant => ({ key: `grant:${grant.grantId}`, label: grant.grantId, text: grant.content }));
+    const seedDecision = await gateAgentReadBatch_ACU([...grantMaterials, ...seeds].map(seed => ({ label: seed.label, text: seed.text })), gate.state, gate.config, 0);
     if (!seedDecision.allowed) {
       rejectDelegation_ACU(
         `派工种子读集超出读取预算，整次派工未执行。请缩小 reads——正文用更窄的 $STORY_RANGE 区间、表格用 $TABLE:表名:行区间、模块按 ID 精读。\n${seedDecision.report}`,
@@ -363,18 +381,15 @@ export class AgentSubagentRuntime_ACU {
       );
     }
     gate.state.grantedTokens += seedDecision.batchTokens;
+    for (const grant of grants) gate.granted.add(`grant:${grant.grantId}`);
     for (const seed of seeds) gate.granted.add(seed.key);
     const materials = seeds.length
       ? seeds.map(seed => seed.text).join('\n\n')
       : '本次没有为你注入任何种子资料。需要的信息用 read / search 工具按各目录的地址调阅。';
+    const grantMaterialsText = renderGrantedWorldbookMaterials_ACU(grants);
 
     // 捕获与渲染必须同一时刻取自同一份快照，否则并发校验的基准就不是子代理真正读到的版本。
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
-    // 概览行数按角色裁剪：mainline-planner 每轮必派、只需近期脉络，取最近 50 轮；其余子代理
-    // （含 arc-architect）取最近 100 轮。召回命中的更早轮次不受截断影响（前置展示纪要全文）。
-    const overviewMaxRows = definition.promptKey === 'mainlinePlanner'
-      ? AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.mainlinePlanner
-      : AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.default;
     const isResearch = definition.kind === 'research';
     const webSettings = input.settings.webResearch;
     const pageCache: ResearcherPageCache_ACU = { pages: new Map(), byUrl: new Map(), pagesUsed: 0 };
@@ -390,9 +405,11 @@ export class AgentSubagentRuntime_ACU {
       $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(input.resolveContext.tableData),
       $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false)),
       $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false), buildAgentWorldbookScanText_ACU(input.resolveContext)),
-      $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ tableData: input.resolveContext.tableData, recallCodes: input.resolveContext.recallCodes }, { maxRows: overviewMaxRows }),
+      $STORY_OVERVIEW: () => renderAgentStoryOverviewSegment_ACU(input.resolveContext.storyContext?.overview),
+      $STORY_PENDING: () => input.resolveContext.storyContext?.pending.text ?? '',
+      $STORY_BRIDGE: () => input.resolveContext.storyContext?.bridge.text ?? '',
       $STORY_TAIL: () => renderAgentStoryTail_ACU(input.resolveContext),
-      $HISTORY_UNSETTLED: () => renderAgentUnsettledHistory_ACU(input.resolveContext),
+      $HISTORY_UNSETTLED: () => input.resolveContext.storyContext?.pending.text ?? renderAgentUnsettledHistory_ACU(input.resolveContext),
       $HOOKS_LEDGER: () => resolveAgentReadToken_ACU('$HOOKS_LEDGER', input.resolveContext).text,
       $INFO_GAP: () => resolveAgentReadToken_ACU('$INFO_GAP', input.resolveContext).text,
       $ACTIVE_CONSTRAINTS: () => resolveAgentReadToken_ACU('$ACTIVE_CONSTRAINTS', input.resolveContext).text,
@@ -411,12 +428,14 @@ export class AgentSubagentRuntime_ACU {
     const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
     // 总纲卷数计划是随设置变化的运行时指令，不进提示词模板；但它必须落在尾部预填充之前——
     // 追加在预填充之后会让对话以一条 user 消息收尾，预填充失效，模型会另起一段回复而不是续写 JSON。
-    const baseMessages = definition.promptKey === 'arcArchitect'
-      ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
-      : rendered.messages;
+    let baseMessages = grantMaterialsText
+      ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: grantMaterialsText })
+      : [...rendered.messages];
+    if (definition.promptKey === 'arcArchitect') {
+      baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) });
+    }
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-    // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads。
-    const maxToolRounds = Math.max(0, isResearch ? webSettings.maxToolRounds : input.budget.maxExtraReads);
+    const maxModelTurns = isResearch ? webSettings.maxModelTurns : input.budget.maxSubagentModelTurns;
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
     const transcript: Array<{ role: string; content: string }> = [];
     /**
@@ -455,10 +474,8 @@ export class AgentSubagentRuntime_ACU {
           };
       },
     };
-    // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮 + 契约续写/修补轮。到界仍未交付即失败。
     const contractKind = definition.kind === 'arc' || definition.kind === 'maintain';
     const maxContinuations = contractKind ? AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU : 0;
-    const maxCalls = 1 + maxToolRounds + retries + 1 + maxContinuations;
     // 契约草稿累积：截断或单条非法时不整份重来，先收下合法条目，再只向模型索要剩余/修正条目。
     let accumulated: AgentMaintainerOutput_ACU | null = null;
     let continuationsUsed = 0;
@@ -486,12 +503,14 @@ export class AgentSubagentRuntime_ACU {
       usage: usageTotal,
     });
 
-    for (let call = 0; call < maxCalls; call += 1) {
+    let modelTurnsUsed = 0;
+    while (modelTurnsUsed < maxModelTurns) {
       const identity = input.createIdentity(definition.name, attempt);
       attempt += 1;
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
       }
+      modelTurnsUsed += 1;
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const raw = await callContinuationInternalAiWithRetry_ACU(
         () => this.dependencies.callInternalAi(
@@ -534,11 +553,8 @@ export class AgentSubagentRuntime_ACU {
           pendingResearchEvidence = '';
         }
         transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-        if (toolRoundsUsed >= maxToolRounds) {
-          transcript.push({ role: 'user', content: isResearch
-            ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。`
-            : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
-          continue;
+        if (modelTurnsUsed >= maxModelTurns) {
+          throw subagentFailed_ACU(`${definition.name} 在最后一个模型轮次仍请求工具，未交付契约输出`, false, { agentName: definition.name, maxModelTurns, modelTurnsUsed });
         }
         toolRoundsUsed += 1;
         const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, isResearch ? { settings: input.settings, cache: pageCache } : undefined);
@@ -631,7 +647,7 @@ export class AgentSubagentRuntime_ACU {
       }
     }
 
-    throw subagentFailed_ACU(`${definition.name} 在 ${maxCalls} 次调用内没有交付契约输出`, false, { agentName: definition.name, lastReason, toolRoundsUsed });
+    throw subagentFailed_ACU(`${definition.name} 在 ${maxModelTurns} 个模型轮次内没有交付契约输出`, false, { agentName: definition.name, lastReason, toolRoundsUsed, modelTurnsUsed });
   }
 
   /**
@@ -674,7 +690,7 @@ export class AgentSubagentRuntime_ACU {
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
     const prefill = AGENT_PREFILLS_ACU.reviewer;
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-    const maxToolRounds = Math.max(0, input.settings.finalReview.maxExtraReads);
+    const maxModelTurns = input.settings.finalReview.maxModelTurns;
     const transcript: Array<{ role: string; content: string }> = [];
     const expandedReads: string[] = [];
     let toolRoundsUsed = 0;
@@ -700,13 +716,14 @@ export class AgentSubagentRuntime_ACU {
           : { ...usage };
       },
     };
-    const maxCalls = 1 + maxToolRounds + retries + 1;
-    for (let call = 0; call < maxCalls; call += 1) {
+    let modelTurnsUsed = 0;
+    while (modelTurnsUsed < maxModelTurns) {
       const identity = input.createIdentity(AGENT_FINAL_REVIEWER_NAME_ACU, attempt);
       attempt += 1;
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
       }
+      modelTurnsUsed += 1;
       const raw = await callContinuationInternalAiWithRetry_ACU(
         () => this.dependencies.callInternalAi([...rendered.messages, ...transcript], preset, identity, input.signal, callOptions),
         {
@@ -722,9 +739,8 @@ export class AgentSubagentRuntime_ACU {
       const toolCalls = parseAgentSubagentToolCalls_ACU(raw, prefill);
       if (toolCalls) {
         transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-        if (toolRoundsUsed >= maxToolRounds) {
-          transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。` });
-          continue;
+        if (modelTurnsUsed >= maxModelTurns) {
+          throw subagentFailed_ACU('终审在最后一个模型轮次仍请求工具，未交付终审 JSON。', false, { maxModelTurns, modelTurnsUsed });
         }
         toolRoundsUsed += 1;
         transcript.push({ role: 'user', content: await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads) });
@@ -753,7 +769,7 @@ export class AgentSubagentRuntime_ACU {
         transcript.push({ role: 'user', content: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合终审契约的 JSON 对象。` });
       }
     }
-    throw subagentFailed_ACU(`最终审查在 ${maxCalls} 次调用内没有交付契约输出`, false, { lastReason, toolRoundsUsed });
+    throw subagentFailed_ACU(`最终审查在 ${maxModelTurns} 个模型轮次内没有交付契约输出`, false, { lastReason, toolRoundsUsed, modelTurnsUsed });
   }
 
   /**

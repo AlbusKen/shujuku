@@ -29,30 +29,46 @@ async function flushSave(nextTick: () => Promise<void>): Promise<void> {
 afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); });
 
 describe('WorldSimulationSettingsPanel', () => {
-  it('mounts a four-role local draft without persistence, then saves the edited prompt explicitly', async () => {
+  it('mounts a four-role local prompt draft, reorders segments, and saves only explicitly', async () => {
     const { app, el, settings, received, nextTick } = await mountPanel();
     expect(settings.worldSimulation).toBeUndefined();
-    expect(el.textContent).toContain('四角色伪 Role 提示词');
+    expect(el.textContent).toContain('四角色 Prompt Segments');
     expect(el.textContent).toContain('主 Agent（world-director）');
     expect(el.textContent).toContain('实体子代理（entity-movement）');
     expect(el.textContent).toContain('事件子代理（faction-events）');
     expect(el.textContent).toContain('线索子代理（thread-weaver）');
 
-    const prompt = el.querySelector<HTMLTextAreaElement>('.acu-prompt-segs textarea');
-    expect(prompt).not.toBeNull();
-    prompt!.value = '只选择所需子代理，不直接写账本。';
-    prompt!.dispatchEvent(new Event('input', { bubbles: true }));
+    const prompts = el.querySelectorAll<HTMLTextAreaElement>('.world-simulation-settings__prompt-agent textarea');
+    expect(prompts.length).toBeGreaterThan(2);
+    prompts[1]!.value = '只选择所需子代理，不直接写账本。';
+    prompts[1]!.dispatchEvent(new Event('input', { bubbles: true }));
+    const down = el.querySelector<HTMLButtonElement>('.world-simulation-settings__prompt-agent button[title="下移该段"]');
+    down!.click();
     await nextTick();
     expect(settings.worldSimulation).toBeUndefined();
 
     const save = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存世界推演设置');
     save!.click(); await flushSave(nextTick);
     expect(settings.worldSimulation.agentPrompts['world-director'][0].content).toBe('只选择所需子代理，不直接写账本。');
+    expect(settings.worldSimulation.agentGuidance).toBeUndefined();
     expect(received).toHaveBeenCalledTimes(1);
     app.unmount();
   });
 
-  it('exports and imports only a complete strict pseudo-role configuration into the local draft', async () => {
+  it('persists the explicit read/search switch only after the user saves the local draft', async () => {
+    const { app, el, settings, nextTick } = await mountPanel();
+    expect(el.textContent).toContain('允许 Agent 使用 read/search');
+    const switches = Array.from(el.querySelectorAll<HTMLButtonElement>('[role="switch"]'));
+    expect(switches).toHaveLength(3);
+    switches[2]!.click(); await nextTick();
+    expect(settings.worldSimulation).toBeUndefined();
+    const save = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存世界推演设置');
+    save!.click(); await flushSave(nextTick);
+    expect(settings.worldSimulation.toolsEnabled).toBe(false);
+    app.unmount();
+  });
+
+  it('exports and imports only a complete prompt-segment configuration into the local draft', async () => {
     const { app, el, settings, nextTick } = await mountPanel();
     const exportButton = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '导出到文本');
     exportButton!.click(); await nextTick();

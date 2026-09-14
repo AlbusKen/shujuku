@@ -8,14 +8,24 @@ export type WorldClockPrecision_ACU = 'exact' | 'approximate' | 'unknown';
 export type WorldEntityImportance_ACU = 'core' | 'active' | 'background';
 export type WorldSimulationAgentName_ACU = 'world-director' | 'entity-movement' | 'faction-events' | 'thread-weaver';
 export type WorldSimulationPromptRole_ACU = 'system' | 'user' | 'assistant';
+/** Ordered, user-configurable prompt segments. Fixed runtime injections use whole-segment placeholders. */
 export interface WorldSimulationPromptSegment_ACU { role: WorldSimulationPromptRole_ACU; content: string; enabled: boolean; deletable: boolean; }
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
+/** Historical persisted shape, retained only for one-time settings migration. */
+export type WorldSimulationAgentGuidance_ACU = Record<WorldSimulationAgentName_ACU, string>;
 
 export interface WorldSimulationBudget_ACU {
-  maxIterations: number;
+  /** Total model outputs available to world-director; tools consume this same cap. */
+  maxMasterModelTurns: number;
+  /** Total model outputs available to each delegated specialist; tools consume this same cap. */
+  maxSpecialistModelTurns: number;
   maxDelegations: number;
-  maxReads: number;
   readTokenBudget: WorldReadBudgetTier_ACU;
+  /**
+   * Read-only compatibility metadata copied from legacy `maxReads`. It is never a runtime budget.
+   * Null means this settings object was created after cumulative read-count retirement.
+   */
+  legacyReadCount: number | null;
 }
 
 export interface WorldStoryClock_ACU {
@@ -163,8 +173,13 @@ export interface WorldSimulationSettings_ACU {
   maxTrackedEntities: number;
   visibilityPolicy: WorldVisibilityPolicy_ACU;
   showHiddenInUi: boolean;
+  /** Enables the model-facing read/search protocol; fixed story context remains available either way. */
+  toolsEnabled: boolean;
   budgets: Record<WorldSimulationScale_ACU, WorldSimulationBudget_ACU>;
+  /** The only persisted prompt layout; segments determine fixed injection placement. */
   agentPrompts: WorldSimulationAgentPrompts_ACU;
+  /** Identifies the prompt-placeholder persistence contract. */
+  promptForceDefaultVersion: string;
 }
 
 export interface WorldSimulationEnvelope_ACU {

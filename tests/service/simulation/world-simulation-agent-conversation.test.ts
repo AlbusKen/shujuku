@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 import { WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
-import { appendWorldSimulationConversation_ACU, readWorldSimulationConversationTimeline_ACU, readWorldSimulationConversationTimelineWithDiagnostics_ACU, updateWorldSimulationConversationStatus_ACU, WORLD_SIMULATION_AGENT_CONVERSATION_FIELD_ACU } from '../../../src/service/simulation/world-simulation-agent-conversation';
+import { appendWorldSimulationConversation_ACU, readNextPendingWorldSimulationInstruction_ACU, readWorldSimulationConversationTimeline_ACU, readWorldSimulationConversationTimelineWithDiagnostics_ACU, updateWorldSimulationConversationStatus_ACU, WORLD_SIMULATION_AGENT_CONVERSATION_FIELD_ACU } from '../../../src/service/simulation/world-simulation-agent-conversation';
 import { resolveActiveWorldSimulationSwipe_ACU } from '../../../src/service/simulation/simulation-swipe';
 
 const saveChat = vi.fn(async () => undefined);
@@ -46,6 +46,13 @@ describe('world simulation agent conversation', () => {
     const timeline = readWorldSimulationConversationTimelineWithDiagnostics_ACU(value);
     expect(timeline.invalidMessageIndexes).toEqual([0]);
     expect(timeline.messages).toMatchObject([{ title: '有效请求' }]);
+  });
+
+  it('returns pending user instructions in their append order', async () => {
+    const value = chat(); useChat(value);
+    await appendWorldSimulationConversation_ACU(0, [{ kind: 'user', status: 'pending', title: '第一条', detail: '先处理' }], value);
+    await appendWorldSimulationConversation_ACU(0, [{ kind: 'user', status: 'pending', title: '第二条', detail: '后处理' }], value);
+    expect(readNextPendingWorldSimulationInstruction_ACU(value)).toMatchObject({ id: 1, text: '先处理' });
   });
 
   it('restores the exact prior field when strict host save fails', async () => {

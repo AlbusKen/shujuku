@@ -7,6 +7,7 @@ import {
 } from '../../service/continuation/agent/agent-module-store';
 import { ContinuationValidationError_ACU } from '../../service/continuation/model';
 import type { AgentModuleSnapshot_ACU } from '../../service/continuation/agent/agent-model';
+import { CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU } from '../../service/continuation/continuation-volume-capacity';
 import { useToastStore } from '../stores/toast-store';
 
 /** 用户可分模块编辑的六项资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
@@ -52,7 +53,7 @@ function emptyModuleState_ACU(): ModuleDraftState_ACU {
  * 数据提交给 replaceAgentModuleSnapshotByUser_ACU，其 merge 语义保留其余模块的磁盘值；
  * 一个模块保存成功只重置该模块的草稿，其他模块未保存的编辑不受影响（dirty 按模块隔离）。
  */
-export function useContinuationMaterials() {
+export function useContinuationMaterials(getMaxStagesPerVolume: () => number = () => CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU) {
   const toast = useToastStore();
   const snapshot = ref<AgentModuleSnapshot_ACU | null>(null);
   const loadError = ref('');
@@ -120,7 +121,7 @@ export function useContinuationMaterials() {
     state.saving = true;
     try {
       // 只提交本模块：写入侧按 merge 语义保留其余模块的磁盘值，不会覆盖别的模块。
-      const saved = await replaceAgentModuleSnapshotByUser_ACU({ [module]: parsed });
+      const saved = await replaceAgentModuleSnapshotByUser_ACU({ [module]: parsed }, undefined, getMaxStagesPerVolume());
       snapshot.value = saved;
       resetModule(module, saved);
       toast.success(`${CONTINUATION_MATERIAL_MODULE_LABELS_ACU[module]}已保存，修订号已推进。`);

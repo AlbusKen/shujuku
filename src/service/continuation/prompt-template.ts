@@ -30,8 +30,8 @@ export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$OUTLINE_WINDOW',
   // 目录+状态骨架占位符：楼层索引、大纲单行状态、已启用世界书目录、读集词汇表。
   '$STORY_CATALOG', '$OUTLINE_STATE', '$WORLDBOOK_CATALOG', '$AGENT_READ_CATALOG',
-  // 三层正文注入与世界书命中：事件概览、尾部全文楼层、未结算正文全量、本轮语境命中条目。
-  '$STORY_OVERVIEW', '$STORY_TAIL', '$HISTORY_UNSETTLED', '$WORLDBOOK_HITS',
+  // 固定正文快照与世界书命中：事件概览、pending、bridge、目录与遗留兼容出口。
+  '$STORY_OVERVIEW', '$STORY_PENDING', '$STORY_BRIDGE', '$STORY_TAIL', '$HISTORY_UNSETTLED', '$WORLDBOOK_HITS',
   // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚、跨阶段节奏状态。
   '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET', '$PACING_CONTEXT',
   // 百科资料库：全量摘要 / 目录行 / web-researcher 专用的出网工具说明。

@@ -97,6 +97,8 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
     readCompactionMark: () => null,
     writeCompactionMark: async () => true,
     loadWorldbook: async () => buildEmptyAgentWorldbookSnapshot_ACU(true),
+    loadStoryOverview: async () => ({ state: 'empty', content: '', digest: 'test-empty-overview', diagnostic: 'test fixture', worldbookName: 'test-book', comment: 'test-comment' }),
+    requirementsStore: { read: () => null, userSourceIds: () => [], pendingSourceIds: () => [], replace: async () => { throw new Error('requirements store should not be called'); } },
     budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1 },
   });
 

@@ -69,11 +69,19 @@ export function normalizeGeneratedWhitespace_ACU(input) {
   let fixedClosingLineCount = 0;
   let fixedTrailingWhitespaceLineCount = 0;
   let state = 'code';
-  const lines = String(input).split(/(\r?\n)/);
+  // Rollup may concatenate CRLF third-party chunks into otherwise LF artifacts. Git regards
+  // the retained CR on changed lines as trailing whitespace, so generated artifacts are LF-only.
+  const lines = String(input).replace(/\r\n/g, '\n').split(/(\n)/);
   for (let i = 0; i < lines.length; i += 2) {
     const originalLine = lines[i];
     let line = originalLine;
-    if (state === 'code') {
+    // CSS and HTML template literals can contain indentation-only blank lines. They have
+    // no text payload, so removing that indentation is safe even while inside a literal.
+    if (/^[\t ]+$/.test(line)) {
+      line = '';
+      fixedTrailingWhitespaceLineCount += 1;
+    }
+    if (state === 'code' && line) {
       line = line.replace(/^( +)(\t+)/, (_match, _spaces, tabs) => {
         fixedIndentLineCount += 1;
         return tabs;

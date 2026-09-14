@@ -14,8 +14,8 @@
         <textarea :value="draft" rows="3" placeholder="补充你希望世界侧推进、保留或撤销的方向；这不是已发生事实。" @input="draft = ($event.target as HTMLTextAreaElement).value" @keydown="onKeydown" />
         <div class="world-sim-chat__actions">
           <span>Ctrl / ⌘ + Enter 发送</span>
-          <AcuButton v-if="running" variant="danger" @click="stop">停止</AcuButton>
-          <AcuButton v-else variant="primary" :disabled="!draft.trim()" @click="send">发送</AcuButton>
+          <AcuButton v-if="running" variant="danger" @click="interrupt">中断并维护</AcuButton>
+          <AcuButton variant="primary" :disabled="!draft.trim() || busy" @click="send">发送</AcuButton>
         </div>
       </div>
     </div>
@@ -35,8 +35,8 @@ const entries = ref<WorldSimulationConversationMessage_ACU[]>([]);
 const draft = ref('');
 const busy = ref(false);
 const notice = ref('');
-const running = computed(() => busy.value || runtime.isAgentSessionRunning());
-const committing = computed(() => runtime.isAgentSessionCommitting?.() === true);
+const running = computed(() => busy.value || runtime.isAgentSessionRunning() || runtime.isAutomaticFlightRunning?.() === true);
+const committing = computed(() => runtime.isAgentSessionCommitting?.() === true || runtime.isAutomaticFlightCommitting?.() === true);
 function refresh(): void {
   const timeline = readWorldSimulationConversationTimelineWithDiagnostics_ACU();
   entries.value = timeline.messages;
@@ -45,16 +45,21 @@ function refresh(): void {
   }
 }
 function label(entry: WorldSimulationConversationMessage_ACU): string { return entry.kind === 'user' ? '你' : entry.kind === 'plan' ? '主 Agent' : entry.agentName || entry.kind; }
-async function send(): Promise<void> { const text = draft.value.trim(); if (!text || running.value) return; busy.value = true; notice.value = ''; try { const result = await runtime.submitAgentMessage(text); draft.value = ''; notice.value = result === 'queued' ? '请求已排队，下一条可用 AI 楼层会处理。' : result === 'started_with_audit_warning' ? '世界账本已联合提交，但会话审计同步失败；不要重复发送同一请求。' : '请求已提交给世界推演 Agent。'; } catch (error) { notice.value = error instanceof Error ? error.message : String(error); } finally { busy.value = false; refresh(); } }
-function stop(): void {
-  const result = runtime.stopAgentSession();
-  notice.value = result === 'committed'
-    ? '世界账本已联合提交；会话审计同步仍在进行，无需重复发送请求。'
-    : result === 'committing'
-    ? '世界账本严格保存已开始，无法取消；正在等待联合保存完成。'
-    : result === 'aborted'
-      ? '已请求停止；尚未取得提交权的账本变化不会落盘。'
-      : '当前没有可停止的世界推演 Agent 会话。';
+async function send(): Promise<void> { const text = draft.value.trim(); if (!text || busy.value) return; busy.value = true; notice.value = ''; try { const result = await runtime.submitAgentMessage(text); draft.value = ''; notice.value = result === 'queued' ? '请求已排队，当前飞行完成后会按顺序处理。' : result === 'started_with_audit_warning' ? '世界账本已联合提交，但会话审计同步失败；不要重复发送同一请求。' : '请求已提交给世界推演 Agent。'; } catch (error) { notice.value = error instanceof Error ? error.message : String(error); } finally { busy.value = false; refresh(); } }
+async function interrupt(): Promise<void> {
+  if (busy.value) return;
+  busy.value = true; notice.value = '';
+  try {
+    const instruction = draft.value.trim() || '中止当前可取消的世界推演，并先维护后续请求。';
+    const result = await runtime.interruptAndMaintain({ action: 'interrupt_and_maintain', instruction });
+    draft.value = '';
+    notice.value = result === 'queued_after_commit'
+      ? '世界账本严格保存已开始，无法取消；中断请求已排队，保存完成后会先维护。'
+      : result === 'queued_after_abort' || result === 'queued_after_flight'
+        ? '当前可取消飞行已中断；请求将按顺序先维护。'
+        : '中断请求已提交给世界推演 Agent。';
+  } catch (error) { notice.value = error instanceof Error ? error.message : String(error); }
+  finally { busy.value = false; refresh(); }
 }
 function onKeydown(event: KeyboardEvent): void { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void send(); } }
 let unsubscribe: (() => void) | null = null;

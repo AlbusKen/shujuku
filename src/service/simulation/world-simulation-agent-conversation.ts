@@ -142,8 +142,6 @@ export async function appendWorldSimulationConversation_ACU(
   }
 }
 
-
-
 async function writeEnvelope_ACU(message: Record<string, unknown>, envelope: ConversationEnvelope_ACU): Promise<void> {
   const had = Object.prototype.hasOwnProperty.call(message, WORLD_SIMULATION_AGENT_CONVERSATION_FIELD_ACU);
   const previous = message[WORLD_SIMULATION_AGENT_CONVERSATION_FIELD_ACU];
@@ -158,8 +156,9 @@ async function writeEnvelope_ACU(message: Record<string, unknown>, envelope: Con
   }
 }
 
-export function readLatestPendingWorldSimulationInstruction_ACU(chat: any[] = getChatArray_ACU()): WorldSimulationConversationRef_ACU | null {
-  let latest: (WorldSimulationConversationRef_ACU & { at: number }) | null = null;
+/** Returns the oldest active-swipe user request so queued instructions retain message order. */
+export function readNextPendingWorldSimulationInstruction_ACU(chat: any[] = getChatArray_ACU()): WorldSimulationConversationRef_ACU | null {
+  let next: (WorldSimulationConversationRef_ACU & { at: number }) | null = null;
   for (let index = 0; index < chat.length; index += 1) {
     const message = chat[index];
     if (!record(message) || message[WORLD_SIMULATION_AGENT_CONVERSATION_FIELD_ACU] === undefined) continue;
@@ -167,13 +166,13 @@ export function readLatestPendingWorldSimulationInstruction_ACU(chat: any[] = ge
       const { active, envelope } = entryFor(message, index);
       const entry = envelope.entries.find(item => sameSwipeLocation(item.swipe, active.identity));
       for (const item of entry?.messages ?? []) {
-        if (item.kind === 'user' && item.status === 'pending' && (!latest || item.at >= latest.at)) {
-          latest = { messageIndex: index, swipe: { ...active.identity }, id: item.id, text: item.detail, at: item.at };
+        if (item.kind === 'user' && item.status === 'pending' && (!next || item.at < next.at || (item.at === next.at && (index < next.messageIndex || (index === next.messageIndex && item.id < next.id))))) {
+          next = { messageIndex: index, swipe: { ...active.identity }, id: item.id, text: item.detail, at: item.at };
         }
       }
     } catch (_) { /* A non-authoritative damaged floor cannot block requests from valid floors. */ }
   }
-  return latest && { messageIndex: latest.messageIndex, swipe: latest.swipe, id: latest.id, text: latest.text };
+  return next && { messageIndex: next.messageIndex, swipe: next.swipe, id: next.id, text: next.text };
 }
 
 export async function updateWorldSimulationConversationStatus_ACU(

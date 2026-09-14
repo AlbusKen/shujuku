@@ -9,6 +9,9 @@
 import type { StageTurn_ACU, StageTurnPacing_ACU } from '../model';
 import { describeStageTempo_ACU } from '../outline-schema';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
+import { renderAgentStoryOverviewSegment_ACU, type AgentStoryContextSnapshot_ACU } from '../../agent-kernel/story-context';
+import type { AgentMaterialGrantTable_ACU } from '../../agent-kernel/material-grants';
+import type { AgentRequirementSnapshot_ACU } from '../../agent-kernel/requirements';
 import {
   AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
   AGENT_STORY_WINDOW_DEFAULT_ACU,
@@ -80,6 +83,13 @@ export interface AgentResolveContext_ACU {
   tableData?: unknown;
   /** 运行起点预取的世界书快照；缺省为不可用空快照（如测试环境）。 */
   worldbook?: AgentWorldbookSnapshot_ACU;
+  /** 固定正文快照；生产 Agent 运行只消费该快照，防止中途正文或概要漂移。 */
+  storyContext?: AgentStoryContextSnapshot_ACU;
+  /** 当前 continuation run 的世界书授权表，只是运行内快照，绝不持久化正文。 */
+  materialGrantTable?: AgentMaterialGrantTable_ACU;
+  /** 当前有效用户要求的独立 sidecar 快照。 */
+  requirementsSnapshot?: AgentRequirementSnapshot_ACU | null;
+  pendingRequirementSourceIds?: readonly string[];
   /** 上下文提取/排除规则；缺省不做任何过滤。 */
   contextRules?: AgentContextRules_ACU;
   /** 本轮召回的 AM 码（取自最后一个用户楼层）；缺省为空。 */
@@ -108,7 +118,7 @@ interface AgentStoryFloor_ACU {
   text: string;
 }
 
-function listAgentStoryFloors_ACU(source: AgentStoryFloorSource_ACU): AgentStoryFloor_ACU[] {
+export function listAgentStoryFloors_ACU(source: AgentStoryFloorSource_ACU): AgentStoryFloor_ACU[] {
   const chat = Array.isArray(source.chat) ? source.chat : [];
   return chat
     .map((message, index) => ({ index, text: messageText_ACU(message, source.contextRules) }))
@@ -627,10 +637,10 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
   const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;
   switch (normalized) {
     case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
-    case '$STORY_CATALOG': return { title, text: renderAgentStoryCatalog_ACU(context) };
-    case '$STORY_OVERVIEW': return { title, text: renderAgentStoryOverview_ACU(context) };
+    case '$STORY_CATALOG': return { title, text: context.storyContext?.catalog.text ?? renderAgentStoryCatalog_ACU(context) };
+    case '$STORY_OVERVIEW': return { title, text: renderAgentStoryOverviewSegment_ACU(context.storyContext?.overview) };
     case '$STORY_TAIL': return { title, text: renderAgentStoryTail_ACU(context) };
-    case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
+    case '$HISTORY_UNSETTLED': return { title, text: context.storyContext?.pending.text ?? renderAgentUnsettledHistory_ACU(context) };
     case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
     case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
     case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnGuidance_ACU(context.execution.turn ?? null) };

@@ -15,6 +15,7 @@ import {
   AGENT_CHRONOLOGY_PRECISIONS_ACU,
   AGENT_HOOK_IMPORTANCES_ACU,
   AGENT_HOOK_STATUSES_ACU,
+  AGENT_PLAN_CONTROL_OPERATIONS_ACU,
   AGENT_REVEAL_STATUSES_ACU,
   AGENT_REVIEW_VERDICTS_ACU,
   AGENT_SEARCH_SCOPES_ACU,
@@ -31,6 +32,7 @@ import {
   type AgentInfoGapPatch_ACU,
   type AgentMainAction_ACU,
   type AgentMaintainerOutput_ACU,
+  type AgentPlanControlAction_ACU,
   type AgentModuleDelta_ACU,
   type AgentPlannerOutput_ACU,
   type AgentReviewerOutput_ACU,
@@ -195,12 +197,25 @@ function parseDelegations_ACU(value: unknown): AgentDelegation_ACU[] {
   if (!Array.isArray(value) || !value.length) failProtocol_ACU('delegate 动作必须提供非空的 delegations 数组');
   return value.map((raw, index) => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delegations[${index}] 必须是对象`);
+    for (const key of Object.keys(raw)) {
+      if (!['agentName', 'prompt', 'reads', 'materialGrants', 'writes'].includes(key)) failProtocol_ACU(`delegations[${index}] 包含未知字段：${key}`);
+    }
     const agentName = readText_ACU(raw.agentName);
     const prompt = readText_ACU(raw.prompt);
     if (!agentName) failProtocol_ACU(`delegations[${index}].agentName 不能为空`);
     if (!prompt) failProtocol_ACU(`delegations[${index}].prompt 不能为空`);
-    // 旧协议的 writes 字段静默忽略：写入范围由子代理职责固定决定，不再由主 Agent 授权。
-    return { agentName, prompt, reads: readTextList_ACU(raw.reads) };
+    if (raw.materialGrants !== undefined && !Array.isArray(raw.materialGrants)) failProtocol_ACU(`delegations[${index}].materialGrants 必须是数组`);
+    const materialGrants = raw.materialGrants === undefined ? [] : readTextList_ACU(raw.materialGrants);
+    if ((raw.materialGrants !== undefined && (raw.materialGrants as unknown[]).length !== materialGrants.length)
+      || new Set(materialGrants).size !== materialGrants.length
+      || materialGrants.some(grant => !/^W[1-9]\d*$/.test(grant))) {
+      failProtocol_ACU(`delegations[${index}].materialGrants 必须是不重复的 W 编码数组`);
+    }
+    if (raw.reads !== undefined && !Array.isArray(raw.reads)) failProtocol_ACU(`delegations[${index}].reads 必须是数组`);
+    const reads = readTextList_ACU(raw.reads);
+    if (raw.reads !== undefined && (raw.reads as unknown[]).length !== reads.length) failProtocol_ACU(`delegations[${index}].reads 必须是非空字符串数组`);
+    if (reads.some(read => read.startsWith('$WORLDBOOK:'))) failProtocol_ACU(`delegations[${index}].reads 不得绕过 materialGrants 初始下发世界书`);
+    return { agentName, prompt, materialGrants, reads };
   });
 }
 
@@ -282,16 +297,18 @@ function collectActionObjects_ACU(raw: string | null | undefined, prefill: strin
  * @param raw 模型返回的原始文本
  * @param prefill 尾段预填充
  * @param allowDelegate 本轮是否仍允许派工
+ * @param allowTools 本轮是否仍允许 read/search；最后一个模型轮次只能收敛或阻断
  * @returns 判别联合形式的动作对象（可能是 tools 批次）
  */
-export function parseAgentMainOutput_ACU(raw: string | null | undefined, prefill: string, allowDelegate: boolean): AgentMainAction_ACU {
+export function parseAgentMainOutput_ACU(raw: string | null | undefined, prefill: string, allowDelegate: boolean, allowTools = true): AgentMainAction_ACU {
   const { records } = collectActionObjects_ACU(raw, prefill);
   const toolRecords = records.filter(record => { const action = readText_ACU(record.action); return action === 'read' || action === 'search'; });
   if (toolRecords.length) {
+    if (!allowTools) failProtocol_ACU('本轮为最后一个模型轮次，已禁用 read/search，必须输出 finalize 或 block');
     const calls = toolRecords.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(parseAgentToolCall_ACU);
     return { kind: 'tools', thought: readText_ACU(toolRecords[0].thought), calls };
   }
-  return parseAgentMainAction_ACU(records[0], allowDelegate);
+  return parseAgentMainAction_ACU(records[0], allowDelegate, allowTools);
 }
 
 /**
@@ -479,11 +496,47 @@ function parseWebRefsExpectedRevision_ACU(value: unknown): number | undefined {
  * 解析主 Agent 的一次协议动作。
  * @param payload 已解析的 JSON 载荷
  * @param allowDelegate 本轮是否仍允许派工（预算最后一轮为 false）
+ * @param allowTools 本轮是否仍允许 read/search 或 requirements maintenance
  * @returns 判别联合形式的动作对象
  */
-export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allowDelegate: boolean): AgentMainAction_ACU {
+export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allowDelegate: boolean, allowTools = true): AgentMainAction_ACU {
   const action = readText_ACU(payload.action);
   const thought = readText_ACU(payload.thought);
+  if (action === 'plan_control') {
+    if (!allowTools) failProtocol_ACU('本轮为最后一个模型轮次，已禁用 plan_control，必须输出 finalize 或 block');
+    const keys = ['thought', 'action', 'operation', 'instruction', 'volumeIds', 'stageId', 'targetMessageIndex'];
+    for (const key of Object.keys(payload)) if (!keys.includes(key)) failProtocol_ACU(`plan_control 包含未知字段：${key}`);
+    for (const key of keys.slice(2)) if (!(key in payload)) failProtocol_ACU(`plan_control 缺少字段：${key}`);
+    const operation = readText_ACU(payload.operation);
+    if (!(AGENT_PLAN_CONTROL_OPERATIONS_ACU as readonly string[]).includes(operation)) failProtocol_ACU(`plan_control.operation 非法：${operation || '(空)'}`);
+    const instruction = readText_ACU(payload.instruction);
+    if (!instruction) failProtocol_ACU('plan_control.instruction 必须是非空的具体要求');
+    if (!Array.isArray(payload.volumeIds)) failProtocol_ACU('plan_control.volumeIds 必须是数组');
+    const volumeIds = payload.volumeIds.map((item, index) => {
+      const id = readText_ACU(item);
+      if (!id) failProtocol_ACU(`plan_control.volumeIds[${index}] 必须是非空字符串`);
+      return id;
+    });
+    if (new Set(volumeIds).size !== volumeIds.length) failProtocol_ACU('plan_control.volumeIds 不得重复');
+    if (typeof payload.stageId !== 'string') failProtocol_ACU('plan_control.stageId 必须是字符串');
+    const stageId = payload.stageId.trim();
+    const targetMessageIndex = payload.targetMessageIndex === null
+      ? null
+      : Number.isInteger(payload.targetMessageIndex) && (payload.targetMessageIndex as number) >= 0
+        ? payload.targetMessageIndex as number
+        : (() => failProtocol_ACU('plan_control.targetMessageIndex 必须是非负整数或 null'))();
+    const requiresVolumeIds = operation === 'revise_story_arc';
+    const requiresStageId = ['revise_outline_remaining', 'regenerate_current_outline', 'continue_next_stage'].includes(operation);
+    const requiresTarget = operation === 'adopt_external_progress';
+    if ((requiresVolumeIds && !volumeIds.length) || (!requiresVolumeIds && volumeIds.length)) failProtocol_ACU(`${operation} 的 volumeIds 字段不符合协议`);
+    if ((requiresStageId && !stageId) || (!requiresStageId && stageId)) failProtocol_ACU(`${operation} 的 stageId 字段不符合协议`);
+    if ((requiresTarget && targetMessageIndex === null) || (!requiresTarget && targetMessageIndex !== null)) failProtocol_ACU(`${operation} 的 targetMessageIndex 字段不符合协议`);
+    return { kind: 'plan_control', thought, operation: operation as AgentPlanControlAction_ACU['operation'], instruction, volumeIds, stageId, targetMessageIndex };
+  }
+  if (action === 'maintain_requirements') {
+    if (!allowTools) failProtocol_ACU('本轮为最后一个模型轮次，已禁用要求维护，必须输出 finalize 或 block');
+    return { kind: 'maintain_requirements', thought, payload: { ...payload } };
+  }
   if (action === 'delegate') {
     if (!allowDelegate) failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
     return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
@@ -507,9 +560,10 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     return { kind: 'block', thought, reason, unresolved: readTextList_ACU(payload.unresolved) };
   }
   if (action === 'read' || action === 'search') {
+    if (!allowTools) failProtocol_ACU('本轮为最后一个模型轮次，已禁用 read/search，必须输出 finalize 或 block');
     return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
   }
-  failProtocol_ACU(`action 必须是 read / search / delegate / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 maintain_requirements / read / search / delegate / plan_control / finalize / block 之一；实际收到：${action || '(空)'}`);
 }
 
 function parseCharacterKnowledge_ACU(value: unknown): AgentInfoGapDeltaItem_ACU['characterKnowledge'] {

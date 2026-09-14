@@ -24,9 +24,9 @@ function custom() {
     visibilityPolicy: 'always_revealed' as const,
     showHiddenInUi: true,
     budgets: {
-      light: { maxIterations: 2, maxDelegations: 0, maxReads: 1, readTokenBudget: 'low' as const },
-      normal: { maxIterations: 6, maxDelegations: 3, maxReads: 9, readTokenBudget: 'high' as const },
-      deep: { maxIterations: 11, maxDelegations: 5, maxReads: 30, readTokenBudget: 'medium' as const },
+      light: { maxMasterModelTurns: 2, maxSpecialistModelTurns: 2, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' as const },
+      normal: { maxMasterModelTurns: 6, maxSpecialistModelTurns: 4, maxDelegations: 3, legacyReadCount: null, readTokenBudget: 'high' as const },
+      deep: { maxMasterModelTurns: 11, maxSpecialistModelTurns: 5, maxDelegations: 5, legacyReadCount: null, readTokenBudget: 'medium' as const },
     },
   };
 }

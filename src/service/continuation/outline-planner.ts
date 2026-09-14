@@ -20,7 +20,7 @@ import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
   type ContinuationError_ACU,
-  type ContinuationInternalAiRequestIdentity_ACU,
+  type ContinuationInternalAiRequestIdentity_ACU, type ContinuationStageBoundInternalAiRequestIdentity_ACU,
   type ContinuationReplanConstraints_ACU,
   type ContinuationRevisionReason_ACU,
   type ContinuationSettings_ACU,
@@ -31,8 +31,8 @@ import {
 export interface ContinuationOutlinePlanningRequest_ACU {
   settings: ContinuationSettings_ACU;
   reason: ContinuationRevisionReason_ACU;
-  createInternalRequestIdentity: (attempt: number) => ContinuationInternalAiRequestIdentity_ACU & { source: 'outline' };
-  isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
+  createInternalRequestIdentity: (attempt: number) => ContinuationStageBoundInternalAiRequestIdentity_ACU & { source: 'outline' };
+  isInternalRequestCurrent: (identity: ContinuationStageBoundInternalAiRequestIdentity_ACU & { source: 'outline' }) => boolean;
   /** node/turn 的 ID 分配器。模型不再输出 id，结构标识全部由运行时生成。 */
   allocateId: (prefix: string) => string;
   replanInstruction?: string;

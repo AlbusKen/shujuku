@@ -107,6 +107,26 @@ describe('StageExecutionEngine_ACU', () => {
     await expect(engine.prepareCurrentTurnInstruction(() => current)).rejects.toThrow('stale');
   });
 
+  it('普通规划轮注入 plan_control 回调，正文重试轮明确不注入', async () => {
+    const planner = { plan: vi.fn(async (request: any) => {
+      if (!request.planControl) return { instruction: '重试文本', attempts: 1, apiPreset: { presetName: '', source: 'current', reason: 'current_configuration' } };
+      const result = await request.planControl({ kind: 'plan_control', thought: '重做后续大纲', operation: 'regenerate_current_outline', instruction: '按事实重做', volumeIds: [], stageId: 'stage-a', targetMessageIndex: null });
+      expect(result).toMatchObject({ ok: true, summary: '已受控重做' });
+      return { instruction: '正常规划文本', attempts: 1, apiPreset: { presetName: '', source: 'current', reason: 'current_configuration' } };
+    }) };
+    const engine = new StageExecutionEngine_ACU({
+      readEnvelope: envelope as any, getChatIdentity: () => 'chat-a', allocateId: prefix => `${prefix}-a`, planner: planner as any,
+    });
+    const planControl = vi.fn(async () => ({ ok: true, summary: '已受控重做', requiresReview: false, stopped: null }));
+
+    await expect(engine.prepareCurrentTurnInstruction(() => true, undefined, undefined, undefined, planControl)).resolves.toMatchObject({ instruction: { instruction: '正常规划文本' } });
+    expect(planControl).toHaveBeenCalledOnce();
+
+    const existing = { chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-1', attemptId: 'attempt-retry' };
+    await expect(engine.prepareCurrentTurnInstruction(() => true, existing, undefined, undefined, planControl)).resolves.toMatchObject({ instruction: { instruction: '重试文本' } });
+    expect(planControl).toHaveBeenCalledOnce();
+  });
+
   it('正文重试轮沿用既有身份且不注入大纲操作回调', async () => {
     const planner = { plan: vi.fn(async (request: any) => {
       expect(request.applyOutline).toBeUndefined();

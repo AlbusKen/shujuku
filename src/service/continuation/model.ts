@@ -72,7 +72,8 @@ export type ContinuationErrorCode_ACU =
   | 'CONTINUATION_AGENT_SUBAGENT_FAILED'
   | 'CONTINUATION_AGENT_WRITE_REJECTED'
   | 'CONTINUATION_AGENT_OUTLINE_REPLANNED'
-  | 'CONTINUATION_AGENT_SNAPSHOT_INVALID';
+  | 'CONTINUATION_AGENT_SNAPSHOT_INVALID'
+  | 'CONTINUATION_VOLUME_STAGE_LIMIT_REACHED';
 
 export interface ContinuationError_ACU {
   code: ContinuationErrorCode_ACU;
@@ -138,11 +139,14 @@ export interface ContinuationAgentApiPresetChoice_ACU {
 
 export type ContinuationAgentApiPresets_ACU = Record<ContinuationAgentApiPresetRole_ACU, ContinuationAgentApiPresetChoice_ACU>;
 
-/** 发送前最终审查的独立资源与开关，不占用主 Agent 或普通子代理的读取额度。 */
+/** 发送前最终审查的独立资源与开关，不占用主 Agent 或普通子代理的模型轮次。 */
 export interface ContinuationFinalReviewSettings_ACU {
   enabled: boolean;
   readTokenBudget: number | string;
-  maxExtraReads: number;
+  /** Final-reviewer 的全部模型输出上限；工具输出也消耗此轮次。 */
+  maxModelTurns: number;
+  /** 仅用于展示旧 maxExtraReads；绝不参与运行时工具门禁。 */
+  legacyExtraReadCount: number | null;
 }
 
 /** 通用网页搜索的提供方。duckduckgo 免 key 经酒馆转发抓 HTML；其余复用酒馆自身「网页搜索」已配置的 key 或实例。 */
@@ -167,8 +171,10 @@ export interface ContinuationWebResearchSettings_ACU {
   searchProvider: ContinuationWebSearchProvider_ACU;
   /** searchProvider=searxng 时的实例地址。 */
   searxngBaseUrl: string;
-  /** 单次派工里出网/本地工具轮次上限。 */
-  maxToolRounds: number;
+  /** 网页检索子代理的全部模型输出上限；工具输出也消耗此轮次。 */
+  maxModelTurns: number;
+  /** 仅用于展示旧 maxToolRounds；绝不参与运行时工具门禁。 */
+  legacyToolRoundCount: number | null;
   /** 单次派工最多抓取（精读）的页面数。 */
   maxPages: number;
   /** 单页存入资料库的原文字数上限。 */
@@ -269,18 +275,20 @@ export interface StageOutline_ACU {
  * 在这里独立声明是为了避免 model ↔ agent-model 的循环依赖。
  */
 export interface ContinuationAgentRunBudgetSettings_ACU {
-  /** 一次规划运行内主 Agent 的最大决策迭代数（工具批次不计入）。 */
-  maxIterations: number;
+  /** 一次规划运行内主 Agent 的全部模型输出上限，工具输出也计入。 */
+  maxModelTurns: number;
+  /** 每个普通子代理派工内的全部模型输出上限，工具输出也计入。 */
+  maxSubagentModelTurns: number;
   /** 一次规划运行内累计派工上限。 */
   maxDelegations: number;
   /** 同一子代理在一次运行内的派工上限。 */
   maxSameAgent: number;
   /** 单次 delegate 动作里并发子任务数上限。 */
   maxConcurrent: number;
-  /** 主 Agent 一次运行内 read/search 调用总数上限。 */
-  maxReads: number;
-  /** 子代理自主补充调阅的工具轮数上限。 */
-  maxExtraReads: number;
+  /** 仅用于展示 legacy maxReads；绝不参与任何读取或模型门禁。 */
+  legacyReadCount: number | null;
+  /** 仅用于展示 legacy maxExtraReads；绝不参与任何读取或模型门禁。 */
+  legacyExtraReadCount: number | null;
 }
 
 export interface ContinuationSettings_ACU {
@@ -294,6 +302,8 @@ export interface ContinuationSettings_ACU {
   outlinePreview: boolean;
   autoNextStage: boolean;
   maxAutomaticStages: number;
+  /** 每个 active story-arc volume 最多可承载的阶段数。 */
+  maxStagesPerVolume: number;
   loopTags: string;
   loopDelaySeconds: number;
   totalDurationMinutes: number;
@@ -368,6 +378,10 @@ export interface ContinuationTask_ACU {
 export interface ContinuationStage_ACU {
   stageId: string;
   stageNumber: number;
+  /** New stages bind to the uniquely active volume; undefined is a readable legacy stage. */
+  volumeId?: string;
+  /** Story-arc revision observed when the stage was bound. */
+  storyArcRevision?: number;
   status: ContinuationStageStatus_ACU;
   activeRevision: number;
   revisions: StageRevision_ACU[];
@@ -410,14 +424,14 @@ export interface ContinuationPendingHostTurn_ACU {
   status: 'awaiting_generation' | 'retry_ready' | 'exhausted';
 }
 
-export type ContinuationInternalAiSource_ACU = 'outline' | 'turn_instruction' | 'agent_main' | 'agent_subagent' | 'handoff_summary';
+export type ContinuationInternalAiSource_ACU = 'outline' | 'turn_instruction' | 'agent_main' | 'agent_subagent' | 'handoff_summary' | 'takeover_assessment' | 'takeover_baseline';
 
 /**
  * Request-scoped provenance for an internal AI call. It deliberately contains
  * only durable identifiers, never prompts or generated text.
  */
-export interface ContinuationInternalAiRequestIdentity_ACU {
-  source: ContinuationInternalAiSource_ACU;
+export interface ContinuationStageBoundInternalAiRequestIdentity_ACU {
+  source: Exclude<ContinuationInternalAiSource_ACU, 'takeover_baseline'>;
   requestId: string;
   chatIdentity: string;
   taskId: string;
@@ -428,12 +442,33 @@ export interface ContinuationInternalAiRequestIdentity_ACU {
   attemptId?: string;
 }
 
-export interface ContinuationTurnInstructionRequestIdentity_ACU extends TurnAttemptIdentity_ACU {
+export type ContinuationInternalAiRequestIdentity_ACU = ContinuationStageBoundInternalAiRequestIdentity_ACU | {
+  /** 无阶段接管只结算既有正文；不得伪造 stageId/revision。 */
+  source: 'takeover_baseline';
+  requestId: string;
+  chatIdentity: string;
+  taskId: string;
+  attemptId?: string;
+};
+
+export type ContinuationTurnInstructionRequestIdentity_ACU = TurnAttemptIdentity_ACU & {
   requestId: string;
   source: 'turn_instruction';
-}
+};
 
-export type ContinuationTimelineKind_ACU = 'task_created' | 'outline_ready' | 'turn_sent' | 'turn_completed' | 'turn_retry' | 'stage_completed' | 'paused' | 'stopped' | 'failed';
+export type ContinuationTimelineKind_ACU = 'task_created' | 'outline_ready' | 'turn_sent' | 'turn_completed' | 'turn_retry' | 'stage_completed' | 'external_progress_adopted' | 'external_progress_baselined' | 'paused' | 'stopped' | 'failed';
+
+export type ContinuationTakeoverDisposition_ACU = 'continue_current_stage' | 'complete_current_stage' | 'replace_current_stage';
+
+/** 未信任 assessment 的严格载荷；运行时另按当前大纲验证连续前缀和消息 identity。 */
+export interface ContinuationTakeoverAssessment_ACU {
+  targetMessageIndex: number;
+  disposition: ContinuationTakeoverDisposition_ACU;
+  satisfiedTurnIds: string[];
+  evidenceMessageIndexes: number[];
+  requiresStoryArcRevision: boolean;
+  reason: string;
+}
 
 export interface ContinuationTimelineEntry_ACU {
   id: string;
@@ -446,6 +481,19 @@ export interface ContinuationTimelineEntry_ACU {
   attemptId?: string;
   messageIndex?: number;
   errorCode?: ContinuationErrorCode_ACU;
+  /** 外部正文接管/基线专用的稳定宿主锚；普通 timeline 事件不带这些字段。 */
+  adoptionChatIdentity?: string;
+  targetMessageIndex?: number;
+  targetMessageId?: number;
+  targetSwipeIndex?: number;
+  sourceStartMessageIndex?: number;
+  sourceEndMessageIndex?: number;
+  /** 仅 external_progress_adopted 是阶段进度，baseline 不带以下评估字段。 */
+  satisfiedTurnIds?: string[];
+  evidenceMessageIndexes?: number[];
+  takeoverDisposition?: ContinuationTakeoverDisposition_ACU;
+  requiresStoryArcRevision?: boolean;
+  reason?: string;
 }
 
 export interface ContinuationReplanConstraints_ACU {

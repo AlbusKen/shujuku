@@ -77,13 +77,25 @@ describe('主 Agent 动作解析', () => {
   it('delegate 需要非空派工列表，且每项都要有代理名与任务', () => {
     const action = parseAgentMainAction_ACU({ action: 'delegate', thought: '先结算', delegations: [{ agentName: 'hook-cognition-maintainer', prompt: '结算未处理正文', reads: ['$HISTORY_UNSETTLED'], writes: ['$HOOKS_LEDGER'] }] }, true);
     expect(action).toMatchObject({ kind: 'delegate' });
+    expect(parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'mainline-planner', prompt: '核验设定', materialGrants: ['W1'], reads: [] }] }, true))
+      .toMatchObject({ delegations: [{ materialGrants: ['W1'], reads: [] }] });
 
     expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [] }, true)).toThrowError(/非空的 delegations/);
     expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ prompt: '干活' }] }, true)).toThrowError(/agentName 不能为空/);
+    expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'mainline-planner', prompt: '越权', materialGrants: ['W0'], reads: [] }] }, true)).toThrowError(/W 编码/);
+    expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'mainline-planner', prompt: '绕过', reads: ['$WORLDBOOK:设定集:7'] }] }, true)).toThrowError(/不得绕过/);
+    expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'mainline-planner', prompt: '伪字段', materialGrants: [], reads: [], forged: true }] }, true)).toThrowError(/未知字段/);
   });
 
   it('预算最后一轮禁用 delegate', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'mainline-planner', prompt: '策划' }] }, false)).toThrowError(/预算最后一轮/);
+  });
+
+  it('最后模型轮次只允许 finalize 或 block', () => {
+    expect(() => parseAgentMainOutput_ACU('{"action":"read","reads":["$HOOKS_LEDGER"]}', AGENT_PREFILLS_ACU.main, false, false)).toThrowError(/最后一个模型轮次/);
+    expect(() => parseAgentMainAction_ACU({ action: 'maintain_requirements', requirements: [] }, false, false)).toThrowError(/最后一个模型轮次/);
+    expect(() => parseAgentMainAction_ACU({ action: 'plan_control', operation: 'regenerate_story_arc_all', instruction: '重整后续台阶', volumeIds: [], stageId: '', targetMessageIndex: null }, false, false)).toThrowError(/最后一个模型轮次/);
+    expect(parseAgentMainAction_ACU({ action: 'block', reason: '资料不足' }, false, false)).toMatchObject({ kind: 'block' });
   });
 
   it('finalize 必须给出 instruction，constraints 缺省为 null', () => {
@@ -91,6 +103,11 @@ describe('主 Agent 动作解析', () => {
     expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '本轮指导', constraints: { add: ['红线一'], retire: ['C01-1'] } }, true))
       .toMatchObject({ constraints: { add: ['红线一'], retire: ['C01-1'] } });
     expect(() => parseAgentMainAction_ACU({ action: 'finalize' }, true)).toThrowError(/非空 instruction/);
+  });
+
+  it('maintain_requirements 保留原始载荷，严格 replacement 校验交由运行时 Store 执行', () => {
+    const payload = { action: 'maintain_requirements', thought: '同步最新输入', expectedRevision: 0, appliedUserMessageId: 'continuation-user:2', requirements: [], summary: '清空冲突项' };
+    expect(parseAgentMainAction_ACU(payload, true)).toEqual({ kind: 'maintain_requirements', thought: '同步最新输入', payload });
   });
 
   it('finalize 的 constraints 兼容旧全量键：current 并入 add、retired 并入 retire，空对象归一为 null', () => {
@@ -101,11 +118,41 @@ describe('主 Agent 动作解析', () => {
     expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '指导', constraints: {} }, true)).toMatchObject({ constraints: null });
   });
 
-  it('edit_outline 已从主 Agent 协议退役，要求委派 outline-architect', () => {
+  it('plan_control 只接受 operation 对应的闭合目标字段', () => {
+    const cases = [
+      { operation: 'revise_story_arc', volumeIds: ['VOL-01'], stageId: '', targetMessageIndex: null },
+      { operation: 'regenerate_story_arc_remaining', volumeIds: [], stageId: '', targetMessageIndex: null },
+      { operation: 'regenerate_story_arc_all', volumeIds: [], stageId: '', targetMessageIndex: null },
+      { operation: 'revise_outline_remaining', volumeIds: [], stageId: 'stage-1', targetMessageIndex: null },
+      { operation: 'regenerate_current_outline', volumeIds: [], stageId: 'stage-1', targetMessageIndex: null },
+      { operation: 'continue_next_stage', volumeIds: [], stageId: 'stage-1', targetMessageIndex: null },
+      { operation: 'adopt_external_progress', volumeIds: [], stageId: '', targetMessageIndex: 8 },
+    ] as const;
+    for (const item of cases) {
+      expect(parseAgentMainAction_ACU({
+        action: 'plan_control', thought: '按事实维护计划', instruction: '执行受控规划', ...item,
+      }, true)).toMatchObject({ kind: 'plan_control', ...item });
+    }
+
+    expect(parseAgentMainAction_ACU({
+      action: 'plan_control', thought: '当前阶段后半段已脱节', operation: 'regenerate_current_outline', instruction: '按最近正文重做未完成部分', volumeIds: [], stageId: 'stage-1', targetMessageIndex: null,
+    }, true)).toMatchObject({ kind: 'plan_control', operation: 'regenerate_current_outline', stageId: 'stage-1' });
+    expect(parseAgentMainAction_ACU({
+      action: 'plan_control', operation: 'revise_story_arc', instruction: '修订第一卷台阶', volumeIds: ['VOL-01'], stageId: '', targetMessageIndex: null,
+    }, true)).toMatchObject({ kind: 'plan_control', volumeIds: ['VOL-01'] });
+    expect(() => parseAgentMainAction_ACU({
+      action: 'plan_control', operation: 'adopt_external_progress', instruction: '按目标楼事实接管', volumeIds: [], stageId: '', targetMessageIndex: null,
+    }, true)).toThrowError(/targetMessageIndex 字段不符合协议/);
+    expect(() => parseAgentMainAction_ACU({
+      action: 'plan_control', operation: 'revise_story_arc', instruction: '修订第一卷台阶', volumeIds: ['VOL-01'], stageId: '', targetMessageIndex: null, forged: true,
+    }, true)).toThrowError(/未知字段/);
+  });
+
+  it('edit_outline 已从主 Agent 协议退役，要求使用受控 plan_control', () => {
     expect(() => parseAgentMainAction_ACU({
       action: 'edit_outline',
       edits: [{ op: 'set_turn_goal', turnId: 'turn-3', goal: '让守门人先露破绽' }],
-    }, true)).toThrowError(/大纲调整请派工 outline-architect/);
+    }, true)).toThrowError(/plan_control/);
   });
 
   it('维护类的 patch 只收显式字段，至少要带一个可改字段', () => {
@@ -156,7 +203,7 @@ describe('主 Agent 动作解析', () => {
 
   it('未知动作和已退役的大纲动作直接拒绝', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ finalize \/ block/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/maintain_requirements \/ read \/ search \/ delegate \/ plan_control \/ finalize \/ block/);
   });
 });
 

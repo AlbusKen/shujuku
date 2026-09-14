@@ -108,6 +108,22 @@ describe('Agent 总纲写集事务', () => {
     }), ['storyArc'], 6)).toThrowError(/不得携带卷级容量字段/);
   });
 
+  it('运行时每卷容量贯穿 storyArc upsert 与 patch：自定义 cap 不被默认 5 截断', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({
+      storyArc: [storyArcItem_ACU({ targetStageRange: { min: 4, max: 6 } })],
+    }), ['storyArc'], 6, [], 8);
+    expect(seeded.storyArc[0].targetStageRange).toEqual({ min: 4, max: 6 });
+
+    const patched = applyAgentModuleDelta_ACU(seeded, delta_ACU({
+      storyArcPatches: [{ id: 'VOL-01', targetStageRange: { min: 5, max: 7 } }],
+    }), ['storyArc'], 7, [], 8);
+    expect(patched.storyArc[0].targetStageRange).toEqual({ min: 5, max: 7 });
+
+    expect(() => applyAgentModuleDelta_ACU(patched, delta_ACU({
+      storyArcPatches: [{ id: 'VOL-01', targetStageRange: { min: 6, max: 9 } }],
+    }), ['storyArc'], 8, [], 8)).toThrowError(/不得超过每卷阶段上限/);
+  });
+
   it('全书方向只能有一条活跃条目，同一份写集里先 retire 再 upsert 放行', () => {
     const twoStories = delta_ACU({
       storyArc: [

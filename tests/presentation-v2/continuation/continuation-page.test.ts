@@ -33,6 +33,7 @@ const saveActiveOutline = vi.fn(async () => true);
 const clearData = vi.fn(async () => true);
 const acceptOutline = vi.fn(async () => true);
 const saveSettings = vi.fn(async () => 'saved' as const);
+const adoptExternalProgress = vi.fn(async () => true);
 const restorePromptDefault = vi.fn((draft: any) => draft);
 const materialsReload = vi.fn();
 
@@ -40,7 +41,7 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () =>
   useContinuationRuntime: () => ({
     activeStage, activeRevision, activeNode, activeTurn, busy, canContinue, continueTask, initialize,
     isAwaitingHostResult: awaitingHostResult, originInstruction, refresh,
-    retryCurrentTurn, acceptOutline, sendAgentMessage, saveActiveOutline, clearData, restorePromptDefault,
+    retryCurrentTurn, acceptOutline, sendAgentMessage, saveActiveOutline, clearData, adoptExternalProgress, restorePromptDefault,
     saveSettings, settings, statusText, stopTask, task,
   }),
   // 连续高压轮上限输入框的上界常量：组件从 composable 取，mock 缺了它会整页渲染失败。
@@ -50,7 +51,7 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationMaterials', () 
   useContinuationMaterials: () => ({
     snapshot: materialsSnapshot,
     loadError: ref(''),
-    modules: {},
+    modules: { storyArc: { draft: '[]', error: '', dirty: false, saving: false } },
     reload: materialsReload,
     save: vi.fn(),
     discard: vi.fn(),
@@ -95,7 +96,7 @@ function setTask(status = 'paused', pending = false): void {
     ], timeline: [],
     pendingHostTurn: pending ? { status: 'awaiting_generation' } : null,
   };
-  materialsSnapshot.value = { storyArc: [{ id: 'VOL-01', scope: 'volume', title: '禁区试探', status: 'active', retired: false }], revisions: { storyArc: 1 } };
+  materialsSnapshot.value = { storyArc: [{ id: 'VOL-01', scope: 'volume', title: '禁区试探', status: 'active', retired: false, stageNumbers: [1] }], revisions: { storyArc: 1 } };
   activeStage.value = task.value.stages[0];
   activeRevision.value = task.value.stages[0].revisions[0];
   canContinue.value = status === 'paused';
@@ -177,14 +178,16 @@ beforeEach(() => {
 function setSettings(): void {
   settings.value = {
     stageSize: 'standard', customTurnMin: null, customTurnMax: null,
+    storyArcVolumePlan: 'medium', customStoryArcVolumeCount: null,
     outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
+    maxStagesPerVolume: 5,
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3, minGenerationTokens: 1000,
     storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
-    finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
-    webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false, baidu: true }, searchProvider: 'duckduckgo', searxngBaseUrl: '', maxToolRounds: 8, maxPages: 8, pageCharLimit: 4000, blockedDomains: '' },
-    agentRunBudget: { maxIterations: 8, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxReads: 8, maxExtraReads: 3 },
+    finalReview: { enabled: false, readTokenBudget: '50%', maxModelTurns: 12, legacyExtraReadCount: null },
+    webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false, baidu: true }, searchProvider: 'duckduckgo', searxngBaseUrl: '', maxModelTurns: 12, legacyToolRoundCount: null, maxPages: 8, pageCharLimit: 4000, blockedDomains: '' },
+    agentRunBudget: { maxModelTurns: 12, maxSubagentModelTurns: 12, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, legacyReadCount: null, legacyExtraReadCount: null },
     contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '', promptCacheEnabled: false,
     agentApiPresets: {
@@ -533,6 +536,11 @@ describe('ContinuationPage', () => {
     expect(el.textContent).toContain('所属 active 卷：[VOL-01]「禁区试探」');
     expect(el.textContent).toContain('摸清出口守卫');
     expect(el.textContent).toContain('功能：世界日常');
+    buttonByText(el, '故事总纲')!.click();
+    await nextTick();
+    expect(el.textContent).toContain('当前 active 卷容量：1 / 5 个阶段');
+    buttonByText(el, '阶段大纲')!.click();
+    await nextTick();
     expect(el.textContent).toContain('主线：停驻');
     expect(el.textContent).toContain('时间：数日 · 取得钥匙后的第三日');
     expect(el.textContent).toContain('当前执行');
@@ -585,6 +593,77 @@ describe('ContinuationPage', () => {
     app.unmount();
   });
 
+  it('暂停任务可从指定 AI 楼接管外部进度，空目标保留给领域层选择最新 AI 楼', async () => {
+    setTask();
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('接管外部正文');
+    buttonByText(el, '接管外部进度')!.click();
+    await nextTick();
+    expect(adoptExternalProgress).toHaveBeenCalledWith(undefined);
+
+    const input = Array.from(el.querySelectorAll<HTMLInputElement>('input')).find(item => item.placeholder.includes('目标 AI 楼'))!;
+    input.value = '12';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    buttonByText(el, '接管外部进度')!.click();
+    await nextTick();
+    expect(adoptExternalProgress).toHaveBeenLastCalledWith(12);
+    app.unmount();
+  });
+
+  it('无活动任务接管要求明确的后续续写要求，并将其与可选目标楼传给 runtime', async () => {
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('接管外部正文');
+
+    buttonByText(el, '接管外部进度')!.click();
+    await nextTick();
+    expect(adoptExternalProgress).not.toHaveBeenCalled();
+    expect(el.textContent).toContain('无活动任务接管必须填写后续续写要求');
+
+    const instruction = Array.from(el.querySelectorAll<HTMLTextAreaElement>('textarea')).find(item => item.placeholder.includes('接管后的续写要求'))!;
+    typeInto(instruction, '从守门人现身后的局势继续推进');
+    const target = Array.from(el.querySelectorAll<HTMLInputElement>('input')).find(item => item.placeholder.includes('目标 AI 楼'))!;
+    target.value = '5';
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    buttonByText(el, '接管外部进度')!.click();
+    await nextTick();
+
+    expect(adoptExternalProgress).toHaveBeenCalledWith(5, '从守门人现身后的局势继续推进');
+    app.unmount();
+  });
+
+  it('资料面板把历史超限和 legacy 映射歧义呈现为只读容量诊断', async () => {
+    setTask();
+    const baseStage = task.value.stages[0];
+    task.value.stages = Array.from({ length: 6 }, (_item, index) => ({
+      ...baseStage,
+      stageId: `stage-${index + 1}`,
+      stageNumber: index + 1,
+      status: index === 5 ? 'running' : 'completed',
+      completedTurns: index === 5 ? 0 : 4,
+    }));
+    task.value.activeStageId = 'stage-6';
+    materialsSnapshot.value = {
+      storyArc: [{ id: 'VOL-01', scope: 'volume', title: '禁区试探', status: 'active', retired: false, stageNumbers: [1, 2, 3, 4, 5, 6] }],
+      revisions: { storyArc: 1 },
+    };
+    const { app, el } = await mountPage();
+    buttonByText(el, '故事总纲')!.click();
+    await nextTick();
+    expect(el.textContent).toContain('当前 active 卷容量：6 / 5 个阶段');
+    expect(el.textContent).toContain('历史阶段已超限；可读但不能新增阶段');
+
+    materialsSnapshot.value = {
+      storyArc: [
+        { id: 'VOL-01', scope: 'volume', title: '禁区试探', status: 'active', retired: false, stageNumbers: [1] },
+        { id: 'VOL-02', scope: 'volume', title: '另一卷', status: 'planned', retired: false, stageNumbers: [1] },
+      ],
+      revisions: { storyArc: 2 },
+    };
+    await nextTick();
+    expect(el.textContent).toContain('容量诊断：阶段 1 同时登记在多个卷');
+    app.unmount();
+  });
+
   it('渲染设置与伪 Role 提示词，设置修改后自动经 runtime 保存', async () => {
     vi.useFakeTimers();
     try {
@@ -599,6 +678,7 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('单批次读取上限');
       expect(el.textContent).toContain('临近总结时的精读额度');
       expect(el.textContent).toContain('连续高压轮上限');
+      expect(el.textContent).toContain('每卷阶段上限');
       expect(el.textContent).toContain('终审单批次读取上限');
       expect(el.textContent).toContain('关闭时不装配终审证据');
       expect(el.textContent).toContain('不会发起终审调用');
@@ -619,8 +699,8 @@ describe('ContinuationPage', () => {
       await vi.advanceTimersByTimeAsync(900);
       expect(saveSettings).toHaveBeenCalledOnce();
       expect(saveSettings.mock.calls[0][0]).toMatchObject({
-        stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
-        finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
+        stageSize: 'short', maxStagesPerVolume: 5, storyWindowFloors: 20, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
+        finalReview: { enabled: false, readTokenBudget: '50%', maxModelTurns: 12, legacyExtraReadCount: null },
         agentApiPresets: { finalReviewer: { mode: 'inherit', presetName: '' } },
         agentPrompts: { finalReviewer: [{ content: '终审' }] },
       });

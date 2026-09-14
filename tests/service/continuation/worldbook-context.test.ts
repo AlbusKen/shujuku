@@ -11,7 +11,7 @@ function createDependencies_ACU(overrides: Partial<ContinuationWorldbookAdapterD
     resolveInjectionTarget: vi.fn().mockResolvedValue('纪要书'),
     getIsolationPrefix: vi.fn().mockReturnValue('ACU-[chat-a]-'),
     buildRelevantWorldbookContent: vi.fn().mockResolvedValue('相关世界书背景'),
-    readLorebookEntries: vi.fn().mockResolvedValue({}),
+    readTargetLorebookEntries: vi.fn().mockResolvedValue([]),
     logReadFailure: vi.fn(),
     ...overrides,
   } satisfies ContinuationWorldbookAdapterDependencies_ACU;
@@ -33,7 +33,7 @@ describe('ContinuationWorldbookContext_ACU', () => {
     expect(options.excludeEntry({ comment: 'ACU-[chat-a]-总结条目1' })).toBe(true);
     expect(options.excludeEntry({ comment: '普通设定' })).toBe(false);
     expect(dependencies.resolveInjectionTarget).not.toHaveBeenCalled();
-    expect(dependencies.readLorebookEntries).not.toHaveBeenCalled();
+    expect(dependencies.readTargetLorebookEntries).not.toHaveBeenCalled();
   });
 
   it('returns empty background when configured book resolution fails', async () => {
@@ -52,6 +52,21 @@ describe('ContinuationWorldbookContext_ACU', () => {
     await expect(context.readRelevantBackground('剧情')).resolves.toBe('');
     expect(dependencies.buildRelevantWorldbookContent).not.toHaveBeenCalled();
     expect(dependencies.logReadFailure).not.toHaveBeenCalled();
+  });
+
+  it('reads the single current-isolation summary index and preserves missing versus failed diagnostics', async () => {
+    const dependencies = createDependencies_ACU({
+      readTargetLorebookEntries: vi.fn().mockResolvedValue([
+        { comment: 'TavernDB-ACU-CustomExport-纪要索引', content: '其他隔离空间' },
+        { comment: 'ACU-[chat-a]-TavernDB-ACU-CustomExport-纪要索引', content: '当前索引内容' },
+      ]),
+    });
+    const context = new ContinuationWorldbookContext_ACU(dependencies);
+    await expect(context.readStoryOverview()).resolves.toMatchObject({ state: 'ready', content: '当前索引内容', worldbookName: '纪要书' });
+    expect(dependencies.readTargetLorebookEntries).toHaveBeenCalledWith('纪要书');
+
+    const failed = new ContinuationWorldbookContext_ACU(createDependencies_ACU({ readTargetLorebookEntries: vi.fn().mockRejectedValue(new Error('host offline')) }));
+    await expect(failed.readStoryOverview()).resolves.toMatchObject({ state: 'failed', content: '' });
   });
 });
 

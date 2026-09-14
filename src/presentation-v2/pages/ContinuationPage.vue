@@ -20,6 +20,15 @@
       />
     </AcuPanel>
 
+    <AcuPanel v-if="!runtime.task.value || runtime.task.value.status === 'paused'" title="接管外部正文" description="从指定 AI 正文楼恢复续写；留空时采用当前最后一条 AI 正文。没有任务时必须填写后续续写要求。不会删除、改写或 regenerate 正文。">
+      <div class="acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start">
+        <AcuInput v-model="takeoverTargetIndex" type="number" :min="0" placeholder="目标 AI 楼（留空=最新）" />
+        <AcuTextarea v-if="!runtime.task.value" v-model="takeoverInstruction" :rows="3" placeholder="接管后的续写要求（必填）" />
+        <AcuButton variant="primary" :loading="runtime.busy.value" @click="adoptExternalProgress">接管外部进度</AcuButton>
+      </div>
+      <p v-if="takeoverError" class="acu-v2-continuation-page__error">{{ takeoverError }}</p>
+    </AcuPanel>
+
     <AcuPanel v-if="runtime.task.value && runtime.task.value.status === 'awaiting_outline_review' && runtime.activeRevision.value" title="待确认的大纲" description="确认前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。">
       <AcuTextarea :model-value="outlineDraft" :rows="16" @update:model-value="outlineDraft = $event" />
       <p v-if="outlineDraftError" class="acu-v2-continuation-page__error">{{ outlineDraftError }}</p>
@@ -36,6 +45,7 @@
           :task="runtime.task.value"
           :active-stage="runtime.activeStage.value"
           :active-revision="runtime.activeRevision.value"
+          :max-stages-per-volume="runtime.settings.value?.maxStagesPerVolume ?? CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU"
           :busy="runtime.busy.value"
           @save-outline="saveOutline"
           @clear="clearData"
@@ -100,6 +110,9 @@
               <AcuFormRow label="自动阶段上限" hint="连续自动推进多少个阶段后暂停，等待你确认。">
                 <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
               </AcuFormRow>
+              <AcuFormRow label="每卷阶段上限" hint="每个 active 故事卷最多承载多少个阶段；达到上限后必须收卷并推进下一卷。范围 1–20。">
+                <AcuInput v-model="settingsDraft.maxStagesPerVolume" type="number" :min="1" :max="20" />
+              </AcuFormRow>
               <AcuFormRow label="正文重试次数" hint="酒馆生成失败或被判定截断时最多重试几次。">
                 <AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" />
               </AcuFormRow>
@@ -160,8 +173,11 @@
             @toggle="toggleGroup('budget')"
           >
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="主 Agent 迭代上限" hint="一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）。范围 1–30。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxIterations" type="number" :min="1" :max="30" />
+              <AcuFormRow label="主 Agent 模型轮次上限" hint="一次规划内主 Agent 最多输出多少次动作；read/search、派工、交付与阻断均计入。范围 1–30。">
+                <AcuInput v-model="settingsDraft.agentRunBudget.maxModelTurns" type="number" :min="1" :max="30" />
+              </AcuFormRow>
+              <AcuFormRow label="每个子代理模型轮次上限" hint="每次派工中子代理最多输出多少次动作；read/search 也计入。范围 1–30。">
+                <AcuInput v-model="settingsDraft.agentRunBudget.maxSubagentModelTurns" type="number" :min="1" :max="30" />
               </AcuFormRow>
               <AcuFormRow label="派工总数上限" hint="一次规划内最多派出多少个子代理任务，0 为禁止派工。范围 0–20。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxDelegations" type="number" :min="0" :max="20" />
@@ -172,13 +188,8 @@
               <AcuFormRow label="并发派工上限" hint="同一波次最多同时运行几个子代理；API 限流严格时调小。范围 1–6。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxConcurrent" type="number" :min="1" :max="6" />
               </AcuFormRow>
-              <AcuFormRow label="读取批次上限" hint="主 Agent 一次规划内 read/search 工具批次的次数上限，0 为禁止读取。范围 0–30。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxReads" type="number" :min="0" :max="30" />
-              </AcuFormRow>
-              <AcuFormRow label="子代理工具轮上限" hint="子代理首轮之外还允许几轮 read/search 追加读取，0 为只靠固定注入与派工种子。范围 0–10。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxExtraReads" type="number" :min="0" :max="10" />
-              </AcuFormRow>
             </div>
+            <p v-if="settingsDraft.agentRunBudget.legacyReadCount !== null || settingsDraft.agentRunBudget.legacyExtraReadCount !== null" class="acu-v2-continuation-page__meta">已检测到旧版累计读取设置，仅作为迁移诊断保留；读取仍只受单批内容围栏控制。</p>
           </AcuDisclosureGroup>
 
           <AcuDisclosureGroup
@@ -193,11 +204,11 @@
               <AcuFormRow label="终审单批次读取上限" hint="终审每次 read/search 工具批次最多可注入多少 token；超过整批打回。填正整数或形如 20% 的百分比（按总结阈值折算）。">
                 <AcuInput v-model="settingsDraft.finalReview.readTokenBudget" type="text" />
               </AcuFormRow>
-              <AcuFormRow label="终审额外读取轮数" hint="终审首轮之外允许追加 read/search 的次数，0 为只使用固定证据。范围 0–10。">
-                <AcuInput v-model="settingsDraft.finalReview.maxExtraReads" type="number" :min="0" :max="10" />
+              <AcuFormRow label="终审模型轮次上限" hint="终审最多输出多少次动作；read/search 也计入。范围 1–30。">
+                <AcuInput v-model="settingsDraft.finalReview.maxModelTurns" type="number" :min="1" :max="30" />
               </AcuFormRow>
             </div>
-            <p class="acu-v2-continuation-page__meta">终审默认关闭；开启后会额外调用 final-reviewer，先看世界书目录与命中预览，再按实际需要 search/read 精读条目。它使用独立的单批次读取上限与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。</p>
+            <p class="acu-v2-continuation-page__meta">终审默认关闭；开启后会额外调用 final-reviewer，先看世界书目录与命中预览，再按实际需要 search/read 精读条目。它使用独立的单批次读取上限与模型轮次，不占用主 Agent 的轮次。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。</p>
           </AcuDisclosureGroup>
 
           <AcuDisclosureGroup
@@ -222,8 +233,8 @@
               <AcuFormRow v-if="settingsDraft.webResearch.searchProvider === 'searxng'" label="SearXNG 实例地址" hint="形如 https://searx.example.org">
                 <AcuInput v-model="settingsDraft.webResearch.searxngBaseUrl" type="text" />
               </AcuFormRow>
-              <AcuFormRow label="单次工具轮上限" hint="web-researcher 一次派工里搜索/抓取/本地调阅的轮数上限。范围 1–20。">
-                <AcuInput v-model="settingsDraft.webResearch.maxToolRounds" type="number" :min="1" :max="20" />
+              <AcuFormRow label="单次模型轮次上限" hint="web-researcher 一次派工最多输出多少次动作；搜索、抓取与本地调阅也计入。范围 1–30。">
+                <AcuInput v-model="settingsDraft.webResearch.maxModelTurns" type="number" :min="1" :max="30" />
               </AcuFormRow>
               <AcuFormRow label="单次抓取页数上限" hint="单次检索最多阅读的外部页面数。页面正文仅在检索子代理当次上下文中使用，不会写入聊天。范围 1–30。">
                 <AcuInput v-model="settingsDraft.webResearch.maxPages" type="number" :min="1" :max="30" />
@@ -334,6 +345,8 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU } from '../../service/continuation/continuation-volume-capacity';
+
 import type { ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
@@ -364,6 +377,9 @@ const outlineDraft = ref('');
 const messageDraft = ref('');
 const messageSending = ref(false);
 const outlineDraftError = ref('');
+const takeoverTargetIndex = ref('');
+const takeoverError = ref('');
+const takeoverInstruction = ref('');
 const settingsError = ref('');
 const settingsNotice = ref('');
 const materialsPanel = ref<InstanceType<typeof ContinuationMaterialsPanel> | null>(null);
@@ -610,6 +626,34 @@ async function sendMessage(text: string): Promise<void> {
   }
 }
 
+async function adoptExternalProgress(): Promise<void> {
+  const raw = String(takeoverTargetIndex.value ?? '').trim();
+  let targetMessageIndex: number | undefined;
+  const taskExists = runtime.task.value !== null;
+  const instruction = taskExists ? undefined : takeoverInstruction.value.trim();
+  if (!taskExists && !instruction) {
+    takeoverError.value = '无活动任务接管必须填写后续续写要求';
+    return;
+  }
+  try {
+    if (raw) {
+      targetMessageIndex = requiredInteger(raw, '接管目标楼');
+      if (targetMessageIndex < 0) throw new Error('接管目标楼不能小于 0');
+    }
+    takeoverError.value = '';
+  } catch (error) {
+    takeoverError.value = error instanceof Error ? error.message : '接管目标楼无效';
+    return;
+  }
+  const adopted = taskExists
+    ? await runtime.adoptExternalProgress(targetMessageIndex)
+    : await runtime.adoptExternalProgress(targetMessageIndex, instruction);
+  if (adopted) {
+    if (!taskExists) takeoverInstruction.value = '';
+    materialsPanel.value?.reload();
+  }
+}
+
 /** 用户手动改写的大纲保存成功后刷新资料面板，让它读到新的 revision。 */
 async function saveOutline(outline: StageOutline_ACU): Promise<void> {
   if (await runtime.saveActiveOutline(outline)) materialsPanel.value?.reload();
@@ -671,6 +715,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     customTurnMax,
     customStoryArcVolumeCount,
     maxAutomaticStages: requiredInteger(source.maxAutomaticStages, '自动阶段上限'),
+    maxStagesPerVolume: requiredRangeInteger(source.maxStagesPerVolume, '每卷阶段上限', 1, 20),
     generationRetryLimit: requiredInteger(source.generationRetryLimit, '正文重试次数'),
     minGenerationTokens: requiredInteger(source.minGenerationTokens, '正文最低 token 数'),
     internalAiRetryLimit: requiredInteger(source.internalAiRetryLimit, '内部 AI 重试次数'),
@@ -686,25 +731,28 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     finalReview: {
       enabled: source.finalReview.enabled,
       readTokenBudget: normalizedReadBudget(source.finalReview.readTokenBudget),
-      maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
+      maxModelTurns: requiredRangeInteger(source.finalReview.maxModelTurns, '终审模型轮次上限', 1, 30),
+      legacyExtraReadCount: source.finalReview.legacyExtraReadCount,
     },
     webResearch: {
       enabled: source.webResearch.enabled,
       sources: { ...source.webResearch.sources },
       searchProvider: source.webResearch.searchProvider,
       searxngBaseUrl: String(source.webResearch.searxngBaseUrl ?? '').trim(),
-      maxToolRounds: requiredRangeInteger(source.webResearch.maxToolRounds, '网页检索单次工具轮上限', 1, 20),
+      maxModelTurns: requiredRangeInteger(source.webResearch.maxModelTurns, '网页检索单次模型轮次上限', 1, 30),
+      legacyToolRoundCount: source.webResearch.legacyToolRoundCount,
       maxPages: requiredRangeInteger(source.webResearch.maxPages, '网页检索单次抓取页数上限', 1, 30),
       pageCharLimit: requiredRangeInteger(source.webResearch.pageCharLimit, '网页检索单页阅读字数上限', 500, 20000),
       blockedDomains: String(source.webResearch.blockedDomains ?? ''),
     },
     agentRunBudget: {
-      maxIterations: requiredRangeInteger(source.agentRunBudget.maxIterations, '主 Agent 迭代上限', 1, 30),
+      maxModelTurns: requiredRangeInteger(source.agentRunBudget.maxModelTurns, '主 Agent 模型轮次上限', 1, 30),
+      maxSubagentModelTurns: requiredRangeInteger(source.agentRunBudget.maxSubagentModelTurns, '每个子代理模型轮次上限', 1, 30),
       maxDelegations: requiredRangeInteger(source.agentRunBudget.maxDelegations, '派工总数上限', 0, 20),
       maxSameAgent: requiredRangeInteger(source.agentRunBudget.maxSameAgent, '单代理派工上限', 1, 10),
       maxConcurrent: requiredRangeInteger(source.agentRunBudget.maxConcurrent, '并发派工上限', 1, 6),
-      maxReads: requiredRangeInteger(source.agentRunBudget.maxReads, '读取批次上限', 0, 30),
-      maxExtraReads: requiredRangeInteger(source.agentRunBudget.maxExtraReads, '子代理工具轮上限', 0, 10),
+      legacyReadCount: source.agentRunBudget.legacyReadCount,
+      legacyExtraReadCount: source.agentRunBudget.legacyExtraReadCount,
     },
   };
   if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.minGenerationTokens < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {

@@ -9,11 +9,12 @@ import {
   V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU,
   V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU,
   V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU,
+  V30_MAIN_AGENT_PLAN_CONTROL_PROTOCOL_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { renderAgentTurnGuidance_ACU, renderAgentTurnPacingGuidance_ACU } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
 import {
   buildDefaultContinuationSettings_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU,
   V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU,
 } from '../../../../src/service/continuation/defaults';
 
@@ -25,7 +26,7 @@ describe('continuation P0 pacing prompt contracts', () => {
   it('assembles the V24 outline contract under the current default version', () => {
     const settings = buildDefaultContinuationSettings_ACU();
 
-    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU);
+    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
     expect(settings.outlinePrompt.some(segment => segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)).toBe(true);
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('setup 与 cooldown 允许主线保持不动');
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('隔夜、数日后还是更久');
@@ -51,6 +52,18 @@ describe('continuation P0 pacing prompt contracts', () => {
 
     expect(finalReviewer).toContain('【节奏、日常与时间审查】');
     expect(finalReviewer).toContain('只有“气氛放松”也判为 revise');
+  });
+
+  it('keeps D1 plan-control capability text verbatim', () => {
+    const main = promptText_ACU(buildDefaultAgentMainPrompt_ACU());
+    expect(main).toContain('你可以通过 plan_control 请求运行时执行受控规划操作，但你不能直接改写任务、阶段、revision、总纲资料或正文。总纲仍由 arc-architect 生成候选并经事务校验；阶段大纲仍由 outline-architect 与既有 planner 生成、校验和冻结。\n\n重新生成或修改计划只改变未来计划：已经保留在当前聊天分支里的正文仍是已发生事实，不能因重做总纲或大纲而被删除、否认或改写。');
+  });
+
+  it('injects the closed plan_control protocol into the default main Agent prompt', () => {
+    const main = promptText_ACU(buildDefaultAgentMainPrompt_ACU());
+    expect(main).toContain('【新增受控能力】');
+    expect(main).toContain(V30_MAIN_AGENT_PLAN_CONTROL_PROTOCOL_ACU);
+    expect(V30_MAIN_AGENT_PLAN_CONTROL_PROTOCOL_ACU).toContain('目标AI楼层或null}\n\n字段规则：');
   });
 
   it('enforces the V26 chronology contract across maintainer, main agent, and final reviewer defaults', () => {

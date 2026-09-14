@@ -34,8 +34,8 @@ export interface AgentRunResumeState_ACU {
   taskId: string;
   /** 保存时刻的大纲游标指纹（stageId#revision#turnId）。游标变了的旧证据不允许污染新轮次。 */
   cursorKey: string;
-  /** 恢复后应执行的迭代序号（从 1 开始）。 */
-  nextIteration: number;
+  /** 已实际发送的主 Agent 模型请求数；恢复时不得重新获得已用轮次。 */
+  modelTurnsUsed: number;
   ledger: AgentRunLedgerSnapshot_ACU;
   finalReview: AgentFinalReviewResumeState_ACU;
 }
@@ -62,7 +62,7 @@ export function saveAgentRunState_ACU(chatIdentity: string, state: AgentRunResum
   statesByChat_ACU.set(chatIdentity, {
     taskId: state.taskId,
     cursorKey: state.cursorKey,
-    nextIteration: state.nextIteration,
+    modelTurnsUsed: state.modelTurnsUsed,
     ledger: {
       delegationsUsed: state.ledger.delegationsUsed,
       perAgent: { ...state.ledger.perAgent },
@@ -90,7 +90,7 @@ export function readAgentRunState_ACU(chatIdentity: string, taskId: string, curs
   return {
     taskId: cached.taskId,
     cursorKey: cached.cursorKey,
-    nextIteration: cached.nextIteration,
+    modelTurnsUsed: cached.modelTurnsUsed,
     ledger: {
       delegationsUsed: cached.ledger.delegationsUsed,
       perAgent: { ...cached.ledger.perAgent },

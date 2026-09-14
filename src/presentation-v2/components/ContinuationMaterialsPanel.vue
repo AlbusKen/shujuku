@@ -323,6 +323,16 @@
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         总纲 {{ materials.snapshot.value.storyArc.length }} 条 · 修订号 {{ materials.snapshot.value.revisions.storyArc }}
       </p>
+      <template v-if="volumeCapacity">
+        <p v-if="volumeCapacity.activeVolumeId" class="acu-v2-continuation-materials__meta">
+          当前 active 卷容量：{{ volumeCapacity.countedStages }} / {{ volumeCapacity.maxStagesPerVolume }} 个阶段
+          <template v-if="volumeCapacity.countedStages > volumeCapacity.maxStagesPerVolume">（历史阶段已超限；可读但不能新增阶段）</template>
+          <template v-else-if="volumeCapacity.countedStages === volumeCapacity.maxStagesPerVolume">（已达到上限，不能新增阶段）</template>
+        </p>
+        <p v-for="problem in volumeCapacity.legacyMappingProblems" :key="problem" class="acu-v2-continuation-materials__error">
+          容量诊断：{{ problem }}；历史资料保持只读，新阶段创建将被拒绝。
+        </p>
+      </template>
       <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
       <p v-if="!materials.snapshot.value?.storyArc.length" class="acu-v2-continuation-materials__empty">
         还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。
@@ -367,12 +377,14 @@ import { computed, onMounted, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import AcuTextarea from './_lib/AcuTextarea.vue';
 import { useContinuationMaterials } from '../composables/useContinuationMaterials';
+import { diagnoseContinuationVolumeCapacity_ACU } from '../../service/continuation/continuation-volume-capacity';
 import type { ContinuationStage_ACU, ContinuationTask_ACU, StageOutline_ACU, StageRevision_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 
 const props = defineProps<{
   task: ContinuationTask_ACU | null;
   activeStage: ContinuationStage_ACU | null;
   activeRevision: StageRevision_ACU | null;
+  maxStagesPerVolume: number;
   busy: boolean;
 }>();
 
@@ -408,12 +420,17 @@ const TIME_LABELS: Record<string, string> = { continuous: '连续', same_day: '�
 const INFERRED_FIELD_LABELS: Record<string, string> = { function: '功能', mainlineDelta: '主线', timeAdvance: '时间' };
 
 const activeTab = ref<TabId>('outline');
-const materials = useContinuationMaterials();
+const materials = useContinuationMaterials(() => props.maxStagesPerVolume);
 const outlineDraft = ref('');
 const outlineError = ref('');
 const outlineDirty = ref(false);
 const clearPending = ref(false);
 const activeVolume = computed(() => materials.snapshot.value?.storyArc.find(entry => entry.scope === 'volume' && !entry.retired && entry.status === 'active') ?? null);
+const volumeCapacity = computed(() => {
+  const snapshot = materials.snapshot.value;
+  if (!snapshot || !props.task) return null;
+  return diagnoseContinuationVolumeCapacity_ACU(props.task.stages, snapshot, props.maxStagesPerVolume, props.task.activeStageId);
+});
 const historyStages = computed(() => (props.task?.stages ?? []).filter(stage => stage.stageId !== props.activeStage?.stageId));
 
 function displayRevision(stage: ContinuationStage_ACU): StageRevision_ACU | null {

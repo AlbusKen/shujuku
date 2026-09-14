@@ -1,4 +1,5 @@
 import { extractAgentKernelJsonObjects_ACU } from '../../agent-kernel/json-payload';
+import { parseAgentKernelToolsAction_ACU, type AgentKernelToolCall_ACU } from '../../agent-kernel/agent-tools';
 import {
   createWorldSimError_ACU,
   isWorldEntity_ACU,
@@ -43,6 +44,17 @@ function parseOutput_ACU(raw: string | null | undefined): Record<string, unknown
   if (!isRecord_ACU(value) || !exactKeys_ACU(value, ['expectedRevisions', 'entities', 'events', 'threads'])) {
     fail_ACU('世界推演 Agent 输出含缺失或未知顶层字段');
   }
+  return value;
+}
+
+function parseSpecialistPayload_ACU(raw: string | null | undefined): Record<string, unknown> {
+  if (typeof raw !== 'string' || !raw.trim()) fail_ACU('世界推演子代理返回为空');
+  const text = raw.trim();
+  const objects = extractAgentKernelJsonObjects_ACU(text, 2);
+  if (objects.length !== 1 || objects[0] !== text) fail_ACU('世界推演子代理必须只返回一个完整 JSON 对象');
+  let value: unknown;
+  try { value = JSON.parse(text); } catch (_) { fail_ACU('世界推演子代理 JSON 非法'); }
+  if (!isRecord_ACU(value)) fail_ACU('世界推演子代理输出必须是对象');
   return value;
 }
 
@@ -138,4 +150,68 @@ export function parseWorldSimulationAgentOutput_ACU(input: {
   const expectedRevisions = parseExpectedRevisions_ACU(payload.expectedRevisions, touched, input.snapshot);
   for (const item of events) if (item.action === 'upsert') assertEventDuration_ACU(item.value, input.storyClock, input.anchorMessageIndex);
   return { anchorMessageIndex: input.anchorMessageIndex, storyClock: input.storyClock, expectedRevisions, entities, events, threads };
+}
+
+export interface WorldSimulationSpecialistCandidate_ACU {
+  kind: 'candidate';
+  transaction: WorldSimulationTransaction_ACU | null;
+  evidenceRefs: string[];
+  summary: string;
+  uncertainties: string[];
+}
+export type WorldSimulationSpecialistOutput_ACU = WorldSimulationSpecialistCandidate_ACU | { kind: 'tools'; thought: string; calls: AgentKernelToolCall_ACU[] };
+
+function stringList_ACU(value: unknown, path: string): string[] {
+  if (!Array.isArray(value) || !value.every(item => typeof item === 'string' && item.trim())) fail_ACU(`${path} 必须是字符串数组`);
+  const list = value.map(item => item.trim());
+  if (new Set(list).size !== list.length) fail_ACU(`${path} 不允许重复`);
+  return list;
+}
+
+function assertSpecialistToolScopes_ACU(calls: readonly AgentKernelToolCall_ACU[]): void {
+  if (calls.some(call => call.kind === 'search' && call.scope.some(scope => !['story', 'ledger', 'tables', 'worldbook'].includes(scope)))) {
+    fail_ACU('世界推演子代理 search.scope 只能使用 story、ledger、tables、worldbook');
+  }
+}
+
+/** Parses C5: tools or one role-restricted candidate with auditable evidence references. */
+export function parseWorldSimulationSpecialistOutput_ACU(input: {
+  raw: string | null | undefined;
+  agent: WorldSimulationAgentDefinition_ACU;
+  snapshot: WorldStateSnapshot_ACU;
+  anchorMessageIndex: number;
+  storyClock: WorldStoryClock_ACU;
+  allowedEvidenceRefs: readonly string[];
+}): WorldSimulationSpecialistOutput_ACU {
+  const payload = parseSpecialistPayload_ACU(input.raw);
+  if (Object.prototype.hasOwnProperty.call(payload, 'action')) {
+    try {
+      const tools = parseAgentKernelToolsAction_ACU(payload);
+      assertSpecialistToolScopes_ACU(tools.calls);
+      return tools;
+    }
+    catch (error) { fail_ACU(error instanceof Error ? error.message : '世界推演子代理 tools 动作非法'); }
+  }
+  if (!exactKeys_ACU(payload, ['expectedRevisions', 'entities', 'events', 'threads', 'evidenceRefs', 'summary', 'uncertainties'])) {
+    fail_ACU('世界推演子代理候选含缺失或未知顶层字段');
+  }
+  const evidenceRefs = stringList_ACU(payload.evidenceRefs, 'evidenceRefs');
+  const uncertainties = stringList_ACU(payload.uncertainties, 'uncertainties');
+  if (typeof payload.summary !== 'string' || !payload.summary.trim()) fail_ACU('summary 必须是非空字符串');
+  const transaction = parseWorldSimulationAgentOutput_ACU({
+    raw: JSON.stringify({ expectedRevisions: payload.expectedRevisions, entities: payload.entities, events: payload.events, threads: payload.threads }),
+    agent: input.agent, snapshot: input.snapshot, anchorMessageIndex: input.anchorMessageIndex, storyClock: input.storyClock,
+  });
+  const allowed = new Set(input.allowedEvidenceRefs);
+  if (evidenceRefs.some(ref => !allowed.has(ref))) fail_ACU('evidenceRefs 引用了本次未真实获得的资料');
+  if (transaction && !evidenceRefs.length) fail_ACU('非空候选必须提供至少一条真实 evidenceRefs');
+  for (const item of transaction?.threads ?? []) {
+    if (item.action !== 'upsert' || item.value.visibility.mode !== 'hidden') continue;
+    const expectedSurfaceHint = item.value.expectedSurfaceHint?.trim() ?? '';
+    const summary = item.value.summary.trim();
+    if (expectedSurfaceHint && summary && expectedSurfaceHint.includes(summary)) {
+      fail_ACU('hidden 线索的 expectedSurfaceHint 不得直接复述同一候选 summary');
+    }
+  }
+  return { kind: 'candidate', transaction, evidenceRefs, summary: payload.summary.trim(), uncertainties };
 }

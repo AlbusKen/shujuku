@@ -43,6 +43,7 @@
       </AcuPanel>
       <WorldSimulationAgentChat />
       <WorldSimulationAgentPreview :show-hidden="worldSimulationSettings.showHiddenInUi" />
+      <WorldSimulationMaterialsPanel :refresh-tick="chatChangedTick" />
       <WorldSimulationSettingsPanel @saved="onWorldSimulationSettingsSaved" />
     </AcuPanelGrid>
   </section>
@@ -58,6 +59,7 @@ import WorldbookEntryToolbar from '../components/WorldbookEntryToolbar.vue';
 import WorldbookSourcePicker from '../components/WorldbookSourcePicker.vue';
 import WorldSimulationAgentChat from '../components/WorldSimulationAgentChat.vue';
 import WorldSimulationAgentPreview from '../components/WorldSimulationAgentPreview.vue';
+import WorldSimulationMaterialsPanel from '../components/WorldSimulationMaterialsPanel.vue';
 import WorldSimulationSettingsPanel from '../components/WorldSimulationSettingsPanel.vue';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
 import type { WorldSimulationSettings_ACU } from '../../service/simulation/model';
@@ -80,6 +82,7 @@ const entries = useAgentWorldbookEntries({
 const entryFilter = ref('');
 const entryEmptyText = ref('当前 Agent 世界书范围内无可 Skill 化的条目。');
 const worldSimulationSettings = ref<WorldSimulationSettings_ACU>(readWorldSimulationSettings_ACU() ?? buildDefaultWorldSimulationSettings_ACU());
+const chatChangedTick = useChatChangedTick();
 
 const currentScopeLabel = computed(() => {
   if (agentControl.worldbookScope.value.source === 'character') {
@@ -140,7 +143,7 @@ function onWorldSimulationSettingsSaved(settings: WorldSimulationSettings_ACU): 
 }
 
 onMounted(() => { void refreshAll(); });
-watch(useChatChangedTick(), () => { void refreshAll(); });
+watch(chatChangedTick, () => { void refreshAll(); });
 </script>
 
 <style scoped>

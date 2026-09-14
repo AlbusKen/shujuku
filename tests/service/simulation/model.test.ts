@@ -19,15 +19,15 @@ const WORLD_SIMULATION_ERROR_CODES_ACU: Record<WorldSimulationErrorCode_ACU, tru
 describe('world simulation model', () => {
   it('uses the designed three-tier budget table without sharing mutable defaults', () => {
     expect(WORLD_SIMULATION_DEFAULT_BUDGETS_ACU).toEqual({
-      light: { maxIterations: 1, maxDelegations: 0, maxReads: 2, readTokenBudget: 'low' },
-      normal: { maxIterations: 3, maxDelegations: 2, maxReads: 6, readTokenBudget: 'medium' },
-      deep: { maxIterations: 5, maxDelegations: 4, maxReads: 12, readTokenBudget: 'high' },
+      light: { maxMasterModelTurns: 3, maxSpecialistModelTurns: 2, maxDelegations: 1, readTokenBudget: 'low', legacyReadCount: null },
+      normal: { maxMasterModelTurns: 4, maxSpecialistModelTurns: 3, maxDelegations: 2, readTokenBudget: 'medium', legacyReadCount: null },
+      deep: { maxMasterModelTurns: 5, maxSpecialistModelTurns: 4, maxDelegations: 4, readTokenBudget: 'high', legacyReadCount: null },
     });
     const first = buildDefaultWorldSimulationSettings_ACU();
     const second = buildDefaultWorldSimulationSettings_ACU();
-    first.budgets.deep.maxReads = 0;
-    expect(second.budgets.deep.maxReads).toBe(12);
-    expect(first).toMatchObject({ enabled: false, joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, minFloorGap: 1, checkpointInterval: 20, maxTrackedEntities: 12, visibilityPolicy: 'agent', showHiddenInUi: false });
+    first.budgets.deep.maxSpecialistModelTurns = 1;
+    expect(second.budgets.deep.maxSpecialistModelTurns).toBe(4);
+    expect(first).toMatchObject({ enabled: false, joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, minFloorGap: 1, checkpointInterval: 20, maxTrackedEntities: 12, visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true });
   });
 
   it('validates clock precision and visibility discriminants', () => {

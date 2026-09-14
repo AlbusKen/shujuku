@@ -8,6 +8,7 @@ import {
   type WorldSimulationOrchestratorPort_ACU,
   type WorldSimulationRuntimeDependencies_ACU,
 } from '../../../src/service/simulation/simulation-runtime';
+import { readWorldSimulationStoryBranchIdentity_ACU } from '../../../src/service/simulation/world-simulation-story-context';
 
 function enabledSettings(overrides: Partial<WorldSimulationSettings_ACU> = {}): WorldSimulationSettings_ACU {
   return { ...buildDefaultWorldSimulationSettings_ACU(), enabled: true, ...overrides };
@@ -70,7 +71,7 @@ describe('isWorldSimulationSettings_ACU', () => {
     expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), minFloorGap: 0 })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), visibilityPolicy: 'sometimes' })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), showHiddenInUi: 'true' })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), budgets: { light: { maxIterations: 0, maxDelegations: 0, maxReads: 0, readTokenBudget: 'low' } } })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...enabledSettings(), budgets: { light: { maxMasterModelTurns: 0, maxSpecialistModelTurns: 1, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' } } })).toBe(false);
   });
 });
 
@@ -135,6 +136,78 @@ describe('WorldSimulationRuntime_ACU.onAiFloorCompleted', () => {
     expect(trigger).toHaveBeenCalledTimes(1);
   });
 
+  it('continues FIFO drain when a session settles while its current drain is still active', async () => {
+    let calls = 0;
+    let runtime!: WorldSimulationRuntime_ACU;
+    const agentSession = {
+      isRunning: () => false,
+      hasPendingRequest: () => calls < 2,
+      runPendingForAnchor: vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) runtime.requestPendingAgentDrain();
+        return 'no_change';
+      }),
+    };
+    ({ runtime } = createRuntime({ getChat: aiChat, agentSession: agentSession as any }));
+    runtime.requestPendingAgentDrain();
+    await flush();
+    expect(agentSession.runPendingForAnchor).toHaveBeenCalledTimes(2);
+  });
+
+  it('drains a second pending request before resuming the automatic gate after the first no_change', async () => {
+    let pending = 2;
+    const trigger = vi.fn(async () => ({}));
+    const owned = vi.fn(async () => gateReply(1));
+    const agentSession = {
+      isRunning: () => false,
+      hasPendingRequest: () => pending > 0,
+      runPendingForAnchor: vi.fn(async () => {
+        if (!pending) return 'not_run';
+        pending -= 1;
+        return 'no_change';
+      }),
+    };
+    const { runtime } = createRuntime({ getChat: aiChat, runOwnedAi: owned, agentSession: agentSession as any, orchestrator: createPort({ trigger }) });
+    await runtime.onAiFloorCompleted(intent(1, 2, 1));
+    await flush();
+    expect(agentSession.runPendingForAnchor).toHaveBeenCalledTimes(2);
+    expect(owned).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('interrupts an automatic cancellable gate, queues maintenance, and drains it after the flight exits', async () => {
+    let entered: (() => void) | undefined;
+    let signal: AbortSignal | null | undefined;
+    const gate = new Promise<string>((_resolve, reject) => {
+      entered = () => undefined;
+      void reject;
+    });
+    const owned = vi.fn(async (request: any) => {
+      if (request.source !== 'world-sim-gate') return null;
+      signal = request.signal;
+      entered?.();
+      return new Promise<string>((_resolve, reject) => request.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    });
+    const agentSession = { isRunning: () => false, isCommitting: () => false, submit: vi.fn(async () => 'queued'), stop: vi.fn(() => 'idle'), runPendingForAnchor: vi.fn(async () => 'not_run') };
+    const { runtime } = createRuntime({ getChat: aiChat, runOwnedAi: owned, agentSession: agentSession as any, orchestrator: createPort() });
+    await runtime.onAiFloorCompleted(intent(1, 2, 1));
+    for (let index = 0; index < 20 && !signal; index += 1) await Promise.resolve();
+    const result = await runtime.interruptAndMaintain({ action: 'interrupt_and_maintain', instruction: '先停止并维护' });
+    expect(result).toBe('queued_after_flight');
+    expect(agentSession.submit).toHaveBeenCalledWith('先停止并维护', { forceQueue: true });
+    expect(signal?.aborted).toBe(true);
+    await flush();
+    expect(agentSession.runPendingForAnchor).toHaveBeenCalledWith(1, expect.any(Array));
+  });
+
+  it('queues explicit maintenance behind a committing automatic flight without attempting cancellation', async () => {
+    const discardFlight = vi.fn(() => true);
+    const agentSession = { isRunning: () => false, isCommitting: () => false, submit: vi.fn(async () => 'queued'), stop: vi.fn(() => 'idle'), runPendingForAnchor: vi.fn(async () => 'not_run') };
+    const { runtime } = createRuntime({ getChat: aiChat, agentSession: agentSession as any, orchestrator: createPort({ getPhase: () => 'committing', discardFlight }) });
+    await expect(runtime.interruptAndMaintain({ action: 'interrupt_and_maintain', instruction: '保存后维护' })).resolves.toBe('queued_after_commit');
+    expect(discardFlight).not.toHaveBeenCalled();
+  });
+
   it('never calls the gate for a pending or ambiguous floor resolution', async () => {
     const onlyUser = [{ is_user: true, mes: 'u' }];
     const { runtime, runOwnedAi } = createRuntime({ getChat: () => onlyUser });
@@ -176,6 +249,111 @@ describe('WorldSimulationRuntime_ACU.onAiFloorCompleted', () => {
     await flush();
     expect(owned).not.toHaveBeenCalled();
   });
+
+  it('routes a uniquely hinted light floor directly to one specialist without a world-director call', async () => {
+    const state = { anchorMessageIndex: 0, storyClock: { anchorText: '第1日', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 }, entities: [{ id: 'ent-1', kind: 'character', name: '密探', importance: 'active', situation: '观察', agenda: '等待', lastMovedIndex: 0, lastMovedAt: '即时', visibility: { mode: 'hidden' }, retired: false, updatedIndex: 0 }], events: [], threads: [], revisions: { entities: 0, events: 0, threads: 0 } };
+    const gate = JSON.stringify({ storyTime: { anchorText: '第1日', elapsedSinceLastRun: '3小时', precision: 'approximate', evidenceIndexes: [1] }, worthUpdating: true, reason: '实体焦点', focusHints: ['ent-1'], scale: 'light' });
+    const transaction = JSON.stringify({ expectedRevisions: { entities: 0 }, entities: [{ action: 'upsert', value: { ...state.entities[0], situation: '已移动', updatedIndex: 0 } }], events: [], threads: [] });
+    const candidate = JSON.stringify({ ...JSON.parse(transaction), evidenceRefs: ['$WORLD_STATE'], summary: '密探移动', uncertainties: [] });
+    let specialistCalls = 0;
+    const owned = vi.fn(async (request: any) => request.source === 'world-sim-gate'
+      ? gate
+      : ++specialistCalls === 1 ? '{"thought":"核对当前状态","action":"tools","calls":[{"kind":"read","reads":["$WORLD_STATE"]}]}' : candidate);
+    const trigger = vi.fn(async (_anchor: number, runner: any) => runner({ runId: 'run-light', isCurrent: () => true, getMetadata: () => ({ initialAnchorMessageIndex: 1 }) }));
+    const storyContext: any = { feature: 'world-simulation', runId: 'run-light', chatIdentity: 'chat-a', branchIdentity: readWorldSimulationStoryBranchIdentity_ACU(aiChat(), 1), sourceRevision: 'r1', sourceDigest: 'd1', profile: 'world-director', overview: { state: 'ready', text: '概览', digest: 'o1', diagnostic: '' }, pending: { text: '正文', digest: 'p1' }, bridge: { text: '', digest: 'b1' }, catalog: { text: '1', digest: 'c1' } };
+    const { runtime } = createRuntime({
+      getChat: aiChat, runOwnedAi: owned, orchestrator: createPort({ trigger }),
+      store: { read: () => ({ state, deltaMessageIndices: [], checkpointMessageIndex: -1 }) } as any,
+      buildStoryContext: async () => storyContext,
+    });
+    await runtime.onAiFloorCompleted(intent(1, 2, 1)); await flush();
+    expect(owned.mock.calls.map(call => call[0].source)).toEqual(['world-sim-gate', 'world-sim-agent:entity-movement', 'world-sim-agent:entity-movement']);
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears an automatic light empty C5 candidate without calling the settler or commitProjection', async () => {
+    const state = { anchorMessageIndex: 0, storyClock: { anchorText: '第1日', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 }, entities: [{ id: 'ent-1', kind: 'character', name: '密探', importance: 'active', situation: '观察', agenda: '等待', lastMovedIndex: 0, lastMovedAt: '即时', visibility: { mode: 'hidden' }, retired: false, updatedIndex: 0 }], events: [], threads: [], revisions: { entities: 0, events: 0, threads: 0 } };
+    const gate = JSON.stringify({ storyTime: { anchorText: '第1日', elapsedSinceLastRun: '3小时', precision: 'approximate', evidenceIndexes: [1] }, worthUpdating: true, reason: '实体焦点', focusHints: ['ent-1'], scale: 'light' });
+    const emptyCandidate = '{"expectedRevisions":{},"entities":[],"events":[],"threads":[],"evidenceRefs":[],"summary":"当前没有安全变化","uncertainties":["暂无新增事实"]}';
+    const owned = vi.fn(async (request: any) => request.source === 'world-sim-gate' ? gate : emptyCandidate);
+    const commitProjection = vi.fn(async () => ({}));
+    const { WorldSimulationOrchestrator_ACU } = await import('../../../src/service/simulation/simulation-orchestrator');
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ readLeaseSnapshot: () => lease(1), createRunId: () => 'empty-light' });
+    const storyContext: any = { feature: 'world-simulation', runId: 'empty-light', chatIdentity: 'chat-a', branchIdentity: readWorldSimulationStoryBranchIdentity_ACU(aiChat(), 1), sourceRevision: 'r1', sourceDigest: 'd1', profile: 'world-director', overview: { state: 'ready', text: '概览', digest: 'o1', diagnostic: '' }, pending: { text: '正文', digest: 'p1' }, bridge: { text: '', digest: 'b1' }, catalog: { text: '1', digest: 'c1' } };
+    const { runtime } = createRuntime({
+      getChat: aiChat, runOwnedAi: owned, orchestrator, readLeaseSnapshot: () => lease(1),
+      store: { read: () => ({ state, deltaMessageIndices: [], checkpointMessageIndex: -1 }), commitProjection } as any,
+      buildStoryContext: async () => storyContext,
+    });
+    await runtime.onAiFloorCompleted(intent(1, 2, 1));
+    await flush();
+    expect(owned.mock.calls.map(call => call[0].source)).toEqual(['world-sim-gate', 'world-sim-agent:entity-movement']);
+    expect(orchestrator.getPhase('chat-a')).toBe('idle');
+    expect(commitProjection).not.toHaveBeenCalled();
+  });
+
+  it('rejects an automatic candidate when frozen requirements change before settlement', async () => {
+    const state = { anchorMessageIndex: 0, storyClock: { anchorText: '第1日', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 }, entities: [{ id: 'ent-1', kind: 'character', name: '密探', importance: 'active', situation: '观察', agenda: '等待', lastMovedIndex: 0, lastMovedAt: '即时', visibility: { mode: 'hidden' }, retired: false, updatedIndex: 0 }], events: [], threads: [], revisions: { entities: 0, events: 0, threads: 0 } };
+    const gate = JSON.stringify({ storyTime: { anchorText: '第1日', elapsedSinceLastRun: '3小时', precision: 'approximate', evidenceIndexes: [1] }, worthUpdating: true, reason: '实体焦点', focusHints: ['ent-1'], scale: 'light' });
+    const transaction = JSON.stringify({ expectedRevisions: { entities: 0 }, entities: [{ action: 'upsert', value: { ...state.entities[0], situation: '已移动', updatedIndex: 0 } }], events: [], threads: [] });
+    const candidate = JSON.stringify({ ...JSON.parse(transaction), evidenceRefs: ['$WORLD_STATE'], summary: '密探移动', uncertainties: [] });
+    let requirementRevision = 0;
+    const requirementsStore: any = { read: () => ({ feature: 'world-simulation' as const, revision: requirementRevision, lastAppliedUserMessageId: null, requirements: [] }), userSourceIds: () => [], pendingSourceIds: () => [], replace: vi.fn() };
+    let specialistCalls = 0;
+    const owned = vi.fn(async (request: any) => {
+      if (request.source === 'world-sim-gate') return gate;
+      specialistCalls += 1;
+      if (specialistCalls === 1) return '{"thought":"核对状态","action":"tools","calls":[{"kind":"read","reads":["$WORLD_STATE"]}]}';
+      requirementRevision = 1;
+      return candidate;
+    });
+    const commitProjection = vi.fn(async () => ({}));
+    const { WorldSimulationOrchestrator_ACU } = await import('../../../src/service/simulation/simulation-orchestrator');
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ readLeaseSnapshot: () => lease(1), createRunId: () => 'material-stale' });
+    const storyContext: any = { feature: 'world-simulation', runId: 'material-stale', chatIdentity: 'chat-a', branchIdentity: readWorldSimulationStoryBranchIdentity_ACU(aiChat(), 1), sourceRevision: 'r1', sourceDigest: 'd1', profile: 'world-director', overview: { state: 'ready', text: '概览', digest: 'o1', diagnostic: '' }, pending: { text: '正文', digest: 'p1' }, bridge: { text: '', digest: 'b1' }, catalog: { text: '1', digest: 'c1' } };
+    const { runtime } = createRuntime({ getChat: aiChat, runOwnedAi: owned, orchestrator, readLeaseSnapshot: () => lease(1), requirementsStore, loadWorldbook: async () => ({ available: true, entries: [] }), store: { read: () => ({ state, deltaMessageIndices: [], checkpointMessageIndex: -1 }), commitProjection } as any, buildStoryContext: async () => storyContext });
+    await runtime.onAiFloorCompleted(intent(1, 2, 1)); await flush();
+    expect(orchestrator.getPhase('chat-a')).toBe('idle');
+    expect(commitProjection).not.toHaveBeenCalled();
+  });
+
+  it('passes a normal director delegation seed read to its selected automatic specialist', async () => {
+    const state = { anchorMessageIndex: 0, storyClock: { anchorText: '第1日', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 }, entities: [{ id: 'ent-1', kind: 'character', name: '密探', importance: 'active', situation: '观察', agenda: '等待', lastMovedIndex: 0, lastMovedAt: '即时', visibility: { mode: 'hidden' }, retired: false, updatedIndex: 0 }], events: [], threads: [], revisions: { entities: 0, events: 0, threads: 0 } };
+    const gate = JSON.stringify({ storyTime: { anchorText: '第2日', elapsedSinceLastRun: '一日', precision: 'approximate', evidenceIndexes: [1] }, worthUpdating: true, reason: '需要核验实体', focusHints: [], scale: 'normal' });
+    const transaction = JSON.stringify({ expectedRevisions: { entities: 0 }, entities: [{ action: 'upsert', value: { ...state.entities[0], situation: '已移动', updatedIndex: 0 } }], events: [], threads: [] });
+    const candidate = JSON.stringify({ ...JSON.parse(transaction), evidenceRefs: ['$WORLD_STATE'], summary: '密探移动', uncertainties: [] });
+    let masterCalls = 0;
+    let specialistCalls = 0;
+    const owned = vi.fn(async (request: any) => {
+      if (request.source === 'world-sim-gate') return gate;
+      if (request.source === 'world-sim-master') {
+        masterCalls += 1;
+        return masterCalls === 1
+          ? '{"action":"delegate","thought":"补证后核验","delegations":[{"agentName":"entity-movement","task":"核验密探位置","materialGrants":[],"reads":["$STORY_PENDING"]}]}'
+          : '{"action":"finalize","thought":"采用候选","decision":"commit","acceptedAgents":["entity-movement"],"summary":"可提交","unresolved":[]}';
+      }
+      specialistCalls += 1;
+      return specialistCalls === 1
+        ? '{"thought":"读取当前状态","action":"tools","calls":[{"kind":"read","reads":["$WORLD_STATE"]}]}'
+        : candidate;
+    });
+    const trigger = vi.fn(async (_anchor: number, runner: any) => runner({ runId: 'run-normal', isCurrent: () => true, getMetadata: () => ({ initialAnchorMessageIndex: 1 }) }));
+    const storyContext: any = { feature: 'world-simulation', runId: 'run-normal', chatIdentity: 'chat-a', branchIdentity: readWorldSimulationStoryBranchIdentity_ACU(aiChat(), 1), sourceRevision: 'r1', sourceDigest: 'd1', profile: 'world-director', overview: { state: 'ready', text: '概览', digest: 'o1', diagnostic: '' }, pending: { text: '正文', digest: 'p1' }, bridge: { text: '', digest: 'b1' }, catalog: { text: '1', digest: 'c1' } };
+    const { runtime } = createRuntime({ getChat: aiChat, runOwnedAi: owned, orchestrator: createPort({ trigger }), store: { read: () => ({ state, deltaMessageIndices: [], checkpointMessageIndex: -1 }) } as any, buildStoryContext: async () => storyContext });
+
+    await runtime.onAiFloorCompleted(intent(1, 2, 1)); await flush();
+    const specialistCallsForAgent = owned.mock.calls.filter(call => call[0].source === 'world-sim-agent:entity-movement');
+    const specialist = specialistCallsForAgent[0]![0];
+    const seedRead = specialist.messages.find((message: any) => message.content.includes('<UNTRUSTED_READ_MATERIAL>'));
+    expect(seedRead).toMatchObject({ role: 'user' });
+    expect(seedRead.content).toContain('### $STORY_PENDING');
+    const toolResults = specialistCallsForAgent[1]![0].messages.find((message: any) => message.content.includes('<UNTRUSTED_TOOL_RESULTS>'));
+    expect(toolResults).toMatchObject({ role: 'user' });
+    expect(toolResults.content).toContain('### $WORLD_STATE');
+    expect(owned.mock.calls.map(call => call[0].source)).toEqual(['world-sim-gate', 'world-sim-master', 'world-sim-agent:entity-movement', 'world-sim-agent:entity-movement', 'world-sim-master']);
+  });
+
+
 });
 
 describe('WorldSimulationRuntime_ACU.awaitBeforePlotStart', () => {

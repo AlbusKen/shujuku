@@ -1,4 +1,4 @@
-import type { WorldSimulationModule_ACU, WorldSimulationScale_ACU } from '../model';
+import type { WorldSimulationModule_ACU, WorldSimulationScale_ACU, WorldStateSnapshot_ACU } from '../model';
 export type { WorldSimulationAgentName_ACU } from '../model';
 import type { WorldSimulationAgentName_ACU } from '../model';
 
@@ -11,7 +11,7 @@ export interface WorldSimulationAgentDefinition_ACU {
 
 /** Main-loop-owned direct role. It is not one of the three delegated specialists. */
 export const WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU: WorldSimulationAgentDefinition_ACU = {
-  name: 'world-director', description: '整合当前世界状态，做最低成本的直接推演；可协调实体、事件与线索，但不得写正文。', writableModules: ['entities', 'events', 'threads'], delegated: false,
+  name: 'world-director', description: '整合当前世界状态、读取资料、协调受限子代理并收敛候选；不直接写入任何领域模块。', writableModules: [], delegated: false,
 };
 
 /** The design's three delegated specialists. */
@@ -28,9 +28,30 @@ export function findWorldSimulationAgent_ACU(name: string): WorldSimulationAgent
 
 /** Light avoids delegation; normal/deep widen the same deterministic responsibility sequence. */
 export function selectWorldSimulationAgents_ACU(scale: WorldSimulationScale_ACU): readonly WorldSimulationAgentDefinition_ACU[] {
-  if (scale === 'light') return [WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU];
-  if (scale === 'normal') return [WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, WORLD_SIMULATION_AGENT_CATALOG_ACU[0], WORLD_SIMULATION_AGENT_CATALOG_ACU[1]];
-  return [WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, ...WORLD_SIMULATION_AGENT_CATALOG_ACU];
+  if (scale === 'light') return [];
+  if (scale === 'normal') return [WORLD_SIMULATION_AGENT_CATALOG_ACU[0], WORLD_SIMULATION_AGENT_CATALOG_ACU[1]];
+  return WORLD_SIMULATION_AGENT_CATALOG_ACU;
+}
+
+/**
+ * A light round may bypass the director only when every gate hint identifies exactly one
+ * existing ledger module and all resolved hints agree on that same specialist.
+ */
+export function selectWorldSimulationLightAgentFromFocusHints_ACU(
+  snapshot: Pick<WorldStateSnapshot_ACU, 'entities' | 'events' | 'threads'>,
+  focusHints: readonly string[],
+): WorldSimulationAgentDefinition_ACU | null {
+  if (!Array.isArray(focusHints) || !focusHints.length || !focusHints.every(hint => typeof hint === 'string' && hint.trim())) return null;
+  let selectedModule: WorldSimulationModule_ACU | null = null;
+  for (const hint of focusHints) {
+    const matches = (['entities', 'events', 'threads'] as const).filter(module => snapshot[module].some(item => item.id === hint));
+    if (matches.length !== 1) return null;
+    if (selectedModule !== null && selectedModule !== matches[0]) return null;
+    selectedModule = matches[0];
+  }
+  return selectedModule === null
+    ? null
+    : WORLD_SIMULATION_AGENT_CATALOG_ACU.find(agent => agent.writableModules.includes(selectedModule)) ?? null;
 }
 
 export function renderWorldSimulationAgentCatalog_ACU(): string {

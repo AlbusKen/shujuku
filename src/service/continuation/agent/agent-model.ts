@@ -378,6 +378,9 @@ export interface AgentOutlineOpResult_ACU {
 export interface AgentDelegation_ACU {
   agentName: string;
   prompt: string;
+  /** 主 Agent本次已读世界书正文的运行内短编码；正文由 runtime 注入，不能塞进 prompt。 */
+  materialGrants?: string[];
+  /** 非世界书种子读集。世界书只能通过 materialGrants 初始下发。 */
   reads: string[];
 }
 
@@ -444,6 +447,12 @@ export interface AgentToolsAction_ACU {
   calls: AgentToolCall_ACU[];
 }
 
+export interface AgentMaintainRequirementsAction_ACU {
+  kind: 'maintain_requirements';
+  thought: string;
+  payload: Record<string, unknown>;
+}
+
 export interface AgentFinalizeAction_ACU {
   kind: 'finalize';
   thought: string;
@@ -464,6 +473,36 @@ export interface AgentBlockAction_ACU {
   thought: string;
   reason: string;
   unresolved: string[];
+}
+
+export const AGENT_PLAN_CONTROL_OPERATIONS_ACU = [
+  'revise_story_arc',
+  'regenerate_story_arc_remaining',
+  'regenerate_story_arc_all',
+  'revise_outline_remaining',
+  'regenerate_current_outline',
+  'continue_next_stage',
+  'adopt_external_progress',
+] as const;
+export type AgentPlanControlOperation_ACU = typeof AGENT_PLAN_CONTROL_OPERATIONS_ACU[number];
+
+/** 主 Agent 仅提出规划意图；运行时二次校验目标、租约与写入事务。 */
+export interface AgentPlanControlAction_ACU {
+  kind: 'plan_control';
+  thought: string;
+  operation: AgentPlanControlOperation_ACU;
+  instruction: string;
+  volumeIds: string[];
+  stageId: string;
+  targetMessageIndex: number | null;
+}
+
+/** 同租约规划控制回执；等待确认与停止状态必须由调用方如实呈现。 */
+export interface AgentPlanControlResult_ACU {
+  ok: boolean;
+  summary: string;
+  requiresReview: boolean;
+  stopped: 'stage_limit_reached' | 'duration_reached' | null;
 }
 
 /**
@@ -495,27 +534,29 @@ export type AgentOutlineEditOp_ACU =
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU;
+export type AgentMainAction_ACU = AgentMaintainRequirementsAction_ACU | AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU | AgentPlanControlAction_ACU;
 
-/** 运行时硬边界。预留最后一轮让主 Agent 有机会正常交付而不是被突然掐断。 */
+/** 运行时硬边界。每个模型输出（包括 tools）均消耗主或子 Agent 的模型轮次。 */
 export interface AgentRunBudget_ACU {
-  maxIterations: number;
+  maxModelTurns: number;
+  maxSubagentModelTurns: number;
   maxDelegations: number;
   maxSameAgent: number;
   maxConcurrent: number;
-  /** 主 Agent 一次运行内 read/search 工具批次的次数上限。 */
-  maxReads: number;
-  /** 子代理小循环里工具轮次上限（首轮之外还允许几轮 read/search）。 */
-  maxExtraReads: number;
+  /** 仅兼容展示旧 maxReads；绝不参与运行时门禁。 */
+  legacyReadCount: number | null;
+  /** 仅兼容展示旧 maxExtraReads；绝不参与运行时门禁。 */
+  legacyExtraReadCount: number | null;
 }
 
 export const DEFAULT_AGENT_RUN_BUDGET_ACU: AgentRunBudget_ACU = {
-  maxIterations: 8,
+  maxModelTurns: 12,
+  maxSubagentModelTurns: 12,
   maxDelegations: 6,
   maxSameAgent: 2,
   maxConcurrent: 3,
-  maxReads: 8,
-  maxExtraReads: 3,
+  legacyReadCount: null,
+  legacyExtraReadCount: null,
 };
 
 /** 一次派工的执行结果。被运行时拒绝的委派也走这里回灌给主 Agent。 */
@@ -728,6 +769,8 @@ export interface ContinuationAgentTurnPlanRequest_ACU {
   isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   /** 大纲操作回调，由编排器在租约内执行。正文重试轮不注入，此时大纲派工被拒绝回灌。 */
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>;
+  /** 受控规划操作回调；主循环不得反调公开编排器入口以免嵌套 lease。 */
+  planControl?: (action: AgentPlanControlAction_ACU) => Promise<AgentPlanControlResult_ACU>;
   signal?: AbortSignal | null;
 }
 

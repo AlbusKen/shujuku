@@ -31,7 +31,7 @@ function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
       recentTurnCount: 2,
       tableData: { s1: { name: '角色表', content: [['姓名'], ['林瑶']] } },
     },
-    budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 1, maxReads: 8, maxExtraReads: 1 },
+    budget: { maxModelTurns: 12, maxSubagentModelTurns: 12, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 1, legacyReadCount: null, legacyExtraReadCount: null },
     preset: preset_ACU,
     createIdentity: (_name, attempt) => ({ taskId: 't', stageId: 's', turnId: 'u', attemptId: `a-${attempt}`, source: 'agent_subagent' }) as any,
     isCurrent: () => true,
@@ -93,6 +93,26 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(rendered).toContain('没有已结算的故事时间记录');
     expect(rendered).toContain('$CHRONOLOGY 故事年代学账本');
     expect(rendered).toContain('【故事时间结算契约】');
+  });
+
+  it('injects only the validated first-round worldbook grant snapshot and rejects a mismatched grant set', async () => {
+    const calls: Array<Array<{ role: string; content: string }>> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => { calls.push(messages); return finalReply_ACU; },
+    });
+    const input = input_ACU();
+    input.delegation = { agentName: 'hook-cognition-maintainer', prompt: '核验晶屑设定', materialGrants: ['W1'], reads: [] };
+    input.grants = [{ grantId: 'W1', source: { address: '$WORLDBOOK:设定集:7', revision: '设定集:7:12', digest: 'digest-1' }, content: '晶屑不可离开铁门。' }];
+    await runtime.run(input);
+    const rendered = calls[0].map(message => message.content).join('\n');
+    expect(rendered).toContain('【UNTRUSTED_AGENT_WORLD_BOOK_GRANTS】');
+    expect(rendered).toContain('W1｜$WORLDBOOK:设定集:7｜digest-1');
+    expect(rendered).toContain('晶屑不可离开铁门。');
+
+    const mismatched = input_ACU();
+    mismatched.delegation = { agentName: 'hook-cognition-maintainer', prompt: '越权', materialGrants: ['W1'], reads: [] };
+    await expect(runtime.run(mismatched)).rejects.toThrow('不一致');
   });
 
   it('renders fixed user intent and the complete current-stage outline from one resolve context', async () => {
@@ -176,7 +196,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
 
   it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {
     const base = input_ACU();
-    base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxExtraReads: 1 };
+    base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxModelTurns: 12, legacyExtraReadCount: null };
     base.settings.agentReadTokenBudget = 1;
     base.resolveContext.worldbook = {
       available: true,

@@ -28,6 +28,7 @@ import {
   type AgentWritableModule_ACU,
 } from './agent-model';
 import { normalizeEvidenceIndexes_ACU, normalizeStageNumbers_ACU } from './agent-module-store';
+import { assertStoryArcTargetStageRanges_ACU, CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU } from '../continuation-volume-capacity';
 
 function reject_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -245,7 +246,7 @@ function assertVolumeCompletionContract_ACU(volume: AgentStoryArcEntry_ACU): voi
   }
 }
 
-function assertStoryArcContractShape_ACU(entries: readonly AgentStoryArcEntry_ACU[]): void {
+function assertStoryArcContractShape_ACU(entries: readonly AgentStoryArcEntry_ACU[], maxStagesPerVolume: number): void {
   for (const entry of entries) {
     if (entry.retired || !hasVolumeContractField_ACU(entry)) continue;
     if (entry.scope !== 'volume') {
@@ -253,6 +254,7 @@ function assertStoryArcContractShape_ACU(entries: readonly AgentStoryArcEntry_AC
     }
     assertCompleteVolumeContract_ACU(entry, 'new');
   }
+  assertStoryArcTargetStageRanges_ACU(entries, maxStagesPerVolume);
 }
 
 /** 验证卷台阶的生命周期；阶段完成与卷完成是两层事实，不能互相替代。 */
@@ -384,7 +386,7 @@ function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: A
   return [...byId.values()];
 }
 
-function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[]): AgentStoryArcEntry_ACU[] {
+function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[], maxStagesPerVolume: number): AgentStoryArcEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
   for (const item of items) {
     if (!item.id.trim()) reject_ACU('总纲条目缺少 id');
@@ -435,11 +437,11 @@ function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: Agent
   }
   const next = [...byId.values()];
   assertSingleActiveStoryScope_ACU(next);
-  assertStoryArcContractShape_ACU(next);
+  assertStoryArcContractShape_ACU(next, maxStagesPerVolume);
   return next;
 }
 
-function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: AgentStoryArcPatch_ACU[]): AgentStoryArcEntry_ACU[] {
+function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: AgentStoryArcPatch_ACU[], maxStagesPerVolume: number): AgentStoryArcEntry_ACU[] {
   const byId = new Map(entries.map(entry => [entry.id, entry]));
   for (const patch of patches) {
     const current = byId.get(patch.id);
@@ -469,7 +471,7 @@ function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: Ag
     byId.set(patch.id, merged);
   }
   const next = [...byId.values()];
-  assertStoryArcContractShape_ACU(next);
+  assertStoryArcContractShape_ACU(next, maxStagesPerVolume);
   return next;
 }
 
@@ -487,6 +489,7 @@ export function applyAgentModuleDelta_ACU(
   allowedWrites: readonly string[],
   settledIndex: number,
   completedStageNumbers: readonly number[] = [],
+  maxStagesPerVolume = CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU,
 ): AgentModuleSnapshot_ACU {
   assertWritePermission_ACU(delta, allowedWrites);
   assertExpectedRevisions_ACU(delta, snapshot);
@@ -500,10 +503,12 @@ export function applyAgentModuleDelta_ACU(
   if (delta.hookPatches.length) hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
   let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
   if (delta.infoGapPatches.length) infoGap = applyInfoGapPatches_ACU(infoGap, delta.infoGapPatches);
-  let storyArc = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
+  let storyArc = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc, maxStagesPerVolume) : snapshot.storyArc;
+  if (delta.storyArc.length) assertStoryArcTargetStageRanges_ACU(storyArc, maxStagesPerVolume);
   if (delta.storyArcPatches.length) {
-    storyArc = applyStoryArcPatches_ACU(storyArc, delta.storyArcPatches);
+    storyArc = applyStoryArcPatches_ACU(storyArc, delta.storyArcPatches, maxStagesPerVolume);
     assertSingleActiveStoryScope_ACU(storyArc);
+    assertStoryArcTargetStageRanges_ACU(storyArc, maxStagesPerVolume);
   }
   if (storyArcTouched) assertVolumeLifecycle_ACU(snapshot.storyArc, storyArc, new Set(completedStageNumbers));
   const chronology = chronologyTouched ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;

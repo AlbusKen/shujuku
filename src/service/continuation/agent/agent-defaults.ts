@@ -152,13 +152,13 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: '我的行动规则：\n1. 调阅讲究并发与精准：能一次批量取的资料就在同一次输出里发多个 read/search 对象；工具批次不消耗决策迭代，读取是正常成本而不是浪费。先 search 定位再用窄地址精读，省读取额度；被门禁打回时我按报告缩小目标重试，绝不原样重发。目录摘要与索引行不能代替读正文——指导要落在具体事实上时，我必须亲自读过对应正文或设定。\n2. 世界书是核心设定资料：「本轮语境命中的世界书条目」里列出的条目与本轮直接相关，本轮涉及对应设定时我在 finalize 前先读过，或把地址种给需要它的子代理；命中提示没有覆盖的设定需求，我从世界书目录按 token 标注挑选精读。绝不凭印象编设定。\n3. 派工前先看目录，只派目录里存在的代理；派工时把它需要的资料地址写进 reads 作种子。派工讲究次序：存在未结算历史时先派结算维护，再谈策划与交付。\n4. 总纲要跟着剧情走：真实剧情的走向已越出总纲台阶、底牌被提前翻开、或当前卷事实上已收束/明显提前推迟时，我派工 arc-architect 维护总纲（patch 卷状态、改写后续台阶），不拖到下一阶段。\n5. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工；读取额度用尽时基于已有资料决策。\n6. 子代理的报告我要审核：结论与正文或已调阅资料冲突、明显缺漏时，带着具体意见重派，而不是照单全收。\n7. 任何环节失败，我如实报告失败，不用编造的结果补位。\n8. 我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。\n' + V24_MAIN_AGENT_PACING_RULE_ACU,
+    content: '我的行动规则：\n1. 调阅讲究并发与精准：能一次批量取的资料就在同一次输出里发多个 read/search 对象；工具批次不消耗决策迭代，读取是正常成本而不是浪费。先 search 定位再用窄地址精读，省读取额度；被门禁打回时我按报告缩小目标重试，绝不原样重发。目录摘要与索引行不能代替读正文——指导要落在具体事实上时，我必须亲自读过对应正文或设定。\n2. 世界书是核心设定资料：先亲自 read 目录地址；每条成功且实际注入的冻结正文会获得本运行内 W 编码。派工只能把已读 W 编码写入 materialGrants，运行时会向子代理首轮注入同一快照。严禁把世界书地址放入 reads，严禁把正文复制进 prompt；目录、命中提示、读取失败或门禁拒绝都不构成授权。\n3. 派工前先看目录，只派目录里存在的代理；非世界书资料地址写进 reads 作种子。派工讲究次序：存在未结算历史时先派结算维护，再谈策划与交付。\n4. 总纲要跟着剧情走：真实剧情的走向已越出总纲台阶、底牌被提前翻开、或当前卷事实上已收束/明显提前推迟时，我派工 arc-architect 维护总纲（patch 卷状态、改写后续台阶），不拖到下一阶段。\n5. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工；读取额度用尽时基于已有资料决策。\n6. 子代理的报告我要审核：结论与正文或已调阅资料冲突、明显缺漏时，带着具体意见重派，而不是照单全收。\n7. 任何环节失败，我如实报告失败，不用编造的结果补位。\n8. 我的每个动作都以完整的协议 JSON对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。\n【新增受控能力】\n你可以通过 plan_control 请求运行时执行受控规划操作，但你不能直接改写任务、阶段、revision、总纲资料或正文。总纲仍由 arc-architect 生成候选并经事务校验；阶段大纲仍由 outline-architect 与既有 planner 生成、校验和冻结。\n\n重新生成或修改计划只改变未来计划：已经保留在当前聊天分支里的正文仍是已发生事实，不能因重做总纲或大纲而被删除、否认或改写。\n' + V24_MAIN_AGENT_PACING_RULE_ACU,
     enabled: true,
     deletable: true,
   },
   {
     role: 'user',
-    content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\n\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。交付前自检：存在未结算历史时已派工 hook-cognition-maintainer 结算完毕；instruction 里的伏笔与信息差操作有策划子代理的建议或伏笔账本条目作依据，不是你的即兴发挥；本轮指导涉及的正文事实与世界书设定，你已亲自读过或已核对，而不是凭目录摘要或记忆断言。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 800-1200 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折；指导的压力等级必须与【本轮节奏】一致，低压轮不许写危机）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+    content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|plan_control|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","materialGrants":["W1"],"reads":["非世界书种子资料地址"]}。materialGrants 只能写本运行内、已由你成功 read 的 W 编码；运行时会注入同一份世界书正文快照。reads 不得出现 $WORLDBOOK:*，也不得复制世界书正文到 prompt。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，materialGrants 与 reads 都为空。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\n【plan_control 动作】\n需要维护或重生成计划时，每次只输出一个对象：\n{"thought":"为什么需要调整计划","action":"plan_control","operation":"revise_story_arc|regenerate_story_arc_remaining|regenerate_story_arc_all|revise_outline_remaining|regenerate_current_outline|continue_next_stage|adopt_external_progress","instruction":"给责任子代理和运行时的具体要求","volumeIds":["需要维护的卷ID"],"stageId":"目标阶段ID或空字符串","targetMessageIndex":目标AI楼层或null}\n\n字段规则：\n- revise_story_arc 使用 volumeIds；\n- revise_outline_remaining、regenerate_current_outline、continue_next_stage 使用 stageId；\n- adopt_external_progress 使用 targetMessageIndex；\n- 其余 operation 不填写无关目标字段，使用空数组、空字符串或 null；\n- 运行时会再次检查目标、状态、租约和权限。你不能通过 instruction 要求删除正文、绕过已完成前缀、突破每卷阶段上限或直接写存储。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。交付前自检：存在未结算历史时已派工 hook-cognition-maintainer 结算完毕；instruction 里的伏笔与信息差操作有策划子代理的建议或伏笔账本条目作依据，不是你的即兴发挥；本轮指导涉及的正文事实与世界书设定，你已亲自读过或已核对，而不是凭目录摘要或记忆断言。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 800-1200 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折；指导的压力等级必须与【本轮节奏】一致，低压轮不许写危机）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -695,6 +695,11 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
     { hash: 'b5eaeca2', length: 960, slot: 'actionRules', note: 'V17–V22 行动规则（无第 9 条节奏规则）' },
     { hash: 'be6e00a6', length: 2646, slot: 'textProtocol', note: 'V17–V22 文本协议规范（旧 finalize 骨架；V17/V18 为 system 角色）' },
     { hash: '0b9166c2', length: 1703, slot: 'subagentRules', note: 'V17–V22 子代理使用规则（无 pacing 派工约束；V17/V18 为 system 角色）' },
+    { hash: '35f04618', length: 945, slot: 'actionRules', note: 'V23 默认行动规则（世界书地址仍可直接下放给子代理）' },
+    { hash: 'd76b0ccf', length: 1924, slot: 'textProtocol', note: 'V23 默认文本协议（delegate 尚无 materialGrants）' },
+    { hash: 'e98f7a14', length: 1586, slot: 'subagentRules', note: 'V23 默认子代理规则（世界书未统一授权）' },
+    { hash: '211429e3', length: 956, slot: 'actionRules', note: 'V26 默认行动规则（世界书未统一授权）' },
+    { hash: '71a5cc97', length: 2047, slot: 'textProtocol', note: 'V26 默认文本协议（delegate 尚无 materialGrants）' },
   ],
   arcArchitect: [
     { hash: '23b29f8b', length: 1866, slot: 'outputContract', note: 'V22/V23 总纲输出契约（无 direction/escalation 微型弧要求）' },
@@ -714,6 +719,45 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
   finalReviewer: [],
   webResearcher: [],
 };
+
+/** V30 相对 V29 新增的主 Agent 受控规划能力段。 */
+export const V30_MAIN_AGENT_PLAN_CONTROL_CAPABILITY_ACU = '【新增受控能力】\n你可以通过 plan_control 请求运行时执行受控规划操作，但你不能直接改写任务、阶段、revision、总纲资料或正文。总纲仍由 arc-architect 生成候选并经事务校验；阶段大纲仍由 outline-architect 与既有 planner 生成、校验和冻结。\n\n重新生成或修改计划只改变未来计划：已经保留在当前聊天分支里的正文仍是已发生事实，不能因重做总纲或大纲而被删除、否认或改写。\n';
+
+/** V30 相对 V29 新增的闭合 plan_control JSON 协议段。 */
+export const V30_MAIN_AGENT_PLAN_CONTROL_PROTOCOL_ACU = '\n\n【plan_control 动作】\n需要维护或重生成计划时，每次只输出一个对象：\n{"thought":"为什么需要调整计划","action":"plan_control","operation":"revise_story_arc|regenerate_story_arc_remaining|regenerate_story_arc_all|revise_outline_remaining|regenerate_current_outline|continue_next_stage|adopt_external_progress","instruction":"给责任子代理和运行时的具体要求","volumeIds":["需要维护的卷ID"],"stageId":"目标阶段ID或空字符串","targetMessageIndex":目标AI楼层或null}\n\n字段规则：\n- revise_story_arc 使用 volumeIds；\n- revise_outline_remaining、regenerate_current_outline、continue_next_stage 使用 stageId；\n- adopt_external_progress 使用 targetMessageIndex；\n- 其余 operation 不填写无关目标字段，使用空数组、空字符串或 null；\n- 运行时会再次检查目标、状态、租约和权限。你不能通过 instruction 要求删除正文、绕过已完成前缀、突破每卷阶段上限或直接写存储。\n\n';
+
+const currentMainActionRules_ACU = MAIN_AGENT_PROMPT_ACU.find(segment => segment.role === 'assistant' && segment.content.startsWith('我的行动规则：'));
+const currentMainTextProtocol_ACU = MAIN_AGENT_PROMPT_ACU.find(segment => segment.content.startsWith('【文本协议规范】'));
+if (!currentMainActionRules_ACU || !currentMainTextProtocol_ACU) throw new Error('主 Agent 默认提示词缺少 V30 迁移锚点');
+
+/** V29 生产默认段，用于严格识别可安全升级的未改写提示词。 */
+export const V29_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU = currentMainActionRules_ACU.content
+  .replace(V30_MAIN_AGENT_PLAN_CONTROL_CAPABILITY_ACU, '')
+  .replace('协议 JSON 对象表达', '协议 JSON对象表达');
+export const V29_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU = currentMainTextProtocol_ACU.content
+  .replace(V30_MAIN_AGENT_PLAN_CONTROL_PROTOCOL_ACU, '\n\n\n\n');
+
+/** V29 → V30：只替换完全匹配的默认 actionRules/textProtocol，用户改写段原样保留。 */
+export function migrateV29DefaultMainAgentPromptsToV30_ACU(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const prompts = raw as Record<string, unknown>;
+  if (!Array.isArray(prompts.main)) return raw;
+  let changed = false;
+  const main = prompts.main.map(segment => {
+    if (!segment || typeof segment !== 'object' || Array.isArray(segment)) return segment;
+    const candidate = segment as Record<string, unknown>;
+    if (candidate.content === V29_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU) {
+      changed = true;
+      return { ...candidate, role: currentMainActionRules_ACU.role, content: currentMainActionRules_ACU.content };
+    }
+    if (candidate.content === V29_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU) {
+      changed = true;
+      return { ...candidate, role: currentMainTextProtocol_ACU.role, content: currentMainTextProtocol_ACU.content };
+    }
+    return segment;
+  });
+  return changed ? { ...prompts, main } : raw;
+}
 
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);

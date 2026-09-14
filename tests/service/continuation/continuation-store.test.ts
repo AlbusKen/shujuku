@@ -165,6 +165,81 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(new FirstFloorContinuationStore_ACU().readPersisted()?.activeTask?.stageBudgetBaseCount).toBe(1);
   });
 
+  it('reads missing volume capacity and stage binding as legacy-only in memory, while rejecting partial or unknown persisted shapes', () => {
+    const legacy = buildRunningEnvelope_ACU() as any;
+    delete legacy.settings.maxStagesPerVolume;
+    const chat: any[] = [{ _qrf_continuation: legacy }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const restored = new FirstFloorContinuationStore_ACU().readPersisted()!;
+    expect(restored.settings.maxStagesPerVolume).toBe(5);
+    expect(restored.activeTask!.stages[0]).not.toHaveProperty('volumeId');
+    expect(chat[0]._qrf_continuation.settings).not.toHaveProperty('maxStagesPerVolume');
+    expect(chat[0]._qrf_continuation.activeTask.stages[0]).not.toHaveProperty('volumeId');
+
+    const bound = buildRunningEnvelope_ACU() as any;
+    bound.activeTask.stages[0].volumeId = 'VOL-01';
+    bound.activeTask.stages[0].storyArcRevision = 3;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: bound }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().readPersisted()?.activeTask?.stages[0]).toMatchObject({ volumeId: 'VOL-01', storyArcRevision: 3 });
+
+    const partial = buildRunningEnvelope_ACU() as any;
+    partial.activeTask.stages[0].volumeId = 'VOL-01';
+    const unknown = buildRunningEnvelope_ACU() as any;
+    unknown.activeTask.stages[0].unexpected = true;
+    for (const invalid of [partial, unknown]) {
+      _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: invalid }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+      expect(() => new FirstFloorContinuationStore_ACU().readPersisted()).toThrow(ContinuationValidationError_ACU);
+    }
+  });
+
+  it('external_progress_adopted 只接受结构化宿主消息锚，拒绝旧隔离标签字段', () => {
+    const persisted = buildRunningEnvelope_ACU() as any;
+    persisted.activeTask.timeline = [{
+      id: 'adopt-1', at: 3, kind: 'external_progress_adopted', stageId: 'stage-1', revision: 1,
+      adoptionChatIdentity: 'chat-a', targetMessageIndex: 3, targetMessageId: 30, targetSwipeIndex: 0,
+      sourceStartMessageIndex: 1, sourceEndMessageIndex: 3,
+      satisfiedTurnIds: ['turn-1'], evidenceMessageIndexes: [2],
+      takeoverDisposition: 'continue_current_stage', requiresStoryArcRevision: false, reason: '外部正文满足当前连续轮次。',
+    }];
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: persisted }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().readPersisted()?.activeTask?.timeline[0]).toMatchObject({
+      kind: 'external_progress_adopted', targetMessageIndex: 3, targetMessageId: 30, targetSwipeIndex: 0,
+    });
+
+    const weak = JSON.parse(JSON.stringify(persisted));
+    weak.activeTask.timeline[0].unexpectedAnchor = true;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: weak }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(() => new FirstFloorContinuationStore_ACU().readPersisted()).toThrow(ContinuationValidationError_ACU);
+  });
+
+  it('external_progress_baselined 只接受零进度基线的闭合消息锚字段', () => {
+    const persisted = buildEnvelope_ACU() as any;
+    persisted.activeTask = {
+      taskId: 'task-baseline', originInstruction: '从外部现状继续', status: 'paused', createdAt: 1, updatedAt: 1, runStartedAt: null, deadlineAt: null,
+      runStageCount: 0, stageBudgetBaseCount: 0, activeStageId: null, stages: [], stopReason: null, lastError: null,
+      timeline: [
+        { id: 'task-created', at: 1, kind: 'task_created' },
+        { id: 'baseline-1', at: 2, kind: 'external_progress_baselined', adoptionChatIdentity: 'chat-a', targetMessageIndex: 4, targetMessageId: 40, targetSwipeIndex: 0, sourceStartMessageIndex: 0, sourceEndMessageIndex: 4 },
+      ],
+    };
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: persisted }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().readPersisted()?.activeTask).toMatchObject({
+      activeStageId: null, stages: [], timeline: [
+        { kind: 'task_created' },
+        { kind: 'external_progress_baselined', targetMessageIndex: 4, targetMessageId: 40, targetSwipeIndex: 0 },
+      ],
+    });
+
+    const partial = JSON.parse(JSON.stringify(persisted));
+    delete partial.activeTask.timeline[1].targetMessageId;
+    const unknown = JSON.parse(JSON.stringify(persisted));
+    unknown.activeTask.timeline[1].stageId = 'fabricated-stage';
+    for (const invalid of [partial, unknown]) {
+      _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: invalid }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+      expect(() => new FirstFloorContinuationStore_ACU().readPersisted()).toThrow(ContinuationValidationError_ACU);
+    }
+  });
+
   it('fails closed on persisted prompt segments with an unsupported role or empty content', () => {
     const invalidRole = buildEnvelope_ACU() as any;
     invalidRole.settings.outlinePrompt = [{ role: 'tool', content: 'invalid', deletable: true }];
@@ -242,7 +317,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
     expect(loaded.settings.outlinePrompt).toEqual(expectedOutlinePrompt);
   });
@@ -267,7 +342,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
     expect(loaded.settings.outlinePrompt).toEqual(expectedOutlinePrompt);
   });
@@ -309,7 +384,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.main.some(segment => segment.content === V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU)).toBe(false);
     expect(loaded.settings.agentPrompts.main.filter(segment => segment.role === 'system')).toHaveLength(1);
     expect(loaded.settings.agentPrompts.main[0].role).toBe('system');
@@ -337,7 +412,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
       String(segment.content).startsWith('【本回合运行时数据】'),
     );
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.main[runtimeIndex]).toMatchObject({
       role: 'system',
       content: '【本回合运行时数据】\n这是用户定制的运行时提示词。',
@@ -368,7 +443,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: v19 }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.main.some(segment => segment.content === V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU)).toBe(false);
     expect(loaded.settings.agentPrompts.main.find(segment => String(segment.content).startsWith('【以下是你自己的会话记录】'))?.content).toBe(currentDefaultMainAgentHistoryGuide_ACU());
     expect(loaded.settings.agentPrompts.main.find(segment => String(segment.content).startsWith('我收到的上下文分三层：'))?.content).toBe(currentDefaultMainAgentLayoutAnswer_ACU());
@@ -395,7 +470,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.main).toEqual(expectedMain);
     expect(loaded.settings.agentPrompts.arcArchitect).toEqual(expectedArc);
     expect(loaded.settings.agentPrompts.arcArchitect[2].content).toContain('总纲解决六件事');
@@ -413,7 +488,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.arcArchitect[6].content).toContain('短线 7–8 卷');
     expect(loaded.settings.agentPrompts.arcArchitect).toContainEqual(custom);
   });
@@ -434,7 +509,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.arcArchitect[6].content).toContain('completionStageNumber');
     expect(loaded.settings.agentPrompts.arcArchitect[6].content).toContain('continuationRationale');
     expect(loaded.settings.agentPrompts.main.some((segment: any) => String(segment.content).includes('单个阶段完成只回写当前 active 卷'))).toBe(true);
@@ -458,7 +533,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)).toBe(true);
     expect(loaded.settings.agentPrompts.main.some(segment => segment.content.includes(V24_MAIN_AGENT_PACING_RULE_ACU))).toBe(true);
     expect(loaded.settings.agentPrompts.main.some(segment => segment.content.includes(V23_MAIN_AGENT_PACING_RULE_ACU))).toBe(false);
@@ -487,7 +562,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     const contents = loaded.settings.outlinePrompt.map(segment => segment.content);
     const defaults = buildDefaultContinuationSettings_ACU().outlinePrompt.map(segment => segment.content);
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     // 三段协议段被换成当前默认；旧协议文本一个不剩。
     expect(contents).toEqual(defaults);
     expect(contents.some(content => content.includes('每个 <turn> 都必须带 pacing 属性'))).toBe(false);
@@ -507,7 +582,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
       : segment);
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: v26 }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content === V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)).toBe(true);
 
     const customized = buildEnvelope_ACU() as any;
@@ -517,7 +592,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
       : segment);
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: customized }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     const kept = new FirstFloorContinuationStore_ACU().read()!;
-    expect(kept.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(kept.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(kept.settings.outlinePrompt.some(segment => segment.content.endsWith('用户自定义补充'))).toBe(true);
     expect(kept.settings.outlinePrompt.some(segment => segment.content === V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)).toBe(false);
   });
@@ -532,7 +607,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.arcArchitect.filter(
       segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU,
     )).toHaveLength(1);
@@ -548,7 +623,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.arcArchitect).toEqual(customized.settings.agentPrompts.arcArchitect);
     expect(loaded.settings.agentPrompts.arcArchitect.some(
       (segment: any) => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU,
@@ -568,7 +643,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.main.filter(segment => segment.content === V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU)).toHaveLength(1);
     expect(loaded.settings.agentPrompts.maintainer.filter(segment => segment.content === V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU)).toHaveLength(1);
     expect(loaded.settings.agentPrompts.finalReviewer.filter(segment => segment.content === V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU)).toHaveLength(1);
@@ -591,7 +666,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
     expect(loaded.settings.agentPrompts.main.some(segment => segment.content === V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU)).toBe(false);
   });
@@ -615,7 +690,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content === customOutline)).toBe(true);
     expect(loaded.settings.outlinePrompt.some(segment => segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)).toBe(false);
     expect(loaded.settings.agentPrompts.main.some(segment => segment.content === '用户自定义主 Agent 节奏规则')).toBe(true);
@@ -630,7 +705,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.6-continuation-default-lineage-v28');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv3.8-continuation-plan-control-v30');
     expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content.includes('<stage_tempo>'))).toBe(true);
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');
@@ -647,6 +722,18 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: missing }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     expect(new FirstFloorContinuationStore_ACU().read()!.settings.promptCacheEnabled).toBe(false);
     expect(buildDefaultContinuationSettings_ACU().promptCacheEnabled).toBe(false);
+  });
+
+  it('defaults every model-turn guard to the configured minimum of twelve', () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    expect(settings.agentRunBudget).toMatchObject({
+      maxModelTurns: 12,
+      maxSubagentModelTurns: 12,
+      legacyReadCount: null,
+      legacyExtraReadCount: null,
+    });
+    expect(settings.finalReview).toMatchObject({ maxModelTurns: 12, legacyExtraReadCount: null });
+    expect(settings.webResearch).toMatchObject({ maxModelTurns: 12, legacyToolRoundCount: null });
   });
 
   it('存量信封缺 minGenerationTokens 时补默认 1000', () => {
@@ -668,8 +755,32 @@ describe('FirstFloorContinuationStore_ACU', () => {
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
     expect(loaded.settings.agentPrompts.main[0].content).toBe('保留的用户主控提示词');
     expect(loaded.settings.agentPrompts.finalReviewer).toEqual(buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer);
-    expect(loaded.settings.finalReview).toEqual({ enabled: false, readTokenBudget: '20%', maxExtraReads: 6 });
+    expect(loaded.settings.finalReview).toEqual({ enabled: false, readTokenBudget: '20%', maxModelTurns: 12, legacyExtraReadCount: null });
     expect(loaded.settings.agentApiPresets.finalReviewer).toEqual({ mode: 'inherit', presetName: '' });
+  });
+
+  it('reads legacy read counters only as diagnostics without mutating the persisted envelope', () => {
+    const legacy = buildEnvelope_ACU() as any;
+    legacy.settings.agentRunBudget = { maxIterations: 5, maxDelegations: 2, maxSameAgent: 1, maxConcurrent: 1, maxReads: 0, maxExtraReads: 0 };
+    legacy.settings.finalReview = { enabled: false, readTokenBudget: '20%', maxExtraReads: 0 };
+    legacy.settings.webResearch = { ...legacy.settings.webResearch, maxToolRounds: 8 };
+    delete legacy.settings.webResearch.maxModelTurns;
+    delete legacy.settings.webResearch.legacyToolRoundCount;
+    const chat = [{ _qrf_continuation: legacy }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+    expect(loaded.settings.agentRunBudget).toMatchObject({ maxModelTurns: 5, maxSubagentModelTurns: 12, legacyReadCount: 0, legacyExtraReadCount: 0 });
+    expect(loaded.settings.finalReview).toMatchObject({ maxModelTurns: 12, legacyExtraReadCount: 0 });
+    expect(loaded.settings.webResearch).toMatchObject({ maxModelTurns: 12, legacyToolRoundCount: 8 });
+    expect(chat[0]._qrf_continuation).toBe(legacy);
+  });
+
+  it('rejects mixed legacy and model-turn budget shapes', () => {
+    const invalid = buildEnvelope_ACU() as any;
+    invalid.settings.agentRunBudget = { ...invalid.settings.agentRunBudget, maxIterations: 12 };
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: invalid }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(() => new FirstFloorContinuationStore_ACU().read()).toThrow(ContinuationValidationError_ACU);
   });
 
   it('fails closed on persisted final-review settings with illegal values', () => {

@@ -1,5 +1,5 @@
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationInternalAiRequestIdentity_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type StageNode_ACU, type StageRevision_ACU, type StageTurn_ACU, type TurnAttemptIdentity_ACU } from './model';
-import type { AgentOutlineOpResult_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
+import type { AgentOutlineOpResult_ACU, AgentPlanControlAction_ACU, AgentPlanControlResult_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
 import type { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 
 /** 严格执行快照：只在铸造宿主归属身份时使用，要求大纲游标完整且已冻结。 */
@@ -101,6 +101,7 @@ export class StageExecutionEngine_ACU {
     existingAttempt?: TurnAttemptIdentity_ACU,
     applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>,
     signal?: AbortSignal | null,
+    planControl?: (action: AgentPlanControlAction_ACU) => Promise<AgentPlanControlResult_ACU>,
   ): Promise<ContinuationPreparedTurnInstruction_ACU> {
     const chatIdentity = this.dependencies.getChatIdentity();
     const initial = currentAgentContext_ACU(this.dependencies.readEnvelope());
@@ -135,6 +136,7 @@ export class StageExecutionEngine_ACU {
       },
       isInternalRequestCurrent: isCurrent,
       applyOutline: existingAttempt ? undefined : applyOutline,
+      planControl: existingAttempt ? undefined : planControl,
       signal,
     });
 

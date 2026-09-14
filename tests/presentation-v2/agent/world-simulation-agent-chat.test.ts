@@ -3,14 +3,16 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-async function mountChat(running = false, committing = false, stopResult: 'idle' | 'aborted' | 'committing' | 'committed' = 'aborted', submitResult: 'started' | 'started_with_audit_warning' | 'queued' = 'started') {
+async function mountChat(running = false, committing = false, interruptResult: 'started' | 'started_with_audit_warning' | 'queued_after_abort' | 'queued_after_flight' | 'queued_after_commit' = 'queued_after_abort', submitResult: 'started' | 'started_with_audit_warning' | 'queued' = 'started') {
   vi.resetModules();
   document.body.innerHTML = '';
   const runtime = {
     isAgentSessionRunning: vi.fn(() => running),
     isAgentSessionCommitting: vi.fn(() => committing),
     submitAgentMessage: vi.fn(async () => submitResult),
-    stopAgentSession: vi.fn(() => stopResult),
+    isAutomaticFlightRunning: vi.fn(() => false),
+    isAutomaticFlightCommitting: vi.fn(() => false),
+    interruptAndMaintain: vi.fn(async () => interruptResult),
   };
   const read = vi.fn(() => ({ messages: [], invalidMessageIndexes: [] }));
   vi.doMock('../../../src/service/simulation/simulation-runtime-registry', () => ({ getWorldSimulationRuntime_ACU: () => runtime }));
@@ -46,28 +48,33 @@ describe('WorldSimulationAgentChat', () => {
     app.unmount();
   });
 
-  it('only exposes stop while the session is running and forwards the explicit stop action', async () => {
+  it('keeps ordinary sends available while running and forwards explicit interrupt control separately', async () => {
     const { app, el, runtime } = await mountChat(true);
-    expect(Array.from(el.querySelectorAll('button')).map(button => button.textContent?.trim())).toContain('停止');
-    const stop = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '停止');
-    stop!.click();
-    expect(runtime.stopAgentSession).toHaveBeenCalledTimes(1);
-    expect(runtime.submitAgentMessage).not.toHaveBeenCalled();
+    expect(Array.from(el.querySelectorAll('button')).map(button => button.textContent?.trim())).toContain('中断并维护');
+    const textarea = el.querySelector<HTMLTextAreaElement>('textarea');
+    textarea!.value = '普通补充'; textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    await Promise.resolve();
+    const send = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '发送');
+    send!.click(); await Promise.resolve();
+    expect(runtime.submitAgentMessage).toHaveBeenCalledWith('普通补充');
+    const interrupt = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '中断并维护');
+    interrupt!.click(); await Promise.resolve(); await Promise.resolve();
+    expect(runtime.interruptAndMaintain).toHaveBeenCalledWith({ action: 'interrupt_and_maintain', instruction: '中止当前可取消的世界推演，并先维护后续请求。' });
     app.unmount();
   });
 
   it('reports an already-entered strict save as non-cancellable instead of promising a rollback', async () => {
-    const { app, el, runtime, nextTick } = await mountChat(true, true, 'committing');
+    const { app, el, runtime, nextTick } = await mountChat(true, true, 'queued_after_commit');
     expect(el.textContent).toContain('世界账本严格保存中');
-    const stop = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '停止');
-    stop!.click(); await nextTick();
-    expect(runtime.stopAgentSession).toHaveBeenCalledTimes(1);
-    expect(el.textContent).toContain('世界账本严格保存已开始，无法取消；正在等待联合保存完成。');
+    const interrupt = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '中断并维护');
+    interrupt!.click(); await Promise.resolve(); await nextTick();
+    expect(runtime.interruptAndMaintain).toHaveBeenCalledTimes(1);
+    expect(el.textContent).toContain('世界账本严格保存已开始，无法取消；中断请求已排队，保存完成后会先维护。');
     app.unmount();
   });
 
   it('reports a committed ledger with audit warning without inviting a duplicate business retry', async () => {
-    const { app, el, runtime, nextTick } = await mountChat(false, false, 'committed', 'started_with_audit_warning');
+    const { app, el, runtime, nextTick } = await mountChat(false, false, 'queued_after_abort', 'started_with_audit_warning');
     const textarea = el.querySelector<HTMLTextAreaElement>('textarea');
     textarea!.value = '推进港口局势';
     textarea!.dispatchEvent(new Event('input', { bubbles: true })); await nextTick();

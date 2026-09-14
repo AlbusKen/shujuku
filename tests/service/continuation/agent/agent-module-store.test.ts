@@ -10,6 +10,7 @@ import {
   renderAgentConstraints_ACU,
   renderAgentHooksLedger_ACU,
   renderAgentInfoGap_ACU,
+  replaceAgentModuleSnapshotByUser_ACU,
   validateAgentModuleSnapshot_ACU,
   writeAgentModuleSnapshot_ACU,
 } from '../../../../src/service/continuation/agent/agent-module-store';
@@ -179,6 +180,26 @@ describe('Agent 资料快照存储', () => {
     expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(1);
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(-1));
     expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(0);
+  });
+
+  it('用户保存 storyArc 使用调用方显式传入的每卷容量，而非反向读取其他存储', async () => {
+    const storyArc = [{
+      id: 'VOL-01', scope: 'volume', title: '第一卷', direction: '主角追查失踪账本', escalation: '线索引来追杀，收在账本落入敌手', withheld: '', status: 'active',
+      stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '',
+      targetStageRange: { min: 4, max: 6 },
+    }];
+    const acceptedChat: any[] = [{ mes: '正文' }];
+    _set_SillyTavern_API_ACU({ chat: acceptedChat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+
+    const saved = await replaceAgentModuleSnapshotByUser_ACU({ storyArc }, acceptedChat, 8);
+    expect(saved.storyArc[0].targetStageRange).toEqual({ min: 4, max: 6 });
+    expect(acceptedChat[0][AGENT_MODULE_FIELD_ACU].storyArc[0].targetStageRange).toEqual({ min: 4, max: 6 });
+
+    const rejectedChat: any[] = [{ mes: '正文' }];
+    _set_SillyTavern_API_ACU({ chat: rejectedChat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    await expect(replaceAgentModuleSnapshotByUser_ACU({ storyArc }, rejectedChat, 5))
+      .rejects.toMatchObject({ error: { code: 'CONTINUATION_VOLUME_STAGE_LIMIT_REACHED' } });
+    expect(Object.prototype.hasOwnProperty.call(rejectedChat[0], AGENT_MODULE_FIELD_ACU)).toBe(false);
   });
 
   it('写盘失败时还原楼层字段而不留下半成品', async () => {

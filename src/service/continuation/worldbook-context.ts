@@ -1,6 +1,8 @@
 import { getCurrentCharacterWorldbookBinding_ACU } from '../../data/gateways/character-gateway';
 import { getIsolationPrefix_ACU, getInjectionTargetLorebook_ACU } from '../worldbook/injection-engine-state';
-import { buildCombinedWorldbookContentByStrategy_ACU, getLorebookEntriesByNames_ACU } from '../worldbook/pipeline';
+import { buildCombinedWorldbookContentByStrategy_ACU } from '../worldbook/pipeline';
+import { getLorebookEntriesRequired_ACU } from '../../data/gateways/worldbook-gateway';
+import { AgentStoryOverviewProvider_ACU, type AgentStoryOverviewProviderResult_ACU } from '../agent-kernel/story-overview-provider';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { logWarn_ACU } from '../../shared/utils';
 
@@ -9,8 +11,8 @@ export interface ContinuationWorldbookAdapterDependencies_ACU {
   resolveInjectionTarget: () => Promise<string | null>;
   getIsolationPrefix: () => string;
   buildRelevantWorldbookContent: (options: Record<string, unknown>) => Promise<string>;
-  readLorebookEntries: (bookNames: string[]) => Promise<Record<string, unknown[]>>;
-  logReadFailure: (phase: 'background' | 'history') => void;
+  readTargetLorebookEntries: (bookName: string) => Promise<unknown[]>;
+  logReadFailure: (phase: 'background' | 'overview') => void;
 }
 
 const AM_CODE_PATTERN_ACU = /^AM\d+$/i;
@@ -60,7 +62,7 @@ const defaultDependencies_ACU: ContinuationWorldbookAdapterDependencies_ACU = {
   resolveInjectionTarget: () => getInjectionTargetLorebook_ACU(),
   getIsolationPrefix: () => getIsolationPrefix_ACU(),
   buildRelevantWorldbookContent: options => buildCombinedWorldbookContentByStrategy_ACU(options),
-  readLorebookEntries: bookNames => getLorebookEntriesByNames_ACU(bookNames),
+  readTargetLorebookEntries: bookName => getLorebookEntriesRequired_ACU(bookName),
   logReadFailure: phase => logWarn_ACU('[Continuation] 世界书只读失败。', { phase, error: { category: 'read_failed' } }),
 };
 
@@ -87,4 +89,20 @@ export class ContinuationWorldbookContext_ACU {
       return '';
     }
   }
+
+  /** 当前注入目标的数据库纪要索引；失败由 Provider 结构化返回，绝不伪装为空概要。 */
+  async readStoryOverview(): Promise<AgentStoryOverviewProviderResult_ACU> {
+    const provider = new AgentStoryOverviewProvider_ACU({
+      resolveTarget: this.dependencies.resolveInjectionTarget,
+      getIsolationPrefix: this.dependencies.getIsolationPrefix,
+      readEntries: this.dependencies.readTargetLorebookEntries,
+    });
+    const result = await provider.read();
+    if (result.state === 'failed') this.dependencies.logReadFailure('overview');
+    return result;
+  }
+}
+
+export async function readContinuationStoryOverview_ACU(): Promise<AgentStoryOverviewProviderResult_ACU> {
+  return new ContinuationWorldbookContext_ACU().readStoryOverview();
 }

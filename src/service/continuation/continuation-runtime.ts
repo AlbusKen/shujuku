@@ -8,11 +8,10 @@ import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 import {
-  extractAgentRecallCodesFromChat_ACU,
-  renderAgentStoryOverview_ACU,
   renderAgentStoryTail_ACU,
   type AgentContextRules_ACU,
 } from './agent/agent-placeholder-resolver';
+import { renderAgentStoryOverviewProviderResult_ACU } from '../agent-kernel/story-overview-provider';
 import { readAgentModuleSnapshot_ACU, renderAgentChronology_ACU, renderAgentConstraints_ACU, renderAgentHooksByIds_ACU, renderAgentInfoGapByIds_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
 import { ContinuationWorldbookContext_ACU } from './worldbook-context';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
@@ -110,10 +109,11 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
   const storySource = () => ({ chat: getChatArray_ACU(), storyWindowFloors: settings.storyWindowFloors, storyTailFloors: settings.storyTailFloors, contextRules });
   const storyTail = () => renderAgentStoryTail_ACU(storySource());
   const background = () => worldbook.readRelevantBackground(`${task.originInstruction}\n${storyTail()}`);
+  const storyOverview = worldbook.readStoryOverview();
   return {
     $ORIGIN_INSTRUCTION: () => task.originInstruction,
     $1: background,
-    $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(getChatArray_ACU()) }),
+    $STORY_OVERVIEW: async () => renderAgentStoryOverviewProviderResult_ACU(await storyOverview),
     $STORY_TAIL: storyTail,
     $STAGE_HISTORY: () => serializeStageHistory_ACU(task),
     $COMPLETED_STAGE_PART: () => completedPrefix_ACU(stage, revision),
@@ -243,6 +243,7 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
       const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
       return buildResolvers_ACU(context.task, stage, revision, worldbook, context.envelope.settings);
     },
+    readModuleSnapshot: () => readAgentModuleSnapshot_ACU(getChatArray_ACU()),
     hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
     buildFallbackSettings: buildInitialContinuationSettings_ACU,
     onSettingsReplaced: writeGlobalContinuationSettings_ACU,

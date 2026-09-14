@@ -5,6 +5,7 @@ import {
   isWorldSimulationSettings_ACU,
   normalizeWorldSimulationSettings_ACU,
   readWorldSimulationSettings_ACU,
+  readWorldSimulationSettingsUpgrade_ACU,
   setWorldSimulationSettingsPersistence_ACU,
   writeWorldSimulationSettings_ACU,
   writeWorldSimulationSettingsStrict_ACU,
@@ -38,8 +39,9 @@ describe('world simulation settings validation', () => {
     expect(isWorldSimulationSettings_ACU({ ...enabled(), enabled: 'yes' })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabled(), visibilityPolicy: 'sometimes' })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabled(), showHiddenInUi: 'true' })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...enabled(), toolsEnabled: 'true' })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabled(), minFloorGap: 0 })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { light: { maxIterations: 0, maxDelegations: 0, maxReads: 0, readTokenBudget: 'low' } } })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { light: { maxMasterModelTurns: 0, maxSpecialistModelTurns: 1, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' } } })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabled(), unknownField: true })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { ...enabled().budgets, extra: enabled().budgets.light } })).toBe(false);
     expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { ...enabled().budgets, light: { ...enabled().budgets.light, unexpected: 1 } } })).toBe(false);
@@ -75,13 +77,70 @@ describe('world simulation settings read/write', () => {
   it('deeply upgrades missing legacy budget fields in memory, but rejects invalid fields that are present', () => {
     const legacy = normalizeWorldSimulationSettings_ACU({
       enabled: true,
-      budgets: { light: { maxIterations: 2 }, deep: { readTokenBudget: 'low' } },
+      budgets: { light: { maxIterations: 2, maxReads: 7 }, deep: { readTokenBudget: 'low' } },
     });
     expect(legacy).toMatchObject({ upgraded: true, settings: { enabled: true } });
-    expect(legacy?.settings.budgets.light).toEqual({ ...buildDefaultWorldSimulationSettings_ACU().budgets.light, maxIterations: 2 });
+    expect(legacy?.settings.budgets.light).toEqual({ ...buildDefaultWorldSimulationSettings_ACU().budgets.light, maxMasterModelTurns: 2, legacyReadCount: 7 });
     expect(legacy?.settings.budgets.normal).toEqual(buildDefaultWorldSimulationSettings_ACU().budgets.normal);
     expect(legacy?.settings.budgets.deep).toEqual({ ...buildDefaultWorldSimulationSettings_ACU().budgets.deep, readTokenBudget: 'low' });
+    expect(legacy?.settings.toolsEnabled).toBe(true);
     expect(normalizeWorldSimulationSettings_ACU({ enabled: true, budgets: { light: { maxIterations: 0 } } })).toBeNull();
+  });
+
+  it('treats shared-only budget fields as a partial new tier and rejects mixed exclusive shapes', () => {
+    const defaults = buildDefaultWorldSimulationSettings_ACU();
+    const sharedOnly = normalizeWorldSimulationSettings_ACU({
+      enabled: true,
+      budgets: { light: { maxDelegations: 3, readTokenBudget: 'low' } },
+    });
+    expect(sharedOnly).toMatchObject({ upgraded: true, settings: { enabled: true } });
+    expect(sharedOnly?.settings.budgets.light).toEqual({
+      ...defaults.budgets.light,
+      maxDelegations: 3,
+      readTokenBudget: 'low',
+    });
+    expect(normalizeWorldSimulationSettings_ACU({
+      enabled: true,
+      budgets: { light: { maxIterations: 2, maxSpecialistModelTurns: 2 } },
+    })).toBeNull();
+  });
+
+  it('keeps legacy maxReads only as non-persisting compatibility metadata', () => {
+    const legacy = {
+      enabled: true,
+      budgets: {
+        light: { maxIterations: 2, maxDelegations: 1, maxReads: 99, readTokenBudget: 'low' },
+        normal: { maxIterations: 3, maxDelegations: 2, maxReads: 88, readTokenBudget: 'medium' },
+        deep: { maxIterations: 4, maxDelegations: 3, maxReads: 77, readTokenBudget: 'high' },
+      },
+    };
+    _set_settings_ACU({ worldSimulation: legacy } as any);
+    const upgrade = readWorldSimulationSettingsUpgrade_ACU();
+    expect(upgrade?.settings.budgets.deep).toMatchObject({ maxMasterModelTurns: 4, maxSpecialistModelTurns: 4, legacyReadCount: 77 });
+    expect((settings_ACU as any).worldSimulation).toBe(legacy);
+  });
+
+  it('migrates legacy prompts into v4 placeholders without writing, then persists only agentPrompts', async () => {
+    const legacy = buildDefaultWorldSimulationSettings_ACU() as any;
+    delete legacy.promptForceDefaultVersion;
+    legacy.agentPrompts = {
+      'world-director': [{ role: 'system', content: '旧主控规则：$USER_REQUEST', enabled: true, deletable: true }],
+      'entity-movement': [{ role: 'user', content: '旧实体规则：$AGENT_NAME', enabled: true, deletable: true }],
+      'faction-events': [{ role: 'user', content: '旧事件规则', enabled: true, deletable: true }],
+      'thread-weaver': [{ role: 'assistant', content: '旧线索规则', enabled: true, deletable: true }],
+    };
+    _set_settings_ACU({ worldSimulation: legacy } as any);
+
+    const upgrade = readWorldSimulationSettingsUpgrade_ACU();
+    expect(upgrade).toMatchObject({ upgraded: true, settings: { agentPrompts: { 'world-director': expect.any(Array) } } });
+    expect(upgrade!.settings.agentPrompts['world-director']).toContainEqual({ role: 'system', content: '旧主控规则：$USER_REQUEST', enabled: true, deletable: true });
+    expect(upgrade!.settings.agentPrompts['world-director'].some(segment => segment.content === '$WORLD_SIMULATION_ROOT')).toBe(true);
+    expect((settings_ACU as any).worldSimulation).toBe(legacy);
+
+    persist.mockReturnValueOnce({ saved: true, storageType: 'tavern' });
+    await expect(writeWorldSimulationSettingsStrict_ACU(upgrade!.settings)).resolves.toMatchObject({ ok: true, upgraded: false });
+    expect((settings_ACU as any).worldSimulation).toMatchObject({ agentPrompts: upgrade!.settings.agentPrompts });
+    expect((settings_ACU as any).worldSimulation.agentGuidance).toBeUndefined();
   });
 
   it('writes through to the shared settings store and reads the value back', () => {
@@ -104,9 +163,9 @@ describe('world simulation settings read/write', () => {
     const custom = {
       ...enabled(),
       budgets: {
-        light: { maxIterations: 2, maxDelegations: 0, maxReads: 1, readTokenBudget: 'low' as const },
-        normal: { maxIterations: 4, maxDelegations: 1, maxReads: 8, readTokenBudget: 'high' as const },
-        deep: { maxIterations: 9, maxDelegations: 3, maxReads: 20, readTokenBudget: 'high' as const },
+        light: { maxMasterModelTurns: 2, maxSpecialistModelTurns: 2, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' as const },
+        normal: { maxMasterModelTurns: 4, maxSpecialistModelTurns: 3, maxDelegations: 1, legacyReadCount: null, readTokenBudget: 'high' as const },
+        deep: { maxMasterModelTurns: 9, maxSpecialistModelTurns: 5, maxDelegations: 3, legacyReadCount: null, readTokenBudget: 'high' as const },
       },
     };
     expect(writeWorldSimulationSettings_ACU(custom)).toEqual({ ok: true, upgraded: false });

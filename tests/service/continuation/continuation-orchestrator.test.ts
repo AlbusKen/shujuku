@@ -4,10 +4,18 @@ import { FirstFloorContinuationStore_ACU } from '../../../src/service/continuati
 import { ContinuationOrchestrator_ACU } from '../../../src/service/continuation/continuation-orchestrator';
 import { buildDefaultContinuationSettings_ACU } from '../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../../../src/service/continuation/model';
+import { buildEmptyAgentModuleSnapshot_ACU } from '../../../src/service/continuation/agent/agent-module-store';
+import { AGENT_MODULE_FIELD_ACU } from '../../../src/service/continuation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
 /** 每三轮一个低压轮，满足默认 0.3 的低压占比与连续高压上限，避免固定件本身就违反节奏规则。 */
 const pacingAt = (index: number) => (index % 3 === 0 ? 'setup' : 'pressure') as 'setup' | 'pressure';
+
+async function writeModuleSnapshotReceipt_ACU(chat: any[], index: number, snapshot: any) {
+  const value = { ...snapshot };
+  chat[index][AGENT_MODULE_FIELD_ACU] = value;
+  return { targetIndex: index, value };
+}
 
 const outline = {
   schemaVersion: 1 as const,
@@ -30,12 +38,13 @@ const outline = {
  * 执行引擎桩：模拟主 Agent 的大纲行为——没有可执行大纲（无阶段或阶段已完成）时
  * 先通过注入的回调派工大纲子代理，review/stopped 时按真实循环的行为抛错中止。
  */
-function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean; conversation?: ReturnType<typeof vi.fn>; onSettingsReplaced?: ReturnType<typeof vi.fn> } = {}) {
+function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean; conversation?: ReturnType<typeof vi.fn>; onSettingsReplaced?: ReturnType<typeof vi.fn>; moduleSnapshot?: any; takeoverAssessor?: { assess: ReturnType<typeof vi.fn> }; takeoverSettler?: { settle: ReturnType<typeof vi.fn> }; takeoverArcMaintainer?: { maintain: ReturnType<typeof vi.fn> }; writeModuleSnapshot?: ReturnType<typeof vi.fn>; invokePlanControl?: (planControl: ((action: any) => Promise<any>) | undefined, store: FirstFloorContinuationStore_ACU) => Promise<void> | void } = {}) {
   const planner = options.planner ?? vi.fn().mockResolvedValue({ outline, attempts: 1, requiresReview: !!options.preview, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
   let sequence = 0;
   const store = new FirstFloorContinuationStore_ACU();
+  const moduleSnapshot = options.moduleSnapshot ?? { ...buildEmptyAgentModuleSnapshot_ACU(), storyArc: [{ id: 'VOL-01', scope: 'volume', title: '第一卷', direction: '推进主线', escalation: '冲突升级后收束', withheld: '', status: 'active', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '' }], revisions: { ...buildEmptyAgentModuleSnapshot_ACU().revisions, storyArc: 4 } };
   const executionEngine = {
-    prepareCurrentTurnInstruction: vi.fn().mockImplementation(async (_isLeaseCurrent: unknown, _retryAttempt: unknown, applyOutline: (instruction: string) => Promise<{ requiresReview: boolean; stopped: string | null }>) => {
+    prepareCurrentTurnInstruction: vi.fn().mockImplementation(async (_isLeaseCurrent: unknown, _retryAttempt: unknown, applyOutline: (instruction: string) => Promise<{ requiresReview: boolean; stopped: string | null }>, _signal: unknown, planControl: ((action: any) => Promise<any>) | undefined) => {
       const task = store.readPersisted()?.activeTask;
       const stage = task?.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) : null;
       if (!stage || stage.status === 'completed') {
@@ -47,6 +56,7 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', 'agent_loop', '新大纲等待确认', false));
         }
       }
+      if (options.invokePlanControl) await options.invokePlanControl(planControl, store);
       return { identity: {}, instruction: { instruction: '发送文本', attempts: 1 } };
     }),
   };
@@ -61,6 +71,11 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
     readChronicleSnapshot: vi.fn().mockResolvedValue({ count: 3, range: { first: 'AM1', last: 'AM3' } }),
     createOutlineResolvers: () => ({}),
     appendAgentConversation, clearAgentModules, clearAgentConversation,
+    readModuleSnapshot: () => moduleSnapshot,
+    ...(options.takeoverAssessor ? { takeoverAssessor: options.takeoverAssessor as any } : {}),
+    ...(options.takeoverSettler ? { takeoverSettler: options.takeoverSettler as any } : {}),
+    ...(options.takeoverArcMaintainer ? { takeoverArcMaintainer: options.takeoverArcMaintainer as any } : {}),
+    ...(options.writeModuleSnapshot ? { writeModuleSnapshot: options.writeModuleSnapshot as any } : {}),
     ...(options.hasLiveHostClaim ? { hasLiveHostClaim: options.hasLiveHostClaim } : {}),
     ...(options.onSettingsReplaced ? { onSettingsReplaced: options.onSettingsReplaced } : {}),
   });
@@ -113,9 +128,31 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(planner).toHaveBeenCalledTimes(1);
     const task = store.readPersisted()!.activeTask!;
     expect(task.runStageCount).toBe(1);
-    expect(task.stages[0]).toMatchObject({ status: 'running', activeRevision: 1 });
+    expect(task.stages[0]).toMatchObject({ status: 'running', activeRevision: 1, volumeId: 'VOL-01', storyArcRevision: 4 });
     expect(task.stages[0].revisions[0].frozen).toBe(true);
     expect(task.stages[0].revisions[0].replanInstruction).toBe('按当前要求规划大纲');
+  });
+
+  it('continueTask 在同一 lease 内把 plan_control 回调交给执行引擎，并受既有大纲事务保护', async () => {
+    const invoked = vi.fn();
+    const { orchestrator, planner, store } = createOrchestrator({
+      invokePlanControl: async (planControl, liveStore) => {
+        expect(planControl).toEqual(expect.any(Function));
+        const stage = liveStore.readPersisted()!.activeTask!.stages[0];
+        const result = await planControl!({
+          kind: 'plan_control', thought: '真实正文已偏离剩余计划', operation: 'regenerate_current_outline',
+          instruction: '按当前已发生事实重做未完成部分', volumeIds: [], stageId: stage.stageId, targetMessageIndex: null,
+        });
+        invoked(result);
+      },
+    });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+
+    await expect(orchestrator.continueTask()).resolves.toMatchObject({ task: { status: 'running' } });
+
+    expect(invoked).toHaveBeenCalledWith(expect.objectContaining({ ok: true, requiresReview: false }));
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(store.readPersisted()!.activeTask!.stages[0]).toMatchObject({ activeRevision: 2, status: 'running', completedTurns: 0 });
   });
 
   it('persists replacement settings through the first-floor transaction, including while the task is running', async () => {
@@ -294,6 +331,233 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(task).toMatchObject({ runStageCount: 2 });
     expect(task.stages.map(stage => stage.status)).toEqual(['completed', 'running']);
     expect(task.stages[1].revisions[0].frozen).toBe(true);
+  });
+
+  it('rejects a next stage when the uniquely bound active volume is already at its hard cap', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    await confirmTurns(orchestrator, store, 6);
+    const persisted = store.readPersisted()!;
+    persisted.settings = { ...persisted.settings, maxStagesPerVolume: 1 };
+    await store.replaceAtomically(persisted, { chatIdentity: 'chat-a' });
+    const activeStageId = persisted.activeTask!.activeStageId;
+
+    await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_VOLUME_STAGE_LIMIT_REACHED');
+    const task = store.readPersisted()!.activeTask!;
+    expect(task).toMatchObject({ runStageCount: 1, activeStageId });
+    expect(task.stages).toHaveLength(1);
+    expect(task.stages[0]).toMatchObject({ volumeId: 'VOL-01', storyArcRevision: 4, status: 'completed' });
+  });
+
+  it('无活动任务时从 1、5、20 楼外部正文建立零阶段基线，不伪造旧完成轮次', async () => {
+    for (const count of [1, 5, 20]) {
+      const takeoverAssessor = { assess: vi.fn() };
+      const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+      const writeModuleSnapshot = vi.fn(writeModuleSnapshotReceipt_ACU);
+      const { orchestrator, store } = createOrchestrator({ takeoverAssessor, takeoverSettler, writeModuleSnapshot });
+      const chat = Array.from({ length: count }, (_item, index) => ({ message_id: index, mes: `外部正文 ${index + 1}`, is_user: false }));
+      _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+
+      const adopted = await orchestrator.adoptExternalProgress({ targetMessageIndex: count - 1, instruction: '从外部正文后的现状继续推进主线' });
+
+      expect(takeoverAssessor.assess).not.toHaveBeenCalled();
+      expect(takeoverSettler.settle).toHaveBeenCalledWith(expect.objectContaining({
+        externalMessages: Array.from({ length: count }, (_item, index) => ({ index, text: `外部正文 ${index + 1}` })),
+        createIdentity: expect.any(Function),
+      }));
+      const identity = takeoverSettler.settle.mock.calls[0][0].createIdentity();
+      expect(identity).toMatchObject({ source: 'takeover_baseline', taskId: adopted.task.taskId });
+      expect(identity).not.toHaveProperty('stageId');
+      expect(writeModuleSnapshot).toHaveBeenCalledWith(chat, count - 1, expect.objectContaining({ settledThroughIndex: count - 1 }));
+      expect(adopted.task).toMatchObject({ originInstruction: '从外部正文后的现状继续推进主线', status: 'paused', activeStageId: null, runStageCount: 0 });
+      expect(adopted.task.stages).toEqual([]);
+      expect(adopted.task.timeline).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'task_created' }),
+        expect.objectContaining({ kind: 'external_progress_baselined', targetMessageIndex: count - 1, targetMessageId: count - 1, targetSwipeIndex: 0, sourceStartMessageIndex: 0, sourceEndMessageIndex: count - 1 }),
+      ]));
+      expect(adopted.task.timeline.some(entry => entry.kind === 'external_progress_adopted')).toBe(false);
+      expect(store.readPersisted()?.activeTask?.stages).toEqual([]);
+      expect(chat).toHaveLength(count);
+    }
+  });
+
+  it('无活动任务接管缺少明确续写要求时拒绝且不结算或创建任务', async () => {
+    const takeoverSettler = { settle: vi.fn() };
+    const { orchestrator, store } = createOrchestrator({ takeoverSettler });
+    _set_SillyTavern_API_ACU({ chat: [{ message_id: 0, mes: '外部正文', is_user: false }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+
+    await expectCode(() => orchestrator.adoptExternalProgress({ targetMessageIndex: 0 }), 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY');
+
+    expect(takeoverSettler.settle).not.toHaveBeenCalled();
+    expect(store.readPersisted()).toBeNull();
+  });
+
+  it('活动阶段接管在资料快照已写但首楼提交失败时回滚资料并明确失败', async () => {
+    const takeoverAssessor = { assess: vi.fn() };
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const writeModuleSnapshot = vi.fn(writeModuleSnapshotReceipt_ACU);
+    const { orchestrator, store } = createOrchestrator({ takeoverAssessor, takeoverSettler, writeModuleSnapshot });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const before = store.readPersisted()!;
+    const revision = before.activeTask!.stages[0].revisions[0];
+    const paused = { ...before, activeTask: { ...before.activeTask!, status: 'paused' as const, pendingHostTurn: null } };
+    const chat: any[] = [{ message_id: 0, mes: '开场', is_user: true, _qrf_continuation: paused }, { message_id: 1, mes: '外部正文', is_user: false }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    takeoverAssessor.assess.mockResolvedValue({ targetMessageIndex: 1, disposition: 'continue_current_stage', satisfiedTurnIds: [revision.outline.nodes[0].turns[0].id], evidenceMessageIndexes: [1], requiresStoryArcRevision: false, reason: '外部正文满足第一轮。' });
+    (store as any).updatePersistedAtomically = vi.fn(async () => { throw new Error('first-floor commit failed'); });
+
+    await expectCode(() => orchestrator.adoptExternalProgress({ targetMessageIndex: 1 }), 'CONTINUATION_PERSIST_FAILED');
+
+    expect(chat[1]).not.toHaveProperty(AGENT_MODULE_FIELD_ACU);
+    expect(store.readPersisted()!.activeTask!.timeline.some(entry => entry.kind === 'external_progress_adopted')).toBe(false);
+  });
+
+  it('无任务 baseline 在资料快照已写但首楼提交失败时回滚且不创建任务', async () => {
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const writeModuleSnapshot = vi.fn(writeModuleSnapshotReceipt_ACU);
+    const { orchestrator, store } = createOrchestrator({ takeoverSettler, writeModuleSnapshot });
+    const previous = { preserved: '接管前资料字段' };
+    const chat: any[] = [{ message_id: 0, mes: '外部正文', is_user: false, [AGENT_MODULE_FIELD_ACU]: previous }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    (store as any).updatePersistedAtomically = vi.fn(async () => { throw new Error('first-floor commit failed'); });
+
+    await expectCode(() => orchestrator.adoptExternalProgress({ targetMessageIndex: 0, instruction: '从外部正文后的事实继续' }), 'CONTINUATION_PERSIST_FAILED');
+
+    expect(chat[0][AGENT_MODULE_FIELD_ACU]).toBe(previous);
+    expect(store.readPersisted()).toBeNull();
+  });
+
+  it('接管资料写入 receipt 已被同锚后续更新替代时不覆盖该更新并报告 unsafe', async () => {
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const replacement = { later: '同锚后续资料更新' };
+    const writeModuleSnapshot = vi.fn(async (chat: any[], index: number, snapshot: any) => {
+      const value = { ...snapshot };
+      chat[index][AGENT_MODULE_FIELD_ACU] = replacement;
+      return { targetIndex: index, value };
+    });
+    const { orchestrator, store } = createOrchestrator({ takeoverSettler, writeModuleSnapshot });
+    const chat: any[] = [{ message_id: 0, mes: '外部正文', is_user: false }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    (store as any).updatePersistedAtomically = vi.fn(async () => { throw new Error('first-floor commit failed'); });
+
+    try {
+      await orchestrator.adoptExternalProgress({ targetMessageIndex: 0, instruction: '从外部正文后的事实继续' });
+      throw new Error('expected failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContinuationValidationError_ACU);
+      expect((error as ContinuationValidationError_ACU).error).toMatchObject({ code: 'CONTINUATION_PERSIST_FAILED', details: { rollback: 'unsafe' } });
+    }
+    expect(chat[0][AGENT_MODULE_FIELD_ACU]).toBe(replacement);
+  });
+
+  it('接管资料回滚的严格保存失败时保留快照并显式报告 failed', async () => {
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const writeModuleSnapshot = vi.fn(writeModuleSnapshotReceipt_ACU);
+    const { orchestrator, store } = createOrchestrator({ takeoverSettler, writeModuleSnapshot });
+    const chat: any[] = [{ message_id: 0, mes: '外部正文', is_user: false }];
+    const saveChat = vi.fn().mockRejectedValue(new Error('rollback save failed'));
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    (store as any).updatePersistedAtomically = vi.fn(async () => { throw new Error('first-floor commit failed'); });
+
+    try {
+      await orchestrator.adoptExternalProgress({ targetMessageIndex: 0, instruction: '从外部正文后的事实继续' });
+      throw new Error('expected failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContinuationValidationError_ACU);
+      expect((error as ContinuationValidationError_ACU).error).toMatchObject({ code: 'CONTINUATION_PERSIST_FAILED', details: { rollback: 'failed' } });
+    }
+    expect(chat[0]).toHaveProperty(AGENT_MODULE_FIELD_ACU);
+    expect(saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('非破坏性接管以 assessment 的连续 turnId 和目标 message_id/swipe 为准，不按外部楼层数量伪造进度', async () => {
+    const takeoverAssessor = { assess: vi.fn() };
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const writeModuleSnapshot = vi.fn(writeModuleSnapshotReceipt_ACU);
+    const { orchestrator, store } = createOrchestrator({ takeoverAssessor, takeoverSettler, writeModuleSnapshot });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const before = store.readPersisted()!;
+    const stage = before.activeTask!.stages[0];
+    const revision = stage.revisions[0];
+    const paused = { ...before, activeTask: { ...before.activeTask!, status: 'paused' as const, pendingHostTurn: null } };
+    const chat: any[] = [
+      { message_id: 0, mes: '开场', is_user: true, _qrf_continuation: paused },
+      { message_id: 1, mes: '外部正文一', is_user: false },
+      { message_id: 2, mes: '外部正文二', is_user: false, swipes: ['外部正文二'], swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    takeoverAssessor.assess.mockResolvedValue({ targetMessageIndex: 2, disposition: 'continue_current_stage', satisfiedTurnIds: [revision.outline.nodes[0].turns[0].id], evidenceMessageIndexes: [1], requiresStoryArcRevision: false, reason: '第一轮目标已由外部正文满足。' });
+
+    const adopted = await orchestrator.adoptExternalProgress({ targetMessageIndex: 2, instruction: '从此接管' });
+
+    expect(takeoverAssessor.assess).toHaveBeenCalledWith(expect.objectContaining({ sourceStartMessageIndex: 0, targetMessageIndex: 2, externalMessages: [{ index: 1, text: '外部正文一' }, { index: 2, text: '外部正文二' }] }));
+    expect(takeoverSettler.settle).toHaveBeenCalledWith(expect.objectContaining({ externalMessages: [{ index: 1, text: '外部正文一' }, { index: 2, text: '外部正文二' }] }));
+    expect(writeModuleSnapshot).toHaveBeenCalledWith(chat, 2, expect.objectContaining({ settledThroughIndex: 2 }));
+    expect(adopted.task.stages[0]).toMatchObject({ completedTurns: 1, activeTurnIndex: 1 });
+    expect(adopted.task.timeline.at(-1)).toMatchObject({ kind: 'external_progress_adopted', targetMessageIndex: 2, targetMessageId: 2, targetSwipeIndex: 0, satisfiedTurnIds: [revision.outline.nodes[0].turns[0].id] });
+    expect(chat).toHaveLength(3);
+  });
+
+  it('接管评估跳过连续前缀时拒绝且不写 timeline', async () => {
+    const takeoverAssessor = { assess: vi.fn() };
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const { orchestrator, store } = createOrchestrator({ takeoverAssessor, takeoverSettler, writeModuleSnapshot: vi.fn(writeModuleSnapshotReceipt_ACU) });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const before = store.readPersisted()!;
+    const revision = before.activeTask!.stages[0].revisions[0];
+    const paused = { ...before, activeTask: { ...before.activeTask!, status: 'paused' as const, pendingHostTurn: null } };
+    _set_SillyTavern_API_ACU({ chat: [{ message_id: 0, mes: '开场', is_user: true, _qrf_continuation: paused }, { message_id: 1, mes: '外部正文', is_user: false }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    takeoverAssessor.assess.mockResolvedValue({ targetMessageIndex: 1, disposition: 'continue_current_stage', satisfiedTurnIds: [revision.outline.nodes[0].turns[1].id], evidenceMessageIndexes: [1], requiresStoryArcRevision: false, reason: '错误跳过了第一轮。' });
+
+    await expectCode(() => orchestrator.adoptExternalProgress({ targetMessageIndex: 1 }), 'CONTINUATION_TASK_STATE_INVALID');
+    expect(store.readPersisted()!.activeTask!.timeline.some(entry => entry.kind === 'external_progress_adopted')).toBe(false);
+  });
+
+  it('replace_current_stage 保留既有完成前缀，并立即复用既有大纲 seam 建立新 revision', async () => {
+    const takeoverAssessor = { assess: vi.fn() };
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const { orchestrator, store, planner } = createOrchestrator({ takeoverAssessor, takeoverSettler, writeModuleSnapshot: vi.fn(writeModuleSnapshotReceipt_ACU) });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const before = store.readPersisted()!;
+    const stage = before.activeTask!.stages[0];
+    const paused = { ...before, activeTask: { ...before.activeTask!, status: 'paused' as const, pendingHostTurn: null } };
+    _set_SillyTavern_API_ACU({ chat: [{ message_id: 0, mes: '开场', is_user: true, _qrf_continuation: paused }, { message_id: 1, mes: '外部正文完全改变了原计划', is_user: false }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    takeoverAssessor.assess.mockResolvedValue({ targetMessageIndex: 1, disposition: 'replace_current_stage', satisfiedTurnIds: [], evidenceMessageIndexes: [1], requiresStoryArcRevision: false, reason: '外部正文已经使原计划的后半段失效。' });
+
+    const adopted = await orchestrator.adoptExternalProgress({ targetMessageIndex: 1 });
+
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(adopted.task.stages[0]).toMatchObject({ stageId: stage.stageId, status: 'running', activeRevision: 2, completedTurns: 0 });
+    expect(adopted.task.timeline.some(entry => entry.kind === 'external_progress_adopted' && entry.takeoverDisposition === 'replace_current_stage')).toBe(true);
+  });
+
+  it('外部正文越过卷台阶时先经受控 arc-architect 写集维护总纲，再提交接管事实', async () => {
+    const takeoverAssessor = { assess: vi.fn() };
+    const takeoverSettler = { settle: vi.fn().mockResolvedValue({ summary: '外部正文已结算', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [] } }) };
+    const takeoverArcMaintainer = { maintain: vi.fn().mockResolvedValue({ summary: '卷台阶已按外部正文调整', delta: { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [{ id: 'VOL-01', direction: '外部正文已使主角绕过门禁并直面守门人' }], chronology: [], constraintProposals: [] } }) };
+    const writeModuleSnapshot = vi.fn(writeModuleSnapshotReceipt_ACU);
+    const { orchestrator, store } = createOrchestrator({ takeoverAssessor, takeoverSettler, takeoverArcMaintainer, writeModuleSnapshot });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const before = store.readPersisted()!;
+    const revision = before.activeTask!.stages[0].revisions[0];
+    const paused = { ...before, activeTask: { ...before.activeTask!, status: 'paused' as const, pendingHostTurn: null } };
+    const chat: any[] = [{ message_id: 0, mes: '开场', is_user: true, _qrf_continuation: paused }, { message_id: 1, mes: '外部正文越过本卷原目标', is_user: false }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    takeoverAssessor.assess.mockResolvedValue({ targetMessageIndex: 1, disposition: 'continue_current_stage', satisfiedTurnIds: [revision.outline.nodes[0].turns[0].id], evidenceMessageIndexes: [1], requiresStoryArcRevision: true, reason: '外部正文已越过当前卷的原定门禁台阶。' });
+
+    const adopted = await orchestrator.adoptExternalProgress({ targetMessageIndex: 1 });
+
+    expect(takeoverArcMaintainer.maintain).toHaveBeenCalledOnce();
+    expect(writeModuleSnapshot).toHaveBeenCalledWith(chat, 1, expect.objectContaining({
+      storyArc: [expect.objectContaining({ id: 'VOL-01', direction: '外部正文已使主角绕过门禁并直面守门人' })],
+    }));
+    expect(adopted.task.timeline.at(-1)).toMatchObject({ kind: 'external_progress_adopted', requiresStoryArcRevision: true });
   });
 
   it('replans the remaining stage as an agent outline op and freezes the next revision', async () => {

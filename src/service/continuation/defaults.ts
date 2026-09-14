@@ -1,5 +1,6 @@
 import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationAgentApiPresets_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationStageSize_ACU, type ContinuationTurnRange_ACU, type ContinuationWebResearchSettings_ACU } from './model';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
+import { CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU } from './continuation-volume-capacity';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -194,6 +195,13 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU = 'spv3.5-continu
  * V28 maps every known historical default segment to its current slot and restores missing task segments.
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU = 'spv3.6-continuation-default-lineage-v28';
+/**
+ * Shared-agent material grant version. Exact V23/V26 default main-agent rule segments are upgraded
+ * to the current `materialGrants` delegation protocol while user-edited text remains untouched.
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU = 'spv3.7-continuation-material-grants-lineage-v29';
+/** Plan-control version: exact V29 defaults gain the closed plan_control protocol; user-edited segments remain untouched. */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU = 'spv3.8-continuation-plan-control-v30';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -206,11 +214,11 @@ export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU = 20;
 
 /** 终审单个读取批次上限；与主 Agent 设置独立，按会话总结阈值折算。 */
 export const CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU = '20%';
-/** 终审允许的额外 worldbook read/search 工具轮上限。 */
-export const CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU = 6;
+/** 终审的全部模型输出上限；工具输出同样计入。 */
+export const CONTINUATION_FINAL_REVIEW_MAX_MODEL_TURNS_DEFAULT_ACU = 12;
 
-/** 网页检索子代理单次派工的工具轮上限：搜 + 读 + 补搜的典型路径需要 6–8 轮。 */
-export const CONTINUATION_WEB_RESEARCH_MAX_TOOL_ROUNDS_DEFAULT_ACU = 8;
+/** 网页检索子代理单次派工的全部模型输出上限。 */
+export const CONTINUATION_WEB_RESEARCH_MAX_MODEL_TURNS_DEFAULT_ACU = 12;
 /** 单次派工最多精读的页面数。每页原文都会随资料快照落进楼层，多了会撑大聊天文件。 */
 export const CONTINUATION_WEB_RESEARCH_MAX_PAGES_DEFAULT_ACU = 8;
 /** 单页存入资料库的原文字数上限。 */
@@ -222,7 +230,8 @@ export function buildDefaultContinuationWebResearchSettings_ACU(): ContinuationW
     sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false, baidu: true },
     searchProvider: 'duckduckgo',
     searxngBaseUrl: '',
-    maxToolRounds: CONTINUATION_WEB_RESEARCH_MAX_TOOL_ROUNDS_DEFAULT_ACU,
+    maxModelTurns: CONTINUATION_WEB_RESEARCH_MAX_MODEL_TURNS_DEFAULT_ACU,
+    legacyToolRoundCount: null,
     maxPages: CONTINUATION_WEB_RESEARCH_MAX_PAGES_DEFAULT_ACU,
     pageCharLimit: CONTINUATION_WEB_RESEARCH_PAGE_CHAR_LIMIT_DEFAULT_ACU,
     blockedDomains: '',
@@ -256,6 +265,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     outlinePreview: false,
     autoNextStage: true,
     maxAutomaticStages: 6,
+    maxStagesPerVolume: CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU,
     loopTags: '',
     loopDelaySeconds: 5,
     totalDurationMinutes: 0,
@@ -269,7 +279,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     storyTailFloors: AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
     agentReadTokenBudget: AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
     agentReadFallbackTokens: AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
-    finalReview: { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxExtraReads: CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU },
+    finalReview: { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxModelTurns: CONTINUATION_FINAL_REVIEW_MAX_MODEL_TURNS_DEFAULT_ACU, legacyExtraReadCount: null },
     webResearch: buildDefaultContinuationWebResearchSettings_ACU(),
     contextExtractRules: [],
     contextExcludeRules: [],
@@ -281,7 +291,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU,
   };
 }
 

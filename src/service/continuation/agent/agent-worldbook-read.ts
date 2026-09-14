@@ -8,6 +8,7 @@
  * 遗留的总结条目（旧总结系统的残留）不再暴露；未启用条目不进目录、不进搜索、不可读。
  */
 
+import type { AgentMaterialGrantSource_ACU } from '../../agent-kernel/material-grants';
 import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine-state';
 import { getLorebookEntriesByNames_ACU } from '../../worldbook/pipeline';
 import { getCurrentWorldbookConfig_ACU } from '../../settings/settings-readers';
@@ -184,4 +185,26 @@ export function renderAgentWorldbookEntries_ACU(snapshot: AgentWorldbookSnapshot
   const parts: string[] = found.map(entry => `### ${entry.title}（${entry.bookName}#${entry.uid}）\n${entry.content}`);
   if (missing.length) parts.push(`以下 uid 不存在于「${book}」的已启用条目中：${missing.join('、')}。地址请从世界书目录复制。`);
   return parts.join('\n\n');
+}
+
+/** Maps an already-read worldbook address to exact frozen entries; failed or partial addresses grant nothing. */
+export function resolveAgentWorldbookGrantEntries_ACU(snapshot: AgentWorldbookSnapshot_ACU | undefined, token: string): AgentWorldbookEntryView_ACU[] {
+  if (!snapshot?.available || !token.startsWith('$WORLDBOOK:')) return [];
+  const body = token.slice('$WORLDBOOK:'.length);
+  const separator = body.lastIndexOf(':');
+  if (separator <= 0) return [];
+  const bookName = body.slice(0, separator).trim();
+  const uids = body.slice(separator + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean);
+  if (!bookName || !uids.length || new Set(uids).size !== uids.length) return [];
+  const found = uids.map(uid => snapshot.entries.find(entry => entry.bookName === bookName && entry.uid === uid) ?? null);
+  return found.every((entry): entry is AgentWorldbookEntryView_ACU => entry !== null) ? found : [];
+}
+
+/** Source identity is based on the frozen entry body, so same address with changed text cannot reuse a grant. */
+export function createAgentWorldbookGrantSource_ACU(entry: AgentWorldbookEntryView_ACU): AgentMaterialGrantSource_ACU {
+  let hash = 0x811c9dc5;
+  const value = `${entry.bookName}\n${entry.uid}\n${entry.content}`;
+  for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 0x01000193); }
+  const digest = `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  return { address: `$WORLDBOOK:${entry.bookName}:${entry.uid}`, revision: `${entry.bookName}:${entry.uid}:${entry.content.length}`, digest };
 }

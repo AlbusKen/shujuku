@@ -264,6 +264,10 @@ export function useContinuationRuntime() {
     return run_ACU(() => runtime.orchestrator.replanRemaining({ instruction }));
   }
 
+  async function adoptExternalProgress(targetMessageIndex?: number, instruction?: string): Promise<boolean> {
+    return run_ACU(() => runtime.orchestrator.adoptExternalProgress({ ...(targetMessageIndex === undefined ? {} : { targetMessageIndex }), ...(instruction === undefined ? {} : { instruction }) }));
+  }
+
   async function retryCurrentTurn(): Promise<void> {
     await run_ACU(() => runtime.orchestrator.retryCurrentTurn());
   }
@@ -381,6 +385,7 @@ export function useContinuationRuntime() {
   return {
     clearData,
     parsePromptBundle,
+    adoptExternalProgress,
     restorePromptDefault,
     saveActiveOutline,
     sendAgentMessage,

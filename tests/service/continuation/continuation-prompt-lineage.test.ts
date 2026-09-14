@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU } from '../../../src/service/continuation/defaults';
 import {
   AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
   buildDefaultContinuationAgentPrompts_ACU,
@@ -23,6 +23,8 @@ import {
   V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU,
   V20_DEFAULT_ARC_ARCHITECT_TASK_ACU,
   V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU,
+  V29_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU,
+  V29_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU,
 } from '../../../src/service/continuation/agent/agent-defaults';
 import type { ContinuationPromptSegment_ACU } from '../../../src/service/continuation/model';
 
@@ -78,7 +80,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
@@ -92,6 +94,42 @@ describe('默认提示词谱系迁移', () => {
       const missing = required.filter(token => !text.includes(token));
       expect(missing, `${label} ${role}`).toEqual([]);
     }
+  });
+
+  it('仅把 V28 中命中已知旧默认段的文本升级到 materialGrants 协议', () => {
+    const exactDefault = historicalSettings_ACU('v26');
+    exactDefault.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
+    const upgraded = validateContinuationSettings_ACU(exactDefault);
+    expect(upgraded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
+    expect(upgraded.agentPrompts).toEqual(buildDefaultContinuationSettings_ACU().agentPrompts);
+
+    const customized = historicalSettings_ACU('v26');
+    customized.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
+    const actionRules = customized.agentPrompts.main.find((segment: ContinuationPromptSegment_ACU) => segment.content.startsWith('我的行动规则：'))!;
+    actionRules.content = `${actionRules.content}\n用户自定义：不替换这段。`;
+    const kept = validateContinuationSettings_ACU(customized);
+    expect(kept.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
+    expect(kept.agentPrompts.main.some(segment => segment.content.endsWith('用户自定义：不替换这段。'))).toBe(true);
+  });
+
+  it('V29 只升级未改写的主 Agent 默认 actionRules 与 textProtocol，读取不覆盖用户改写', () => {
+    const exactDefault = buildDefaultContinuationSettings_ACU() as any;
+    exactDefault.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
+    const actionRules = exactDefault.agentPrompts.main.find((segment: ContinuationPromptSegment_ACU) => segment.content.startsWith('我的行动规则：'))!;
+    const textProtocol = exactDefault.agentPrompts.main.find((segment: ContinuationPromptSegment_ACU) => segment.content.startsWith('【文本协议规范】'))!;
+    actionRules.content = V29_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU;
+    textProtocol.content = V29_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU;
+    const upgraded = validateContinuationSettings_ACU(exactDefault);
+    expect(upgraded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
+    expect(upgraded.agentPrompts.main).toEqual(buildDefaultContinuationAgentPrompts_ACU().main);
+
+    const customized = buildDefaultContinuationSettings_ACU() as any;
+    customized.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
+    const customizedActionRules = customized.agentPrompts.main.find((segment: ContinuationPromptSegment_ACU) => segment.content.startsWith('我的行动规则：'))!;
+    customizedActionRules.content = `${V29_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU}\n用户自定义：保留。`;
+    const kept = validateContinuationSettings_ACU(customized);
+    expect(kept.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
+    expect(kept.agentPrompts.main.some(segment => segment.content.endsWith('用户自定义：保留。'))).toBe(true);
   });
 
   it('用户改写过的段与追加段在谱系迁移中原样保留', () => {
@@ -135,7 +173,7 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 

@@ -44,6 +44,33 @@ describe('world simulation schema migration', () => {
     expect(parseWorldSimulationPersistedValue_ACU(legacy)).toMatchObject({ version: 1, kind: 'checkpoint' });
   });
 
+  it('keeps v1 history forward-compatible by ignoring unknown fields at record and nested domain levels', () => {
+    const checkpoint = record();
+    checkpoint.futureRecordField = true;
+    checkpoint.state.futureStateField = true;
+    checkpoint.state.storyClock.futureClockField = true;
+    checkpoint.state.revisions.futureRevisionField = 1;
+    checkpoint.state.threads[0].futureThreadField = true;
+    checkpoint.state.threads[0].visibility.futureVisibilityField = true;
+    expect(parseLegacyWorldSimulationLedgerRecord_ACU(checkpoint)).toMatchObject({ kind: 'checkpoint', id: 'cp-4' });
+
+    const delta = {
+      version: 1,
+      kind: 'delta',
+      id: 'delta-4',
+      anchorMessageIndex: 4,
+      delta: {
+        ...state(),
+        futureDeltaField: true,
+        storyClock: { ...state().storyClock, futureClockField: true },
+        revisions: { ...state().revisions, futureRevisionField: 1 },
+        threads: [{ ...state().threads[0], futureThreadField: true }],
+      },
+    };
+    delta.futureRecordField = true;
+    expect(parseLegacyWorldSimulationLedgerRecord_ACU(delta)).toMatchObject({ kind: 'delta', id: 'delta-4' });
+  });
+
   it('accepts a complete per-swipe envelope and keeps its lineage/projection binding', () => {
     const parsed = parseWorldSimulationPerSwipeEnvelope_ACU(envelope());
     expect(parsed).toMatchObject({ version: 2, kind: 'per_swipe', entries: [{

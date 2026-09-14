@@ -7,6 +7,7 @@
  */
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
+import { assertStoryArcTargetStageRanges_ACU, CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU } from '../continuation-volume-capacity';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import {
   AGENT_BLOCK_CHAR_LIMIT_ACU,
@@ -427,7 +428,78 @@ export function readAgentModuleSnapshot_ACU(chat?: any[]): AgentModuleSnapshot_A
  * @param targetIndex 承载快照的楼层下标，通常是当前末楼
  * @param snapshot 待写入的全量快照
  */
-export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: number, snapshot: AgentModuleSnapshot_ACU): Promise<void> {
+export interface AgentModuleSnapshotCheckpoint_ACU {
+  chat: any[];
+  targetIndex: number;
+  targetMessage: object;
+  targetMessageId: number;
+  targetSwipeIndex: number;
+  hadPrevious: boolean;
+  previous: unknown;
+  hasWritten: boolean;
+  written?: unknown;
+}
+
+/** 一次成功写入的不可伪造内存 receipt；补偿只接受仍挂在目标楼上的同一对象。 */
+export interface AgentModuleSnapshotWriteReceipt_ACU {
+  targetIndex: number;
+  value: unknown;
+}
+
+/** 捕获接管写入前的单楼资料字段；仅用于同一请求内的失败补偿，绝不落盘为新身份。 */
+export function captureAgentModuleSnapshotCheckpoint_ACU(chat: any[], targetIndex: number): AgentModuleSnapshotCheckpoint_ACU {
+  const message = Array.isArray(chat) ? chat[targetIndex] : null;
+  if (!message || typeof message !== 'object' || !Number.isInteger(message.message_id) || !Number.isInteger(message.swipe_id ?? 0) || (message.swipe_id ?? 0) < 0) {
+    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', '无法捕获接管资料回滚点：目标楼身份不可用', false, { targetIndex }));
+  }
+  const container = message as Record<string, unknown>;
+  return {
+    chat,
+    targetIndex,
+    targetMessage: message,
+    targetMessageId: message.message_id,
+    targetSwipeIndex: message.swipe_id ?? 0,
+    hadPrevious: Object.prototype.hasOwnProperty.call(container, AGENT_MODULE_FIELD_ACU),
+    previous: container[AGENT_MODULE_FIELD_ACU],
+    hasWritten: false,
+  };
+}
+
+/** 标记已成功写入的资料字段；补偿只恢复这次确实仍在楼上的写入，避免覆盖后续更新。 */
+export function markAgentModuleSnapshotCheckpointWritten_ACU(checkpoint: AgentModuleSnapshotCheckpoint_ACU, receipt: unknown): boolean {
+  const message = checkpoint.chat[checkpoint.targetIndex];
+  if (!isRecord_ACU(receipt)
+    || receipt.targetIndex !== checkpoint.targetIndex
+    || !Object.prototype.hasOwnProperty.call(receipt, 'value')
+    || message !== checkpoint.targetMessage
+    || !message
+    || message.message_id !== checkpoint.targetMessageId
+    || (message.swipe_id ?? 0) !== checkpoint.targetSwipeIndex
+    || (message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU] !== receipt.value) return false;
+  checkpoint.written = receipt.value;
+  checkpoint.hasWritten = true;
+  return true;
+}
+
+/** 尝试恢复接管前资料字段；返回 false 表示目标楼或资料已变化，禁止覆盖。 */
+export async function restoreAgentModuleSnapshotCheckpoint_ACU(checkpoint: AgentModuleSnapshotCheckpoint_ACU): Promise<boolean> {
+  const message = checkpoint.chat[checkpoint.targetIndex];
+  if (!checkpoint.hasWritten || getChatArray_ACU() !== checkpoint.chat || message !== checkpoint.targetMessage || !message || message.message_id !== checkpoint.targetMessageId || (message.swipe_id ?? 0) !== checkpoint.targetSwipeIndex) return false;
+  const container = message as Record<string, unknown>;
+  if (container[AGENT_MODULE_FIELD_ACU] !== checkpoint.written) return false;
+  const current = container[AGENT_MODULE_FIELD_ACU];
+  try {
+    if (checkpoint.hadPrevious) container[AGENT_MODULE_FIELD_ACU] = checkpoint.previous;
+    else delete container[AGENT_MODULE_FIELD_ACU];
+    await saveChatToHostStrict_ACU();
+    return true;
+  } catch (error) {
+    container[AGENT_MODULE_FIELD_ACU] = current;
+    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', '接管资料回滚保存失败，目标楼可能保留半提交快照', false, { targetIndex: checkpoint.targetIndex, message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: number, snapshot: AgentModuleSnapshot_ACU): Promise<AgentModuleSnapshotWriteReceipt_ACU> {
   const message = Array.isArray(chat) ? chat[targetIndex] : null;
   if (!message || typeof message !== 'object') {
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照的目标楼层不可用', false, { targetIndex }));
@@ -437,8 +509,10 @@ export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: num
   const previous = container[AGENT_MODULE_FIELD_ACU];
   const settledThroughIndex = Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex);
   try {
-    container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex, updatedAt: Date.now() };
+    const written = { ...snapshot, settledThroughIndex, updatedAt: Date.now() };
+    container[AGENT_MODULE_FIELD_ACU] = written;
     await saveChatToHostStrict_ACU();
+    return { targetIndex, value: written };
   } catch (error) {
     if (hadPrevious) container[AGENT_MODULE_FIELD_ACU] = previous;
     else delete container[AGENT_MODULE_FIELD_ACU];
@@ -460,7 +534,7 @@ function rejectSnapshotEdit_ACU(message: string, details?: Record<string, unknow
  * @param chat 聊天数组，缺省取当前聊天
  * @returns 落盘后的快照
  */
-export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: any[]): Promise<AgentModuleSnapshot_ACU> {
+export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: any[], maxStagesPerVolume = CONTINUATION_MAX_STAGES_PER_VOLUME_DEFAULT_ACU): Promise<AgentModuleSnapshot_ACU> {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const targetIndex = messages.length - 1;
   if (targetIndex < 0) rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
@@ -485,6 +559,9 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
   };
   const validated = validateAgentModuleSnapshot_ACU(merged);
   if (!validated) rejectSnapshotEdit_ACU('资料快照结构非法：hooks / infoGap / constraints 必须是数组；storyArc / chronology 一旦提供必须整体结构合法（chronology 每条需要非空 id/anchor/elapsed/transition、合法 precision、非空非负整数 evidenceIndexes 与非负 updatedIndex，retire 需给理由）');
+  if (Object.prototype.hasOwnProperty.call(raw, 'storyArc')) {
+    assertStoryArcTargetStageRanges_ACU(validated.storyArc, maxStagesPerVolume);
+  }
   const checks: Array<[string, unknown, readonly unknown[]]> = [
     ['伏笔账本 hooks', merged.hooks, validated.hooks],
     ['信息差 infoGap', merged.infoGap, validated.infoGap],
