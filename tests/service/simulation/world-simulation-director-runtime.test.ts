@@ -44,6 +44,20 @@ describe('WorldSimulationDirectorRuntime_ACU', () => {
     expect(master).toHaveBeenCalledTimes(1); expect(specialists).toHaveBeenCalledTimes(1);
   });
 
+  it('adopts the modern specialist candidate when delegation leaves no convergence turn', async () => {
+    const settings = buildDefaultWorldSimulationSettings_ACU();
+    settings.budgets.deep.maxMasterModelTurns = 1;
+    const master = vi.fn(async () => '{"action":"delegate","thought":"预算内核验","delegations":[{"agentName":"entity-movement","task":"核验位置","materialGrants":[],"reads":[]}]}');
+    const specialists = vi.fn(async () => loop);
+
+    const result = await new WorldSimulationDirectorRuntime_ACU().run({ ...input(), settings }, { runMaster: master, runSpecialists: specialists });
+
+    expect(result.action).toMatchObject({ kind: 'delegate', legacy: false });
+    expect(result.loop).toBe(loop);
+    expect(master).toHaveBeenCalledTimes(1);
+    expect(specialists).toHaveBeenCalledTimes(1);
+  });
+
   it('registers a $TABLE grant only after a successful frozen-table read and grants it to specialists via materialGrants', async () => {
     const tableData = { 'sheet1': { name: '纪要表', content: [['轮次', '概要'], ['第 1 轮', '主角抵达港口']] } };
     const master = vi.fn()

@@ -317,6 +317,73 @@ describe('WorldSimulationRuntime_ACU.onAiFloorCompleted', () => {
     expect(commitProjection).not.toHaveBeenCalled();
   });
 
+  it('maintains pending automatic requirements before returning a normal no_change result', async () => {
+    const source = 'world-simulation-user:1:number:1:0:1';
+    let snapshot: any = { feature: 'world-simulation', revision: 0, lastAppliedUserMessageId: null, requirements: [] };
+    const requirementsStore: any = {
+      read: () => snapshot,
+      userSourceIds: () => [source],
+      pendingSourceIds: () => [source],
+      replace: vi.fn(async (_target: number, raw: any) => {
+        snapshot = { feature: 'world-simulation', revision: 1, lastAppliedUserMessageId: raw.appliedUserMessageId, requirements: raw.requirements };
+        return snapshot;
+      }),
+    };
+    let masterCalls = 0;
+    const owned = vi.fn(async (request: any) => {
+      if (request.source !== 'world-sim-master') throw new Error('no specialist should run');
+      masterCalls += 1;
+      return masterCalls === 1
+        ? JSON.stringify({ action: 'maintain_requirements', thought: '吸收用户要求', expectedRevision: 0, appliedUserMessageId: source, requirements: [{ id: 'R1', category: 'canon', priority: 'hard', text: '港口封锁', sourceRefs: [source] }], summary: '同步港口规则' })
+        : '{"action":"finalize","thought":"无需修改","decision":"no_change","acceptedAgents":[],"summary":"无账本改动","unresolved":[]}';
+    });
+    const { WorldSimulationOrchestrator_ACU } = await import('../../../src/service/simulation/simulation-orchestrator');
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ readLeaseSnapshot: () => lease(1), createRunId: () => 'auto-requirements' });
+    const { runtime } = createRuntime({ getChat: aiChat, runOwnedAi: owned, orchestrator, readLeaseSnapshot: () => lease(1), requirementsStore });
+
+    await runtime.onAiFloorCompleted(intent(1, 2, 1));
+    await flush();
+
+    expect(requirementsStore.replace).toHaveBeenCalledTimes(1);
+    expect(masterCalls).toBe(2);
+    expect(orchestrator.getPhase('chat-a')).toBe('idle');
+  });
+
+  it('retries rejected automatic requirements maintenance and preserves the rejection in master history', async () => {
+    const source = 'world-simulation-user:1:number:1:0:1';
+    let snapshot: any = { feature: 'world-simulation', revision: 0, lastAppliedUserMessageId: null, requirements: [] };
+    const requirementsStore: any = {
+      read: () => snapshot,
+      userSourceIds: () => [source],
+      pendingSourceIds: () => [source],
+      replace: vi.fn(async (_target: number, raw: any) => {
+        snapshot = { feature: 'world-simulation', revision: 1, lastAppliedUserMessageId: raw.appliedUserMessageId, requirements: raw.requirements };
+        return snapshot;
+      }),
+    };
+    let masterCalls = 0;
+    const owned = vi.fn(async (request: any) => {
+      if (request.source !== 'world-sim-master') throw new Error('no specialist should run');
+      masterCalls += 1;
+      if (masterCalls === 1) return JSON.stringify({ action: 'maintain_requirements', thought: '错误引用', expectedRevision: 0, appliedUserMessageId: 'world-simulation-user:old', requirements: [{ id: 'R1', category: 'canon', priority: 'hard', text: '港口封锁', sourceRefs: ['world-simulation-user:old'] }], summary: '错误' });
+      if (masterCalls === 2) {
+        expect(request.messages.some((message: any) => message.content.includes('<UNTRUSTED_REQUIREMENTS_REJECTION>'))).toBe(true);
+        return JSON.stringify({ action: 'maintain_requirements', thought: '修正引用', expectedRevision: 0, appliedUserMessageId: source, requirements: [{ id: 'R1', category: 'canon', priority: 'hard', text: '港口封锁', sourceRefs: [source] }], summary: '修正' });
+      }
+      return '{"action":"finalize","thought":"无需修改","decision":"no_change","acceptedAgents":[],"summary":"无账本改动","unresolved":[]}';
+    });
+    const { WorldSimulationOrchestrator_ACU } = await import('../../../src/service/simulation/simulation-orchestrator');
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ readLeaseSnapshot: () => lease(1), createRunId: () => 'auto-requirements-retry' });
+    const { runtime } = createRuntime({ getChat: aiChat, runOwnedAi: owned, orchestrator, readLeaseSnapshot: () => lease(1), requirementsStore });
+
+    await runtime.onAiFloorCompleted(intent(1, 2, 1));
+    await flush();
+
+    expect(requirementsStore.replace).toHaveBeenCalledTimes(1);
+    expect(masterCalls).toBe(3);
+    expect(orchestrator.getPhase('chat-a')).toBe('idle');
+  });
+
   it('passes a normal director delegation seed read to its selected automatic specialist', async () => {
     const state = { anchorMessageIndex: 0, storyClock: { anchorText: '第1日', elapsedSinceLastRun: '即时', precision: 'unknown' as const, evidenceIndexes: [], updatedIndex: 0 }, entities: [{ id: 'ent-1', kind: 'character', name: '密探', importance: 'active', situation: '观察', agenda: '等待', lastMovedIndex: 0, lastMovedAt: '即时', visibility: { mode: 'hidden' }, retired: false, updatedIndex: 0 }], events: [], threads: [], revisions: { entities: 0, events: 0, threads: 0 } };
     const transaction = JSON.stringify({ expectedRevisions: { entities: 0 }, entities: [{ action: 'upsert', value: { ...state.entities[0], situation: '已移动', updatedIndex: 0 } }], events: [], threads: [] });

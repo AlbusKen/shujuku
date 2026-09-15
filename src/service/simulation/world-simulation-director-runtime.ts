@@ -93,11 +93,16 @@ export class WorldSimulationDirectorRuntime_ACU {
         if (rejected?.kind === 'rejected') fail_ACU('WORLD_SIM_PROTOCOL_INVALID', rejected.reason === 'scope-mismatch' ? '世界书 grant 作用域不匹配' : `未经本轮读取授权的世界书 grant：${rejected.grantId ?? '未知'}`);
         const grantsByAgent = new Map<string, readonly AgentMaterialGrant_ACU[]>();
         action.plan.delegations.forEach((item, index) => grantsByAgent.set(item.agent, resolved[index]?.kind === 'accepted' ? resolved[index].grants : []));
-        // Specialists have their own per-agent model-turn cap. A modern delegate still reserves
-        // one later director call for finalize/block; legacy bare delegation returns immediately.
-        if (!action.legacy && callsUsed + 1 >= budget.maxMasterModelTurns) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '派工后未保留主 Agent 收敛轮次');
+        // Specialists have their own per-agent model-turn cap. A modern delegate normally reserves
+        // one later director call for finalize/block; when that reserve is unavailable we still run
+        // the specialists and adopt their candidate directly instead of discarding the whole round.
+        const convergenceReserved = action.legacy || callsUsed + 1 < budget.maxMasterModelTurns;
         candidate = await dependencies.runSpecialists(action.plan, grantsByAgent, budget.maxSpecialistModelTurns, worldbook, action.legacy, { tableData: effectiveInput.tableData, summaryOverview: effectiveInput.summaryOverview, storyContext: effectiveInput.storyContext }); candidatePlan = action.plan;
         if (action.legacy) return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
+        if (!convergenceReserved) {
+          // 预算已无收敛轮次：直接采用本轮候选，而不是让已完成的子代理写集作废。
+          return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
+        }
         history.push({ role: 'user', content: `【子代理候选】\n${renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_SPECIALIST_CANDIDATES', JSON.stringify({ agents: candidate.agentsRun, transactions: candidate.transactions }))}` });
         continue;
       }

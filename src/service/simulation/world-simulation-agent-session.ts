@@ -14,7 +14,7 @@ import { WorldSimulationStore_ACU } from './simulation-store';
 import { WorldSimulationRequirementsStore_ACU } from './simulation-requirements-store';
 import { appendWorldSimulationConversation_ACU, readNextPendingWorldSimulationInstruction_ACU, updateWorldSimulationConversationStatus_ACU, type WorldSimulationConversationRef_ACU } from './world-simulation-agent-conversation';
 import { runWorldSimulationManualAgentExecution_ACU } from './world-simulation-agent-execution';
-import type { WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
+import { renderWorldSimulationUntrustedBlock_ACU, type WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
 import { isAiMessage_ACU } from '../runtime/message-handler';
 import { captureSummaryOverviewText_ACU } from './world-simulation-shared-context';
 import { createWorldSimulationMaterialReader_ACU } from './world-simulation-material-reader';
@@ -197,10 +197,10 @@ export class WorldSimulationAgentSession_ACU {
           const replacement = parseAgentRequirementsReplacement_ACU(execution.action.payload, requirementSourceIds);
           const latestPendingSourceId = pendingRequirementSourceIds[pendingRequirementSourceIds.length - 1];
           if (!latestPendingSourceId || replacement.appliedUserMessageId !== latestPendingSourceId) {
-            fail('WORLD_SIM_PROTOCOL_INVALID', `世界推演要求维护必须吸收最新用户输入 ${latestPendingSourceId ?? '(无)'}`);
+            throw new Error(`世界推演要求维护必须吸收最新用户输入 ${latestPendingSourceId ?? '(无)'}`);
           }
           const next = await requirementsStore.replace(anchor, execution.action.payload, chat);
-          if (next.lastAppliedUserMessageId !== latestPendingSourceId) fail('WORLD_SIM_PROTOCOL_INVALID', '世界推演要求保存后未确认最新用户输入水位');
+          if (next.lastAppliedUserMessageId !== latestPendingSourceId) throw new Error('世界推演要求保存后未确认最新用户输入水位');
           if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演要求保存后来源或目标 swipe 已变化');
           requirementsSnapshot = next;
           pendingRequirementSourceIds = [];
@@ -213,7 +213,18 @@ export class WorldSimulationAgentSession_ACU {
           }
         } catch (error) {
           if (error instanceof WorldSimulationValidationError_ACU) throw error;
-          fail('WORLD_SIM_PROTOCOL_INVALID', `世界推演要求维护被拒绝：${error instanceof Error ? error.message : String(error)}`);
+          // 协议抖动不终止整轮：把拒绝原因回灌给模型，下一轮重出 maintain_requirements。
+          masterHistory = [...masterHistory, {
+            role: 'user',
+            content: renderWorldSimulationUntrustedBlock_ACU(
+              'UNTRUSTED_REQUIREMENTS_REJECTION',
+              [
+                `本次要求维护未被采纳：${error instanceof Error ? error.message : String(error)}`,
+                `仍待吸收的用户输入 source id：${JSON.stringify(pendingRequirementSourceIds)}`,
+                '在该列表清空前，只能输出一个完整 maintain_requirements JSON 对象；不得 tools、delegate、finalize 或 block。',
+              ].join('\n'),
+            ),
+          }];
         }
       }
       if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演 Agent 返回时来源或目标 swipe 已变化');

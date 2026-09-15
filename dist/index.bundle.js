@@ -140205,14 +140205,18 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                         fail_ACU$4('WORLD_SIM_PROTOCOL_INVALID', rejected.reason === 'scope-mismatch' ? '世界书 grant 作用域不匹配' : `未经本轮读取授权的世界书 grant：${rejected.grantId ?? '未知'}`);
                     const grantsByAgent = new Map();
                     action.plan.delegations.forEach((item, index) => grantsByAgent.set(item.agent, resolved[index]?.kind === 'accepted' ? resolved[index].grants : []));
-                    // Specialists have their own per-agent model-turn cap. A modern delegate still reserves
-                    // one later director call for finalize/block; legacy bare delegation returns immediately.
-                    if (!action.legacy && callsUsed + 1 >= budget.maxMasterModelTurns)
-                        fail_ACU$4('WORLD_SIM_BUDGET_EXCEEDED', '派工后未保留主 Agent 收敛轮次');
+                    // Specialists have their own per-agent model-turn cap. A modern delegate normally reserves
+                    // one later director call for finalize/block; when that reserve is unavailable we still run
+                    // the specialists and adopt their candidate directly instead of discarding the whole round.
+                    const convergenceReserved = action.legacy || callsUsed + 1 < budget.maxMasterModelTurns;
                     candidate = await dependencies.runSpecialists(action.plan, grantsByAgent, budget.maxSpecialistModelTurns, worldbook, action.legacy, { tableData: effectiveInput.tableData, summaryOverview: effectiveInput.summaryOverview, storyContext: effectiveInput.storyContext });
                     candidatePlan = action.plan;
                     if (action.legacy)
                         return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
+                    if (!convergenceReserved) {
+                        // 预算已无收敛轮次：直接采用本轮候选，而不是让已完成的子代理写集作废。
+                        return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
+                    }
                     history.push({ role: 'user', content: `【子代理候选】\n${renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_SPECIALIST_CANDIDATES', JSON.stringify({ agents: candidate.agentsRun, transactions: candidate.transactions }))}` });
                     continue;
                 }
@@ -141216,11 +141220,11 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                         const replacement = parseAgentRequirementsReplacement_ACU(execution.action.payload, requirementSourceIds);
                         const latestPendingSourceId = pendingRequirementSourceIds[pendingRequirementSourceIds.length - 1];
                         if (!latestPendingSourceId || replacement.appliedUserMessageId !== latestPendingSourceId) {
-                            fail$1('WORLD_SIM_PROTOCOL_INVALID', `世界推演要求维护必须吸收最新用户输入 ${latestPendingSourceId ?? '(无)'}`);
+                            throw new Error(`世界推演要求维护必须吸收最新用户输入 ${latestPendingSourceId ?? '(无)'}`);
                         }
                         const next = await requirementsStore.replace(anchor, execution.action.payload, chat);
                         if (next.lastAppliedUserMessageId !== latestPendingSourceId)
-                            fail$1('WORLD_SIM_PROTOCOL_INVALID', '世界推演要求保存后未确认最新用户输入水位');
+                            throw new Error('世界推演要求保存后未确认最新用户输入水位');
                         if (!isCurrent())
                             fail$1('WORLD_SIM_STALE', '世界推演要求保存后来源或目标 swipe 已变化');
                         requirementsSnapshot = next;
@@ -141237,7 +141241,15 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                     catch (error) {
                         if (error instanceof WorldSimulationValidationError_ACU)
                             throw error;
-                        fail$1('WORLD_SIM_PROTOCOL_INVALID', `世界推演要求维护被拒绝：${error instanceof Error ? error.message : String(error)}`);
+                        // 协议抖动不终止整轮：把拒绝原因回灌给模型，下一轮重出 maintain_requirements。
+                        masterHistory = [...masterHistory, {
+                                role: 'user',
+                                content: renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_REQUIREMENTS_REJECTION', [
+                                    `本次要求维护未被采纳：${error instanceof Error ? error.message : String(error)}`,
+                                    `仍待吸收的用户输入 source id：${JSON.stringify(pendingRequirementSourceIds)}`,
+                                    '在该列表清空前，只能输出一个完整 maintain_requirements JSON 对象；不得 tools、delegate、finalize 或 block。',
+                                ].join('\n')),
+                            }];
                     }
                 }
                 if (!isCurrent())
@@ -142758,7 +142770,12 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                     });
                     const settler = this.createSettler_ACU({ chatIdentity, storyClockAtSource: storyClock, settings, signal: controller.signal });
                     const completion = this.orchestrator.trigger(anchorMessageIndex, runner, settler);
-                    void completion.then(() => this.finishAutomaticFlight_ACU(chatIdentity, controller), () => this.finishAutomaticFlight_ACU(chatIdentity, controller));
+                    void completion.then(() => this.finishAutomaticFlight_ACU(chatIdentity, controller), error => {
+                        if (!(error instanceof WorldSimulationNoCandidateError_ACU)) {
+                            logWarn_ACU('[世界推演] 自动推演未能完成本楼层结算。', error);
+                        }
+                        this.finishAutomaticFlight_ACU(chatIdentity, controller);
+                    });
                 }
                 catch (_) {
                     this.finishAutomaticFlight_ACU(chatIdentity, controller);
@@ -142846,7 +142863,7 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                 }
                 const budget = input.settings.budgets[input.scale];
                 const settledThroughIndex = base?.state.anchorMessageIndex ?? -1;
-                const requirementsSnapshot = this.requirementsStore.read(sourceAnchorMessageIndex, input.chat);
+                let requirementsSnapshot = this.requirementsStore.read(sourceAnchorMessageIndex, input.chat);
                 const storyContext = await (this.dependencies.buildStoryContext ?? buildWorldSimulationStoryContext_ACU)({
                     chat: input.chat,
                     anchorMessageIndex: sourceAnchorMessageIndex,
@@ -142938,15 +142955,60 @@ upsert 必须提交完整领域对象；retire 使用 {"action":"retire","id":"�
                     grants = [];
                 }
                 else {
-                    const director = await new WorldSimulationDirectorRuntime_ACU().run({
-                        runId: lease.runId, snapshot, storyClock: input.storyClock, settings: input.settings, budget,
-                        reads: [], storyContext, requirementsSnapshot, worldbook, isCurrent: isStoryContextCurrent, userInstruction: '', tableData: sharedTableData, summaryOverview: sharedSummaryOverview, material,
-                    }, {
-                        runMaster: request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: input.chatIdentity, prompt: request.prompt, messages: [...request.messages], signal: input.signal }),
-                        runSpecialists,
-                    });
+                    let masterCallsUsed = 0;
+                    let masterHistory = [];
+                    let activeRequirementsSnapshot = requirementsSnapshot;
+                    let activePendingSourceIds = [...this.requirementsStore.pendingSourceIds(sourceAnchorMessageIndex, input.chat)];
+                    let director;
+                    for (;;) {
+                        director = await new WorldSimulationDirectorRuntime_ACU().run({
+                            runId: lease.runId, snapshot, storyClock: input.storyClock, settings: input.settings, budget,
+                            reads: [], storyContext, requirementsSnapshot: activeRequirementsSnapshot, worldbook,
+                            isCurrent: isStoryContextCurrent, userInstruction: '', tableData: sharedTableData,
+                            summaryOverview: sharedSummaryOverview, material, pendingRequirementSourceIds: activePendingSourceIds,
+                            masterCallsUsed, history: masterHistory,
+                        }, {
+                            runMaster: request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: input.chatIdentity, prompt: request.prompt, messages: [...request.messages], signal: input.signal }),
+                            runSpecialists,
+                        });
+                        masterHistory = director.history.map(message => ({ ...message }));
+                        masterCallsUsed += 1;
+                        if (director.action.kind !== 'maintain_requirements')
+                            break;
+                        const latestPendingSourceId = activePendingSourceIds[activePendingSourceIds.length - 1];
+                        try {
+                            if (!latestPendingSourceId) {
+                                throw new Error('没有待吸收的用户输入，不应维护要求');
+                            }
+                            const replacement = parseAgentRequirementsReplacement_ACU(director.action.payload, this.requirementsStore.userSourceIds(sourceAnchorMessageIndex, input.chat));
+                            if (replacement.appliedUserMessageId !== latestPendingSourceId) {
+                                throw new Error(`appliedUserMessageId 必须是最新尚未吸收用户输入 ${latestPendingSourceId}`);
+                            }
+                            const next = await this.requirementsStore.replace(sourceAnchorMessageIndex, director.action.payload, input.chat);
+                            if (next.lastAppliedUserMessageId !== latestPendingSourceId) {
+                                throw new Error('世界推演要求保存后未确认最新用户输入水位');
+                            }
+                            activeRequirementsSnapshot = next;
+                            activePendingSourceIds = [];
+                        }
+                        catch (error) {
+                            if (error instanceof WorldSimulationValidationError_ACU)
+                                throw error;
+                            masterHistory = [...masterHistory, {
+                                    role: 'user',
+                                    content: renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_REQUIREMENTS_REJECTION', [
+                                        `本次要求维护未被采纳：${error instanceof Error ? error.message : String(error)}`,
+                                        `仍待吸收的用户输入 source id：${JSON.stringify(activePendingSourceIds)}`,
+                                        '在该列表清空前，只能输出一个完整 maintain_requirements JSON 对象。',
+                                    ].join('\n')),
+                                }];
+                        }
+                        if (!isStoryContextCurrent())
+                            rejectStale_ACU('世界推演要求维护后租约或聊天已变化');
+                    }
                     candidateLoop = director.loop;
                     grants = director.grants;
+                    requirementsSnapshot = activeRequirementsSnapshot;
                 }
                 const currentRequirementsRevision = this.requirementsStore.read(sourceAnchorMessageIndex, this.dependencies.getChat())?.revision ?? null;
                 const frozenRequirementsRevision = requirementsSnapshot?.revision ?? null;

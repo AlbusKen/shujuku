@@ -141,24 +141,72 @@ describe('world simulation Agent session', () => {
     expect(commitProjection).not.toHaveBeenCalled();
   });
 
-  it('rejects an older pending source without saving or committing', async () => {
+  it('retries an older pending source after feeding its rejection back to the master', async () => {
     const latest = 'world-simulation-user:1:string:ai-1:0:2';
     const requirementStore = requirementsStore({ sourceIds: [source, latest], pendingSourceIds: [source, latest] });
-    const { session, runOwnedAi, commitProjection } = createSession(undefined, vi.fn(async () => maintainOutput(source)), undefined, {}, requirementStore);
+    let masterCalls = 0;
+    const { session, runOwnedAi, commitProjection } = createSession(undefined, vi.fn(async (request: any) => {
+      if (request.source !== 'world-sim-master') return entityOutput();
+      masterCalls += 1;
+      if (masterCalls === 1) return maintainOutput(source);
+      if (masterCalls === 2) {
+        expect(request.messages.some((message: any) => message.content.includes('<UNTRUSTED_REQUIREMENTS_REJECTION>'))).toBe(true);
+        return maintainOutput(latest);
+      }
+      return '{"delegations":[{"agent":"entity-movement","instruction":"推进密探行动"}]}';
+    }), undefined, {}, requirementStore);
 
-    await expect(session.submit('先补充再修改')).rejects.toMatchObject({ error: { code: 'WORLD_SIM_PROTOCOL_INVALID' } });
-    expect(requirementStore.replacements).toHaveLength(0);
+    await expect(session.submit('先补充再修改')).resolves.toBe('started');
+    expect(requirementStore.replacements).toHaveLength(1);
+    expect(masterCalls).toBe(3);
+    expect(runOwnedAi.mock.calls.filter(call => call[0].source === 'world-sim-master')).toHaveLength(3);
+    expect(commitProjection).toHaveBeenCalledTimes(1);
+  });
+
+  it('still stops immediately when the target swipe changes after requirements persistence', async () => {
+    const requirementStore = requirementsStore({
+      sourceIds: [source],
+      pendingSourceIds: [source],
+      replace: async raw => {
+        const replacement = raw as any;
+        return { feature: 'world-simulation', revision: 1, lastAppliedUserMessageId: replacement.appliedUserMessageId, requirements: replacement.requirements };
+      },
+    });
+    const value = chat();
+    const { session, runOwnedAi, commitProjection } = createSession(value, vi.fn(async (request: any) => {
+      if (request.source === 'world-sim-master') return maintainOutput();
+      return entityOutput();
+    }), undefined, {}, requirementStore);
+    requirementStore.replacements.length = 0;
+    const replace = requirementStore.replace;
+    requirementStore.replace = async (...args: any[]) => {
+      const next = await replace(...args);
+      value[1]!.swipe_id = 1;
+      return next;
+    };
+
+    await expect(session.submit('保存后切换分支')).rejects.toMatchObject({ error: { code: 'WORLD_SIM_STALE' } });
+    expect(requirementStore.replacements).toHaveLength(1);
     expect(runOwnedAi).toHaveBeenCalledTimes(1);
     expect(commitProjection).not.toHaveBeenCalled();
   });
 
-  it('fails closed when the requirements Store rejects persistence', async () => {
+  it('fails closed without committing when the requirements Store keeps rejecting persistence', async () => {
     const requirementStore = requirementsStore({ sourceIds: [source], pendingSourceIds: [source], replace: async () => { throw new Error('strict save failed'); } });
-    const { session, runOwnedAi, commitProjection } = createSession(undefined, vi.fn(async () => maintainOutput()), undefined, {}, requirementStore);
+    let masterCalls = 0;
+    const { session, runOwnedAi, commitProjection } = createSession(undefined, vi.fn(async (request: any) => {
+      if (request.source !== 'world-sim-master') return entityOutput();
+      masterCalls += 1;
+      if (masterCalls > 1) {
+        expect(request.messages.some((message: any) => message.content.includes('<UNTRUSTED_REQUIREMENTS_REJECTION>'))).toBe(true);
+      }
+      return maintainOutput();
+    }), undefined, {}, requirementStore);
 
-    await expect(session.submit('保存必须成功')).rejects.toMatchObject({ error: { code: 'WORLD_SIM_PROTOCOL_INVALID' } });
-    expect(requirementStore.replacements).toHaveLength(1);
-    expect(runOwnedAi).toHaveBeenCalledTimes(1);
+    await expect(session.submit('保存必须成功')).rejects.toMatchObject({ error: { code: 'WORLD_SIM_BUDGET_EXCEEDED' } });
+    expect(masterCalls).toBeGreaterThan(1);
+    expect(requirementStore.replacements).toHaveLength(masterCalls);
+    expect(runOwnedAi).toHaveBeenCalledTimes(masterCalls);
     expect(commitProjection).not.toHaveBeenCalled();
   });
 
