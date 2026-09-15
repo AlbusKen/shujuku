@@ -10,7 +10,7 @@
 
 import type { AgentMaterialGrantSource_ACU } from '../../agent-kernel/material-grants';
 import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine-state';
-import { getLorebookEntriesByNames_ACU } from '../../worldbook/pipeline';
+import { getLorebookEntriesStrict_ACU } from '../../worldbook/pipeline';
 import { getCurrentWorldbookConfig_ACU } from '../../settings/settings-readers';
 import { isEntryBlocked_ACU, logWarn_ACU } from '../../../shared/utils';
 import {
@@ -37,10 +37,25 @@ export interface AgentWorldbookSnapshot_ACU {
   entries: AgentWorldbookEntryView_ACU[];
   /** 读取宿主失败时为 false；目录会如实标注，不当成「没有条目」。 */
   available: boolean;
+  /** 仅 available=false 时出现；只含状态、计数与错误类别。 */
+  failure?: AgentWorldbookSnapshotFailure_ACU;
+}
+
+export interface AgentWorldbookSnapshotFailure_ACU {
+  status: string;
+  categories: string[];
+  failedBooks: number;
+  invalidBookNames: number;
 }
 
 export function buildEmptyAgentWorldbookSnapshot_ACU(available = true): AgentWorldbookSnapshot_ACU {
-  return { entries: [], available };
+  return available
+    ? { entries: [], available: true }
+    : {
+      entries: [],
+      available: false,
+      failure: { status: 'unavailable', categories: ['unknown'], failedBooks: 0, invalidBookNames: 0 },
+    };
 }
 
 function isRecord_ACU(value: unknown): value is Record<string, unknown> {
@@ -88,13 +103,40 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
   try {
     const bookNames = await resolveRelevantBookNames_ACU();
     if (!bookNames.length) return buildEmptyAgentWorldbookSnapshot_ACU();
-    const entriesByBook = await getLorebookEntriesByNames_ACU(bookNames);
+    const result = await getLorebookEntriesStrict_ACU(bookNames, {
+      source: 'agent_runtime',
+      validationPolicy: 'validate_list',
+      runId: `agent-worldbook:${Date.now()}`,
+    });
+    if (result.status !== 'success') {
+      const categories = [...new Set([
+        ...result.failedBooks.map(item => item.errorCategory),
+        ...(result.invalidBookNames.length ? ['invalid_selection'] : []),
+      ])];
+      if (!categories.length) categories.push(result.status);
+      logWarn_ACU('[Continuation][Agent] 世界书快照预取失败，本轮目录与搜索将不含世界书。', {
+        status: result.status,
+        categories,
+        failedBooks: result.failedBookNames.length,
+        invalidBookNames: result.invalidBookNames.length,
+      });
+      return {
+        entries: [],
+        available: false,
+        failure: {
+          status: result.status,
+          categories,
+          failedBooks: result.failedBookNames.length,
+          invalidBookNames: result.invalidBookNames.length,
+        },
+      };
+    }
     const isolationPrefix = getIsolationPrefix_ACU();
     const enabledEntriesMap = getCurrentWorldbookConfig_ACU()?.enabledEntries;
 
     const entries: AgentWorldbookEntryView_ACU[] = [];
-    for (const bookName of bookNames) {
-      for (const raw of entriesByBook[bookName] ?? []) {
+    for (const [bookName, rawEntries] of Object.entries(result.entriesByBook)) {
+      for (const raw of rawEntries ?? []) {
         if (!isRecord_ACU(raw)) continue;
         if (raw.enabled !== true) continue;
         const uid = String(raw.uid ?? '').trim();

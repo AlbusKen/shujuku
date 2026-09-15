@@ -59,7 +59,7 @@ function renderRuntimeContext_ACU(input: Parameters<typeof renderWorldSimulation
     renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_CURRENT_REQUIREMENTS', dynamicValues.$CURRENT_REQUIREMENTS),
     ...(isMaster ? [
       renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_PENDING_REQUIREMENT_SOURCES', dynamicValues.$PENDING_REQUIREMENT_SOURCES),
-      '【世界书资料】目录和命中提示只是索引；世界书正文需要实际 read 后才是可引用的参考设定。',
+      '【世界书资料】目录和命中提示只是索引；世界书正文需要实际 read 后才是可引用的参考设定。W 编码只发给本 run 已成功读取的资料，包括世界书与表格。',
       renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_WORLDBOOK_CATALOG', dynamicValues.$WORLDBOOK_CATALOG),
       renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_WORLDBOOK_HITS', dynamicValues.$WORLDBOOK_HITS),
     ] : [
@@ -88,6 +88,7 @@ export function renderWorldSimulationAgentMessages_ACU(input: {
   summaryOverview?: string;
   worldbookCatalog?: string;
   worldbookHits?: string;
+  worldbookAvailable?: boolean;
   toolResults?: readonly string[];
   previousCandidateSummaries?: readonly string[];
   delegationInstruction?: string;

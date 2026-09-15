@@ -23,6 +23,8 @@ export interface WorldSimulationManualAgentExecutionInput_ACU {
   masterCallsUsed?: number; history?: readonly WorldSimulationPromptMessage_ACU[]; isCurrent: () => boolean; userInstruction: string; readGateConfig: AgentKernelReadGateConfig_ACU;
   /** 每次模型请求发送前重新读取正文/纪要材料；同一次请求内只调用一次。 */
   material?: WorldSimulationPromptMaterialRefresher_ACU;
+  /** 已提供时复用冻结快照；省略时由 director 调用默认 loader。 */
+  worldbook?: AgentWorldbookSnapshot_ACU;
 }
 export interface WorldSimulationManualAgentExecutionDependencies_ACU {
   countTokens: (text: string) => Promise<number>;
@@ -48,7 +50,7 @@ export async function runWorldSimulationManualAgentExecution_ACU(input: WorldSim
   const result = await new WorldSimulationDirectorRuntime_ACU().run({
     runId: input.runId, snapshot: input.snapshot, storyClock: input.storyClock, settings: input.settings, reads: input.reads,
     storyContext: input.storyContext, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds,
-    masterCallsUsed: input.masterCallsUsed, history: input.history, isCurrent: input.isCurrent, userInstruction: input.userInstruction, tableData: input.tableData, summaryOverview: input.summaryOverview, material: input.material,
+    masterCallsUsed: input.masterCallsUsed, history: input.history, isCurrent: input.isCurrent, userInstruction: input.userInstruction, tableData: input.tableData, summaryOverview: input.summaryOverview, material: input.material, ...(input.worldbook ? { worldbook: input.worldbook } : {}),
   }, { runMaster: dependencies.runAgent, runSpecialists });
   if (result.action.kind === 'block') fail_ACU('WORLD_SIM_PROTOCOL_INVALID', `world-director 阻断本轮：${result.action.reason}`);
   return { action: result.action, plan: result.plan, loop: result.loop, grants: result.grants, history: result.history };

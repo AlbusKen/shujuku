@@ -42,6 +42,7 @@ function createSession(value = chat(), runOwnedAi = vi.fn(async (request: any) =
     getChat: () => value, getChatIdentity: () => 'chat-a', readSettings: () => ({ ...buildDefaultWorldSimulationSettings_ACU(), ...settingsPatch }),
     store: { read: () => null, commitProjection } as any, countTokens: async () => 1, runOwnedAi,
     createRecordId: () => 'manual-1', canRun, requirementsStore: requirementStore, onIdle,
+    loadWorldbook: async () => ({ available: true, entries: [] }),
   });
   return { session, value, runOwnedAi, commitProjection, requirementStore };
 }

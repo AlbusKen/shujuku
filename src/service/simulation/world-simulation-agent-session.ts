@@ -3,7 +3,7 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import type { AgentKernelReadGateConfig_ACU } from '../agent-kernel/read-gate';
 import type { AgentStoryContextSnapshot_ACU } from '../agent-kernel/story-context';
 import { parseAgentRequirementsReplacement_ACU, type AgentRequirementSnapshot_ACU } from '../agent-kernel/requirements';
-import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
+import { loadAgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
 import { buildWorldSimulationStoryContext_ACU } from './world-simulation-story-context';
 import { createWorldSimError_ACU, WorldSimulationValidationError_ACU, type WorldSimulationTransaction_ACU, type WorldStateSnapshot_ACU } from './model';
 import { parseWorldSimulationProjection_ACU } from './simulation-projection';
@@ -15,9 +15,11 @@ import { WorldSimulationRequirementsStore_ACU } from './simulation-requirements-
 import { appendWorldSimulationConversation_ACU, readNextPendingWorldSimulationInstruction_ACU, updateWorldSimulationConversationStatus_ACU, type WorldSimulationConversationRef_ACU } from './world-simulation-agent-conversation';
 import { runWorldSimulationManualAgentExecution_ACU } from './world-simulation-agent-execution';
 import { renderWorldSimulationUntrustedBlock_ACU, type WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
+import { beginWorldSimulationSessionRun_ACU, finishWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU } from './world-simulation-agent-session-log';
 import { isAiMessage_ACU } from '../runtime/message-handler';
 import { captureSummaryOverviewText_ACU } from './world-simulation-shared-context';
 import { createWorldSimulationMaterialReader_ACU } from './world-simulation-material-reader';
+import { renderWorldSimulationRequirementsRetryHint_ACU } from './simulation-requirements-replacement';
 
 
 export interface WorldSimulationAgentSessionDependencies_ACU {
@@ -143,6 +145,8 @@ export class WorldSimulationAgentSession_ACU {
     };
     if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演会话来源或目标 swipe 已变化');
     this.abort = new AbortController(); this.running = true; this.committing = false; this.committed = false;
+    beginWorldSimulationSessionRun_ACU('开始世界推演 Agent 运行', '正在装配受限上下文并等待主 Agent 决策。');
+    logWorldSimulationSession_ACU({ kind: 'user_message', title: '你的补充', detail: ref.text });
     // 本飞行一旦取得所有权就冻结 requirements 授权；首个 await 是运行状态审计，后到 submit
     // 可以在该窗口排队但绝不能扩展当前飞行可引用的 source 或最新 pending 水位。
     const requirementsStore = this.dependencies.requirementsStore ?? defaultRequirementsStore_ACU;
@@ -179,6 +183,7 @@ export class WorldSimulationAgentSession_ACU {
         runId: `manual:${ref.messageIndex}:${ref.id}`,
         chatIdentity: identity,
       });
+      const worldbook = await (this.dependencies.loadWorldbook ?? loadAgentWorldbookSnapshot_ACU)();
       let masterCallsUsed = 0;
       let masterHistory: WorldSimulationPromptMessage_ACU[] = [];
       let execution: Awaited<ReturnType<typeof runWorldSimulationManualAgentExecution_ACU>>;
@@ -187,15 +192,15 @@ export class WorldSimulationAgentSession_ACU {
           runId: `manual:${ref.messageIndex}:${ref.id}`, snapshot: before, anchorMessageIndex: anchor, storyClock: manualClock(base?.state ?? null, anchor), settings, reads: [], storyContext,
           tableData: sharedTableData, summaryOverview: sharedSummaryOverview,
           requirementsSnapshot, pendingRequirementSourceIds, masterCallsUsed, history: masterHistory,
-          readGateConfig: readGateConfig(settings.budgets.deep), userInstruction: ref.text, isCurrent, material,
+          readGateConfig: readGateConfig(settings.budgets.deep), userInstruction: ref.text, isCurrent, material, worldbook,
         }, { countTokens: this.dependencies.countTokens, runAgent: async request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: identity, prompt: request.prompt, messages: [...request.messages], signal: this.abort?.signal }) });
         masterHistory = execution.history.map(message => ({ ...message }));
         masterCallsUsed += 1;
         if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演主 Agent 返回后来源或目标 swipe 已变化');
         if (execution.action.kind !== 'maintain_requirements') break;
         try {
-          const replacement = parseAgentRequirementsReplacement_ACU(execution.action.payload, requirementSourceIds);
           const latestPendingSourceId = pendingRequirementSourceIds[pendingRequirementSourceIds.length - 1];
+          const replacement = parseAgentRequirementsReplacement_ACU(execution.action.payload, requirementSourceIds);
           if (!latestPendingSourceId || replacement.appliedUserMessageId !== latestPendingSourceId) {
             throw new Error(`世界推演要求维护必须吸收最新用户输入 ${latestPendingSourceId ?? '(无)'}`);
           }
@@ -220,8 +225,7 @@ export class WorldSimulationAgentSession_ACU {
               'UNTRUSTED_REQUIREMENTS_REJECTION',
               [
                 `本次要求维护未被采纳：${error instanceof Error ? error.message : String(error)}`,
-                `仍待吸收的用户输入 source id：${JSON.stringify(pendingRequirementSourceIds)}`,
-                '在该列表清空前，只能输出一个完整 maintain_requirements JSON 对象；不得 tools、delegate、finalize 或 block。',
+                `${renderWorldSimulationRequirementsRetryHint_ACU(pendingRequirementSourceIds)}；不得 tools、delegate、finalize 或 block。`,
               ].join('\n'),
             ),
           }];
@@ -244,6 +248,7 @@ export class WorldSimulationAgentSession_ACU {
         } catch (error) {
           auditFailures.push(`无变更状态审计同步失败：${error instanceof Error ? error.message : String(error)}`);
         }
+        finishWorldSimulationSessionRun_ACU('世界推演已完成', '主 Agent 判断本次无需修改世界账本。');
         return auditFailures.length ? 'no_change_with_audit_warning' : 'no_change';
       }
       try {
@@ -270,6 +275,7 @@ export class WorldSimulationAgentSession_ACU {
         } catch (error) {
           auditFailures.push(`空候选状态审计同步失败：${error instanceof Error ? error.message : String(error)}`);
         }
+        finishWorldSimulationSessionRun_ACU('世界推演已完成', '子代理没有产生可提交的账本变化。');
         return auditFailures.length ? 'no_change_with_audit_warning' : 'no_change';
       }
       const after = applyWorldSimulationTransaction_ACU(before, transaction, settings.maxTrackedEntities);
@@ -294,9 +300,11 @@ export class WorldSimulationAgentSession_ACU {
       } catch (error) {
         auditFailures.push(`提交审计：${error instanceof Error ? error.message : String(error)}`);
       }
+      finishWorldSimulationSessionRun_ACU('世界推演已完成', auditFailures.length ? '世界账本已联合提交；会话审计存在警告。' : '世界账本已完成受控联合提交。');
       return auditFailures.length ? 'committed_with_audit_warning' : 'committed';
     } catch (error) {
       if (this.committed) throw error;
+      finishWorldSimulationSessionRun_ACU('世界推演运行失败', error instanceof Error ? error.message : String(error), false);
       try { await updateWorldSimulationConversationStatus_ACU(ref, 'failed', error instanceof Error ? error.message : String(error), chat); } catch (_) {}
       throw error;
     } finally {

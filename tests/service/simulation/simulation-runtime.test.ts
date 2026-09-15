@@ -48,6 +48,7 @@ function createRuntime(overrides: Partial<WorldSimulationRuntimeDependencies_ACU
     runOwnedAi,
     buildStoryContext: async input => ({ feature: 'world-simulation', runId: input.runId, chatIdentity: input.chatIdentity, branchIdentity: 'test-branch', sourceRevision: 'test-r1', sourceDigest: 'test-d1', profile: 'world-director', overview: { state: 'ready', text: '概览', digest: 'overview-d1', diagnostic: '' }, pending: { text: '正文', digest: 'pending-d1' }, bridge: { text: '', digest: 'bridge-d1' }, catalog: { text: '1', digest: 'catalog-d1' } }),
     store: { read: () => null } as any,
+    loadWorldbook: async () => ({ available: true, entries: [] }),
     ...overrides,
   };
   return { runtime: new WorldSimulationRuntime_ACU(dependencies), dependencies, runOwnedAi };

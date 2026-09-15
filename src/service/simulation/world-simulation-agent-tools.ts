@@ -66,11 +66,26 @@ function read_ACU(address: string, input: WorldSimulationAgentToolsInput_ACU): {
   }
   return { text: `读取 ${address} 被拒绝：不在世界推演子代理可读目录中。`, ref: null };
 }
+
+/** Frozen-snapshot search source: title, keys, body lines, and a copyable read address on every line. */
+export function renderWorldSimulationWorldbookSearchSource_ACU(worldbook: AgentWorldbookSnapshot_ACU): string {
+  const lines: string[] = [];
+  for (const entry of worldbook.entries) {
+    const address = `$WORLDBOOK:${entry.bookName}:${entry.uid}`;
+    lines.push(`${entry.title}｜${entry.keys.join('、')}｜${address}`);
+    for (const line of entry.content.split(/\r?\n/)) {
+      const text = line.trim();
+      if (text) lines.push(`${text}｜${address}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 function searchSource_ACU(scope: readonly string[], input: WorldSimulationAgentToolsInput_ACU): string {
   const sections: string[] = [];
   if (scope.includes('story')) sections.push(input.storyContext?.overview.text ?? '', input.storyContext?.pending.text ?? '', input.storyContext?.bridge.text ?? '', input.storyContext?.catalog.text ?? '');
   if (scope.includes('ledger')) sections.push(stateText_ACU(input.snapshot));
-  if (scope.includes('worldbook')) sections.push(input.worldbook.entries.map(entry => `${entry.title}｜${entry.keys.join('、')}｜$WORLDBOOK:${entry.bookName}:${entry.uid}`).join('\n'));
+  if (scope.includes('worldbook')) sections.push(renderWorldSimulationWorldbookSearchSource_ACU(input.worldbook));
   if (scope.includes('tables')) sections.push(input.tableData ? '表格数据可搜索；按表名或概览定位后用 read 精读。' : '该运行没有可读取的表格资料。');
   if (scope.includes('proposals')) sections.push('该运行没有可读取的提案资料。');
   return sections.join('\n');

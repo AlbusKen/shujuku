@@ -83,6 +83,39 @@ describe('WorldSimulationDirectorRuntime_ACU', () => {
       .rejects.toMatchObject({ error: { code: 'WORLD_SIM_PROTOCOL_INVALID' } });
   });
 
+  it('fails closed before any model call when the worldbook snapshot is unavailable', async () => {
+    const master = vi.fn();
+    await expect(new WorldSimulationDirectorRuntime_ACU().run(
+      { ...input(), worldbook: { available: false, entries: [], failure: { status: 'read_failed', categories: ['unknown'], failedBooks: 1, invalidBookNames: 0 } } },
+      { runMaster: master, runSpecialists: vi.fn() },
+    )).rejects.toMatchObject({ error: { code: 'WORLD_SIM_PROTOCOL_INVALID', message: expect.stringContaining('世界书快照不可用') } });
+    expect(master).not.toHaveBeenCalled();
+  });
+
+  it('keeps unknown grants fail-closed after an authorized table grant on an available empty worldbook', async () => {
+    const master = vi.fn()
+      .mockResolvedValueOnce('{"action":"tools","thought":"读取纪要","calls":[{"kind":"read","reads":["$TABLE:纪要表:1-1"]}] }')
+      .mockResolvedValueOnce('{"action":"delegate","thought":"混入未知 grant","delegations":[{"agentName":"entity-movement","task":"核验位置","materialGrants":["W1","W2"],"reads":[]}]}');
+    const tableData = { sheet1: { name: '纪要表', content: [['轮次'], ['第 1 轮']] } };
+    await expect(new WorldSimulationDirectorRuntime_ACU().run(
+      { ...input(), worldbook: { available: true, entries: [] }, tableData },
+      { runMaster: master, runSpecialists: vi.fn() },
+    )).rejects.toMatchObject({ error: { code: 'WORLD_SIM_PROTOCOL_INVALID' } });
+  });
+
+  it('uses the default loader when no snapshot is provided and reuses an explicit snapshot without reloading', async () => {
+    const loaded = { available: true, entries: [{ bookName: '港口设定', uid: '1', title: '港口规则', keys: ['港口'], constant: false, content: '夜间封锁', tokens: 2 }] };
+    const loadWorldbook = vi.fn(async () => loaded);
+    const master = vi.fn(async () => '{"action":"finalize","thought":"结束","decision":"no_change","acceptedAgents":[],"summary":"无变更","unresolved":[]}');
+    const { worldbook: _omitted, ...withoutSnapshot } = input();
+    await new WorldSimulationDirectorRuntime_ACU().run(withoutSnapshot, { runMaster: master, runSpecialists: vi.fn(), loadWorldbook });
+    expect(loadWorldbook).toHaveBeenCalledTimes(1);
+    loadWorldbook.mockClear();
+    await new WorldSimulationDirectorRuntime_ACU().run(input(), { runMaster: master, runSpecialists: vi.fn(), loadWorldbook });
+    expect(loadWorldbook).not.toHaveBeenCalled();
+  });
+
+
 
   it('counts tools against the director model-turn cap but never spends specialist turns', async () => {
     const settings = buildDefaultWorldSimulationSettings_ACU();

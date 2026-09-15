@@ -2,6 +2,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/world-simulation-agent-session-log';
 
 async function mountChat(running = false, committing = false, interruptResult: 'started' | 'started_with_audit_warning' | 'queued_after_abort' | 'queued_after_flight' | 'queued_after_commit' = 'queued_after_abort', submitResult: 'started' | 'started_with_audit_warning' | 'queued' = 'started') {
   vi.resetModules();
@@ -22,8 +23,7 @@ async function mountChat(running = false, committing = false, interruptResult: '
   }));
   vi.doMock('../../../src/presentation-v2/composables/useChatChangedListener', async () => {
     const { ref } = await import('vue');
-    return { useChatChangedTick: () => ref(0) };
-  });
+    return { useChatChangedTick: () => ref(0), useChatMutationTick: () => ref(0) };});
   const { createApp, nextTick } = await import('vue');
   const Chat = (await import('../../../src/presentation-v2/components/WorldSimulationAgentChat.vue')).default;
   const el = document.createElement('div'); document.body.appendChild(el);
@@ -31,7 +31,7 @@ async function mountChat(running = false, committing = false, interruptResult: '
   return { app, el, runtime, read, nextTick };
 }
 
-afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); vi.resetModules(); });
+afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); vi.resetModules(); resetWorldSimulationSessionLogForTests_ACU(); });
 
 describe('WorldSimulationAgentChat', () => {
   it('mounts read-only, then sends a trimmed request only after explicit user action', async () => {
@@ -68,7 +68,7 @@ describe('WorldSimulationAgentChat', () => {
     expect(el.textContent).toContain('世界账本严格保存中');
     const interrupt = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '中断并维护');
     interrupt!.click(); await Promise.resolve(); await nextTick();
-    expect(runtime.interruptAndMaintain).toHaveBeenCalledTimes(1);
+  expect(runtime.interruptAndMaintain).toHaveBeenCalledTimes(1);
     expect(el.textContent).toContain('世界账本严格保存已开始，无法取消；中断请求已排队，保存完成后会先维护。');
     app.unmount();
   });
@@ -82,6 +82,22 @@ describe('WorldSimulationAgentChat', () => {
     send!.click(); await Promise.resolve(); await nextTick();
     expect(runtime.submitAgentMessage).toHaveBeenCalledTimes(1);
     expect(el.textContent).toContain('世界账本已联合提交，但会话审计同步失败；不要重复发送同一请求。');
+    app.unmount();
+  });
+
+  it('renders live session entries from the in-memory log instead of the audit timeline', async () => {
+    const { app, el, read, nextTick } = await mountChat();
+    expect(read).toHaveBeenCalledTimes(1);
+    const sessionLog = await import('../../../src/service/simulation/world-simulation-agent-session-log');
+    await nextTick();
+    sessionLog.beginWorldSimulationSessionRun_ACU('开始推演', '开始');
+    sessionLog.logWorldSimulationSession_ACU({ kind: 'delegation', title: '派工', detail: '子代理推进', agentName: '子代理' });
+    sessionLog.finishWorldSimulationSessionRun_ACU('完成', '已提交', true);
+    await nextTick();
+
+    expect(el.textContent).toContain('开始推演');
+    expect(el.textContent).toContain('子代理');
+    expect(el.textContent).toContain('已提交');
     app.unmount();
   });
 });

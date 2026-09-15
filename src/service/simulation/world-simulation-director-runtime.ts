@@ -2,13 +2,13 @@ import { resolveAgentMaterialGrants_ACU, type AgentMaterialGrant_ACU, type Agent
 import { renderAgentTableByName_ACU } from '../continuation/agent/agent-tables';
 import type { AgentKernelToolCall_ACU } from '../agent-kernel/agent-tools';
 import type { AgentRequirementSnapshot_ACU } from '../agent-kernel/requirements';
-import { buildEmptyAgentWorldbookSnapshot_ACU, createAgentWorldbookGrantSource_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookEntries_ACU, renderAgentWorldbookHits_ACU, resolveAgentWorldbookGrantEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
+import { createAgentWorldbookGrantSource_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookEntries_ACU, renderAgentWorldbookHits_ACU, resolveAgentWorldbookGrantEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
 import { createWorldSimError_ACU, WorldSimulationValidationError_ACU, type WorldSimulationSettings_ACU, type WorldStateSnapshot_ACU, type WorldStoryClock_ACU } from './model';
 import type { AgentStoryContextSnapshot_ACU } from '../agent-kernel/story-context';
 import type { WorldSimulationAgentLoopResult_ACU } from './agent/agent-main-loop';
 import { WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU } from './agent/agent-catalog';
 import { parseWorldSimulationMasterAction_ACU, type WorldSimulationDelegationPlan_ACU, type WorldSimulationMasterAction_ACU } from './world-simulation-agent-interaction';
-import { parseTableAddress_ACU } from './world-simulation-agent-tools';
+import { parseTableAddress_ACU, renderWorldSimulationWorldbookSearchSource_ACU } from './world-simulation-agent-tools';
 import { renderWorldSimulationMasterMessages_ACU, renderWorldSimulationUntrustedBlock_ACU, type WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
 import { mergeWorldSimulationPromptMaterial_ACU, type WorldSimulationPromptMaterialRefresher_ACU } from './world-simulation-prompt-material';
 
@@ -36,6 +36,12 @@ export interface WorldSimulationDirectorRuntimeResult_ACU {
 function fail_ACU(code: 'WORLD_SIM_PROTOCOL_INVALID' | 'WORLD_SIM_BUDGET_EXCEEDED', message: string): never {
   throw new WorldSimulationValidationError_ACU(createWorldSimError_ACU(code, 'agent', message, false));
 }
+function renderWorldSimulationWorldbookUnavailableMessage_ACU(worldbook: AgentWorldbookSnapshot_ACU): string {
+  const failure = worldbook.failure;
+  if (!failure) return '世界书快照不可用，本轮终止';
+  const categories = failure.categories.length ? failure.categories.join(',') : 'unknown';
+  return `世界书快照不可用，本轮终止（status=${failure.status}; categories=${categories}; failedBooks=${failure.failedBooks}; invalidBookNames=${failure.invalidBookNames}）`;
+}
 function flatten_ACU(messages: readonly WorldSimulationPromptMessage_ACU[]): string { return messages.map(message => `[${message.role}]\n${message.content}`).join('\n\n'); }
 function emptyPlan_ACU(): WorldSimulationDelegationPlan_ACU { return { delegations: [] }; }
 
@@ -47,8 +53,10 @@ export class WorldSimulationDirectorRuntime_ACU {
     let callsUsed = input.masterCallsUsed ?? 0;
     if (!Number.isInteger(callsUsed) || callsUsed < 0 || callsUsed >= budget.maxMasterModelTurns) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', 'world-director 已无可用模型轮次');
     let worldbook: AgentWorldbookSnapshot_ACU;
-    try { worldbook = input.worldbook ?? await (dependencies.loadWorldbook ?? loadAgentWorldbookSnapshot_ACU)(); }
-    catch (_) { worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false); }
+    worldbook = input.worldbook ?? await (dependencies.loadWorldbook ?? loadAgentWorldbookSnapshot_ACU)();
+    if (!worldbook.available) {
+      fail_ACU('WORLD_SIM_PROTOCOL_INVALID', renderWorldSimulationWorldbookUnavailableMessage_ACU(worldbook));
+    }
     const table: AgentMaterialGrantTable_ACU = { feature: 'world-simulation', runId: input.runId, grants: [] };
     // Keep real conversation history separate from the stable runtime snapshot. Re-rendering a
     // changing tool result inside the prompt prefix defeats natural provider prefix caching.
@@ -69,7 +77,7 @@ export class WorldSimulationDirectorRuntime_ACU {
         ...input, storyContext: materialState.storyContext, summaryOverview: materialState.summaryOverview, tableData: materialState.tableData,
       };
       const worldbookScan = [input.userInstruction, effectiveInput.storyContext?.overview.text ?? '', effectiveInput.storyContext?.pending.text ?? '', effectiveInput.storyContext?.bridge.text ?? ''].join('\n');
-      const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts: input.settings.agentPrompts, history, toolsEnabled: input.settings.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: input.reads, storyContext: effectiveInput.storyContext, summaryOverview: effectiveInput.summaryOverview, userInstruction: input.userInstruction, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds, worldbookCatalog: renderAgentWorldbookCatalog_ACU(worldbook), worldbookHits: renderAgentWorldbookHits_ACU(worldbook, worldbookScan) });
+      const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts: input.settings.agentPrompts, history, toolsEnabled: input.settings.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: input.reads, storyContext: effectiveInput.storyContext, summaryOverview: effectiveInput.summaryOverview, userInstruction: input.userInstruction, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds, worldbookAvailable: worldbook.available, worldbookCatalog: renderAgentWorldbookCatalog_ACU(worldbook), worldbookHits: renderAgentWorldbookHits_ACU(worldbook, worldbookScan) });
       const runtimeContext = messages.find(message => message.role === 'user' && message.content.includes('【本次运行上下文】'));
       if (runtimeContext) history.push({ ...runtimeContext });
       const raw = await dependencies.runMaster({ source: 'world-sim-master', messages, prompt: flatten_ACU(messages) });
@@ -172,7 +180,7 @@ export class WorldSimulationDirectorRuntime_ACU {
     const sections: string[] = [];
     if (scope.includes('story')) sections.push(input.storyContext?.overview.text ?? '', input.storyContext?.pending.text ?? '', input.storyContext?.bridge.text ?? '', input.storyContext?.catalog.text ?? '');
     if (scope.includes('ledger')) sections.push(JSON.stringify({ revisions: input.snapshot.revisions, entities: input.snapshot.entities, events: input.snapshot.events, threads: input.snapshot.threads }));
-    if (scope.includes('worldbook')) sections.push(worldbook.entries.map(entry => `${entry.title}｜${entry.keys.join('、')}｜$WORLDBOOK:${entry.bookName}:${entry.uid}`).join('\n'));
+    if (scope.includes('worldbook')) sections.push(renderWorldSimulationWorldbookSearchSource_ACU(worldbook));
     if (scope.includes('tables')) sections.push(input.tableData ? '表格数据可搜索；按表名或概览定位后用 read 精读。' : '该运行没有可读取的表格资料。');
     if (scope.includes('proposals')) sections.push('该运行没有可读取的提案资料。');
     return sections.join('\n');

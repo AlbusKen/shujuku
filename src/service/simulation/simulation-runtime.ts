@@ -24,7 +24,8 @@ import { runWorldSimulationAgentLoop_ACU } from './agent/agent-main-loop';
 import { findWorldSimulationAgent_ACU, selectWorldSimulationLightAgentFromFocusHints_ACU } from './agent/agent-catalog';
 import { WorldSimulationDirectorRuntime_ACU } from './world-simulation-director-runtime';
 import { WorldSimulationSpecialistRuntime_ACU } from './world-simulation-specialist-runtime';
-import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
+import { loadAgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
+import { logWorldSimulationSession_ACU, updateWorldSimulationSession_ACU } from './world-simulation-agent-session-log';
 
 import { createWorldSimError_ACU, WorldSimulationValidationError_ACU } from './model';
 import type {
@@ -66,6 +67,7 @@ import { captureSummaryOverviewText_ACU } from './world-simulation-shared-contex
 import { createWorldSimulationMaterialReader_ACU } from './world-simulation-material-reader';
 import type { WorldSimulationPromptMaterialRefresher_ACU } from './world-simulation-prompt-material';
 import { renderWorldSimulationUntrustedBlock_ACU } from './world-simulation-agent-prompts';
+import { renderWorldSimulationRequirementsRetryHint_ACU } from './simulation-requirements-replacement';
 
 export interface WorldSimulationRuntimeJoinResult_ACU {
   kind: 'skipped' | 'joined' | 'timeout' | 'failed';
@@ -596,9 +598,7 @@ export class WorldSimulationRuntime_ACU {
       const lightSpecialist = input.scale === 'light'
         ? selectWorldSimulationLightAgentFromFocusHints_ACU(snapshot, input.focusHints)
         : null;
-      let worldbook;
-      try { worldbook = await this.loadWorldbook(); }
-      catch (_) { worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false); }
+      const worldbook = await this.loadWorldbook();
       // request-local 材料：每次模型请求发送前按当前锚点重新读取正文与纪要；失败回退本次飞行起点冻结值。
       const material = createWorldSimulationMaterialReader_ACU({
         getChat: () => this.dependencies.getChat(),
@@ -703,8 +703,7 @@ export class WorldSimulationRuntime_ACU {
                 'UNTRUSTED_REQUIREMENTS_REJECTION',
                 [
                   `本次要求维护未被采纳：${error instanceof Error ? error.message : String(error)}`,
-                  `仍待吸收的用户输入 source id：${JSON.stringify(activePendingSourceIds)}`,
-                  '在该列表清空前，只能输出一个完整 maintain_requirements JSON 对象。',
+                  renderWorldSimulationRequirementsRetryHint_ACU(activePendingSourceIds),
                 ].join('\n'),
               ),
             }];
@@ -899,7 +898,22 @@ export function createWorldSimulationRuntime_ACU(
       chatIdentity: request.chatIdentity,
       source: request.source,
     };
-    return executeAgentKernelRequest_ACU({
+    const sourceLabel = request.source === 'world-sim-master'
+      ? '主 Agent 正在决策'
+      : request.source === 'world-sim-rebase'
+        ? '正在复核候选与最新楼层'
+        : request.source.startsWith('world-sim-agent:')
+          ? '子代理正在生成候选写集'
+          : '世界推演正在请求模型';
+    const entryId = logWorldSimulationSession_ACU({
+      kind: request.source === 'world-sim-rebase' ? 'rebase' : request.source.startsWith('world-sim-agent:') ? 'delegation' : 'main_action',
+      title: sourceLabel,
+      detail: request.source,
+      agentName: request.source.startsWith('world-sim-agent:') ? request.source.slice('world-sim-agent:'.length) : 'world-director',
+      status: 'running',
+    });
+    try {
+      const result = await executeAgentKernelRequest_ACU({
       before: () => beginWorldSimulationInternalAiRequest_ACU(identity),
       settle: () => settleWorldSimulationInternalAiRequest_ACU(identity.requestId),
       invoke: () => callAIWithResolvedPreset_ACU(
@@ -912,6 +926,15 @@ export function createWorldSimulationRuntime_ACU(
         },
       ),
     });
+      updateWorldSimulationSession_ACU(entryId, { status: 'done', ok: true });
+      return result;
+    } catch (error) {
+      updateWorldSimulationSession_ACU(entryId, {
+        detail: error instanceof Error ? error.message : String(error),
+        status: 'failed', ok: false,
+      });
+      throw error;
+    }
   });
   const agentSession = overrides.agentSession ?? new WorldSimulationAgentSession_ACU({
     getChat,
