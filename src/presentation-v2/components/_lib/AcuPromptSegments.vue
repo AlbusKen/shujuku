@@ -13,6 +13,7 @@
             v-if="showEnabled"
             :model-value="seg.enabled !== false"
             label="启用"
+            :disabled="lockUndeletable && seg.deletable === false"
             @update:model-value="$emit('update', index, { enabled: $event })"
           />
           <AcuSelect
@@ -20,6 +21,7 @@
             size="sm"
             :options="roleOptions"
             :model-value="seg.role"
+            :disabled="lockUndeletable && seg.deletable === false"
             @update:model-value="$emit('update', index, { role: $event })"
           />
           <AcuSelect
@@ -36,15 +38,15 @@
               <AcuIconButton
                 icon="fa-solid fa-arrow-up"
                 size="sm"
-                :disabled="index === 0"
-                :title="index === 0 ? '已经是第一段' : '上移该段'"
+                :disabled="index === 0 || isMoveLocked(index, -1)"
+                :title="index === 0 ? '已经是第一段' : isMoveLocked(index, -1) ? '引擎段顺序不可改变' : '上移该段'"
                 @click="$emit('move', index, -1)"
               />
               <AcuIconButton
                 icon="fa-solid fa-arrow-down"
                 size="sm"
-                :disabled="index === segments.length - 1"
-                :title="index === segments.length - 1 ? '已经是最后一段' : '下移该段'"
+                :disabled="index === segments.length - 1 || isMoveLocked(index, 1)"
+                :title="index === segments.length - 1 ? '已经是最后一段' : isMoveLocked(index, 1) ? '引擎段顺序不可改变' : '下移该段'"
                 @click="$emit('move', index, 1)"
               />
             </template>
@@ -110,13 +112,14 @@ import AcuIconButton from './AcuIconButton.vue';
 import AcuSelect from './AcuSelect.vue';
 import AcuTextarea from './AcuTextarea.vue';
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   segments: PromptSegment[];
   roleOptions?: AcuSelectOption[];
   slotOptions?: AcuSelectOption[];
   showSlot?: boolean;
   showEnabled?: boolean;
   allowMove?: boolean;
+  lockUndeletable?: boolean;
   rows?: number;
   emptyText?: string;
 }>(), {
@@ -125,6 +128,7 @@ withDefaults(defineProps<{
   showSlot: true,
   showEnabled: false,
   allowMove: false,
+  lockUndeletable: false,
   rows: 6,
   emptyText: '暂无提示词段。点击下方按钮添加第一段。',
 });
@@ -135,6 +139,12 @@ const emit = defineEmits<{
   (e: 'move', index: number, delta: -1 | 1): void;
   (e: 'update', index: number, patch: Partial<PromptSegment>): void;
 }>();
+
+function isMoveLocked(index: number, delta: -1 | 1): boolean {
+  if (!props.lockUndeletable) return false;
+  const target = index + delta;
+  return props.segments[index]?.deletable === false || props.segments[target]?.deletable === false;
+}
 
 function onSlot(index: number, raw: string): void {
   const value = raw === 'A' || raw === 'B' ? raw : '';

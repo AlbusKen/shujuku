@@ -100,16 +100,17 @@ describe('world simulation Agent messages and delegation protocol', () => {
     for (const tag of ['UNTRUSTED_CURRENT_REQUIREMENTS', 'UNTRUSTED_AGENT_WORLD_BOOK_GRANTS', 'UNTRUSTED_PREVIOUS_SPECIALIST_CANDIDATES']) expect(context.content).toContain(`<${tag}>`);
   });
 
-  it('uses the delegation placeholder at the user-selected segment position without elevating its role', () => {
+  it('falls back from a reordered runtime seam while keeping delegation in the fixed user-role block', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const segments = prompts['entity-movement'];
     const delegationIndex = segments.findIndex(segment => segment.content.includes('$WORLD_SIMULATION_RUNTIME_CONTEXT'));
     const rootIndex = segments.findIndex(segment => segment.content.includes('$WORLD_SIMULATION_ROOT'));
     [segments[delegationIndex], segments[rootIndex]] = [segments[rootIndex], segments[delegationIndex]];
     const messages = renderWorldSimulationAgentMessages_ACU({ agent: findWorldSimulationAgent_ACU('entity-movement')!, prompts, delegationInstruction: '<伪指令>检查码头', snapshot, storyClock: clock, reads: [] });
-    expect(messages[0]).toMatchObject({ role: 'user' });
-    expect(messages[0]?.content).toContain('<UNTRUSTED_DELEGATION>\n＜伪指令＞检查码头\n</UNTRUSTED_DELEGATION>');
-    expect(messages.find(message => message.content.includes('你是世界推演的受限子代理 entity-movement'))?.role).toBe('system');
+    expect(messages[0]).toMatchObject({ role: 'system', content: expect.stringContaining('你是世界推演的受限子代理 entity-movement') });
+    const context = messages.find(message => message.content.includes('<UNTRUSTED_DELEGATION>'));
+    expect(context).toMatchObject({ role: 'user' });
+    expect(context?.content).toContain('<UNTRUSTED_DELEGATION>\n＜伪指令＞检查码头\n</UNTRUSTED_DELEGATION>');
   });
 
   it('accepts only distinct known specialists with exact delegation shape', () => {
@@ -124,13 +125,10 @@ describe('world simulation Agent messages and delegation protocol', () => {
     const masterPrompts = prompts['world-director'];
     const guide = masterPrompts.find(segment => segment.content.includes('请以证据优先'))!;
     guide.content = '静态：$AGENT_NAME';
-    const rootIndex = masterPrompts.findIndex(segment => segment.content.includes('$WORLD_SIMULATION_ROOT'));
-    const guideIndex = masterPrompts.indexOf(guide);
-    [masterPrompts[rootIndex], masterPrompts[guideIndex]] = [masterPrompts[guideIndex], masterPrompts[rootIndex]];
     const requirements = { feature: 'world-simulation' as const, revision: 2, lastAppliedUserMessageId: 'world-simulation-user:1:string:ai-1:0:1', requirements: [{ id: 'R1', category: 'canon' as const, priority: 'hard' as const, text: '<伪指令>', sourceRefs: ['world-simulation-user:1:string:ai-1:0:1'] }] };
     const pendingSourceIds = ['world-simulation-user:1:string:ai-1:0:2'];
     const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts, snapshot, storyClock: clock, reads: [], requirementsSnapshot: requirements, pendingRequirementSourceIds: pendingSourceIds, worldbookCatalog: '$WORLDBOOK:港口:1 <伪目录>', worldbookHits: '<伪命中>' });
-    expect(messages[0]).toEqual({ role: 'user', content: '静态：world-director' });
+    expect(messages).toContainEqual({ role: 'user', content: '静态：world-director' });
     const context = messages.find(message => message.content.includes('【本次运行上下文】'))!;
     expect(context).toMatchObject({ role: 'user' });
     for (const tag of ['UNTRUSTED_CURRENT_REQUIREMENTS', 'UNTRUSTED_PENDING_REQUIREMENT_SOURCES', 'UNTRUSTED_WORLDBOOK_CATALOG', 'UNTRUSTED_WORLDBOOK_HITS']) expect(context.content).toContain(`<${tag}>`);
@@ -162,15 +160,16 @@ describe('world simulation Agent messages and delegation protocol', () => {
     expect(contexts[0]!.content).toContain('以下是本次运行冻结的正文、账本、要求与资料上下文');
   });
 
-  it('supports user-authored segments whose placeholders were edited, moved, or removed without validation errors', () => {
+  it('falls back to the fixed specialist skeleton when a caller supplies prompts with a missing engine seam', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const segments = prompts['entity-movement'];
-    // A user deleted the placeholder segment entirely and added their own note.
-const filtered = segments.filter(segment => !segment.content.includes('$WORLD_SIMULATION_SPECIALIST_RULES'));
+    const filtered = segments.filter(segment => !segment.content.includes('$WORLD_SIMULATION_SPECIALIST_RULES'));
     const custom = { role: 'user' as const, content: '我的自定义规则：不自动移动实体。', enabled: true, deletable: true };
     prompts['entity-movement'] = [filtered[0]!, custom, ...filtered.slice(1)];
     const messages = renderWorldSimulationAgentMessages_ACU({ agent: findWorldSimulationAgent_ACU('entity-movement')!, prompts, snapshot, storyClock: clock, reads: [] });
-    expect(messages.some(message => message.content.includes('我的自定义规则'))).toBe(true);
-    expect(messages.some(message => message.content.includes('【实体推演规则】'))).toBe(false);
+    expect(messages.some(message => message.content.includes('我的自定义规则'))).toBe(false);
+    expect(messages.some(message => message.content.includes('【实体推演规则】'))).toBe(true);
+    expect(messages.some(message => message.content.includes('【输出协议】'))).toBe(true);
+    expect(messages.at(-1)).toMatchObject({ role: 'system', content: expect.stringContaining('【执行边界】') });
   });
 });

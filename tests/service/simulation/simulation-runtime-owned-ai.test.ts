@@ -29,13 +29,33 @@ const enabledSettings = (patch: Record<string, unknown> = {}) => ({
     deep: { maxMasterModelTurns: 5, maxSpecialistModelTurns: 4, maxDelegations: 4, readTokenBudget: 'high', legacyReadCount: null },
   },
   agentPrompts: {},
-  promptForceDefaultVersion: 'spv6.1-world-sim-guided-placeholders-v7',
+  promptForceDefaultVersion: 'spv6.2-world-sim-locked-seams-v8',
   ...patch,
 });
 
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('world simulation runOwnedAi preset resolution', () => {
+  it('forwards the director role messages unchanged to the resolved provider call', async () => {
+    let capturedMessages: any = null;
+    vi.doMock('../../../src/service/ai/api-call', async importOriginal => ({
+      ...(await importOriginal<any>()),
+      callAIWithResolvedPreset_ACU: vi.fn(async (messages: any) => {
+        capturedMessages = messages;
+        return 'ok';
+      }),
+    }));
+    const runtime = await loadFactory(enabledSettings(), []);
+    const messages = [
+      { role: 'system', content: '【行动规则】delegate/finalize' },
+      { role: 'user', content: '<UNTRUSTED_WORLD_STATE>{}</UNTRUSTED_WORLD_STATE>' },
+      { role: 'assistant', content: '收到' },
+      { role: 'system', content: '【执行边界】' },
+    ];
+    await expect((runtime as any).dependencies.runOwnedAi({ source: 'world-sim-master', chatIdentity: 'c', prompt: 'flattened', messages })).resolves.toBe('ok');
+    expect(capturedMessages).toEqual(messages);
+  });
+
   it('resolves the user-fixed preset when it exists', async () => {
     let captured: any = null;
     vi.doMock('../../../src/service/ai/api-call', async importOriginal => ({

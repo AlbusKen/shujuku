@@ -1,4 +1,4 @@
-import { buildDefaultWorldSimulationAgentGuidance_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU, WORLD_SIMULATION_V4_DYNAMIC_PLACEHOLDERS_ACU } from './defaults';
+import { buildDefaultWorldSimulationAgentGuidance_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU, hasRequiredWorldSimulationPromptSeams_ACU, WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU, WORLD_SIMULATION_V4_DYNAMIC_PLACEHOLDERS_ACU } from './defaults';
 import type { WorldSimulationAgentGuidance_ACU, WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptRole_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from './model';
 import { settings_ACU } from '../runtime/state-manager';
 
@@ -147,6 +147,11 @@ function hasEnabledPromptSegments_ACU(value: Partial<WorldSimulationAgentPrompts
     || value[name]!.some(segment => segment.enabled));
 }
 
+function hasRequiredPromptSeams_ACU(value: Partial<WorldSimulationAgentPrompts_ACU>): boolean {
+  return AGENT_NAMES_ACU.every(name => Object.prototype.hasOwnProperty.call(value, name)
+    && hasRequiredWorldSimulationPromptSeams_ACU(name, value[name]!));
+}
+
 function mergeAgentPrompts_ACU(raw: Partial<WorldSimulationAgentPrompts_ACU> | undefined): WorldSimulationAgentPrompts_ACU {
   const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
   return Object.fromEntries(AGENT_NAMES_ACU.map(name => [name, raw?.[name] ?? defaults[name]])) as WorldSimulationAgentPrompts_ACU;
@@ -232,7 +237,7 @@ export function isWorldSimulationSettings_ACU(value: unknown): value is WorldSim
   if (typeof value.fixedApiPresetName !== 'string') return false;
   return isCompleteBudgets_ACU(value.budgets)
     && isPartialAgentPrompts_ACU(value.agentPrompts) && hasExactKeys_ACU(value.agentPrompts, AGENT_NAMES_ACU)
-    && hasEnabledPromptSegments_ACU(value.agentPrompts)
+    && hasEnabledPromptSegments_ACU(value.agentPrompts) && hasRequiredPromptSeams_ACU(value.agentPrompts)
     && value.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU;
 }
 
@@ -288,6 +293,7 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
     ? guidanceToCurrentPrompts_ACU(raw.agentGuidance as Partial<WorldSimulationAgentGuidance_ACU>)
     : hasPrompts
       ? raw.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU
+        && hasRequiredPromptSeams_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
         ? mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
         : migratePromptsToV6_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
       : mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU> | undefined);
@@ -305,7 +311,8 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
   // This should hold because all present fields were validated and every missing field is copied
   // from the complete defaults. Keep the fail-closed guard in case this contract changes.
   if (!isCompleteBudgets_ACU(merged.budgets) || !isPartialAgentPrompts_ACU(merged.agentPrompts)
-    || !hasExactKeys_ACU(merged.agentPrompts, AGENT_NAMES_ACU) || !hasEnabledPromptSegments_ACU(merged.agentPrompts)) return null;
+    || !hasExactKeys_ACU(merged.agentPrompts, AGENT_NAMES_ACU) || !hasEnabledPromptSegments_ACU(merged.agentPrompts)
+    || !hasRequiredPromptSeams_ACU(merged.agentPrompts)) return null;
   return {
     settings: merged,
     upgraded: true,

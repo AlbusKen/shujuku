@@ -1,4 +1,4 @@
-import { buildDefaultWorldSimulationAgentPrompts_ACU, WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU } from './defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, hasRequiredWorldSimulationPromptSeams_ACU, WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU } from './defaults';
 import type { WorldSimulationAgentPrompts_ACU, WorldStateSnapshot_ACU, WorldStoryClock_ACU } from './model';
 import type { WorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
 import type { AgentStoryContextSnapshot_ACU } from '../agent-kernel/story-context';
@@ -131,7 +131,9 @@ export function renderWorldSimulationAgentMessages_ACU(input: {
     '$WORLD_SIMULATION_EXECUTION_BOUNDARY': WORLD_SIMULATION_EXECUTION_BOUNDARY_PROMPT_ACU,
   };
   const history = input.history ?? [];
-  const segments = (input.prompts ?? buildDefaultWorldSimulationAgentPrompts_ACU())[input.agent.name];
+  const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+  const configured = (input.prompts ?? defaults)[input.agent.name];
+  const segments = hasRequiredWorldSimulationPromptSeams_ACU(input.agent.name, configured) ? configured : defaults[input.agent.name];
   const renderStatic_ACU = (content: string): string => replaceAll(replaceAll(content, staticPlaceholders as Record<string, string>), staticValues);
   return segments
     .filter(segment => segment.enabled)

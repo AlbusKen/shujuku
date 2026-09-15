@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V4_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V6_ACU } from '../../../src/service/simulation/defaults';
+import { buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V4_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V6_ACU, WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V61_ACU } from '../../../src/service/simulation/defaults';
 import { settings_ACU, _set_settings_ACU } from '../../../src/service/runtime/state-manager';
 import {
   isWorldSimulationSettings_ACU,
@@ -262,9 +262,27 @@ describe('world simulation settings read/write', () => {
     expect(normalizeWorldSimulationSettings_ACU({ ...complete(), apiPresetMode: 'sometimes' })).toBeNull();
   });
 
-  it('keeps an already-guided v6.1 layout unchanged on read', () => {
-    const v61 = buildDefaultWorldSimulationSettings_ACU();
-    expect(normalizeWorldSimulationSettings_ACU(v61)?.upgraded).toBe(false);
+  it('keeps an already locked current layout unchanged on read', () => {
+    const current = buildDefaultWorldSimulationSettings_ACU();
+    expect(normalizeWorldSimulationSettings_ACU(current)?.upgraded).toBe(false);
+  });
+
+  it('repairs a v6.1 layout whose director protocol seam was deleted without losing custom static guidance', () => {
+    const v61 = buildDefaultWorldSimulationSettings_ACU() as any;
+    v61.promptForceDefaultVersion = WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_V61_ACU;
+    v61.agentPrompts['world-director'] = v61.agentPrompts['world-director']
+      .filter((segment: any) => !segment.content.includes('$WORLD_SIMULATION_PROTOCOL'));
+    v61.agentPrompts['world-director'].splice(1, 0, {
+      role: 'user', content: '用户保留的主控规则', enabled: true, deletable: true,
+    });
+
+    const upgrade = normalizeWorldSimulationSettings_ACU(v61);
+    expect(upgrade).not.toBeNull();
+    expect(upgrade?.upgraded).toBe(true);
+    expect(upgrade?.settings.promptForceDefaultVersion).toBe(WORLD_SIMULATION_PROMPT_FORCE_DEFAULT_VERSION_ACU);
+    const director = upgrade!.settings.agentPrompts['world-director'];
+    expect(director).toContainEqual({ role: 'user', content: '用户保留的主控规则', enabled: true, deletable: true });
+    expect(director.some(segment => segment.content.includes('$WORLD_SIMULATION_PROTOCOL') && segment.deletable === false)).toBe(true);
   });
 
   it('tolerates retired gate keys from old configs, strips them, and reports an upgrade', () => {

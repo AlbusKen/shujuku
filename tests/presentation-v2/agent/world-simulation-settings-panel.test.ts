@@ -34,15 +34,15 @@ async function flushSave(nextTick: () => Promise<void>): Promise<void> {
 afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); });
 
 describe('WorldSimulationSettingsPanel', () => {
-  it('mounts a freely editable prompt segment editor and saves only explicitly', async () => {
+  it('mounts protected engine seams, allows editing their guidance shell, and saves only explicitly', async () => {
     const { app, el, settings, received, nextTick } = await mountPanel();
     expect(settings.worldSimulation).toBeUndefined();
-    expect(el.textContent).toContain('四角色提示词（可自由编辑）');
+    expect(el.textContent).toContain('四角色提示词（引擎协议受保护）');
     expect(el.textContent).toContain('主 Agent（world-director）');
     expect(el.textContent).toContain('实体子代理（entity-movement）');
     expect(el.textContent).toContain('事件子代理（faction-events）');
     expect(el.textContent).toContain('线索子代理（thread-weaver）');
-    // Every persisted segment renders as a fully editable row: role, content, enabled, move, delete.
+    // The shell text remains editable, while the placeholder seam itself stays present.
     const textareas = el.querySelectorAll<HTMLTextAreaElement>('.world-simulation-settings__prompt-agent textarea');
     expect(textareas.length).toBeGreaterThan(4);
     // The first segment is the guided world charter: editable body containing the placeholder token.
@@ -63,23 +63,22 @@ describe('WorldSimulationSettingsPanel', () => {
     app.unmount();
   });
 
-  it('allows editing role, enabled, deletion, and reordering of every prompt segment including placeholders', async () => {
+  it('locks engine segment role, enabled state, deletion and ordering', async () => {
     const { app, el, settings, nextTick } = await mountPanel();
     const agentSection = el.querySelector('.world-simulation-settings__prompt-agent')!;
     const firstItem = agentSection.querySelector('.acu-prompt-segs__item')!;
-    // Default first segment (world charter) can be deleted: placeholders are not special.
-    const deleteButtons = Array.from(agentSection.querySelectorAll<HTMLButtonElement>('.acu-icon-btn--danger'));
-    expect(deleteButtons.length).toBeGreaterThan(0);
-    deleteButtons[0]!.click(); await nextTick();
-    expect(agentSection.querySelector('.acu-prompt-segs__item .acu-textarea')?.value).not.toContain('$WORLD_SIMULATION_ROOT');
+    expect(firstItem.querySelector<HTMLButtonElement>('[role="checkbox"]')?.disabled).toBe(true);
+    expect(firstItem.querySelector<HTMLButtonElement>('.acu-select__trigger')?.disabled).toBe(true);
+    expect(firstItem.querySelector<HTMLButtonElement>('.acu-icon-btn--danger')?.disabled).toBe(true);
+    const moveButtons = firstItem.querySelectorAll<HTMLButtonElement>('.acu-icon-btn');
+    expect(Array.from(moveButtons).every(button => button.disabled)).toBe(true);
     expect(settings.worldSimulation).toBeUndefined();
 
-    // After deletion the guided-charter segment is gone from the draft, and a reload from
-    // the store defaults proves deletion is a real draft mutation, not a UI-only state.
     const save = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存世界推演设置');
     save!.click(); await flushSave(nextTick);
-    expect(settings.worldSimulation.agentPrompts['world-director'].some((segment: any) => segment.content.includes('$WORLD_SIMULATION_ROOT'))).toBe(false);
-    expect(settings.worldSimulation.agentPrompts['world-director'].length).toBeGreaterThan(0);
+    const director = settings.worldSimulation.agentPrompts['world-director'];
+    expect(director[0]).toMatchObject({ role: 'system', enabled: true, deletable: false, content: expect.stringContaining('$WORLD_SIMULATION_ROOT') });
+    expect(director.at(-1)).toMatchObject({ role: 'system', enabled: true, deletable: false, content: expect.stringContaining('$WORLD_SIMULATION_EXECUTION_BOUNDARY') });
     expect(settings.worldSimulation.agentGuidance).toBeUndefined();
     app.unmount();
   });

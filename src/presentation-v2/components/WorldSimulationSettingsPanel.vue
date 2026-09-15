@@ -32,7 +32,7 @@
     </section>
     <section class="world-simulation-settings__prompts">
       <div class="world-simulation-settings__prompt-heading">
-        <div><strong>四角色提示词（可自由编辑）</strong><p>每一段都可以编辑正文、角色、启用状态、顺序，并可删除或新增；默认提示词中的 $WORLD_SIMULATION_* 占位符只是运行时注入点，可以像普通文本一样改写或删除。运行时把静态占位符原位替换为引擎内容；$WORLD_SIMULATION_HISTORY 位置会保留真实历史的角色与顺序；$WORLD_SIMULATION_RUNTIME_CONTEXT 保持单一 user 消息。正文、要求、世界书、工具结果和委派始终作为独立 user-role UNTRUSTED 消息。</p></div>
+        <div><strong>四角色提示词（引擎协议受保护）</strong><p>可新增、删除和编辑自定义静态段。带 $WORLD_SIMULATION_* 的引擎段固定启用状态、角色与顺序；可编辑占位符周边说明，但不能删除占位符。这样主控派工、候选收敛和运行上下文不会因旧配置或误操作消失。</p></div>
         <div class="world-simulation-settings__actions"><AcuButton size="sm" @click="restoreDefaultPrompts">恢复默认提示词</AcuButton><AcuButton size="sm" @click="exportPrompts">导出到文本</AcuButton></div>
       </div>
       <details v-for="agent in agents" :key="agent.name" class="world-simulation-settings__prompt-agent" :open="agent.name === 'world-director'">
@@ -43,6 +43,7 @@
           :show-slot="false"
           :show-enabled="true"
           :allow-move="true"
+          :lock-undeletable="true"
           :rows="5"
           empty-text="暂无提示词段。"
           @add="position => addPrompt(agent.name, position)"
@@ -71,7 +72,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, findWorldSimulationAgent_ACU } from '../../service/simulation/agent/agent-catalog';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU } from '../../service/simulation/defaults';
 import type { WorldReadBudgetTier_ACU, WorldSimulationAgentName_ACU, WorldSimulationAgentPrompts_ACU, WorldSimulationPromptSegment_ACU, WorldSimulationScale_ACU, WorldSimulationSettings_ACU, WorldVisibilityPolicy_ACU } from '../../service/simulation/model';
 import AcuPromptSegments, { type PromptSegment } from './_lib/AcuPromptSegments.vue';
 import { isWorldSimulationSettings_ACU, readWorldSimulationSettings_ACU, readWorldSimulationSettingsUpgrade_ACU, writeWorldSimulationSettingsStrict_ACU } from '../../service/simulation/simulation-settings';
@@ -153,7 +154,12 @@ function promptList(agent: WorldSimulationAgentName_ACU): WorldSimulationPromptS
 function addPrompt(agent: WorldSimulationAgentName_ACU, position: 'top' | 'bottom'): void {
   const prompts = promptList(agent);
   const segment: WorldSimulationPromptSegment_ACU = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true };
-  if (position === 'top') prompts.unshift(segment); else prompts.push(segment);
+  const firstEditable = prompts.findIndex(item => item.deletable !== false);
+  const historyIndex = prompts.findIndex(item => item.content.includes('$WORLD_SIMULATION_HISTORY'));
+  const insertAt = position === 'top'
+    ? (firstEditable >= 0 ? firstEditable : Math.max(1, historyIndex))
+    : (historyIndex >= 0 ? historyIndex : Math.max(1, prompts.length - 2));
+  prompts.splice(insertAt, 0, segment);
 }
 function deletePrompt(agent: WorldSimulationAgentName_ACU, index: number): void {
   const prompts = promptList(agent);
@@ -161,12 +167,24 @@ function deletePrompt(agent: WorldSimulationAgentName_ACU, index: number): void 
 }
 function movePrompt(agent: WorldSimulationAgentName_ACU, index: number, delta: -1 | 1): void {
   const prompts = promptList(agent); const target = index + delta;
+  if (prompts[index]?.deletable === false || prompts[target]?.deletable === false) return;
   if (target >= 0 && target < prompts.length) [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
 }
 function updatePrompt(agent: WorldSimulationAgentName_ACU, index: number, patch: Partial<WorldSimulationPromptSegment_ACU>): void {
   const prompts = promptList(agent);
   const current = prompts[index];
-  if (current) prompts[index] = { ...current, ...patch };
+  if (current) {
+    if (current.deletable === false) {
+      const placeholder = WORLD_SIMULATION_AGENT_PROMPT_PLACEHOLDERS_ACU.find(item => current.content.includes(item));
+      if (typeof patch.content === 'string' && placeholder && patch.content.split(placeholder).length !== 2) {
+        message.value = { kind: 'error', text: `引擎段必须且只能保留一个 ${placeholder} 占位符。` };
+        return;
+      }
+      prompts[index] = { ...current, ...(typeof patch.content === 'string' ? { content: patch.content } : {}) };
+      return;
+    }
+    prompts[index] = { ...current, ...patch };
+  }
   else if (prompts.length === 0 && typeof patch.content === 'string') prompts.push({ role: 'user', content: patch.content, enabled: true, deletable: true });
   else if (prompts.length > 0) prompts[prompts.length - 1] = { ...prompts[prompts.length - 1], ...patch };
 }
