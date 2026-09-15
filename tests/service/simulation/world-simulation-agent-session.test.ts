@@ -39,7 +39,7 @@ function createSession(value = chat(), runOwnedAi = vi.fn(async (request: any) =
   _set_SillyTavern_API_ACU({ chat: value, saveChat } as any);
   const commitProjection = vi.fn(async () => ({}));
   const session = new WorldSimulationAgentSession_ACU({
-    getChat: () => value, getChatIdentity: () => 'chat-a', readSettings: () => ({ ...buildDefaultWorldSimulationSettings_ACU(), enabled: true, ...settingsPatch }),
+    getChat: () => value, getChatIdentity: () => 'chat-a', readSettings: () => ({ ...buildDefaultWorldSimulationSettings_ACU(), ...settingsPatch }),
     store: { read: () => null, commitProjection } as any, countTokens: async () => 1, runOwnedAi,
     createRecordId: () => 'manual-1', canRun, requirementsStore: requirementStore, onIdle,
   });

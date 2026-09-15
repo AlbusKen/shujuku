@@ -10,6 +10,7 @@ import { WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU } from './agent/agent-catalog'
 import { parseWorldSimulationMasterAction_ACU, type WorldSimulationDelegationPlan_ACU, type WorldSimulationMasterAction_ACU } from './world-simulation-agent-interaction';
 import { parseTableAddress_ACU } from './world-simulation-agent-tools';
 import { renderWorldSimulationMasterMessages_ACU, renderWorldSimulationUntrustedBlock_ACU, type WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
+import { mergeWorldSimulationPromptMaterial_ACU, type WorldSimulationPromptMaterialRefresher_ACU } from './world-simulation-prompt-material';
 
 export interface WorldSimulationDirectorRuntimeInput_ACU {
   runId: string; snapshot: WorldStateSnapshot_ACU; storyClock: WorldStoryClock_ACU; settings: WorldSimulationSettings_ACU;
@@ -20,10 +21,12 @@ export interface WorldSimulationDirectorRuntimeInput_ACU {
   /** 冻结纪要概览文本（共享上下文产出）；进入 runtime context 的 UNTRUSTED_SUMMARY_OVERVIEW。 */
   summaryOverview?: string;
   worldbook?: AgentWorldbookSnapshot_ACU; budget?: WorldSimulationSettings_ACU['budgets']['deep']; history?: readonly WorldSimulationPromptMessage_ACU[];
+  /** 每次模型请求发送前重新读取正文/纪要材料；同一次请求内只调用一次。 */
+  material?: WorldSimulationPromptMaterialRefresher_ACU;
 }
 export interface WorldSimulationDirectorRuntimeDependencies_ACU {
   runMaster: (request: { source: string; messages: readonly WorldSimulationPromptMessage_ACU[]; prompt: string }) => Promise<string | null>;
-  runSpecialists: (plan: WorldSimulationDelegationPlan_ACU, grantsByAgent: ReadonlyMap<string, readonly AgentMaterialGrant_ACU[]>, specialistModelTurns: number, worldbook: AgentWorldbookSnapshot_ACU, legacy: boolean, shared: { tableData?: unknown; summaryOverview?: string }) => Promise<WorldSimulationAgentLoopResult_ACU>;
+  runSpecialists: (plan: WorldSimulationDelegationPlan_ACU, grantsByAgent: ReadonlyMap<string, readonly AgentMaterialGrant_ACU[]>, specialistModelTurns: number, worldbook: AgentWorldbookSnapshot_ACU, legacy: boolean, shared: { tableData?: unknown; summaryOverview?: string; storyContext?: AgentStoryContextSnapshot_ACU; material?: WorldSimulationPromptMaterialRefresher_ACU }) => Promise<WorldSimulationAgentLoopResult_ACU>;
   loadWorldbook?: () => Promise<AgentWorldbookSnapshot_ACU>;
 }
 export interface WorldSimulationDirectorRuntimeResult_ACU {
@@ -50,12 +53,23 @@ export class WorldSimulationDirectorRuntime_ACU {
     // Keep real conversation history separate from the stable runtime snapshot. Re-rendering a
     // changing tool result inside the prompt prefix defeats natural provider prefix caching.
     const history: WorldSimulationPromptMessage_ACU[] = (input.history ?? []).map(message => ({ ...message }));
+    let materialState: { storyContext?: AgentStoryContextSnapshot_ACU; summaryOverview?: string; tableData?: unknown } = {
+      storyContext: input.storyContext, summaryOverview: input.summaryOverview, tableData: input.tableData,
+    };
     let candidate: WorldSimulationAgentLoopResult_ACU | null = null;
     let candidatePlan = emptyPlan_ACU();
     for (; callsUsed < budget.maxMasterModelTurns; callsUsed += 1) {
       if (!input.isCurrent()) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'world-director 调用前租约已失效');
-      const worldbookScan = [input.userInstruction, input.storyContext?.overview.text ?? '', input.storyContext?.pending.text ?? '', input.storyContext?.bridge.text ?? ''].join('\n');
-      const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts: input.settings.agentPrompts, history, toolsEnabled: input.settings.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: input.reads, storyContext: input.storyContext, summaryOverview: input.summaryOverview, userInstruction: input.userInstruction, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds, worldbookCatalog: renderAgentWorldbookCatalog_ACU(worldbook), worldbookHits: renderAgentWorldbookHits_ACU(worldbook, worldbookScan) });
+      if (input.material) {
+        try { materialState = mergeWorldSimulationPromptMaterial_ACU(materialState, await input.material()); }
+        catch (_) { /* 材料读取失败保留旧值：绝不因资料读取阻断模型调用 */ }
+      }
+      // 本次请求的有效材料：占位符与工具读取共享同一份 request-local 快照。
+      const effectiveInput: WorldSimulationDirectorRuntimeInput_ACU = {
+        ...input, storyContext: materialState.storyContext, summaryOverview: materialState.summaryOverview, tableData: materialState.tableData,
+      };
+      const worldbookScan = [input.userInstruction, effectiveInput.storyContext?.overview.text ?? '', effectiveInput.storyContext?.pending.text ?? '', effectiveInput.storyContext?.bridge.text ?? ''].join('\n');
+      const messages = renderWorldSimulationMasterMessages_ACU({ agent: WORLD_SIMULATION_DIRECTOR_DEFINITION_ACU, prompts: input.settings.agentPrompts, history, toolsEnabled: input.settings.toolsEnabled, snapshot: input.snapshot, storyClock: input.storyClock, reads: input.reads, storyContext: effectiveInput.storyContext, summaryOverview: effectiveInput.summaryOverview, userInstruction: input.userInstruction, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds, worldbookCatalog: renderAgentWorldbookCatalog_ACU(worldbook), worldbookHits: renderAgentWorldbookHits_ACU(worldbook, worldbookScan) });
       const runtimeContext = messages.find(message => message.role === 'user' && message.content.includes('【本次运行上下文】'));
       if (runtimeContext) history.push({ ...runtimeContext });
       const raw = await dependencies.runMaster({ source: 'world-sim-master', messages, prompt: flatten_ACU(messages) });
@@ -68,7 +82,7 @@ export class WorldSimulationDirectorRuntime_ACU {
       if (action.kind === 'maintain_requirements') return { action, plan: emptyPlan_ACU(), loop: null, grants: table.grants, history };
       if (action.kind === 'tools') {
         if (!input.settings.toolsEnabled) fail_ACU('WORLD_SIM_PROTOCOL_INVALID', 'world-director 工具能力已由设置关闭');
-        const result = this.executeTools_ACU(action.calls, input, worldbook, table);
+        const result = this.executeTools_ACU(action.calls, effectiveInput, worldbook, table);
         history.push({ role: 'user', content: `【工具结果】\n${result}` });
         continue;
       }
@@ -82,7 +96,7 @@ export class WorldSimulationDirectorRuntime_ACU {
         // Specialists have their own per-agent model-turn cap. A modern delegate still reserves
         // one later director call for finalize/block; legacy bare delegation returns immediately.
         if (!action.legacy && callsUsed + 1 >= budget.maxMasterModelTurns) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '派工后未保留主 Agent 收敛轮次');
-        candidate = await dependencies.runSpecialists(action.plan, grantsByAgent, budget.maxSpecialistModelTurns, worldbook, action.legacy, { tableData: input.tableData, summaryOverview: input.summaryOverview }); candidatePlan = action.plan;
+        candidate = await dependencies.runSpecialists(action.plan, grantsByAgent, budget.maxSpecialistModelTurns, worldbook, action.legacy, { tableData: effectiveInput.tableData, summaryOverview: effectiveInput.summaryOverview, storyContext: effectiveInput.storyContext }); candidatePlan = action.plan;
         if (action.legacy) return { action, plan: candidatePlan, loop: candidate, grants: table.grants, history };
         history.push({ role: 'user', content: `【子代理候选】\n${renderWorldSimulationUntrustedBlock_ACU('UNTRUSTED_SPECIALIST_CANDIDATES', JSON.stringify({ agents: candidate.agentsRun, transactions: candidate.transactions }))}` });
         continue;

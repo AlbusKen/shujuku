@@ -73,19 +73,35 @@ function activeSwipeIndex_ACU(message: Record<string, any>): number {
   return swipeIndex;
 }
 
+/**
+ * Reads the body the user currently sees. `mes` and `swipes[swipe_id]` are two host-side mirrors of
+ * the same visible page; a temporary divergence between them is a host sync artifact, not a story
+ * branch ambiguity, and must never block reading or starting a run. Inactive pages are never read.
+ */
+export function readWorldSimulationCurrentBody_ACU(message: Record<string, any>): string | null {
+  if (typeof message.mes === 'string' && message.mes.length > 0) return message.mes;
+  if (Array.isArray(message.swipes)) {
+    try {
+      const page = message.swipes[activeSwipeIndex_ACU(message)];
+      if (typeof page === 'string' && page.length > 0) return page;
+    } catch (_) { /* invalid page index falls back to the visible mirror below */ }
+  }
+  return typeof message.mes === 'string' ? message.mes : null;
+}
+
 /** Resolves exactly one active AI page without guessing inactive-swipe identity. */
 export function resolveActiveWorldSimulationSwipe_ACU(messageIndex: number, rawMessage: unknown): ActiveWorldSimulationSwipe_ACU {
   if (!Number.isInteger(messageIndex) || messageIndex < 0 || !rawMessage || typeof rawMessage !== 'object' || Array.isArray(rawMessage)) {
     return fail_ACU('WORLD_SIM_PROTOCOL_INVALID', '世界推演目标消息或索引非法', { messageIndex });
   }
   const message = rawMessage as Record<string, any>;
-  if (!isAiMessage_ACU(message) || typeof message.mes !== 'string') {
+  if (!isAiMessage_ACU(message)) {
     return fail_ACU('WORLD_SIM_CONFLICT', '世界推演目标必须是当前 AI 正文楼层', { messageIndex });
   }
   const swipeIndex = activeSwipeIndex_ACU(message);
-  const text = Array.isArray(message.swipes) ? message.swipes[swipeIndex] : message.mes;
-  if (text !== message.mes) {
-    return fail_ACU('WORLD_SIM_CONFLICT', '当前 AI 正文与 active swipe 页不一致', { messageIndex, swipeIndex });
+  const text = readWorldSimulationCurrentBody_ACU(message);
+  if (typeof text !== 'string') {
+    return fail_ACU('WORLD_SIM_CONFLICT', '世界推演目标必须是当前 AI 正文楼层', { messageIndex });
   }
   return {
     message,

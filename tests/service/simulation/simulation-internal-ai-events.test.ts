@@ -13,7 +13,7 @@ import {
   settleWorldSimulationInternalAiRequest_ACU,
 } from '../../../src/service/simulation/simulation-internal-ai-events';
 
-function identity(requestId: string, source = 'world-sim-gate') {
+function identity(requestId: string, source = 'world-sim-master') {
   return { requestId, chatIdentity: 'chat-a', source };
 }
 

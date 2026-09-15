@@ -21,15 +21,17 @@ describe('world simulation story-context adapter', () => {
     expect(snapshot.catalog.text).not.toContain('楼层 0');
   });
 
-  it('binds digest to active-swipe branch identity and rejects active-page divergence', async () => {
+  it('binds digest to active-swipe branch identity and tolerates a host mirror divergence', async () => {
     const value = chat();
     const first = await buildWorldSimulationStoryContext_ACU({ chat: value, anchorMessageIndex: 2, chatIdentity: 'chat-a', runId: 'run-a', settledThroughIndex: -1 }, deps());
     value[2].mes = '替换后的 active swipe 正文'; value[2].swipes[0] = value[2].mes;
     const second = await buildWorldSimulationStoryContext_ACU({ chat: value, anchorMessageIndex: 2, chatIdentity: 'chat-a', runId: 'run-b', settledThroughIndex: -1 }, deps());
     expect(second.sourceDigest).not.toBe(first.sourceDigest);
     expect(readWorldSimulationStoryBranchIdentity_ACU(value, 2)).toBe(second.branchIdentity);
+    // mes 与 swipes[swipe_id] 的临时分叉是宿主同步产物，不是分支歧义：读取以 mes 为准，不得阻断。
     value[2].mes = '与 active swipe 不同';
-    await expect(buildWorldSimulationStoryContext_ACU({ chat: value, anchorMessageIndex: 2, chatIdentity: 'chat-a', runId: 'run-c', settledThroughIndex: -1 }, deps())).rejects.toThrow();
+    const diverged = await buildWorldSimulationStoryContext_ACU({ chat: value, anchorMessageIndex: 2, chatIdentity: 'chat-a', runId: 'run-c', settledThroughIndex: -1 }, deps());
+    expect(diverged.pending.text).toContain('与 active swipe 不同');
   });
 
   it('keeps provider failure observable rather than turning it into empty history', async () => {

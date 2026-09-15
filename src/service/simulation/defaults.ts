@@ -100,7 +100,7 @@ export function buildDefaultWorldSimulationAgentPrompts_ACU(guidance: Partial<Wo
 
 export const WORLD_SIMULATION_DEFAULT_JOIN_WAIT_MS_ACU = 30_000;
 export const WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU = 30_000;
-export const WORLD_SIMULATION_DEFAULT_MIN_FLOOR_GAP_ACU = 1;
+
 export const WORLD_SIMULATION_DEFAULT_CHECKPOINT_INTERVAL_ACU = 20;
 export const WORLD_SIMULATION_DEFAULT_MAX_TRACKED_ENTITIES_ACU = 12;
 
@@ -112,7 +112,7 @@ export const WORLD_SIMULATION_DEFAULT_BUDGETS_ACU: Readonly<Record<'light' | 'no
 
 export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettings_ACU {
   return {
-    enabled: false, joinWaitMs: WORLD_SIMULATION_DEFAULT_JOIN_WAIT_MS_ACU, minFloorGap: WORLD_SIMULATION_DEFAULT_MIN_FLOOR_GAP_ACU,
+    joinWaitMs: WORLD_SIMULATION_DEFAULT_JOIN_WAIT_MS_ACU,
     checkpointInterval: WORLD_SIMULATION_DEFAULT_CHECKPOINT_INTERVAL_ACU, maxTrackedEntities: WORLD_SIMULATION_DEFAULT_MAX_TRACKED_ENTITIES_ACU,
     visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true,
     apiPresetMode: 'current',

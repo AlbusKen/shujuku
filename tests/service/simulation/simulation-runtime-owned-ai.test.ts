@@ -20,7 +20,7 @@ async function loadFactory(settings: unknown, presets: unknown[]) {
 }
 
 const enabledSettings = (patch: Record<string, unknown> = {}) => ({
-  enabled: true, joinWaitMs: 0, minFloorGap: 1, checkpointInterval: 1, maxTrackedEntities: 1,
+  joinWaitMs: 0, checkpointInterval: 1, maxTrackedEntities: 1,
   visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true,
   apiPresetMode: 'current', fixedApiPresetName: '',
   budgets: {

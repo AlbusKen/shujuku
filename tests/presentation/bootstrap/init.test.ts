@@ -437,7 +437,7 @@ describe('mainInitialize_ACU 世界推演接线', () => {
   });
 
   it('世界推演内部生成的 GENERATION_ENDED 被排除，既不派发自动填表也不触发世界推演', () => {
-    m.worldSimConsumeInternal.mockReturnValueOnce({ requestId: 'ws-1', chatIdentity: 'chat-a', source: 'world-sim-gate' });
+    m.worldSimConsumeInternal.mockReturnValueOnce({ requestId: 'ws-1', chatIdentity: 'chat-a', source: 'world-sim-master' });
 
     expect(m.generationStarted).toBeTypeOf('function');
     m.generationStarted!('normal', {}, false);

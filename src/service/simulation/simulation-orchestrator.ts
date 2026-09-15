@@ -9,7 +9,7 @@ import {
   type WorldStateSnapshot_ACU,
 } from './model';
 import { parseWorldSimulationLedgerRecord_ACU } from './simulation-replay';
-import type { WorldSimulationMaterialLease_ACU } from './world-simulation-material-lease';
+
 
 export type WorldSimulationPhase_ACU = 'idle' | 'simulating' | 'candidate_pending' | 'checking' | 'committing';
 
@@ -40,7 +40,6 @@ export interface WorldSimulationOrchestrationCandidate_ACU {
   sourceAnchorMessageIndex: number;
   state: WorldStateSnapshot_ACU;
   sourceTransactions: readonly WorldSimulationTransaction_ACU[];
-  materialLease?: WorldSimulationMaterialLease_ACU;
 }
 
 export interface WorldSimulationLease_ACU {

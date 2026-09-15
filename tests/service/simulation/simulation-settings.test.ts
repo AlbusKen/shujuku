@@ -11,8 +11,8 @@ import {
   writeWorldSimulationSettingsStrict_ACU,
 } from '../../../src/service/simulation/simulation-settings';
 
-function enabled() {
-  return { ...buildDefaultWorldSimulationSettings_ACU(), enabled: true };
+function complete() {
+  return { ...buildDefaultWorldSimulationSettings_ACU() };
 }
 
 let persist: ReturnType<typeof vi.fn>;
@@ -26,25 +26,25 @@ beforeEach(() => {
 describe('world simulation settings validation', () => {
   it('accepts the complete default shape and both joinWaitMs bounds', () => {
     expect(isWorldSimulationSettings_ACU(buildDefaultWorldSimulationSettings_ACU())).toBe(true);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), joinWaitMs: 0 })).toBe(true);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU })).toBe(true);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), joinWaitMs: 0 })).toBe(true);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU })).toBe(true);
     expect(isWorldSimulationSettings_ACU(null)).toBe(false);
     expect(isWorldSimulationSettings_ACU([])).toBe(false);
   });
 
   it('rejects out-of-range or mistyped known fields instead of coercing them', () => {
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), joinWaitMs: -1 })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU + 1 })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), joinWaitMs: 1.5 })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), enabled: 'yes' })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), visibilityPolicy: 'sometimes' })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), showHiddenInUi: 'true' })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), toolsEnabled: 'true' })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), minFloorGap: 0 })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { light: { maxMasterModelTurns: 0, maxSpecialistModelTurns: 1, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' } } })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), unknownField: true })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { ...enabled().budgets, extra: enabled().budgets.light } })).toBe(false);
-    expect(isWorldSimulationSettings_ACU({ ...enabled(), budgets: { ...enabled().budgets, light: { ...enabled().budgets.light, unexpected: 1 } } })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), joinWaitMs: -1 })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU + 1 })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), joinWaitMs: 1.5 })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), enabled: 'yes' })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), visibilityPolicy: 'sometimes' })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), showHiddenInUi: 'true' })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), toolsEnabled: 'true' })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), minFloorGap: 0 })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), budgets: { light: { maxMasterModelTurns: 0, maxSpecialistModelTurns: 1, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' } } })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), unknownField: true })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), budgets: { ...complete().budgets, extra:complete().budgets.light } })).toBe(false);
+    expect(isWorldSimulationSettings_ACU({ ...complete(), budgets: { ...complete().budgets, light: { ...complete().budgets.light, unexpected: 1 } } })).toBe(false);
   });
 });
 
@@ -53,62 +53,58 @@ describe('world simulation settings read/write', () => {
     expect(readWorldSimulationSettings_ACU()).toBeNull();
     _set_settings_ACU({ worldSimulation: 42 } as any);
     expect(readWorldSimulationSettings_ACU()).toBeNull();
-    _set_settings_ACU({ worldSimulation: { enabled: true, joinWaitMs: 99_999 } } as any);
+    _set_settings_ACU({ worldSimulation: { joinWaitMs: 99_999 } } as any);
     // A present-but-out-of-range value is invalid, not "old data": the feature stays off.
     expect(readWorldSimulationSettings_ACU()).toBeNull();
   });
 
   it('normalizes partial legacy data in memory and reports it as an upgrade', () => {
-    const result = normalizeWorldSimulationSettings_ACU({ enabled: true, joinWaitMs: 1_000 });
+    const result = normalizeWorldSimulationSettings_ACU({ joinWaitMs: 1_000 });
     expect(result?.upgraded).toBe(true);
-    expect(result?.settings).toEqual({ ...buildDefaultWorldSimulationSettings_ACU(), enabled: true, joinWaitMs: 1_000 });
+    expect(result?.settings).toEqual({ ...buildDefaultWorldSimulationSettings_ACU(), joinWaitMs: 1_000 });
     expect(result?.settings.apiPresetMode).toBe('current');
-    _set_settings_ACU({ worldSimulation: { enabled: true } } as any);
-    expect(readWorldSimulationSettings_ACU()?.joinWaitMs).toBe(buildDefaultWorldSimulationSettings_ACU().joinWaitMs);
+    _set_settings_ACU({ worldSimulation: {} } as any);
+    expect(readWorldSimulationSettings_ACU()).toBeNull();
   });
 
   it('does not mark complete data as upgraded and rejects an empty object', () => {
-    expect(normalizeWorldSimulationSettings_ACU(enabled())?.upgraded).toBe(false);
+    expect(normalizeWorldSimulationSettings_ACU(complete())?.upgraded).toBe(false);
     expect(normalizeWorldSimulationSettings_ACU({})).toBeNull();
     expect(normalizeWorldSimulationSettings_ACU({ unknownField: 1 })).toBeNull();
-    expect(normalizeWorldSimulationSettings_ACU({ ...enabled(), unknownField: 1 })).toBeNull();
-    expect(normalizeWorldSimulationSettings_ACU({ ...enabled(), budgets: { ...enabled().budgets, light: { ...enabled().budgets.light, unexpected: 1 } } })).toBeNull();
+    expect(normalizeWorldSimulationSettings_ACU({ ...complete(), unknownField: 1 })).toBeNull();
+    expect(normalizeWorldSimulationSettings_ACU({ ...complete(), budgets: { ...complete().budgets, light: { ...complete().budgets.light, unexpected: 1 } } })).toBeNull();
   });
 
   it('deeply upgrades missing legacy budget fields in memory, but rejects invalid fields that are present', () => {
     const legacy = normalizeWorldSimulationSettings_ACU({
-      enabled: true,
       budgets: { light: { maxIterations: 2, maxReads: 7 }, deep: { readTokenBudget: 'low' } },
     });
-    expect(legacy).toMatchObject({ upgraded: true, settings: { enabled: true } });
+    expect(legacy).toMatchObject({ upgraded: true });
     expect(legacy?.settings.budgets.light).toEqual({ ...buildDefaultWorldSimulationSettings_ACU().budgets.light, maxMasterModelTurns: 2, legacyReadCount: 7 });
     expect(legacy?.settings.budgets.normal).toEqual(buildDefaultWorldSimulationSettings_ACU().budgets.normal);
     expect(legacy?.settings.budgets.deep).toEqual({ ...buildDefaultWorldSimulationSettings_ACU().budgets.deep, readTokenBudget: 'low' });
     expect(legacy?.settings.toolsEnabled).toBe(true);
-    expect(normalizeWorldSimulationSettings_ACU({ enabled: true, budgets: { light: { maxIterations: 0 } } })).toBeNull();
+    expect(normalizeWorldSimulationSettings_ACU({ budgets: { light: { maxIterations: 0 } } })).toBeNull();
   });
 
   it('treats shared-only budget fields as a partial new tier and rejects mixed exclusive shapes', () => {
     const defaults = buildDefaultWorldSimulationSettings_ACU();
     const sharedOnly = normalizeWorldSimulationSettings_ACU({
-      enabled: true,
       budgets: { light: { maxDelegations: 3, readTokenBudget: 'low' } },
     });
-    expect(sharedOnly).toMatchObject({ upgraded: true, settings: { enabled: true } });
+    expect(sharedOnly).toMatchObject({ upgraded: true });
     expect(sharedOnly?.settings.budgets.light).toEqual({
       ...defaults.budgets.light,
       maxDelegations: 3,
       readTokenBudget: 'low',
     });
     expect(normalizeWorldSimulationSettings_ACU({
-      enabled: true,
       budgets: { light: { maxIterations: 2, maxSpecialistModelTurns: 2 } },
     })).toBeNull();
   });
 
   it('keeps legacy maxReads only as non-persisting compatibility metadata', () => {
     const legacy = {
-      enabled: true,
       budgets: {
         light: { maxIterations: 2, maxDelegations: 1, maxReads: 99, readTokenBudget: 'low' },
         normal: { maxIterations: 3, maxDelegations: 2, maxReads: 88, readTokenBudget: 'medium' },
@@ -192,24 +188,24 @@ describe('world simulation settings read/write', () => {
   });
 
   it('writes through to the shared settings store and reads the value back', () => {
-    expect(writeWorldSimulationSettings_ACU(enabled())).toEqual({ ok: true, upgraded: false });
-    expect((settings_ACU as any).worldSimulation).toEqual(enabled());
-    expect(readWorldSimulationSettings_ACU()).toEqual(enabled());
+    expect(writeWorldSimulationSettings_ACU(complete())).toEqual({ ok: true, upgraded: false });
+    expect((settings_ACU as any).worldSimulation).toEqual(complete());
+    expect(readWorldSimulationSettings_ACU()).toEqual(complete());
     expect(persist).toHaveBeenCalledTimes(1);
   });
 
   it('refuses to persist an invalid value, leaves the store untouched, and never saves', () => {
-    writeWorldSimulationSettings_ACU(enabled());
+    writeWorldSimulationSettings_ACU(complete());
     persist.mockClear();
     const before = (settings_ACU as any).worldSimulation;
-    expect(writeWorldSimulationSettings_ACU({ ...enabled(), joinWaitMs: -1 })).toEqual({ ok: false, reason: 'invalid' });
+    expect(writeWorldSimulationSettings_ACU({ ...complete(), joinWaitMs: -1 })).toEqual({ ok: false, reason: 'invalid' });
     expect((settings_ACU as any).worldSimulation).toBe(before);
     expect(persist).not.toHaveBeenCalled();
   });
 
   it('round-trips a full custom budget set', () => {
     const custom = {
-      ...enabled(),
+      ...complete(),
       budgets: {
         light: { maxMasterModelTurns: 2, maxSpecialistModelTurns: 2, maxDelegations: 0, legacyReadCount: null, readTokenBudget: 'low' as const },
         normal: { maxMasterModelTurns: 4, maxSpecialistModelTurns: 3, maxDelegations: 1, legacyReadCount: null, readTokenBudget: 'high' as const },
@@ -221,15 +217,15 @@ describe('world simulation settings read/write', () => {
   });
 
   it('strict UI persistence confirms only a reliable save and restores the prior snapshot on failure', async () => {
-    const prior = enabled();
+    const prior =complete();
     _set_settings_ACU({ worldSimulation: prior } as any);
     persist.mockReturnValueOnce({ saved: true, storageType: 'tavern' });
-    const saved = { ...enabled(), joinWaitMs: 12_000 };
+    const saved = { ...complete(), joinWaitMs: 12_000 };
     await expect(writeWorldSimulationSettingsStrict_ACU(saved)).resolves.toEqual({ ok: true, upgraded: false, storageType: 'tavern' });
     expect(readWorldSimulationSettings_ACU()).toEqual(saved);
 
     persist.mockImplementationOnce(() => { throw new Error('host save failed'); });
-    const rejected = { ...enabled(), joinWaitMs: 13_000 };
+    const rejected = { ...complete(), joinWaitMs: 13_000 };
     await expect(writeWorldSimulationSettingsStrict_ACU(rejected)).resolves.toEqual({ ok: false, reason: 'persist_failed' });
     expect(readWorldSimulationSettings_ACU()).toEqual(saved);
 
@@ -260,14 +256,24 @@ describe('world simulation settings read/write', () => {
   });
 
   it('keeps a user-fixed API preset across normalization and rejects an invalid mode', () => {
-    const fixed = { ...enabled(), apiPresetMode: 'fixed' as const, fixedApiPresetName: '预设A' };
+    const fixed = { ...complete(), apiPresetMode: 'fixed' as const, fixedApiPresetName: '预设A' };
     expect(isWorldSimulationSettings_ACU(fixed)).toBe(true);
     expect(normalizeWorldSimulationSettings_ACU(fixed)?.upgraded).toBe(false);
-    expect(normalizeWorldSimulationSettings_ACU({ ...enabled(), apiPresetMode: 'sometimes' })).toBeNull();
+    expect(normalizeWorldSimulationSettings_ACU({ ...complete(), apiPresetMode: 'sometimes' })).toBeNull();
   });
 
   it('keeps an already-guided v6.1 layout unchanged on read', () => {
     const v61 = buildDefaultWorldSimulationSettings_ACU();
     expect(normalizeWorldSimulationSettings_ACU(v61)?.upgraded).toBe(false);
+  });
+
+  it('tolerates retired gate keys from old configs, strips them, and reports an upgrade', () => {
+    const legacy = { ...complete(), enabled: true, minFloorGap: 3 } as Record<string, unknown>;
+    const upgrade = normalizeWorldSimulationSettings_ACU(legacy);
+    expect(upgrade).not.toBeNull();
+    expect(upgrade!.upgraded).toBe(true);
+    expect(upgrade!.settings).toEqual(complete());
+    // Strict validation still rejects retired keys: only the normalize path tolerates them.
+    expect(isWorldSimulationSettings_ACU(legacy)).toBe(false);
   });
 });

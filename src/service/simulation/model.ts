@@ -119,58 +119,12 @@ export interface WorldStateSnapshot_ACU {
   revisions: WorldModuleRevisions_ACU;
 }
 
-export type WorldSimulationRealtimePacing_ACU = 'normal' | 'fast';
 
-/** Runtime facts supplied by the future orchestrator before paying for the AI gate. */
-export interface WorldSimulationGateLocalState_ACU {
-  enabled: boolean;
-  flightModeActive: boolean;
-  isSimulating: boolean;
-  chatIdentity: string;
-  lastSimulationChatIdentity?: string | null;
-  branchReparsed: boolean;
-  newAiFloorCount: number;
-  minFloorGap: number;
-}
-
-export interface WorldSimulationGateInput_ACU {
-  anchorMessageIndex: number;
-  local: WorldSimulationGateLocalState_ACU;
-  realtimePacing: WorldSimulationRealtimePacing_ACU;
-  recentStoryTail: string;
-  /** 冻结纪要概览文本（共享上下文产出）；仅用于定位，不作为时间证据。 */
-  summaryOverview?: string;
-  activeEntitySummaries: readonly string[];
-  lastSimulation?: {
-    anchorMessageIndex: number;
-    conclusionSummary: string;
-    storyClock: WorldStoryClock_ACU;
-  } | null;
-}
-
-export type WorldSimulationGateDecision_ACU =
-  | {
-    worthUpdating: false;
-    source: 'local' | 'gate' | 'time-policy';
-    reason: string;
-    storyTime?: WorldStoryClock_ACU;
-    focusHints: string[];
-  }
-  | {
-    worthUpdating: true;
-    source: 'gate';
-    reason: string;
-    storyTime: WorldStoryClock_ACU;
-    focusHints: string[];
-    scale: WorldSimulationScale_ACU;
-  };
 
 
 
 export interface WorldSimulationSettings_ACU {
-  enabled: boolean;
   joinWaitMs: number;
-  minFloorGap: number;
   checkpointInterval: number;
   maxTrackedEntities: number;
   visibilityPolicy: WorldVisibilityPolicy_ACU;
@@ -277,7 +231,6 @@ export interface WorldSimulationPerSwipeEnvelope_ACU {
 export type WorldSimulationPersistedValue_ACU = WorldSimulationLedgerRecord_ACU | WorldSimulationPerSwipeEnvelope_ACU;
 
 export type WorldSimulationErrorCode_ACU =
-  | 'WORLD_SIM_GATE_FAILED'
   | 'WORLD_SIM_PROTOCOL_INVALID'
   | 'WORLD_SIM_STALE'
   | 'WORLD_SIM_CONFLICT'
@@ -289,7 +242,7 @@ export type WorldSimulationErrorCode_ACU =
   | 'WORLD_SIM_INJECTION_FAILED'
   | 'WORLD_SIM_READ_FAILED';
 
-export type WorldSimulationErrorPhase_ACU = 'gate' | 'protocol' | 'agent' | 'replay' | 'transaction' | 'persist' | 'orchestrate' | 'rebase' | 'injection';
+export type WorldSimulationErrorPhase_ACU = 'protocol' | 'agent' | 'replay' | 'transaction' | 'persist' | 'orchestrate' | 'rebase' | 'injection';
 
 export interface WorldSimulationError_ACU {
   code: WorldSimulationErrorCode_ACU;

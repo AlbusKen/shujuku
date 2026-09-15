@@ -13,7 +13,12 @@ const SCALES_ACU = ['light', 'normal', 'deep'] as const satisfies readonly (keyo
 const READ_TIERS_ACU = ['low', 'medium', 'high'] as const;
 const AGENT_NAMES_ACU: readonly WorldSimulationAgentName_ACU[] = ['world-director', 'entity-movement', 'faction-events', 'thread-weaver'];
 const PROMPT_ROLES_ACU: readonly WorldSimulationPromptRole_ACU[] = ['system', 'user', 'assistant'];
-const BASE_SETTINGS_KEYS_ACU = ['enabled', 'joinWaitMs', 'minFloorGap', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'toolsEnabled', 'apiPresetMode', 'fixedApiPresetName', 'budgets'] as const;
+const BASE_SETTINGS_KEYS_ACU = ['joinWaitMs', 'checkpointInterval', 'maxTrackedEntities', 'visibilityPolicy', 'showHiddenInUi', 'toolsEnabled', 'apiPresetMode', 'fixedApiPresetName', 'budgets'] as const;
+/**
+ * 已退役的启动门禁键。旧配置仍然可能携带它们；读取时容忍其存在、在内存中剥离并报告
+ * `upgraded: true`（是否写回由调用方决定）。绝不因为这两个键把整份配置判为非法而 fail-closed。
+ */
+const RETIRED_SETTINGS_KEYS_ACU = ['enabled', 'minFloorGap'] as const;
 const SETTINGS_KEYS_ACU: readonly (keyof WorldSimulationSettings_ACU)[] = [...BASE_SETTINGS_KEYS_ACU, 'agentPrompts', 'promptForceDefaultVersion'];
 const GUIDANCE_LEGACY_SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentGuidance', 'promptForceDefaultVersion'] as const;
 const PRE_KERNEL_PROMPT_SETTINGS_KEYS_ACU = [...BASE_SETTINGS_KEYS_ACU, 'agentPrompts'] as const;
@@ -216,10 +221,8 @@ function isPartialAgentGuidance_ACU(value: unknown): value is Partial<WorldSimul
 /** True only for a complete, in-range settings object. Never normalizes and never guesses. */
 export function isWorldSimulationSettings_ACU(value: unknown): value is WorldSimulationSettings_ACU {
   if (!isRecord_ACU(value) || !hasExactKeys_ACU(value, SETTINGS_KEYS_ACU)) return false;
-  if (typeof value.enabled !== 'boolean') return false;
   if (!Number.isInteger(value.joinWaitMs) || (value.joinWaitMs as number) < 0
     || (value.joinWaitMs as number) > WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU) return false;
-  if (!isIntAtLeast_ACU(value.minFloorGap, 1)) return false;
   if (!isIntAtLeast_ACU(value.checkpointInterval, 1)) return false;
   if (!isIntAtLeast_ACU(value.maxTrackedEntities, 1)) return false;
   if (!VISIBILITY_POLICIES_ACU.includes(String(value.visibilityPolicy) as WorldVisibilityPolicy_ACU)) return false;
@@ -234,9 +237,7 @@ export function isWorldSimulationSettings_ACU(value: unknown): value is WorldSim
 }
 
 const TOP_LEVEL_FIELD_VALIDATORS_ACU: Omit<Record<keyof WorldSimulationSettings_ACU, (value: unknown) => boolean>, 'budgets' | 'agentPrompts' | 'promptForceDefaultVersion'> = {
-  enabled: value => typeof value === 'boolean',
   joinWaitMs: value => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU,
-  minFloorGap: value => isIntAtLeast_ACU(value, 1),
   checkpointInterval: value => isIntAtLeast_ACU(value, 1),
   maxTrackedEntities: value => isIntAtLeast_ACU(value, 1),
   visibilityPolicy: value => VISIBILITY_POLICIES_ACU.includes(String(value) as WorldVisibilityPolicy_ACU),
@@ -261,13 +262,14 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
   const keys = hasGuidance
     ? GUIDANCE_LEGACY_SETTINGS_KEYS_ACU
     : hasPrompts ? SETTINGS_KEYS_ACU : PRE_KERNEL_PROMPT_SETTINGS_KEYS_ACU;
-  if (!hasOnlyKnownKeys_ACU(raw, keys)) return null;
-  const present = keys
+  if (!hasOnlyKnownKeys_ACU(raw, [...keys, ...RETIRED_SETTINGS_KEYS_ACU])) return null;
+  const present = [...keys, ...RETIRED_SETTINGS_KEYS_ACU]
     .filter(key => Object.prototype.hasOwnProperty.call(raw, key));
   if (present.length === 0) return null;
   for (const key of present) {
+    if ((RETIRED_SETTINGS_KEYS_ACU as readonly string[]).includes(key)) continue;
     if (key !== 'budgets' && key !== 'agentGuidance' && key !== 'agentPrompts' && key !== 'promptForceDefaultVersion'
-      && !TOP_LEVEL_FIELD_VALIDATORS_ACU[key](raw[key])) return null;
+      && !TOP_LEVEL_FIELD_VALIDATORS_ACU[key as keyof typeof TOP_LEVEL_FIELD_VALIDATORS_ACU](raw[key])) return null;
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'budgets') && !isPartialBudgets_ACU(raw.budgets)) return null;
   if (hasGuidance && !isPartialAgentGuidance_ACU(raw.agentGuidance)) return null;
@@ -289,7 +291,7 @@ export function normalizeWorldSimulationSettings_ACU(raw: unknown): WorldSimulat
         ? mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
         : migratePromptsToV6_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU>)
       : mergeAgentPrompts_ACU(raw.agentPrompts as Partial<WorldSimulationAgentPrompts_ACU> | undefined);
-  const { budgets: _budgets, agentGuidance: _guidance, agentPrompts: _prompts, promptForceDefaultVersion: _version, ...top } = raw;
+  const { budgets: _budgets, agentGuidance: _guidance, agentPrompts: _prompts, promptForceDefaultVersion: _version, enabled: _retiredEnabled, minFloorGap: _retiredMinFloorGap, ...top } = raw;
   const merged: WorldSimulationSettings_ACU = {
     ...defaults,
     ...top,

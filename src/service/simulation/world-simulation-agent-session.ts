@@ -4,7 +4,7 @@ import type { AgentKernelReadGateConfig_ACU } from '../agent-kernel/read-gate';
 import type { AgentStoryContextSnapshot_ACU } from '../agent-kernel/story-context';
 import { parseAgentRequirementsReplacement_ACU, type AgentRequirementSnapshot_ACU } from '../agent-kernel/requirements';
 import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
-import { buildWorldSimulationStoryContext_ACU, readWorldSimulationStoryBranchIdentity_ACU } from './world-simulation-story-context';
+import { buildWorldSimulationStoryContext_ACU } from './world-simulation-story-context';
 import { createWorldSimError_ACU, WorldSimulationValidationError_ACU, type WorldSimulationTransaction_ACU, type WorldStateSnapshot_ACU } from './model';
 import { parseWorldSimulationProjection_ACU } from './simulation-projection';
 import { renderWorldSimulationPublicDelta_ACU } from './simulation-public-delta';
@@ -16,8 +16,8 @@ import { appendWorldSimulationConversation_ACU, readNextPendingWorldSimulationIn
 import { runWorldSimulationManualAgentExecution_ACU } from './world-simulation-agent-execution';
 import type { WorldSimulationPromptMessage_ACU } from './world-simulation-agent-prompts';
 import { isAiMessage_ACU } from '../runtime/message-handler';
-import { captureWorldSimulationMaterialLease_ACU, refreshWorldSimulationMaterialLease_ACU, sameWorldSimulationMaterialLease_ACU, withWorldSimulationMaterialLeaseGrants_ACU, type WorldSimulationMaterialLease_ACU } from './world-simulation-material-lease';
 import { captureSummaryOverviewText_ACU } from './world-simulation-shared-context';
+import { createWorldSimulationMaterialReader_ACU } from './world-simulation-material-reader';
 
 
 export interface WorldSimulationAgentSessionDependencies_ACU {
@@ -101,31 +101,6 @@ export class WorldSimulationAgentSession_ACU {
     for (const resolve of this.idleWaiters) resolve();
     this.idleWaiters.clear();
   }
-  private async assertCurrentMaterialLease_ACU(
-    lease: WorldSimulationMaterialLease_ACU,
-    requirementsStore: WorldSimulationRequirementsStorePort_ACU,
-    anchor: number,
-    identity: string,
-  ): Promise<void> {
-    try {
-      const chat = this.dependencies.getChat();
-      if (this.dependencies.getChatIdentity(chat) !== identity) fail('WORLD_SIM_STALE', '世界推演运行资料复验时聊天已切换');
-      const requirementsSnapshot = requirementsStore.read(anchor, chat);
-      const storyContext = await (this.dependencies.buildStoryContext ?? buildWorldSimulationStoryContext_ACU)({
-        chat, anchorMessageIndex: anchor, chatIdentity: identity, runId: `manual-material-check:${anchor}`,
-        settledThroughIndex: lease.settledThroughIndex,
-      });
-      let worldbook;
-      try { worldbook = await (this.dependencies.loadWorldbook ?? loadAgentWorldbookSnapshot_ACU)(); }
-      catch (_) { worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false); }
-      const current = refreshWorldSimulationMaterialLease_ACU(lease, { requirementsSnapshot, storyContext, settledThroughIndex: lease.settledThroughIndex, worldbook });
-      if (!sameWorldSimulationMaterialLease_ACU(lease, current)) fail('WORLD_SIM_STALE', '世界推演要求、正文概览、正文快照或世界书授权资料已变化');
-    } catch (error) {
-      if (error instanceof WorldSimulationValidationError_ACU) throw error;
-      fail('WORLD_SIM_STALE', `世界推演运行资料无法复验：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
   async submit(text: string, options: { forceQueue?: boolean } = {}): Promise<WorldSimulationAgentSubmitResult_ACU> {
     const chat = this.dependencies.getChat(); const anchor = latestAi(chat);
     if (anchor < 0) fail('WORLD_SIM_STALE', '当前聊天没有可承载世界推演会话的 AI 楼层');
@@ -150,12 +125,11 @@ export class WorldSimulationAgentSession_ACU {
 
   private async run(ref: WorldSimulationConversationRef_ACU, anchor: number): Promise<'committed' | 'committed_with_audit_warning' | 'no_change' | 'no_change_with_audit_warning'> {
     const chat = this.dependencies.getChat(); const settings = this.dependencies.readSettings();
-    if (!settings?.enabled) fail('WORLD_SIM_PROTOCOL_INVALID', '请先启用并保存世界推演设置');
+    if (!settings) fail('WORLD_SIM_PROTOCOL_INVALID', '世界推演设置不可用');
     if (anchor !== latestAi(chat) || !isAiMessage_ACU(chat[anchor])) fail('WORLD_SIM_STALE', '世界推演会话目标已不是当前最新 AI 楼层');
     const identity = this.dependencies.getChatIdentity(chat); if (!identity) fail('WORLD_SIM_STALE', '当前聊天身份不可用');
     if (!this.dependencies.canRun(identity)) fail('WORLD_SIM_STALE', '世界推演已有在飞任务，用户请求已保留待下一楼执行');
     const targetSwipe = resolveActiveWorldSimulationSwipe_ACU(anchor, chat[anchor]).identity;
-    const sourceBranchIdentity = readWorldSimulationStoryBranchIdentity_ACU(chat, anchor);
     const isCurrent = (): boolean => {
       if (this.abort?.signal.aborted || this.dependencies.getChatIdentity(this.dependencies.getChat()) !== identity) return false;
       const current = this.dependencies.getChat();
@@ -164,8 +138,7 @@ export class WorldSimulationAgentSession_ACU {
         const sourceSwipe = resolveActiveWorldSimulationSwipe_ACU(ref.messageIndex, current[ref.messageIndex]).identity;
         const currentTargetSwipe = resolveActiveWorldSimulationSwipe_ACU(anchor, current[anchor]).identity;
         return JSON.stringify(sourceSwipe) === JSON.stringify(ref.swipe)
-          && JSON.stringify(currentTargetSwipe) === JSON.stringify(targetSwipe)
-          && readWorldSimulationStoryBranchIdentity_ACU(current, anchor) === sourceBranchIdentity;
+          && JSON.stringify(currentTargetSwipe) === JSON.stringify(targetSwipe);
       } catch (_) { return false; }
     };
     if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演会话来源或目标 swipe 已变化');
@@ -195,10 +168,17 @@ export class WorldSimulationAgentSession_ACU {
         settledThroughIndex,
       });
       if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演正文快照装配后来源或目标 swipe 已变化');
-      // 本飞行起点一次性冻结共享表格快照与纪要概览；维持循环与子代理共享同一对象。
+      // 起点值只作为首轮回退；每次模型请求发送前由 material 按当前锚点重新读取正文与纪要。
       const sharedTableData = this.dependencies.getTableData?.() ?? undefined;
       const sharedSummaryOverview = this.dependencies.summaryOverviewOverride ?? captureSummaryOverviewText_ACU(sharedTableData);
-      let baseMaterialLease = captureWorldSimulationMaterialLease_ACU({ requirementsSnapshot, storyContext, settledThroughIndex });
+      const material = createWorldSimulationMaterialReader_ACU({
+        getChat: () => this.dependencies.getChat(),
+      }).bind({
+        anchorMessageIndex: anchor,
+        settledThroughIndex,
+        runId: `manual:${ref.messageIndex}:${ref.id}`,
+        chatIdentity: identity,
+      });
       let masterCallsUsed = 0;
       let masterHistory: WorldSimulationPromptMessage_ACU[] = [];
       let execution: Awaited<ReturnType<typeof runWorldSimulationManualAgentExecution_ACU>>;
@@ -207,7 +187,7 @@ export class WorldSimulationAgentSession_ACU {
           runId: `manual:${ref.messageIndex}:${ref.id}`, snapshot: before, anchorMessageIndex: anchor, storyClock: manualClock(base?.state ?? null, anchor), settings, reads: [], storyContext,
           tableData: sharedTableData, summaryOverview: sharedSummaryOverview,
           requirementsSnapshot, pendingRequirementSourceIds, masterCallsUsed, history: masterHistory,
-          readGateConfig: readGateConfig(settings.budgets.deep), userInstruction: ref.text, isCurrent,
+          readGateConfig: readGateConfig(settings.budgets.deep), userInstruction: ref.text, isCurrent, material,
         }, { countTokens: this.dependencies.countTokens, runAgent: async request => this.dependencies.runOwnedAi({ source: request.source, chatIdentity: identity, prompt: request.prompt, messages: [...request.messages], signal: this.abort?.signal }) });
         masterHistory = execution.history.map(message => ({ ...message }));
         masterCallsUsed += 1;
@@ -224,7 +204,6 @@ export class WorldSimulationAgentSession_ACU {
           if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演要求保存后来源或目标 swipe 已变化');
           requirementsSnapshot = next;
           pendingRequirementSourceIds = [];
-          baseMaterialLease = captureWorldSimulationMaterialLease_ACU({ requirementsSnapshot, storyContext, settledThroughIndex });
           try {
             await appendWorldSimulationConversation_ACU(anchor, [{ kind: 'plan', status: 'done', title: '当前要求已维护', detail: `requirements revision 已更新为 ${next.revision}；主 Agent 将依据新要求重新决策。`, agentName: 'world-director' }], chat);
           } catch (error) {
@@ -238,7 +217,6 @@ export class WorldSimulationAgentSession_ACU {
         }
       }
       if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演 Agent 返回时来源或目标 swipe 已变化');
-      const materialLease = withWorldSimulationMaterialLeaseGrants_ACU(baseMaterialLease, execution.grants);
       const renderAuditWarnings = (): string => auditFailures.length ? `【审计警告】${auditFailures.join('；')}` : '';
       const planDetail = [
         renderAuditWarnings(),
@@ -257,7 +235,6 @@ export class WorldSimulationAgentSession_ACU {
         }
         return auditFailures.length ? 'no_change_with_audit_warning' : 'no_change';
       }
-      await this.assertCurrentMaterialLease_ACU(materialLease, requirementsStore, anchor, identity);
       try {
         await appendWorldSimulationConversation_ACU(anchor, execution.loop.agentsRun.map(agentName => ({
           kind: 'delegation' as const,
@@ -270,6 +247,11 @@ export class WorldSimulationAgentSession_ACU {
         auditFailures.push(`子代理候选审计同步失败：${error instanceof Error ? error.message : String(error)}`);
       }
       const transaction = derive(before, execution.loop.snapshot, anchor);
+      const currentRequirementsRevision = requirementsStore.read(anchor, chat)?.revision ?? null;
+      const frozenRequirementsRevision = requirementsSnapshot?.revision ?? null;
+      if (currentRequirementsRevision !== frozenRequirementsRevision) {
+        fail('WORLD_SIM_STALE', '世界推演提交前 requirements revision 已变化');
+      }
       if (!isCurrent()) fail('WORLD_SIM_STALE', '世界推演提交前来源或目标 swipe 已变化');
       if (!transaction) {
         try {
@@ -285,7 +267,6 @@ export class WorldSimulationAgentSession_ACU {
       const commitInput = { anchorMessageIndex: anchor, recordId: this.dependencies.createRecordId(), state: after, delta: { anchorMessageIndex: anchor, storyClock: after.storyClock, entities: after.entities, events: after.events, threads: after.threads, revisions: after.revisions }, checkpointInterval: settings.checkpointInterval, expectedReplayDigest, parentReplayDigest, swipe: targetSwipe, sourceAnchorMessageIndex: anchor, coverageStartMessageIndex: anchor, coverageEndMessageIndex: anchor, expectedProjectionBlockHash: current?.blockHash ?? null, publicText: delta.text || null, publicEntryIds: [...delta.publicEntryIds] };
       // There is no cancellation seam once commitProjection enters the strict per-chat writer.
       // Mark the handoff synchronously so stop() is honest about the remaining host save.
-      await this.assertCurrentMaterialLease_ACU(materialLease, requirementsStore, anchor, identity);
       this.committing = true;
       await this.dependencies.store.commitProjection(commitInput);
       // The ledger + projection joint save is now authoritative. Conversation writes are audit-only

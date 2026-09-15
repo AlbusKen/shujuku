@@ -16,9 +16,7 @@ import { isWorldSimulationSettings_ACU } from '../../../src/service/simulation/s
 function custom() {
   return {
     ...buildDefaultWorldSimulationSettings_ACU(),
-    enabled: true,
     joinWaitMs: 12_345,
-    minFloorGap: 3,
     checkpointInterval: 7,
     maxTrackedEntities: 42,
     visibilityPolicy: 'always_revealed' as const,

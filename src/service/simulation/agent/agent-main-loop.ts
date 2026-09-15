@@ -20,6 +20,7 @@ import {
 import { selectWorldSimulationAgents_ACU, type WorldSimulationAgentDefinition_ACU } from './agent-catalog';
 import { parseWorldSimulationAgentOutput_ACU } from './agent-protocol';
 import { renderWorldSimulationAgentMessages_ACU, type WorldSimulationPromptMessage_ACU } from '../world-simulation-agent-prompts';
+import { mergeWorldSimulationPromptMaterial_ACU, type WorldSimulationPromptMaterialRefresher_ACU } from '../world-simulation-prompt-material';
 import { WorldSimulationSpecialistRuntime_ACU } from '../world-simulation-specialist-runtime';
 
 export interface WorldSimulationAgentLoopInput_ACU {
@@ -50,6 +51,8 @@ export interface WorldSimulationAgentLoopInput_ACU {
   worldbook?: AgentWorldbookSnapshot_ACU;
   specialistRuntime?: WorldSimulationSpecialistRuntime_ACU;
   visibilityPolicy?: WorldVisibilityPolicy_ACU;
+  /** 每次 AI 请求发送前重新读取正文/纪要材料；同一次请求内只调用一次。 */
+  material?: WorldSimulationPromptMaterialRefresher_ACU;
 }
 
 export interface WorldSimulationAgentLoopDependencies_ACU {
@@ -122,6 +125,15 @@ export async function runWorldSimulationAgentLoop_ACU(input: WorldSimulationAgen
   if (delegations > input.budget.maxDelegations) {
     fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '世界推演角色计划超过派工预算', false, { delegations, maxDelegations: input.budget.maxDelegations });
   }
+  // request-local 材料：本次模型调用前刷新一次，本次请求的全部占位符共享同一份快照。
+  let materialState: { storyContext?: AgentStoryContextSnapshot_ACU; summaryOverview?: string; tableData?: unknown } = {
+    storyContext: input.storyContext, summaryOverview: input.summaryOverview, tableData: input.tableData,
+  };
+  const refreshMaterial_ACU = async (): Promise<void> => {
+    if (!input.material) return;
+    try { materialState = mergeWorldSimulationPromptMaterial_ACU(materialState, await input.material()); }
+    catch (_) { /* 材料读取失败保留旧值：绝不因资料读取阻断模型调用 */ }
+  };
   let candidate = input.snapshot;
   const agentsRun: string[] = [];
   const transactions: WorldSimulationTransaction_ACU[] = [];
@@ -136,12 +148,14 @@ export async function runWorldSimulationAgentLoop_ACU(input: WorldSimulationAgen
     const callBudget = input.budget.maxSpecialistModelTurns;
     if (input.specialistRuntime) {
       if (!input.worldbook || callBudget < 1) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '世界推演子代理没有可用工具循环预算或冻结世界书快照', false, { agent: agent.name, callBudget });
+      await refreshMaterial_ACU();
       const result = await input.specialistRuntime.run({
         agent, snapshot: input.snapshot, anchorMessageIndex: input.anchorMessageIndex, storyClock: input.storyClock,
-        storyContext: input.storyContext, requirementsSnapshot: input.requirementsSnapshot, materialGrants: input.materialGrantsByAgent?.get(agent.name) ?? [],
+        storyContext: materialState.storyContext, requirementsSnapshot: input.requirementsSnapshot, materialGrants: input.materialGrantsByAgent?.get(agent.name) ?? [],
         seedReadRefs: seedReads, fixedReads: input.readTexts, worldbook: input.worldbook, previousCandidateSummaries: candidateSummaries, prompts: input.agentPrompts, delegationInstruction: input.delegationInstructions?.get(agent.name), toolsEnabled: input.toolsEnabled,
-        tableData: input.tableData, summaryOverview: input.summaryOverview,
+        tableData: materialState.tableData, summaryOverview: materialState.summaryOverview,
         maxCalls: callBudget, isCurrent,
+        material: input.material,
       }, { runAgent: request => dependencies.runAgent({ agent, prompt: request.prompt, messages: request.messages, snapshot: input.snapshot, storyClock: input.storyClock, reads: request.reads, isCurrent }) });
       callsUsed += result.callsUsed;
       const transaction = result.candidate.transaction && normalizeWorldSimulationTransactionVisibility_ACU(result.candidate.transaction, input.visibilityPolicy ?? 'agent');
@@ -158,8 +172,9 @@ export async function runWorldSimulationAgentLoop_ACU(input: WorldSimulationAgen
       callsUsed += 1;
       const currentReadGate = await decideAgentKernelReadBatch_ACU([renderState_ACU(candidate), ...storyMaterials, ...agentReads], input.readGateConfig, input.contextTokens, countTokens);
       if (!currentReadGate.allowed) fail_ACU('WORLD_SIM_BUDGET_EXCEEDED', '世界推演候选状态超出读取 token 预算', false, { reason: currentReadGate.reason, batchTokens: currentReadGate.batchTokens });
+      await refreshMaterial_ACU();
       if (!isCurrent()) stale_ACU('世界推演租约在 AI 调用前已失效');
-      const messages = renderWorldSimulationAgentMessages_ACU({ agent, prompts: input.agentPrompts, history, delegationInstruction: input.delegationInstructions?.get(agent.name), toolsEnabled: input.toolsEnabled, snapshot: candidate, storyClock: input.storyClock, reads: agentReads, storyContext: input.storyContext, userInstruction: input.userInstruction, materialGrants: input.materialGrantsByAgent?.get(agent.name) });
+      const messages = renderWorldSimulationAgentMessages_ACU({ agent, prompts: input.agentPrompts, history, delegationInstruction: input.delegationInstructions?.get(agent.name), toolsEnabled: input.toolsEnabled, snapshot: candidate, storyClock: input.storyClock, reads: agentReads, storyContext: materialState.storyContext, userInstruction: input.userInstruction, summaryOverview: materialState.summaryOverview, materialGrants: input.materialGrantsByAgent?.get(agent.name) });
       const runtimeContext = messages.find(message => message.role === 'user' && message.content.includes('【本次运行上下文】'));
       if (runtimeContext) history.push({ ...runtimeContext });
       const raw = await dependencies.runAgent({ agent, prompt: flattenMessages_ACU(messages), messages, snapshot: candidate, storyClock: input.storyClock, reads: agentReads, isCurrent });

@@ -43,8 +43,13 @@ describe('world simulation active swipe identity', () => {
     expect(resolved.identity.messageKey).toBe('index:3');
   });
 
-  it('rejects invalid pages and current-body divergence without guessing', () => {
-    expectCode(() => resolveActiveWorldSimulationSwipe_ACU(1, message({ mes: '用户切换后正文' })), 'WORLD_SIM_CONFLICT');
+  it('tolerates current-body mirror divergence while rejecting invalid active pages', () => {
+    const diverged = resolveActiveWorldSimulationSwipe_ACU(1, message({ mes: '用户切换后正文' }));
+    expect(diverged.text).toBe('用户切换后正文');
+    expect(diverged.identity).toMatchObject({
+      swipeIndex: 1,
+      baseTextHash: hashWorldSimulationBody_ACU('用户切换后正文'),
+    });
     expectCode(() => resolveActiveWorldSimulationSwipe_ACU(1, message({ swipe_id: 2 })), 'WORLD_SIM_CONFLICT');
     expectCode(() => resolveActiveWorldSimulationSwipe_ACU(1, message({ swipe_id: undefined })), 'WORLD_SIM_CONFLICT');
   });

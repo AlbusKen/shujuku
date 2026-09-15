@@ -88,8 +88,8 @@ describe('WorldSimulationSettingsPanel', () => {
     const { app, el, settings, nextTick } = await mountPanel();
     expect(el.textContent).toContain('允许 Agent 使用 read/search');
     const switches = Array.from(el.querySelectorAll<HTMLButtonElement>('[role="switch"]'));
-    expect(switches).toHaveLength(3);
-    switches[2]!.click(); await nextTick();
+    expect(switches).toHaveLength(2);
+    switches[1]!.click(); await nextTick();
     expect(settings.worldSimulation).toBeUndefined();
     const save = Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存世界推演设置');
     save!.click(); await flushSave(nextTick);

@@ -1,8 +1,5 @@
 <template>
   <AcuPanel title="世界推演 Agent 设置" description="这里配置世界推演专用 Agent；挂载和编辑都只修改本地草稿，只有点击保存才会持久化。">
-    <AcuFormRow label="启用世界推演" hint="关闭时不会发起世界推演 AI 请求。">
-      <AcuToggle :model-value="draft.enabled" @update:model-value="draft.enabled = $event" />
-    </AcuFormRow>
     <div class="world-simulation-settings__numbers">
       <AcuFormRow v-for="field in numberFields" :key="field.key" :label="field.label" :hint="field.hint">
         <AcuInput type="number" :min="field.min" :max="field.max" :model-value="draft[field.key]" @update:model-value="draft[field.key] = asNumber($event)" />
@@ -92,7 +89,6 @@ import AcuToggle from './_lib/AcuToggle.vue';
 const scales: WorldSimulationScale_ACU[] = ['light', 'normal', 'deep'];
 const numberFields = [
   { key: 'joinWaitMs', label: '剧情推进等待（毫秒）', hint: '0 到 30000；只等待已存在的候选结算。', min: 0, max: 30000 },
-  { key: 'minFloorGap', label: '最小楼层间隔', hint: '至少 1。', min: 1 },
   { key: 'checkpointInterval', label: '检查点间隔', hint: '至少 1。', min: 1 },
   { key: 'maxTrackedEntities', label: '最大追踪实体', hint: '至少 1。', min: 1 },
 ] as const;

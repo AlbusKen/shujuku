@@ -3,7 +3,6 @@ import { buildDefaultWorldSimulationSettings_ACU, WORLD_SIMULATION_DEFAULT_BUDGE
 import { createWorldSimError_ACU, describeWorldEntityKind_ACU, describeWorldThreadStatus_ACU, describeWorldVisibility_ACU, isWorldEntity_ACU, isWorldEvent_ACU, isWorldStableId_ACU, isWorldStoryClock_ACU, isWorldThread_ACU, isWorldVisibility_ACU, type WorldSimulationErrorCode_ACU, type WorldStoryClock_ACU, type WorldThreadStatus_ACU } from '../../../src/service/simulation/model';
 
 const WORLD_SIMULATION_ERROR_CODES_ACU: Record<WorldSimulationErrorCode_ACU, true> = {
-  WORLD_SIM_GATE_FAILED: true,
   WORLD_SIM_PROTOCOL_INVALID: true,
   WORLD_SIM_STALE: true,
   WORLD_SIM_CONFLICT: true,
@@ -27,7 +26,7 @@ describe('world simulation model', () => {
     const second = buildDefaultWorldSimulationSettings_ACU();
     first.budgets.deep.maxSpecialistModelTurns = 1;
     expect(second.budgets.deep.maxSpecialistModelTurns).toBe(4);
-    expect(first).toMatchObject({ enabled: false, joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, minFloorGap: 1, checkpointInterval: 20, maxTrackedEntities: 12, visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true });
+    expect(first).toMatchObject({ joinWaitMs: WORLD_SIMULATION_MAX_JOIN_WAIT_MS_ACU, checkpointInterval: 20, maxTrackedEntities: 12, visibilityPolicy: 'agent', showHiddenInUi: false, toolsEnabled: true });
   });
 
   it('validates clock precision and visibility discriminants', () => {
@@ -72,7 +71,7 @@ describe('world simulation model', () => {
 
   it('creates every plan-defined error code without losing structured diagnostics', () => {
     const codes = Object.keys(WORLD_SIMULATION_ERROR_CODES_ACU) as WorldSimulationErrorCode_ACU[];
-    expect(codes).toHaveLength(11);
+    expect(codes).toHaveLength(10);
     for (const code of codes) {
       const error = createWorldSimError_ACU(code, 'protocol', '结构化原因', code === 'WORLD_SIM_PROTOCOL_INVALID', { code });
       expect(error).toEqual({ code, phase: 'protocol', message: '结构化原因', retryable: code === 'WORLD_SIM_PROTOCOL_INVALID', details: { code } });

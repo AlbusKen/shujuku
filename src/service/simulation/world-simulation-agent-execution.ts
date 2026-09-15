@@ -10,6 +10,7 @@ import type { AgentRequirementSnapshot_ACU } from '../agent-kernel/requirements'
 import type { AgentMaterialGrant_ACU } from '../agent-kernel/material-grants';
 import { createWorldSimError_ACU, WorldSimulationValidationError_ACU, type WorldSimulationSettings_ACU, type WorldStateSnapshot_ACU, type WorldStoryClock_ACU } from './model';
 import type { AgentKernelReadGateConfig_ACU } from '../agent-kernel/read-gate';
+import type { WorldSimulationPromptMaterialRefresher_ACU } from './world-simulation-prompt-material';
 
 export interface WorldSimulationManualAgentExecutionInput_ACU {
   runId: string; snapshot: WorldStateSnapshot_ACU; anchorMessageIndex: number; storyClock: WorldStoryClock_ACU;
@@ -20,6 +21,8 @@ export interface WorldSimulationManualAgentExecutionInput_ACU {
   summaryOverview?: string;
   requirementsSnapshot?: AgentRequirementSnapshot_ACU | null; pendingRequirementSourceIds?: readonly string[];
   masterCallsUsed?: number; history?: readonly WorldSimulationPromptMessage_ACU[]; isCurrent: () => boolean; userInstruction: string; readGateConfig: AgentKernelReadGateConfig_ACU;
+  /** 每次模型请求发送前重新读取正文/纪要材料；同一次请求内只调用一次。 */
+  material?: WorldSimulationPromptMaterialRefresher_ACU;
 }
 export interface WorldSimulationManualAgentExecutionDependencies_ACU {
   countTokens: (text: string) => Promise<number>;
@@ -30,7 +33,7 @@ function fail_ACU(code: 'WORLD_SIM_PROTOCOL_INVALID' | 'WORLD_SIM_BUDGET_EXCEEDE
 
 /** Main Agent selects specialists; only selected role-bound specialists may produce transactions. */
 export async function runWorldSimulationManualAgentExecution_ACU(input: WorldSimulationManualAgentExecutionInput_ACU, dependencies: WorldSimulationManualAgentExecutionDependencies_ACU): Promise<WorldSimulationManualAgentExecutionResult_ACU> {
-  const runSpecialists = async (plan: WorldSimulationDelegationPlan_ACU, grantsByAgent: ReadonlyMap<string, readonly AgentMaterialGrant_ACU[]>, specialistModelTurns: number, worldbook: AgentWorldbookSnapshot_ACU, legacy: boolean, shared: { tableData?: unknown; summaryOverview?: string }): Promise<WorldSimulationAgentLoopResult_ACU> => {
+  const runSpecialists = async (plan: WorldSimulationDelegationPlan_ACU, grantsByAgent: ReadonlyMap<string, readonly AgentMaterialGrant_ACU[]>, specialistModelTurns: number, worldbook: AgentWorldbookSnapshot_ACU, legacy: boolean, shared: { tableData?: unknown; summaryOverview?: string; storyContext?: AgentStoryContextSnapshot_ACU; material?: WorldSimulationPromptMaterialRefresher_ACU }): Promise<WorldSimulationAgentLoopResult_ACU> => {
     const agents = plan.delegations.map(item => findWorldSimulationAgent_ACU(item.agent)!);
     if (!agents.length) return { snapshot: input.snapshot, agentsRun: [], callsUsed: 0, readTokens: 0, transactions: [] };
     const instructions = new Map(plan.delegations.map(item => [item.agent, item.instruction]));
@@ -39,13 +42,13 @@ export async function runWorldSimulationManualAgentExecution_ACU(input: WorldSim
       snapshot: input.snapshot, anchorMessageIndex: input.anchorMessageIndex, storyClock: input.storyClock, isCurrent: input.isCurrent,
       scale: 'deep', budget: { ...input.settings.budgets.deep, maxSpecialistModelTurns: specialistModelTurns, maxDelegations: plan.delegations.length }, maxTrackedEntities: input.settings.maxTrackedEntities,
       readTexts: input.reads, readGateConfig: input.readGateConfig, contextTokens: 0, toolsEnabled: input.settings.toolsEnabled, agentPrompts: input.settings.agentPrompts, delegationInstructions: instructions,
-      storyContext: input.storyContext, tableData: shared.tableData, summaryOverview: shared.summaryOverview, userInstruction: input.userInstruction, agents, materialGrantsByAgent: grantsByAgent, readTextsByAgent: readsByAgent, requirementsSnapshot: input.requirementsSnapshot, worldbook, ...(legacy ? {} : { specialistRuntime: new WorldSimulationSpecialistRuntime_ACU() }), visibilityPolicy: input.settings.visibilityPolicy,
+      storyContext: shared.storyContext ?? input.storyContext, tableData: shared.tableData, summaryOverview: shared.summaryOverview, material: shared.material ?? input.material, userInstruction: input.userInstruction, agents, materialGrantsByAgent: grantsByAgent, readTextsByAgent: readsByAgent, requirementsSnapshot: input.requirementsSnapshot, worldbook, ...(legacy ? {} : { specialistRuntime: new WorldSimulationSpecialistRuntime_ACU() }), visibilityPolicy: input.settings.visibilityPolicy,
     }, { countTokens: dependencies.countTokens, runAgent: request => dependencies.runAgent({ source: `world-sim-agent:${request.agent.name}`, messages: request.messages, prompt: request.prompt }) });
   };
   const result = await new WorldSimulationDirectorRuntime_ACU().run({
     runId: input.runId, snapshot: input.snapshot, storyClock: input.storyClock, settings: input.settings, reads: input.reads,
     storyContext: input.storyContext, requirementsSnapshot: input.requirementsSnapshot, pendingRequirementSourceIds: input.pendingRequirementSourceIds,
-    masterCallsUsed: input.masterCallsUsed, history: input.history, isCurrent: input.isCurrent, userInstruction: input.userInstruction, tableData: input.tableData, summaryOverview: input.summaryOverview,
+    masterCallsUsed: input.masterCallsUsed, history: input.history, isCurrent: input.isCurrent, userInstruction: input.userInstruction, tableData: input.tableData, summaryOverview: input.summaryOverview, material: input.material,
   }, { runMaster: dependencies.runAgent, runSpecialists });
   if (result.action.kind === 'block') fail_ACU('WORLD_SIM_PROTOCOL_INVALID', `world-director 阻断本轮：${result.action.reason}`);
   return { action: result.action, plan: result.plan, loop: result.loop, grants: result.grants, history: result.history };
