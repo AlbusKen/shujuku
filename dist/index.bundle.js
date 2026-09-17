@@ -136612,6 +136612,70 @@ $CONTENT
         return validateLedger_ACU(raw, phase);
     }
 
+    const WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU = ['run_started', 'run_resumed', 'user_message', 'thought', 'main_action', 'protocol_retry', 'tool_read', 'delegation', 'stage_plan', 'handoff', 'finalize', 'block', 'run_failed', 'run_completed'];
+    const partitions_ACU = new Map();
+    const clean_ACU$1 = (value, limit) => { const text = String(value ?? '').replace(/[\r\n]+/g, ' ').trim(); return text.length <= limit ? text : `${text.slice(0, limit)}…`; };
+    function partition_ACU(chatIdentity) {
+        const key = chatIdentity.trim();
+        if (!key)
+            throw new Error('WORLD_SIMULATION_SESSION_CHAT_IDENTITY_REQUIRED');
+        let partition = partitions_ACU.get(key);
+        if (!partition) {
+            partition = { entries: [], nextId: 1, running: false, listeners: new Set() };
+            partitions_ACU.set(key, partition);
+        }
+        return partition;
+    }
+    function notify_ACU(partition) { for (const listener of partition.listeners) {
+        try {
+            listener();
+        }
+        catch { /* observer isolation */ }
+    } }
+    function beginWorldSimulationSessionRun_ACU(chatIdentity, label, detail = '', resume = false) {
+        partition_ACU(chatIdentity).running = true;
+        return logWorldSimulationSession_ACU(chatIdentity, { kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
+    }
+    function logWorldSimulationSession_ACU(chatIdentity, input) {
+        const partition = partition_ACU(chatIdentity);
+        const ok = input.ok !== false;
+        const id = partition.nextId++;
+        const at = typeof input.at === 'number' && Number.isFinite(input.at) && input.at >= 0 ? input.at : Date.now();
+        partition.entries.push({ id, at, kind: input.kind, title: clean_ACU$1(input.title, 300), detail: clean_ACU$1(input.detail, 2000), agentName: clean_ACU$1(input.agentName, 128), ok, status: input.status ?? (ok ? 'done' : 'failed') });
+        if (partition.entries.length > 300)
+            partition.entries = partition.entries.slice(-300);
+        if (['run_completed', 'run_failed', 'block'].includes(input.kind))
+            partition.running = false;
+        notify_ACU(partition);
+        return id;
+    }
+    function updateWorldSimulationSession_ACU(chatIdentity, id, patch) {
+        const partition = partition_ACU(chatIdentity);
+        const entry = partition.entries.find(item => item.id === id);
+        if (!entry)
+            return;
+        if (patch.title !== undefined)
+            entry.title = clean_ACU$1(patch.title, 300);
+        if (patch.detail !== undefined)
+            entry.detail = clean_ACU$1(patch.detail, 2000);
+        if (patch.ok !== undefined)
+            entry.ok = patch.ok;
+        entry.status = patch.status ?? (patch.ok === undefined ? entry.status : patch.ok ? 'done' : 'failed');
+        notify_ACU(partition);
+    }
+    function readWorldSimulationSessionLog_ACU(chatIdentity) { return partition_ACU(chatIdentity).entries.map(item => ({ ...item })); }
+    function hydrateWorldSimulationSessionLog_ACU(chatIdentity, items) { const partition = partition_ACU(chatIdentity); if (partition.entries.length)
+        return 0; for (const item of items)
+        logWorldSimulationSession_ACU(chatIdentity, item); partition.running = false; return items.length; }
+    function clearWorldSimulationSessionLog_ACU(chatIdentity, options = {}) { const partition = partition_ACU(chatIdentity); partition.entries = []; if (!options.keepRunning)
+        partition.running = false; notify_ACU(partition); }
+    /** 强制结束运行标记。异常路径（协议失败、API 异常）不会写 run_failed 事件，由终局兜底调用本函数，避免 UI 永远停在「正在工作」。返回是否确实结束了一次运行。 */
+    function endWorldSimulationSessionRun_ACU(chatIdentity) { const partition = partition_ACU(chatIdentity); if (!partition.running)
+        return false; partition.running = false; notify_ACU(partition); return true; }
+    function isWorldSimulationSessionRunning_ACU(chatIdentity) { return partition_ACU(chatIdentity).running; }
+    function subscribeWorldSimulationSessionLog_ACU(chatIdentity, listener) { const listeners = partition_ACU(chatIdentity).listeners; listeners.add(listener); return () => { listeners.delete(listener); }; }
+    function resetWorldSimulationSessionLogForTests_ACU() { partitions_ACU.clear(); }
+
     const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
     const WORLD_SIMULATION_CONVERSATION_FIELD_ACU = '_qrf_world_simulation_agent_chat';
     const WORLD_SIMULATION_MATERIALS_FIELD_ACU = '_qrf_world_simulation_agent_materials';
@@ -136621,6 +136685,8 @@ $CONTENT
     const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff'];
 
     const TEXT_LIMIT_ACU = 8000;
+    let sessionEventSequence_ACU = 0;
+    const conversationWriteQueues_ACU = new Map();
     function isRecord_ACU$6(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
@@ -136640,6 +136706,11 @@ $CONTENT
     function validateMessage_ACU(raw, path) {
         if (!isRecord_ACU$6(raw))
             reject_ACU$2(`${path} 必须是对象`, { path });
+        const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok']);
+        for (const key of Object.keys(raw)) {
+            if (!allowed.has(key))
+                reject_ACU$2(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
+        }
         const kind = raw.kind;
         if (typeof kind !== 'string' || !WORLD_SIMULATION_MESSAGE_KINDS_ACU.includes(kind)) {
             reject_ACU$2(`${path}.kind 非法`, { path: `${path}.kind` });
@@ -136654,6 +136725,28 @@ $CONTENT
         };
         if (raw.readKey !== undefined)
             message.readKey = requiredText_ACU$1(raw.readKey, `${path}.readKey`);
+        if (raw.eventKind !== undefined) {
+            const eventKind = requiredText_ACU$1(raw.eventKind, `${path}.eventKind`);
+            if (!WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU.includes(eventKind)) {
+                reject_ACU$2(`${path}.eventKind 非法`, { path: `${path}.eventKind` });
+            }
+            message.eventKind = eventKind;
+        }
+        if (raw.title !== undefined)
+            message.title = requiredText_ACU$1(raw.title, `${path}.title`);
+        if (raw.status !== undefined) {
+            if (raw.status !== 'running' && raw.status !== 'done' && raw.status !== 'failed') {
+                reject_ACU$2(`${path}.status 非法`, { path: `${path}.status` });
+            }
+            message.status = raw.status;
+        }
+        if (raw.agentName !== undefined)
+            message.agentName = requiredText_ACU$1(raw.agentName, `${path}.agentName`);
+        if (raw.ok !== undefined) {
+            if (typeof raw.ok !== 'boolean')
+                reject_ACU$2(`${path}.ok 必须是布尔值`, { path: `${path}.ok` });
+            message.ok = raw.ok;
+        }
         return message;
     }
     function validateCompaction_ACU(raw, path) {
@@ -136876,7 +136969,20 @@ $CONTENT
             ? text
             : `${text.slice(0, TEXT_LIMIT_ACU)}\n（本条内容超出 ${TEXT_LIMIT_ACU} 字上限，已截断）`;
     }
-    async function appendWorldSimulationConversationSegment_ACU(input, chat) {
+    async function serializeConversationWrite_ACU(chatIdentity, operation) {
+        const previous = conversationWriteQueues_ACU.get(chatIdentity) ?? Promise.resolve();
+        const current = previous.catch(() => undefined).then(() => operation());
+        const tail = current.then(() => undefined, () => undefined);
+        conversationWriteQueues_ACU.set(chatIdentity, tail);
+        try {
+            return await current;
+        }
+        finally {
+            if (conversationWriteQueues_ACU.get(chatIdentity) === tail)
+                conversationWriteQueues_ACU.delete(chatIdentity);
+        }
+    }
+    async function appendWorldSimulationConversationSegmentUnlocked_ACU(input, chat) {
         const usable = input.appends.filter(item => String(item.text ?? '').trim());
         if (usable.length === 0)
             return false;
@@ -136888,13 +136994,23 @@ $CONTENT
             const message = {
                 id: nextId++,
                 kind: item.kind,
-                text: item.kind === 'runtime' ? String(item.text) : truncateText_ACU(String(item.text)),
+                text: truncateText_ACU(String(item.text)),
                 digest: String(item.digest ?? ''),
                 turnKey: String(item.turnKey ?? ''),
                 at,
             };
             if (item.readKey)
                 message.readKey = item.readKey;
+            if (item.eventKind)
+                message.eventKind = item.eventKind;
+            if (item.title)
+                message.title = item.title;
+            if (item.status)
+                message.status = item.status;
+            if (item.agentName)
+                message.agentName = item.agentName;
+            if (item.ok !== undefined)
+                message.ok = item.ok;
             return message;
         });
         const hostMessage = messages[input.anchor.messageIndex];
@@ -136953,6 +137069,51 @@ $CONTENT
             throw error;
         }
         return true;
+    }
+    async function appendWorldSimulationConversationSegment_ACU(input, chat) {
+        return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => appendWorldSimulationConversationSegmentUnlocked_ACU(input, chat));
+    }
+    function conversationKindForSessionEvent_ACU(kind) {
+        if (kind === 'user_message')
+            return 'user';
+        if (kind === 'run_started' || kind === 'run_resumed')
+            return 'turn';
+        if (kind === 'tool_read')
+            return 'tool';
+        if (kind === 'handoff')
+            return 'handoff';
+        if (kind === 'protocol_retry' || kind === 'thought')
+            return 'runtime';
+        return 'agent';
+    }
+    /**
+     * 将已定格的会话卡片追加到楼层锚定会话。调用方应在 running 卡片转为 done/failed，
+     * 或产生终态事件时调用；eventKey 在同一 run 内必须稳定且唯一。
+     */
+    async function appendWorldSimulationSessionEvent_ACU(input, chat) {
+        const ok = input.event.ok !== false;
+        const status = input.event.status ?? (ok ? 'done' : 'failed');
+        const title = requiredText_ACU$1(input.event.title, 'event.title');
+        const eventKey = requiredText_ACU$1(input.eventKey, 'eventKey');
+        return appendWorldSimulationConversationSegment_ACU({
+            anchor: input.anchor,
+            segmentId: `session:${input.runId}:${eventKey}:${Date.now().toString(36)}:${++sessionEventSequence_ACU}`,
+            runId: input.runId,
+            taskId: input.taskId,
+            stageId: input.stageId,
+            stageRevision: input.stageRevision,
+            appends: [{
+                    kind: conversationKindForSessionEvent_ACU(input.event.kind),
+                    text: String(input.event.detail || title),
+                    digest: title,
+                    turnKey: `${input.runId}:${eventKey}`,
+                    eventKind: input.event.kind,
+                    title,
+                    status,
+                    agentName: input.event.agentName,
+                    ok,
+                }],
+        }, chat);
     }
 
     const WORLD_SIMULATION_EVIDENCE_STATUSES_ACU = ['ok', 'empty', 'failed', 'truncated', 'dependency_unavailable'];
@@ -137089,68 +137250,6 @@ $CONTENT
         };
         await writeWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_MATERIALS_FIELD_ACU, anchor, snapshot, chat);
     }
-
-    const partitions_ACU = new Map();
-    const clean_ACU$1 = (value, limit) => { const text = String(value ?? '').replace(/[\r\n]+/g, ' ').trim(); return text.length <= limit ? text : `${text.slice(0, limit)}…`; };
-    function partition_ACU(chatIdentity) {
-        const key = chatIdentity.trim();
-        if (!key)
-            throw new Error('WORLD_SIMULATION_SESSION_CHAT_IDENTITY_REQUIRED');
-        let partition = partitions_ACU.get(key);
-        if (!partition) {
-            partition = { entries: [], nextId: 1, running: false, listeners: new Set() };
-            partitions_ACU.set(key, partition);
-        }
-        return partition;
-    }
-    function notify_ACU(partition) { for (const listener of partition.listeners) {
-        try {
-            listener();
-        }
-        catch { /* observer isolation */ }
-    } }
-    function beginWorldSimulationSessionRun_ACU(chatIdentity, label, detail = '', resume = false) {
-        partition_ACU(chatIdentity).running = true;
-        logWorldSimulationSession_ACU(chatIdentity, { kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
-    }
-    function logWorldSimulationSession_ACU(chatIdentity, input) {
-        const partition = partition_ACU(chatIdentity);
-        const ok = input.ok !== false;
-        const id = partition.nextId++;
-        partition.entries.push({ id, at: Date.now(), kind: input.kind, title: clean_ACU$1(input.title, 300), detail: clean_ACU$1(input.detail, 2000), agentName: clean_ACU$1(input.agentName, 128), ok, status: input.status ?? (ok ? 'done' : 'failed') });
-        if (partition.entries.length > 300)
-            partition.entries = partition.entries.slice(-300);
-        if (['run_completed', 'run_failed', 'block'].includes(input.kind))
-            partition.running = false;
-        notify_ACU(partition);
-        return id;
-    }
-    function updateWorldSimulationSession_ACU(chatIdentity, id, patch) {
-        const partition = partition_ACU(chatIdentity);
-        const entry = partition.entries.find(item => item.id === id);
-        if (!entry)
-            return;
-        if (patch.title !== undefined)
-            entry.title = clean_ACU$1(patch.title, 300);
-        if (patch.detail !== undefined)
-            entry.detail = clean_ACU$1(patch.detail, 2000);
-        if (patch.ok !== undefined)
-            entry.ok = patch.ok;
-        entry.status = patch.status ?? (patch.ok === undefined ? entry.status : patch.ok ? 'done' : 'failed');
-        notify_ACU(partition);
-    }
-    function readWorldSimulationSessionLog_ACU(chatIdentity) { return partition_ACU(chatIdentity).entries.map(item => ({ ...item })); }
-    function hydrateWorldSimulationSessionLog_ACU(chatIdentity, items) { const partition = partition_ACU(chatIdentity); if (partition.entries.length)
-        return 0; for (const item of items)
-        logWorldSimulationSession_ACU(chatIdentity, item); partition.running = false; return items.length; }
-    function clearWorldSimulationSessionLog_ACU(chatIdentity, options = {}) { const partition = partition_ACU(chatIdentity); partition.entries = []; if (!options.keepRunning)
-        partition.running = false; notify_ACU(partition); }
-    /** 强制结束运行标记。异常路径（协议失败、API 异常）不会写 run_failed 事件，由终局兜底调用本函数，避免 UI 永远停在「正在工作」。返回是否确实结束了一次运行。 */
-    function endWorldSimulationSessionRun_ACU(chatIdentity) { const partition = partition_ACU(chatIdentity); if (!partition.running)
-        return false; partition.running = false; notify_ACU(partition); return true; }
-    function isWorldSimulationSessionRunning_ACU(chatIdentity) { return partition_ACU(chatIdentity).running; }
-    function subscribeWorldSimulationSessionLog_ACU(chatIdentity, listener) { const listeners = partition_ACU(chatIdentity).listeners; listeners.add(listener); return () => { listeners.delete(listener); }; }
-    function resetWorldSimulationSessionLogForTests_ACU() { partitions_ACU.clear(); }
 
     const WORLD_SIMULATION_HISTORY_EMERGENCY_FACTOR_ACU = 1.25;
     async function countWorldSimulationTokens_ACU(text) {
@@ -138050,7 +138149,19 @@ $CONTENT
             const readGateState = createWorldSimulationReadGateState_ACU();
             const toolUsage = { readsUsed: 0 };
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
-            beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
+            const persistEntry = async (entryId, eventKey) => {
+                if (!input.persistSessionEvent)
+                    return;
+                const entry = readWorldSimulationSessionLog_ACU(input.identity.chatIdentity).find(item => item.id === entryId);
+                if (!entry)
+                    return;
+                await input.persistSessionEvent(eventKey, {
+                    kind: entry.kind, title: entry.title, detail: entry.detail,
+                    agentName: entry.agentName, ok: entry.ok, status: entry.status,
+                });
+            };
+            const runEntryId = beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
+            await persistEntry(runEntryId, resumed ? 'run-resumed' : 'run-started');
             const persist = (nextIteration, reviewerFeedback = '') => {
                 const unique = uniqueCandidates_ACU(candidates);
                 saveWorldSimulationRunState_ACU(input.identity.chatIdentity, {
@@ -138089,12 +138200,17 @@ $CONTENT
                 }
                 catch (error) {
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: compact_ACU(error), ok: false, status: 'failed' });
+                    await persistEntry(mainEntryId, `main-${iteration}-failed`);
+                    const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '主 Agent 请求失败', detail: compact_ACU(error), agentName: director, ok: false });
+                    await persistEntry(failedId, `run-failed-main-${iteration}`);
                     throw error;
                 }
                 if (sent.status === 'rejected') {
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: sent.reason, ok: false, status: 'failed' });
+                    await persistEntry(mainEntryId, `main-${iteration}-rejected`);
                     persist(iteration);
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '最终请求超出 Token 门禁', detail: sent.reason, agentName: director, ok: false });
+                    const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '最终请求超出 Token 门禁', detail: sent.reason, agentName: director, ok: false });
+                    await persistEntry(failedId, `run-failed-token-${iteration}`);
                     throw new Error(sent.reason);
                 }
                 const raw = String(sent.response ?? '');
@@ -138106,15 +138222,18 @@ $CONTENT
                 catch (error) {
                     const failure = recordWorldSimulationProtocolFailure_ACU(protocolRepair, error);
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮协议未通过`, detail: `${failure.issue.reasonCode} ${failure.issue.path}`, ok: false, status: 'failed' });
+                    await persistEntry(mainEntryId, `main-${iteration}-protocol-failed`);
                     if (!failure.retry) {
                         persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
                         throw error;
                     }
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate) });
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
+                    const retryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
+                    await persistEntry(retryId, `main-${iteration}-protocol-retry`);
                     continue;
                 }
                 updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 动作：${action.kind}`, detail: `第 ${iteration} 轮决策完成`, ok: true, status: 'done' });
+                await persistEntry(mainEntryId, `main-${iteration}-done`);
                 if (action.kind === 'read' || action.kind === 'search' || action.kind === 'tools') {
                     const calls = action.kind === 'tools' ? action.calls : [action];
                     const toolEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
@@ -138140,9 +138259,11 @@ $CONTENT
                             detail: results.map(result => `${result.kind}:${result.status} ${result.address} ${result.summary}`).join('；'),
                             ok: toolOk, status: toolOk ? 'done' : 'failed',
                         });
+                        await persistEntry(toolEntryId, `tool-${iteration}`);
                     }
                     catch (error) {
                         updateWorldSimulationSession_ACU(input.identity.chatIdentity, toolEntryId, { title: '资料读取失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+                        await persistEntry(toolEntryId, `tool-${iteration}-failed`);
                         throw error;
                     }
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
@@ -138181,7 +138302,9 @@ $CONTENT
                         if (outcome.candidate)
                             candidates.push(outcome.candidate);
                         const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
-                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, runningEntries.get(accepted[index]), { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
+                        const entryId = runningEntries.get(accepted[index]);
+                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
+                        await persistEntry(entryId, `delegation-${iteration}-${index + 1}`);
                     }
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) });
                     persist(iteration + 1);
@@ -138189,7 +138312,8 @@ $CONTENT
                 }
                 if (action.kind === 'block') {
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: action.reason, detail: action.unresolved.join('；'), agentName: director, ok: false });
+                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: action.reason, detail: action.unresolved.join('；'), agentName: director, ok: false });
+                    await persistEntry(blockId, `block-${iteration}`);
                     return { outcome: 'blocked', summary: action.reason, unresolved: action.unresolved, outcomes };
                 }
                 if (action.outcome === 'no_change') {
@@ -138200,7 +138324,8 @@ $CONTENT
                         continue;
                     }
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: '世界推演无变化', detail: action.summary, agentName: director });
+                    const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: '世界推演无变化', detail: action.summary, agentName: director });
+                    await persistEntry(completedId, 'run-completed-no-change');
                     return { outcome: 'no_change', summary: action.summary, outcomes };
                 }
                 const available = uniqueCandidates_ACU(candidates);
@@ -138214,9 +138339,11 @@ $CONTENT
                 try {
                     reviewer = await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
+                    await persistEntry(reviewerEntryId, `causality-review-${iteration}`);
                 }
                 catch (error) {
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: '因果审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+                    await persistEntry(reviewerEntryId, `causality-review-${iteration}-failed`);
                     persist(iteration + 1, compact_ACU(error));
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `reviewer 未完成：${compact_ACU(error)}。请继续修正候选或输出 blocked。` });
                     continue;
@@ -138231,7 +138358,8 @@ $CONTENT
                 if (reviewer.verdict === 'reject' || !acceptedCandidates.length || reviewer.findings.some(item => item.severity === 'blocking')) {
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
                     const unresolved = reviewer.findings.filter(item => item.severity !== 'minor').map(item => `${item.reasonCode}:${item.path}`);
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
+                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
+                    await persistEntry(blockId, `block-reviewer-${iteration}`);
                     return { outcome: 'blocked', summary: reviewer.summary, unresolved: unresolved.length ? unresolved : ['reviewer rejected all candidates'], outcomes };
                 }
                 const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
@@ -138248,12 +138376,16 @@ $CONTENT
                     });
                     const guidanceOk = guidanceOutcome.status === 'candidate' || guidanceOutcome.status === 'no_change';
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: `guidance 审核：${guidanceOutcome.status}`, detail: guidanceOutcome.summary, ok: guidanceOk, status: guidanceOk ? 'done' : 'failed' });
+                    await persistEntry(guidanceEntryId, `guidance-review-${iteration}`);
                 }
                 catch (error) {
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: 'guidance 审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+                    await persistEntry(guidanceEntryId, `guidance-review-${iteration}-failed`);
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
                     endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
                     const message = compact_ACU(error);
+                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 未完成', detail: message, agentName: 'guidance-reviewer', ok: false });
+                    await persistEntry(blockId, `block-guidance-${iteration}`);
                     return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
                 }
                 outcomes.push(guidanceOutcome);
@@ -138261,17 +138393,21 @@ $CONTENT
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
                     endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
                     const unresolved = guidanceOutcome.unresolved?.length ? guidanceOutcome.unresolved : [guidanceOutcome.reasonCode ?? guidanceOutcome.summary];
+                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance 审核阻断', detail: guidanceOutcome.summary, agentName: 'guidance-reviewer', ok: false });
+                    await persistEntry(blockId, `block-guidance-outcome-${iteration}`);
                     return { outcome: 'blocked', summary: guidanceOutcome.summary, unresolved, outcomes };
                 }
                 const finalCandidates = guidanceOutcome.candidate ? [...acceptedCandidates, guidanceOutcome.candidate] : acceptedCandidates;
                 const evidenceRefs = [...new Set([...causalEvidenceRefs, ...guidanceOutcome.evidenceRefs])];
                 clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
                 const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs, reviewer };
-                logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
+                const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
+                await persistEntry(completedId, 'run-completed-commit');
                 return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
             }
             persist(input.settings.agentRunBudget.maxIterations, 'iteration budget exhausted');
-            logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '迭代预算耗尽', detail: `maxIterations=${input.settings.agentRunBudget.maxIterations}`, agentName: director, ok: false });
+            const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '迭代预算耗尽', detail: `maxIterations=${input.settings.agentRunBudget.maxIterations}`, agentName: director, ok: false });
+            await persistEntry(blockId, 'block-iteration-budget');
             return { outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽', unresolved: ['iteration budget exhausted'], outcomes };
         }
     }
@@ -138987,6 +139123,18 @@ $CONTENT
         }
         async plan(input) {
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, 'world-stage-planner', 'agent_loop', this.dependencies.apiPreset);
+            let protocolEventSequence = 0;
+            const persistEntry = async (entryId, eventKey, stageRevision) => {
+                if (!this.dependencies.chatIdentity || !this.dependencies.persistSessionEvent)
+                    return;
+                const entry = readWorldSimulationSessionLog_ACU(this.dependencies.chatIdentity).find(item => item.id === entryId);
+                if (!entry)
+                    return;
+                await this.dependencies.persistSessionEvent(eventKey, {
+                    kind: entry.kind, title: entry.title, detail: entry.detail,
+                    agentName: entry.agentName, ok: entry.ok, status: entry.status,
+                }, stageRevision);
+            };
             const entryId = this.dependencies.chatIdentity
                 ? logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
                     kind: 'stage_plan',
@@ -139011,36 +139159,40 @@ $CONTENT
                     if (sent.status === 'rejected')
                         throw new Error(sent.reason);
                     const raw = String(sent.response ?? '');
+                    let parsed;
                     try {
-                        const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
+                        parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
                         if (parsed.action !== 'plan')
                             throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
-                        const revision = 1;
-                        if (this.dependencies.chatIdentity && entryId !== null) {
-                            updateWorldSimulationSession_ACU(this.dependencies.chatIdentity, entryId, {
-                                title: parsed.plan.title,
-                                detail: parsed.summary,
-                                ok: true,
-                                status: 'done',
-                            });
-                        }
-                        return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: 'initial', replanInstruction: '', frozen: false, plan: parsed.plan } };
                     }
                     catch (error) {
                         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
                         if (this.dependencies.chatIdentity) {
-                            logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+                            const retryEntryId = logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
                                 kind: 'protocol_retry',
                                 title: failure.retry ? '阶段规划协议修正' : '阶段规划输出被拒绝',
                                 detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`,
                                 agentName: 'world-stage-planner',
                                 ok: false,
                             });
+                            await persistEntry(retryEntryId, `stage-plan-protocol-${++protocolEventSequence}`, 0);
                         }
                         if (!failure.retry)
                             throw error;
                         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` });
+                        continue;
                     }
+                    const revision = 1;
+                    if (this.dependencies.chatIdentity && entryId !== null) {
+                        updateWorldSimulationSession_ACU(this.dependencies.chatIdentity, entryId, {
+                            title: parsed.plan.title,
+                            detail: parsed.summary,
+                            ok: true,
+                            status: 'done',
+                        });
+                        await persistEntry(entryId, 'stage-plan', revision);
+                    }
+                    return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: 'initial', replanInstruction: '', frozen: false, plan: parsed.plan } };
                 }
             }
             catch (error) {
@@ -139051,6 +139203,7 @@ $CONTENT
                         ok: false,
                         status: 'failed',
                     });
+                    await persistEntry(entryId, 'stage-plan-failed', 0);
                 }
                 throw error;
             }
@@ -139518,9 +139671,19 @@ $CONTENT
                 const baseContext = buildPromptContext_ACU({
                     identity, anchor, instruction, envelope, stagePlan: {}, registry, chat,
                 });
+                const persistSessionEvent = (eventKey, event, stageRevision = identity.stageRevision) => appendWorldSimulationSessionEvent_ACU({
+                    anchor,
+                    runId: identity.runId,
+                    taskId: identity.taskId,
+                    stageId: identity.stageId,
+                    stageRevision,
+                    eventKey,
+                    event,
+                }, getChatArray_ACU());
                 const planner = new WorldSimulationStagePlanner_ACU({
                     invoke: (messages, preset) => invokeWorldSimulationAgent_ACU('world-stage-planner', messages, preset, identity, signal),
                     chatIdentity: identity.chatIdentity,
+                    persistSessionEvent,
                 });
                 const plannedRevision = (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
                 const promptContext = buildPromptContext_ACU({
@@ -139556,6 +139719,7 @@ $CONTENT
                                 promptContext: { ...promptContext, task: store.read().task, worldStagePlan: plannedRevision.plan },
                                 registry,
                                 tools,
+                                persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
                             }),
                         });
                         return engine.run({ identity: runIdentity });
@@ -179571,8 +179735,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n/* 与 ContinuationSessionFeed 保持同一份样式：纵向列表用 flex 列而不是 grid（容器带 max-height 时\n   grid 会把行压缩到最小贡献，卡片会被纵向压扁成一条条细线）；flex 列 + 子项 flex:none 保证\n   每个条目保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-756b2e56] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-756b2e56] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-756b2e56] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-756b2e56] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-756b2e56]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\n\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-756b2e56] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-756b2e56]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-756b2e56] { flex: none; padding:1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-756b2e56] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-756b2e56] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-756b2e56] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-756b2e56] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-756b2e56] { display: block; margin: 3px 0 0; text-align: right;\n}\n\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-756b2e56] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-756b2e56] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-756b2e56] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\n\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-756b2e56] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-756b2e56 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-756b2e56], .acu-v2-session-feed__card--stage_plan[data-v-756b2e56], .acu-v2-session-feed__card--protocol_retry[data-v-756b2e56], .acu-v2-session-feed__card--tool_read[data-v-756b2e56] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-756b2e56], .acu-v2-session-feed__card--run_completed[data-v-756b2e56] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-756b2e56] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-756b2e56] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-756b2e56] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-756b2e56] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-756b2e56] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-756b2e56] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-756b2e56] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-756b2e56] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-756b2e56] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-756b2e56 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-756b2e56] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-756b2e56] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-756b2e56] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-756b2e56] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-756b2e56] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-756b2e56] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-756b2e56] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-756b2e56] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-756b2e56] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-756b2e56 1.1s ease-in-out infinite;\n}\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-756b2e56] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-756b2e56], .acu-v2-session-feed__card--stage_plan[data-v-756b2e56], .acu-v2-session-feed__card--protocol_retry[data-v-756b2e56], .acu-v2-session-feed__card--tool_read[data-v-756b2e56] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-756b2e56] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-756b2e56] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-756b2e56] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-756b2e56] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-756b2e56 {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-756b2e56 {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-756b2e56 {\nto { transform: rotate(360deg);\n}\n}\n", "src/presentation-v2/components/WorldSimulationSessionFeed.vue#style-0-756b2e56");
-    var WorldSimulationSessionFeed_vue_vue_type_style_index_0_scoped_756b2e56_lang = null;
+    injectSfcStyle("\n/* 与 ContinuationSessionFeed 保持同一份样式：纵向列表用 flex 列而不是 grid（容器带 max-height 时\n   grid 会把行压缩到最小贡献，卡片会被纵向压扁成一条条细线）；flex 列 + 子项 flex:none 保证\n   每个条目保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-54c94f83] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-54c94f83] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-54c94f83] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-54c94f83] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-54c94f83]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\n\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-54c94f83] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-54c94f83]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-54c94f83] { flex: none; padding:1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-54c94f83] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-54c94f83] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-54c94f83] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-54c94f83] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-54c94f83] { display: block; margin: 3px 0 0; text-align: right;\n}\n\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-54c94f83] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-54c94f83] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-54c94f83] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\n\n/* 协议修正是内部恢复信息，默认只保留一行弱提示；用户主动展开时才显示诊断片段。 */\n.acu-v2-session-feed__protocol[data-v-54c94f83] { margin-left: 16px; padding: 3px 8px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__protocol-summary[data-v-54c94f83] { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style-position: inside;\n}\n.acu-v2-session-feed__protocol-detail[data-v-54c94f83] { margin: 4px 0 0 16px; color: var(--acu-text-3); white-space: pre-wrap; word-break: break-word;\n}\n\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-54c94f83] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-54c94f83 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-54c94f83], .acu-v2-session-feed__card--stage_plan[data-v-54c94f83], .acu-v2-session-feed__card--tool_read[data-v-54c94f83] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-54c94f83], .acu-v2-session-feed__card--run_completed[data-v-54c94f83] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-54c94f83] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-54c94f83] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-54c94f83] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-54c94f83] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-54c94f83] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-54c94f83] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-54c94f83] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-54c94f83] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-54c94f83] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-54c94f83 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-54c94f83] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-54c94f83] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-54c94f83] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-54c94f83] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-54c94f83] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-54c94f83] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-54c94f83] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-54c94f83] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-54c94f83] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-54c94f83 1.1s ease-in-out infinite;\n}\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-54c94f83] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__protocol[data-v-54c94f83] { margin-left: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-54c94f83], .acu-v2-session-feed__card--stage_plan[data-v-54c94f83], .acu-v2-session-feed__card--tool_read[data-v-54c94f83] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-54c94f83] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-54c94f83] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-54c94f83] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-54c94f83] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-54c94f83 {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-54c94f83 {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-54c94f83 {\nto { transform: rotate(360deg);\n}\n}\n", "src/presentation-v2/components/WorldSimulationSessionFeed.vue#style-0-54c94f83");
+    var WorldSimulationSessionFeed_vue_vue_type_style_index_0_scoped_54c94f83_lang = null;
 
     const _hoisted_1$x = {
 	ref: "feedElement",
@@ -179593,26 +179757,33 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$h = { class: "acu-v2-session-feed__user-bubble" };
     const _hoisted_9$f = { class: "acu-v2-session-feed__user-text" };
     const _hoisted_10$e = { class: "acu-v2-session-feed__time" };
-    const _hoisted_11$e = { class: "acu-v2-session-feed__thought" };
-    const _hoisted_12$d = { class: "acu-v2-session-feed__thought-label" };
-    const _hoisted_13$b = {
+    const _hoisted_11$e = { class: "acu-v2-session-feed__protocol" };
+    const _hoisted_12$d = { class: "acu-v2-session-feed__protocol-summary" };
+    const _hoisted_13$b = { class: "acu-v2-session-feed__time" };
+    const _hoisted_14$b = {
+	key: 0,
+	class: "acu-v2-session-feed__protocol-detail"
+    };
+    const _hoisted_15$a = { class: "acu-v2-session-feed__thought" };
+    const _hoisted_16$a = { class: "acu-v2-session-feed__thought-label" };
+    const _hoisted_17$8 = {
 	key: 0,
 	class: "acu-v2-session-feed__thought-text"
     };
-    const _hoisted_14$b = ["onClick"];
-    const _hoisted_15$a = {
+    const _hoisted_18$8 = ["onClick"];
+    const _hoisted_19$8 = {
 	key: 0,
 	class: "acu-v2-session-feed__spinner"
     };
-    const _hoisted_16$a = { class: "acu-v2-session-feed__badge" };
-    const _hoisted_17$8 = { class: "acu-v2-session-feed__title" };
-    const _hoisted_18$8 = { class: "acu-v2-session-feed__time" };
-    const _hoisted_19$8 = ["onClick"];
-    const _hoisted_20$7 = {
+    const _hoisted_20$7 = { class: "acu-v2-session-feed__badge" };
+    const _hoisted_21$7 = { class: "acu-v2-session-feed__title" };
+    const _hoisted_22$5 = { class: "acu-v2-session-feed__time" };
+    const _hoisted_23$4 = ["onClick"];
+    const _hoisted_24$4 = {
 	key: 1,
 	class: "acu-v2-session-feed__detail"
     };
-    const _hoisted_21$7 = {
+    const _hoisted_25$4 = {
 	key: 2,
 	class: "acu-v2-session-feed__running"
     };
@@ -179681,18 +179852,42 @@ Expected function or array of functions, received type ${typeof value}.`
 							)])])],
 							2112
 							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
-						)) : entry.kind === "thought" ? (openBlock(), createElementBlock(
+						)) : entry.kind === "protocol_retry" ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 2 },
-							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_11$e, [createBaseVNode(
+							[createCommentVNode(" 内部过程：协议修正默认收敛为单行提示，避免与主流程卡片并列。 "), createBaseVNode("details", _hoisted_11$e, [createBaseVNode("summary", _hoisted_12$d, [_cache[0] || (_cache[0] = createBaseVNode(
 								"span",
-								_hoisted_12$d,
+								null,
+								"已自动修正一次模型输出",
+								-1
+								/* CACHED */
+							)), createBaseVNode(
+								"span",
+								_hoisted_13$b,
+								toDisplayString($setup.formatTime(entry.at)),
+								1
+								/* TEXT */
+							)]), entry.detail ? (openBlock(), createElementBlock(
+								"p",
+								_hoisted_14$b,
+								toDisplayString(entry.title) + "：" + toDisplayString(entry.detail),
+								1
+								/* TEXT */
+							)) : createCommentVNode("v-if", true)])],
+							2112
+							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
+						)) : entry.kind === "thought" ? (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 3 },
+							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_15$a, [createBaseVNode(
+								"span",
+								_hoisted_16$a,
 								toDisplayString(entry.title),
 								1
 								/* TEXT */
 							), entry.detail ? (openBlock(), createElementBlock(
 								"p",
-								_hoisted_13$b,
+								_hoisted_17$8,
 								toDisplayString(entry.detail),
 								1
 								/* TEXT */
@@ -179701,7 +179896,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
 						)) : (openBlock(), createElementBlock(
 							Fragment,
-							{ key: 3 },
+							{ key: 4 },
 							[createCommentVNode(" 工具调用卡片：取证 / 派工 / 阶段计划 / 交付 / 终态 "), createBaseVNode(
 								"div",
 								{ class: normalizeClass(["acu-v2-session-feed__card", [`acu-v2-session-feed__card--${entry.kind}`, `acu-v2-session-feed__card--${entry.status}`]]) },
@@ -179714,7 +179909,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										createBaseVNode(
 											"span",
 											{ class: normalizeClass(["acu-v2-session-feed__status", `acu-v2-session-feed__status--${entry.status}`]) },
-											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$a)) : entry.status === "failed" ? (openBlock(), createElementBlock(
+											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_19$8)) : entry.status === "failed" ? (openBlock(), createElementBlock(
 												Fragment,
 												{ key: 1 },
 												[createTextVNode("✕")],
@@ -179732,21 +179927,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_16$a,
+											_hoisted_20$7,
 											toDisplayString($setup.kindLabel(entry)),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_17$8,
+											_hoisted_21$7,
 											toDisplayString(entry.title),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_18$8,
+											_hoisted_22$5,
 											toDisplayString($setup.formatTime(entry.at)),
 											1
 											/* TEXT */
@@ -179761,15 +179956,15 @@ Expected function or array of functions, received type ${typeof value}.`
 											2
 											/* CLASS */
 										)) : createCommentVNode("v-if", true)
-									], 8, _hoisted_14$b),
+									], 8, _hoisted_18$8),
 									entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
 										key: 0,
 										class: "acu-v2-session-feed__preview",
 										onClick: ($event) => $setup.toggle(entry)
-									}, toDisplayString(entry.detail), 9, _hoisted_19$8)) : createCommentVNode("v-if", true),
+									}, toDisplayString(entry.detail), 9, _hoisted_23$4)) : createCommentVNode("v-if", true),
 									entry.detail && $setup.isExpanded(entry) ? (openBlock(), createElementBlock(
 										"p",
-										_hoisted_20$7,
+										_hoisted_24$4,
 										toDisplayString(entry.detail),
 										1
 										/* TEXT */
@@ -179788,7 +179983,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			$props.running ? (openBlock(), createElementBlock("div", _hoisted_21$7, [..._cache[0] || (_cache[0] = [createBaseVNode(
+			$props.running ? (openBlock(), createElementBlock("div", _hoisted_25$4, [..._cache[1] || (_cache[1] = [createBaseVNode(
 				"span",
 				{ class: "acu-v2-session-feed__pulse" },
 				null,
@@ -179804,7 +179999,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var WorldSimulationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-756b2e56"]]);
+    var WorldSimulationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-54c94f83"]]);
 
     var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationChat',
@@ -181028,6 +181223,34 @@ Expected function or array of functions, received type ${typeof value}.`
     function cloneSettings_ACU(settings) {
         return JSON.parse(JSON.stringify(settings));
     }
+    function projectWorldSimulationSessionFromConversation_ACU(messages) {
+        return messages
+            .filter(message => message.kind !== 'handoff')
+            .map(message => {
+            const persistedKind = typeof message.eventKind === 'string'
+                && WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU.includes(message.eventKind)
+                ? message.eventKind
+                : null;
+            const fallbackKind = message.kind === 'user'
+                ? 'user_message'
+                : message.kind === 'turn'
+                    ? 'run_started'
+                    : message.kind === 'agent'
+                        ? 'main_action'
+                        : message.kind === 'runtime'
+                            ? 'thought'
+                            : 'tool_read';
+            return {
+                kind: persistedKind ?? fallbackKind,
+                title: message.title || message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
+                detail: message.text,
+                agentName: message.agentName,
+                ok: message.ok,
+                status: message.status,
+                at: message.at,
+            };
+        });
+    }
     function useWorldSimulationRuntime() {
         const runtime = getWorldSimulationRuntime_ACU();
         const snapshot = ref(null);
@@ -181046,16 +181269,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const chatIdentity = next.session.chatIdentity;
             if (!chatIdentity || next.session.entries.length || isWorldSimulationSessionRunning_ACU(chatIdentity))
                 return;
-            const projected = next.conversation.messages
-                .filter(message => message.kind !== 'handoff')
-                .map(message => ({
-                kind: (message.kind === 'user' ? 'user_message'
-                    : message.kind === 'turn' ? 'run_started'
-                        : message.kind === 'agent' ? 'main_action'
-                            : 'tool_read'),
-                title: message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
-                detail: message.text,
-            }));
+            const projected = projectWorldSimulationSessionFromConversation_ACU(next.conversation.messages);
             if (projected.length)
                 hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
         }

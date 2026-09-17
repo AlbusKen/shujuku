@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU } from '../../../../src/service/simulation/agent/agent-model';
-import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from '../../../../src/service/simulation/agent/agent-conversation-store';
+import { appendWorldSimulationConversationSegment_ACU, appendWorldSimulationSessionEvent_ACU, readWorldSimulationConversation_ACU } from '../../../../src/service/simulation/agent/agent-conversation-store';
 import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simulation/simulation-store';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 
@@ -98,5 +98,61 @@ describe('world simulation conversation segments', () => {
     }, chat)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_SNAPSHOT_INVALID' } });
     expect(chat[0][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(damaged);
     expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('持久化会话事件元数据并可完整读取', async () => {
+    const chat: any[] = [{ message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-events', getCurrentChatId: () => 'chat-events', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+
+    await appendWorldSimulationSessionEvent_ACU({
+      anchor,
+      runId: 'run-events',
+      taskId: 'task-events',
+      stageId: 'stage-events',
+      stageRevision: 2,
+      eventKey: 'tool-1',
+      event: {
+        kind: 'tool_read',
+        title: '资料读取部分失败',
+        detail: 'ledger:current unavailable',
+        agentName: 'world-director',
+        ok: false,
+        status: 'failed',
+      },
+    }, chat);
+
+    expect(readWorldSimulationConversation_ACU(chat).messages).toMatchObject([{
+      kind: 'tool',
+      text: 'ledger:current unavailable',
+      digest: '资料读取部分失败',
+      eventKind: 'tool_read',
+      title: '资料读取部分失败',
+      agentName: 'world-director',
+      ok: false,
+      status: 'failed',
+    }]);
+  });
+
+  it('同一聊天的并发追加被串行化且不会丢段或复用消息 ID', async () => {
+    const chat: any[] = [{ message_id: 8, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-serial', getCurrentChatId: () => 'chat-serial', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const append = (index: number) => appendWorldSimulationConversationSegment_ACU({
+      anchor,
+      segmentId: `seg-${index}`,
+      runId: 'run-serial',
+      taskId: 'task-serial',
+      stageId: 'stage-serial',
+      stageRevision: 1,
+      appends: [{ kind: 'agent' as const, text: `event-${index}` }],
+    }, chat);
+
+    await Promise.all([append(1), append(2), append(3)]);
+
+    const messages = readWorldSimulationConversation_ACU(chat).messages;
+    expect(messages.map(item => item.text)).toEqual(['event-1', 'event-2', 'event-3']);
+    expect(new Set(messages.map(item => item.id)).size).toBe(3);
+    expect(saveChat).toHaveBeenCalledTimes(3);
   });
 });

@@ -8,11 +8,12 @@ import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPreset
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
+import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
 import { clearWorldSimulationRunState_ACU, readWorldSimulationRunState_ACU, saveWorldSimulationRunState_ACU } from './agent-run-cache';
-import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
+import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -30,6 +31,7 @@ export interface WorldSimulationMainLoopInput_ACU {
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
+  persistSessionEvent?: (eventKey: string, event: WorldSimulationSessionInput_ACU) => Promise<unknown>;
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -78,7 +80,20 @@ export class WorldSimulationMainLoop_ACU {
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
-    beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
+    const persistEntry = async (entryId: number, eventKey: string): Promise<void> => {
+      if (!input.persistSessionEvent) return;
+      const entry = readWorldSimulationSessionLog_ACU(input.identity.chatIdentity).find(item => item.id === entryId);
+      if (!entry) return;
+      await input.persistSessionEvent(eventKey, {
+        kind: entry.kind, title: entry.title, detail: entry.detail,
+        agentName: entry.agentName, ok: entry.ok, status: entry.status,
+      });
+    };
+    const runEntryId = beginWorldSimulationSessionRun_ACU(
+      input.identity.chatIdentity, '世界推演 Agent 运行',
+      resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed,
+    );
+    await persistEntry(runEntryId, resumed ? 'run-resumed' : 'run-started');
 
     const persist = (nextIteration: number, reviewerFeedback = ''): void => {
       const unique = uniqueCandidates_ACU(candidates);
@@ -122,12 +137,17 @@ export class WorldSimulationMainLoop_ACU {
         });
       } catch (error) {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: compact_ACU(error), ok: false, status: 'failed' });
+        await persistEntry(mainEntryId, `main-${iteration}-failed`);
+        const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '主 Agent 请求失败', detail: compact_ACU(error), agentName: director, ok: false });
+        await persistEntry(failedId, `run-failed-main-${iteration}`);
         throw error;
       }
       if (sent.status === 'rejected') {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: sent.reason, ok: false, status: 'failed' });
+        await persistEntry(mainEntryId, `main-${iteration}-rejected`);
         persist(iteration);
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '最终请求超出 Token 门禁', detail: sent.reason, agentName: director, ok: false });
+        const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '最终请求超出 Token 门禁', detail: sent.reason, agentName: director, ok: false });
+        await persistEntry(failedId, `run-failed-token-${iteration}`);
         throw new Error(sent.reason);
       }
       const raw = String(sent.response ?? '');
@@ -138,15 +158,18 @@ export class WorldSimulationMainLoop_ACU {
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(protocolRepair, error);
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮协议未通过`, detail: `${failure.issue.reasonCode} ${failure.issue.path}`, ok: false, status: 'failed' });
+        await persistEntry(mainEntryId, `main-${iteration}-protocol-failed`);
         if (!failure.retry) {
           persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
           throw error;
         }
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate) });
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
+        const retryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
+        await persistEntry(retryId, `main-${iteration}-protocol-retry`);
         continue;
       }
       updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 动作：${action.kind}`, detail: `第 ${iteration} 轮决策完成`, ok: true, status: 'done' });
+      await persistEntry(mainEntryId, `main-${iteration}-done`);
 
       if (action.kind === 'read' || action.kind === 'search' || action.kind === 'tools') {
         const calls = action.kind === 'tools' ? action.calls : [action];
@@ -173,8 +196,10 @@ export class WorldSimulationMainLoop_ACU {
             detail: results.map(result => `${result.kind}:${result.status} ${result.address} ${result.summary}`).join('；'),
             ok: toolOk, status: toolOk ? 'done' : 'failed',
           });
+          await persistEntry(toolEntryId, `tool-${iteration}`);
         } catch (error) {
           updateWorldSimulationSession_ACU(input.identity.chatIdentity, toolEntryId, { title: '资料读取失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+          await persistEntry(toolEntryId, `tool-${iteration}-failed`);
           throw error;
         }
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
@@ -212,7 +237,9 @@ export class WorldSimulationMainLoop_ACU {
           outcomes.push(outcome);
           if (outcome.candidate) candidates.push(outcome.candidate);
           const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
-          updateWorldSimulationSession_ACU(input.identity.chatIdentity, runningEntries.get(accepted[index])!, { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
+          const entryId = runningEntries.get(accepted[index])!;
+          updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
+          await persistEntry(entryId, `delegation-${iteration}-${index + 1}`);
         }
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) });
         persist(iteration + 1);
@@ -221,7 +248,8 @@ export class WorldSimulationMainLoop_ACU {
 
       if (action.kind === 'block') {
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: action.reason, detail: action.unresolved.join('；'), agentName: director, ok: false });
+        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: action.reason, detail: action.unresolved.join('；'), agentName: director, ok: false });
+        await persistEntry(blockId, `block-${iteration}`);
         return { outcome: 'blocked', summary: action.reason, unresolved: action.unresolved, outcomes };
       }
 
@@ -234,7 +262,8 @@ export class WorldSimulationMainLoop_ACU {
           continue;
         }
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: '世界推演无变化', detail: action.summary, agentName: director });
+        const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: '世界推演无变化', detail: action.summary, agentName: director });
+        await persistEntry(completedId, 'run-completed-no-change');
         return { outcome: 'no_change', summary: action.summary, outcomes };
       }
 
@@ -249,8 +278,10 @@ export class WorldSimulationMainLoop_ACU {
       try {
         reviewer = await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
+        await persistEntry(reviewerEntryId, `causality-review-${iteration}`);
       } catch (error) {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: '因果审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+        await persistEntry(reviewerEntryId, `causality-review-${iteration}-failed`);
         persist(iteration + 1, compact_ACU(error));
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `reviewer 未完成：${compact_ACU(error)}。请继续修正候选或输出 blocked。` });
         continue;
@@ -265,7 +296,8 @@ export class WorldSimulationMainLoop_ACU {
       if (reviewer.verdict === 'reject' || !acceptedCandidates.length || reviewer.findings.some(item => item.severity === 'blocking')) {
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         const unresolved = reviewer.findings.filter(item => item.severity !== 'minor').map(item => `${item.reasonCode}:${item.path}`);
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
+        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
+        await persistEntry(blockId, `block-reviewer-${iteration}`);
         return { outcome: 'blocked', summary: reviewer.summary, unresolved: unresolved.length ? unresolved : ['reviewer rejected all candidates'], outcomes };
       }
       const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
@@ -286,11 +318,15 @@ export class WorldSimulationMainLoop_ACU {
         });
         const guidanceOk = guidanceOutcome.status === 'candidate' || guidanceOutcome.status === 'no_change';
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: `guidance 审核：${guidanceOutcome.status}`, detail: guidanceOutcome.summary, ok: guidanceOk, status: guidanceOk ? 'done' : 'failed' });
+        await persistEntry(guidanceEntryId, `guidance-review-${iteration}`);
       } catch (error) {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: 'guidance 审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+        await persistEntry(guidanceEntryId, `guidance-review-${iteration}-failed`);
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
         const message = compact_ACU(error);
+        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 未完成', detail: message, agentName: 'guidance-reviewer', ok: false });
+        await persistEntry(blockId, `block-guidance-${iteration}`);
         return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
       }
       outcomes.push(guidanceOutcome);
@@ -298,18 +334,22 @@ export class WorldSimulationMainLoop_ACU {
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
         const unresolved = guidanceOutcome.unresolved?.length ? guidanceOutcome.unresolved : [guidanceOutcome.reasonCode ?? guidanceOutcome.summary];
+        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance 审核阻断', detail: guidanceOutcome.summary, agentName: 'guidance-reviewer', ok: false });
+        await persistEntry(blockId, `block-guidance-outcome-${iteration}`);
         return { outcome: 'blocked', summary: guidanceOutcome.summary, unresolved, outcomes };
       }
       const finalCandidates = guidanceOutcome.candidate ? [...acceptedCandidates, guidanceOutcome.candidate] : acceptedCandidates;
       const evidenceRefs = [...new Set([...causalEvidenceRefs, ...guidanceOutcome.evidenceRefs])];
       clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
       const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs, reviewer };
-      logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
+      const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
+      await persistEntry(completedId, 'run-completed-commit');
       return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
     }
 
     persist(input.settings.agentRunBudget.maxIterations, 'iteration budget exhausted');
-    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '迭代预算耗尽', detail: `maxIterations=${input.settings.agentRunBudget.maxIterations}`, agentName: director, ok: false });
+    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '迭代预算耗尽', detail: `maxIterations=${input.settings.agentRunBudget.maxIterations}`, agentName: director, ok: false });
+    await persistEntry(blockId, 'block-iteration-budget');
     return { outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽', unresolved: ['iteration budget exhausted'], outcomes };
   }
 }

@@ -1,8 +1,12 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from 'vue';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
 import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, restoreWorldSimulationPromptDefault_ACU } from '../../service/simulation/agent/prompt-template';
-import { hydrateWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU } from '../../service/simulation/agent/agent-session-log';
-import type { WorldSimulationSessionInput_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入
+import {
+  WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU,
+  hydrateWorldSimulationSessionLog_ACU,
+  isWorldSimulationSessionRunning_ACU,
+  type WorldSimulationSessionInput_ACU,
+} from '../../service/simulation/agent/agent-session-log';
 import { subscribeWorldSimulationSessionLog_ACU } from '../../service/simulation/agent/agent-session-log';
 import { getWorldSimulationRuntime_ACU, type WorldSimulationUiSnapshot_ACU } from '../../service/simulation/simulation-runtime';
 import { WorldSimulationValidationError_ACU, type WorldSimulationSettings_ACU } from '../../service/simulation/model';
@@ -14,6 +18,37 @@ function messageOf(error: unknown): string {
 
 function cloneSettings_ACU(settings: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU {
   return JSON.parse(JSON.stringify(settings)) as WorldSimulationSettings_ACU;
+}
+
+export function projectWorldSimulationSessionFromConversation_ACU(
+  messages: WorldSimulationUiSnapshot_ACU['conversation']['messages'],
+): WorldSimulationSessionInput_ACU[] {
+  return messages
+    .filter(message => message.kind !== 'handoff')
+    .map(message => {
+      const persistedKind = typeof message.eventKind === 'string'
+        && (WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU as readonly string[]).includes(message.eventKind)
+        ? message.eventKind as WorldSimulationSessionInput_ACU['kind']
+        : null;
+      const fallbackKind: WorldSimulationSessionInput_ACU['kind'] = message.kind === 'user'
+        ? 'user_message'
+        : message.kind === 'turn'
+          ? 'run_started'
+          : message.kind === 'agent'
+            ? 'main_action'
+            : message.kind === 'runtime'
+              ? 'thought'
+              : 'tool_read';
+      return {
+        kind: persistedKind ?? fallbackKind,
+        title: message.title || message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
+        detail: message.text,
+        agentName: message.agentName,
+        ok: message.ok,
+        status: message.status,
+        at: message.at,
+      } satisfies WorldSimulationSessionInput_ACU;
+    });
 }
 
 export function useWorldSimulationRuntime() {
@@ -34,16 +69,7 @@ export function useWorldSimulationRuntime() {
   function hydrateSessionFromConversation(next: WorldSimulationUiSnapshot_ACU): void {
     const chatIdentity = next.session.chatIdentity;
     if (!chatIdentity || next.session.entries.length || isWorldSimulationSessionRunning_ACU(chatIdentity)) return;
-    const projected = next.conversation.messages
-      .filter(message => message.kind !== 'handoff')
-      .map(message => ({
-        kind: (message.kind === 'user' ? 'user_message'
-          : message.kind === 'turn' ? 'run_started'
-          : message.kind === 'agent' ? 'main_action'
-          : 'tool_read') as WorldSimulationSessionInput_ACU['kind'],
-        title: message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
-        detail: message.text,
-      }));
+    const projected = projectWorldSimulationSessionFromConversation_ACU(next.conversation.messages);
     if (projected.length) hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
   }
 

@@ -13,11 +13,23 @@ export interface WorldSimulationBucket_ACU<T> { schemaVersion: typeof WORLD_SIMU
 
 export const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff'] as const;
 export type WorldSimulationMessageKind_ACU = typeof WORLD_SIMULATION_MESSAGE_KINDS_ACU[number];
-export interface WorldSimulationConversationMessage_ACU { id: number; kind: WorldSimulationMessageKind_ACU; text: string; digest: string; turnKey: string; at: number; readKey?: string; }
+export type WorldSimulationConversationEventStatus_ACU = 'running' | 'done' | 'failed';
+export interface WorldSimulationConversationEventMetadata_ACU {
+  eventKind?: string;
+  title?: string;
+  status?: WorldSimulationConversationEventStatus_ACU;
+  agentName?: string;
+  ok?: boolean;
+}
+export interface WorldSimulationConversationMessage_ACU extends WorldSimulationConversationEventMetadata_ACU {
+  id: number; kind: WorldSimulationMessageKind_ACU; text: string; digest: string; turnKey: string; at: number; readKey?: string;
+}
 export interface WorldSimulationConversationCompaction_ACU { compactedThroughId: number; report: string; at: number; }
 export interface WorldSimulationConversationSegment_ACU { schemaVersion: typeof WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU; segmentId: string; runId: string; taskId: string; stageId: string; stageRevision: number; messages: WorldSimulationConversationMessage_ACU[]; compaction?: WorldSimulationConversationCompaction_ACU; updatedAt: number; }
 export interface WorldSimulationConversationFloorRecord_ACU { schemaVersion: typeof WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU; segments: WorldSimulationConversationSegment_ACU[]; updatedAt: number; }
-export interface WorldSimulationConversationAppend_ACU { kind: WorldSimulationMessageKind_ACU; text: string; digest?: string; turnKey?: string; readKey?: string; }
+export interface WorldSimulationConversationAppend_ACU extends WorldSimulationConversationEventMetadata_ACU {
+  kind: WorldSimulationMessageKind_ACU; text: string; digest?: string; turnKey?: string; readKey?: string;
+}
 
 export interface WorldSimulationMaterialsSnapshot_ACU { schemaVersion: typeof WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU; ledgerRevision: number; ledger: WorldSimulationLedger_ACU; evidenceRefs: string[]; updatedAt: number; }
 export interface WorldSimulationConversationView_ACU { nextId: number; messages: WorldSimulationConversationMessage_ACU[]; compaction: WorldSimulationConversationCompaction_ACU | null; diagnostics: string[]; }

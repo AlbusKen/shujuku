@@ -11,6 +11,10 @@ import {
   resolveWorldSimulationAnchor_ACU,
 } from '../simulation-store';
 import {
+  WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU,
+  type WorldSimulationSessionInput_ACU,
+} from './agent-session-log';
+import {
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_MESSAGE_KINDS_ACU,
   WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
@@ -25,6 +29,8 @@ import {
 } from './agent-model';
 
 const TEXT_LIMIT_ACU = 8000;
+let sessionEventSequence_ACU = 0;
+const conversationWriteQueues_ACU = new Map<string, Promise<void>>();
 
 function isRecord_ACU(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -48,6 +54,10 @@ function nonNegativeInteger_ACU(value: unknown, path: string): number {
 
 function validateMessage_ACU(raw: unknown, path: string): WorldSimulationConversationMessage_ACU {
   if (!isRecord_ACU(raw)) reject_ACU(`${path} 必须是对象`, { path });
+  const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok']);
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) reject_ACU(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
+  }
   const kind = raw.kind;
   if (typeof kind !== 'string' || !(WORLD_SIMULATION_MESSAGE_KINDS_ACU as readonly string[]).includes(kind)) {
     reject_ACU(`${path}.kind 非法`, { path: `${path}.kind` });
@@ -61,6 +71,25 @@ function validateMessage_ACU(raw: unknown, path: string): WorldSimulationConvers
     at: nonNegativeInteger_ACU(raw.at, `${path}.at`),
   };
   if (raw.readKey !== undefined) message.readKey = requiredText_ACU(raw.readKey, `${path}.readKey`);
+  if (raw.eventKind !== undefined) {
+    const eventKind = requiredText_ACU(raw.eventKind, `${path}.eventKind`);
+    if (!(WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU as readonly string[]).includes(eventKind)) {
+      reject_ACU(`${path}.eventKind 非法`, { path: `${path}.eventKind` });
+    }
+    message.eventKind = eventKind;
+  }
+  if (raw.title !== undefined) message.title = requiredText_ACU(raw.title, `${path}.title`);
+  if (raw.status !== undefined) {
+    if (raw.status !== 'running' && raw.status !== 'done' && raw.status !== 'failed') {
+      reject_ACU(`${path}.status 非法`, { path: `${path}.status` });
+    }
+    message.status = raw.status;
+  }
+  if (raw.agentName !== undefined) message.agentName = requiredText_ACU(raw.agentName, `${path}.agentName`);
+  if (raw.ok !== undefined) {
+    if (typeof raw.ok !== 'boolean') reject_ACU(`${path}.ok 必须是布尔值`, { path: `${path}.ok` });
+    message.ok = raw.ok;
+  }
   return message;
 }
 
@@ -305,7 +334,19 @@ export interface AppendWorldSimulationConversationInput_ACU {
   compaction?: WorldSimulationConversationCompaction_ACU;
 }
 
-export async function appendWorldSimulationConversationSegment_ACU(
+async function serializeConversationWrite_ACU<T>(chatIdentity: string, operation: () => Promise<T>): Promise<T> {
+  const previous = conversationWriteQueues_ACU.get(chatIdentity) ?? Promise.resolve();
+  const current: Promise<T> = previous.catch((): void => undefined).then(() => operation());
+  const tail: Promise<void> = current.then((): void => undefined, (): void => undefined);
+  conversationWriteQueues_ACU.set(chatIdentity, tail);
+  try {
+    return await current;
+  } finally {
+    if (conversationWriteQueues_ACU.get(chatIdentity) === tail) conversationWriteQueues_ACU.delete(chatIdentity);
+  }
+}
+
+async function appendWorldSimulationConversationSegmentUnlocked_ACU(
   input: AppendWorldSimulationConversationInput_ACU,
   chat?: any[],
 ): Promise<boolean> {
@@ -319,12 +360,17 @@ export async function appendWorldSimulationConversationSegment_ACU(
     const message: WorldSimulationConversationMessage_ACU = {
       id: nextId++,
       kind: item.kind,
-      text: item.kind === 'runtime' ? String(item.text) : truncateText_ACU(String(item.text)),
+      text: truncateText_ACU(String(item.text)),
       digest: String(item.digest ?? ''),
       turnKey: String(item.turnKey ?? ''),
       at,
     };
     if (item.readKey) message.readKey = item.readKey;
+    if (item.eventKind) message.eventKind = item.eventKind;
+    if (item.title) message.title = item.title;
+    if (item.status) message.status = item.status;
+    if (item.agentName) message.agentName = item.agentName;
+    if (item.ok !== undefined) message.ok = item.ok;
     return message;
   });
   const hostMessage = messages[input.anchor.messageIndex] as Record<string, unknown>;
@@ -378,4 +424,64 @@ export async function appendWorldSimulationConversationSegment_ACU(
     throw error;
   }
   return true;
+}
+
+export async function appendWorldSimulationConversationSegment_ACU(
+  input: AppendWorldSimulationConversationInput_ACU,
+  chat?: any[],
+): Promise<boolean> {
+  return serializeConversationWrite_ACU(input.anchor.chatIdentity, () =>
+    appendWorldSimulationConversationSegmentUnlocked_ACU(input, chat));
+}
+
+export interface AppendWorldSimulationSessionEventInput_ACU {
+  anchor: WorldSimulationAnchorIdentity_ACU;
+  runId: string;
+  taskId: string;
+  stageId: string;
+  stageRevision: number;
+  eventKey: string;
+  event: WorldSimulationSessionInput_ACU;
+}
+
+function conversationKindForSessionEvent_ACU(kind: WorldSimulationSessionInput_ACU['kind']): WorldSimulationConversationMessage_ACU['kind'] {
+  if (kind === 'user_message') return 'user';
+  if (kind === 'run_started' || kind === 'run_resumed') return 'turn';
+  if (kind === 'tool_read') return 'tool';
+  if (kind === 'handoff') return 'handoff';
+  if (kind === 'protocol_retry' || kind === 'thought') return 'runtime';
+  return 'agent';
+}
+
+/**
+ * 将已定格的会话卡片追加到楼层锚定会话。调用方应在 running 卡片转为 done/failed，
+ * 或产生终态事件时调用；eventKey 在同一 run 内必须稳定且唯一。
+ */
+export async function appendWorldSimulationSessionEvent_ACU(
+  input: AppendWorldSimulationSessionEventInput_ACU,
+  chat?: any[],
+): Promise<boolean> {
+  const ok = input.event.ok !== false;
+  const status = input.event.status ?? (ok ? 'done' : 'failed');
+  const title = requiredText_ACU(input.event.title, 'event.title');
+  const eventKey = requiredText_ACU(input.eventKey, 'eventKey');
+  return appendWorldSimulationConversationSegment_ACU({
+    anchor: input.anchor,
+    segmentId: `session:${input.runId}:${eventKey}:${Date.now().toString(36)}:${++sessionEventSequence_ACU}`,
+    runId: input.runId,
+    taskId: input.taskId,
+    stageId: input.stageId,
+    stageRevision: input.stageRevision,
+    appends: [{
+      kind: conversationKindForSessionEvent_ACU(input.event.kind),
+      text: String(input.event.detail || title),
+      digest: title,
+      turnKey: `${input.runId}:${eventKey}`,
+      eventKind: input.event.kind,
+      title,
+      status,
+      agentName: input.event.agentName,
+      ok,
+    }],
+  }, chat);
 }

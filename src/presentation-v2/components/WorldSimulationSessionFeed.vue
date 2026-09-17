@@ -22,6 +22,15 @@
         </div>
       </div>
 
+      <!-- 内部过程：协议修正默认收敛为单行提示，避免与主流程卡片并列。 -->
+      <details v-else-if="entry.kind === 'protocol_retry'" class="acu-v2-session-feed__protocol">
+        <summary class="acu-v2-session-feed__protocol-summary">
+          <span>已自动修正一次模型输出</span>
+          <span class="acu-v2-session-feed__time">{{ formatTime(entry.at) }}</span>
+        </summary>
+        <p v-if="entry.detail" class="acu-v2-session-feed__protocol-detail">{{ entry.title }}：{{ entry.detail }}</p>
+      </details>
+
       <!-- 思考条目：弱化渲染，像 coding agent 的推理气泡 -->
       <div v-else-if="entry.kind === 'thought'" class="acu-v2-session-feed__thought">
         <span class="acu-v2-session-feed__thought-label">{{ entry.title }}</span>
@@ -167,9 +176,14 @@ watch(() => props.entries.length, async (length, previous) => {
 .acu-v2-session-feed__thought-label { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
 .acu-v2-session-feed__thought-text { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word; }
 
+/* 协议修正是内部恢复信息，默认只保留一行弱提示；用户主动展开时才显示诊断片段。 */
+.acu-v2-session-feed__protocol { margin-left: 16px; padding: 3px 8px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
+.acu-v2-session-feed__protocol-summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style-position: inside; }
+.acu-v2-session-feed__protocol-detail { margin: 4px 0 0 16px; color: var(--acu-text-3); white-space: pre-wrap; word-break: break-word; }
+
 /* 工具调用卡片 */
 .acu-v2-session-feed__card { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in 0.18s ease-out; overflow: hidden; }
-.acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--protocol_retry, .acu-v2-session-feed__card--tool_read { margin-left: 16px; }
+.acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--tool_read { margin-left: 16px; }
 .acu-v2-session-feed__card--finalize, .acu-v2-session-feed__card--run_completed { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card--failed { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card--running { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }
@@ -195,7 +209,8 @@ watch(() => props.entries.length, async (length, previous) => {
    横向空间留给正文；用户气泡放宽到近整行。 */
 @media (max-width: 640px) {
   .acu-v2-session-feed { max-height: 62vh; padding: 8px; }
-  .acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--protocol_retry, .acu-v2-session-feed__card--tool_read { margin-left: 8px; }
+  .acu-v2-session-feed__protocol { margin-left: 8px; }
+  .acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--tool_read { margin-left: 8px; }
   .acu-v2-session-feed__card-head { padding: 7px 8px; gap: 6px; }
   .acu-v2-session-feed__preview { padding: 0 8px 7px 12px; }
   .acu-v2-session-feed__detail { padding: 0 8px 8px 12px; }

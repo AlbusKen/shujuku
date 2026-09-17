@@ -99,6 +99,28 @@ describe('世界推演阶段 runtime', () => {
     expect(entries[2].detail).toContain('模型返回片段');
   });
 
+  it('阶段计划持久化失败时不误触发模型协议重试', async () => {
+    const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
+    const invoke = vi.fn(async () => JSON.stringify({ action: 'plan', summary: '规划完成', plan }));
+    const persistSessionEvent = vi.fn(async () => { throw new Error('HOST_SAVE_FAILED'); });
+    const planner = new WorldSimulationStagePlanner_ACU({
+      apiPreset,
+      countTokens: async () => 1,
+      invoke,
+      chatIdentity: 'chat-planner-persist-failed',
+      persistSessionEvent,
+    });
+
+    await expect(planner.plan({ settings, promptContext: context(), now: 13 })).rejects.toThrow('HOST_SAVE_FAILED');
+
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(persistSessionEvent).toHaveBeenCalledTimes(2);
+    expect(readWorldSimulationSessionLog_ACU('chat-planner-persist-failed')).toHaveLength(1);
+    expect(readWorldSimulationSessionLog_ACU('chat-planner-persist-failed')[0]).toMatchObject({
+      kind: 'stage_plan', title: '阶段规划失败', status: 'failed', ok: false,
+    });
+  });
+
   it('执行引擎在主循环前后复核冻结身份与锚点', async () => {
     const identity = {
       runId: 'run-1', chatIdentity: 'chat-1', triggerKind: 'assistant_completed' as const,

@@ -2,7 +2,7 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
-import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
+import { appendWorldSimulationConversationSegment_ACU, appendWorldSimulationSessionEvent_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU } from './agent/agent-module-store';
 import { isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from './world-simulation-agent-tools';
@@ -123,9 +123,21 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         identity, anchor, instruction, envelope, stagePlan: {}, registry, chat,
       });
 
+      const persistSessionEvent = (eventKey: string, event: import('./agent/agent-session-log').WorldSimulationSessionInput_ACU, stageRevision = identity.stageRevision) =>
+        appendWorldSimulationSessionEvent_ACU({
+          anchor,
+          runId: identity.runId,
+          taskId: identity.taskId,
+          stageId: identity.stageId,
+          stageRevision,
+          eventKey,
+          event,
+        }, getChatArray_ACU());
+
       const planner = new WorldSimulationStagePlanner_ACU({
         invoke: (messages, preset) => invokeWorldSimulationAgent_ACU('world-stage-planner', messages, preset, identity, signal),
         chatIdentity: identity.chatIdentity,
+        persistSessionEvent,
       });
       const plannedRevision = (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
       const promptContext = buildPromptContext_ACU({
@@ -162,6 +174,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               promptContext: { ...promptContext, task: store.read()!.task, worldStagePlan: plannedRevision.plan },
               registry,
               tools,
+              persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
             }),
           });
           return engine.run({ identity: runIdentity });
