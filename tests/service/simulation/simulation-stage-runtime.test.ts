@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../../src/service/simulation/defaults';
 import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../src/service/simulation/agent/agent-defaults';
 import { confirmWorldSimulationStageRevision_ACU, replaceWorldSimulationStagePlan_ACU, WorldSimulationStagePlanner_ACU } from '../../../src/service/simulation/simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from '../../../src/service/simulation/simulation-stage-execution-engine';
 import { createWorldSimulationEvidenceRegistry_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../src/service/simulation/world-simulation-evidence-registry';
+import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 
 const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) };
 const context = () => {
@@ -13,6 +14,7 @@ const context = () => {
 const plan = { schemaVersion: 1 as const, title: '阶段', objective: '推进世界', impactScope: ['world'], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock' as const], convergenceConditions: ['完成'], blockingConditions: [], completedSteps: [], nextStep: '执行' };
 
 describe('世界推演阶段 runtime', () => {
+  afterEach(() => { resetWorldSimulationSessionLogForTests_ACU(); });
   it('生成、确认并冻结阶段 revision', async () => {
     const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
     const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke: async () => JSON.stringify({ action: 'plan', summary: 'ok', plan }) });
@@ -28,7 +30,7 @@ describe('世界推演阶段 runtime', () => {
     const invoke = vi.fn()
       .mockResolvedValueOnce(JSON.stringify({ action: 'plan', summary: '只有摘要' }))
       .mockResolvedValueOnce(JSON.stringify({ action: 'plan', summary: '已补全', plan }));
-    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke });
+    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke, chatIdentity: 'chat-planner' });
 
     const result = await planner.plan({ settings, promptContext: context(), now: 11 });
 
@@ -39,12 +41,18 @@ describe('世界推演阶段 runtime', () => {
     expect(retryMessages.at(-2)).toMatchObject({ role: 'assistant', content: expect.stringContaining('只有摘要') });
     expect(retryMessages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('MISSING_FIELD $.plan') });
     expect(retryMessages.at(-1)?.content).toContain('完整 JSON');
+    const entries = readWorldSimulationSessionLog_ACU('chat-planner');
+    expect(entries.map(item => item.kind)).toEqual(['protocol_retry', 'stage_plan']);
+    expect(entries[0]).toMatchObject({ title: '阶段规划协议修正', ok: false });
+    expect(entries[0].detail).toContain('MISSING_FIELD $.plan');
+    expect(entries[0].detail).toContain('模型返回片段');
+    expect(entries[1]).toMatchObject({ title: '阶段', detail: '已补全' });
   });
 
   it('planner 重复返回同一非法协议时保留结构化错误并停止重试', async () => {
     const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
     const invoke = vi.fn().mockResolvedValue(JSON.stringify({ action: 'plan', summary: '仍缺计划' }));
-    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke });
+    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke, chatIdentity: 'chat-planner-reject' });
 
     let caught: any;
     try {
@@ -58,6 +66,11 @@ describe('世界推演阶段 runtime', () => {
       code: 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID',
       details: { reasonCode: 'MISSING_FIELD', path: '$.plan' },
     });
+    const entries = readWorldSimulationSessionLog_ACU('chat-planner-reject');
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ kind: 'protocol_retry', title: '阶段规划协议修正', ok: false });
+    expect(entries[1]).toMatchObject({ kind: 'protocol_retry', title: '阶段规划输出被拒绝', ok: false });
+    expect(entries[1].detail).toContain('模型返回片段');
   });
 
   it('执行引擎在主循环前后复核冻结身份与锚点', async () => {

@@ -69,4 +69,19 @@ describe('世界推演 Agent 协议', () => {
     expect(recordWorldSimulationProtocolFailure_ACU(state, error).retry).toBe(true);
     expect(recordWorldSimulationProtocolFailure_ACU(state, error).retry).toBe(false);
   });
+
+  it('拒绝非法账本模块并保留 INVALID_LEDGER_MODULE', () => {
+    let error: unknown;
+    try {
+      parseWorldSimulationPlannerOutput_ACU({ action: 'plan', summary: '非法模块', plan: { ...plan, expectedLedgerChanges: ['ledger'] } });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(compactWorldSimulationProtocolError_ACU(error)).toMatchObject({
+      reasonCode: 'INVALID_LEDGER_MODULE',
+      path: '$.plan.expectedLedgerChanges',
+      expected: 'clock | dimensions | seeds | actors | chronicle | guidance',
+      actual: 'ledger',
+    });
+  });
 });

@@ -128,7 +128,7 @@ export class WorldSimulationMainLoop_ACU {
           throw error;
         }
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `主 Agent 输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请只输出修正后的 JSON。` });
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}`, agentName: director, ok: false });
+        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
         continue;
       }
       logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: `主 Agent 动作：${action.kind}`, agentName: director });

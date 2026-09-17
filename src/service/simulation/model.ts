@@ -46,6 +46,9 @@ export interface WorldChronicleEntry_ACU { id: string; at: string; summary: stri
 export interface WorldGuidance_ACU { signals: string[]; excludedFacts: string[]; evidenceRefs: string[]; }
 export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU; revision: number; clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[]; chronicle: WorldChronicleEntry_ACU[]; guidance: WorldGuidance_ACU; }
 
+export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'] as const;
+export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
+
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';
 export type WorldSimulationTimelineKind_ACU = 'task_created' | 'plan_ready' | 'plan_confirmed' | 'stage_started' | 'stage_replanned' | 'stage_completed' | 'paused' | 'resumed' | 'stopped' | 'committed' | 'no_change' | 'blocked' | 'failed';
 
@@ -57,7 +60,7 @@ export interface WorldSimulationStagePlan_ACU {
   factsToVerify: string[];
   plannedTools: string[];
   plannedSpecialists: string[];
-  expectedLedgerChanges: Array<'clock' | 'dimensions' | 'seeds' | 'actors' | 'chronicle' | 'guidance'>;
+  expectedLedgerChanges: Array<WorldSimulationLedgerModule_ACU>;
   convergenceConditions: string[];
   blockingConditions: string[];
   completedSteps: string[];

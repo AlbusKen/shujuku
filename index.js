@@ -135916,6 +135916,7 @@ $CONTENT
     }
     function createWorldSimulationError_ACU(code, phase, message, retryable = false, details) { return details ? { code, phase, message, retryable, details } : { code, phase, message, retryable }; }
     const WORLD_SIMULATION_WEB_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'];
+    const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'];
 
     const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v2';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
@@ -135978,6 +135979,7 @@ $CONTENT
         return [
             '只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
             '顶层必须且只能包含 action、summary、plan；action 只能是 plan 或 replan，summary 必须是非空字符串，plan 必须是完整对象，禁止省略、设为 null 或只返回摘要。',
+            `plan.expectedLedgerChanges 只能使用这些账本模块：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。禁止使用 ledger、world_state、relationships 或其他历史遗留命名。`,
             `严格遵循此结构示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner)}`,
         ].join('\n');
     }
@@ -136147,7 +136149,6 @@ $CONTENT
     const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'plan_confirmed', 'stage_started', 'stage_replanned', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed'];
     const ERROR_CODES_ACU = ['WORLD_SIMULATION_ENVELOPE_INVALID', 'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'WORLD_SIMULATION_CHAT_CHANGED', 'WORLD_SIMULATION_ANCHOR_INVALID', 'WORLD_SIMULATION_ANCHOR_STALE', 'WORLD_SIMULATION_REVISION_CONFLICT', 'WORLD_SIMULATION_PERSIST_FAILED', 'WORLD_SIMULATION_SNAPSHOT_INVALID', 'WORLD_SIMULATION_EVIDENCE_UNAUTHORIZED', 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'WORLD_SIMULATION_API_PRESET_MISSING', 'WORLD_SIMULATION_CONFIG_INVALID'];
     const ERROR_PHASES_ACU = ['load', 'persist', 'anchor', 'agent_persist', 'agent_loop', 'agent_delegate', 'handoff_summary'];
-    const LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'];
     const WORLD_SIMULATION_STATE_FIELD_ACU$1 = '_qrf_world_simulation_state';
     function isRecord_ACU$7(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function fail_ACU$3(message, phase, details) { throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_ENVELOPE_INVALID', phase, message, false, details)); }
@@ -136324,7 +136325,7 @@ $CONTENT
             fail_ACU$3(`${path}.schemaVersion 必须为 1`, phase);
         if (!Array.isArray(raw.expectedLedgerChanges))
             fail_ACU$3(`${path}.expectedLedgerChanges 必须是数组`, phase);
-        return { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: string_ACU(raw.title, `${path}.title`, phase), objective: string_ACU(raw.objective, `${path}.objective`, phase), impactScope: stringArray_ACU(raw.impactScope, `${path}.impactScope`, phase), factsToVerify: stringArray_ACU(raw.factsToVerify, `${path}.factsToVerify`, phase), plannedTools: stringArray_ACU(raw.plannedTools, `${path}.plannedTools`, phase), plannedSpecialists: stringArray_ACU(raw.plannedSpecialists, `${path}.plannedSpecialists`, phase), expectedLedgerChanges: raw.expectedLedgerChanges.map((item, index) => enum_ACU(item, LEDGER_MODULES_ACU, `${path}.expectedLedgerChanges[${index}]`, phase)), convergenceConditions: stringArray_ACU(raw.convergenceConditions, `${path}.convergenceConditions`, phase), blockingConditions: stringArray_ACU(raw.blockingConditions, `${path}.blockingConditions`, phase), completedSteps: stringArray_ACU(raw.completedSteps, `${path}.completedSteps`, phase), nextStep: string_ACU(raw.nextStep, `${path}.nextStep`, phase, true) };
+        return { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: string_ACU(raw.title, `${path}.title`, phase), objective: string_ACU(raw.objective, `${path}.objective`, phase), impactScope: stringArray_ACU(raw.impactScope, `${path}.impactScope`, phase), factsToVerify: stringArray_ACU(raw.factsToVerify, `${path}.factsToVerify`, phase), plannedTools: stringArray_ACU(raw.plannedTools, `${path}.plannedTools`, phase), plannedSpecialists: stringArray_ACU(raw.plannedSpecialists, `${path}.plannedSpecialists`, phase), expectedLedgerChanges: raw.expectedLedgerChanges.map((item, index) => enum_ACU(item, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.expectedLedgerChanges[${index}]`, phase)), convergenceConditions: stringArray_ACU(raw.convergenceConditions, `${path}.convergenceConditions`, phase), blockingConditions: stringArray_ACU(raw.blockingConditions, `${path}.blockingConditions`, phase), completedSteps: stringArray_ACU(raw.completedSteps, `${path}.completedSteps`, phase), nextStep: string_ACU(raw.nextStep, `${path}.nextStep`, phase, true) };
     }
     function validateWorldSimulationEnvelope_ACU(raw, phase = 'load') {
         if (!isRecord_ACU$7(raw))
@@ -137766,11 +137767,10 @@ $CONTENT
         const raw = closedObject_ACU(value, path, ['schemaVersion', 'title', 'objective', 'impactScope', 'factsToVerify', 'plannedTools', 'plannedSpecialists', 'expectedLedgerChanges', 'convergenceConditions', 'blockingConditions', 'completedSteps', 'nextStep']);
         if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
             fail_ACU('INVALID_SCHEMA_VERSION', `${path}.schemaVersion`, String(WORLD_SIMULATION_SCHEMA_VERSION_ACU), raw.schemaVersion);
-        const modules = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'];
         const expectedLedgerChanges = requiredList_ACU(raw.expectedLedgerChanges, `${path}.expectedLedgerChanges`);
         for (const item of expectedLedgerChanges)
-            if (!modules.includes(item))
-                fail_ACU('INVALID_LEDGER_MODULE', `${path}.expectedLedgerChanges`, modules.join(' | '), item);
+            if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(item))
+                fail_ACU('INVALID_LEDGER_MODULE', `${path}.expectedLedgerChanges`, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), item);
         return {
             schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
             title: requiredText_ACU(raw.title, `${path}.title`),
@@ -138020,7 +138020,7 @@ $CONTENT
                         throw error;
                     }
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `主 Agent 输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请只输出修正后的 JSON。` });
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}`, agentName: director, ok: false });
+                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
                     continue;
                 }
                 logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: `主 Agent 动作：${action.kind}`, agentName: director });
@@ -138938,10 +138938,27 @@ $CONTENT
                     if (!input.previous && parsed.action !== 'plan')
                         throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
                     const revision = (input.previous?.revision ?? 0) + 1;
+                    if (this.dependencies.chatIdentity) {
+                        logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+                            kind: 'stage_plan',
+                            title: parsed.plan.title,
+                            detail: parsed.summary,
+                            agentName: 'world-stage-planner',
+                        });
+                    }
                     return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
                 }
                 catch (error) {
                     const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+                    if (this.dependencies.chatIdentity) {
+                        logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+                            kind: 'protocol_retry',
+                            title: failure.retry ? '阶段规划协议修正' : '阶段规划输出被拒绝',
+                            detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`,
+                            agentName: 'world-stage-planner',
+                            ok: false,
+                        });
+                    }
                     if (!failure.retry)
                         throw error;
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` });
@@ -139414,6 +139431,7 @@ $CONTENT
                 });
                 const planner = new WorldSimulationStagePlanner_ACU({
                     invoke: (messages, preset) => invokeWorldSimulationAgent_ACU('world-stage-planner', messages, preset, identity, signal),
+                    chatIdentity: identity.chatIdentity,
                 });
                 const plannedRevision = previous
                     ? (await planner.plan({
@@ -179423,19 +179441,43 @@ Expected function or array of functions, received type ${typeof value}.`
             const feed = ref(null);
             const hiddenCount = computed(() => Math.max(0, props.entries.length - visibleLimit.value));
             const visibleEntries = computed(() => hiddenCount.value ? props.entries.slice(hiddenCount.value) : props.entries);
-            const labels = { main_action: '主 Agent', protocol_retry: '纠错', tool_read: '证据读取', delegation: '子代理', stage_plan: '阶段计划', handoff: '交接', finalize: '交付', block: '阻断', run_failed: '失败', run_completed: '完成' };
-            function toggle(id) { expanded.value = { ...expanded.value, [id]: !expanded.value[id] }; }
+            const nextExpandCount = computed(() => Math.min(STEP, hiddenCount.value));
+            const labels = { main_action: '主 Agent', protocol_retry: '重试', tool_read: '证据读取', delegation: '子代理', stage_plan: '阶段计划', handoff: '交接', finalize: '交付', block: '阻断', run_failed: '失败', run_completed: '完成' };
+            function defaultExpanded(entry) {
+                if (entry.status === 'failed')
+                    return true;
+                return entry.kind === 'finalize' || entry.kind === 'run_completed' || entry.kind === 'run_failed' || entry.kind === 'block';
+            }
+            function isExpanded(entry) { return expanded.value[entry.id] ?? defaultExpanded(entry); }
+            function toggle(entry) {
+                if (!entry.detail)
+                    return;
+                expanded.value = { ...expanded.value, [entry.id]: !isExpanded(entry) };
+            }
+            async function expandOlder() {
+                const element = feed.value;
+                const beforeHeight = element?.scrollHeight ?? 0;
+                visibleLimit.value += STEP;
+                await nextTick();
+                if (element)
+                    element.scrollTop += element.scrollHeight - beforeHeight;
+            }
             function format(at) { return new Date(at).toLocaleTimeString(); }
-            watch(() => props.entries.length, async () => { await nextTick(); if (feed.value)
-                feed.value.scrollTop = feed.value.scrollHeight; });
-            const __returned__ = { props, STEP, visibleLimit, expanded, feed, hiddenCount, visibleEntries, labels, toggle, format };
+            watch(() => props.entries.length, async (length, previous) => {
+                if (length < (previous ?? 0))
+                    visibleLimit.value = STEP;
+                await nextTick();
+                if (feed.value)
+                    feed.value.scrollTop = feed.value.scrollHeight;
+            });
+            const __returned__ = { props, STEP, visibleLimit, expanded, feed, hiddenCount, visibleEntries, nextExpandCount, labels, defaultExpanded, isExpanded, toggle, expandOlder, format };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.ws-feed[data-v-bd0b7d10]{display:flex;flex-direction:column;gap:6px;max-height:420px;overflow:auto;padding:12px;border:1px solid color-mix(in srgb,var(--acu-text-3) 20%,transparent);border-radius:8px;background:color-mix(in srgb,var(--acu-bg-2) 60%,transparent)}.ws-feed__empty[data-v-bd0b7d10],.ws-feed__preview[data-v-bd0b7d10],.ws-feed__detail[data-v-bd0b7d10],.ws-feed__thought p[data-v-bd0b7d10]{margin:0;color:var(--acu-text-3);font-size:12px;white-space:pre-wrap}.ws-feed__fold[data-v-bd0b7d10]{padding:6px;border:1px dashed var(--acu-border);border-radius:8px;background:transparent;color:var(--acu-text-3)}.ws-feed__divider[data-v-bd0b7d10]{display:flex;align-items:center;gap:8px;padding:5px 2px}.ws-feed__divider span[data-v-bd0b7d10],.ws-feed__badge[data-v-bd0b7d10]{padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--acu-accent) 15%,transparent);font-size:11px}.ws-feed time[data-v-bd0b7d10]{margin-left:auto;color:var(--acu-text-3);font-size:11px}.ws-feed__user[data-v-bd0b7d10]{display:flex;justify-content:flex-end}.ws-feed__user>div[data-v-bd0b7d10]{max-width:82%;padding:8px 11px;border-radius:10px 10px 2px 10px;background:color-mix(in srgb,var(--acu-accent) 16%,var(--acu-bg-2))}.ws-feed__user p[data-v-bd0b7d10]{margin:0;white-space:pre-wrap}.ws-feed__thought[data-v-bd0b7d10]{padding-left:10px;border-left:2px solid color-mix(in srgb,var(--acu-text-3) 30%,transparent)}.ws-feed__card[data-v-bd0b7d10]{overflow:hidden;border:1px solid color-mix(in srgb,var(--acu-text-3) 16%,transparent);border-radius:8px;background:var(--acu-bg-2)}.ws-feed__card--delegation[data-v-bd0b7d10],.ws-feed__card--tool_read[data-v-bd0b7d10]{margin-left:16px}.ws-feed__card--failed[data-v-bd0b7d10],.ws-feed__card--run_failed[data-v-bd0b7d10],.ws-feed__card--block[data-v-bd0b7d10]{border-left:3px solid var(--acu-danger)}.ws-feed__card--done.ws-feed__card--finalize[data-v-bd0b7d10],.ws-feed__card--run_completed[data-v-bd0b7d10]{border-left:3px solid var(--acu-success)}.ws-feed__head[data-v-bd0b7d10]{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:0;background:transparent;color:inherit;text-align:left}.ws-feed__head strong[data-v-bd0b7d10]{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ws-feed__state[data-v-bd0b7d10]{width:16px;text-align:center}.ws-feed__preview[data-v-bd0b7d10],.ws-feed__detail[data-v-bd0b7d10]{padding:0 10px 8px 34px}.ws-feed__preview[data-v-bd0b7d10]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ws-feed__running[data-v-bd0b7d10]{display:flex;align-items:center;gap:8px;padding:6px 10px;color:var(--acu-text-2);font-size:12px}.ws-feed__running span[data-v-bd0b7d10]{width:8px;height:8px;border-radius:50%;background:var(--acu-accent);animation:pulse-bd0b7d10 1.1s infinite}@keyframes pulse-bd0b7d10{50%{opacity:.3}}@media(max-width:640px){.ws-feed[data-v-bd0b7d10]{max-height:62vh;padding:8px}.ws-feed__card--delegation[data-v-bd0b7d10],.ws-feed__card--tool_read[data-v-bd0b7d10]{margin-left:8px}}\n", "src/presentation-v2/components/WorldSimulationSessionFeed.vue#style-0-bd0b7d10");
-    var WorldSimulationSessionFeed_vue_vue_type_style_index_0_scoped_bd0b7d10_lang = null;
+    injectSfcStyle("\n.ws-feed[data-v-2300c88b]{display:flex;flex-direction:column;gap:6px;max-height:420px;overflow:auto;padding:12px;border:1px solid color-mix(in srgb,var(--acu-text-3) 20%,transparent);border-radius:8px;background:color-mix(in srgb,var(--acu-bg-2) 60%,transparent)}.ws-feed[data-v-2300c88b]>*{flex:0 0 auto}.ws-feed__empty[data-v-2300c88b],.ws-feed__preview[data-v-2300c88b],.ws-feed__detail[data-v-2300c88b],.ws-feed__thought p[data-v-2300c88b]{margin:0;color:var(--acu-text-3);font-size:12px;white-space:pre-wrap}.ws-feed__fold[data-v-2300c88b]{padding:6px;border:1px dashed var(--acu-border);border-radius:8px;background:transparent;color:var(--acu-text-3)}.ws-feed__divider[data-v-2300c88b]{display:flex;align-items:center;gap:8px;padding:5px 2px}.ws-feed__divider span[data-v-2300c88b],.ws-feed__badge[data-v-2300c88b]{padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--acu-accent) 15%,transparent);font-size:11px}.ws-feed time[data-v-2300c88b]{margin-left:auto;color:var(--acu-text-3);font-size:11px}.ws-feed__user[data-v-2300c88b]{display:flex;justify-content:flex-end}.ws-feed__user>div[data-v-2300c88b]{max-width:82%;padding:8px 11px;border-radius:10px 10px 2px 10px;background:color-mix(in srgb,var(--acu-accent) 16%,var(--acu-bg-2))}.ws-feed__user p[data-v-2300c88b]{margin:0;white-space:pre-wrap}.ws-feed__thought[data-v-2300c88b]{padding-left:10px;border-left:2px solid color-mix(in srgb,var(--acu-text-3) 30%,transparent)}.ws-feed__card[data-v-2300c88b]{overflow:hidden;border:1px solid color-mix(in srgb,var(--acu-text-3) 16%,transparent);border-radius:8px;background:var(--acu-bg-2)}.ws-feed__card--delegation[data-v-2300c88b],.ws-feed__card--tool_read[data-v-2300c88b],.ws-feed__card--protocol_retry[data-v-2300c88b]{margin-left:16px}.ws-feed__card--failed[data-v-2300c88b],.ws-feed__card--run_failed[data-v-2300c88b],.ws-feed__card--block[data-v-2300c88b]{border-left:3px solid var(--acu-danger)}.ws-feed__card--done.ws-feed__card--finalize[data-v-2300c88b],.ws-feed__card--run_completed[data-v-2300c88b]{border-left:3px solid var(--acu-success)}.ws-feed__head[data-v-2300c88b]{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:0;background:transparent;color:inherit;text-align:left}.ws-feed__head strong[data-v-2300c88b]{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ws-feed__state[data-v-2300c88b]{width:16px;text-align:center}.ws-feed__preview[data-v-2300c88b],.ws-feed__detail[data-v-2300c88b]{padding:0 10px 8px 34px}.ws-feed__preview[data-v-2300c88b]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ws-feed__running[data-v-2300c88b]{display:flex;align-items:center;gap:8px;padding:6px 10px;color:var(--acu-text-2);font-size:12px}.ws-feed__running span[data-v-2300c88b]{width:8px;height:8px;border-radius:50%;background:var(--acu-accent);animation:pulse-2300c88b 1.1s infinite}@keyframes pulse-2300c88b{50%{opacity:.3}}@media(max-width:640px){.ws-feed[data-v-2300c88b]{max-height:62vh;padding:8px}.ws-feed__card--delegation[data-v-2300c88b],.ws-feed__card--tool_read[data-v-2300c88b],.ws-feed__card--protocol_retry[data-v-2300c88b]{margin-left:8px}}\n", "src/presentation-v2/components/WorldSimulationSessionFeed.vue#style-0-2300c88b");
+    var WorldSimulationSessionFeed_vue_vue_type_style_index_0_scoped_2300c88b_lang = null;
 
     const _hoisted_1$x = {
 	ref: "feed",
@@ -179462,13 +179504,10 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$g = { class: "ws-feed__state" };
     const _hoisted_9$e = { class: "ws-feed__badge" };
     const _hoisted_10$e = { key: 0 };
-    const _hoisted_11$e = {
-	key: 0,
-	class: "ws-feed__detail"
-    };
+    const _hoisted_11$e = ["onClick"];
     const _hoisted_12$d = {
 	key: 1,
-	class: "ws-feed__preview"
+	class: "ws-feed__detail"
     };
     const _hoisted_13$b = {
 	key: 2,
@@ -179486,9 +179525,9 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: 1,
 					class: "ws-feed__fold",
 					type: "button",
-					onClick: _cache[0] || (_cache[0] = ($event) => $setup.visibleLimit += $setup.STEP)
+					onClick: $setup.expandOlder
 				},
-				"已折叠 " + toDisplayString($setup.hiddenCount) + " 条更早记录 · 点击展开",
+				"已折叠 " + toDisplayString($setup.hiddenCount) + " 条更早记录 · 点击展开更早的 " + toDisplayString($setup.nextExpandCount) + " 条",
 				1
 				/* TEXT */
 			)) : createCommentVNode("v-if", true),
@@ -179551,53 +179590,55 @@ Expected function or array of functions, received type ${typeof value}.`
 								key: 3,
 								class: normalizeClass(["ws-feed__card", [`ws-feed__card--${entry.kind}`, `ws-feed__card--${entry.status}`]])
 							},
-							[createBaseVNode("button", {
-								type: "button",
-								class: "ws-feed__head",
-								onClick: ($event) => $setup.toggle(entry.id)
-							}, [
-								createBaseVNode(
-									"span",
-									_hoisted_8$g,
-									toDisplayString(entry.status === "running" ? "…" : entry.status === "failed" ? "×" : "✓"),
+							[
+								createBaseVNode("button", {
+									type: "button",
+									class: "ws-feed__head",
+									onClick: ($event) => $setup.toggle(entry)
+								}, [
+									createBaseVNode(
+										"span",
+										_hoisted_8$g,
+										toDisplayString(entry.status === "running" ? "…" : entry.status === "failed" ? "×" : "✓"),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"span",
+										_hoisted_9$e,
+										toDisplayString(entry.agentName || $setup.labels[entry.kind] || entry.kind),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"strong",
+										null,
+										toDisplayString(entry.title),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"time",
+										null,
+										toDisplayString($setup.format(entry.at)),
+										1
+										/* TEXT */
+									),
+									entry.detail ? (openBlock(), createElementBlock("span", _hoisted_10$e, "▾")) : createCommentVNode("v-if", true)
+								], 8, _hoisted_7$g),
+								entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
+									key: 0,
+									class: "ws-feed__preview",
+									onClick: ($event) => $setup.toggle(entry)
+								}, toDisplayString(entry.detail), 9, _hoisted_11$e)) : createCommentVNode("v-if", true),
+								entry.detail && $setup.isExpanded(entry) ? (openBlock(), createElementBlock(
+									"p",
+									_hoisted_12$d,
+									toDisplayString(entry.detail),
 									1
 									/* TEXT */
-								),
-								createBaseVNode(
-									"span",
-									_hoisted_9$e,
-									toDisplayString(entry.agentName || $setup.labels[entry.kind] || entry.kind),
-									1
-									/* TEXT */
-								),
-								createBaseVNode(
-									"strong",
-									null,
-									toDisplayString(entry.title),
-									1
-									/* TEXT */
-								),
-								createBaseVNode(
-									"time",
-									null,
-									toDisplayString($setup.format(entry.at)),
-									1
-									/* TEXT */
-								),
-								entry.detail ? (openBlock(), createElementBlock("span", _hoisted_10$e, "▾")) : createCommentVNode("v-if", true)
-							], 8, _hoisted_7$g), entry.detail && $setup.expanded[entry.id] ? (openBlock(), createElementBlock(
-								"p",
-								_hoisted_11$e,
-								toDisplayString(entry.detail),
-								1
-								/* TEXT */
-							)) : entry.detail ? (openBlock(), createElementBlock(
-								"p",
-								_hoisted_12$d,
-								toDisplayString(entry.detail),
-								1
-								/* TEXT */
-							)) : createCommentVNode("v-if", true)],
+								)) : createCommentVNode("v-if", true)
+							],
 							2
 							/* CLASS */
 						))],
@@ -179608,7 +179649,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			$props.running ? (openBlock(), createElementBlock("div", _hoisted_13$b, [..._cache[1] || (_cache[1] = [createBaseVNode(
+			$props.running ? (openBlock(), createElementBlock("div", _hoisted_13$b, [..._cache[0] || (_cache[0] = [createBaseVNode(
 				"span",
 				null,
 				null,
@@ -179624,7 +179665,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var WorldSimulationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-bd0b7d10"]]);
+    var WorldSimulationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-2300c88b"]]);
 
     var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationChat',

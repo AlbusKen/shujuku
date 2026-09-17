@@ -125,6 +125,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
       });
       const planner = new WorldSimulationStagePlanner_ACU({
         invoke: (messages, preset) => invokeWorldSimulationAgent_ACU('world-stage-planner', messages, preset, identity, signal),
+        chatIdentity: identity.chatIdentity,
       });
       const plannedRevision = previous
         ? (await planner.plan({

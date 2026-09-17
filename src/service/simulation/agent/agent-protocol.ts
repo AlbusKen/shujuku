@@ -1,4 +1,4 @@
-import { WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationStagePlan_ACU } from '../model';
+import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationStagePlan_ACU } from '../model';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
 
@@ -188,9 +188,8 @@ function closedObject_ACU(value: unknown, path: string, required: readonly strin
 function stagePlan_ACU(value: unknown, path = '$.plan'): WorldSimulationStagePlan_ACU {
   const raw = closedObject_ACU(value, path, ['schemaVersion', 'title', 'objective', 'impactScope', 'factsToVerify', 'plannedTools', 'plannedSpecialists', 'expectedLedgerChanges', 'convergenceConditions', 'blockingConditions', 'completedSteps', 'nextStep']);
   if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU) fail_ACU('INVALID_SCHEMA_VERSION', `${path}.schemaVersion`, String(WORLD_SIMULATION_SCHEMA_VERSION_ACU), raw.schemaVersion);
-  const modules = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'] as const;
   const expectedLedgerChanges = requiredList_ACU(raw.expectedLedgerChanges, `${path}.expectedLedgerChanges`);
-  for (const item of expectedLedgerChanges) if (!(modules as readonly string[]).includes(item)) fail_ACU('INVALID_LEDGER_MODULE', `${path}.expectedLedgerChanges`, modules.join(' | '), item);
+  for (const item of expectedLedgerChanges) if (!(WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]).includes(item)) fail_ACU('INVALID_LEDGER_MODULE', `${path}.expectedLedgerChanges`, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), item);
   return {
     schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
     title: requiredText_ACU(raw.title, `${path}.title`),

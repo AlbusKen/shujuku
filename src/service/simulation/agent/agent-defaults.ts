@@ -1,4 +1,4 @@
-import { WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
+import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
 export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v2';
@@ -73,6 +73,7 @@ export function worldSimulationPlannerProtocolInstruction_ACU(): string {
   return [
     '只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
     '顶层必须且只能包含 action、summary、plan；action 只能是 plan 或 replan，summary 必须是非空字符串，plan 必须是完整对象，禁止省略、设为 null 或只返回摘要。',
+    `plan.expectedLedgerChanges 只能使用这些账本模块：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。禁止使用 ledger、world_state、relationships 或其他历史遗留命名。`,
     `严格遵循此结构示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner)}`,
   ].join('\n');
 }

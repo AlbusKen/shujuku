@@ -6,12 +6,14 @@ import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonP
 import { executeWorldSimulationFinalRequest_ACU } from './agent/final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './agent/prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent/agent-token-budget';
+import { logWorldSimulationSession_ACU } from './agent/agent-session-log';
 
 export interface WorldSimulationStagePlannerDependencies_ACU {
   invoke(messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
   protocolRetries?: number;
+  chatIdentity?: string;
 }
 export interface WorldSimulationStagePlanRequest_ACU {
   settings: WorldSimulationSettings_ACU;
@@ -46,9 +48,26 @@ export class WorldSimulationStagePlanner_ACU {
         if (input.previous && parsed.action !== 'replan') throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
         if (!input.previous && parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
         const revision = (input.previous?.revision ?? 0) + 1;
+        if (this.dependencies.chatIdentity) {
+          logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+            kind: 'stage_plan',
+            title: parsed.plan.title,
+            detail: parsed.summary,
+            agentName: 'world-stage-planner',
+          });
+        }
         return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+        if (this.dependencies.chatIdentity) {
+          logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+            kind: 'protocol_retry',
+            title: failure.retry ? '阶段规划协议修正' : '阶段规划输出被拒绝',
+            detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`,
+            agentName: 'world-stage-planner',
+            ok: false,
+          });
+        }
         if (!failure.retry) throw error;
         transcript.push(
           { role: 'assistant', content: raw || '(empty)' },
