@@ -24,6 +24,16 @@ const snapshot = ref<any>({ envelope: envelope.value, conversation: { messages: 
 vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
   useWorldSimulationRuntime: () => ({ snapshot, ready, busy, error, settingsDraft, envelope, task, activeRevision, refresh, send, confirmPlan, replan, resume, cancel, saveSettings }),
 }));
+vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
+  const { ref } = await import('vue');
+  return {
+    useApiPresetSelectOptions: () => ({
+      apiStore: { presets: [{ name: '预设A' }], activePresetName: '预设A', refreshFromSettings: vi.fn() },
+      followActiveApiLabel: ref('跟随当前活动 API（预设A）'),
+      apiPresetSelectOptions: ref([{ value: '', label: '跟随当前活动 API（预设A）' }, { value: '预设A', label: '预设A' }]),
+    }),
+  };
+});
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({ useChatChangedTick: () => chatTick, useChatMutationTick: () => mutationTick }));
 
 async function mountPage() {

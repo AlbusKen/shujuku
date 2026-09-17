@@ -178921,7 +178921,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_12$e = { class: "acu-agent-advanced__grid" };
     const _hoisted_13$c = { class: "acu-agent-advanced__section" };
     const _hoisted_14$a = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_15$a = { class: "acu-agent-advanced__prompt-scope" };
+    const _hoisted_15$9 = { class: "acu-agent-advanced__prompt-scope" };
     const _hoisted_16$9 = { class: "acu-agent-advanced__prompt-actions" };
     const _hoisted_17$8 = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$8 = { class: "acu-agent-advanced__prompt-head" };
@@ -179087,7 +179087,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					createBaseVNode(
 						"p",
-						_hoisted_15$a,
+						_hoisted_15$9,
 						toDisplayString($setup.plotCopy.agentControl.prompts.scopeHint),
 						1
 						/* TEXT */
@@ -180432,6 +180432,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-52923a64"]]);
 
+    const INHERIT_CHANNEL_VALUE$1 = '__inherit__';
     var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationSettingsPanel',
         props: {
@@ -180444,11 +180445,10 @@ Expected function or array of functions, received type ${typeof value}.`
             const props = __props;
             const emit = __emit;
             const draft = reactive({});
-            const agentApiDraft = ref('{}');
-            const promptsTransfer = ref('');
+            const { apiStore, apiPresetSelectOptions } = useApiPresetSelectOptions();
             const message = ref(null);
             const activeAgent = ref('world-director');
-            const apiModeOptions = [{ value: 'current', label: '跟随当前 API' }, { value: 'fixed', label: '固定预设' }];
+            const promptImportInput = ref(null);
             const webProviderOptions = [
                 { value: 'duckduckgo', label: 'DuckDuckGo' },
                 { value: 'serper', label: 'Serper' },
@@ -180457,6 +180457,9 @@ Expected function or array of functions, received type ${typeof value}.`
             ];
             const roleOptions = [{ value: 'system', label: 'SYSTEM' }, { value: 'user', label: 'USER' }, { value: 'assistant', label: 'ASSISTANT' }];
             const agentOptions = WORLD_SIMULATION_AGENT_CATALOG_ACU.map(item => ({ value: item.name, label: `${item.name} · ${item.description}` }));
+            const agentChannelRoles = WORLD_SIMULATION_AGENT_CATALOG_ACU.map(item => item.name);
+            const agentChannelOptions = computed(() => [{ value: INHERIT_CHANNEL_VALUE$1, label: '跟随全局默认' }, ...apiPresetSelectOptions.value]);
+            const globalApiValue = computed(() => (draft.apiPresetMode === 'fixed' ? draft.fixedApiPresetName : ''));
             const budgetFields = [
                 { key: 'maxIterations', label: '主循环迭代上限', min: 1, max: 100 }, { key: 'maxDelegations', label: '派工总数上限', min: 0, max: 100 },
                 { key: 'maxSameAgent', label: '单代理派工上限', min: 0, max: 20 }, { key: 'maxConcurrent', label: '并发派工上限', min: 1, max: 20 },
@@ -180464,9 +180467,27 @@ Expected function or array of functions, received type ${typeof value}.`
             ];
             function cloneSettings(value) { return JSON.parse(JSON.stringify(value)); }
             function sync(value) { if (!value)
-                return; Object.assign(draft, cloneSettings(value)); agentApiDraft.value = JSON.stringify(value.agentApiPresets, null, 2); message.value = null; }
+                return; Object.assign(draft, cloneSettings(value)); message.value = null; }
             watch(() => props.settings, sync, { immediate: true, deep: true });
+            onMounted(() => apiStore.refreshFromSettings());
             function setBudget(key, value) { draft.agentRunBudget[key] = Number(value); }
+            function setGlobalApi(value) { const trimmed = String(value ?? '').trim(); draft.apiPresetMode = trimmed ? 'fixed' : 'current'; draft.fixedApiPresetName = trimmed; }
+            function agentChannelValue(role) {
+                const choice = draft.agentApiPresets?.[role];
+                if (!choice)
+                    return INHERIT_CHANNEL_VALUE$1;
+                return choice.mode === 'fixed' ? choice.presetName : '';
+            }
+            function applyAgentChannel(role, value) {
+                const trimmed = String(value ?? '').trim();
+                const next = { ...draft.agentApiPresets };
+                if (trimmed === INHERIT_CHANNEL_VALUE$1)
+                    delete next[role];
+                else
+                    next[role] = trimmed ? { mode: 'fixed', presetName: trimmed } : { mode: 'current', presetName: '' };
+                draft.agentApiPresets = next;
+            }
+            function presetExists(presetName) { return apiStore.presets.some(preset => preset.name === presetName); }
             function addPrompt(position) { const list = draft.agentPrompts[activeAgent.value]; const item = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true, pinned: false }; position === 'top' ? list.unshift(item) : list.push(item); }
             function deletePrompt(index) { const list = draft.agentPrompts[activeAgent.value]; if (list[index]?.deletable)
                 list.splice(index, 1); }
@@ -180475,34 +180496,78 @@ Expected function or array of functions, received type ${typeof value}.`
             function updatePrompt(index, patch) { const current = draft.agentPrompts[activeAgent.value][index]; if (!current)
                 return; draft.agentPrompts[activeAgent.value][index] = current.pinned ? { ...current, ...(typeof patch.content === 'string' ? { content: patch.content } : {}) } : { ...current, ...patch, pinned: current.pinned }; }
             function restoreAgent() { draft.agentPrompts[activeAgent.value] = buildDefaultWorldSimulationAgentPrompt_ACU(activeAgent.value); message.value = { kind: 'success', text: '已恢复当前角色的本地默认提示词；尚未保存。' }; }
-            function exportPrompts() { promptsTransfer.value = JSON.stringify(draft.agentPrompts, null, 2); message.value = { kind: 'success', text: '已导出到文本框；尚未保存。' }; }
-            function importPrompts() { try {
-                draft.agentPrompts = importWorldSimulationPrompts_ACU(promptsTransfer.value);
-                message.value = { kind: 'success', text: '提示词已导入本地草稿；尚未保存。' };
+            function restoreAllPrompts() { draft.agentPrompts = buildDefaultWorldSimulationAgentPrompts_ACU(); message.value = { kind: 'success', text: '已恢复全部角色的本地默认提示词；尚未保存。' }; }
+            function exportPrompts() {
+                try {
+                    const bundle = { version: 1, agentPrompts: JSON.parse(exportWorldSimulationPrompts_ACU(draft.agentPrompts)) };
+                    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const anchor = document.createElement('a');
+                    anchor.href = url;
+                    anchor.download = 'acu-world-simulation-prompts.json';
+                    document.body.appendChild(anchor);
+                    anchor.click();
+                    document.body.removeChild(anchor);
+                    URL.revokeObjectURL(url);
+                    message.value = { kind: 'success', text: '提示词 JSON 已导出。' };
+                }
+                catch (error) {
+                    message.value = { kind: 'error', text: error instanceof Error ? error.message : '提示词导出失败' };
+                }
             }
-            catch (error) {
-                message.value = { kind: 'error', text: error instanceof Error ? error.message : '提示词导入失败' };
-            } }
-            function save() { try {
-                const parsed = JSON.parse(agentApiDraft.value);
-                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-                    throw new Error('Agent API 渠道必须是对象');
-                const next = cloneSettings(draft);
-                next.agentApiPresets = parsed;
-                emit('save', next);
-                message.value = { kind: 'success', text: '保存请求已提交；runtime 将重新读取并确认结果。' };
+            async function onImportPromptsFile(event) {
+                const input = event.target;
+                const file = input.files?.[0];
+                input.value = '';
+                if (!file)
+                    return;
+                try {
+                    const parsed = JSON.parse(await file.text());
+                    const prompts = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, 'agentPrompts')
+                        ? parsed.agentPrompts
+                        : parsed;
+                    draft.agentPrompts = importWorldSimulationPrompts_ACU(JSON.stringify(prompts ?? ''));
+                    emit('save', cloneSettings(draft));
+                    message.value = { kind: 'success', text: '提示词 JSON 已导入并提交保存。' };
+                }
+                catch (error) {
+                    message.value = { kind: 'error', text: error instanceof Error ? error.message : '提示词 JSON 读取失败' };
+                }
             }
-            catch (error) {
-                message.value = { kind: 'error', text: error instanceof Error ? error.message : '设置 JSON 非法' };
-            } }
-            const __returned__ = { props, emit, draft, agentApiDraft, promptsTransfer, message, activeAgent, apiModeOptions, webProviderOptions, roleOptions, agentOptions, budgetFields, cloneSettings, sync, setBudget, addPrompt, deletePrompt, movePrompt, updatePrompt, restoreAgent, exportPrompts, importPrompts, save, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuPanel, AcuPromptSegments, AcuSelect, AcuTextarea, AcuToggle };
+            function save() {
+                try {
+                    exportWorldSimulationPrompts_ACU(draft.agentPrompts);
+                    if (draft.apiPresetMode === 'fixed') {
+                        const presetName = draft.fixedApiPresetName.trim();
+                        if (!presetName)
+                            throw new Error('固定 API 预设不能为空');
+                        if (!presetExists(presetName))
+                            throw new Error(`API 预设 "${presetName}" 不存在，请重新选择`);
+                    }
+                    for (const [role, choice] of Object.entries(draft.agentApiPresets ?? {})) {
+                        if (choice?.mode !== 'fixed')
+                            continue;
+                        const presetName = choice.presetName.trim();
+                        if (!presetName)
+                            throw new Error(`${role} 的固定渠道必须选择预设`);
+                        if (!presetExists(presetName))
+                            throw new Error(`${role} 渠道的 API 预设 "${presetName}" 不存在，请重新选择`);
+                    }
+                    emit('save', cloneSettings(draft));
+                    message.value = { kind: 'success', text: '保存请求已提交；runtime 将重新读取并确认结果。' };
+                }
+                catch (error) {
+                    message.value = { kind: 'error', text: error instanceof Error ? error.message : '设置校验失败' };
+                }
+            }
+            const __returned__ = { props, emit, draft, apiStore, apiPresetSelectOptions, message, activeAgent, promptImportInput, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, webProviderOptions, roleOptions, agentOptions, agentChannelRoles, agentChannelOptions, globalApiValue, budgetFields, cloneSettings, sync, setBudget, setGlobalApi, agentChannelValue, applyAgentChannel, presetExists, addPrompt, deletePrompt, movePrompt, updatePrompt, restoreAgent, restoreAllPrompts, exportPrompts, onImportPromptsFile, save, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuPanel, AcuPromptSegments, AcuSelect, AcuToggle };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.world-sim-settings__toggles[data-v-931b0566],.world-sim-settings__numbers[data-v-931b0566]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.world-sim-settings__section[data-v-931b0566]{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent)}.world-sim-settings__heading[data-v-931b0566],.world-sim-settings__actions[data-v-931b0566]{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.world-sim-settings__heading>div[data-v-931b0566]:first-child{flex:1 1 320px}.world-sim-settings__heading p[data-v-931b0566],.world-sim-settings__muted[data-v-931b0566]{margin:4px 0 0;color:var(--acu-text-3);font-size:12px}.world-sim-settings__actions[data-v-931b0566]{justify-content:flex-end}.world-sim-settings__transfer[data-v-931b0566]{display:grid;gap:9px;padding:10px;border:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent);border-radius:7px}.world-sim-settings__transfer summary[data-v-931b0566]{cursor:pointer}@media(max-width:640px){.world-sim-settings__toggles[data-v-931b0566],.world-sim-settings__numbers[data-v-931b0566]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationSettingsPanel.vue#style-0-931b0566");
-    var WorldSimulationSettingsPanel_vue_vue_type_style_index_0_scoped_931b0566_lang = null;
+    injectSfcStyle("\n.world-sim-settings__toggles[data-v-2c21c193],.world-sim-settings__numbers[data-v-2c21c193]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.world-sim-settings__section[data-v-2c21c193]{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent)}.world-sim-settings__heading[data-v-2c21c193],.world-sim-settings__actions[data-v-2c21c193]{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.world-sim-settings__heading>div[data-v-2c21c193]:first-child{flex:1 1 320px}.world-sim-settings__heading p[data-v-2c21c193],.world-sim-settings__muted[data-v-2c21c193]{margin:4px 0 0;color:var(--acu-text-3);font-size:12px}.world-sim-settings__actions[data-v-2c21c193]{justify-content:flex-end}.world-sim-settings__file-input[data-v-2c21c193]{display:none}@media(max-width:640px){.world-sim-settings__toggles[data-v-2c21c193],.world-sim-settings__numbers[data-v-2c21c193]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationSettingsPanel.vue#style-0-2c21c193");
+    var WorldSimulationSettingsPanel_vue_vue_type_style_index_0_scoped_2c21c193_lang = null;
 
     const _hoisted_1$s = {
 	key: 0,
@@ -180516,12 +180581,11 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_7$d = { class: "world-sim-settings__toggles" };
     const _hoisted_8$d = { class: "world-sim-settings__numbers" };
     const _hoisted_9$c = { class: "world-sim-settings__section" };
-    const _hoisted_10$c = { class: "world-sim-settings__section" };
-    const _hoisted_11$c = { class: "world-sim-settings__heading" };
-    const _hoisted_12$b = { class: "world-sim-settings__actions" };
-    const _hoisted_13$9 = { class: "world-sim-settings__transfer" };
+    const _hoisted_10$c = { class: "world-sim-settings__numbers" };
+    const _hoisted_11$c = { class: "world-sim-settings__section" };
+    const _hoisted_12$b = { class: "world-sim-settings__heading" };
+    const _hoisted_13$9 = { class: "world-sim-settings__actions" };
     const _hoisted_14$9 = { class: "world-sim-settings__actions" };
-    const _hoisted_15$9 = { class: "world-sim-settings__actions" };
     function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: "世界推演 Agent 设置",
@@ -180576,26 +180640,19 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					}),
-					createVNode($setup["AcuFormRow"], { label: "API 模式" }, {
-						default: withCtx(() => [createVNode($setup["AcuSelect"], {
-							modelValue: $setup.draft.apiPresetMode,
-							"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.draft.apiPresetMode = $event),
-							options: $setup.apiModeOptions
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					$setup.draft.apiPresetMode === "fixed" ? (openBlock(), createBlock($setup["AcuFormRow"], {
-						key: 0,
-						label: "固定 API 预设"
+					createVNode($setup["AcuFormRow"], {
+						label: "API 预设（全局默认）",
+						hint: "所有 Agent 默认走这个预设；需要单独指定时使用下方「Agent API 渠道映射」。"
 					}, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.draft.fixedApiPresetName,
-							"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.draft.fixedApiPresetName = $event)
-						}, null, 8, ["modelValue"])]),
+						default: withCtx(() => [createVNode($setup["AcuSelect"], {
+							options: $setup.apiPresetSelectOptions,
+							"model-value": $setup.globalApiValue,
+							"onUpdate:modelValue": $setup.setGlobalApi
+						}, null, 8, ["options", "model-value"])]),
 						_: 1
-					})) : createCommentVNode("v-if", true)
+					})
 				]),
-				createBaseVNode("section", _hoisted_4$h, [_cache[19] || (_cache[19] = createBaseVNode(
+				createBaseVNode("section", _hoisted_4$h, [_cache[15] || (_cache[15] = createBaseVNode(
 					"strong",
 					null,
 					"Agent 运行预算",
@@ -180628,7 +180685,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* STABLE_FRAGMENT */
 				))])]),
 				createBaseVNode("section", _hoisted_6$f, [
-					_cache[20] || (_cache[20] = createBaseVNode(
+					_cache[16] || (_cache[16] = createBaseVNode(
 						"strong",
 						null,
 						"受限网页研究",
@@ -180642,28 +180699,28 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuToggle"], {
 								modelValue: $setup.draft.webResearch.enabled,
-								"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.draft.webResearch.enabled = $event)
+								"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.draft.webResearch.enabled = $event)
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], { label: "萌娘百科" }, {
 							default: withCtx(() => [createVNode($setup["AcuToggle"], {
 								modelValue: $setup.draft.webResearch.sources.moegirl,
-								"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.draft.webResearch.sources.moegirl = $event)
+								"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.draft.webResearch.sources.moegirl = $event)
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], { label: "中文 Wikipedia" }, {
 							default: withCtx(() => [createVNode($setup["AcuToggle"], {
 								modelValue: $setup.draft.webResearch.sources.wikipediaZh,
-								"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.draft.webResearch.sources.wikipediaZh = $event)
+								"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.draft.webResearch.sources.wikipediaZh = $event)
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						}),
 						createVNode($setup["AcuFormRow"], { label: "英文 Wikipedia" }, {
 							default: withCtx(() => [createVNode($setup["AcuToggle"], {
 								modelValue: $setup.draft.webResearch.sources.wikipediaEn,
-								"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.draft.webResearch.sources.wikipediaEn = $event)
+								"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.draft.webResearch.sources.wikipediaEn = $event)
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						})
@@ -180672,7 +180729,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						createVNode($setup["AcuFormRow"], { label: "搜索服务" }, {
 							default: withCtx(() => [createVNode($setup["AcuSelect"], {
 								modelValue: $setup.draft.webResearch.searchProvider,
-								"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.draft.webResearch.searchProvider = $event),
+								"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.draft.webResearch.searchProvider = $event),
 								options: $setup.webProviderOptions
 							}, null, 8, ["modelValue"])]),
 							_: 1
@@ -180683,14 +180740,14 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								modelValue: $setup.draft.webResearch.searxngBaseUrl,
-								"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.draft.webResearch.searxngBaseUrl = $event)
+								"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.draft.webResearch.searxngBaseUrl = $event)
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
 						createVNode($setup["AcuFormRow"], { label: "单页字符上限" }, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								modelValue: $setup.draft.webResearch.pageCharLimit,
-								"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.draft.webResearch.pageCharLimit = $event),
+								"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.draft.webResearch.pageCharLimit = $event),
 								type: "number",
 								min: 500,
 								max: 2e4
@@ -180703,54 +180760,110 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
 								modelValue: $setup.draft.webResearch.blockedDomains,
-								"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.draft.webResearch.blockedDomains = $event)
+								"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.draft.webResearch.blockedDomains = $event)
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						})
 					])
 				]),
-				createBaseVNode("section", _hoisted_9$c, [_cache[21] || (_cache[21] = createBaseVNode(
+				createBaseVNode("section", _hoisted_9$c, [_cache[17] || (_cache[17] = createBaseVNode(
 					"div",
 					{ class: "world-sim-settings__heading" },
-					[createBaseVNode("div", null, [createBaseVNode("strong", null, "Agent API 渠道映射"), createBaseVNode("p", null, "仅接受现有 simulation Agent 的 current/fixed 映射；保存时由 envelope validator 复核。")])],
+					[createBaseVNode("div", null, [createBaseVNode("strong", null, "Agent API 渠道映射"), createBaseVNode("p", null, "「跟随全局默认」即使用上方 API 预设；单独指定后选择即写入草稿，保存时校验预设存在，不再手写 JSON。")])],
 					-1
 					/* CACHED */
-				)), createVNode($setup["AcuTextarea"], {
-					modelValue: $setup.agentApiDraft,
-					"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.agentApiDraft = $event),
-					rows: 8
-				}, null, 8, ["modelValue"])]),
-				createBaseVNode("section", _hoisted_10$c, [
-					createBaseVNode("div", _hoisted_11$c, [_cache[24] || (_cache[24] = createBaseVNode(
+				)), createBaseVNode("div", _hoisted_10$c, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.agentChannelRoles, (role) => {
+						return openBlock(), createBlock($setup["AcuFormRow"], {
+							key: role,
+							label: role
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuSelect"], {
+								options: $setup.agentChannelOptions,
+								"model-value": $setup.agentChannelValue(role),
+								"onUpdate:modelValue": (value) => $setup.applyAgentChannel(role, String(value))
+							}, null, 8, [
+								"options",
+								"model-value",
+								"onUpdate:modelValue"
+							])]),
+							_: 2
+						}, 1032, ["label"]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])]),
+				createBaseVNode("section", _hoisted_11$c, [
+					createBaseVNode("div", _hoisted_12$b, [_cache[22] || (_cache[22] = createBaseVNode(
 						"div",
 						null,
-						[createBaseVNode("strong", null, "角色提示词"), createBaseVNode("p", null, "引擎 seam 不可删除；导入只更新本地草稿，不会改写世界账本、会话或正文。")],
+						[createBaseVNode("strong", null, "角色提示词"), createBaseVNode("p", null, "引擎 seam 不可删除；导入导出使用与智能续写一致的 JSON 文件，导入后立即提交保存；不会改写世界账本、会话或正文。")],
 						-1
 						/* CACHED */
-					)), createBaseVNode("div", _hoisted_12$b, [createVNode($setup["AcuButton"], {
-						size: "sm",
-						onClick: $setup.exportPrompts
-					}, {
-						default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
-							"导出到文本",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}), createVNode($setup["AcuButton"], {
-						size: "sm",
-						onClick: $setup.restoreAgent
-					}, {
-						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
-							"恢复当前角色默认值",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					})])]),
+					)), createBaseVNode("div", _hoisted_13$9, [
+						createVNode($setup["AcuButton"], {
+							size: "sm",
+							onClick: $setup.exportPrompts
+						}, {
+							default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+								"导出提示词 JSON",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}),
+						createVNode($setup["AcuButton"], {
+							size: "sm",
+							onClick: _cache[13] || (_cache[13] = ($event) => $setup.promptImportInput?.click())
+						}, {
+							default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
+								"导入提示词 JSON",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}),
+						createBaseVNode(
+							"input",
+							{
+								ref: "promptImportInput",
+								type: "file",
+								accept: ".json,application/json",
+								class: "world-sim-settings__file-input",
+								onChange: $setup.onImportPromptsFile
+							},
+							null,
+							544
+							/* NEED_HYDRATION, NEED_PATCH */
+						),
+						createVNode($setup["AcuButton"], {
+							size: "sm",
+							onClick: $setup.restoreAllPrompts
+						}, {
+							default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
+								"恢复全部默认",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}),
+						createVNode($setup["AcuButton"], {
+							size: "sm",
+							onClick: $setup.restoreAgent
+						}, {
+							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+								"恢复当前角色默认值",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						})
+					])]),
 					createVNode($setup["AcuSelect"], {
 						modelValue: $setup.activeAgent,
-						"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.activeAgent = $event),
+						"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.activeAgent = $event),
 						options: $setup.agentOptions
 					}, null, 8, ["modelValue", "options"]),
 					createVNode($setup["AcuPromptSegments"], {
@@ -180764,43 +180877,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						onDelete: $setup.deletePrompt,
 						onMove: $setup.movePrompt,
 						onUpdate: $setup.updatePrompt
-					}, null, 8, ["segments"]),
-					createBaseVNode("details", _hoisted_13$9, [
-						_cache[27] || (_cache[27] = createBaseVNode(
-							"summary",
-							null,
-							"导入 / 导出 Prompt Segments JSON",
-							-1
-							/* CACHED */
-						)),
-						createVNode($setup["AcuTextarea"], {
-							modelValue: $setup.promptsTransfer,
-							"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.promptsTransfer = $event),
-							rows: 8
-						}, null, 8, ["modelValue"]),
-						createBaseVNode("div", _hoisted_14$9, [createVNode($setup["AcuButton"], {
-							size: "sm",
-							onClick: $setup.importPrompts
-						}, {
-							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
-								"从文本导入",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}), createVNode($setup["AcuButton"], {
-							size: "sm",
-							disabled: !$setup.promptsTransfer,
-							onClick: _cache[18] || (_cache[18] = ($event) => $setup.promptsTransfer = "")
-						}, {
-							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
-								"清空文本",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}, 8, ["disabled"])])
-					])
+					}, null, 8, ["segments"])
 				]),
 				$setup.message ? (openBlock(), createBlock($setup["AcuMessage"], {
 					key: 0,
@@ -180813,12 +180890,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					)]),
 					_: 1
 				}, 8, ["kind"])) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_15$9, [createVNode($setup["AcuButton"], {
+				createBaseVNode("div", _hoisted_14$9, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					loading: $props.busy,
 					onClick: $setup.save
 				}, {
-					default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
+					default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
 						"保存世界推演设置",
 						-1
 						/* CACHED */
@@ -180832,7 +180909,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	});
     }
-    var WorldSimulationSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-931b0566"]]);
+    var WorldSimulationSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-2c21c193"]]);
 
     function messageOf(error) {
         if (error instanceof WorldSimulationValidationError_ACU)
