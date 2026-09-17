@@ -3,7 +3,7 @@ import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEv
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
 
 const SCAN_LIMIT_ACU = 6;
-const TERMINALS_ACU = ['commit', 'no_change', 'blocked', 'awaiting_plan_review', 'stage_replanned'] as const;
+const TERMINALS_ACU = ['commit', 'no_change', 'blocked'] as const;
 const isRecord_ACU = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text_ACU = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
 const texts_ACU = (value: unknown): string[] => Array.isArray(value) ? value.map(text_ACU).filter(Boolean) : [];
@@ -209,7 +209,7 @@ function stagePlan_ACU(value: unknown, path = '$.plan'): WorldSimulationStagePla
 export function parseWorldSimulationPlannerOutput_ACU(value: unknown): WorldSimulationPlannerOutput_ACU {
   const raw = closedObject_ACU(value, '$', ['action', 'summary', 'plan']);
   const action = text_ACU(raw.action);
-  if (action !== 'plan' && action !== 'replan') fail_ACU('INVALID_PLANNER_ACTION', '$.action', 'plan | replan', raw.action);
+  if (action !== 'plan') fail_ACU('INVALID_PLANNER_ACTION', '$.action', 'plan', raw.action);
   return { action, summary: requiredText_ACU(raw.summary, '$.summary'), plan: stagePlan_ACU(raw.plan) };
 }
 

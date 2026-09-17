@@ -75,7 +75,6 @@ function buildReplay(options: ReplayOptions) {
   } as any);
 
   const envelope = buildDefaultWorldSimulationEnvelope_ACU();
-  envelope.settings.planPreview = false;
   envelope.settings.agentRunBudget = {
     maxIterations: 6,
     maxDelegations: 4,

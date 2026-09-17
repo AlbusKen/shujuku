@@ -1,8 +1,8 @@
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
 export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 1 as const;
 
-export type WorldSimulationTaskStatus_ACU = 'drafting' | 'awaiting_plan_review' | 'paused' | 'running' | 'stopping_after_inflight' | 'completed' | 'abandoned' | 'failed';
-export type WorldSimulationStageStatus_ACU = 'planning' | 'awaiting_review' | 'running' | 'completed' | 'abandoned' | 'failed';
+export type WorldSimulationTaskStatus_ACU = 'drafting' | 'paused' | 'running' | 'stopping_after_inflight' | 'completed' | 'abandoned' | 'failed';
+export type WorldSimulationStageStatus_ACU = 'planning' | 'running' | 'completed' | 'abandoned' | 'failed';
 export type WorldSimulationTriggerKind_ACU = 'assistant_completed' | 'agent_chat_message';
 export type WorldSimulationErrorCode_ACU =
   | 'WORLD_SIMULATION_ENVELOPE_INVALID'
@@ -35,7 +35,7 @@ export interface WorldSimulationWebResearchSettings_ACU {
   pageCharLimit: number;
   blockedDomains: string;
 }
-export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; planPreview: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; promptForceDefaultVersion?: string; }
+export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; promptForceDefaultVersion?: string; }
 
 export interface WorldEvidenceRef_ACU { ref: string; source: string; summary: string; }
 export interface WorldClock_ACU { storyTime: string; elapsed: string; precision: 'exact' | 'approximate' | 'unknown'; evidenceRefs: string[]; }
@@ -50,7 +50,7 @@ export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seed
 export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
 
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';
-export type WorldSimulationTimelineKind_ACU = 'task_created' | 'plan_ready' | 'plan_confirmed' | 'stage_started' | 'stage_replanned' | 'stage_completed' | 'paused' | 'resumed' | 'stopped' | 'committed' | 'no_change' | 'blocked' | 'failed';
+export type WorldSimulationTimelineKind_ACU = 'task_created' | 'plan_ready' | 'stage_started' | 'stage_completed' | 'paused' | 'resumed' | 'stopped' | 'committed' | 'no_change' | 'blocked' | 'failed';
 
 export interface WorldSimulationStagePlan_ACU {
   schemaVersion: typeof WORLD_SIMULATION_SCHEMA_VERSION_ACU;

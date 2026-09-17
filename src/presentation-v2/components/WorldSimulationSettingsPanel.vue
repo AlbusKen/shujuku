@@ -4,7 +4,6 @@
     <template v-else>
       <div class="world-sim-settings__toggles">
         <AcuFormRow label="自动触发" hint="assistant 完成后自动启动世界推演。"><AcuToggle v-model="draft.autoTriggerEnabled" /></AcuFormRow>
-        <AcuFormRow label="计划执行前预览"><AcuToggle v-model="draft.planPreview" /></AcuFormRow>
       </div>
       <div class="world-sim-settings__numbers">
         <AcuFormRow label="历史 Token 预算"><AcuInput v-model="draft.agentHistoryTokenBudget" type="number" :min="0" /></AcuFormRow>

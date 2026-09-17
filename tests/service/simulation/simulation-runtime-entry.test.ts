@@ -7,9 +7,8 @@ import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
 const start = vi.fn(async () => ({ status: 'skipped' as const, reason: 'disabled' as const }));
 const resume = vi.fn(async () => ({ status: 'skipped' as const, reason: 'duplicate' as const }));
-const replan = vi.fn(async () => ({ status: 'awaiting_plan_review' as const, identity: {} as any }));
 const cancel = vi.fn(() => true);
-const orchestrator = { start, resume, replan, cancel } as any;
+const orchestrator = { start, resume, cancel } as any;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -106,7 +105,7 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
     });
   });
 
-  it('计划确认与重规划只通过 orchestrator 并复用冻结锚点', async () => {
+  it('已进入 blocking 状态的 paused 任务在快照中可见并可直接恢复', async () => {
     const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
@@ -116,17 +115,16 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
       anchorMessageId: anchor.messageId, anchorMessageKey: anchor.messageKey, anchorSwipeId: anchor.swipeId,
       anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1,
     };
-    envelope.task = { taskId: 'task', originInstruction: '推进', status: 'awaiting_plan_review', createdAt: 1, updatedAt: 1, activeRun: identity, stopReason: null };
+    envelope.task = { taskId: 'task', originInstruction: '推进', status: 'paused', createdAt: 1, updatedAt: 1, activeRun: identity, stopReason: '证据不足' };
     envelope.activeStageId = 'stage';
-    envelope.stages = [{ stageId: 'stage', stageNumber: 1, status: 'awaiting_review', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: false, plan: { schemaVersion: 1, title: 'p', objective: 'o', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: [], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '' } }] }];
+    envelope.stages = [{ stageId: 'stage', stageNumber: 1, status: 'failed', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: { schemaVersion: 1, title: 'p', objective: 'o', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: [], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '' } }] }];
     chat[0]._qrf_world_simulation = envelope;
     const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
 
-    await runtime.confirmPlan();
-    await runtime.replan('缩小影响范围');
-
+    const snapshot = runtime.readUiSnapshot();
+    expect(snapshot.envelope?.task).toMatchObject({ status: 'paused', stopReason: '证据不足' });
+    await runtime.resume();
     expect(resume).toHaveBeenCalledWith({ anchor });
-    expect(replan).toHaveBeenCalledWith({ anchor, instruction: '缩小影响范围' });
   });
 
   it('只有显式保存设置才创建 envelope，并经过严格宿主保存', async () => {

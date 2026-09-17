@@ -20,10 +20,18 @@ import {
 
 export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
 
-const TASK_STATUSES_ACU = ['drafting', 'awaiting_plan_review', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'] as const;
-const STAGE_STATUSES_ACU = ['planning', 'awaiting_review', 'running', 'completed', 'abandoned', 'failed'] as const;
+const TASK_STATUSES_ACU = ['drafting', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'] as const;
+const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'] as const;
 const REVISION_REASONS_ACU = ['initial', 'automatic_replan', 'manual_replan', 'resume_repair'] as const;
-const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'plan_confirmed', 'stage_started', 'stage_replanned', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed'] as const;
+const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed'] as const;
+// 计划确认流程退役后的旧数据归一化：读取历史存量聊天时不再 fail-closed。
+const LEGACY_TASK_STATUSES_ACU: Record<string, NonNullable<WorldSimulationEnvelope_ACU['task']>['status']> = { awaiting_plan_review: 'paused' };
+const LEGACY_STAGE_STATUSES_ACU: Record<string, WorldSimulationEnvelope_ACU['stages'][number]['status']> = { awaiting_review: 'planning' };
+const LEGACY_TIMELINE_KINDS_ACU: Record<string, WorldSimulationEnvelope_ACU['timeline'][number]['kind']> = { plan_confirmed: 'stage_started', stage_replanned: 'stage_completed' };
+const normalizeLegacyEnum_ACU = <T extends string>(allowed: readonly T[], legacy: Record<string, T>, value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): T => {
+  const mapped = typeof value === 'string' ? legacy[value] : undefined;
+  return mapped ?? enum_ACU(value, allowed, path, phase);
+};
 const ERROR_CODES_ACU = ['WORLD_SIMULATION_ENVELOPE_INVALID', 'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'WORLD_SIMULATION_CHAT_CHANGED', 'WORLD_SIMULATION_ANCHOR_INVALID', 'WORLD_SIMULATION_ANCHOR_STALE', 'WORLD_SIMULATION_REVISION_CONFLICT', 'WORLD_SIMULATION_PERSIST_FAILED', 'WORLD_SIMULATION_SNAPSHOT_INVALID', 'WORLD_SIMULATION_EVIDENCE_UNAUTHORIZED', 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'WORLD_SIMULATION_API_PRESET_MISSING', 'WORLD_SIMULATION_CONFIG_INVALID'] as const;
 const ERROR_PHASES_ACU = ['load', 'persist', 'anchor', 'agent_persist', 'agent_loop', 'agent_delegate', 'handoff_summary'] as const;
 
@@ -62,7 +70,7 @@ function uniqueIds_ACU(items: readonly { id: string }[], path: string, phase: Wo
 
 function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['settings'] {
   if (!isRecord_ACU(raw)) fail_ACU('settings 必须是对象', phase, { path: 'settings' });
-  exactKeys_ACU(raw, ['autoTriggerEnabled', 'planPreview', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion'], 'settings', phase);
+  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview'], 'settings', phase);
   if (!isRecord_ACU(raw.agentRunBudget)) fail_ACU('settings.agentRunBudget 必须是对象', phase);
   exactKeys_ACU(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
   const budget = {
@@ -105,7 +113,6 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   };
   return {
     autoTriggerEnabled: boolean_ACU(raw.autoTriggerEnabled, 'settings.autoTriggerEnabled', phase),
-    planPreview: boolean_ACU(raw.planPreview, 'settings.planPreview', phase),
     agentHistoryTokenBudget: integer_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', phase, 0, 1000000),
     agentReadTokenBudget: readBudget,
     agentReadFallbackTokens: integer_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', phase, 0, 100000),
@@ -192,7 +199,7 @@ export function validateWorldSimulationEnvelope_ACU(raw: unknown, phase: WorldSi
     });
     const activeRevision = integer_ACU(stage.activeRevision, `stages[${stageIndex}].activeRevision`, phase, 1);
     if (!revisions.some(revision => revision.revision === activeRevision)) fail_ACU(`stages[${stageIndex}].activeRevision 不存在`, phase);
-    return { stageId: stableId_ACU(stage.stageId, `stages[${stageIndex}].stageId`, phase), stageNumber: integer_ACU(stage.stageNumber, `stages[${stageIndex}].stageNumber`, phase, 1), status: enum_ACU(stage.status, STAGE_STATUSES_ACU, `stages[${stageIndex}].status`, phase), activeRevision, revisions };
+    return { stageId: stableId_ACU(stage.stageId, `stages[${stageIndex}].stageId`, phase), stageNumber: integer_ACU(stage.stageNumber, `stages[${stageIndex}].stageNumber`, phase, 1), status: normalizeLegacyEnum_ACU(STAGE_STATUSES_ACU, LEGACY_STAGE_STATUSES_ACU, stage.status, `stages[${stageIndex}].status`, phase), activeRevision, revisions };
   });
   uniqueIds_ACU(stages.map(stage => ({ id: stage.stageId })), 'stages', phase);
   const activeStageId = raw.activeStageId === null ? null : stableId_ACU(raw.activeStageId, 'activeStageId', phase);
@@ -201,7 +208,7 @@ export function validateWorldSimulationEnvelope_ACU(raw: unknown, phase: WorldSi
   if (raw.task !== null) {
     if (!isRecord_ACU(raw.task)) fail_ACU('task 必须是对象或 null', phase);
     exactKeys_ACU(raw.task, ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'activeRun', 'stopReason'], [], 'task', phase);
-    task = { taskId: stableId_ACU(raw.task.taskId, 'task.taskId', phase), originInstruction: string_ACU(raw.task.originInstruction, 'task.originInstruction', phase), status: enum_ACU(raw.task.status, TASK_STATUSES_ACU, 'task.status', phase), createdAt: integer_ACU(raw.task.createdAt, 'task.createdAt', phase), updatedAt: integer_ACU(raw.task.updatedAt, 'task.updatedAt', phase), activeRun: null, stopReason: raw.task.stopReason === null ? null : string_ACU(raw.task.stopReason, 'task.stopReason', phase) };
+    task = { taskId: stableId_ACU(raw.task.taskId, 'task.taskId', phase), originInstruction: string_ACU(raw.task.originInstruction, 'task.originInstruction', phase), status: normalizeLegacyEnum_ACU(TASK_STATUSES_ACU, LEGACY_TASK_STATUSES_ACU, raw.task.status, 'task.status', phase), createdAt: integer_ACU(raw.task.createdAt, 'task.createdAt', phase), updatedAt: integer_ACU(raw.task.updatedAt, 'task.updatedAt', phase), activeRun: null, stopReason: raw.task.stopReason === null ? null : string_ACU(raw.task.stopReason, 'task.stopReason', phase) };
     if (raw.task.activeRun !== null) {
       const run = raw.task.activeRun;
       if (!isRecord_ACU(run)) fail_ACU('task.activeRun 必须是对象或 null', phase);
@@ -217,7 +224,7 @@ export function validateWorldSimulationEnvelope_ACU(raw: unknown, phase: WorldSi
   const timeline = raw.timeline.map((entry, index) => {
     if (!isRecord_ACU(entry)) fail_ACU(`timeline[${index}] 必须是对象`, phase);
     exactKeys_ACU(entry, ['id', 'at', 'kind', 'taskId'], ['stageId', 'revision', 'runId', 'message', 'errorCode'], `timeline[${index}]`, phase);
-    return { id: stableId_ACU(entry.id, `timeline[${index}].id`, phase), at: integer_ACU(entry.at, `timeline[${index}].at`, phase), kind: enum_ACU(entry.kind, TIMELINE_KINDS_ACU, `timeline[${index}].kind`, phase), taskId: stableId_ACU(entry.taskId, `timeline[${index}].taskId`, phase), ...(entry.stageId === undefined ? {} : { stageId: stableId_ACU(entry.stageId, `timeline[${index}].stageId`, phase) }), ...(entry.revision === undefined ? {} : { revision: integer_ACU(entry.revision, `timeline[${index}].revision`, phase, 1) }), ...(entry.runId === undefined ? {} : { runId: stableId_ACU(entry.runId, `timeline[${index}].runId`, phase) }), ...(entry.message === undefined ? {} : { message: string_ACU(entry.message, `timeline[${index}].message`, phase, true) }), ...(entry.errorCode === undefined ? {} : { errorCode: enum_ACU(entry.errorCode, ERROR_CODES_ACU, `timeline[${index}].errorCode`, phase) }) };
+    return { id: stableId_ACU(entry.id, `timeline[${index}].id`, phase), at: integer_ACU(entry.at, `timeline[${index}].at`, phase), kind: normalizeLegacyEnum_ACU(TIMELINE_KINDS_ACU, LEGACY_TIMELINE_KINDS_ACU, entry.kind, `timeline[${index}].kind`, phase), taskId: stableId_ACU(entry.taskId, `timeline[${index}].taskId`, phase), ...(entry.stageId === undefined ? {} : { stageId: stableId_ACU(entry.stageId, `timeline[${index}].stageId`, phase) }), ...(entry.revision === undefined ? {} : { revision: integer_ACU(entry.revision, `timeline[${index}].revision`, phase, 1) }), ...(entry.runId === undefined ? {} : { runId: stableId_ACU(entry.runId, `timeline[${index}].runId`, phase) }), ...(entry.message === undefined ? {} : { message: string_ACU(entry.message, `timeline[${index}].message`, phase, true) }), ...(entry.errorCode === undefined ? {} : { errorCode: enum_ACU(entry.errorCode, ERROR_CODES_ACU, `timeline[${index}].errorCode`, phase) }) };
   });
   let lastError: WorldSimulationEnvelope_ACU['lastError'] = null;
   if (raw.lastError !== null) {

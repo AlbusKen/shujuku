@@ -17,21 +17,19 @@ export interface WorldSimulationStorePort_ACU {
 }
 export interface WorldSimulationPreparedRun_ACU {
   revision: WorldSimulationStageRevision_ACU;
-  alreadyFrozen?: boolean;
   execute(identity: WorldSimulationRunIdentity_ACU): Promise<WorldSimulationMainLoopResult_ACU>;
 }
 export interface WorldSimulationOrchestratorDependencies_ACU {
   store: WorldSimulationStorePort_ACU;
   now(): number;
   allocateId(kind: 'task' | 'stage' | 'run' | 'timeline'): string;
-  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; previous?: WorldSimulationStageRevision_ACU | null; reason?: WorldSimulationStageRevision_ACU['reason']; replanInstruction?: string }): Promise<WorldSimulationPreparedRun_ACU>;
+  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal }): Promise<WorldSimulationPreparedRun_ACU>;
   assertAnchorCurrent(anchor: WorldSimulationAnchorIdentity_ACU): void | Promise<void>;
   appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string }): Promise<void>;
   commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string }): Promise<void>;
 }
 export type WorldSimulationOrchestratorResult_ACU =
   | { status: 'skipped'; reason: 'disabled' | 'duplicate' | 'busy' }
-  | { status: 'awaiting_plan_review'; identity: WorldSimulationRunIdentity_ACU }
   | { status: 'completed'; identity: WorldSimulationRunIdentity_ACU; result: WorldSimulationMainLoopResult_ACU }
   | { status: 'cancelled'; identity: WorldSimulationRunIdentity_ACU }
   | { status: 'failed'; identity: WorldSimulationRunIdentity_ACU; error: WorldSimulationError_ACU };
@@ -52,7 +50,7 @@ const placeholderPlan_ACU: WorldSimulationStagePlan_ACU = {
 };
 const abortByChat_ACU = new Map<string, AbortController>();
 
-const activeTaskStatuses_ACU = new Set(['drafting', 'awaiting_plan_review', 'running', 'stopping_after_inflight', 'paused']);
+const activeTaskStatuses_ACU = new Set(['drafting', 'running', 'stopping_after_inflight', 'paused']);
 
 function sameTrigger_ACU(
   run: WorldSimulationRunIdentity_ACU | null,
@@ -114,51 +112,7 @@ export class WorldSimulationOrchestrator_ACU {
       await this.dependencies.assertAnchorCurrent(input.anchor);
       assertRunCurrent_ACU(envelope, identity);
       const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: input.instruction ?? envelope.task.originInstruction, envelope, signal: controller.signal });
-      return await this.persistPlanAndMaybeExecute_ACU(identity, input.anchor, prepared, controller.signal, true);
-    } catch (error) {
-      return this.finishFailure_ACU(identity, error, controller.signal.aborted);
-    } finally {
-      if (abortByChat_ACU.get(identity.chatIdentity) === controller) abortByChat_ACU.delete(identity.chatIdentity);
-    }
-  }
-
-  async replan(input: { anchor: WorldSimulationAnchorIdentity_ACU; instruction: string }): Promise<WorldSimulationOrchestratorResult_ACU> {
-    const envelope = this.dependencies.store.read();
-    const identity = envelope?.task?.activeRun;
-    const instruction = input.instruction.trim();
-    if (!envelope?.task || !identity || envelope.task.status !== 'awaiting_plan_review' || envelope.activeStageId !== identity.stageId) {
-      return { status: 'skipped', reason: 'duplicate' };
-    }
-    if (!instruction) {
-      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-        'WORLD_SIMULATION_CONFIG_INVALID', 'persist', '重规划指令不能为空', false,
-      ));
-    }
-    if (abortByChat_ACU.has(identity.chatIdentity)) return { status: 'skipped', reason: 'busy' };
-    const stage = envelope.stages.find(item => item.stageId === identity.stageId);
-    const previous = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
-    if (!stage || !previous || previous.revision !== identity.stageRevision) {
-      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-        'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '待重规划阶段 revision 已变化', false,
-      ));
-    }
-
-    const controller = new AbortController();
-    abortByChat_ACU.set(identity.chatIdentity, controller);
-    try {
-      await this.dependencies.assertAnchorCurrent(input.anchor);
-      assertRunCurrent_ACU(envelope, identity);
-      const prepared = await this.dependencies.prepare({
-        identity,
-        anchor: input.anchor,
-        instruction,
-        envelope,
-        signal: controller.signal,
-        previous,
-        reason: 'manual_replan',
-        replanInstruction: instruction,
-      });
-      return await this.persistPlanAndMaybeExecute_ACU(identity, input.anchor, prepared, controller.signal, false);
+      return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
     } catch (error) {
       return this.finishFailure_ACU(identity, error, controller.signal.aborted);
     } finally {
@@ -215,7 +169,7 @@ export class WorldSimulationOrchestrator_ACU {
       await this.dependencies.assertAnchorCurrent(input.anchor);
       if (controller.signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
       const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: input.instruction, envelope: reserved!, signal: controller.signal });
-      return await this.persistPlanAndMaybeExecute_ACU(identity, input.anchor, prepared, controller.signal, false);
+      return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
     } catch (error) {
       return this.finishFailure_ACU(identity, error, controller.signal.aborted);
     } finally {
@@ -223,19 +177,16 @@ export class WorldSimulationOrchestrator_ACU {
     }
   }
 
-  private async persistPlanAndMaybeExecute_ACU(
+  private async persistPlanAndExecute_ACU(
     reservedIdentity: WorldSimulationRunIdentity_ACU,
     anchor: WorldSimulationAnchorIdentity_ACU,
     prepared: WorldSimulationPreparedRun_ACU,
     signal: AbortSignal,
-    forceExecute: boolean,
   ): Promise<WorldSimulationOrchestratorResult_ACU> {
     if (signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
     await this.dependencies.assertAnchorCurrent(anchor);
     assertRunCurrent_ACU(this.dependencies.store.read(), reservedIdentity);
-    const current = this.dependencies.store.read()!;
-    const shouldAwaitReview = current.settings.planPreview && !forceExecute && !prepared.alreadyFrozen;
-    const revision = shouldAwaitReview || prepared.revision.frozen ? prepared.revision : { ...prepared.revision, frozen: true };
+    const revision = prepared.revision.frozen ? prepared.revision : { ...prepared.revision, frozen: true };
     const identity = { ...reservedIdentity, stageRevision: revision.revision };
     const now = this.dependencies.now();
 
@@ -244,21 +195,17 @@ export class WorldSimulationOrchestrator_ACU {
       const stage = envelope!.stages.find(item => item.stageId === reservedIdentity.stageId)!;
       return {
         ...envelope!,
-        task: { ...envelope!.task!, status: shouldAwaitReview ? 'awaiting_plan_review' : 'running', updatedAt: now, activeRun: identity },
-        stages: envelope!.stages.map(item => item.stageId === stage.stageId ? { ...item, status: shouldAwaitReview ? 'awaiting_review' : 'running', activeRevision: revision.revision, revisions: [revision] } : item),
+        task: { ...envelope!.task!, status: 'running', updatedAt: now, activeRun: identity },
+        stages: envelope!.stages.map(item => item.stageId === stage.stageId ? { ...item, status: 'running', activeRevision: revision.revision, revisions: [revision] } : item),
         timeline: [
           ...envelope!.timeline,
           { id: this.dependencies.allocateId('timeline'), at: now, kind: 'plan_ready', taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId },
-          ...(shouldAwaitReview ? [] : [
-            { id: this.dependencies.allocateId('timeline'), at: now, kind: 'plan_confirmed' as const, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId },
-            { id: this.dependencies.allocateId('timeline'), at: now, kind: 'stage_started' as const, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId },
-          ]),
+          { id: this.dependencies.allocateId('timeline'), at: now, kind: 'stage_started' as const, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId },
         ],
         updatedAt: now,
       };
     }, { chatIdentity: identity.chatIdentity, taskId: identity.taskId, stageId: identity.stageId, revision: reservedIdentity.stageRevision });
 
-    if (shouldAwaitReview) return { status: 'awaiting_plan_review', identity };
     if (signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
     const result = await prepared.execute(identity);
     await this.dependencies.assertAnchorCurrent(anchor);
@@ -275,13 +222,12 @@ export class WorldSimulationOrchestrator_ACU {
     }
     await this.dependencies.store.updateAtomically(envelope => {
       assertRunCurrent_ACU(envelope, identity);
-      const awaiting = result.outcome === 'awaiting_plan_review' || result.outcome === 'stage_replanned';
       const blocked = result.outcome === 'blocked';
       return {
         ...envelope!,
-        task: { ...envelope!.task!, status: awaiting ? 'awaiting_plan_review' : blocked ? 'paused' : 'completed', updatedAt: completedAt, activeRun: awaiting || blocked ? envelope!.task!.activeRun : null, stopReason: blocked ? result.summary : null },
-        stages: envelope!.stages.map(stage => stage.stageId === identity.stageId ? { ...stage, status: awaiting ? 'awaiting_review' : blocked ? 'failed' : 'completed' } : stage),
-        timeline: [...envelope!.timeline, { id: this.dependencies.allocateId('timeline'), at: completedAt, kind: awaiting ? 'stage_replanned' : blocked ? 'blocked' : 'no_change', taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId, message: result.summary }],
+        task: { ...envelope!.task!, status: blocked ? 'paused' : 'completed', updatedAt: completedAt, activeRun: blocked ? envelope!.task!.activeRun : null, stopReason: blocked ? result.summary : null },
+        stages: envelope!.stages.map(stage => stage.stageId === identity.stageId ? { ...stage, status: blocked ? 'failed' : 'completed' } : stage),
+        timeline: [...envelope!.timeline, { id: this.dependencies.allocateId('timeline'), at: completedAt, kind: blocked ? 'blocked' : 'no_change', taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId, message: result.summary }],
         updatedAt: completedAt,
       };
     }, { chatIdentity: identity.chatIdentity, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision });

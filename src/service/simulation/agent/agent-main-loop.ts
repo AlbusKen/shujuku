@@ -189,11 +189,6 @@ export class WorldSimulationMainLoop_ACU {
         return { outcome: 'blocked', summary: action.reason, unresolved: action.unresolved, outcomes };
       }
 
-      if (action.outcome === 'awaiting_plan_review' || action.outcome === 'stage_replanned') {
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
-        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'finalize', title: action.outcome, detail: action.summary, agentName: director });
-        return { outcome: action.outcome, summary: action.summary, outcomes };
-      }
 
       if (action.outcome === 'no_change') {
         const insufficient = !action.evidenceRefs.length || !outcomes.length || outcomes.some(item => item.status !== 'no_change') || candidates.length > 0;

@@ -26,7 +26,7 @@ export interface WorldSimulationMaterialsReadResult_ACU { snapshot: WorldSimulat
 
 export interface WorldSimulationProtocolIssue_ACU { reasonCode: string; path: string; expected: string; actual: unknown; }
 export interface WorldSimulationDelegation_ACU { agentName: string; instruction: string; reads: string[]; }
-export type WorldSimulationTerminalOutcome_ACU = 'commit' | 'no_change' | 'blocked' | 'awaiting_plan_review' | 'stage_replanned';
+export type WorldSimulationTerminalOutcome_ACU = 'commit' | 'no_change' | 'blocked';
 export type WorldSimulationToolCall_ACU =
   | { kind: 'read'; reads: string[] }
   | { kind: 'search'; query: string; scope: string[]; maxResults: number; isRegex: boolean };
@@ -78,6 +78,6 @@ export type WorldSimulationMainLoopResult_ACU =
   | { outcome: 'commit'; summary: string; commitCandidate: WorldSimulationCommitCandidate_ACU; outcomes: WorldSimulationSubagentOutcome_ACU[] }
   | { outcome: 'no_change'; summary: string; outcomes: WorldSimulationSubagentOutcome_ACU[] }
   | { outcome: 'blocked'; summary: string; unresolved: string[]; outcomes: WorldSimulationSubagentOutcome_ACU[] }
-  | { outcome: 'awaiting_plan_review' | 'stage_replanned'; summary: string; outcomes: WorldSimulationSubagentOutcome_ACU[] };
+;
 export interface WorldSimulationHandoffState_ACU { currentGoal: string; effectiveConstraints: string[]; decisions: string[]; completedItems: string[]; pendingItems: string[]; blockers: string[]; continuityFacts: string[]; readKeys: string[]; recentTurns: string[]; }
 export interface WorldSimulationRunOutcome_ACU { agentName: string; status: 'candidate' | 'no_change' | 'failed' | 'blocked'; summary: string; fingerprint: string; }

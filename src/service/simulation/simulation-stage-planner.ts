@@ -18,9 +18,6 @@ export interface WorldSimulationStagePlannerDependencies_ACU {
 export interface WorldSimulationStagePlanRequest_ACU {
   settings: WorldSimulationSettings_ACU;
   promptContext: WorldSimulationPlaceholderContext_ACU;
-  previous?: WorldSimulationStageRevision_ACU | null;
-  reason?: WorldSimulationStageRevision_ACU['reason'];
-  replanInstruction?: string;
   now?: number;
 }
 
@@ -45,9 +42,8 @@ export class WorldSimulationStagePlanner_ACU {
       const raw = String(sent.response ?? '');
       try {
         const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
-        if (input.previous && parsed.action !== 'replan') throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
-        if (!input.previous && parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
-        const revision = (input.previous?.revision ?? 0) + 1;
+        if (parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
+        const revision = 1;
         if (this.dependencies.chatIdentity) {
           logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
             kind: 'stage_plan',
@@ -56,7 +52,7 @@ export class WorldSimulationStagePlanner_ACU {
             agentName: 'world-stage-planner',
           });
         }
-        return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
+        return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: 'initial' as const, replanInstruction: '', frozen: false, plan: parsed.plan } };
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
         if (this.dependencies.chatIdentity) {

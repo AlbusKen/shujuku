@@ -106,7 +106,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         appends: [{ kind: 'user', text, turnKey: identity.triggerConversationMessageId ?? identity.runId }],
       }, getChatArray_ACU());
     },
-    prepare: async ({ identity, anchor, instruction, envelope, signal, previous, reason, replanInstruction }) => {
+    prepare: async ({ identity, anchor, instruction, envelope, signal }) => {
       const chat = getChatArray_ACU();
       assertWorldSimulationAnchorCurrent_ACU(anchor, chat);
       const registry = createWorldSimulationEvidenceRegistry_ACU(identity.runId);
@@ -117,28 +117,15 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         summary: '冻结 assistant 锚点正文',
         exact: true,
       });
-      const activeStage = envelope.stages.find(stage => stage.stageId === identity.stageId);
-      const existingRevision = activeStage?.revisions.find(item => item.revision === activeStage.activeRevision) ?? null;
       const baseContext = buildPromptContext_ACU({
-        identity, anchor, instruction, envelope,
-        stagePlan: existingRevision?.plan ?? {}, registry, chat,
+        identity, anchor, instruction, envelope, stagePlan: {}, registry, chat,
       });
+
       const planner = new WorldSimulationStagePlanner_ACU({
         invoke: (messages, preset) => invokeWorldSimulationAgent_ACU('world-stage-planner', messages, preset, identity, signal),
         chatIdentity: identity.chatIdentity,
       });
-      const plannedRevision = previous
-        ? (await planner.plan({
-            settings: envelope.settings,
-            promptContext: baseContext,
-            previous,
-            reason,
-            replanInstruction,
-            now: Date.now(),
-          })).revision
-        : envelope.task?.status === 'awaiting_plan_review' && existingRevision
-          ? existingRevision
-          : (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
+      const plannedRevision = (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
       const promptContext = buildPromptContext_ACU({
         identity, anchor, instruction, envelope,
         stagePlan: plannedRevision.plan, registry, chat,
@@ -159,7 +146,6 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
       const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents });
       return {
         revision: plannedRevision,
-        alreadyFrozen: plannedRevision.frozen,
         execute: async runIdentity => {
           const engine = new WorldSimulationStageExecutionEngine_ACU({
             readEnvelope: () => store.read(),
@@ -247,20 +233,6 @@ export class WorldSimulationRuntime_ACU {
     if (!identity) return null;
     const anchor = restoreWorldSimulationAnchor_ACU(identity, this.getChat());
     return this.orchestrator.resume({ anchor });
-  }
-
-  async confirmPlan(): Promise<WorldSimulationOrchestratorResult_ACU | null> {
-    const envelope = new FirstFloorWorldSimulationStore_ACU().read();
-    if (envelope?.task?.status !== 'awaiting_plan_review') return null;
-    return this.resume();
-  }
-
-  async replan(instruction: string): Promise<WorldSimulationOrchestratorResult_ACU | null> {
-    const envelope = new FirstFloorWorldSimulationStore_ACU().read();
-    const identity = envelope?.task?.activeRun;
-    if (!identity || envelope.task?.status !== 'awaiting_plan_review') return null;
-    const anchor = restoreWorldSimulationAnchor_ACU(identity, this.getChat());
-    return this.orchestrator.replan({ anchor, instruction });
   }
 
   async saveSettings(settings: WorldSimulationSettings_ACU): Promise<void> {

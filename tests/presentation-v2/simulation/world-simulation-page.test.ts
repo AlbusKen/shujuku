@@ -14,15 +14,13 @@ const task = ref<any>(null);
 const activeRevision = ref<any>(null);
 const refresh = vi.fn(() => true);
 const send = vi.fn(async () => true);
-const confirmPlan = vi.fn(async () => true);
-const replan = vi.fn(async () => true);
 const resume = vi.fn(async () => true);
 const cancel = vi.fn(() => true);
 const saveSettings = vi.fn(async () => true);
 const snapshot = ref<any>({ envelope: envelope.value, conversation: { messages: [], nextId: 1, compaction: null, diagnostics: [] }, materials: { snapshot: null, diagnostics: [], adoptedIndex: null }, session: { entries: [], running: false }, anchor: null, projectionPreview: null });
 
 vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
-  useWorldSimulationRuntime: () => ({ snapshot, ready, busy, error, settingsDraft, envelope, task, activeRevision, refresh, send, confirmPlan, replan, resume, cancel, saveSettings }),
+  useWorldSimulationRuntime: () => ({ snapshot, ready, busy, error, settingsDraft, envelope, task, activeRevision, refresh, send, resume, cancel, saveSettings }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
   const { ref } = await import('vue');
@@ -81,20 +79,14 @@ describe('WorldSimulationPage', () => {
     app.unmount();
   });
 
-  it('待确认计划只通过 runtime 执行确认与重规划', async () => {
-    task.value = { status: 'awaiting_plan_review' };
+  it('不再渲染计划确认、重规划与恢复按钮区域', async () => {
+    task.value = { status: 'paused' };
     activeRevision.value = { plan: { title: '北境阶段', objective: '核实边境压力' } };
     const { app, host } = await mountPage();
-    const input = host.querySelector<HTMLTextAreaElement>('textarea[placeholder="输入重规划约束或修正方向"]')!;
-    input.value = '只处理已授权证据';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    await nextTick();
-    button(host, '重规划')?.click();
-    await nextTick();
-    expect(replan).toHaveBeenCalledWith('只处理已授权证据');
-    button(host, '确认计划并执行')?.click();
-    await nextTick();
-    expect(confirmPlan).toHaveBeenCalledTimes(1);
+    expect(host.textContent).not.toContain('阶段计划预览');
+    expect(host.textContent).not.toContain('确认计划并执行');
+    expect(host.querySelector('textarea[placeholder="输入重规划约束或修正方向"]')).toBeNull();
+    expect(button(host, '重规划')).toBeUndefined();
     app.unmount();
   });
 

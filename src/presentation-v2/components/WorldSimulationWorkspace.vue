@@ -15,14 +15,11 @@
         :task="runtime.task.value"
         :last-error="runtime.envelope.value?.lastError ?? null"
         :entries="sessionState.entries"
-        :active-plan="runtime.activeRevision.value?.plan ?? null"
         :anchor="snapshot?.anchor ?? null"
         :task-status="runtime.task.value?.status ?? null"
         @send="sendMessage"
         @update:draft="messageDraft = $event"
         @stop="stopRun"
-        @confirm-plan="runtime.confirmPlan"
-        @replan="runtime.replan"
         @resume="runtime.resume"
         @refresh="refresh"
       />
@@ -78,7 +75,6 @@ const statusText = computed(() => {
   const task = runtime.task.value;
   if (!task) return '尚未创建任务';
   if (task.status === 'running' || task.status === 'drafting') return '运行中';
-  if (task.status === 'awaiting_plan_review') return '等待计划确认';
   if (task.status === 'paused') return '已暂停';
   if (task.status === 'completed') return '已完成';
   if (task.status === 'failed') return '已失败';

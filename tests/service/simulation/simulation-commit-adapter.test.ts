@@ -23,7 +23,6 @@ function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
     taskId: 'task-1', stageId: 'stage-1', stageRevision: 1,
   };
   const envelope = buildDefaultWorldSimulationEnvelope_ACU();
-  envelope.settings.planPreview = false;
   envelope.task = { taskId: identity.taskId, originInstruction: '推进', status: 'running', createdAt: 1, updatedAt: 1, activeRun: identity, stopReason: null };
   envelope.activeStageId = identity.stageId;
   envelope.stages = [{ stageId: identity.stageId, stageNumber: 1, status: 'running', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: { schemaVersion: 1, title: '阶段', objective: '推进', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock', 'guidance'], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '提交' } }] }];

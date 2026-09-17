@@ -23,9 +23,8 @@ const plan: WorldSimulationStagePlan_ACU = {
 const revision = (frozen = false): WorldSimulationStageRevision_ACU => ({ revision: 1, createdAt: 2, reason: 'initial', replanInstruction: '', frozen, plan });
 const completed = { outcome: 'no_change' as const, summary: '无变化', outcomes: [] };
 
-function fixture(options: { planPreview?: boolean; prepare?: (signal: AbortSignal) => Promise<WorldSimulationPreparedRun_ACU> } = {}) {
+function fixture(options: { prepare?: (signal: AbortSignal) => Promise<WorldSimulationPreparedRun_ACU> } = {}) {
   let envelope: WorldSimulationEnvelope_ACU | null = buildDefaultWorldSimulationEnvelope_ACU();
-  envelope.settings.planPreview = options.planPreview ?? true;
   const initialLedger = envelope.ledger;
   let id = 0;
   const execute = vi.fn(async () => completed);
@@ -57,45 +56,52 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(f.store.updateAtomically).not.toHaveBeenCalled();
   });
 
-  it('计划预览持久化冻结锚点身份并等待确认', async () => {
-    const f = fixture({ planPreview: true });
-    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
-    expect(result.status).toBe('awaiting_plan_review');
-    expect(f.execute).not.toHaveBeenCalled();
-    expect(f.getEnvelope().task).toMatchObject({ status: 'awaiting_plan_review', activeRun: { anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest' } });
-    expect(f.getEnvelope().stages[0]).toMatchObject({ status: 'awaiting_review', activeRevision: 1 });
-    expect(f.getEnvelope().ledger).toBe(f.initialLedger);
-  });
-
-  it('关闭计划预览时冻结 revision、执行一次且不修改 ledger', async () => {
-    const f = fixture({ planPreview: false });
+  it('触发后直接冻结 revision 并执行一次，不等待人工确认', async () => {
+    const f = fixture();
     const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
     expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change' } });
     expect(f.execute).toHaveBeenCalledOnce();
-    expect(f.getEnvelope().task).toMatchObject({ status: 'completed' });
-    expect(f.getEnvelope().stages[0]).toMatchObject({ status: 'completed', revisions: [{ frozen: true }] });
+    expect(f.getEnvelope().task).toMatchObject({ status: 'completed', activeRun: null });
+    expect(f.getEnvelope().stages[0]).toMatchObject({ status: 'completed', activeRevision: 1, revisions: [{ frozen: true }] });
     expect(f.getEnvelope().ledger).toBe(f.initialLedger);
-    expect(f.getEnvelope().ledger.revision).toBe(0);
   });
 
-  it('同一冻结触发只运行一次，不同触发在活动任务期间返回 busy', async () => {
-    const f = fixture({ planPreview: true });
-    await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+  it('在途运行期间同锚点触发返回 duplicate、其他触发返回 busy，释放后下一轮触发正常完成', async () => {
+    let releasePrepare!: () => void;
+    const preparing = new Promise<void>(resolve => { releasePrepare = resolve; });
+    let prepareEntered!: () => void;
+    const entered = new Promise<void>(resolve => { prepareEntered = resolve; });
+    const execute = vi.fn(async () => completed);
+    const f = fixture({
+      prepare: async () => {
+        prepareEntered();
+        await preparing;
+        return { revision: revision(), execute };
+      },
+    });
+    const running = f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    await entered;
     await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
       .resolves.toEqual({ status: 'skipped', reason: 'duplicate' });
     await expect(f.orchestrator.start({
-      triggerKind: 'assistant_completed',
-      anchor: { ...anchor(), messageId: 2, messageKey: 'number:2', contentDigest: 'digest-2' },
+      triggerKind: 'agent_chat_message',
+      anchor: anchor(),
       instruction: '推进',
+      triggerConversationMessageId: 'turn-1',
     })).resolves.toEqual({ status: 'skipped', reason: 'busy' });
     expect(f.prepare).toHaveBeenCalledOnce();
+    releasePrepare();
+    await expect(running).resolves.toMatchObject({ status: 'completed' });
+    expect(f.getEnvelope().task).toMatchObject({ status: 'completed', activeRun: null });
+    await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .resolves.toMatchObject({ status: 'completed' });
+    expect(f.prepare).toHaveBeenCalledTimes(2);
   });
 
   it('取消会传播 AbortSignal、停止本次运行且不修改 ledger', async () => {
     let enteredPrepare!: () => void;
     const preparing = new Promise<void>(resolve => { enteredPrepare = resolve; });
     const f = fixture({
-      planPreview: false,
       prepare: signal => new Promise<WorldSimulationPreparedRun_ACU>((_resolve, reject) => {
         enteredPrepare();
         signal.addEventListener('abort', () => reject(new Error('WORLD_SIMULATION_ABORTED')), { once: true });
@@ -110,29 +116,6 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(f.orchestrator.cancel('chat-a')).toBe(false);
   });
 
-  it('待确认计划可带指令重规划为新 revision，且保持待确认不执行', async () => {
-    const f = fixture({ planPreview: true });
-    await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
-    f.prepare.mockImplementationOnce(async (input: any) => ({
-      revision: {
-        ...revision(),
-        revision: 2,
-        reason: 'manual_replan',
-        replanInstruction: input.replanInstruction,
-      },
-      execute: f.execute,
-    }));
-
-    const result = await f.orchestrator.replan({ anchor: anchor(), instruction: '缩小影响范围' });
-
-    expect(result).toMatchObject({ status: 'awaiting_plan_review', identity: { stageRevision: 2 } });
-    expect(f.prepare.mock.calls[1][0]).toMatchObject({
-      previous: { revision: 1 }, reason: 'manual_replan', replanInstruction: '缩小影响范围',
-    });
-    expect(f.execute).not.toHaveBeenCalled();
-    expect(f.getEnvelope().stages[0]).toMatchObject({ status: 'awaiting_review', activeRevision: 2, revisions: [{ revision: 2, reason: 'manual_replan', replanInstruction: '缩小影响范围' }] });
-  });
-
   it('执行期间 ledger revision 漂移时拒绝完成并保留漂移后的 ledger', async () => {
     let releaseExecute!: () => void;
     const executing = new Promise<void>(resolve => { releaseExecute = resolve; });
@@ -143,10 +126,7 @@ describe('WorldSimulationOrchestrator_ACU', () => {
       await executing;
       return completed;
     });
-    const f = fixture({
-      planPreview: false,
-      prepare: async () => ({ revision: revision(), execute }),
-    });
+    const f = fixture({ prepare: async () => ({ revision: revision(), execute }) });
     const running = f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
     await entered;
     const driftedLedger = { ...f.getEnvelope().ledger, revision: 1 };

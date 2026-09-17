@@ -67,8 +67,6 @@ export function useWorldSimulationRuntime() {
     activeRevision: computed(() => { const e = snapshot.value?.envelope; const s = e?.stages.find(stage => stage.stageId === e.activeStageId); return s?.revisions.find(item => item.revision === s.activeRevision) ?? null; }),
     refresh,
     send: (text: string) => run(() => runtime.sendAgentMessage(text)),
-    confirmPlan: () => run(() => runtime.confirmPlan()),
-    replan: (text: string) => run(() => runtime.replan(text)),
     resume: () => run(() => runtime.resume()),
     cancel: () => runtime.cancel(),
     saveSettings: () => settingsDraft.value ? run(() => runtime.saveSettings(cloneSettings_ACU(settingsDraft.value!))) : Promise.resolve(false),

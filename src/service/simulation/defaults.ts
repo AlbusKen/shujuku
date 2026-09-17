@@ -4,7 +4,6 @@ import { WORLD_LEDGER_SCHEMA_VERSION_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, t
 export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettings_ACU {
   return {
     autoTriggerEnabled: true,
-    planPreview: true,
     agentHistoryTokenBudget: 120000,
     agentReadTokenBudget: '20%',
     agentReadFallbackTokens: 6000,
