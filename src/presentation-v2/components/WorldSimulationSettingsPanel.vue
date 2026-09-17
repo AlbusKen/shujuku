@@ -1,5 +1,5 @@
 <template>
-  <AcuPanel title="世界推演 Agent 设置" description="挂载和编辑只修改本地草稿；只有点击保存才经当前 runtime 严格校验并持久化。">
+  <AcuPanel title="世界推演 Agent 设置" description="API 渠道选择即校验并保存；提示词与预算等其余项只修改本地草稿，点击保存后经 runtime 严格校验并持久化。">
     <p v-if="!settings" class="world-sim-settings__muted">设置尚未加载。</p>
     <template v-else>
       <div class="world-sim-settings__toggles">
@@ -34,7 +34,7 @@
         </div>
       </section>
       <section class="world-sim-settings__section">
-        <div class="world-sim-settings__heading"><div><strong>Agent API 渠道映射</strong><p>「跟随全局默认」即使用上方 API 预设；单独指定后选择即写入草稿，保存时校验预设存在，不再手写 JSON。</p></div></div>
+        <div class="world-sim-settings__heading"><div><strong>Agent API 渠道映射</strong><p>「跟随全局默认」即使用上方 API 预设；选择立即校验预设存在并保存，运行期按已持久化的渠道调用，不再手写 JSON。</p></div></div>
         <div class="world-sim-settings__numbers">
           <AcuFormRow v-for="role in agentChannelRoles" :key="role" :label="role">
             <AcuSelect :options="agentChannelOptions" :model-value="agentChannelValue(role)" @update:model-value="value => applyAgentChannel(role, String(value))" />
@@ -50,7 +50,8 @@
         <AcuPromptSegments :segments="draft.agentPrompts[activeAgent]" :role-options="roleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" :rows="5" @add="addPrompt" @delete="deletePrompt" @move="movePrompt" @update="updatePrompt" />
       </section>
       <AcuMessage v-if="message" :kind="message.kind">{{ message.text }}</AcuMessage>
-      <div class="world-sim-settings__actions"><AcuButton variant="primary" :loading="busy" @click="save">保存世界推演设置</AcuButton></div>
+      <AcuMessage v-if="notice" :kind="notice.kind">{{ notice.text }}</AcuMessage>
+      <div class="world-sim-settings__actions"><AcuButton variant="primary" :loading="busy" @click="save()">保存世界推演设置</AcuButton></div>
     </template>
   </AcuPanel>
 </template>
@@ -76,6 +77,7 @@ const emit = defineEmits<{ (event: 'save', settings: WorldSimulationSettings_ACU
 const draft = reactive<WorldSimulationSettings_ACU>({} as WorldSimulationSettings_ACU);
 const { apiStore, apiPresetSelectOptions } = useApiPresetSelectOptions();
 const message = ref<{ kind: 'success' | 'error'; text: string } | null>(null);
+const notice = ref<{ kind: 'success' | 'error'; text: string } | null>(null);
 const activeAgent = ref<WorldSimulationAgentName_ACU>('world-director');
 const promptImportInput = ref<HTMLInputElement | null>(null);
 const INHERIT_CHANNEL_VALUE = '__inherit__';
@@ -100,7 +102,7 @@ function sync(value: WorldSimulationSettings_ACU | null): void { if (!value) ret
 watch(() => props.settings, sync, { immediate: true, deep: true });
 onMounted(() => apiStore.refreshFromSettings());
 function setBudget(key: keyof WorldSimulationRunBudget_ACU, value: string | number): void { draft.agentRunBudget[key] = Number(value); }
-function setGlobalApi(value: unknown): void { const trimmed = String(value ?? '').trim(); draft.apiPresetMode = trimmed ? 'fixed' : 'current'; draft.fixedApiPresetName = trimmed; }
+function setGlobalApi(value: unknown): void { const trimmed = String(value ?? '').trim(); draft.apiPresetMode = trimmed ? 'fixed' : 'current'; draft.fixedApiPresetName = trimmed; save(); }
 function agentChannelValue(role: WorldSimulationAgentName_ACU): string {
   const choice = draft.agentApiPresets?.[role];
   if (!choice) return INHERIT_CHANNEL_VALUE;
@@ -112,7 +114,11 @@ function applyAgentChannel(role: WorldSimulationAgentName_ACU, value: unknown): 
   if (trimmed === INHERIT_CHANNEL_VALUE) delete next[role];
   else next[role] = trimmed ? { mode: 'fixed', presetName: trimmed } : { mode: 'current', presetName: '' };
   draft.agentApiPresets = next;
+  commitNow();
 }
+// 渠道类改动走“选择即保存”：运行期读取的是已持久化的 settings，不立即落盘就会出现 UI 显示与实际调用不一致。
+function commitNow(): void { save(); }
+
 function presetExists(presetName: string): boolean { return apiStore.presets.some(preset => preset.name === presetName); }
 function addPrompt(position: 'top' | 'bottom'): void { const list = draft.agentPrompts[activeAgent.value]; const item: WorldSimulationPromptSegment_ACU = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true, pinned: false }; position === 'top' ? list.unshift(item) : list.push(item); }
 function deletePrompt(index: number): void { const list = draft.agentPrompts[activeAgent.value]; if (list[index]?.deletable) list.splice(index, 1); }
@@ -169,9 +175,9 @@ function save(): void {
       if (!presetExists(presetName)) throw new Error(`${role} 渠道的 API 预设 "${presetName}" 不存在，请重新选择`);
     }
     emit('save', cloneSettings(draft));
-    message.value = { kind: 'success', text: '保存请求已提交；runtime 将重新读取并确认结果。' };
+    notice.value = { kind: 'success', text: '世界推演设置已提交保存。' };
   } catch (error) {
-    message.value = { kind: 'error', text: error instanceof Error ? error.message : '设置校验失败' };
+    notice.value = { kind: 'error', text: error instanceof Error ? error.message : '设置校验失败' };
   }
 }
 </script>

@@ -180447,6 +180447,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const draft = reactive({});
             const { apiStore, apiPresetSelectOptions } = useApiPresetSelectOptions();
             const message = ref(null);
+            const notice = ref(null);
             const activeAgent = ref('world-director');
             const promptImportInput = ref(null);
             const webProviderOptions = [
@@ -180471,7 +180472,7 @@ Expected function or array of functions, received type ${typeof value}.`
             watch(() => props.settings, sync, { immediate: true, deep: true });
             onMounted(() => apiStore.refreshFromSettings());
             function setBudget(key, value) { draft.agentRunBudget[key] = Number(value); }
-            function setGlobalApi(value) { const trimmed = String(value ?? '').trim(); draft.apiPresetMode = trimmed ? 'fixed' : 'current'; draft.fixedApiPresetName = trimmed; }
+            function setGlobalApi(value) { const trimmed = String(value ?? '').trim(); draft.apiPresetMode = trimmed ? 'fixed' : 'current'; draft.fixedApiPresetName = trimmed; save(); }
             function agentChannelValue(role) {
                 const choice = draft.agentApiPresets?.[role];
                 if (!choice)
@@ -180486,7 +180487,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 else
                     next[role] = trimmed ? { mode: 'fixed', presetName: trimmed } : { mode: 'current', presetName: '' };
                 draft.agentApiPresets = next;
+                commitNow();
             }
+            // 渠道类改动走“选择即保存”：运行期读取的是已持久化的 settings，不立即落盘就会出现 UI 显示与实际调用不一致。
+            function commitNow() { save(); }
             function presetExists(presetName) { return apiStore.presets.some(preset => preset.name === presetName); }
             function addPrompt(position) { const list = draft.agentPrompts[activeAgent.value]; const item = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true, pinned: false }; position === 'top' ? list.unshift(item) : list.push(item); }
             function deletePrompt(index) { const list = draft.agentPrompts[activeAgent.value]; if (list[index]?.deletable)
@@ -180554,20 +180558,20 @@ Expected function or array of functions, received type ${typeof value}.`
                             throw new Error(`${role} 渠道的 API 预设 "${presetName}" 不存在，请重新选择`);
                     }
                     emit('save', cloneSettings(draft));
-                    message.value = { kind: 'success', text: '保存请求已提交；runtime 将重新读取并确认结果。' };
+                    notice.value = { kind: 'success', text: '世界推演设置已提交保存。' };
                 }
                 catch (error) {
-                    message.value = { kind: 'error', text: error instanceof Error ? error.message : '设置校验失败' };
+                    notice.value = { kind: 'error', text: error instanceof Error ? error.message : '设置校验失败' };
                 }
             }
-            const __returned__ = { props, emit, draft, apiStore, apiPresetSelectOptions, message, activeAgent, promptImportInput, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, webProviderOptions, roleOptions, agentOptions, agentChannelRoles, agentChannelOptions, globalApiValue, budgetFields, cloneSettings, sync, setBudget, setGlobalApi, agentChannelValue, applyAgentChannel, presetExists, addPrompt, deletePrompt, movePrompt, updatePrompt, restoreAgent, restoreAllPrompts, exportPrompts, onImportPromptsFile, save, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuPanel, AcuPromptSegments, AcuSelect, AcuToggle };
+            const __returned__ = { props, emit, draft, apiStore, apiPresetSelectOptions, message, notice, activeAgent, promptImportInput, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, webProviderOptions, roleOptions, agentOptions, agentChannelRoles, agentChannelOptions, globalApiValue, budgetFields, cloneSettings, sync, setBudget, setGlobalApi, agentChannelValue, applyAgentChannel, commitNow, presetExists, addPrompt, deletePrompt, movePrompt, updatePrompt, restoreAgent, restoreAllPrompts, exportPrompts, onImportPromptsFile, save, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuPanel, AcuPromptSegments, AcuSelect, AcuToggle };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.world-sim-settings__toggles[data-v-2c21c193],.world-sim-settings__numbers[data-v-2c21c193]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.world-sim-settings__section[data-v-2c21c193]{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent)}.world-sim-settings__heading[data-v-2c21c193],.world-sim-settings__actions[data-v-2c21c193]{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.world-sim-settings__heading>div[data-v-2c21c193]:first-child{flex:1 1 320px}.world-sim-settings__heading p[data-v-2c21c193],.world-sim-settings__muted[data-v-2c21c193]{margin:4px 0 0;color:var(--acu-text-3);font-size:12px}.world-sim-settings__actions[data-v-2c21c193]{justify-content:flex-end}.world-sim-settings__file-input[data-v-2c21c193]{display:none}@media(max-width:640px){.world-sim-settings__toggles[data-v-2c21c193],.world-sim-settings__numbers[data-v-2c21c193]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationSettingsPanel.vue#style-0-2c21c193");
-    var WorldSimulationSettingsPanel_vue_vue_type_style_index_0_scoped_2c21c193_lang = null;
+    injectSfcStyle("\n.world-sim-settings__toggles[data-v-c9f763e4],.world-sim-settings__numbers[data-v-c9f763e4]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.world-sim-settings__section[data-v-c9f763e4]{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent)}.world-sim-settings__heading[data-v-c9f763e4],.world-sim-settings__actions[data-v-c9f763e4]{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.world-sim-settings__heading>div[data-v-c9f763e4]:first-child{flex:1 1 320px}.world-sim-settings__heading p[data-v-c9f763e4],.world-sim-settings__muted[data-v-c9f763e4]{margin:4px 0 0;color:var(--acu-text-3);font-size:12px}.world-sim-settings__actions[data-v-c9f763e4]{justify-content:flex-end}.world-sim-settings__file-input[data-v-c9f763e4]{display:none}@media(max-width:640px){.world-sim-settings__toggles[data-v-c9f763e4],.world-sim-settings__numbers[data-v-c9f763e4]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationSettingsPanel.vue#style-0-c9f763e4");
+    var WorldSimulationSettingsPanel_vue_vue_type_style_index_0_scoped_c9f763e4_lang = null;
 
     const _hoisted_1$s = {
 	key: 0,
@@ -180589,7 +180593,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: "世界推演 Agent 设置",
-		description: "挂载和编辑只修改本地草稿；只有点击保存才经当前 runtime 严格校验并持久化。"
+		description: "API 渠道选择即校验并保存；提示词与预算等其余项只修改本地草稿，点击保存后经 runtime 严格校验并持久化。"
 	}, {
 		default: withCtx(() => [!$props.settings ? (openBlock(), createElementBlock("p", _hoisted_1$s, "设置尚未加载。")) : (openBlock(), createElementBlock(
 			Fragment,
@@ -180652,7 +180656,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						_: 1
 					})
 				]),
-				createBaseVNode("section", _hoisted_4$h, [_cache[15] || (_cache[15] = createBaseVNode(
+				createBaseVNode("section", _hoisted_4$h, [_cache[16] || (_cache[16] = createBaseVNode(
 					"strong",
 					null,
 					"Agent 运行预算",
@@ -180685,7 +180689,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* STABLE_FRAGMENT */
 				))])]),
 				createBaseVNode("section", _hoisted_6$f, [
-					_cache[16] || (_cache[16] = createBaseVNode(
+					_cache[17] || (_cache[17] = createBaseVNode(
 						"strong",
 						null,
 						"受限网页研究",
@@ -180766,10 +180770,10 @@ Expected function or array of functions, received type ${typeof value}.`
 						})
 					])
 				]),
-				createBaseVNode("section", _hoisted_9$c, [_cache[17] || (_cache[17] = createBaseVNode(
+				createBaseVNode("section", _hoisted_9$c, [_cache[18] || (_cache[18] = createBaseVNode(
 					"div",
 					{ class: "world-sim-settings__heading" },
-					[createBaseVNode("div", null, [createBaseVNode("strong", null, "Agent API 渠道映射"), createBaseVNode("p", null, "「跟随全局默认」即使用上方 API 预设；单独指定后选择即写入草稿，保存时校验预设存在，不再手写 JSON。")])],
+					[createBaseVNode("div", null, [createBaseVNode("strong", null, "Agent API 渠道映射"), createBaseVNode("p", null, "「跟随全局默认」即使用上方 API 预设；选择立即校验预设存在并保存，运行期按已持久化的渠道调用，不再手写 JSON。")])],
 					-1
 					/* CACHED */
 				)), createBaseVNode("div", _hoisted_10$c, [(openBlock(true), createElementBlock(
@@ -180796,7 +180800,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* KEYED_FRAGMENT */
 				))])]),
 				createBaseVNode("section", _hoisted_11$c, [
-					createBaseVNode("div", _hoisted_12$b, [_cache[22] || (_cache[22] = createBaseVNode(
+					createBaseVNode("div", _hoisted_12$b, [_cache[23] || (_cache[23] = createBaseVNode(
 						"div",
 						null,
 						[createBaseVNode("strong", null, "角色提示词"), createBaseVNode("p", null, "引擎 seam 不可删除；导入导出使用与智能续写一致的 JSON 文件，导入后立即提交保存；不会改写世界账本、会话或正文。")],
@@ -180807,7 +180811,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							size: "sm",
 							onClick: $setup.exportPrompts
 						}, {
-							default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+							default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
 								"导出提示词 JSON",
 								-1
 								/* CACHED */
@@ -180818,7 +180822,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							size: "sm",
 							onClick: _cache[13] || (_cache[13] = ($event) => $setup.promptImportInput?.click())
 						}, {
-							default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
+							default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
 								"导入提示词 JSON",
 								-1
 								/* CACHED */
@@ -180842,7 +180846,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							size: "sm",
 							onClick: $setup.restoreAllPrompts
 						}, {
-							default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
+							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
 								"恢复全部默认",
 								-1
 								/* CACHED */
@@ -180853,7 +180857,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							size: "sm",
 							onClick: $setup.restoreAgent
 						}, {
-							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
 								"恢复当前角色默认值",
 								-1
 								/* CACHED */
@@ -180890,12 +180894,23 @@ Expected function or array of functions, received type ${typeof value}.`
 					)]),
 					_: 1
 				}, 8, ["kind"])) : createCommentVNode("v-if", true),
+				$setup.notice ? (openBlock(), createBlock($setup["AcuMessage"], {
+					key: 1,
+					kind: $setup.notice.kind
+				}, {
+					default: withCtx(() => [createTextVNode(
+						toDisplayString($setup.notice.text),
+						1
+						/* TEXT */
+					)]),
+					_: 1
+				}, 8, ["kind"])) : createCommentVNode("v-if", true),
 				createBaseVNode("div", _hoisted_14$9, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					loading: $props.busy,
-					onClick: $setup.save
+					onClick: _cache[15] || (_cache[15] = ($event) => $setup.save())
 				}, {
-					default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+					default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
 						"保存世界推演设置",
 						-1
 						/* CACHED */
@@ -180909,7 +180924,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	});
     }
-    var WorldSimulationSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-2c21c193"]]);
+    var WorldSimulationSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-c9f763e4"]]);
 
     function messageOf(error) {
         if (error instanceof WorldSimulationValidationError_ACU)
