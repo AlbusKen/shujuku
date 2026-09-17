@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
 import type { WorldSimulationEnvelope_ACU, WorldSimulationStagePlan_ACU, WorldSimulationStageRevision_ACU } from '../../../src/service/simulation/model';
 import { WorldSimulationOrchestrator_ACU, type WorldSimulationPreparedRun_ACU } from '../../../src/service/simulation/simulation-orchestrator';
+import { beginWorldSimulationSessionRun_ACU, isWorldSimulationSessionRunning_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 
 const anchor = (chatIdentity = 'chat-a') => ({
   chatIdentity, messageIndex: 1, messageId: 1, messageKey: 'number:1', swipeId: '0', contentDigest: 'digest',
@@ -135,5 +136,16 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     await expect(running).resolves.toMatchObject({ status: 'failed', error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
     expect(f.getEnvelope().ledger).toBe(driftedLedger);
     expect(f.getEnvelope().task).toMatchObject({ status: 'failed', activeRun: null });
+  });
+
+  it('异常失败终局强制关闭会话流 running 标记，UI 停止按钮不再卡死', async () => {
+    resetWorldSimulationSessionLogForTests_ACU();
+    beginWorldSimulationSessionRun_ACU('chat-a', '世界推演 Agent 运行');
+    expect(isWorldSimulationSessionRunning_ACU('chat-a')).toBe(true);
+    const f = fixture({ prepare: async () => ({ revision: revision(), execute: async () => { throw new Error('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID'); } }) });
+    await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .resolves.toMatchObject({ status: 'failed' });
+    expect(f.getEnvelope().task).toMatchObject({ status: 'failed', activeRun: null });
+    expect(isWorldSimulationSessionRunning_ACU('chat-a')).toBe(false);
   });
 });

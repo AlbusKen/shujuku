@@ -137137,6 +137137,9 @@ $CONTENT
         logWorldSimulationSession_ACU(chatIdentity, item); partition.running = false; return items.length; }
     function clearWorldSimulationSessionLog_ACU(chatIdentity, options = {}) { const partition = partition_ACU(chatIdentity); partition.entries = []; if (!options.keepRunning)
         partition.running = false; notify_ACU(partition); }
+    /** 强制结束运行标记。异常路径（协议失败、API 异常）不会写 run_failed 事件，由终局兜底调用本函数，避免 UI 永远停在「正在工作」。返回是否确实结束了一次运行。 */
+    function endWorldSimulationSessionRun_ACU(chatIdentity) { const partition = partition_ACU(chatIdentity); if (!partition.running)
+        return false; partition.running = false; notify_ACU(partition); return true; }
     function isWorldSimulationSessionRunning_ACU(chatIdentity) { return partition_ACU(chatIdentity).running; }
     function subscribeWorldSimulationSessionLog_ACU(chatIdentity, listener) { const listeners = partition_ACU(chatIdentity).listeners; listeners.add(listener); return () => { listeners.delete(listener); }; }
     function resetWorldSimulationSessionLogForTests_ACU() { partitions_ACU.clear(); }
@@ -138840,6 +138843,12 @@ $CONTENT
         async finishFailure_ACU(identity, cause, cancelled) {
             const error = errorFromUnknown_ACU(cause);
             const now = this.dependencies.now();
+            // 异常终局兜底：正常路径由 run_completed/run_failed/block 事件关闭 running，异常路径不会写这些事件，
+            // 必须在这里强制关闭，否则 UI 的 running 脉冲与「停止」按钮会一直卡住。
+            try {
+                endWorldSimulationSessionRun_ACU(identity.chatIdentity);
+            }
+            catch { /* 观察者异常不应阻断失败落盘 */ }
             try {
                 await this.dependencies.store.updateAtomically(envelope => {
                     const active = envelope?.task?.activeRun;

@@ -10,6 +10,7 @@ import {
   type WorldSimulationStageRevision_ACU,
   type WorldSimulationTriggerKind_ACU,
 } from './model';
+import { endWorldSimulationSessionRun_ACU } from './agent/agent-session-log';
 
 export interface WorldSimulationStorePort_ACU {
   read(): WorldSimulationEnvelope_ACU | null;
@@ -237,6 +238,9 @@ export class WorldSimulationOrchestrator_ACU {
   private async finishFailure_ACU(identity: WorldSimulationRunIdentity_ACU, cause: unknown, cancelled: boolean): Promise<WorldSimulationOrchestratorResult_ACU> {
     const error = errorFromUnknown_ACU(cause);
     const now = this.dependencies.now();
+    // 异常终局兜底：正常路径由 run_completed/run_failed/block 事件关闭 running，异常路径不会写这些事件，
+    // 必须在这里强制关闭，否则 UI 的 running 脉冲与「停止」按钮会一直卡住。
+    try { endWorldSimulationSessionRun_ACU(identity.chatIdentity); } catch { /* 观察者异常不应阻断失败落盘 */ }
     try {
       await this.dependencies.store.updateAtomically(envelope => {
         const active = envelope?.task?.activeRun;

@@ -45,6 +45,8 @@ export function updateWorldSimulationSession_ACU(chatIdentity: string, id: numbe
 export function readWorldSimulationSessionLog_ACU(chatIdentity: string): WorldSimulationSessionEntry_ACU[] { return partition_ACU(chatIdentity).entries.map(item => ({ ...item })); }
 export function hydrateWorldSimulationSessionLog_ACU(chatIdentity: string, items: readonly WorldSimulationSessionInput_ACU[]): number { const partition = partition_ACU(chatIdentity); if (partition.entries.length) return 0; for (const item of items) logWorldSimulationSession_ACU(chatIdentity, item); partition.running = false; return items.length; }
 export function clearWorldSimulationSessionLog_ACU(chatIdentity: string, options: { keepRunning?: boolean } = {}): void { const partition = partition_ACU(chatIdentity); partition.entries = []; if (!options.keepRunning) partition.running = false; notify_ACU(partition); }
+/** 强制结束运行标记。异常路径（协议失败、API 异常）不会写 run_failed 事件，由终局兜底调用本函数，避免 UI 永远停在「正在工作」。返回是否确实结束了一次运行。 */
+export function endWorldSimulationSessionRun_ACU(chatIdentity: string): boolean { const partition = partition_ACU(chatIdentity); if (!partition.running) return false; partition.running = false; notify_ACU(partition); return true; }
 export function isWorldSimulationSessionRunning_ACU(chatIdentity: string): boolean { return partition_ACU(chatIdentity).running; }
 export function subscribeWorldSimulationSessionLog_ACU(chatIdentity: string, listener: () => void): () => void { const listeners = partition_ACU(chatIdentity).listeners; listeners.add(listener); return () => { listeners.delete(listener); }; }
 export function resetWorldSimulationSessionLogForTests_ACU(): void { partitions_ACU.clear(); }
