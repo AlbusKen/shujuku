@@ -26,7 +26,7 @@
     </AcuPanel>
 
     <AcuPanelGrid class="world-sim-workspace__layout">
-      <AcuPanel title="世界推演资料维护" description="查看当前 active swipe 的世界状态、Agent 会话、候选轨迹与读取诊断；当前版本保持只读，避免绕过 T1–T9 联合提交。">
+      <AcuPanel title="世界推演资料维护" description="查看当前 active swipe 的世界状态、候选轨迹与读取诊断；当前版本保持只读，避免绕过 T1–T9 联合提交。">
         <WorldSimulationMaterialsPanel v-if="snapshot" :conversation="snapshot.conversation" :materials="snapshot.materials" :session="snapshot.session.entries" />
         <p v-else class="world-sim-workspace__muted">当前没有可显示的世界推演资料。</p>
       </AcuPanel>

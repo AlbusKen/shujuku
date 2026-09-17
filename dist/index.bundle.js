@@ -178843,7 +178843,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_14$c = { class: "acu-agent-advanced__section-head" };
     const _hoisted_15$b = { class: "acu-agent-advanced__prompt-scope" };
     const _hoisted_16$b = { class: "acu-agent-advanced__prompt-actions" };
-    const _hoisted_17$a = { class: "acu-agent-advanced__prompt-head" };
+    const _hoisted_17$9 = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$9 = { class: "acu-agent-advanced__prompt-head" };
     function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
@@ -179085,7 +179085,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					Fragment,
 					{ key: 1 },
 					[
-						createBaseVNode("div", _hoisted_17$a, [createBaseVNode(
+						createBaseVNode("div", _hoisted_17$9, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.decisionTitle),
@@ -179462,7 +179462,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-session-feed__spinner"
     };
     const _hoisted_16$a = { class: "acu-v2-session-feed__badge" };
-    const _hoisted_17$9 = { class: "acu-v2-session-feed__title" };
+    const _hoisted_17$8 = { class: "acu-v2-session-feed__title" };
     const _hoisted_18$8 = { class: "acu-v2-session-feed__time" };
     const _hoisted_19$8 = ["onClick"];
     const _hoisted_20$7 = {
@@ -179596,7 +179596,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_17$9,
+											_hoisted_17$8,
 											toDisplayString(entry.title),
 											1
 											/* TEXT */
@@ -180146,26 +180146,11 @@ Expected function or array of functions, received type ${typeof value}.`
             const emit = __emit;
             const TABS = [
                 { id: 'state', label: '世界状态' },
-                { id: 'conversation', label: 'Agent 会话' },
                 { id: 'candidates', label: '候选轨迹' },
                 { id: 'diagnostics', label: '读取诊断' },
             ];
             const activeTab = ref('state');
             const diagnostics = computed(() => [...props.conversation.diagnostics, ...props.materials.diagnostics]);
-            /** 持久会话消息（user/agent/runtime/tool/turn/handoff）投影成会话流条目，与主面板同构展示。 */
-            const conversationEntries = computed(() => props.conversation.messages.map((message, index) => ({
-                id: index + 1,
-                at: message.at,
-                kind: (message.kind === 'user' ? 'user_message'
-                    : message.kind === 'handoff' ? 'handoff'
-                        : message.kind === 'turn' ? 'run_started'
-                            : 'tool_read'),
-                title: message.digest || '会话材料',
-                detail: message.text,
-                agentName: '',
-                ok: true,
-                status: 'done',
-            })));
             const candidateEntries = computed(() => props.session.filter(item => ['delegation', 'finalize', 'block', 'stage_plan'].includes(item.kind)));
             function agentLabel(item) {
                 return item.agentName || '主 Agent';
@@ -180181,14 +180166,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     { key: 'chronicle', label: '世界编年', items: ledger.chronicle.map(x => ({ id: x.id, title: x.at, detail: x.summary })) },
                 ];
             });
-            const __returned__ = { props, emit, TABS, activeTab, diagnostics, conversationEntries, candidateEntries, agentLabel, ledgerGroups, AcuButton, WorldSimulationSessionFeed };
+            const __returned__ = { props, emit, TABS, activeTab, diagnostics, candidateEntries, agentLabel, ledgerGroups, AcuButton };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-43e0f120] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-43e0f120] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-43e0f120] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-43e0f120] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-43e0f120] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__overview[data-v-43e0f120] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-43e0f120] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview span[data-v-43e0f120] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-43e0f120] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-43e0f120] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-43e0f120] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-43e0f120] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card-head[data-v-43e0f120] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-43e0f120] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__card-body[data-v-43e0f120] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__empty[data-v-43e0f120] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__diagnostics[data-v-43e0f120] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-43e0f120] { grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-43e0f120");
-    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_43e0f120_lang = null;
+    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-532a685c] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-532a685c] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-532a685c] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-532a685c] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-532a685c] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__overview[data-v-532a685c] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-532a685c] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview span[data-v-532a685c] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-532a685c] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-532a685c] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-532a685c] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-532a685c] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card-head[data-v-532a685c] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-532a685c] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__card-body[data-v-532a685c] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__empty[data-v-532a685c] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__diagnostics[data-v-532a685c] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-532a685c] { grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-532a685c");
+    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_532a685c_lang = null;
 
     const _hoisted_1$t = { class: "acu-v2-ws-materials" };
     const _hoisted_2$q = { class: "acu-v2-ws-materials__tabs" };
@@ -180210,24 +180195,20 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_9$d = { class: "acu-v2-ws-materials__card-head" };
     const _hoisted_10$d = { class: "acu-v2-ws-materials__card-body" };
     const _hoisted_11$d = {
-	key: 1,
+	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
     const _hoisted_12$c = {
-	key: 0,
-	class: "acu-v2-ws-materials__empty"
-    };
-    const _hoisted_13$a = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_14$a = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_15$9 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_16$9 = {
+    const _hoisted_13$a = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_14$a = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_15$9 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_17$8 = {
+    const _hoisted_16$9 = {
 	key: 1,
 	class: "acu-v2-ws-materials__diagnostics"
     };
@@ -180348,27 +180329,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			))],
 			64
 			/* STABLE_FRAGMENT */
-		)) : $setup.activeTab === "conversation" ? (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 1 },
-			[createCommentVNode(" Agent 会话：复用与会话主面板同一个 SessionFeed，持久会话消息投影成同构条目 "), $setup.conversationEntries.length ? (openBlock(), createBlock($setup["WorldSimulationSessionFeed"], {
-				key: 0,
-				entries: $setup.conversationEntries,
-				running: false
-			}, null, 8, ["entries"])) : (openBlock(), createElementBlock("p", _hoisted_11$d, "还没有持久化的 Agent 会话材料。"))],
-			64
-			/* STABLE_FRAGMENT */
 		)) : $setup.activeTab === "candidates" ? (openBlock(), createElementBlock(
 			Fragment,
-			{ key: 2 },
-			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_12$c, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_13$a, [(openBlock(true), createElementBlock(
+			{ key: 1 },
+			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_11$d, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_12$c, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.candidateEntries, (item) => {
 					return openBlock(), createElementBlock("article", {
 						key: item.id,
 						class: "acu-v2-ws-materials__card"
-					}, [createBaseVNode("p", _hoisted_14$a, [createBaseVNode(
+					}, [createBaseVNode("p", _hoisted_13$a, [createBaseVNode(
 						"strong",
 						null,
 						toDisplayString(item.title),
@@ -180382,7 +180353,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* TEXT */
 					)]), createBaseVNode(
 						"p",
-						_hoisted_15$9,
+						_hoisted_14$a,
 						toDisplayString(item.detail),
 						1
 						/* TEXT */
@@ -180395,8 +180366,8 @@ Expected function or array of functions, received type ${typeof value}.`
 			/* STABLE_FRAGMENT */
 		)) : (openBlock(), createElementBlock(
 			Fragment,
-			{ key: 3 },
-			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_16$9, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_17$8, [(openBlock(true), createElementBlock(
+			{ key: 2 },
+			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_15$9, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_16$9, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.diagnostics, (item) => {
@@ -180416,7 +180387,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		))
 	]);
     }
-    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-43e0f120"]]);
+    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-532a685c"]]);
 
     const INHERIT_CHANNEL_VALUE$1 = '__inherit__';
     var _sfc_main$s = /*@__PURE__*/ defineComponent({
@@ -181066,8 +181037,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.world-sim-workspace[data-v-fbdfe5d5] { display: flex; flex-direction: column; gap: 18px;\n}\n.world-sim-workspace__layout[data-v-fbdfe5d5] { align-items: start;\n}\n.world-sim-workspace__muted[data-v-fbdfe5d5] { margin: 0; color: var(--acu-text-3); font-size: 12px;\n}\n", "src/presentation-v2/components/WorldSimulationWorkspace.vue#style-0-fbdfe5d5");
-    var WorldSimulationWorkspace_vue_vue_type_style_index_0_scoped_fbdfe5d5_lang = null;
+    injectSfcStyle("\n.world-sim-workspace[data-v-192c9060] { display: flex; flex-direction: column; gap: 18px;\n}\n.world-sim-workspace__layout[data-v-192c9060] { align-items: start;\n}\n.world-sim-workspace__muted[data-v-192c9060] { margin: 0; color: var(--acu-text-3); font-size: 12px;\n}\n", "src/presentation-v2/components/WorldSimulationWorkspace.vue#style-0-192c9060");
+    var WorldSimulationWorkspace_vue_vue_type_style_index_0_scoped_192c9060_lang = null;
 
     const _hoisted_1$r = { class: "world-sim-workspace" };
     const _hoisted_2$o = {
@@ -181123,7 +181094,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		createVNode($setup["AcuPanelGrid"], { class: "world-sim-workspace__layout" }, {
 			default: withCtx(() => [createVNode($setup["AcuPanel"], {
 				title: "世界推演资料维护",
-				description: "查看当前 active swipe 的世界状态、Agent 会话、候选轨迹与读取诊断；当前版本保持只读，避免绕过 T1–T9 联合提交。"
+				description: "查看当前 active swipe 的世界状态、候选轨迹与读取诊断；当前版本保持只读，避免绕过 T1–T9 联合提交。"
 			}, {
 				default: withCtx(() => [$setup.snapshot ? (openBlock(), createBlock($setup["WorldSimulationMaterialsPanel"], {
 					key: 0,
@@ -181163,7 +181134,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		}, null, 8, ["settings", "busy"])
 	]);
     }
-    var WorldSimulationWorkspace = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-fbdfe5d5"]]);
+    var WorldSimulationWorkspace = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-192c9060"]]);
 
     function getEntryLabel_ACU(entry) {
         return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);

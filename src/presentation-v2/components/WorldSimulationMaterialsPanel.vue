@@ -36,12 +36,6 @@
       </template>
     </template>
 
-    <!-- Agent 会话：复用与会话主面板同一个 SessionFeed，持久会话消息投影成同构条目 -->
-    <template v-else-if="activeTab === 'conversation'">
-      <WorldSimulationSessionFeed v-if="conversationEntries.length" :entries="conversationEntries" :running="false" />
-      <p v-else class="acu-v2-ws-materials__empty">还没有持久化的 Agent 会话材料。</p>
-    </template>
-
     <!-- 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 -->
     <template v-else-if="activeTab === 'candidates'">
       <p v-if="!candidateEntries.length" class="acu-v2-ws-materials__empty">暂无候选、派工或终审记录。</p>
@@ -64,7 +58,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
-import WorldSimulationSessionFeed from './WorldSimulationSessionFeed.vue';
 import type { WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 
@@ -77,7 +70,6 @@ const emit = defineEmits<{ (event: 'refresh'): void }>();
 
 const TABS = [
   { id: 'state', label: '世界状态' },
-  { id: 'conversation', label: 'Agent 会话' },
   { id: 'candidates', label: '候选轨迹' },
   { id: 'diagnostics', label: '读取诊断' },
 ] as const;
@@ -86,21 +78,6 @@ type TabId = typeof TABS[number]['id'];
 const activeTab = ref<TabId>('state');
 
 const diagnostics = computed(() => [...props.conversation.diagnostics, ...props.materials.diagnostics]);
-
-/** 持久会话消息（user/agent/runtime/tool/turn/handoff）投影成会话流条目，与主面板同构展示。 */
-const conversationEntries = computed(() => props.conversation.messages.map((message, index) => ({
-  id: index + 1,
-  at: message.at,
-  kind: (message.kind === 'user' ? 'user_message'
-    : message.kind === 'handoff' ? 'handoff'
-    : message.kind === 'turn' ? 'run_started'
-    : 'tool_read') as WorldSimulationSessionEntry_ACU['kind'],
-  title: message.digest || '会话材料',
-  detail: message.text,
-  agentName: '',
-  ok: true,
-  status: 'done' as const,
-})));
 
 const candidateEntries = computed(() => props.session.filter(item => ['delegation', 'finalize', 'block', 'stage_plan'].includes(item.kind)));
 
