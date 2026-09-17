@@ -10,6 +10,10 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : '世界推演操作失败';
 }
 
+function cloneSettings_ACU(settings: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU {
+  return JSON.parse(JSON.stringify(settings)) as WorldSimulationSettings_ACU;
+}
+
 export function useWorldSimulationRuntime() {
   const runtime = getWorldSimulationRuntime_ACU();
   const snapshot = ref<WorldSimulationUiSnapshot_ACU | null>(null);
@@ -24,7 +28,7 @@ export function useWorldSimulationRuntime() {
     try {
       const next = runtime.readUiSnapshot();
       snapshot.value = next;
-      settingsDraft.value = structuredClone(next.envelope?.settings ?? buildDefaultWorldSimulationSettings_ACU());
+      settingsDraft.value = cloneSettings_ACU(next.envelope?.settings ?? buildDefaultWorldSimulationSettings_ACU());
       error.value = '';
       ready.value = true;
       if (next.session.chatIdentity !== subscribedChatIdentity) {
@@ -67,7 +71,7 @@ export function useWorldSimulationRuntime() {
     replan: (text: string) => run(() => runtime.replan(text)),
     resume: () => run(() => runtime.resume()),
     cancel: () => runtime.cancel(),
-    saveSettings: () => settingsDraft.value ? run(() => runtime.saveSettings(structuredClone(settingsDraft.value!))) : Promise.resolve(false),
+    saveSettings: () => settingsDraft.value ? run(() => runtime.saveSettings(cloneSettings_ACU(settingsDraft.value!))) : Promise.resolve(false),
     exportPrompts: () => settingsDraft.value ? exportWorldSimulationPrompts_ACU(settingsDraft.value.agentPrompts) : '',
     importPrompts: (text: string) => { if (!settingsDraft.value) return false; try { settingsDraft.value.agentPrompts = importWorldSimulationPrompts_ACU(text); error.value = ''; return true; } catch (cause) { error.value = messageOf(cause); return false; } },
     restorePrompt: (name: string) => { if (settingsDraft.value) settingsDraft.value = restoreWorldSimulationPromptDefault_ACU(settingsDraft.value, name as never); },

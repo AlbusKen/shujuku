@@ -1,7 +1,10 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
-import { validateWorldSimulationConversationFloorRecord_ACU } from './agent/agent-conversation-store';
+import {
+  migrateLegacyWorldSimulationConversationBucket_ACU,
+  validateWorldSimulationConversationFloorRecord_ACU,
+} from './agent/agent-conversation-store';
 import {
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
@@ -88,17 +91,25 @@ function validateConversationAnchor_ACU(raw: unknown, path: string): WorldSimula
 
 function conversationBucketWithMigratedEntry_ACU(
   raw: unknown,
+  message: Record_ACU,
   sourceAnchor: WorldSimulationAnchorIdentity_ACU,
   persistedAnchor: WorldSimulationAnchorIdentity_ACU,
   updatedAt: number,
 ): WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU> | undefined {
   if (raw === undefined) return undefined;
-  if (!isRecord_ACU(raw) || raw.schemaVersion !== 1 || !isRecord_ACU(raw.entries)) {
+  const legacy = migrateLegacyWorldSimulationConversationBucket_ACU(
+    raw,
+    message,
+    sourceAnchor.chatIdentity,
+    sourceAnchor.messageIndex,
+  );
+  const normalized = legacy ?? raw;
+  if (!isRecord_ACU(normalized) || normalized.schemaVersion !== 1 || !isRecord_ACU(normalized.entries)) {
     reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
   }
-  exactKeys_ACU(raw, ['schemaVersion', 'entries'], WORLD_SIMULATION_CONVERSATION_FIELD_ACU);
+  exactKeys_ACU(normalized, ['schemaVersion', 'entries'], WORLD_SIMULATION_CONVERSATION_FIELD_ACU);
   const entries: WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>['entries'] = {};
-  for (const [key, candidate] of Object.entries(raw.entries)) {
+  for (const [key, candidate] of Object.entries(normalized.entries)) {
     const path = `${WORLD_SIMULATION_CONVERSATION_FIELD_ACU}.entries.${key}`;
     if (!isRecord_ACU(candidate)) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${path} 必须是对象`);
     exactKeys_ACU(candidate, ['anchor', 'value', 'updatedAt'], path);
@@ -218,6 +229,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   );
   const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(
     anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU],
+    anchorMessage,
     input.anchor,
     persistedAnchor,
     input.completedAt,

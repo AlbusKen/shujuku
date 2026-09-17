@@ -19,12 +19,10 @@ const replan = vi.fn(async () => true);
 const resume = vi.fn(async () => true);
 const cancel = vi.fn(() => true);
 const saveSettings = vi.fn(async () => true);
-const importPrompts = vi.fn(() => true);
-const exportPrompts = vi.fn(() => JSON.stringify(settingsDraft.value.agentPrompts));
 const snapshot = ref<any>({ envelope: envelope.value, conversation: { messages: [], nextId: 1, compaction: null, diagnostics: [] }, materials: { snapshot: null, diagnostics: [], adoptedIndex: null }, session: { entries: [], running: false }, anchor: null, projectionPreview: null });
 
 vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
-  useWorldSimulationRuntime: () => ({ snapshot, ready, busy, error, settingsDraft, envelope, task, activeRevision, refresh, send, confirmPlan, replan, resume, cancel, saveSettings, importPrompts, exportPrompts }),
+  useWorldSimulationRuntime: () => ({ snapshot, ready, busy, error, settingsDraft, envelope, task, activeRevision, refresh, send, confirmPlan, replan, resume, cancel, saveSettings }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({ useChatChangedTick: () => chatTick, useChatMutationTick: () => mutationTick }));
 
@@ -36,7 +34,20 @@ async function mountPage() {
 }
 const button = (host: Element, text: string) => Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(item => item.textContent?.includes(text));
 
-beforeEach(() => { document.body.innerHTML = ''; chatTick.value = 0; mutationTick.value = 0; task.value = null; activeRevision.value = null; vi.clearAllMocks(); });
+beforeEach(() => {
+  document.body.innerHTML = '';
+  chatTick.value = 0;
+  mutationTick.value = 0;
+  ready.value = true;
+  busy.value = false;
+  error.value = '';
+  settingsDraft.value = buildDefaultWorldSimulationSettings_ACU();
+  envelope.value = buildDefaultWorldSimulationEnvelope_ACU();
+  task.value = null;
+  activeRevision.value = null;
+  snapshot.value = { envelope: envelope.value, conversation: { messages: [], nextId: 1, compaction: null, diagnostics: [] }, materials: { snapshot: null, diagnostics: [], adoptedIndex: null }, session: { entries: [], running: false }, anchor: null, projectionPreview: null };
+  vi.clearAllMocks();
+});
 
 describe('WorldSimulationPage', () => {
   it('挂载与聊天变化只严格刷新，不隐式保存', async () => {
@@ -77,13 +88,20 @@ describe('WorldSimulationPage', () => {
     app.unmount();
   });
 
-  it('设置只在显式保存时导入提示词并调用 runtime.saveSettings', async () => {
+  it('设置只在显式保存时调用 runtime.saveSettings', async () => {
     const { app, host } = await mountPage();
     expect(saveSettings).not.toHaveBeenCalled();
     button(host, '保存世界推演设置')?.click();
     await nextTick();
-    expect(importPrompts).toHaveBeenCalledTimes(1);
     expect(saveSettings).toHaveBeenCalledTimes(1);
+    app.unmount();
+  });
+
+  it('在母版预览面板展示 runtime 提供的 projection preview', async () => {
+    snapshot.value = { ...snapshot.value, projectionPreview: '<!-- projection-test -->北境压力上升' };
+    const { app, host } = await mountPage();
+    expect(host.textContent).toContain('Projection preview');
+    expect(host.textContent).toContain('北境压力上升');
     app.unmount();
   });
 

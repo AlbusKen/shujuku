@@ -102,6 +102,57 @@ describe('world simulation commit adapter', () => {
     expect(saveChat).toHaveBeenCalledTimes(1);
   });
 
+  it('联合提交会把母版 version=1 会话升级为当前 bucket，并迁移到新 digest 锚点', async () => {
+    const { chat, anchor, commitInput, saveChat } = fixture();
+    chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = {
+      version: 1,
+      entries: [{
+        swipe: {
+          messageIndex: anchor.messageIndex,
+          messageKey: anchor.messageKey,
+          swipeIndex: Number(anchor.swipeId),
+          baseTextHash: 'legacy-hash',
+        },
+        nextId: 2,
+        messages: [{ id: 1, at: 10, kind: 'user', status: 'done', title: '你的补充', detail: '推进港口局势' }],
+      }],
+    };
+
+    await commitWorldSimulationProjection_ACU(commitInput);
+
+    const persistedAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    const bucket = chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
+    expect(bucket).toMatchObject({ schemaVersion: 1, entries: expect.any(Object) });
+    expect(bucket.version).toBeUndefined();
+    expect(bucket.entries[buildWorldSimulationBucketKey_ACU(anchor)]).toBeDefined();
+    expect(bucket.entries[buildWorldSimulationBucketKey_ACU(persistedAnchor)]).toMatchObject({
+      anchor: persistedAnchor,
+      value: { segments: [{ messages: [{ kind: 'user', text: '推进港口局势' }] }] },
+    });
+    expect(readWorldSimulationConversation_ACU(chat).messages.map(item => item.text)).toEqual(['推进港口局势']);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('legacy 会话迁移后的主保存失败会恢复原对象，不留下当前 bucket', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockResolvedValueOnce(undefined);
+    const { chat, anchor, commitInput } = fixture(saveChat);
+    const legacy = {
+      version: 1,
+      entries: [{
+        swipe: { messageIndex: anchor.messageIndex, messageKey: anchor.messageKey, swipeIndex: Number(anchor.swipeId), baseTextHash: 'legacy-hash' },
+        nextId: 2,
+        messages: [{ id: 1, at: 10, kind: 'user', status: 'done', title: '你的补充', detail: '保持原数据' }],
+      }],
+    };
+    chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = legacy;
+
+    await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' } });
+
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(legacy);
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toEqual(legacy);
+  });
+
   it('当前 D0 entry 不存在时仍全量校验历史 conversation entries，并在保存前拒绝损坏 bucket', async () => {
     const { chat, anchor, commitInput, saveChat } = fixture();
     const historicalAnchor = { ...anchor, contentDigest: 'historical-digest' };

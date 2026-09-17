@@ -41,6 +41,7 @@
           @delete-skill="onDeleteSkill"
         />
       </AcuPanel>
+      <WorldSimulationWorkspace />
     </AcuPanelGrid>
   </section>
 </template>
@@ -53,6 +54,7 @@ import WorldbookAgentControlBar from '../components/WorldbookAgentControlBar.vue
 import WorldbookEntryList from '../components/WorldbookEntryList.vue';
 import WorldbookEntryToolbar from '../components/WorldbookEntryToolbar.vue';
 import WorldbookSourcePicker from '../components/WorldbookSourcePicker.vue';
+import WorldSimulationWorkspace from '../components/WorldSimulationWorkspace.vue';
 import { useAgentWorldbookEntries } from '../composables/useAgentWorldbookEntries';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { usePlotWorldbookAgentControl } from '../composables/usePlotWorldbookAgentControl';
