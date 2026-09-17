@@ -42,11 +42,11 @@ afterEach(() => {
 });
 
 describe('router-store · pageRegistry 基线', () => {
-  it('注册表恰好 14 项，分布于 5 分组', async () => {
+  it('注册表恰好 15 项，分布于 5 分组', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.pageRegistry.length).toBe(14);
+    expect(r.pageRegistry.length).toBe(15);
     const byGroup = r.pageRegistry.reduce<Record<string, number>>((acc, p) => {
       acc[p.group] = (acc[p.group] || 0) + 1;
       return acc;
@@ -54,7 +54,7 @@ describe('router-store · pageRegistry 基线', () => {
     expect(byGroup).toEqual({
       overview: 2,
       config: 5,
-      feature: 4,
+      feature: 5,
       tool: 2,
       developer: 1,
     });
@@ -74,6 +74,7 @@ describe('router-store · pageRegistry 基线', () => {
       ['agent', 'Agent', 'config'],
       ['api', 'API', 'config'],
       ['continuation', '智能续写', 'feature'],
+      ['world-simulation', '世界推演', 'feature'],
       ['import', '外部导入', 'feature'],
       ['vector-index', '交火模式', 'feature'],
       ['content-replace', '正文替换', 'feature'],
@@ -211,25 +212,26 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('visiblePagesByGroup 在高手模式默认状态下：overview=1 / config=5 / feature=2 / tool=2 / developer=0', async () => {
+  it('visiblePagesByGroup 在高手模式默认状态下：overview=1 / config=5 / feature=3 / tool=2 / developer=0', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.visiblePagesByGroup.overview.length).toBe(1);
     expect(r.visiblePagesByGroup.config.length).toBe(5);
-    expect(r.visiblePagesByGroup.feature.length).toBe(2);
+    expect(r.visiblePagesByGroup.feature.length).toBe(3);
     expect(r.visiblePagesByGroup.tool.length).toBe(2); // 数据管理 + 高级工具
     expect(r.visiblePagesByGroup.developer.length).toBe(0); // 默认 developerOptionsEnabled=false
   });
 
-  it('智能续写、外部导入、交火模式都关闭时功能分组为空', async () => {
+  it('智能续写、世界推演、外部导入、交火模式都关闭时功能分组为空', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
     state._set_settings_ACU({
       ...state.settings_ACU,
       continuationPageEnabled: false,
+      worldSimulationPageEnabled: false,
       externalImportPageEnabled: false,
       summaryVectorIndexModeDefault: false,
       plotSettings: {
@@ -249,6 +251,7 @@ describe('router-store · 高手模式可见性', () => {
 
     expect(r.visiblePagesByGroup.feature).toEqual([]);
     expect(r.visiblePages.map(p => p.id)).not.toContain('continuation');
+    expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePages.map(p => p.id)).not.toContain('import');
     expect(r.visiblePages.map(p => p.id)).not.toContain('vector-index');
   });
@@ -331,7 +334,7 @@ describe('router-store · 切页 + 持久化', () => {
     expect(persisted.router.activePageId).toBe('continuation');
   });
 
-  it('剧情推进、智能续写、外部导入与交火模式按功能开关控制一级页可见性', async () => {
+  it('剧情推进、智能续写、世界推演、外部导入与交火模式按功能开关控制一级页可见性', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
@@ -339,6 +342,7 @@ describe('router-store · 切页 + 持久化', () => {
 
     expect(r.visiblePagesByGroup.config.map(p => p.id)).toContain('plot');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)[0]).toBe('continuation');
+    expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('world-simulation');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('import');
     expect(r.visiblePages.map(p => p.id)).not.toContain('vector-index');
 
@@ -348,8 +352,10 @@ describe('router-store · 切页 + 持久化', () => {
     expect(r.activePageId).toBe('dashboard');
 
     r.setFeatureGate(m.registry.FEATURE_GATE_CONTINUATION, false);
+    r.setFeatureGate(m.registry.FEATURE_GATE_WORLD_SIMULATION, false);
     r.setFeatureGate(m.registry.FEATURE_GATE_IMPORT, false);
     expect(r.visiblePages.map(p => p.id)).not.toContain('continuation');
+    expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePages.map(p => p.id)).not.toContain('import');
 
     r.setFeatureGate(m.registry.FEATURE_GATE_VECTOR_INDEX, true);

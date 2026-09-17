@@ -21,6 +21,11 @@ const m = vi.hoisted(() => ({
   handleNewMessage: vi.fn(),
   bindInternalGeneration: vi.fn(),
   consumeInternalGeneration: vi.fn(() => null),
+  bindSimulationInternalGeneration: vi.fn(),
+  consumeSimulationInternalGeneration: vi.fn(() => null),
+  createSimulationIntent: vi.fn((eventMessageId: number, chatKey: string, isolationKey: string, generationSeq?: number) => ({ eventMessageId, chatKey, isolationKey, generationSeq })),
+  handleSimulationCompletion: vi.fn(async () => null),
+  getSimulationRuntime: vi.fn(),
   getContinuationRuntime: vi.fn(),
   continuationRuntimeInitialize: vi.fn(async () => undefined),
   continuationBridge: null as any,
@@ -64,6 +69,14 @@ vi.mock('../../../src/service/continuation/internal-ai-events', () => ({
   bindContinuationInternalAiGenerationStarted_ACU: (...args: any[]) => m.bindInternalGeneration(...args),
   consumeContinuationInternalAiGenerationEnded_ACU: (...args: any[]) => m.consumeInternalGeneration(...args),
 }));
+vi.mock('../../../src/service/simulation/simulation-internal-ai-events', () => ({
+  bindWorldSimulationInternalAiGenerationStarted_ACU: (...args: any[]) => m.bindSimulationInternalGeneration(...args),
+  consumeWorldSimulationInternalAiGenerationEnded_ACU: (...args: any[]) => m.consumeSimulationInternalGeneration(...args),
+}));
+vi.mock('../../../src/service/simulation/simulation-runtime', () => ({
+  createWorldSimulationCompletionIntentForCurrentChat_ACU: (...args: any[]) => m.createSimulationIntent(...args),
+  getWorldSimulationRuntime_ACU: () => m.getSimulationRuntime(),
+}));
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({ getContinuationRuntime_ACU: () => m.getContinuationRuntime() }));
 vi.mock('../../../src/service/continuation/host-generation-bridge-registry', () => ({ getContinuationHostGenerationBridge_ACU: () => m.continuationBridge }));
 
@@ -103,6 +116,10 @@ beforeEach(() => {
   m.orchestrate.mockResolvedValue({ action: 'passthrough' });
   m.shouldProcessSummary.mockReturnValue(false);
   m.continuationRuntimeInitialize.mockResolvedValue(undefined);
+  m.consumeInternalGeneration.mockReturnValue(null);
+  m.consumeSimulationInternalGeneration.mockReturnValue(null);
+  m.handleSimulationCompletion.mockResolvedValue(null);
+  m.getSimulationRuntime.mockReturnValue({ handleAssistantCompletion: m.handleSimulationCompletion });
   m.getContinuationRuntime.mockReturnValue({ initialize: m.continuationRuntimeInitialize });
   m.continuationBridge = null;
   Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [{ seq: 3 }] });
@@ -205,9 +222,57 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
     m.generationEnded!(42);
 
     expect(m.bindInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
+    expect(m.bindSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.consumeInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
+    expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
+    expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
     expect(m.autoUpdate).not.toHaveBeenCalled();
     expect(m.handleNewMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('mainInitialize_ACU world simulation generation isolation', () => {
+  it('simulation 内部生成结束时短路自动推演与常规正文管线', () => {
+    m.consumeSimulationInternalGeneration.mockReturnValueOnce({ requestId: 'simulation-request', runId: 'run-a', role: 'world-director' });
+
+    m.generationStarted!('normal', {}, false);
+    m.generationEnded!(42);
+
+    expect(m.bindSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
+    expect(m.consumeSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
+    expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
+  });
+
+  it('普通最终 assistant 正文构造冻结意图并派发一次世界推演', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: 'user' }, { is_user: false, mes: 'assistant', message_id: 42 }];
+
+    m.generationStarted!('normal', {}, false);
+    m.generationEnded!(42);
+    await Promise.resolve();
+
+    expect(m.createSimulationIntent).toHaveBeenCalledWith(42, 'chat-a', 'test-isolation', m.gate.generationSeq);
+    expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
+    expect(m.handleSimulationCompletion).toHaveBeenCalledWith(expect.objectContaining({ eventMessageId: 42, chatKey: 'chat-a' }));
+  });
+
+  it('quiet、dryRun 与 automatic_trigger 不派发世界推演', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: false, mes: 'assistant', message_id: 42 }];
+
+    m.isQuiet.mockImplementation((type: any) => type === 'quiet');
+    m.generationStarted!('quiet', {}, false);
+    m.generationEnded!(42);
+    m.generationStarted!('normal', {}, true);
+    m.generationEnded!(42);
+    m.generationStarted!('normal', { automatic_trigger: true }, false);
+    m.generationEnded!(42);
+    await Promise.resolve();
+
+    expect(m.createSimulationIntent).not.toHaveBeenCalled();
+    expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
   });
 });
 

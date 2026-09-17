@@ -1,0 +1,59 @@
+import { WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationStagePlan_ACU, type WorldSimulationStageRevision_ACU, type WorldSimulationSettings_ACU } from './model';
+import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from './api-preset';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU } from './agent/agent-defaults';
+import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent/agent-placeholder-resolver';
+import { parseWorldSimulationJsonPayload_ACU, parseWorldSimulationPlannerOutput_ACU } from './agent/agent-protocol';
+import { executeWorldSimulationFinalRequest_ACU } from './agent/final-request-token-gate';
+import { renderWorldSimulationPrompt_ACU } from './agent/prompt-template';
+import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent/agent-token-budget';
+
+export interface WorldSimulationStagePlannerDependencies_ACU {
+  invoke(messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string>;
+  countTokens?: WorldSimulationTokenCounter_ACU;
+  apiPreset?: WorldSimulationApiPresetDependencies_ACU;
+}
+export interface WorldSimulationStagePlanRequest_ACU {
+  settings: WorldSimulationSettings_ACU;
+  promptContext: WorldSimulationPlaceholderContext_ACU;
+  previous?: WorldSimulationStageRevision_ACU | null;
+  reason?: WorldSimulationStageRevision_ACU['reason'];
+  replanInstruction?: string;
+  now?: number;
+}
+
+export class WorldSimulationStagePlanner_ACU {
+  constructor(private readonly dependencies: WorldSimulationStagePlannerDependencies_ACU) {}
+
+  async plan(input: WorldSimulationStagePlanRequest_ACU): Promise<{ summary: string; revision: WorldSimulationStageRevision_ACU }> {
+    const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, 'world-stage-planner', 'agent_loop', this.dependencies.apiPreset);
+    const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts['world-stage-planner'], 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
+    const sent = await executeWorldSimulationFinalRequest_ACU({
+      messages: rendered.messages,
+      historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+      count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+      invoke: messages => this.dependencies.invoke(messages, preset),
+    });
+    if (sent.status === 'rejected') throw new Error(sent.reason);
+    const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(sent.response, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
+    if (input.previous && parsed.action !== 'replan') throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
+    if (!input.previous && parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
+    const revision = (input.previous?.revision ?? 0) + 1;
+    return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
+  }
+}
+
+export function confirmWorldSimulationStageRevision_ACU(revision: WorldSimulationStageRevision_ACU): WorldSimulationStageRevision_ACU {
+  if (revision.frozen) return { ...revision, plan: { ...revision.plan } };
+  return { ...revision, frozen: true, plan: { ...revision.plan } };
+}
+
+export function replaceWorldSimulationStagePlan_ACU(revision: WorldSimulationStageRevision_ACU, plan: WorldSimulationStagePlan_ACU): WorldSimulationStageRevision_ACU {
+  if (revision.frozen) throw new Error('WORLD_SIMULATION_STAGE_REVISION_FROZEN');
+  if (plan.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU) throw new Error('WORLD_SIMULATION_STAGE_PLAN_SCHEMA_INVALID');
+  return { ...revision, plan: { ...plan } };
+}
+
+export function activeWorldSimulationStageRevision_ACU(envelope: WorldSimulationEnvelope_ACU): WorldSimulationStageRevision_ACU | null {
+  const stage = envelope.stages.find(item => item.stageId === envelope.activeStageId);
+  return stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
+}

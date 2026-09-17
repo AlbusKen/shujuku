@@ -63,6 +63,14 @@ export interface ChatMessageACUExtensions {
     _qrf_plot_pending_hash?: string;
     /** QRF 剧情推进轮次身份；用于精确定位与失败重试。 */
     _qrf_plot_round_id?: string;
+    /** 世界推演权威状态；字段内部按冻结 assistant 楼层的 active swipe 身份分桶。 */
+    _qrf_world_simulation_state?: Record<string, unknown>;
+    /** 世界推演 Agent 会话分段；与 continuation 会话字段严格隔离。 */
+    _qrf_world_simulation_agent_chat?: Record<string, unknown>;
+    /** 世界推演材料快照；与 continuation 资料字段严格隔离。 */
+    _qrf_world_simulation_agent_materials?: Record<string, unknown>;
+    /** 世界推演聊天级任务 envelope，仅使用于首楼。 */
+    _qrf_world_simulation?: Record<string, unknown>;
     /** QRF 剧情推进任务级结果映射（key=taskId, value=该任务的推进内容） */
     qrf_plot_tasks?: Record<string, string>;
 }

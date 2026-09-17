@@ -62,6 +62,10 @@ export interface Settings_ACU {
   plotWorldbookConfigByCharacter?: Record<string, Pick<WorldbookConfig_ACU, 'source' | 'manualSelection'> & { enabledEntries?: Record<string, unknown> }>;
   mergeSummaryPrompt: string;
   hasImportTableSelection: boolean;
+  /** presentation-v2 智能续写页可见性；缺失按开启处理。 */
+  continuationPageEnabled?: boolean;
+  /** presentation-v2 世界推演页可见性；缺失按开启处理。 */
+  worldSimulationPageEnabled?: boolean;
   /** 存储模式：'native' 原生 JSON 模式 | 'sqlite' SQLite 运行时数据库模式 */
   storageMode: 'native' | 'sqlite';
   /** 输出低于慢阶段阈值的详细性能 span；默认关闭。 */

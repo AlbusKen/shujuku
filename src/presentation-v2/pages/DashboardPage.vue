@@ -105,6 +105,7 @@ import { useDashboardPage } from "../composables/useDashboardPage";
 import {
   FEATURE_GATE_CONTENT_REPLACE,
   FEATURE_GATE_CONTINUATION,
+  FEATURE_GATE_WORLD_SIMULATION,
   FEATURE_GATE_IMPORT,
   FEATURE_GATE_PLOT,
   FEATURE_GATE_VECTOR_INDEX,
@@ -144,6 +145,12 @@ function syncFeaturePageGates(): void {
     FEATURE_GATE_CONTINUATION,
     dashboard.advancedToggles.value.some(
       (item) => item.key === "continuationPageEnabled" && item.value,
+    ),
+  );
+  routerStore.syncFeatureGate(
+    FEATURE_GATE_WORLD_SIMULATION,
+    dashboard.advancedToggles.value.some(
+      (item) => item.key === "worldSimulationPageEnabled" && item.value,
     ),
   );
   routerStore.syncFeatureGate(

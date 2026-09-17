@@ -741,6 +741,7 @@ describe("DashboardPage", () => {
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
     expect(text).toContain("剧情推进");
     expect(text).toContain("智能续写");
+    expect(text).toContain("世界推演");
     expect(text).toContain("外部导入");
     expect(text).toContain("交火模式");
     expect(text).toContain("存储模式");
@@ -761,6 +762,7 @@ describe("DashboardPage", () => {
     expect(visibleToggleKeys).toEqual([
       "plotEnabled",
       "continuationPageEnabled",
+      "worldSimulationPageEnabled",
       "externalImportPageEnabled",
       "contentReplaceEnabled",
       "summaryVectorIndexModeEnabled",
@@ -933,6 +935,7 @@ describe("DashboardPage", () => {
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
     expect(text).toContain("剧情推进");
     expect(text).toContain("智能续写");
+    expect(text).toContain("世界推演");
     expect(text).toContain("外部导入");
     expect(text).toContain("交火模式");
     expect(text).toContain("正文替换");
@@ -943,6 +946,9 @@ describe("DashboardPage", () => {
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
     ).toContain("智能续写");
+    expect(
+      document.querySelector(".acu-v2-sidebar")?.textContent || "",
+    ).toContain("世界推演");
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
     ).toContain("外部导入");
@@ -956,6 +962,9 @@ describe("DashboardPage", () => {
     const continuationToggle = document.querySelector(
       'button[data-acu-toggle-key="continuationPageEnabled"]',
     ) as HTMLButtonElement;
+    const worldSimulationToggle = document.querySelector(
+      'button[data-acu-toggle-key="worldSimulationPageEnabled"]',
+    ) as HTMLButtonElement;
     const importToggle = document.querySelector(
       'button[data-acu-toggle-key="externalImportPageEnabled"]',
     ) as HTMLButtonElement;
@@ -964,18 +973,22 @@ describe("DashboardPage", () => {
     ) as HTMLButtonElement;
     expect(plotToggle).not.toBeNull();
     expect(continuationToggle).not.toBeNull();
+    expect(worldSimulationToggle).not.toBeNull();
     expect(importToggle).not.toBeNull();
     expect(vectorToggle).not.toBeNull();
 
     continuationToggle.click();
+    worldSimulationToggle.click();
     importToggle.click();
     await Promise.resolve();
 
     expect(settings.continuationPageEnabled).toBe(false);
+    expect(settings.worldSimulationPageEnabled).toBe(false);
     expect(settings.externalImportPageEnabled).toBe(false);
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
     expect(text).not.toContain("功能");
     expect(text).not.toContain("智能续写");
+    expect(text).not.toContain("世界推演");
     expect(text).not.toContain("外部导入");
 
     plotToggle.click();
@@ -1023,6 +1036,7 @@ describe("DashboardPage", () => {
     expect(visibleToggleKeys).toEqual([
       "plotEnabled",
       "continuationPageEnabled",
+      "worldSimulationPageEnabled",
       "externalImportPageEnabled",
       "contentReplaceEnabled",
       "summaryVectorIndexModeEnabled",

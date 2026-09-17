@@ -260,6 +260,10 @@ export const dashboardCopy = {
       label: "智能续写",
       description: "手动功能。代替你自动发送提示词，AI 根据内容持续续写。",
     },
+    worldSimulation: {
+      label: "世界推演",
+      description: "审计世界账本、阶段计划与证据，并在确认后把安全 guidance 投影到正文。",
+    },
     externalImport: {
       label: "外部导入",
       description:

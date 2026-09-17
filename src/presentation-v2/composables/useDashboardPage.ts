@@ -966,6 +966,12 @@ export function useDashboardPage(): DashboardPageState {
         value: settings_ACU.continuationPageEnabled !== false,
       },
       {
+        key: "worldSimulationPageEnabled",
+        label: dashboardCopy.toggles.worldSimulation.label,
+        description: dashboardCopy.toggles.worldSimulation.description,
+        value: settings_ACU.worldSimulationPageEnabled !== false,
+      },
+      {
         key: "externalImportPageEnabled",
         label: dashboardCopy.toggles.externalImport.label,
         description: dashboardCopy.toggles.externalImport.description,
@@ -1099,6 +1105,7 @@ export function useDashboardPage(): DashboardPageState {
       setDeveloperOptionsEnabled(!!value);
     } else if (
       key === "continuationPageEnabled" ||
+      key === "worldSimulationPageEnabled" ||
       key === "externalImportPageEnabled"
     ) {
       settings_ACU[key] = !!value;

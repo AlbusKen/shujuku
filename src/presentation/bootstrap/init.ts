@@ -38,6 +38,8 @@ import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
+import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU } from '../../service/simulation/simulation-internal-ai-events';
+import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -430,6 +432,7 @@ export   function mainInitialize_ACU() {
               _set_wasStoppedByUser_ACU(false);
               const context = recordGenerationContext_ACU(type, params, dryRun);
               bindContinuationInternalAiGenerationStarted_ACU(context.seq);
+              bindWorldSimulationInternalAiGenerationStarted_ACU(context.seq);
               // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
               // 对非 quiet/非 dryRun/非自动触发的生成开放宽松认领（spv8.9.2 状态法），桥内部只在
               // 存在未绑定序列号的等待轮时才会认领。
@@ -459,6 +462,11 @@ export   function mainInitialize_ACU() {
                 const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (internalRequest) {
                   logDebug_ACU(`ACU 忽略 continuation 内部 ${internalRequest.source} GENERATION_ENDED: ${internalRequest.requestId}`);
+                  return;
+                }
+                const simulationInternalRequest = consumeWorldSimulationInternalAiGenerationEnded_ACU(generationContext?.seq);
+                if (simulationInternalRequest) {
+                  logDebug_ACU(`ACU 忽略世界推演内部 ${simulationInternalRequest.role} GENERATION_ENDED: ${simulationInternalRequest.requestId}`);
                   return;
                 }
                 const continuationBridge = getContinuationHostGenerationBridge_ACU();
@@ -498,6 +506,17 @@ export   function mainInitialize_ACU() {
                       generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
                   }
                   : undefined;
+                if (generationContext && !generationContext.dryRun && !quietLike && !automaticTrigger && eventMessageId !== undefined) {
+                  const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(
+                    eventMessageId,
+                    currentChatFileIdentifier_ACU,
+                    getCurrentIsolationKey_ACU(),
+                    generationContext.seq,
+                  );
+                  void getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent).catch(error => {
+                    logWarn_ACU(`世界推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
+                  });
+                }
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);
                 } else {
