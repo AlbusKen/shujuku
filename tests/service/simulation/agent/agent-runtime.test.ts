@@ -31,6 +31,27 @@ describe('世界推演 Agent runtime', () => {
     expect(result.candidate?.candidateId).toMatch(/^candidate:/);
   });
 
+  it('specialist 协议重试回灌明确枚举、角色、写入范围与合法 JSON 模板', async () => {
+    const { registry, promptContext } = fixture('specialist-repair');
+    const responses = [
+      JSON.stringify({ status: 'success', agentName: 'macro-dynamics-analyst', summary: '缺少 patch', evidenceRefs: [], uncertainties: [] }),
+      JSON.stringify({ status: 'no_change', agentName: 'macro-dynamics-analyst', summary: '无需修改', evidenceRefs: [], uncertainties: [] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    await expect(runtime.run({
+      delegation: { agentName: 'macro-dynamics-analyst', instruction: '分析时间', reads: [] },
+      settings: settings(), promptContext, registry, tools,
+    })).resolves.toMatchObject({ status: 'no_change', summary: '无需修改' });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const retryMessages = invoke.mock.calls[1][1] as readonly { role: string; content: string }[];
+    const rejection = retryMessages.find(message => message.role === 'user' && message.content.includes('INVALID_SPECIALIST_STATUS'))?.content ?? '';
+    expect(rejection).toContain('status 必须精确为 candidate、no_change、failed、blocked');
+    expect(rejection).toContain('agentName 必须精确为 macro-dynamics-analyst');
+    expect(rejection).toContain('patch 顶层只能使用：clock | dimensions | chronicle');
+    expect(rejection).toContain('"status":"candidate"');
+  });
+
   it('并行派工部分失败时仍可由 reviewer 部分采用成功候选', async () => {
     const { registry, evidence, promptContext } = fixture('partial');
     const candidate = {

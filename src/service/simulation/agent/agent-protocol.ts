@@ -204,7 +204,11 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
     return { kind: 'finalize', outcome: outcome as typeof TERMINALS_ACU[number], summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
   }
   if (action === 'block') {
-    const raw = closedObject_ACU(normalizedValue, '$', ['action', 'reason', 'unresolved']);
+    const reason = text_ACU(normalizedValue.reason);
+    const blockValue = !Object.prototype.hasOwnProperty.call(normalizedValue, 'unresolved') && reason
+      ? { ...normalizedValue, unresolved: [reason] }
+      : normalizedValue;
+    const raw = closedObject_ACU(blockValue, '$', ['action', 'reason', 'unresolved']);
     return { kind: 'block', reason: requiredText_ACU(raw.reason, '$.reason'), unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
   }
   fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', normalizedValue.action);
@@ -247,25 +251,35 @@ export function parseWorldSimulationPlannerOutput_ACU(value: unknown): WorldSimu
   return { action, summary: requiredText_ACU(raw.summary, '$.summary'), plan: stagePlan_ACU(raw.plan) };
 }
 
+function normalizeSpecialistStatus_ACU(value: Record<string, unknown>): Record<string, unknown> {
+  const status = text_ACU(value.status);
+  const hasNonEmptyPatch = isRecord_ACU(value.patch) && Object.keys(value.patch).length > 0;
+  if (['success', 'completed', 'done'].includes(status) && hasNonEmptyPatch) return { ...value, status: 'candidate' };
+  if (status === 'unchanged' && !Object.prototype.hasOwnProperty.call(value, 'patch')) return { ...value, status: 'no_change' };
+  if (status === 'error') return { ...value, status: 'failed' };
+  return value;
+}
+
 export function parseWorldSimulationSpecialistResult_ACU(value: unknown, evidenceRegistry?: WorldSimulationEvidenceRegistrySnapshot_ACU): WorldSimulationSpecialistResult_ACU {
   if (!isRecord_ACU(value)) fail_ACU('OBJECT_REQUIRED', '$', 'specialist result object', value);
-  const status = text_ACU(value.status);
-  const agentName = requiredText_ACU(value.agentName, '$.agentName');
+  const normalized = normalizeSpecialistStatus_ACU(value);
+  const status = text_ACU(normalized.status);
+  const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
   if (status === 'candidate') {
-    const raw = closedObject_ACU(value, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
+    const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
     if (!isRecord_ACU(raw.patch) || !Object.keys(raw.patch).length) fail_ACU('PATCH_REQUIRED', '$.patch', 'non-empty object', raw.patch);
     return { status, agentName, patch: raw.patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
   }
   if (status === 'no_change') {
-    const raw = closedObject_ACU(value, '$', ['status', 'agentName', 'summary', 'evidenceRefs', 'uncertainties']);
+    const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'summary', 'evidenceRefs', 'uncertainties']);
     return { status, agentName, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
   }
   if (status === 'failed') {
-    const raw = closedObject_ACU(value, '$', ['status', 'agentName', 'reasonCode', 'message']);
+    const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'reasonCode', 'message']);
     return { status, agentName, reasonCode: requiredText_ACU(raw.reasonCode, '$.reasonCode'), message: requiredText_ACU(raw.message, '$.message') };
   }
   if (status === 'blocked') {
-    const raw = closedObject_ACU(value, '$', ['status', 'agentName', 'unresolved']);
+    const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'unresolved']);
     return { status, agentName, unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
   }
   fail_ACU('INVALID_SPECIALIST_STATUS', '$.status', 'candidate | no_change | failed | blocked', value.status);
@@ -325,6 +339,34 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
   if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
   lines.push('{"action":"finalize","outcome":"no_change","summary":"一句话总结"}');
   lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
+  return lines.join('\n');
+}
+
+export function renderWorldSimulationSpecialistProtocolRejection_ACU(
+  issue: WorldSimulationProtocolIssue_ACU,
+  agentName: string,
+  writableModules: readonly string[],
+): string {
+  const lines = [
+    `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+    '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或额外字段。',
+    'status 必须精确为 candidate、no_change、failed、blocked 之一。',
+    `agentName 必须精确为 ${agentName}。`,
+  ];
+  if (writableModules.length) {
+    lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
+    lines.push(JSON.stringify({
+      status: 'candidate',
+      agentName,
+      patch: { [writableModules[0]]: {} },
+      summary: '基于已颁发证据形成候选',
+      evidenceRefs: ['evidence:已颁发引用'],
+      uncertainties: [],
+    }));
+  }
+  lines.push(JSON.stringify({ status: 'no_change', agentName, summary: '没有需要修改的内容', evidenceRefs: [], uncertainties: [] }));
+  lines.push(JSON.stringify({ status: 'failed', agentName, reasonCode: 'REASON_CODE', message: '失败原因' }));
+  lines.push(JSON.stringify({ status: 'blocked', agentName, unresolved: ['仍需解决的问题'] }));
   return lines.join('\n');
 }
 

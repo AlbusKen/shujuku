@@ -14,6 +14,7 @@ import {
   parseWorldSimulationSpecialistResult_ACU,
   recordWorldSimulationProtocolFailure_ACU,
   renderWorldSimulationDirectorProtocolRejection_ACU,
+  renderWorldSimulationSpecialistProtocolRejection_ACU,
 } from '../../../../src/service/simulation/agent/agent-protocol';
 
 const plan = { schemaVersion: 1, title: '阶段一', objective: '推进世界', impactScope: ['北境'], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock'], convergenceConditions: ['事实闭合'], blockingConditions: [], completedSteps: [], nextStep: '执行' };
@@ -43,6 +44,33 @@ describe('世界推演 Agent 协议', () => {
     expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: {} }, summary: '越权', evidenceRefs: ['E1'], uncertainties: [] }, snapshot)).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'finalize', outcome: 'commit', summary: '完成', evidenceRefs: [ref] })).toThrowError(/EVIDENCE_REGISTRY_REQUIRED/);
     expect(parseWorldSimulationReviewerResult_ACU({ verdict: 'revise', summary: '需修正', findings: [{ severity: 'major', reasonCode: 'TIME_GAP', path: '$.clock', expected: '连续', actual: '跳跃' }], acceptedCandidateIds: [] })).toMatchObject({ verdict: 'revise' });
+  });
+
+  it('只对具备强语义证据的常见状态别名做受控归一化', () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('status-alias');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
+    const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    const candidate = { agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] };
+    expect(parseWorldSimulationSpecialistResult_ACU({ status: 'success', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
+    expect(parseWorldSimulationSpecialistResult_ACU({ status: 'completed', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
+    expect(parseWorldSimulationSpecialistResult_ACU({ status: 'unchanged', agentName: 'macro', summary: '无变化', evidenceRefs: [], uncertainties: [] }, snapshot)).toMatchObject({ status: 'no_change' });
+    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'success', agentName: 'macro', summary: '缺少 patch', evidenceRefs: [], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
+  });
+
+  it('block 缺少机械 unresolved 列表时从有效 reason 安全推导', () => {
+    expect(parseWorldSimulationMainAction_ACU({ action: 'block', reason: '缺少时间证据' })).toEqual({
+      kind: 'block',
+      reason: '缺少时间证据',
+      unresolved: ['缺少时间证据'],
+    });
+  });
+
+  it('specialist 协议拒绝回灌包含角色、枚举、写入范围与合法模板', () => {
+    const message = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'INVALID_SPECIALIST_STATUS', path: '$.status', expected: 'candidate | no_change | failed | blocked', actual: 'success' }, 'macro-dynamics-analyst', ['clock', 'dimensions']);
+    expect(message).toContain('status 必须精确为 candidate、no_change、failed、blocked');
+    expect(message).toContain('agentName 必须精确为 macro-dynamics-analyst');
+    expect(message).toContain('patch 顶层只能使用：clock | dimensions');
+    expect(message).toContain('"status":"candidate"');
   });
 
   it('主输出把多个 read/search 对象收敛为原子工具批次，并拒绝未知字段', () => {
