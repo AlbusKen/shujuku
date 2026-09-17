@@ -135917,7 +135917,7 @@ $CONTENT
     function createWorldSimulationError_ACU(code, phase, message, retryable = false, details) { return details ? { code, phase, message, retryable, details } : { code, phase, message, retryable }; }
     const WORLD_SIMULATION_WEB_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'];
 
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v1';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v2';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -135937,7 +135937,7 @@ $CONTENT
         if (kind === 'director')
             return '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。';
         if (kind === 'planner')
-            return '仅输出 action、summary、plan 组成的阶段计划 JSON。';
+            return worldSimulationPlannerProtocolInstruction_ACU();
         if (name === 'guidance-reviewer')
             return '仅输出 specialist JSON；只能产出 guidance patch，或明确 no_change、blocked、failed。';
         if (kind === 'reviewer')
@@ -135974,6 +135974,13 @@ $CONTENT
         specialist: { status: 'candidate', agentName: 'macro-dynamics-analyst', patch: { clock: { elapsed: '一天' } }, summary: '时间推进候选', evidenceRefs: ['evidence:clock:1'], uncertainties: [] },
         reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'] },
     };
+    function worldSimulationPlannerProtocolInstruction_ACU() {
+        return [
+            '只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
+            '顶层必须且只能包含 action、summary、plan；action 只能是 plan 或 replan，summary 必须是非空字符串，plan 必须是完整对象，禁止省略、设为 null 或只返回摘要。',
+            `严格遵循此结构示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner)}`,
+        ].join('\n');
+    }
     function promptFingerprint_ACU(segments) {
         let hash = 2166136261;
         const source = JSON.stringify(segments);
@@ -138911,21 +138918,35 @@ $CONTENT
         async plan(input) {
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, 'world-stage-planner', 'agent_loop', this.dependencies.apiPreset);
             const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts['world-stage-planner'], 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
-            const sent = await executeWorldSimulationFinalRequest_ACU({
-                messages: rendered.messages,
-                historyBudgetTokens: input.settings.agentHistoryTokenBudget,
-                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                invoke: messages => this.dependencies.invoke(messages, preset),
-            });
-            if (sent.status === 'rejected')
-                throw new Error(sent.reason);
-            const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(sent.response, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
-            if (input.previous && parsed.action !== 'replan')
-                throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
-            if (!input.previous && parsed.action !== 'plan')
-                throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
-            const revision = (input.previous?.revision ?? 0) + 1;
-            return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
+            const transcript = [];
+            const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
+            const protocolGuard = { role: 'system', content: worldSimulationPlannerProtocolInstruction_ACU() };
+            for (;;) {
+                const sent = await executeWorldSimulationFinalRequest_ACU({
+                    messages: [...rendered.messages, protocolGuard, ...transcript],
+                    historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+                    count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+                    invoke: messages => this.dependencies.invoke(messages, preset),
+                });
+                if (sent.status === 'rejected')
+                    throw new Error(sent.reason);
+                const raw = String(sent.response ?? '');
+                try {
+                    const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
+                    if (input.previous && parsed.action !== 'replan')
+                        throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
+                    if (!input.previous && parsed.action !== 'plan')
+                        throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
+                    const revision = (input.previous?.revision ?? 0) + 1;
+                    return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
+                }
+                catch (error) {
+                    const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+                    if (!failure.retry)
+                        throw error;
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` });
+                }
+            }
         }
     }
     function confirmWorldSimulationStageRevision_ACU(revision) {

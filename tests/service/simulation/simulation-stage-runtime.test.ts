@@ -23,6 +23,43 @@ describe('世界推演阶段 runtime', () => {
     expect(() => replaceWorldSimulationStagePlan_ACU(frozen, plan)).toThrow('WORLD_SIMULATION_STAGE_REVISION_FROZEN');
   });
 
+  it('planner 首次漏掉 plan 时携带协议错误自动修正', async () => {
+    const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
+    const invoke = vi.fn()
+      .mockResolvedValueOnce(JSON.stringify({ action: 'plan', summary: '只有摘要' }))
+      .mockResolvedValueOnce(JSON.stringify({ action: 'plan', summary: '已补全', plan }));
+    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke });
+
+    const result = await planner.plan({ settings, promptContext: context(), now: 11 });
+
+    expect(result.summary).toBe('已补全');
+    expect(result.revision.plan).toEqual(plan);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const retryMessages = invoke.mock.calls[1][0] as Array<{ role: string; content: string }>;
+    expect(retryMessages.at(-2)).toMatchObject({ role: 'assistant', content: expect.stringContaining('只有摘要') });
+    expect(retryMessages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('MISSING_FIELD $.plan') });
+    expect(retryMessages.at(-1)?.content).toContain('完整 JSON');
+  });
+
+  it('planner 重复返回同一非法协议时保留结构化错误并停止重试', async () => {
+    const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
+    const invoke = vi.fn().mockResolvedValue(JSON.stringify({ action: 'plan', summary: '仍缺计划' }));
+    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke });
+
+    let caught: any;
+    try {
+      await planner.plan({ settings, promptContext: context(), now: 12 });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(caught?.error).toMatchObject({
+      code: 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID',
+      details: { reasonCode: 'MISSING_FIELD', path: '$.plan' },
+    });
+  });
+
   it('执行引擎在主循环前后复核冻结身份与锚点', async () => {
     const identity = {
       runId: 'run-1', chatIdentity: 'chat-1', triggerKind: 'assistant_completed' as const,

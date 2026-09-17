@@ -1,7 +1,7 @@
 import { WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v1';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v2';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -29,7 +29,7 @@ export function worldSimulationSeamMarker_ACU(seam: WorldSimulationEngineSeam_AC
 
 function protocolFor_ACU(kind: string, name: WorldSimulationAgentName_ACU): string {
   if (kind === 'director') return '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。';
-  if (kind === 'planner') return '仅输出 action、summary、plan 组成的阶段计划 JSON。';
+  if (kind === 'planner') return worldSimulationPlannerProtocolInstruction_ACU();
   if (name === 'guidance-reviewer') return '仅输出 specialist JSON；只能产出 guidance patch，或明确 no_change、blocked、failed。';
   if (kind === 'reviewer') return '仅输出 verdict、summary、findings、acceptedCandidateIds 组成的审核 JSON。';
   return '仅输出 status、agentName 以及对应结果字段组成的 specialist JSON。';
@@ -68,6 +68,14 @@ export const WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU = {
   specialist: { status: 'candidate', agentName: 'macro-dynamics-analyst', patch: { clock: { elapsed: '一天' } }, summary: '时间推进候选', evidenceRefs: ['evidence:clock:1'], uncertainties: [] },
   reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'] },
 } as const;
+
+export function worldSimulationPlannerProtocolInstruction_ACU(): string {
+  return [
+    '只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
+    '顶层必须且只能包含 action、summary、plan；action 只能是 plan 或 replan，summary 必须是非空字符串，plan 必须是完整对象，禁止省略、设为 null 或只返回摘要。',
+    `严格遵循此结构示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner)}`,
+  ].join('\n');
+}
 
 function promptFingerprint_ACU(segments: readonly WorldSimulationPromptSegment_ACU[]): string {
   let hash = 2166136261;

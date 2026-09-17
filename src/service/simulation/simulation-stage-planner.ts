@@ -1,8 +1,8 @@
 import { WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationStagePlan_ACU, type WorldSimulationStageRevision_ACU, type WorldSimulationSettings_ACU } from './model';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from './api-preset';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU } from './agent/agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationPlannerProtocolInstruction_ACU } from './agent/agent-defaults';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent/agent-placeholder-resolver';
-import { parseWorldSimulationJsonPayload_ACU, parseWorldSimulationPlannerOutput_ACU } from './agent/agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationPlannerOutput_ACU, recordWorldSimulationProtocolFailure_ACU } from './agent/agent-protocol';
 import { executeWorldSimulationFinalRequest_ACU } from './agent/final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './agent/prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent/agent-token-budget';
@@ -11,6 +11,7 @@ export interface WorldSimulationStagePlannerDependencies_ACU {
   invoke(messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
+  protocolRetries?: number;
 }
 export interface WorldSimulationStagePlanRequest_ACU {
   settings: WorldSimulationSettings_ACU;
@@ -27,18 +28,34 @@ export class WorldSimulationStagePlanner_ACU {
   async plan(input: WorldSimulationStagePlanRequest_ACU): Promise<{ summary: string; revision: WorldSimulationStageRevision_ACU }> {
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, 'world-stage-planner', 'agent_loop', this.dependencies.apiPreset);
     const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts['world-stage-planner'], 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
-    const sent = await executeWorldSimulationFinalRequest_ACU({
-      messages: rendered.messages,
-      historyBudgetTokens: input.settings.agentHistoryTokenBudget,
-      count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-      invoke: messages => this.dependencies.invoke(messages, preset),
-    });
-    if (sent.status === 'rejected') throw new Error(sent.reason);
-    const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(sent.response, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
-    if (input.previous && parsed.action !== 'replan') throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
-    if (!input.previous && parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
-    const revision = (input.previous?.revision ?? 0) + 1;
-    return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
+    const transcript: Array<{ role: string; content: string }> = [];
+    const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
+    const protocolGuard = { role: 'system', content: worldSimulationPlannerProtocolInstruction_ACU() };
+
+    for (;;) {
+      const sent = await executeWorldSimulationFinalRequest_ACU({
+        messages: [...rendered.messages, protocolGuard, ...transcript],
+        historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+        count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+        invoke: messages => this.dependencies.invoke(messages, preset),
+      });
+      if (sent.status === 'rejected') throw new Error(sent.reason);
+      const raw = String(sent.response ?? '');
+      try {
+        const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
+        if (input.previous && parsed.action !== 'replan') throw new Error('WORLD_SIMULATION_REPLAN_ACTION_REQUIRED');
+        if (!input.previous && parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
+        const revision = (input.previous?.revision ?? 0) + 1;
+        return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: input.reason ?? (input.previous ? 'automatic_replan' : 'initial'), replanInstruction: input.replanInstruction ?? '', frozen: false, plan: parsed.plan } };
+      } catch (error) {
+        const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+        if (!failure.retry) throw error;
+        transcript.push(
+          { role: 'assistant', content: raw || '(empty)' },
+          { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` },
+        );
+      }
+    }
   }
 }
 
