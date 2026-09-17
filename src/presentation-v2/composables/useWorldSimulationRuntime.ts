@@ -1,6 +1,8 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from 'vue';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
 import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, restoreWorldSimulationPromptDefault_ACU } from '../../service/simulation/agent/prompt-template';
+import { hydrateWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU } from '../../service/simulation/agent/agent-session-log';
+import type { WorldSimulationSessionInput_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入
 import { subscribeWorldSimulationSessionLog_ACU } from '../../service/simulation/agent/agent-session-log';
 import { getWorldSimulationRuntime_ACU, type WorldSimulationUiSnapshot_ACU } from '../../service/simulation/simulation-runtime';
 import { WorldSimulationValidationError_ACU, type WorldSimulationSettings_ACU } from '../../service/simulation/model';
@@ -24,6 +26,27 @@ export function useWorldSimulationRuntime() {
   let subscribedChatIdentity: string | null = null;
   let unsubscribeSession: (() => void) | null = null;
 
+  /**
+   * 从持久会话回灌会话流历史（与 useContinuationSession.hydrate 同语义）：
+   * 会话流是内存态，脚本重载后为空；持久会话锚定在楼层上，是权威历史。
+   * 只在会话流为空且 Agent 未在运行时回灌，避免覆盖实时通道与运行标记。
+   */
+  function hydrateSessionFromConversation(next: WorldSimulationUiSnapshot_ACU): void {
+    const chatIdentity = next.session.chatIdentity;
+    if (!chatIdentity || next.session.entries.length || isWorldSimulationSessionRunning_ACU(chatIdentity)) return;
+    const projected = next.conversation.messages
+      .filter(message => message.kind !== 'handoff')
+      .map(message => ({
+        kind: (message.kind === 'user' ? 'user_message'
+          : message.kind === 'turn' ? 'run_started'
+          : message.kind === 'agent' ? 'main_action'
+          : 'tool_read') as WorldSimulationSessionInput_ACU['kind'],
+        title: message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
+        detail: message.text,
+      }));
+    if (projected.length) hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
+  }
+
   function refresh(): boolean {
     try {
       const next = runtime.readUiSnapshot();
@@ -31,6 +54,7 @@ export function useWorldSimulationRuntime() {
       settingsDraft.value = cloneSettings_ACU(next.envelope?.settings ?? buildDefaultWorldSimulationSettings_ACU());
       error.value = '';
       ready.value = true;
+      hydrateSessionFromConversation(next);
       if (next.session.chatIdentity !== subscribedChatIdentity) {
         unsubscribeSession?.();
         subscribedChatIdentity = next.session.chatIdentity;

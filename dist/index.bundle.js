@@ -139351,6 +139351,8 @@ $CONTENT
             assertAnchorCurrent: anchor => { assertWorldSimulationAnchorCurrent_ACU(anchor, getChatArray_ACU()); },
             commitProjection: commitWorldSimulationProjection_ACU,
             appendUserMessage: async ({ identity, anchor, text }) => {
+                // 与智能续写 recordUserMessage 同语义：用户指令先写会话流（实时显示），再持久化到楼层锚定会话。
+                logWorldSimulationSession_ACU(identity.chatIdentity, { kind: 'user_message', title: '你的消息', detail: text });
                 await appendWorldSimulationConversationSegment_ACU({
                     anchor,
                     segmentId: `user:${identity.runId}`,
@@ -180894,6 +180896,28 @@ Expected function or array of functions, received type ${typeof value}.`
         const settingsDraft = ref(null);
         let subscribedChatIdentity = null;
         let unsubscribeSession = null;
+        /**
+         * 从持久会话回灌会话流历史（与 useContinuationSession.hydrate 同语义）：
+         * 会话流是内存态，脚本重载后为空；持久会话锚定在楼层上，是权威历史。
+         * 只在会话流为空且 Agent 未在运行时回灌，避免覆盖实时通道与运行标记。
+         */
+        function hydrateSessionFromConversation(next) {
+            const chatIdentity = next.session.chatIdentity;
+            if (!chatIdentity || next.session.entries.length || isWorldSimulationSessionRunning_ACU(chatIdentity))
+                return;
+            const projected = next.conversation.messages
+                .filter(message => message.kind !== 'handoff')
+                .map(message => ({
+                kind: (message.kind === 'user' ? 'user_message'
+                    : message.kind === 'turn' ? 'run_started'
+                        : message.kind === 'agent' ? 'main_action'
+                            : 'tool_read'),
+                title: message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
+                detail: message.text,
+            }));
+            if (projected.length)
+                hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
+        }
         function refresh() {
             try {
                 const next = runtime.readUiSnapshot();
@@ -180901,6 +180925,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 settingsDraft.value = cloneSettings_ACU(next.envelope?.settings ?? buildDefaultWorldSimulationSettings_ACU());
                 error.value = '';
                 ready.value = true;
+                hydrateSessionFromConversation(next);
                 if (next.session.chatIdentity !== subscribedChatIdentity) {
                     unsubscribeSession?.();
                     subscribedChatIdentity = next.session.chatIdentity;

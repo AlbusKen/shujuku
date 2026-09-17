@@ -4,7 +4,7 @@ import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU } from './agent/agent-module-store';
-import { isWorldSimulationSessionRunning_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
+import { isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from './world-simulation-agent-tools';
 import { WorldSimulationMainLoop_ACU } from './agent/agent-main-loop';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent/agent-model';
@@ -96,6 +96,8 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
     assertAnchorCurrent: anchor => { assertWorldSimulationAnchorCurrent_ACU(anchor, getChatArray_ACU()); },
     commitProjection: commitWorldSimulationProjection_ACU,
     appendUserMessage: async ({ identity, anchor, text }) => {
+      // 与智能续写 recordUserMessage 同语义：用户指令先写会话流（实时显示），再持久化到楼层锚定会话。
+      logWorldSimulationSession_ACU(identity.chatIdentity, { kind: 'user_message', title: '你的消息', detail: text });
       await appendWorldSimulationConversationSegment_ACU({
         anchor,
         segmentId: `user:${identity.runId}`,
