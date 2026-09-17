@@ -13,6 +13,7 @@ import {
   parseWorldSimulationReviewerResult_ACU,
   parseWorldSimulationSpecialistResult_ACU,
   recordWorldSimulationProtocolFailure_ACU,
+  renderWorldSimulationDirectorProtocolRejection_ACU,
 } from '../../../../src/service/simulation/agent/agent-protocol';
 
 const plan = { schemaVersion: 1, title: '阶段一', objective: '推进世界', impactScope: ['北境'], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock'], convergenceConditions: ['事实闭合'], blockingConditions: [], completedSteps: [], nextStep: '执行' };
@@ -49,8 +50,22 @@ describe('世界推演 Agent 协议', () => {
       '{"action":"read","reads":["$CLOCK"]}\n{"action":"search","query":"边境","scope":["world"],"maxResults":5}\n{"action":"finalize","outcome":"commit","summary":"不能混入"}',
     );
     expect(output).toMatchObject({ kind: 'tools', calls: [{ kind: 'read' }, { kind: 'search', maxResults: 5 }] });
+    expect(parseWorldSimulationMainOutput_ACU(
+      '<WORLD_SIMULATION_ENGINE_SEAM:READ>{"action":"read","reads":["ledger:current"],"evidenceRef":"evidence:run:2","purpose":"核对账本"}</WORLD_SIMULATION_ENGINE_SEAM:READ>',
+    )).toEqual({ kind: 'tools', calls: [{ kind: 'read', reads: ['ledger:current'] }] });
+    expect(parseWorldSimulationMainOutput_ACU(
+      '<WORLD_SIMULATION_ENGINE_SEAM:READ>{"address":"ledger:current"}</WORLD_SIMULATION_ENGINE_SEAM:READ>',
+    )).toEqual({ kind: 'tools', calls: [{ kind: 'read', reads: ['ledger:current'] }] });
+    expect(() => parseWorldSimulationMainOutput_ACU('{"address":"unknown:address"}')).toThrowError(/INVALID_ACTION/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['$CLOCK'], extra: true })).toThrowError(/UNKNOWN_FIELD/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'search', query: '边境', maxResults: 0 })).toThrowError(/INVALID_MAX_RESULTS/);
+  });
+
+  it('协议拒绝回灌明确 read/search 字段与服务端 evidenceRef 语义', () => {
+    const message = renderWorldSimulationDirectorProtocolRejection_ACU({ reasonCode: 'UNKNOWN_FIELD', path: '$.evidenceRef', expected: 'no additional fields', actual: 'evidence:run:2' }, true);
+    expect(message).toContain('read 只能包含 action、reads');
+    expect(message).toContain('不要添加 evidenceRef、purpose');
+    expect(message).toContain('由服务端在读取成功后随工具结果颁发');
   });
 
   it('草稿合并只拼接数组和递归对象，标量冲突时 fail-closed', () => {

@@ -4,7 +4,7 @@ import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/ser
 import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { WorldSimulationMainLoop_ACU } from '../../../../src/service/simulation/agent/agent-main-loop';
 import { resetWorldSimulationRunCacheForTests_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
-import { resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
+import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
 const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) };
@@ -99,6 +99,59 @@ describe('世界推演 Agent runtime', () => {
     expect(result).toMatchObject({ outcome: 'blocked', summary: '修正后阻断' });
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(subagents.run).not.toHaveBeenCalled();
+  });
+
+  it('主 Agent 响应未返回时立即显示 running 卡片，完成后原位更新', async () => {
+    const { registry, promptContext } = fixture('director-live');
+    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    let resolveInvoke!: (value: string) => void;
+    const invoke = vi.fn(() => new Promise<string>(resolve => { resolveInvoke = resolve; }));
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-director-live', chatIdentity: 'chat-director-live', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1 };
+
+    const pending = loop.run({ identity, settings: settings(), promptContext, registry, tools });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    const running = readWorldSimulationSessionLog_ACU(identity.chatIdentity);
+    const runningCard = running.find(item => item.kind === 'main_action');
+    expect(runningCard).toMatchObject({ title: '主 Agent 第 1 轮正在工作', status: 'running', agentName: 'world-director' });
+
+    resolveInvoke(JSON.stringify({ action: 'block', reason: '等待外部证据', unresolved: ['missing'] }));
+    await expect(pending).resolves.toMatchObject({ outcome: 'blocked' });
+
+    const completed = readWorldSimulationSessionLog_ACU(identity.chatIdentity);
+    const completedCard = completed.find(item => item.id === runningCard?.id);
+    expect(completedCard).toMatchObject({ title: '主 Agent 动作：block', status: 'done', ok: true });
+    expect(completed.filter(item => item.kind === 'main_action')).toHaveLength(1);
+  });
+
+  it('工具读取未返回时立即显示 running 卡片，完成后原位更新', async () => {
+    const { registry, promptContext } = fixture('tool-live');
+    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    const responses = [
+      JSON.stringify({ action: 'read', reads: ['ledger:current'] }),
+      JSON.stringify({ action: 'block', reason: '取证完成后暂停', unresolved: ['next'] }),
+    ];
+    let resolveRead!: (value: { status: 'empty'; summary: string }) => void;
+    const liveTools = {
+      read: vi.fn(() => new Promise<{ status: 'empty'; summary: string }>(resolve => { resolveRead = resolve; })),
+      search: vi.fn(async () => ({ status: 'empty' as const, hits: [], summary: 'empty' })),
+    };
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-tool-live', chatIdentity: 'chat-tool-live', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1 };
+
+    const pending = loop.run({ identity, settings: settings(), promptContext, registry, tools: liveTools });
+    await vi.waitFor(() => expect(liveTools.read).toHaveBeenCalledOnce());
+    const running = readWorldSimulationSessionLog_ACU(identity.chatIdentity);
+    const runningCard = running.find(item => item.kind === 'tool_read');
+    expect(runningCard).toMatchObject({ title: '主 Agent 正在读取资料', status: 'running', agentName: 'world-director' });
+
+    resolveRead({ status: 'empty', summary: '当前账本为空' });
+    await expect(pending).resolves.toMatchObject({ outcome: 'blocked' });
+
+    const completed = readWorldSimulationSessionLog_ACU(identity.chatIdentity);
+    const completedCard = completed.find(item => item.id === runningCard?.id);
+    expect(completedCard).toMatchObject({ title: '资料读取完成（1 项）', status: 'done', ok: true });
+    expect(completed.filter(item => item.kind === 'tool_read')).toHaveLength(1);
   });
 
   it('reviewer 要求 revise 时返回主循环修正而不是误提交', async () => {

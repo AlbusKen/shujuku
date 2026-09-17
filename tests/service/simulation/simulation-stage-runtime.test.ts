@@ -25,6 +25,31 @@ describe('世界推演阶段 runtime', () => {
     expect(() => replaceWorldSimulationStagePlan_ACU(frozen, plan)).toThrow('WORLD_SIMULATION_STAGE_REVISION_FROZEN');
   });
 
+  it('planner 请求未完成时立即创建 running 卡片，并在成功后原位更新', async () => {
+    const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
+    let resolveInvoke!: (value: string) => void;
+    const invoke = vi.fn(() => new Promise<string>(resolve => { resolveInvoke = resolve; }));
+    const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke, chatIdentity: 'chat-planner-live' });
+
+    const pending = planner.plan({ settings, promptContext: context(), now: 10 });
+    const running = readWorldSimulationSessionLog_ACU('chat-planner-live');
+
+    expect(running).toHaveLength(1);
+    expect(running[0]).toMatchObject({
+      kind: 'stage_plan',
+      title: '阶段规划正在工作',
+      agentName: 'world-stage-planner',
+      status: 'running',
+    });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    resolveInvoke(JSON.stringify({ action: 'plan', summary: '规划完成', plan }));
+    await pending;
+
+    const completed = readWorldSimulationSessionLog_ACU('chat-planner-live');
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ id: running[0].id, title: '阶段', detail: '规划完成', status: 'done', ok: true });
+  });
+
   it('planner 首次漏掉 plan 时携带协议错误自动修正', async () => {
     const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
     const invoke = vi.fn()
@@ -42,11 +67,11 @@ describe('世界推演阶段 runtime', () => {
     expect(retryMessages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('MISSING_FIELD $.plan') });
     expect(retryMessages.at(-1)?.content).toContain('完整 JSON');
     const entries = readWorldSimulationSessionLog_ACU('chat-planner');
-    expect(entries.map(item => item.kind)).toEqual(['protocol_retry', 'stage_plan']);
-    expect(entries[0]).toMatchObject({ title: '阶段规划协议修正', ok: false });
-    expect(entries[0].detail).toContain('MISSING_FIELD $.plan');
-    expect(entries[0].detail).toContain('模型返回片段');
-    expect(entries[1]).toMatchObject({ title: '阶段', detail: '已补全' });
+    expect(entries.map(item => item.kind)).toEqual(['stage_plan', 'protocol_retry']);
+    expect(entries[0]).toMatchObject({ title: '阶段', detail: '已补全', status: 'done' });
+    expect(entries[1]).toMatchObject({ title: '阶段规划协议修正', ok: false });
+    expect(entries[1].detail).toContain('MISSING_FIELD $.plan');
+    expect(entries[1].detail).toContain('模型返回片段');
   });
 
   it('planner 重复返回同一非法协议时保留结构化错误并停止重试', async () => {
@@ -67,10 +92,11 @@ describe('世界推演阶段 runtime', () => {
       details: { reasonCode: 'MISSING_FIELD', path: '$.plan' },
     });
     const entries = readWorldSimulationSessionLog_ACU('chat-planner-reject');
-    expect(entries).toHaveLength(2);
-    expect(entries[0]).toMatchObject({ kind: 'protocol_retry', title: '阶段规划协议修正', ok: false });
-    expect(entries[1]).toMatchObject({ kind: 'protocol_retry', title: '阶段规划输出被拒绝', ok: false });
-    expect(entries[1].detail).toContain('模型返回片段');
+    expect(entries).toHaveLength(3);
+    expect(entries[0]).toMatchObject({ kind: 'stage_plan', title: '阶段规划失败', status: 'failed', ok: false });
+    expect(entries[1]).toMatchObject({ kind: 'protocol_retry', title: '阶段规划协议修正', ok: false });
+    expect(entries[2]).toMatchObject({ kind: 'protocol_retry', title: '阶段规划输出被拒绝', ok: false });
+    expect(entries[2].detail).toContain('模型返回片段');
   });
 
   it('执行引擎在主循环前后复核冻结身份与锚点', async () => {

@@ -135934,9 +135934,17 @@ $CONTENT
     function worldSimulationSeamMarker_ACU(seam) {
         return `<WORLD_SIMULATION_ENGINE_SEAM:${seam}>`;
     }
+    function worldSimulationDirectorProtocolInstruction_ACU() {
+        return [
+            '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。',
+            'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。',
+            'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
+            '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
+        ].join('\n');
+    }
     function protocolFor_ACU(kind, name) {
         if (kind === 'director')
-            return '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。';
+            return worldSimulationDirectorProtocolInstruction_ACU();
         if (kind === 'planner')
             return worldSimulationPlannerProtocolInstruction_ACU();
         if (name === 'guidance-reviewer')
@@ -137536,7 +137544,11 @@ $CONTENT
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', `${reasonCode}: ${path} 应为 ${expected}`, true, { ...issue }));
     }
     function stripNoise_ACU(raw) {
-        return raw.replace(/<(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '').replace(/<\/?(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>/gi, '').replace(/```[a-zA-Z]*\n?/g, '').trim();
+        return raw
+            .replace(/<(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '')
+            .replace(/<\/?(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>/gi, '')
+            .replace(/<\/?WORLD_SIMULATION_ENGINE_SEAM:[^>]*>/gi, '')
+            .replace(/```[a-zA-Z]*\n?/g, '').trim();
     }
     function balanced_ACU(text, start) {
         let depth = 0;
@@ -137716,16 +137728,48 @@ $CONTENT
             fail_ACU(snapshot ? 'EVIDENCE_REF_UNAUTHORIZED' : 'EVIDENCE_REGISTRY_REQUIRED', path, 'refs registered in current run', unauthorized);
         return refs;
     }
+    const SAFE_TOOL_REQUEST_METADATA_ACU = new Set(['evidenceRef', 'purpose']);
+    function normalizeToolRequestMetadata_ACU(value, action) {
+        if (action !== 'read' && action !== 'search')
+            return value;
+        const normalized = { ...value };
+        for (const key of SAFE_TOOL_REQUEST_METADATA_ACU)
+            delete normalized[key];
+        return normalized;
+    }
+    function isAuthorizedToolAddress_ACU(address) {
+        return WORLD_SIMULATION_TOOL_ADDRESSES_ACU.some(allowed => allowed.endsWith(':')
+            ? address.startsWith(allowed) && address.length > allowed.length
+            : address === allowed);
+    }
+    function normalizeLegacyToolAction_ACU(value) {
+        if (text_ACU$1(value.action))
+            return value;
+        const keys = Object.keys(value);
+        const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
+        if (keys.some(key => !allowed.has(key)))
+            return value;
+        const address = text_ACU$1(value.address);
+        if (address && isAuthorizedToolAddress_ACU(address))
+            return { action: 'read', reads: [address] };
+        if (Array.isArray(value.reads)) {
+            const reads = texts_ACU(value.reads);
+            if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU))
+                return { action: 'read', reads };
+        }
+        return value;
+    }
     function parseWorldSimulationMainAction_ACU(value, allowDelegate = true, evidenceRegistry) {
         if (!isRecord_ACU$3(value))
             fail_ACU('OBJECT_REQUIRED', '$', 'object', value);
-        const action = text_ACU$1(value.action);
+        const normalizedValue = normalizeLegacyToolAction_ACU(value);
+        const action = text_ACU$1(normalizedValue.action);
         if (action === 'read') {
-            const raw = closedObject_ACU(value, '$', ['action', 'reads']);
+            const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'reads']);
             return { kind: 'read', reads: requiredList_ACU(raw.reads, '$.reads') };
         }
         if (action === 'search') {
-            const raw = closedObject_ACU(value, '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
+            const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
             let maxResults = 10;
             if (raw.maxResults !== undefined) {
                 if (!Number.isInteger(raw.maxResults) || Number(raw.maxResults) < 1 || Number(raw.maxResults) > 50)
@@ -137739,7 +137783,7 @@ $CONTENT
         if (action === 'delegate') {
             if (!allowDelegate)
                 fail_ACU('DELEGATION_BUDGET_EXHAUSTED', '$.action', 'non-delegate action', action);
-            const raw = closedObject_ACU(value, '$', ['action', 'delegations']);
+            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'delegations']);
             if (!Array.isArray(raw.delegations) || !raw.delegations.length)
                 fail_ACU('DELEGATIONS_REQUIRED', '$.delegations', 'non-empty array', raw.delegations);
             return { kind: 'delegate', delegations: raw.delegations.map((item, index) => {
@@ -137748,17 +137792,17 @@ $CONTENT
                 }) };
         }
         if (action === 'finalize') {
-            const raw = closedObject_ACU(value, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
+            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
             const outcome = text_ACU$1(raw.outcome);
             if (!TERMINALS_ACU.includes(outcome))
                 fail_ACU('INVALID_OUTCOME', '$.outcome', TERMINALS_ACU.join(' | '), raw.outcome);
             return { kind: 'finalize', outcome: outcome, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
         }
         if (action === 'block') {
-            const raw = closedObject_ACU(value, '$', ['action', 'reason', 'unresolved']);
+            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'reason', 'unresolved']);
             return { kind: 'block', reason: requiredText_ACU(raw.reason, '$.reason'), unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
         }
-        fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', value.action);
+        fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', normalizedValue.action);
     }
     function closedObject_ACU(value, path, required, optional = []) {
         if (!isRecord_ACU$3(value))
@@ -137856,7 +137900,7 @@ $CONTENT
         fail_ACU('JSON_NOT_FOUND', '$', 'balanced JSON object', text.slice(0, 300));
     }
     function parseWorldSimulationMainOutput_ACU(raw, prefill = '', allowDelegate = true, evidenceRegistry) {
-        const records = collectActionObjects_ACU(raw, prefill);
+        const records = collectActionObjects_ACU(raw, prefill).map(normalizeLegacyToolAction_ACU);
         const tools = records.filter(record => record.action === 'read' || record.action === 'search');
         if (tools.length) {
             return { kind: 'tools', calls: tools.map(record => parseWorldSimulationMainAction_ACU(record, allowDelegate, evidenceRegistry)) };
@@ -137874,6 +137918,8 @@ $CONTENT
         const lines = [
             `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
             '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+            'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+            'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
             '动作格式必须是下面之一：',
             '{"action":"read","reads":["ledger:current","summary:current"]}',
             '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
@@ -138005,7 +138051,6 @@ $CONTENT
             const toolUsage = { readsUsed: 0 };
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
             beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
-            logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'thought', title: '主 Agent 启动', detail: `开始本轮幕后推演：${input.promptContext.userGuidance || input.identity.stageId}` });
             const persist = (nextIteration, reviewerFeedback = '') => {
                 const unique = uniqueCandidates_ACU(candidates);
                 saveWorldSimulationRunState_ACU(input.identity.chatIdentity, {
@@ -138025,14 +138070,29 @@ $CONTENT
             for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                 const requestContext = resultContext_ACU(input.promptContext, input.registry, uniqueCandidates_ACU(candidates), outcomes);
-                const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[director], director, createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }));
-                const sent = await executeWorldSimulationFinalRequest_ACU({
-                    messages: [...rendered.messages, ...transcript],
-                    historyBudgetTokens: input.settings.agentHistoryTokenBudget,
-                    count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                    invoke: messages => this.dependencies.invoke(director, messages, preset),
+                const mainEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+                    kind: 'main_action',
+                    title: `主 Agent 第 ${iteration} 轮正在工作`,
+                    detail: iteration === 1 ? `正在分析本轮幕后推演：${input.promptContext.userGuidance || input.identity.stageId}` : '正在结合上一轮取证与派工结果决定下一步动作…',
+                    agentName: director,
+                    status: 'running',
                 });
+                let sent;
+                try {
+                    const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[director], director, createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }));
+                    sent = await executeWorldSimulationFinalRequest_ACU({
+                        messages: [...rendered.messages, { role: 'system', content: worldSimulationDirectorProtocolInstruction_ACU() }, ...transcript],
+                        historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+                        count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+                        invoke: messages => this.dependencies.invoke(director, messages, preset),
+                    });
+                }
+                catch (error) {
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: compact_ACU(error), ok: false, status: 'failed' });
+                    throw error;
+                }
                 if (sent.status === 'rejected') {
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: sent.reason, ok: false, status: 'failed' });
                     persist(iteration);
                     logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_failed', title: '最终请求超出 Token 门禁', detail: sent.reason, agentName: director, ok: false });
                     throw new Error(sent.reason);
@@ -138045,6 +138105,7 @@ $CONTENT
                 }
                 catch (error) {
                     const failure = recordWorldSimulationProtocolFailure_ACU(protocolRepair, error);
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮协议未通过`, detail: `${failure.issue.reasonCode} ${failure.issue.path}`, ok: false, status: 'failed' });
                     if (!failure.retry) {
                         persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
                         throw error;
@@ -138053,27 +138114,44 @@ $CONTENT
                     logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
                     continue;
                 }
-                logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: `主 Agent 动作：${action.kind}`, agentName: director });
+                updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 动作：${action.kind}`, detail: `第 ${iteration} 轮决策完成`, ok: true, status: 'done' });
                 if (action.kind === 'read' || action.kind === 'search' || action.kind === 'tools') {
                     const calls = action.kind === 'tools' ? action.calls : [action];
-                    const results = await runWorldSimulationToolBatch_ACU({
-                        calls, registry: input.registry, dependencies: input.tools,
-                        gate: {
-                            state: readGateState,
-                            config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
-                            usage: toolUsage,
-                            maxReads: input.settings.agentRunBudget.maxReads,
-                            count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                        },
+                    const toolEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+                        kind: 'tool_read', title: '主 Agent 正在读取资料',
+                        detail: calls.map(call => call.kind === 'read' ? `read: ${call.reads.join(', ')}` : `search: ${call.query}`).join('；'),
+                        agentName: director, status: 'running',
                     });
+                    let results;
+                    try {
+                        results = await runWorldSimulationToolBatch_ACU({
+                            calls, registry: input.registry, dependencies: input.tools,
+                            gate: {
+                                state: readGateState,
+                                config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                                usage: toolUsage,
+                                maxReads: input.settings.agentRunBudget.maxReads,
+                                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+                            },
+                        });
+                        const toolOk = results.every(result => result.status === 'ok' || result.status === 'empty');
+                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, toolEntryId, {
+                            title: toolOk ? `资料读取完成（${results.length} 项）` : '资料读取部分失败',
+                            detail: results.map(result => `${result.kind}:${result.status} ${result.address} ${result.summary}`).join('；'),
+                            ok: toolOk, status: toolOk ? 'done' : 'failed',
+                        });
+                    }
+                    catch (error) {
+                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, toolEntryId, { title: '资料读取失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+                        throw error;
+                    }
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
-                    for (const result of results)
-                        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'tool_read', title: `${result.kind}:${result.status}`, detail: `${result.address} ${result.summary}`, agentName: director, ok: result.status === 'ok' || result.status === 'empty' });
                     persist(iteration + 1);
                     continue;
                 }
                 if (action.kind === 'delegate') {
                     const accepted = [];
+                    const runningEntries = new Map();
                     for (const delegation of action.delegations) {
                         const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === delegation.agentName);
                         const used = perAgent.get(delegation.agentName) ?? 0;
@@ -138083,7 +138161,9 @@ $CONTENT
                             continue;
                         }
                         accepted.push(delegation);
-                        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: `${delegation.agentName} 执行中`, detail: delegation.instruction, agentName: delegation.agentName, status: 'running' });
+                        runningEntries.set(delegation, logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+                            kind: 'delegation', title: `${delegation.agentName} 正在工作`, detail: delegation.instruction, agentName: delegation.agentName, status: 'running',
+                        }));
                     }
                     const settled = await Promise.all(accepted.map(async (delegation) => {
                         try {
@@ -138093,13 +138173,15 @@ $CONTENT
                             return { agentName: delegation.agentName, status: 'failed', summary: compact_ACU(error), evidenceRefs: [], uncertainties: [], reasonCode: 'WORLD_SIMULATION_SUBAGENT_FAILED' };
                         }
                     }));
-                    for (const outcome of settled) {
+                    for (let index = 0; index < settled.length; index += 1) {
+                        const outcome = settled[index];
                         delegationsUsed += 1;
                         perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
                         outcomes.push(outcome);
                         if (outcome.candidate)
                             candidates.push(outcome.candidate);
-                        logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, agentName: outcome.agentName, ok: outcome.status === 'candidate' || outcome.status === 'no_change' });
+                        const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
+                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, runningEntries.get(accepted[index]), { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
                     }
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) });
                     persist(iteration + 1);
@@ -138128,10 +138210,13 @@ $CONTENT
                     continue;
                 }
                 let reviewer;
+                const reviewerEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '因果审核正在工作', detail: `正在审核 ${available.length} 个候选的时间、因果、权限与证据完整性`, agentName: 'causality-reviewer', status: 'running' });
                 try {
                     reviewer = await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
                 }
                 catch (error) {
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: '因果审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
                     persist(iteration + 1, compact_ACU(error));
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `reviewer 未完成：${compact_ACU(error)}。请继续修正候选或输出 blocked。` });
                     continue;
@@ -138151,6 +138236,7 @@ $CONTENT
                 }
                 const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
                 let guidanceOutcome;
+                const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });
                 try {
                     const acceptedLedger = applyWorldSimulationCandidates_ACU(input.promptContext.worldState, acceptedCandidates, new Set(causalEvidenceRefs));
                     guidanceOutcome = await this.dependencies.subagents.runGuidanceReviewer({
@@ -138160,18 +138246,21 @@ $CONTENT
                         promptContext: requestContext,
                         registry: input.registry,
                     });
+                    const guidanceOk = guidanceOutcome.status === 'candidate' || guidanceOutcome.status === 'no_change';
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: `guidance 审核：${guidanceOutcome.status}`, detail: guidanceOutcome.summary, ok: guidanceOk, status: guidanceOk ? 'done' : 'failed' });
                 }
                 catch (error) {
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: 'guidance 审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+                    endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
                     const message = compact_ACU(error);
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 未完成', detail: message, agentName: 'guidance-reviewer', ok: false });
                     return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
                 }
                 outcomes.push(guidanceOutcome);
                 if (guidanceOutcome.status === 'blocked' || guidanceOutcome.status === 'failed') {
                     clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+                    endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
                     const unresolved = guidanceOutcome.unresolved?.length ? guidanceOutcome.unresolved : [guidanceOutcome.reasonCode ?? guidanceOutcome.summary];
-                    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 阻断提交', detail: unresolved.join('；'), agentName: 'guidance-reviewer', ok: false });
                     return { outcome: 'blocked', summary: guidanceOutcome.summary, unresolved, outcomes };
                 }
                 const finalCandidates = guidanceOutcome.candidate ? [...acceptedCandidates, guidanceOutcome.candidate] : acceptedCandidates;
@@ -138898,50 +138987,72 @@ $CONTENT
         }
         async plan(input) {
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, 'world-stage-planner', 'agent_loop', this.dependencies.apiPreset);
-            const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts['world-stage-planner'], 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
-            const transcript = [];
-            const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
-            const protocolGuard = { role: 'system', content: worldSimulationPlannerProtocolInstruction_ACU() };
-            for (;;) {
-                const sent = await executeWorldSimulationFinalRequest_ACU({
-                    messages: [...rendered.messages, protocolGuard, ...transcript],
-                    historyBudgetTokens: input.settings.agentHistoryTokenBudget,
-                    count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                    invoke: messages => this.dependencies.invoke(messages, preset),
-                });
-                if (sent.status === 'rejected')
-                    throw new Error(sent.reason);
-                const raw = String(sent.response ?? '');
-                try {
-                    const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
-                    if (parsed.action !== 'plan')
-                        throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
-                    const revision = 1;
-                    if (this.dependencies.chatIdentity) {
-                        logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
-                            kind: 'stage_plan',
-                            title: parsed.plan.title,
-                            detail: parsed.summary,
-                            agentName: 'world-stage-planner',
-                        });
+            const entryId = this.dependencies.chatIdentity
+                ? logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+                    kind: 'stage_plan',
+                    title: '阶段规划正在工作',
+                    detail: '正在对照世界时钟、暗流状态与本轮指令锁定推演焦点…',
+                    agentName: 'world-stage-planner',
+                    status: 'running',
+                })
+                : null;
+            try {
+                const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts['world-stage-planner'], 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
+                const transcript = [];
+                const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
+                const protocolGuard = { role: 'system', content: worldSimulationPlannerProtocolInstruction_ACU() };
+                for (;;) {
+                    const sent = await executeWorldSimulationFinalRequest_ACU({
+                        messages: [...rendered.messages, protocolGuard, ...transcript],
+                        historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+                        count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+                        invoke: messages => this.dependencies.invoke(messages, preset),
+                    });
+                    if (sent.status === 'rejected')
+                        throw new Error(sent.reason);
+                    const raw = String(sent.response ?? '');
+                    try {
+                        const parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
+                        if (parsed.action !== 'plan')
+                            throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
+                        const revision = 1;
+                        if (this.dependencies.chatIdentity && entryId !== null) {
+                            updateWorldSimulationSession_ACU(this.dependencies.chatIdentity, entryId, {
+                                title: parsed.plan.title,
+                                detail: parsed.summary,
+                                ok: true,
+                                status: 'done',
+                            });
+                        }
+                        return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: 'initial', replanInstruction: '', frozen: false, plan: parsed.plan } };
                     }
-                    return { summary: parsed.summary, revision: { revision, createdAt: input.now ?? Date.now(), reason: 'initial', replanInstruction: '', frozen: false, plan: parsed.plan } };
-                }
-                catch (error) {
-                    const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
-                    if (this.dependencies.chatIdentity) {
-                        logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
-                            kind: 'protocol_retry',
-                            title: failure.retry ? '阶段规划协议修正' : '阶段规划输出被拒绝',
-                            detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`,
-                            agentName: 'world-stage-planner',
-                            ok: false,
-                        });
+                    catch (error) {
+                        const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+                        if (this.dependencies.chatIdentity) {
+                            logWorldSimulationSession_ACU(this.dependencies.chatIdentity, {
+                                kind: 'protocol_retry',
+                                title: failure.retry ? '阶段规划协议修正' : '阶段规划输出被拒绝',
+                                detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`,
+                                agentName: 'world-stage-planner',
+                                ok: false,
+                            });
+                        }
+                        if (!failure.retry)
+                            throw error;
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` });
                     }
-                    if (!failure.retry)
-                        throw error;
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` });
                 }
+            }
+            catch (error) {
+                if (this.dependencies.chatIdentity && entryId !== null) {
+                    updateWorldSimulationSession_ACU(this.dependencies.chatIdentity, entryId, {
+                        title: '阶段规划失败',
+                        detail: error instanceof Error ? error.message : String(error),
+                        ok: false,
+                        status: 'failed',
+                    });
+                }
+                throw error;
             }
         }
     }

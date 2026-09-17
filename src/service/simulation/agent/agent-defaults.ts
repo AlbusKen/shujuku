@@ -27,8 +27,17 @@ export function worldSimulationSeamMarker_ACU(seam: WorldSimulationEngineSeam_AC
   return `<WORLD_SIMULATION_ENGINE_SEAM:${seam}>`;
 }
 
+export function worldSimulationDirectorProtocolInstruction_ACU(): string {
+  return [
+    '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。',
+    'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。',
+    'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
+    '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
+  ].join('\n');
+}
+
 function protocolFor_ACU(kind: string, name: WorldSimulationAgentName_ACU): string {
-  if (kind === 'director') return '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。';
+  if (kind === 'director') return worldSimulationDirectorProtocolInstruction_ACU();
   if (kind === 'planner') return worldSimulationPlannerProtocolInstruction_ACU();
   if (name === 'guidance-reviewer') return '仅输出 specialist JSON；只能产出 guidance patch，或明确 no_change、blocked、failed。';
   if (kind === 'reviewer') return '仅输出 verdict、summary、findings、acceptedCandidateIds 组成的审核 JSON。';

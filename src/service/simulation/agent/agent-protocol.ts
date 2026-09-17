@@ -1,5 +1,6 @@
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationStagePlan_ACU } from '../model';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
+import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
 
 const SCAN_LIMIT_ACU = 6;
@@ -14,7 +15,11 @@ function fail_ACU(reasonCode: string, path: string, expected: string, actual: un
 }
 
 function stripNoise_ACU(raw: string): string {
-  return raw.replace(/<(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '').replace(/<\/?(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>/gi, '').replace(/```[a-zA-Z]*\n?/g, '').trim();
+  return raw
+    .replace(/<(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<\/?(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>/gi, '')
+    .replace(/<\/?WORLD_SIMULATION_ENGINE_SEAM:[^>]*>/gi, '')
+    .replace(/```[a-zA-Z]*\n?/g, '').trim();
 }
 
 function balanced_ACU(text: string, start: number): { json: string; end: number } | null {
@@ -137,15 +142,44 @@ function authorizedEvidenceRefs_ACU(value: unknown, path: string, required: bool
   return refs;
 }
 
+const SAFE_TOOL_REQUEST_METADATA_ACU = new Set(['evidenceRef', 'purpose']);
+function normalizeToolRequestMetadata_ACU(value: Record<string, unknown>, action: string): Record<string, unknown> {
+  if (action !== 'read' && action !== 'search') return value;
+  const normalized = { ...value };
+  for (const key of SAFE_TOOL_REQUEST_METADATA_ACU) delete normalized[key];
+  return normalized;
+}
+
+function isAuthorizedToolAddress_ACU(address: string): boolean {
+  return WORLD_SIMULATION_TOOL_ADDRESSES_ACU.some(allowed => allowed.endsWith(':')
+    ? address.startsWith(allowed) && address.length > allowed.length
+    : address === allowed);
+}
+
+function normalizeLegacyToolAction_ACU(value: Record<string, unknown>): Record<string, unknown> {
+  if (text_ACU(value.action)) return value;
+  const keys = Object.keys(value);
+  const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
+  if (keys.some(key => !allowed.has(key))) return value;
+  const address = text_ACU(value.address);
+  if (address && isAuthorizedToolAddress_ACU(address)) return { action: 'read', reads: [address] };
+  if (Array.isArray(value.reads)) {
+    const reads = texts_ACU(value.reads);
+    if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU)) return { action: 'read', reads };
+  }
+  return value;
+}
+
 export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate = true, evidenceRegistry?: WorldSimulationEvidenceRegistrySnapshot_ACU): WorldSimulationMainAction_ACU {
   if (!isRecord_ACU(value)) fail_ACU('OBJECT_REQUIRED', '$', 'object', value);
-  const action = text_ACU(value.action);
+  const normalizedValue = normalizeLegacyToolAction_ACU(value);
+  const action = text_ACU(normalizedValue.action);
   if (action === 'read') {
-    const raw = closedObject_ACU(value, '$', ['action', 'reads']);
+    const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'reads']);
     return { kind: 'read', reads: requiredList_ACU(raw.reads, '$.reads') };
   }
   if (action === 'search') {
-    const raw = closedObject_ACU(value, '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
+    const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
     let maxResults = 10;
     if (raw.maxResults !== undefined) {
       if (!Number.isInteger(raw.maxResults) || Number(raw.maxResults) < 1 || Number(raw.maxResults) > 50) fail_ACU('INVALID_MAX_RESULTS', '$.maxResults', 'integer from 1 to 50', raw.maxResults);
@@ -156,7 +190,7 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
   }
   if (action === 'delegate') {
     if (!allowDelegate) fail_ACU('DELEGATION_BUDGET_EXHAUSTED', '$.action', 'non-delegate action', action);
-    const raw = closedObject_ACU(value, '$', ['action', 'delegations']);
+    const raw = closedObject_ACU(normalizedValue, '$', ['action', 'delegations']);
     if (!Array.isArray(raw.delegations) || !raw.delegations.length) fail_ACU('DELEGATIONS_REQUIRED', '$.delegations', 'non-empty array', raw.delegations);
     return { kind: 'delegate', delegations: raw.delegations.map((item, index) => {
       const delegation = closedObject_ACU(item, `$.delegations[${index}]`, ['agentName', 'instruction'], ['reads']);
@@ -164,16 +198,16 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
     }) };
   }
   if (action === 'finalize') {
-    const raw = closedObject_ACU(value, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
+    const raw = closedObject_ACU(normalizedValue, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
     const outcome = text_ACU(raw.outcome);
     if (!(TERMINALS_ACU as readonly string[]).includes(outcome)) fail_ACU('INVALID_OUTCOME', '$.outcome', TERMINALS_ACU.join(' | '), raw.outcome);
     return { kind: 'finalize', outcome: outcome as typeof TERMINALS_ACU[number], summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
   }
   if (action === 'block') {
-    const raw = closedObject_ACU(value, '$', ['action', 'reason', 'unresolved']);
+    const raw = closedObject_ACU(normalizedValue, '$', ['action', 'reason', 'unresolved']);
     return { kind: 'block', reason: requiredText_ACU(raw.reason, '$.reason'), unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
   }
-  fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', value.action);
+  fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', normalizedValue.action);
 }
 
 
@@ -263,7 +297,7 @@ function collectActionObjects_ACU(raw: string | null | undefined, prefill: strin
 }
 
 export function parseWorldSimulationMainOutput_ACU(raw: string | null | undefined, prefill = '', allowDelegate = true, evidenceRegistry?:WorldSimulationEvidenceRegistrySnapshot_ACU): WorldSimulationMainAction_ACU {
-  const records = collectActionObjects_ACU(raw, prefill);
+  const records = collectActionObjects_ACU(raw, prefill).map(normalizeLegacyToolAction_ACU);
   const tools = records.filter(record => record.action === 'read' || record.action === 'search');
   if (tools.length) {
     return { kind: 'tools', calls: tools.map(record => parseWorldSimulationMainAction_ACU(record, allowDelegate, evidenceRegistry) as Extract<WorldSimulationMainAction_ACU, { kind: 'read' | 'search' }>) };
@@ -282,6 +316,8 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
   const lines = [
     `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
     '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+    'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+    'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
     '动作格式必须是下面之一：',
     '{"action":"read","reads":["ledger:current","summary:current"]}',
     '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
