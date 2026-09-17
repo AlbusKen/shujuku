@@ -272,6 +272,26 @@ export function parseWorldSimulationMainOutput_ACU(raw: string | null | undefine
   return parseWorldSimulationMainAction_ACU(action, allowDelegate, evidenceRegistry);
 }
 
+/**
+ * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 合法动作样例。
+ * 与智能续写 renderMainProtocolRejection_ACU 同语义：快速/推理模型对
+ * 「照这个样子写」远比对「请修正」服从；同时显式禁止模仿系统提示词里的
+ * WORLD_SIMULATION_ENGINE_SEAM 标记——推理模型会把这些标记当输出格式照抄。
+ */
+export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU, allowDelegate: boolean): string {
+  const lines = [
+    `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+    '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+    '动作格式必须是下面之一：',
+    '{"action":"read","reads":["ledger:current","summary:current"]}',
+    '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
+  ];
+  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
+  lines.push('{"action":"finalize","outcome":"no_change","summary":"一句话总结"}');
+  lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
+  return lines.join('\n');
+}
+
 function mergeDraftValue_ACU(base: unknown, continuation: unknown, path: string, depth: number): unknown {
   if (depth > 16) fail_ACU('DRAFT_MERGE_DEPTH', path, 'nesting depth at most 16', depth);
   if (base === undefined) return continuation;

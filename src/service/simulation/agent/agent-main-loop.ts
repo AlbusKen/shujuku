@@ -9,7 +9,7 @@ import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
 import { clearWorldSimulationRunState_ACU, readWorldSimulationRunState_ACU, saveWorldSimulationRunState_ACU } from './agent-run-cache';
 import { beginWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU } from './agent-session-log';
@@ -79,6 +79,7 @@ export class WorldSimulationMainLoop_ACU {
     const toolUsage = { readsUsed: 0 };
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
     beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
+    logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'thought', title: '主 Agent 启动', detail: `开始本轮幕后推演：${input.promptContext.userGuidance || input.identity.stageId}` });
 
     const persist = (nextIteration: number, reviewerFeedback = ''): void => {
       const unique = uniqueCandidates_ACU(candidates);
@@ -127,7 +128,7 @@ export class WorldSimulationMainLoop_ACU {
           persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
           throw error;
         }
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `主 Agent 输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请只输出修正后的 JSON。` });
+        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate) });
         logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
         continue;
       }

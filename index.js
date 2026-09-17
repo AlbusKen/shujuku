@@ -137864,6 +137864,26 @@ $CONTENT
         const action = records.find(record => Object.prototype.hasOwnProperty.call(record, 'action')) ?? records[0];
         return parseWorldSimulationMainAction_ACU(action, allowDelegate, evidenceRegistry);
     }
+    /**
+     * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 合法动作样例。
+     * 与智能续写 renderMainProtocolRejection_ACU 同语义：快速/推理模型对
+     * 「照这个样子写」远比对「请修正」服从；同时显式禁止模仿系统提示词里的
+     * WORLD_SIMULATION_ENGINE_SEAM 标记——推理模型会把这些标记当输出格式照抄。
+     */
+    function renderWorldSimulationDirectorProtocolRejection_ACU(issue, allowDelegate) {
+        const lines = [
+            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+            '动作格式必须是下面之一：',
+            '{"action":"read","reads":["ledger:current","summary:current"]}',
+            '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
+        ];
+        if (allowDelegate)
+            lines.push('{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
+        lines.push('{"action":"finalize","outcome":"no_change","summary":"一句话总结"}');
+        lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
+        return lines.join('\n');
+    }
     function mergeDraftValue_ACU(base, continuation, path, depth) {
         if (depth > 16)
             fail_ACU('DRAFT_MERGE_DEPTH', path, 'nesting depth at most 16', depth);
@@ -137985,6 +138005,7 @@ $CONTENT
             const toolUsage = { readsUsed: 0 };
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
             beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
+            logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'thought', title: '主 Agent 启动', detail: `开始本轮幕后推演：${input.promptContext.userGuidance || input.identity.stageId}` });
             const persist = (nextIteration, reviewerFeedback = '') => {
                 const unique = uniqueCandidates_ACU(candidates);
                 saveWorldSimulationRunState_ACU(input.identity.chatIdentity, {
@@ -138028,7 +138049,7 @@ $CONTENT
                         persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
                         throw error;
                     }
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `主 Agent 输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请只输出修正后的 JSON。` });
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate) });
                     logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
                     continue;
                 }
