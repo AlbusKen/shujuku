@@ -71,7 +71,7 @@ describe('WorldSimulationPage', () => {
 
   it('会话发送只派发到 simulation runtime', async () => {
     const { app, host } = await mountPage();
-    const input = host.querySelector<HTMLTextAreaElement>('.ws-chat textarea')!;
+    const input = host.querySelector<HTMLTextAreaElement>('.acu-v2-agent-chat__input')!;
     input.value = '推进北境局势';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     await nextTick();
