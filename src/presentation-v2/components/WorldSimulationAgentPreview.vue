@@ -1,25 +1,23 @@
 <template>
-  <AcuPanel title="当前 active swipe 世界账本资料" description="只读回放当前分支；默认隐藏 hidden 条目，不会写回账本、会话或正文。">
-    <div class="world-sim-preview">
-      <div class="world-sim-preview__actions"><span>{{ summary }}</span><AcuButton size="sm" @click="emit('refresh')">刷新资料</AcuButton></div>
-      <p v-if="!ledger">当前分支还没有已结算的世界账本。</p>
-      <template v-else>
-        <p>锚点：{{ anchor ? `第 ${anchor.messageIndex + 1} 楼 · swipe ${Number(anchor.swipeId) + 1}` : '当前未解析到 assistant 锚点' }}</p>
-        <div class="world-sim-preview__overview">
-          <div><strong>revision</strong><span>{{ ledger.revision }}</span></div>
-          <div><strong>故事时间</strong><span>{{ ledger.clock.storyTime || '未知' }}</span></div>
-          <div><strong>经过</strong><span>{{ ledger.clock.elapsed || '未知' }}</span></div>
-        </div>
-        <section v-for="group in groups" :key="group.key" class="world-sim-preview__group">
-          <strong>{{ group.label }} · {{ group.items.length }}</strong>
-          <p v-if="!group.items.length">暂无可显示条目。</p>
-          <ul v-else><li v-for="item in group.items" :key="item.id"><strong>{{ item.title }}</strong><span>{{ item.detail }}</span></li></ul>
-        </section>
-        <details class="world-sim-preview__projection"><summary>Projection preview</summary><pre>{{ projectionPreview || '当前没有系统投影。' }}</pre></details>
-        <details v-if="diagnostics.length" class="world-sim-preview__diagnostics"><summary>读取诊断 · {{ diagnostics.length }}</summary><ul><li v-for="item in diagnostics" :key="item">{{ item }}</li></ul></details>
-      </template>
-    </div>
-  </AcuPanel>
+  <div class="world-sim-preview">
+    <div class="world-sim-preview__actions"><span>{{ summary }}</span><AcuButton size="sm" @click="emit('refresh')">刷新资料</AcuButton></div>
+    <p v-if="!ledger">当前分支还没有已结算的世界账本。</p>
+    <template v-else>
+      <p>锚点：{{ anchor ? `第 ${anchor.messageIndex + 1} 楼 · swipe ${Number(anchor.swipeId) + 1}` : '当前未解析到 assistant 锚点' }}</p>
+      <div class="world-sim-preview__overview">
+        <div><strong>revision</strong><span>{{ ledger.revision }}</span></div>
+        <div><strong>故事时间</strong><span>{{ ledger.clock.storyTime || '未知' }}</span></div>
+        <div><strong>经过</strong><span>{{ ledger.clock.elapsed || '未知' }}</span></div>
+      </div>
+      <section v-for="group in groups" :key="group.key" class="world-sim-preview__group">
+        <strong>{{ group.label }} · {{ group.items.length }}</strong>
+        <p v-if="!group.items.length">暂无可显示条目。</p>
+        <ul v-else><li v-for="item in group.items" :key="item.id"><strong>{{ item.title }}</strong><span>{{ item.detail }}</span></li></ul>
+      </section>
+      <details class="world-sim-preview__projection"><summary>Projection preview</summary><pre>{{ projectionPreview || '当前没有系统投影。' }}</pre></details>
+      <details v-if="diagnostics.length" class="world-sim-preview__diagnostics"><summary>读取诊断 · {{ diagnostics.length }}</summary><ul><li v-for="item in diagnostics" :key="item">{{ item }}</li></ul></details>
+    </template>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -27,7 +25,6 @@ import { computed } from 'vue';
 import type { WorldSimulationAnchorIdentity_ACU } from '../../service/simulation/agent/agent-model';
 import type { WorldSimulationLedger_ACU } from '../../service/simulation/model';
 import AcuButton from './_lib/AcuButton.vue';
-import AcuPanel from './_lib/AcuPanel.vue';
 
 const props = withDefaults(defineProps<{
   ledger: WorldSimulationLedger_ACU | null;

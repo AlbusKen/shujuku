@@ -178920,10 +178920,10 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_11$f = { class: "acu-agent-advanced__section-head" };
     const _hoisted_12$e = { class: "acu-agent-advanced__grid" };
     const _hoisted_13$c = { class: "acu-agent-advanced__section" };
-    const _hoisted_14$b = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_15$a = { class: "acu-agent-advanced__prompt-scope" };
-    const _hoisted_16$a = { class: "acu-agent-advanced__prompt-actions" };
-    const _hoisted_17$9 = { class: "acu-agent-advanced__prompt-head" };
+    const _hoisted_14$c = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_15$b = { class: "acu-agent-advanced__prompt-scope" };
+    const _hoisted_16$b = { class: "acu-agent-advanced__prompt-actions" };
+    const _hoisted_17$a = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$9 = { class: "acu-agent-advanced__prompt-head" };
     function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
@@ -179070,7 +179070,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				_: 1
 			}, 8, ["label", "hint"])])]),
 			createBaseVNode("section", _hoisted_13$c, [
-				createBaseVNode("header", _hoisted_14$b, [createBaseVNode("div", null, [
+				createBaseVNode("header", _hoisted_14$c, [createBaseVNode("div", null, [
 					createBaseVNode(
 						"h4",
 						null,
@@ -179087,12 +179087,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					createBaseVNode(
 						"p",
-						_hoisted_15$a,
+						_hoisted_15$b,
 						toDisplayString($setup.plotCopy.agentControl.prompts.scopeHint),
 						1
 						/* TEXT */
 					)
-				]), createBaseVNode("div", _hoisted_16$a, [createVNode($setup["AcuButton"], {
+				]), createBaseVNode("div", _hoisted_16$b, [createVNode($setup["AcuButton"], {
 					size: "sm",
 					disabled: !$setup.canSavePrompts,
 					onClick: $setup.savePromptsToCurrentWorldbook
@@ -179165,7 +179165,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					Fragment,
 					{ key: 1 },
 					[
-						createBaseVNode("div", _hoisted_17$9, [createBaseVNode(
+						createBaseVNode("div", _hoisted_17$a, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.decisionTitle),
@@ -179536,13 +179536,13 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-session-feed__thought-text"
     };
-    const _hoisted_14$a = ["onClick"];
-    const _hoisted_15$9 = {
+    const _hoisted_14$b = ["onClick"];
+    const _hoisted_15$a = {
 	key: 0,
 	class: "acu-v2-session-feed__spinner"
     };
-    const _hoisted_16$9 = { class: "acu-v2-session-feed__badge" };
-    const _hoisted_17$8 = { class: "acu-v2-session-feed__title" };
+    const _hoisted_16$a = { class: "acu-v2-session-feed__badge" };
+    const _hoisted_17$9 = { class: "acu-v2-session-feed__title" };
     const _hoisted_18$8 = { class: "acu-v2-session-feed__time" };
     const _hoisted_19$8 = ["onClick"];
     const _hoisted_20$7 = {
@@ -179651,7 +179651,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										createBaseVNode(
 											"span",
 											{ class: normalizeClass(["acu-v2-session-feed__status", `acu-v2-session-feed__status--${entry.status}`]) },
-											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$9)) : entry.status === "failed" ? (openBlock(), createElementBlock(
+											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$a)) : entry.status === "failed" ? (openBlock(), createElementBlock(
 												Fragment,
 												{ key: 1 },
 												[createTextVNode("✕")],
@@ -179669,14 +179669,14 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_16$9,
+											_hoisted_16$a,
 											toDisplayString($setup.kindLabel(entry)),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_17$8,
+											_hoisted_17$9,
 											toDisplayString(entry.title),
 											1
 											/* TEXT */
@@ -179698,7 +179698,7 @@ Expected function or array of functions, received type ${typeof value}.`
 											2
 											/* CLASS */
 										)) : createCommentVNode("v-if", true)
-									], 8, _hoisted_14$a),
+									], 8, _hoisted_14$b),
 									entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
 										key: 0,
 										class: "acu-v2-session-feed__preview",
@@ -180124,14 +180124,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     { key: 'chronicle', label: '世界编年', items: ledger.chronicle.map(item => ({ id: item.id, title: item.at, detail: item.summary })) },
                 ];
             });
-            const __returned__ = { props, emit, summary, visible, groups, AcuButton, AcuPanel };
+            const __returned__ = { props, emit, summary, visible, groups, AcuButton };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.world-sim-preview[data-v-cfa27bc0]{display:grid;gap:10px}.world-sim-preview__actions[data-v-cfa27bc0]{display:flex;gap:8px;align-items:center;color:var(--acu-text-3);font-size:12px}.world-sim-preview__actions span[data-v-cfa27bc0]{margin-right:auto}.world-sim-preview p[data-v-cfa27bc0]{margin:0;color:var(--acu-text-3);font-size:12px}.world-sim-preview__overview[data-v-cfa27bc0]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.world-sim-preview__overview>div[data-v-cfa27bc0],.world-sim-preview__group[data-v-cfa27bc0],.world-sim-preview__diagnostics[data-v-cfa27bc0],.world-sim-preview__projection[data-v-cfa27bc0]{display:grid;gap:6px;padding:9px;border:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent);border-radius:7px}.world-sim-preview__overview span[data-v-cfa27bc0],.world-sim-preview li span[data-v-cfa27bc0]{color:var(--acu-text-2);font-size:12px}.world-sim-preview ul[data-v-cfa27bc0]{display:grid;gap:5px;margin:0;padding:0;list-style:none}.world-sim-preview li[data-v-cfa27bc0]{display:grid;gap:2px}.world-sim-preview__projection summary[data-v-cfa27bc0]{cursor:pointer}.world-sim-preview__projection pre[data-v-cfa27bc0]{max-height:260px;overflow:auto;margin:6px 0 0;padding:10px;border-radius:8px;background:var(--acu-bg-2);white-space:pre-wrap;word-break:break-word}@media(max-width:640px){.world-sim-preview__overview[data-v-cfa27bc0]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationAgentPreview.vue#style-0-cfa27bc0");
-    var WorldSimulationAgentPreview_vue_vue_type_style_index_0_scoped_cfa27bc0_lang = null;
+    injectSfcStyle("\n.world-sim-preview[data-v-3bf475f3]{display:grid;gap:10px}.world-sim-preview__actions[data-v-3bf475f3]{display:flex;gap:8px;align-items:center;color:var(--acu-text-3);font-size:12px}.world-sim-preview__actions span[data-v-3bf475f3]{margin-right:auto}.world-sim-preview p[data-v-3bf475f3]{margin:0;color:var(--acu-text-3);font-size:12px}.world-sim-preview__overview[data-v-3bf475f3]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.world-sim-preview__overview>div[data-v-3bf475f3],.world-sim-preview__group[data-v-3bf475f3],.world-sim-preview__diagnostics[data-v-3bf475f3],.world-sim-preview__projection[data-v-3bf475f3]{display:grid;gap:6px;padding:9px;border:1px solid color-mix(in srgb,var(--acu-text-3) 18%,transparent);border-radius:7px}.world-sim-preview__overview span[data-v-3bf475f3],.world-sim-preview li span[data-v-3bf475f3]{color:var(--acu-text-2);font-size:12px}.world-sim-preview ul[data-v-3bf475f3]{display:grid;gap:5px;margin:0;padding:0;list-style:none}.world-sim-preview li[data-v-3bf475f3]{display:grid;gap:2px}.world-sim-preview__projection summary[data-v-3bf475f3]{cursor:pointer}.world-sim-preview__projection pre[data-v-3bf475f3]{max-height:260px;overflow:auto;margin:6px 0 0;padding:10px;border-radius:8px;background:var(--acu-bg-2);white-space:pre-wrap;word-break:break-word}@media(max-width:640px){.world-sim-preview__overview[data-v-3bf475f3]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationAgentPreview.vue#style-0-3bf475f3");
+    var WorldSimulationAgentPreview_vue_vue_type_style_index_0_scoped_3bf475f3_lang = null;
 
     const _hoisted_1$u = { class: "world-sim-preview" };
     const _hoisted_2$r = { class: "world-sim-preview__actions" };
@@ -180145,322 +180145,99 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "world-sim-preview__diagnostics"
     };
     function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock($setup["AcuPanel"], {
-		title: "当前 active swipe 世界账本资料",
-		description: "只读回放当前分支；默认隐藏 hidden 条目，不会写回账本、会话或正文。"
-	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$u, [createBaseVNode("div", _hoisted_2$r, [createBaseVNode(
-			"span",
-			null,
-			toDisplayString($setup.summary),
-			1
-			/* TEXT */
-		), createVNode($setup["AcuButton"], {
-			size: "sm",
-			onClick: _cache[0] || (_cache[0] = ($event) => $setup.emit("refresh"))
-		}, {
-			default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
-				"刷新资料",
-				-1
-				/* CACHED */
-			)])]),
-			_: 1
-		})]), !$props.ledger ? (openBlock(), createElementBlock("p", _hoisted_3$m, "当前分支还没有已结算的世界账本。")) : (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 1 },
-			[
-				createBaseVNode(
-					"p",
-					null,
-					"锚点：" + toDisplayString($props.anchor ? `第 ${$props.anchor.messageIndex + 1} 楼 · swipe ${Number($props.anchor.swipeId) + 1}` : "当前未解析到 assistant 锚点"),
-					1
-					/* TEXT */
-				),
-				createBaseVNode("div", _hoisted_4$j, [
-					createBaseVNode("div", null, [_cache[2] || (_cache[2] = createBaseVNode(
-						"strong",
-						null,
-						"revision",
-						-1
-						/* CACHED */
-					)), createBaseVNode(
-						"span",
-						null,
-						toDisplayString($props.ledger.revision),
-						1
-						/* TEXT */
-					)]),
-					createBaseVNode("div", null, [_cache[3] || (_cache[3] = createBaseVNode(
-						"strong",
-						null,
-						"故事时间",
-						-1
-						/* CACHED */
-					)), createBaseVNode(
-						"span",
-						null,
-						toDisplayString($props.ledger.clock.storyTime || "未知"),
-						1
-						/* TEXT */
-					)]),
-					createBaseVNode("div", null, [_cache[4] || (_cache[4] = createBaseVNode(
-						"strong",
-						null,
-						"经过",
-						-1
-						/* CACHED */
-					)), createBaseVNode(
-						"span",
-						null,
-						toDisplayString($props.ledger.clock.elapsed || "未知"),
-						1
-						/* TEXT */
-					)])
-				]),
-				(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.groups, (group) => {
-						return openBlock(), createElementBlock("section", {
-							key: group.key,
-							class: "world-sim-preview__group"
-						}, [createBaseVNode(
-							"strong",
-							null,
-							toDisplayString(group.label) + " · " + toDisplayString(group.items.length),
-							1
-							/* TEXT */
-						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_5$i, "暂无可显示条目。")) : (openBlock(), createElementBlock("ul", _hoisted_6$h, [(openBlock(true), createElementBlock(
-							Fragment,
-							null,
-							renderList(group.items, (item) => {
-								return openBlock(), createElementBlock("li", { key: item.id }, [createBaseVNode(
-									"strong",
-									null,
-									toDisplayString(item.title),
-									1
-									/* TEXT */
-								), createBaseVNode(
-									"span",
-									null,
-									toDisplayString(item.detail),
-									1
-									/* TEXT */
-								)]);
-							}),
-							128
-							/* KEYED_FRAGMENT */
-						))]))]);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				)),
-				createBaseVNode("details", _hoisted_7$f, [_cache[5] || (_cache[5] = createBaseVNode(
-					"summary",
-					null,
-					"Projection preview",
-					-1
-					/* CACHED */
-				)), createBaseVNode(
-					"pre",
-					null,
-					toDisplayString($props.projectionPreview || "当前没有系统投影。"),
-					1
-					/* TEXT */
-				)]),
-				$props.diagnostics.length ? (openBlock(), createElementBlock("details", _hoisted_8$f, [createBaseVNode(
-					"summary",
-					null,
-					"读取诊断 · " + toDisplayString($props.diagnostics.length),
-					1
-					/* TEXT */
-				), createBaseVNode("ul", null, [(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($props.diagnostics, (item) => {
-						return openBlock(), createElementBlock(
-							"li",
-							{ key: item },
-							toDisplayString(item),
-							1
-							/* TEXT */
-						);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))])])) : createCommentVNode("v-if", true)
-			],
-			64
-			/* STABLE_FRAGMENT */
-		))])]),
-		_: 1
-	});
-    }
-    var WorldSimulationAgentPreview = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-cfa27bc0"]]);
-
-    var _sfc_main$t = /*@__PURE__*/ defineComponent({
-        __name: 'WorldSimulationMaterialsPanel',
-        props: {
-            conversation: {},
-            materials: {},
-            session: {}
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            const activeTab = ref('state');
-            const tabs = [{ id: 'state', label: '世界状态' }, { id: 'conversation', label: 'Agent 会话' }, { id: 'candidates', label: '候选轨迹' }, { id: 'diagnostics', label: '读取诊断' }];
-            const candidateEntries = computed(() => props.session.filter(item => ['delegation', 'finalize', 'block', 'stage_plan'].includes(item.kind)));
-            const diagnostics = computed(() => [...props.conversation.diagnostics, ...props.materials.diagnostics]);
-            const ledgerGroups = computed(() => {
-                const ledger = props.materials.snapshot?.ledger;
-                if (!ledger)
-                    return [];
-                return [
-                    { key: 'dimensions', label: '世界维度', items: ledger.dimensions.map(x => ({ id: x.id, title: `${x.name} · ${x.value} / ${x.trend}`, detail: x.rationale })) },
-                    { key: 'seeds', label: '世界种子', items: ledger.seeds.map(x => ({ id: x.id, title: `${x.title} · ${x.status}`, detail: `强度 ${x.level} · ${x.catalyst}` })) },
-                    { key: 'actors', label: '行动者', items: ledger.actors.map(x => ({ id: x.id, title: x.name, detail: `位置：${x.location || '未知'} · 目标：${x.goals.join('、') || '无'}` })) },
-                    { key: 'chronicle', label: '世界编年', items: ledger.chronicle.map(x => ({ id: x.id, title: x.at, detail: x.summary })) },
-                ];
-            });
-            function kindLabel(kind) { return { user: '你', agent: 'Agent', tool: '工具', runtime: '运行', turn: '轮次', handoff: '交接', delegation: '子代理', finalize: '终审', block: '阻断', stage_plan: '阶段计划' }[kind] ?? kind; }
-            const __returned__ = { props, activeTab, tabs, candidateEntries, diagnostics, ledgerGroups, kindLabel };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.ws-materials[data-v-52923a64]{display:grid;gap:12px}.ws-materials__tabs[data-v-52923a64]{display:flex;flex-wrap:wrap;gap:6px}.ws-materials__tabs button[data-v-52923a64]{padding:5px 12px;border:1px solid color-mix(in srgb,var(--acu-text-3) 25%,transparent);border-radius:999px;background:transparent;color:var(--acu-text-2)}.ws-materials__tabs button.active[data-v-52923a64]{background:color-mix(in srgb,var(--acu-accent) 14%,transparent);border-color:var(--acu-accent);color:var(--acu-text-1)}.ws-materials__overview[data-v-52923a64]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.ws-materials__overview>div[data-v-52923a64],section[data-v-52923a64],.ws-materials__cards article[data-v-52923a64]{display:grid;gap:5px;padding:10px;border:1px solid color-mix(in srgb,var(--acu-text-3) 20%,transparent);border-radius:7px}.ws-materials__overview span[data-v-52923a64],section header span[data-v-52923a64],.muted[data-v-52923a64],small[data-v-52923a64]{color:var(--acu-text-3);font-size:12px}section header[data-v-52923a64],.ws-materials__cards article header[data-v-52923a64]{display:flex;justify-content:space-between;gap:8px}.ws-materials__cards[data-v-52923a64]{display:grid;gap:8px}.ws-materials p[data-v-52923a64]{margin:0;white-space:pre-wrap}.ws-materials__timeline[data-v-52923a64]{display:grid;gap:8px;margin:0;padding:0;list-style:none}.ws-materials__timeline li[data-v-52923a64]{display:flex;gap:9px}.ws-materials__timeline li>span[data-v-52923a64]{align-self:start;padding:2px 8px;border-radius:999px;background:var(--acu-bg-2);font-size:11px}.ws-materials__timeline li>div[data-v-52923a64]{flex:1;padding:8px;border-left:2px solid color-mix(in srgb,var(--acu-accent) 40%,transparent)}.ws-materials__diagnostics[data-v-52923a64]{margin:0;padding:10px 10px 10px 28px;border:1px solid var(--acu-border);border-radius:7px;color:var(--acu-text-2);font-size:12px}@media(max-width:640px){.ws-materials__overview[data-v-52923a64]{grid-template-columns:1fr}}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-52923a64");
-    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_52923a64_lang = null;
-
-    const _hoisted_1$t = { class: "ws-materials" };
-    const _hoisted_2$q = { class: "ws-materials__tabs" };
-    const _hoisted_3$l = ["onClick"];
-    const _hoisted_4$i = {
-	key: 0,
-	class: "muted"
-    };
-    const _hoisted_5$h = { class: "ws-materials__overview" };
-    const _hoisted_6$g = {
-	key: 0,
-	class: "muted"
-    };
-    const _hoisted_7$e = {
-	key: 1,
-	class: "ws-materials__cards"
-    };
-    const _hoisted_8$e = {
-	key: 0,
-	class: "muted"
-    };
-    const _hoisted_9$d = {
-	key: 1,
-	class: "ws-materials__timeline"
-    };
-    const _hoisted_10$d = {
-	key: 0,
-	class: "muted"
-    };
-    const _hoisted_11$d = {
-	key: 1,
-	class: "ws-materials__cards"
-    };
-    const _hoisted_12$c = {
-	key: 0,
-	class: "muted"
-    };
-    const _hoisted_13$a = {
-	key: 1,
-	class: "ws-materials__diagnostics"
-    };
-    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$t, [createBaseVNode("div", _hoisted_2$q, [(openBlock(), createElementBlock(
-		Fragment,
+	return openBlock(), createElementBlock("div", _hoisted_1$u, [createBaseVNode("div", _hoisted_2$r, [createBaseVNode(
+		"span",
 		null,
-		renderList($setup.tabs, (tab) => {
-			return createBaseVNode("button", {
-				key: tab.id,
-				type: "button",
-				class: normalizeClass({ active: $setup.activeTab === tab.id }),
-				onClick: ($event) => $setup.activeTab = tab.id
-			}, toDisplayString(tab.label), 11, _hoisted_3$l);
-		}),
-		64
-		/* STABLE_FRAGMENT */
-	))]), $setup.activeTab === "state" ? (openBlock(), createElementBlock(
+		toDisplayString($setup.summary),
+		1
+		/* TEXT */
+	), createVNode($setup["AcuButton"], {
+		size: "sm",
+		onClick: _cache[0] || (_cache[0] = ($event) => $setup.emit("refresh"))
+	}, {
+		default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
+			"刷新资料",
+			-1
+			/* CACHED */
+		)])]),
+		_: 1
+	})]), !$props.ledger ? (openBlock(), createElementBlock("p", _hoisted_3$m, "当前分支还没有已结算的世界账本。")) : (openBlock(), createElementBlock(
 		Fragment,
-		{ key: 0 },
-		[!$props.materials.snapshot ? (openBlock(), createElementBlock("p", _hoisted_4$i, "当前 active swipe 还没有已结算的世界账本。")) : (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 1 },
-			[createBaseVNode("div", _hoisted_5$h, [
-				createBaseVNode("div", null, [_cache[0] || (_cache[0] = createBaseVNode(
-					"strong",
-					null,
-					"结算位置",
-					-1
-					/* CACHED */
-				)), createBaseVNode(
-					"span",
-					null,
-					"第 " + toDisplayString(($props.materials.adoptedIndex ?? 0) + 1) + " 楼",
-					1
-					/* TEXT */
-				)]),
-				createBaseVNode("div", null, [_cache[1] || (_cache[1] = createBaseVNode(
-					"strong",
-					null,
-					"账本修订",
-					-1
-					/* CACHED */
-				)), createBaseVNode(
-					"span",
-					null,
-					"revision " + toDisplayString($props.materials.snapshot.ledgerRevision),
-					1
-					/* TEXT */
-				)]),
+		{ key: 1 },
+		[
+			createBaseVNode(
+				"p",
+				null,
+				"锚点：" + toDisplayString($props.anchor ? `第 ${$props.anchor.messageIndex + 1} 楼 · swipe ${Number($props.anchor.swipeId) + 1}` : "当前未解析到 assistant 锚点"),
+				1
+				/* TEXT */
+			),
+			createBaseVNode("div", _hoisted_4$j, [
 				createBaseVNode("div", null, [_cache[2] || (_cache[2] = createBaseVNode(
 					"strong",
 					null,
-					"证据引用",
+					"revision",
 					-1
 					/* CACHED */
 				)), createBaseVNode(
 					"span",
 					null,
-					toDisplayString($props.materials.snapshot.evidenceRefs.length) + " 条",
+					toDisplayString($props.ledger.revision),
+					1
+					/* TEXT */
+				)]),
+				createBaseVNode("div", null, [_cache[3] || (_cache[3] = createBaseVNode(
+					"strong",
+					null,
+					"故事时间",
+					-1
+					/* CACHED */
+				)), createBaseVNode(
+					"span",
+					null,
+					toDisplayString($props.ledger.clock.storyTime || "未知"),
+					1
+					/* TEXT */
+				)]),
+				createBaseVNode("div", null, [_cache[4] || (_cache[4] = createBaseVNode(
+					"strong",
+					null,
+					"经过",
+					-1
+					/* CACHED */
+				)), createBaseVNode(
+					"span",
+					null,
+					toDisplayString($props.ledger.clock.elapsed || "未知"),
 					1
 					/* TEXT */
 				)])
-			]), (openBlock(true), createElementBlock(
+			]),
+			(openBlock(true), createElementBlock(
 				Fragment,
 				null,
-				renderList($setup.ledgerGroups, (group) => {
-					return openBlock(), createElementBlock("section", { key: group.key }, [createBaseVNode("header", null, [createBaseVNode(
+				renderList($setup.groups, (group) => {
+					return openBlock(), createElementBlock("section", {
+						key: group.key,
+						class: "world-sim-preview__group"
+					}, [createBaseVNode(
 						"strong",
 						null,
-						toDisplayString(group.label),
+						toDisplayString(group.label) + " · " + toDisplayString(group.items.length),
 						1
 						/* TEXT */
-					), createBaseVNode(
-						"span",
-						null,
-						toDisplayString(group.items.length) + " 条",
-						1
-						/* TEXT */
-					)]), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_6$g, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_7$e, [(openBlock(true), createElementBlock(
+					), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_5$i, "暂无可显示条目。")) : (openBlock(), createElementBlock("ul", _hoisted_6$h, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList(group.items, (item) => {
-							return openBlock(), createElementBlock("article", { key: item.id }, [createBaseVNode(
+							return openBlock(), createElementBlock("li", { key: item.id }, [createBaseVNode(
 								"strong",
 								null,
 								toDisplayString(item.title),
 								1
 								/* TEXT */
 							), createBaseVNode(
-								"p",
+								"span",
 								null,
 								toDisplayString(item.detail),
 								1
@@ -180473,109 +180250,333 @@ Expected function or array of functions, received type ${typeof value}.`
 				}),
 				128
 				/* KEYED_FRAGMENT */
-			))],
-			64
-			/* STABLE_FRAGMENT */
-		))],
-		64
-		/* STABLE_FRAGMENT */
-	)) : $setup.activeTab === "conversation" ? (openBlock(), createElementBlock(
-		Fragment,
-		{ key: 1 },
-		[!$props.conversation.messages.length ? (openBlock(), createElementBlock("p", _hoisted_8$e, "还没有持久化的 Agent 会话材料。")) : (openBlock(), createElementBlock("ol", _hoisted_9$d, [(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($props.conversation.messages, (item) => {
-				return openBlock(), createElementBlock("li", { key: `${item.id}:${item.at}` }, [createBaseVNode(
-					"span",
-					null,
-					toDisplayString($setup.kindLabel(item.kind)),
-					1
-					/* TEXT */
-				), createBaseVNode("div", null, [
-					createBaseVNode(
-						"strong",
-						null,
-						toDisplayString(item.digest || `消息 ${item.id}`),
+			)),
+			createBaseVNode("details", _hoisted_7$f, [_cache[5] || (_cache[5] = createBaseVNode(
+				"summary",
+				null,
+				"Projection preview",
+				-1
+				/* CACHED */
+			)), createBaseVNode(
+				"pre",
+				null,
+				toDisplayString($props.projectionPreview || "当前没有系统投影。"),
+				1
+				/* TEXT */
+			)]),
+			$props.diagnostics.length ? (openBlock(), createElementBlock("details", _hoisted_8$f, [createBaseVNode(
+				"summary",
+				null,
+				"读取诊断 · " + toDisplayString($props.diagnostics.length),
+				1
+				/* TEXT */
+			), createBaseVNode("ul", null, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($props.diagnostics, (item) => {
+					return openBlock(), createElementBlock(
+						"li",
+						{ key: item },
+						toDisplayString(item),
 						1
 						/* TEXT */
-					),
-					createBaseVNode(
-						"p",
-						null,
-						toDisplayString(item.text),
-						1
-						/* TEXT */
-					),
-					createBaseVNode(
-						"small",
-						null,
-						toDisplayString(item.turnKey),
-						1
-						/* TEXT */
-					)
-				])]);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		))]))],
-		64
-		/* STABLE_FRAGMENT */
-	)) : $setup.activeTab === "candidates" ? (openBlock(), createElementBlock(
-		Fragment,
-		{ key: 2 },
-		[!$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_10$d, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_11$d, [(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($setup.candidateEntries, (item) => {
-				return openBlock(), createElementBlock("article", { key: item.id }, [createBaseVNode("header", null, [createBaseVNode(
-					"strong",
-					null,
-					toDisplayString(item.title),
-					1
-					/* TEXT */
-				), createBaseVNode(
-					"span",
-					null,
-					toDisplayString(item.agentName || $setup.kindLabel(item.kind)),
-					1
-					/* TEXT */
-				)]), createBaseVNode(
-					"p",
-					null,
-					toDisplayString(item.detail),
-					1
-					/* TEXT */
-				)]);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		))]))],
-		64
-		/* STABLE_FRAGMENT */
-	)) : (openBlock(), createElementBlock(
-		Fragment,
-		{ key: 3 },
-		[!$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_12$c, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_13$a, [(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($setup.diagnostics, (item) => {
-				return openBlock(), createElementBlock(
-					"li",
-					{ key: item },
-					toDisplayString(item),
-					1
-					/* TEXT */
-				);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		))]))],
+					);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])])) : createCommentVNode("v-if", true)
+		],
 		64
 		/* STABLE_FRAGMENT */
 	))]);
     }
-    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-52923a64"]]);
+    var WorldSimulationAgentPreview = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-3bf475f3"]]);
+
+    var _sfc_main$t = /*@__PURE__*/ defineComponent({
+        __name: 'WorldSimulationMaterialsPanel',
+        props: {
+            conversation: {},
+            materials: {},
+            session: {}
+        },
+        emits: ["refresh"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const TABS = [
+                { id: 'state', label: '世界状态' },
+                { id: 'conversation', label: 'Agent 会话' },
+                { id: 'candidates', label: '候选轨迹' },
+                { id: 'diagnostics', label: '读取诊断' },
+            ];
+            const activeTab = ref('state');
+            const diagnostics = computed(() => [...props.conversation.diagnostics, ...props.materials.diagnostics]);
+            /** 持久会话消息（user/agent/runtime/tool/turn/handoff）投影成会话流条目，与主面板同构展示。 */
+            const conversationEntries = computed(() => props.conversation.messages.map((message, index) => ({
+                id: index + 1,
+                at: message.at,
+                kind: (message.kind === 'user' ? 'user_message'
+                    : message.kind === 'handoff' ? 'handoff'
+                        : message.kind === 'turn' ? 'run_started'
+                            : 'tool_read'),
+                title: message.digest || '会话材料',
+                detail: message.text,
+                agentName: '',
+                ok: true,
+                status: 'done',
+            })));
+            const candidateEntries = computed(() => props.session.filter(item => ['delegation', 'finalize', 'block', 'stage_plan'].includes(item.kind)));
+            function agentLabel(item) {
+                return item.agentName || '主 Agent';
+            }
+            const ledgerGroups = computed(() => {
+                const ledger = props.materials.snapshot?.ledger;
+                if (!ledger)
+                    return [];
+                return [
+                    { key: 'dimensions', label: '世界维度', items: ledger.dimensions.map(x => ({ id: x.id, title: `${x.name} · ${x.value} / ${x.trend}`, detail: x.rationale })) },
+                    { key: 'seeds', label: '世界种子', items: ledger.seeds.map(x => ({ id: x.id, title: `${x.title} · ${x.status}`, detail: `强度 ${x.level} · ${x.catalyst}` })) },
+                    { key: 'actors', label: '行动者', items: ledger.actors.map(x => ({ id: x.id, title: x.name, detail: `位置：${x.location || '未知'} · 目标：${x.goals.join('、') || '无'}` })) },
+                    { key: 'chronicle', label: '世界编年', items: ledger.chronicle.map(x => ({ id: x.id, title: x.at, detail: x.summary })) },
+                ];
+            });
+            const __returned__ = { props, emit, TABS, activeTab, diagnostics, conversationEntries, candidateEntries, agentLabel, ledgerGroups, AcuButton, WorldSimulationSessionFeed };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-43e0f120] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-43e0f120] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-43e0f120] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-43e0f120] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-43e0f120] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__overview[data-v-43e0f120] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-43e0f120] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview span[data-v-43e0f120] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-43e0f120] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-43e0f120] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-43e0f120] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-43e0f120] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card-head[data-v-43e0f120] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-43e0f120] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__card-body[data-v-43e0f120] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__empty[data-v-43e0f120] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__diagnostics[data-v-43e0f120] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-43e0f120] { grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-43e0f120");
+    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_43e0f120_lang = null;
+
+    const _hoisted_1$t = { class: "acu-v2-ws-materials" };
+    const _hoisted_2$q = { class: "acu-v2-ws-materials__tabs" };
+    const _hoisted_3$l = ["onClick"];
+    const _hoisted_4$i = { class: "acu-v2-ws-materials__tab-actions" };
+    const _hoisted_5$h = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_6$g = { class: "acu-v2-ws-materials__overview" };
+    const _hoisted_7$e = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_8$e = {
+	key: 1,
+	class: "acu-v2-ws-materials__cards"
+    };
+    const _hoisted_9$d = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_10$d = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_11$d = {
+	key: 1,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_12$c = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_13$a = {
+	key: 1,
+	class: "acu-v2-ws-materials__cards"
+    };
+    const _hoisted_14$a = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_15$9 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_16$9 = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_17$8 = {
+	key: 1,
+	class: "acu-v2-ws-materials__diagnostics"
+    };
+    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$t, [
+		createBaseVNode("div", _hoisted_2$q, [(openBlock(), createElementBlock(
+			Fragment,
+			null,
+			renderList($setup.TABS, (tab) => {
+				return createBaseVNode("button", {
+					key: tab.id,
+					type: "button",
+					class: normalizeClass(["acu-v2-ws-materials__tab", { "acu-v2-ws-materials__tab--active": $setup.activeTab === tab.id }]),
+					onClick: ($event) => $setup.activeTab = tab.id
+				}, toDisplayString(tab.label), 11, _hoisted_3$l);
+			}),
+			64
+			/* STABLE_FRAGMENT */
+		)), createBaseVNode("div", _hoisted_4$i, [createVNode($setup["AcuButton"], { onClick: _cache[0] || (_cache[0] = ($event) => $setup.emit("refresh")) }, {
+			default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
+				"刷新",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		})])]),
+		createCommentVNode(" 世界状态：结算概览 + 分模块卡片，与 ContinuationMaterialsPanel 同一套视觉结构 "),
+		$setup.activeTab === "state" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 0 },
+			[!$props.materials.snapshot ? (openBlock(), createElementBlock("p", _hoisted_5$h, "当前 active swipe 还没有已结算的世界账本。")) : (openBlock(), createElementBlock(
+				Fragment,
+				{ key: 1 },
+				[createBaseVNode("div", _hoisted_6$g, [
+					createBaseVNode("div", null, [_cache[2] || (_cache[2] = createBaseVNode(
+						"strong",
+						null,
+						"结算位置",
+						-1
+						/* CACHED */
+					)), createBaseVNode(
+						"span",
+						null,
+						"第 " + toDisplayString(($props.materials.adoptedIndex ?? 0) + 1) + " 楼",
+						1
+						/* TEXT */
+					)]),
+					createBaseVNode("div", null, [_cache[3] || (_cache[3] = createBaseVNode(
+						"strong",
+						null,
+						"账本修订",
+						-1
+						/* CACHED */
+					)), createBaseVNode(
+						"span",
+						null,
+						"revision " + toDisplayString($props.materials.snapshot.ledgerRevision),
+						1
+						/* TEXT */
+					)]),
+					createBaseVNode("div", null, [_cache[4] || (_cache[4] = createBaseVNode(
+						"strong",
+						null,
+						"证据引用",
+						-1
+						/* CACHED */
+					)), createBaseVNode(
+						"span",
+						null,
+						toDisplayString($props.materials.snapshot.evidenceRefs.length) + " 条",
+						1
+						/* TEXT */
+					)])
+				]), (openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.ledgerGroups, (group) => {
+						return openBlock(), createElementBlock("details", {
+							key: group.key,
+							class: "acu-v2-ws-materials__block",
+							open: ""
+						}, [createBaseVNode(
+							"summary",
+							null,
+							toDisplayString(group.label) + " · " + toDisplayString(group.items.length) + " 条",
+							1
+							/* TEXT */
+						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_7$e, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_8$e, [(openBlock(true), createElementBlock(
+							Fragment,
+							null,
+							renderList(group.items, (item) => {
+								return openBlock(), createElementBlock("article", {
+									key: item.id,
+									class: "acu-v2-ws-materials__card"
+								}, [createBaseVNode("p", _hoisted_9$d, [createBaseVNode(
+									"strong",
+									null,
+									toDisplayString(item.title),
+									1
+									/* TEXT */
+								)]), createBaseVNode(
+									"p",
+									_hoisted_10$d,
+									toDisplayString(item.detail),
+									1
+									/* TEXT */
+								)]);
+							}),
+							128
+							/* KEYED_FRAGMENT */
+						))]))]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))],
+				64
+				/* STABLE_FRAGMENT */
+			))],
+			64
+			/* STABLE_FRAGMENT */
+		)) : $setup.activeTab === "conversation" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 1 },
+			[createCommentVNode(" Agent 会话：复用与会话主面板同一个 SessionFeed，持久会话消息投影成同构条目 "), $setup.conversationEntries.length ? (openBlock(), createBlock($setup["WorldSimulationSessionFeed"], {
+				key: 0,
+				entries: $setup.conversationEntries,
+				running: false
+			}, null, 8, ["entries"])) : (openBlock(), createElementBlock("p", _hoisted_11$d, "还没有持久化的 Agent 会话材料。"))],
+			64
+			/* STABLE_FRAGMENT */
+		)) : $setup.activeTab === "candidates" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 2 },
+			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_12$c, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_13$a, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.candidateEntries, (item) => {
+					return openBlock(), createElementBlock("article", {
+						key: item.id,
+						class: "acu-v2-ws-materials__card"
+					}, [createBaseVNode("p", _hoisted_14$a, [createBaseVNode(
+						"strong",
+						null,
+						toDisplayString(item.title),
+						1
+						/* TEXT */
+					), createBaseVNode(
+						"span",
+						null,
+						toDisplayString($setup.agentLabel(item)),
+						1
+						/* TEXT */
+					)]), createBaseVNode(
+						"p",
+						_hoisted_15$9,
+						toDisplayString(item.detail),
+						1
+						/* TEXT */
+					)]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))]))],
+			64
+			/* STABLE_FRAGMENT */
+		)) : (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 3 },
+			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_16$9, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_17$8, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.diagnostics, (item) => {
+					return openBlock(), createElementBlock(
+						"li",
+						{ key: item },
+						toDisplayString(item),
+						1
+						/* TEXT */
+					);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))]))],
+			64
+			/* STABLE_FRAGMENT */
+		))
+	]);
+    }
+    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-43e0f120"]]);
 
     const INHERIT_CHANNEL_VALUE$1 = '__inherit__';
     var _sfc_main$s = /*@__PURE__*/ defineComponent({
