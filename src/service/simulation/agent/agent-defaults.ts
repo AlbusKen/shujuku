@@ -37,6 +37,8 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
     'read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query、scope、maxResults、isRegex。',
     `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。`,
     'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
+    'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
+    'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
     '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
     '初始化示例：{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"根据锚点与当前账本形成时钟、维度或编年候选","reads":["ledger:current","anchor:message"]}]}',
     'finalize 顶层只能包含 action、outcome、summary、evidenceRefs；outcome 必须精确为 commit、no_change、blocked 之一。candidateId、acceptedCandidateIds、status、verdict 属于派工或审核结果，禁止抄入 finalize。',
@@ -57,6 +59,9 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
   if (writableModules.length) {
     lines.push(`candidate 必须包含非空 patch、summary、evidenceRefs、uncertainties；patch 顶层只能使用：${writableModules.join(' | ')}。`);
     lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
+    lines.push('dimensions、seeds、actors 必须使用 {"upsert":[...]}；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision。');
+    lines.push('expectedRevision 是乐观并发控制：新建条目填 0；修改账本已有条目时填该条目在账本中的当前 revision。不确定时先 read ledger:current 核对，禁止猜测、省略或写成字符串。');
+    lines.push('chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
   }

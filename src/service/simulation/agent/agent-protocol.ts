@@ -423,6 +423,7 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
     '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
     'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
     'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
+    'delegate 只能包含 action、delegations；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
     '动作格式必须是下面之一：',
     '{"action":"read","reads":["ledger:current","summary:current"]}',
     '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
@@ -449,7 +450,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
-    lines.push('dimensions、seeds、actors 必须使用 upsert 对象；dimensions/actors 条目必须含非空 name，seeds 条目必须含非空 title；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
+    lines.push('dimensions、seeds、actors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision：新建条目填 0，修改账本已有条目填该条目当前 revision，不确定时先 read ledger:current 核对；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
     const firstModule = writableModules[0];
     const patchExample = firstModule === 'dimensions'
       ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import {
   compactWorldSimulationProtocolError_ACU,
   createWorldSimulationProtocolRepairState_ACU,
@@ -113,6 +114,8 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('agentName 必须精确为 macro-dynamics-analyst');
     expect(message).toContain('patch 顶层只能使用：clock | dimensions');
     expect(message).toContain('"status":"candidate"');
+    expect(message).toContain('非负整数 expectedRevision');
+    expect(message).toContain('新建条目填 0');
   });
 
   it('reviewer 协议拒绝回灌明确 verdict、finding 结构与三种合法模板', () => {
@@ -167,6 +170,34 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('不得使用 candidate、success、done、finalized 等别名');
     expect(message).toContain('"action":"finalize","outcome":"commit"');
     expect(message).toContain('"action":"finalize","outcome":"no_change"');
+    expect(message).toContain('delegate 只能包含 action、delegations');
+    expect(message).toContain('evidenceRefs 只允许出现在 finalize 顶层');
+  });
+
+  it('初始提示词即声明 specialist upsert/expectedRevision 契约与 director 动作字段白名单', () => {
+    const specialist = worldSimulationSpecialistProtocolInstruction_ACU('macro-dynamics-analyst', ['clock', 'dimensions', 'chronicle']);
+    expect(specialist).toContain('"upsert"');
+    expect(specialist).toContain('非负整数 expectedRevision');
+    expect(specialist).toContain('新建条目填 0');
+    expect(specialist).toContain('当前 revision');
+    const noWrite = worldSimulationSpecialistProtocolInstruction_ACU('lore-researcher', []);
+    expect(noWrite).toContain('不得输出 candidate');
+    expect(noWrite).not.toContain('expectedRevision');
+    const director = worldSimulationDirectorProtocolInstruction_ACU();
+    expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');
+    expect(director).toContain('delegate 只能包含 action、delegations');
+    expect(director).toContain('block 只能包含 action、reason、unresolved');
+  });
+
+  it('默认提示词模板已接线 specialist upsert 契约与 director 字段白名单', () => {
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const specialist = prompts['macro-dynamics-analyst'].map(segment => segment.content).join('\n');
+    expect(specialist).toContain('非负整数 expectedRevision');
+    expect(specialist).toContain('新建条目填 0');
+    expect(specialist).toContain('ledger:current');
+    const director = prompts['world-director'].map(segment => segment.content).join('\n');
+    expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');
+    expect(director).toContain('block 只能包含 action、reason、unresolved');
   });
 
   it('草稿合并只拼接数组和递归对象，标量冲突时 fail-closed', () => {
