@@ -138543,7 +138543,17 @@ $CONTENT
     function state_ACU(raw, path) {
         if (!record_ACU$1(raw))
             reject_ACU$1(`${path} 必须是对象`, { path });
-        const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot']);
+        const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot', 'transcript']);
+        // transcript 为新增可选字段：旧楼层记录没有它，属合法存量；新记录带它时须逐条校验。
+        if (raw.transcript !== undefined) {
+            if (!Array.isArray(raw.transcript))
+                reject_ACU$1(`${path}.transcript 必须是数组`, { path: `${path}.transcript` });
+            raw.transcript.forEach((item, index) => {
+                if (!record_ACU$1(item) || (item.role !== 'assistant' && item.role !== 'user') || typeof item.content !== 'string') {
+                    reject_ACU$1(`${path}.transcript[${index}] 必须是 { role: 'assistant'|'user', content: string }`, { path: `${path}.transcript[${index}]` });
+                }
+            });
+        }
         for (const key of ['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback']) {
             if (!Object.prototype.hasOwnProperty.call(raw, key))
                 reject_ACU$1(`${path}.${key} 缺失`, { path: `${path}.${key}` });
@@ -138565,6 +138575,7 @@ $CONTENT
             ...(raw.candidates === undefined ? {} : { candidates: candidates_ACU(raw.candidates, `${path}.candidates`) }),
             ...(raw.subagentOutcomes === undefined ? {} : { subagentOutcomes: subagentOutcomes_ACU(raw.subagentOutcomes, `${path}.subagentOutcomes`) }),
             ...(raw.evidenceSnapshot === undefined ? {} : { evidenceSnapshot: evidenceSnapshot_ACU(raw.evidenceSnapshot, `${path}.evidenceSnapshot`) }),
+            ...(raw.transcript === undefined ? {} : { transcript: raw.transcript.map(item => ({ role: item.role, content: item.content })) }),
         };
     }
     function validateWorldSimulationRunStateRecord_ACU(raw) {
@@ -138749,7 +138760,7 @@ $CONTENT
             const perAgent = new Map(Object.entries(resumedState?.perAgent ?? {}));
             let delegationsUsed = delegationsStart;
             let iteration = iterationStart;
-            const transcript = [];
+            const transcript = resumedState?.transcript ? [...resumedState.transcript] : [];
             const director = 'world-director';
             // Director may correct several different mechanical fields in sequence; repeated identical
             // failures remain capped by the repair state's per-fingerprint guard.
@@ -138785,6 +138796,7 @@ $CONTENT
                     candidates: unique,
                     subagentOutcomes: outcomes,
                     evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
+                    transcript: [...transcript],
                 };
                 saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
                 if (input.anchor) {

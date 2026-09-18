@@ -179,7 +179,16 @@ function evidenceSnapshot_ACU(value: unknown, path: string): WorldSimulationEvid
 
 function state_ACU(raw: unknown, path: string): WorldSimulationRunResumeState_ACU {
   if (!record_ACU(raw)) reject_ACU(`${path} 必须是对象`, { path });
-  const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot']);
+  const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot', 'transcript']);
+  // transcript 为新增可选字段：旧楼层记录没有它，属合法存量；新记录带它时须逐条校验。
+  if (raw.transcript !== undefined) {
+    if (!Array.isArray(raw.transcript)) reject_ACU(`${path}.transcript 必须是数组`, { path: `${path}.transcript` });
+    raw.transcript.forEach((item, index) => {
+      if (!record_ACU(item) || (item.role !== 'assistant' && item.role !== 'user') || typeof item.content !== 'string') {
+        reject_ACU(`${path}.transcript[${index}] 必须是 { role: 'assistant'|'user', content: string }`, { path: `${path}.transcript[${index}]` });
+      }
+    });
+  }
   for (const key of ['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback']) {
     if (!Object.prototype.hasOwnProperty.call(raw, key)) reject_ACU(`${path}.${key} 缺失`, { path: `${path}.${key}` });
   }
@@ -199,6 +208,7 @@ function state_ACU(raw: unknown, path: string): WorldSimulationRunResumeState_AC
     ...(raw.candidates === undefined ? {} : { candidates: candidates_ACU(raw.candidates, `${path}.candidates`) }),
     ...(raw.subagentOutcomes === undefined ? {} : { subagentOutcomes: subagentOutcomes_ACU(raw.subagentOutcomes, `${path}.subagentOutcomes`) }),
     ...(raw.evidenceSnapshot === undefined ? {} : { evidenceSnapshot: evidenceSnapshot_ACU(raw.evidenceSnapshot, `${path}.evidenceSnapshot`) }),
+    ...(raw.transcript === undefined ? {} : { transcript: (raw.transcript as Array<{ role: string; content: string }>).map(item => ({ role: item.role, content: item.content })) }),
   };
 }
 

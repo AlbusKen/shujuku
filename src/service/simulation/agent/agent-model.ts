@@ -24,6 +24,8 @@ export interface WorldSimulationRunResumeState_ACU {
   candidates?: WorldSimulationCandidate_ACU[];
   subagentOutcomes?: WorldSimulationSubagentOutcome_ACU[];
   evidenceSnapshot?: import('../world-simulation-evidence-registry').WorldSimulationEvidenceRegistrySnapshot_ACU;
+  /** 主 Agent 对话 transcript（assistant 原始输出与 user 反馈）。随 persist 增量落楼层，恢复时回填。 */
+  transcript?: Array<{ role: string; content: string }>;
 }
 export interface WorldSimulationRunStateRecord_ACU {
   schemaVersion: typeof WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU;

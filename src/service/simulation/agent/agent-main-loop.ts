@@ -160,7 +160,7 @@ export class WorldSimulationMainLoop_ACU {
     let delegationsUsed = delegationsStart;
     let iteration = iterationStart;
 
-    const transcript: Array<{ role: string; content: string }> = [];
+    const transcript: Array<{ role: string; content: string }> = resumedState?.transcript ? [...resumedState.transcript] : [];
     const director = 'world-director' as const;
     // Director may correct several different mechanical fields in sequence; repeated identical
     // failures remain capped by the repair state's per-fingerprint guard.
@@ -200,6 +200,7 @@ export class WorldSimulationMainLoop_ACU {
         candidates: unique,
         subagentOutcomes: outcomes,
         evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
+        transcript: [...transcript],
       };
       saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
       if (input.anchor) {

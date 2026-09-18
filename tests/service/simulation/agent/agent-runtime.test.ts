@@ -674,4 +674,55 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
     _set_SillyTavern_API_ACU(undefined);
   });
+
+  it('重启恢复后主 Agent 对话 transcript 从楼层回填，审核意见不丢失', async () => {
+    const { registry, evidence, promptContext } = fixture('transcript-floor-resume');
+    const chat: any[] = [{ message_id: 1, mes: '锚点正文', swipe_id: 0, is_user: false, is_system: false }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-transcript-resume', getCurrentChatId: () => 'chat-transcript-resume', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const candidate = {
+      candidateId: 'candidate:transcript-resume', agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } }, summary: '对话恢复候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn()
+        .mockResolvedValueOnce({ verdict: 'reject' as const, summary: '候选缺少时间证据', findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.elapsed', expected: '锚点支持', actual: '缺失' }], acceptedCandidateIds: [] })
+        .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const runSettings = settings();
+    const identity = {
+      runId: 'run-transcript-resume', chatIdentity: 'chat-transcript-resume', triggerKind: 'agent_chat_message' as const,
+      triggerConversationMessageId: 'turn-1', anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 5,
+      taskId: 'task-transcript-resume', stageId: 'stage-transcript-resume', stageRevision: 2,
+    };
+
+    // 第一段：派工 -> 审核驳回（意见写入 transcript）-> block，形成可恢复现场。
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '首次送审', evidenceRefs: [evidence] }),
+      JSON.stringify({ action: 'block', reason: '等待继续', unresolved: ['用户确认'] }),
+    ];
+    const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    await expect(firstLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
+      .resolves.toMatchObject({ outcome: 'blocked', summary: '等待继续' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    resetWorldSimulationRunCacheForTests_ACU();
+
+    // 第二段：模拟重启后恢复；Director 首轮请求应携带楼层回填的审核意见。
+    const resumedLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '对话恢复后提交', evidenceRefs: [evidence] })), subagents, apiPreset, countTokens: async () => 1 });
+    const result = await resumedLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '对话恢复后提交' });
+    const resumedInvoke = (resumedLoop as unknown as { dependencies: { invoke: { mock: { calls: unknown[][] } } } })['dependencies']['invoke'] as unknown as { mock: { calls: Array<[string, Array<{ role: string; content: string }>, unknown]> } };
+    expect(resumedInvoke.mock.calls.length).toBeGreaterThan(0);
+    expect(JSON.stringify(resumedInvoke.mock.calls[0][1])).toContain('reviewer 驳回或要求修订候选');
+    expect(JSON.stringify(resumedInvoke.mock.calls[0][1])).toContain('EVIDENCE_GAP');
+    _set_SillyTavern_API_ACU(undefined);
+  });
+
 });
