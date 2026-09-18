@@ -364,7 +364,10 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
     '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
   ];
   if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
-  lines.push('{"action":"finalize","outcome":"no_change","summary":"一句话总结"}');
+  lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
+  lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
+  lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
+  lines.push('{"action":"finalize","outcome":"no_change","summary":"证据表明无需变更","evidenceRefs":["evidence:已颁发引用"]}');
   lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
   return lines.join('\n');
 }

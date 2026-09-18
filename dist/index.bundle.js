@@ -136164,6 +136164,8 @@ $CONTENT
             'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
             '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
             '初始化示例：{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"根据锚点与当前账本形成时钟、维度或编年候选","reads":["ledger:current","anchor:message"]}]}',
+            'finalize 顶层只能包含 action、outcome、summary、evidenceRefs；outcome 必须精确为 commit、no_change、blocked 之一。candidateId、acceptedCandidateIds、status、verdict 属于派工或审核结果，禁止抄入 finalize。',
+            '提交示例：{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}',
             '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
         ].join('\n');
     }
@@ -138096,7 +138098,10 @@ $CONTENT
         ];
         if (allowDelegate)
             lines.push('{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
-        lines.push('{"action":"finalize","outcome":"no_change","summary":"一句话总结"}');
+        lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
+        lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
+        lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
+        lines.push('{"action":"finalize","outcome":"no_change","summary":"证据表明无需变更","evidenceRefs":["evidence:已颁发引用"]}');
         lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
         return lines.join('\n');
     }
@@ -138251,7 +138256,9 @@ $CONTENT
             let iteration = Math.max(1, resumed?.nextIteration ?? 1);
             const transcript = [];
             const director = 'world-director';
-            const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
+            // Director may correct several different mechanical fields in sequence; repeated identical
+            // failures remain capped by the repair state's per-fingerprint guard.
+            const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
             const readGateState = createWorldSimulationReadGateState_ACU();
             const toolUsage = { readsUsed: 0 };
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
@@ -138531,6 +138538,10 @@ $CONTENT
     function withTask_ACU(context, task, candidates) {
         return { ...context, task, worldCandidates: candidates ?? context.worldCandidates, evidenceRegistry: context.evidenceRegistry };
     }
+    function bindSpecialistIdentity_ACU(payload, agentName) {
+        const supplied = typeof payload.agentName === 'string' ? payload.agentName.trim() : '';
+        return supplied ? payload : { ...payload, agentName };
+    }
     function toolCalls_ACU(raw, prefill, snapshot) {
         try {
             const action = parseWorldSimulationMainOutput_ACU(raw, prefill, false, snapshot);
@@ -138599,7 +138610,7 @@ $CONTENT
                 }
                 try {
                     const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
-                    const result = parseWorldSimulationSpecialistResult_ACU(payload, requestSnapshot);
+                    const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
                     if (result.agentName !== agentName)
                         throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
                     if (result.status === 'candidate')
@@ -138715,7 +138726,7 @@ $CONTENT
                 const raw = String(sent.response ?? '');
                 try {
                     const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
-                    const result = parseWorldSimulationSpecialistResult_ACU(payload, requestSnapshot);
+                    const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
                     if (result.agentName !== agentName)
                         throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
                     if (result.status === 'candidate')

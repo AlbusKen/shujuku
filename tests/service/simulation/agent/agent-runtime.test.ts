@@ -31,6 +31,30 @@ describe('世界推演 Agent runtime', () => {
     expect(result.candidate?.candidateId).toMatch(/^candidate:/);
   });
 
+  it('specialist 省略绑定身份时由运行时补齐 agentName', async () => {
+    const { registry, promptContext } = fixture('specialist-bound-identity');
+    const invoke = vi.fn(async () => JSON.stringify({ status: 'no_change', summary: '无需修改', evidenceRefs: [], uncertainties: [] }));
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+
+    await expect(runtime.run({
+      delegation: { agentName: 'actor-information-analyst', instruction: '核对行动者信息', reads: [] },
+      settings: settings(), promptContext, registry, tools,
+    })).resolves.toMatchObject({ agentName: 'actor-information-analyst', status: 'no_change', summary: '无需修改' });
+  });
+
+  it('specialist 显式伪造不同身份时仍 fail-closed', async () => {
+    const { registry, promptContext } = fixture('specialist-forged-identity');
+    const invoke = vi.fn(async () => JSON.stringify({
+      status: 'no_change', agentName: 'seed-lifecycle-analyst', summary: '伪造身份', evidenceRefs: [], uncertainties: [],
+    }));
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1, protocolRetries: 0 });
+
+    await expect(runtime.run({
+      delegation: { agentName: 'actor-information-analyst', instruction: '核对行动者信息', reads: [] },
+      settings: settings(), promptContext, registry, tools,
+    })).rejects.toThrow('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
+  });
+
   it('specialist 协议重试回灌明确枚举、角色、写入范围与合法 JSON 模板', async () => {
     const { registry, promptContext } = fixture('specialist-repair');
     const responses = [
@@ -154,6 +178,27 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'blocked', summary: '修正后阻断' });
     expect(invoke).toHaveBeenCalledTimes(2);
+    expect(subagents.run).not.toHaveBeenCalled();
+  });
+
+  it('主 Agent 可连续修正不同 finalize 机械错误且重复指纹门禁不变', async () => {
+    const { registry, promptContext } = fixture('director-sequential-repair');
+    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    const responses = [
+      JSON.stringify({ action: 'finalize', summary: '缺少 outcome', evidenceRefs: [] }),
+      JSON.stringify({ action: 'finalize', outcome: 'no_change', candidateId: 'candidate:wrong', summary: '混入审核字段', evidenceRefs: [] }),
+      JSON.stringify({ action: 'finalize', outcome: 'done', summary: '非法别名', evidenceRefs: [] }),
+      JSON.stringify({ action: 'block', reason: '协议已修正但证据不足', unresolved: ['missing evidence'] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-sequential-repair', chatIdentity: 'chat', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 4;
+
+    await expect(loop.run({ identity, settings: runSettings, promptContext, registry, tools }))
+      .resolves.toMatchObject({ outcome: 'blocked', summary: '协议已修正但证据不足' });
+    expect(invoke).toHaveBeenCalledTimes(4);
     expect(subagents.run).not.toHaveBeenCalled();
   });
 

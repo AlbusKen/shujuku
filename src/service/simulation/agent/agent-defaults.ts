@@ -39,6 +39,8 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
     'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
     '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
     '初始化示例：{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"根据锚点与当前账本形成时钟、维度或编年候选","reads":["ledger:current","anchor:message"]}]}',
+    'finalize 顶层只能包含 action、outcome、summary、evidenceRefs；outcome 必须精确为 commit、no_change、blocked 之一。candidateId、acceptedCandidateIds、status、verdict 属于派工或审核结果，禁止抄入 finalize。',
+    '提交示例：{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}',
     '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
   ].join('\n');
 }

@@ -33,6 +33,11 @@ function withTask_ACU(context: WorldSimulationPlaceholderContext_ACU, task: unkn
   return { ...context, task, worldCandidates: candidates ?? context.worldCandidates, evidenceRegistry: context.evidenceRegistry };
 }
 
+function bindSpecialistIdentity_ACU(payload: Record<string, unknown>, agentName: WorldSimulationAgentName_ACU): Record<string, unknown> {
+  const supplied = typeof payload.agentName === 'string' ? payload.agentName.trim() : '';
+  return supplied ? payload : { ...payload, agentName };
+}
+
 function toolCalls_ACU(raw: string, prefill: string, snapshot: WorldSimulationEvidenceRegistrySnapshot_ACU) {
   try {
     const action = parseWorldSimulationMainOutput_ACU(raw, prefill, false, snapshot);
@@ -98,7 +103,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       }
       try {
         const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
-        const result = parseWorldSimulationSpecialistResult_ACU(payload, requestSnapshot);
+        const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
         if (result.agentName !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
         if (result.status === 'candidate') return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
         if (result.status === 'no_change') return { agentName, status: 'no_change', summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
@@ -205,7 +210,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const raw = String(sent.response ?? '');
       try {
         const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
-        const result = parseWorldSimulationSpecialistResult_ACU(payload, requestSnapshot);
+        const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
         if (result.agentName !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
         if (result.status === 'candidate') return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
         if (result.status === 'no_change') return { agentName, status: 'no_change', summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };

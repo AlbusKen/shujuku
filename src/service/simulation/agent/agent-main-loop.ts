@@ -88,7 +88,9 @@ export class WorldSimulationMainLoop_ACU {
     let iteration = Math.max(1, resumed?.nextIteration ?? 1);
     const transcript: Array<{ role: string; content: string }> = [];
     const director = 'world-director' as const;
-    const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
+    // Director may correct several different mechanical fields in sequence; repeated identical
+    // failures remain capped by the repair state's per-fingerprint guard.
+    const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);

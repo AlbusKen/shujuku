@@ -102,6 +102,12 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('read 只能包含 action、reads');
     expect(message).toContain('不要添加 evidenceRef、purpose');
     expect(message).toContain('由服务端在读取成功后随工具结果颁发');
+    expect(message).toContain('finalize 顶层只能包含 action、outcome、summary、evidenceRefs');
+    expect(message).toContain('candidateId、acceptedCandidateIds、status、verdict 禁止出现');
+    expect(message).toContain('outcome 必须精确为 commit、no_change、blocked');
+    expect(message).toContain('不得使用 candidate、success、done、finalized 等别名');
+    expect(message).toContain('"action":"finalize","outcome":"commit"');
+    expect(message).toContain('"action":"finalize","outcome":"no_change"');
   });
 
   it('草稿合并只拼接数组和递归对象，标量冲突时 fail-closed', () => {
