@@ -319,6 +319,54 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
   });
 
+  it('reviewer 驳回候选后主 Agent 重新派工修订而不是结束任务', async () => {
+    const { registry, evidence, promptContext } = fixture('review-reject-redelegate');
+    const rejectedCandidate = {
+      candidateId: 'candidate:rejected', agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } },
+      summary: '缺少锚点证据的时间候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const revisedCandidate = {
+      ...rejectedCandidate,
+      candidateId: 'candidate:revised',
+      patch: { clock: { elapsed: '30m' } },
+      summary: '按审核意见修正后的时间候选',
+    };
+    const subagents = {
+      run: vi.fn()
+        .mockResolvedValueOnce({ agentName: rejectedCandidate.agentName, status: 'candidate' as const, summary: rejectedCandidate.summary, candidate: rejectedCandidate, evidenceRefs: [evidence], uncertainties: [] })
+        .mockResolvedValueOnce({ agentName: revisedCandidate.agentName, status: 'candidate' as const, summary: revisedCandidate.summary, candidate: revisedCandidate, evidenceRefs: [evidence], uncertainties: [] }),
+      runReviewer: vi.fn()
+        .mockResolvedValueOnce({
+          verdict: 'reject' as const,
+          summary: '候选时间跨度缺少锚点证据',
+          findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.elapsed', expected: '时间跨度由锚点证据支持', actual: '1h 缺少直接依据' }],
+          acceptedCandidateIds: [],
+        })
+        .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '修订候选通过', findings: [], acceptedCandidateIds: [revisedCandidate.candidateId] }),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: rejectedCandidate.agentName, instruction: '分析时间推进', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '首次送审', evidenceRefs: [evidence] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: rejectedCandidate.agentName, instruction: '根据 EVIDENCE_GAP 修正候选', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交修订候选', evidenceRefs: [evidence] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-reject-redelegate', chatIdentity: 'chat-reject-redelegate', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-reject-redelegate', stageId: 'stage-reject-redelegate', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 4;
+
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
+    expect(subagents.run).toHaveBeenCalledTimes(2);
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
+    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
+    expect(subagents.run.mock.calls[1][0].delegation.instruction).toContain('EVIDENCE_GAP');
+  });
+
   it('显式 block 后保留同一 task/cursor 的候选并在恢复时避免重复派工', async () => {
     const { registry, evidence, promptContext } = fixture('resume-after-block');
     const candidate = {

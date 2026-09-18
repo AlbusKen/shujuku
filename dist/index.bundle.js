@@ -138603,19 +138603,17 @@ $CONTENT
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `reviewer 未完成：${compact_ACU(error)}。请继续修正候选或输出 blocked。` });
                     continue;
                 }
-                if (reviewer.verdict === 'revise') {
-                    persist(iteration + 1, reviewer.summary);
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `reviewer 要求修订：${reviewer.summary}\n${reviewer.findings.map(item => `${item.severity}:${item.reasonCode}:${item.path}`).join('\n')}\n请继续派工修正候选，或在无法修正时输出 blocked。` });
-                    continue;
-                }
                 const acceptedIds = new Set(reviewer.acceptedCandidateIds);
                 const acceptedCandidates = available.filter(item => acceptedIds.has(item.candidateId));
-                if (reviewer.verdict === 'reject' || !acceptedCandidates.length || reviewer.findings.some(item => item.severity === 'blocking')) {
+                const blockingFindings = reviewer.findings.filter(item => item.severity === 'blocking');
+                if (reviewer.verdict !== 'accept' || !acceptedCandidates.length || blockingFindings.length) {
                     persist(iteration + 1, reviewer.summary);
-                    const unresolved = reviewer.findings.filter(item => item.severity !== 'minor').map(item => `${item.reasonCode}:${item.path}`);
-                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
-                    await persistEntry(blockId, `block-reviewer-${iteration}`);
-                    return { outcome: 'blocked', summary: reviewer.summary, unresolved: unresolved.length ? unresolved : ['reviewer rejected all candidates'], outcomes };
+                    const findings = reviewer.findings.filter(item => item.severity !== 'minor');
+                    const feedback = findings.length
+                        ? findings.map(item => `${item.severity}:${item.reasonCode}:${item.path}；期望=${item.expected}；实际=${String(item.actual)}`).join('\n')
+                        : 'reviewer 未接受任何候选';
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `reviewer 驳回或要求修订候选：${reviewer.summary}\n${feedback}\n请根据审核意见重新派工修正候选；不得把本次驳回当作任务终局。只有确实无法补足证据或修正时才输出 blocked。` });
+                    continue;
                 }
                 const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
                 let acceptedLedger;
