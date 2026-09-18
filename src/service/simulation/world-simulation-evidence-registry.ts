@@ -55,6 +55,38 @@ export function snapshotWorldSimulationEvidenceRegistry_ACU(registry: WorldSimul
   return Object.freeze({ runId: registry.runId, entries: Object.freeze(registry.entries.map(entry => Object.freeze({ ...entry }))) });
 }
 
+export function mergeWorldSimulationEvidenceRegistrySnapshot_ACU(
+  registry: WorldSimulationEvidenceRegistry_ACU,
+  snapshot: WorldSimulationEvidenceRegistrySnapshot_ACU,
+): void {
+  if (snapshot.runId !== registry.runId) throw new Error('WORLD_SIMULATION_EVIDENCE_RUN_MISMATCH');
+  const escapedRunId = registry.runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const refPattern = new RegExp(`^evidence:${escapedRunId}:(\\d+)$`);
+  const operations: readonly WorldSimulationEvidenceOperation_ACU[] = ['initial', 'read', 'search', 'directory'];
+  const known = new Set(registry.entries.map(entry => entry.evidenceRef
+    ?? JSON.stringify([entry.operation, entry.address, entry.status, entry.summary, entry.exact])));
+  for (const entry of snapshot.entries) {
+    const validShape = entry !== null
+      && typeof entry === 'object'
+      && operations.includes(entry.operation)
+      && (WORLD_SIMULATION_EVIDENCE_STATUSES_ACU as readonly string[]).includes(entry.status)
+      && typeof entry.address === 'string'
+      && !!entry.address.trim()
+      && typeof entry.summary === 'string'
+      && typeof entry.exact === 'boolean';
+    if (!validShape) throw new Error('WORLD_SIMULATION_EVIDENCE_SNAPSHOT_INVALID');
+    const eligible = entry.status === 'ok' && entry.exact && (entry.operation === 'initial' || entry.operation === 'read');
+    const suffix = entry.evidenceRef?.match(refPattern)?.[1];
+    if (eligible !== !!suffix) throw new Error('WORLD_SIMULATION_EVIDENCE_SNAPSHOT_INVALID');
+    const key = entry.evidenceRef ?? JSON.stringify([entry.operation, entry.address, entry.status, entry.summary, entry.exact]);
+    if (suffix) registry.nextId = Math.max(registry.nextId, Number(suffix) + 1);
+    if (!known.has(key)) {
+      registry.entries.push(Object.freeze({ ...entry }));
+      known.add(key);
+    }
+  }
+}
+
 export function findUnauthorizedWorldSimulationEvidenceRefs_ACU(refs: readonly string[], snapshot?: WorldSimulationEvidenceRegistrySnapshot_ACU): string[] {
   if (!refs.length) return [];
   if (!snapshot) return [...refs];

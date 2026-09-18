@@ -1,4 +1,5 @@
 import type { WorldSimulationCandidate_ACU, WorldSimulationRunOutcome_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
+import type { WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 
 export interface WorldSimulationRunResumeState_ACU {
   taskId: string; cursorKey: string; nextIteration: number; delegationsUsed: number;
@@ -6,6 +7,7 @@ export interface WorldSimulationRunResumeState_ACU {
   candidateFingerprint: string; candidateSummary: string; reviewerFeedback: string;
   candidates?: WorldSimulationCandidate_ACU[];
   subagentOutcomes?: WorldSimulationSubagentOutcome_ACU[];
+  evidenceSnapshot?: WorldSimulationEvidenceRegistrySnapshot_ACU;
 }
 const states_ACU = new Map<string, WorldSimulationRunResumeState_ACU>();
 
@@ -16,6 +18,7 @@ function clone_ACU(state: WorldSimulationRunResumeState_ACU): WorldSimulationRun
     outcomes: state.outcomes.map(item => ({ ...item })),
     candidates: state.candidates?.map(item => ({ ...item, patch: { ...item.patch }, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], writableModules: [...item.writableModules] })),
     subagentOutcomes: state.subagentOutcomes?.map(item => ({ ...item, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], unresolved: item.unresolved ? [...item.unresolved] : undefined, candidate: item.candidate ? { ...item.candidate, patch: { ...item.candidate.patch }, evidenceRefs: [...item.candidate.evidenceRefs], uncertainties: [...item.candidate.uncertainties], writableModules: [...item.candidate.writableModules] } : undefined })),
+    evidenceSnapshot: state.evidenceSnapshot ? { runId: state.evidenceSnapshot.runId, entries: state.evidenceSnapshot.entries.map(entry => ({ ...entry })) } : undefined,
   };
 }
 export function saveWorldSimulationRunState_ACU(chatIdentity: string, state: WorldSimulationRunResumeState_ACU): void { if (chatIdentity) states_ACU.set(chatIdentity, clone_ACU(state)); }

@@ -135947,6 +135947,38 @@ $CONTENT
     function snapshotWorldSimulationEvidenceRegistry_ACU(registry) {
         return Object.freeze({ runId: registry.runId, entries: Object.freeze(registry.entries.map(entry => Object.freeze({ ...entry }))) });
     }
+    function mergeWorldSimulationEvidenceRegistrySnapshot_ACU(registry, snapshot) {
+        if (snapshot.runId !== registry.runId)
+            throw new Error('WORLD_SIMULATION_EVIDENCE_RUN_MISMATCH');
+        const escapedRunId = registry.runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const refPattern = new RegExp(`^evidence:${escapedRunId}:(\\d+)$`);
+        const operations = ['initial', 'read', 'search', 'directory'];
+        const known = new Set(registry.entries.map(entry => entry.evidenceRef
+            ?? JSON.stringify([entry.operation, entry.address, entry.status, entry.summary, entry.exact])));
+        for (const entry of snapshot.entries) {
+            const validShape = entry !== null
+                && typeof entry === 'object'
+                && operations.includes(entry.operation)
+                && WORLD_SIMULATION_EVIDENCE_STATUSES_ACU.includes(entry.status)
+                && typeof entry.address === 'string'
+                && !!entry.address.trim()
+                && typeof entry.summary === 'string'
+                && typeof entry.exact === 'boolean';
+            if (!validShape)
+                throw new Error('WORLD_SIMULATION_EVIDENCE_SNAPSHOT_INVALID');
+            const eligible = entry.status === 'ok' && entry.exact && (entry.operation === 'initial' || entry.operation === 'read');
+            const suffix = entry.evidenceRef?.match(refPattern)?.[1];
+            if (eligible !== !!suffix)
+                throw new Error('WORLD_SIMULATION_EVIDENCE_SNAPSHOT_INVALID');
+            const key = entry.evidenceRef ?? JSON.stringify([entry.operation, entry.address, entry.status, entry.summary, entry.exact]);
+            if (suffix)
+                registry.nextId = Math.max(registry.nextId, Number(suffix) + 1);
+            if (!known.has(key)) {
+                registry.entries.push(Object.freeze({ ...entry }));
+                known.add(key);
+            }
+        }
+    }
     function findUnauthorizedWorldSimulationEvidenceRefs_ACU(refs, snapshot) {
         if (!refs.length)
             return [];
@@ -138064,6 +138096,10 @@ $CONTENT
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
                     if (!text_ACU$1(item.id))
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
+                    const labelField = module === 'seeds' ? 'title' : 'name';
+                    if (!text_ACU$1(item[labelField])) {
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
+                    }
                     if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
                     }
@@ -138196,15 +138232,19 @@ $CONTENT
         ];
         if (writableModules.length) {
             lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
-            lines.push('dimensions、seeds、actors 必须使用 {"upsert":[{"id":"...","expectedRevision":0,...}]}；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
+            lines.push('dimensions、seeds、actors 必须使用 upsert 对象；dimensions/actors 条目必须含非空 name，seeds 条目必须含非空 title；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
             const firstModule = writableModules[0];
-            const patchExample = firstModule === 'dimensions' || firstModule === 'seeds' || firstModule === 'actors'
-                ? { upsert: [{ id: '条目ID', expectedRevision: 0 }] }
-                : firstModule === 'chronicle'
-                    ? { append: [{}] }
-                    : firstModule === 'guidance'
-                        ? { signals: ['角色可感知信号'] }
-                        : { elapsed: '1小时' };
+            const patchExample = firstModule === 'dimensions'
+                ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
+                : firstModule === 'seeds'
+                    ? { upsert: [{ id: '条目ID', title: '种子标题', expectedRevision: 0 }] }
+                    : firstModule === 'actors'
+                        ? { upsert: [{ id: '条目ID', name: '角色名称', expectedRevision: 0 }] }
+                        : firstModule === 'chronicle'
+                            ? { append: [{}] }
+                            : firstModule === 'guidance'
+                                ? { signals: ['角色可感知信号'] }
+                                : { elapsed: '1小时' };
             lines.push(JSON.stringify({
                 status: 'candidate',
                 agentName,
@@ -138316,6 +138356,7 @@ $CONTENT
             outcomes: state.outcomes.map(item => ({ ...item })),
             candidates: state.candidates?.map(item => ({ ...item, patch: { ...item.patch }, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], writableModules: [...item.writableModules] })),
             subagentOutcomes: state.subagentOutcomes?.map(item => ({ ...item, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], unresolved: item.unresolved ? [...item.unresolved] : undefined, candidate: item.candidate ? { ...item.candidate, patch: { ...item.candidate.patch }, evidenceRefs: [...item.candidate.evidenceRefs], uncertainties: [...item.candidate.uncertainties], writableModules: [...item.candidate.writableModules] } : undefined })),
+            evidenceSnapshot: state.evidenceSnapshot ? { runId: state.evidenceSnapshot.runId, entries: state.evidenceSnapshot.entries.map(entry => ({ ...entry })) } : undefined,
         };
     }
     function saveWorldSimulationRunState_ACU(chatIdentity, state) { if (chatIdentity)
@@ -138382,6 +138423,61 @@ $CONTENT
             byId.set(item.candidateId, item);
         return [...byId.values()];
     }
+    function record_ACU(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+    }
+    function candidateResourceKeys_ACU(candidate) {
+        const keys = new Set();
+        for (const [module, patch] of Object.entries(candidate.patch)) {
+            const collection = record_ACU(patch);
+            const upsert = collection?.upsert;
+            if (Array.isArray(upsert)) {
+                for (const item of upsert) {
+                    const entry = record_ACU(item);
+                    if (typeof entry?.id === 'string' && entry.id.trim())
+                        keys.add(`${module}:${entry.id.trim()}`);
+                }
+                continue;
+            }
+            keys.add(module);
+        }
+        return keys;
+    }
+    function withoutCandidateResources_ACU(candidate, resources) {
+        if (candidate.agentName === '' || !resources.size)
+            return candidate;
+        const patch = {};
+        for (const [module, value] of Object.entries(candidate.patch)) {
+            const collection = record_ACU(value);
+            const upsert = collection?.upsert;
+            if (Array.isArray(upsert)) {
+                const remaining = upsert.filter(item => {
+                    const entry = record_ACU(item);
+                    return typeof entry?.id !== 'string' || !resources.has(`${module}:${entry.id.trim()}`);
+                });
+                if (remaining.length)
+                    patch[module] = { ...collection, upsert: remaining };
+                continue;
+            }
+            if (!resources.has(module))
+                patch[module] = value;
+        }
+        return Object.keys(patch).length ? { ...candidate, patch } : null;
+    }
+    function upsertCandidateRevision_ACU(items, candidate) {
+        const resources = candidateResourceKeys_ACU(candidate);
+        for (let index = items.length - 1; index >= 0; index -= 1) {
+            const existing = items[index];
+            if (existing.agentName !== candidate.agentName)
+                continue;
+            const retained = withoutCandidateResources_ACU(existing, resources);
+            if (retained)
+                items[index] = retained;
+            else
+                items.splice(index, 1);
+        }
+        items.push(candidate);
+    }
     class WorldSimulationMainLoop_ACU {
         constructor(dependencies) {
             this.dependencies = dependencies;
@@ -138389,6 +138485,9 @@ $CONTENT
         async run(input) {
             const cursorKey = cursorKey_ACU(input.identity);
             const resumed = readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey);
+            if (resumed?.evidenceSnapshot) {
+                mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumed.evidenceSnapshot);
+            }
             const outcomes = latestOutcomes_ACU(resumed?.subagentOutcomes ?? []);
             const candidates = resumed?.candidates ? [...resumed.candidates] : [];
             const perAgent = new Map(Object.entries(resumed?.perAgent ?? {}));
@@ -138429,6 +138528,7 @@ $CONTENT
                     reviewerFeedback,
                     candidates: unique,
                     subagentOutcomes: outcomes,
+                    evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
                 });
             };
             for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
@@ -138555,7 +138655,7 @@ $CONTENT
                         perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
                         upsertLatestOutcome_ACU(outcomes, outcome);
                         if (outcome.candidate)
-                            candidates.push(outcome.candidate);
+                            upsertCandidateRevision_ACU(candidates, outcome.candidate);
                         const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
                         const entryId = runningEntries.get(accepted[index]);
                         updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
@@ -138623,9 +138723,10 @@ $CONTENT
                 catch (error) {
                     const message = compact_ACU(error);
                     persist(iteration + 1, message);
-                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '已接受候选无法应用', detail: message, agentName: director, ok: false });
-                    await persistEntry(blockId, `block-candidate-transaction-${iteration}`);
-                    return { outcome: 'blocked', summary: '已接受候选无法应用', unresolved: [message], outcomes };
+                    const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: '候选事务应用失败，等待修订', detail: message, agentName: director, ok: false, status: 'failed' });
+                    await persistEntry(failedId, `candidate-transaction-failed-${iteration}`);
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须补齐持久化必填字段。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` });
+                    continue;
                 }
                 let guidanceOutcome;
                 const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });

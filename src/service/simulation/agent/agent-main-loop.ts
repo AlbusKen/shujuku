@@ -2,7 +2,7 @@ import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import type { WorldSimulationLedger_ACU, WorldSimulationRunIdentity_ACU, WorldSimulationSettings_ACU } from '../model';
 import { applyWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
-import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
+import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
@@ -75,12 +75,67 @@ function uniqueCandidates_ACU(items: readonly WorldSimulationCandidate_ACU[]): W
   return [...byId.values()];
 }
 
+function record_ACU(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function candidateResourceKeys_ACU(candidate: WorldSimulationCandidate_ACU): Set<string> {
+  const keys = new Set<string>();
+  for (const [module, patch] of Object.entries(candidate.patch)) {
+    const collection = record_ACU(patch);
+    const upsert = collection?.upsert;
+    if (Array.isArray(upsert)) {
+      for (const item of upsert) {
+        const entry = record_ACU(item);
+        if (typeof entry?.id === 'string' && entry.id.trim()) keys.add(`${module}:${entry.id.trim()}`);
+      }
+      continue;
+    }
+    keys.add(module);
+  }
+  return keys;
+}
+
+function withoutCandidateResources_ACU(candidate: WorldSimulationCandidate_ACU, resources: ReadonlySet<string>): WorldSimulationCandidate_ACU | null {
+  if (candidate.agentName === '' || !resources.size) return candidate;
+  const patch: Record<string, unknown> = {};
+  for (const [module, value] of Object.entries(candidate.patch)) {
+    const collection = record_ACU(value);
+    const upsert = collection?.upsert;
+    if (Array.isArray(upsert)) {
+      const remaining = upsert.filter(item => {
+        const entry = record_ACU(item);
+        return typeof entry?.id !== 'string' || !resources.has(`${module}:${entry.id.trim()}`);
+      });
+      if (remaining.length) patch[module] = { ...collection, upsert: remaining };
+      continue;
+    }
+    if (!resources.has(module)) patch[module] = value;
+  }
+  return Object.keys(patch).length ? { ...candidate, patch } : null;
+}
+
+function upsertCandidateRevision_ACU(items: WorldSimulationCandidate_ACU[], candidate: WorldSimulationCandidate_ACU): void {
+  const resources = candidateResourceKeys_ACU(candidate);
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const existing = items[index];
+    if (existing.agentName !== candidate.agentName) continue;
+    const retained = withoutCandidateResources_ACU(existing, resources);
+    if (retained) items[index] = retained;
+    else items.splice(index, 1);
+  }
+  items.push(candidate);
+}
+
 export class WorldSimulationMainLoop_ACU {
   constructor(private readonly dependencies: WorldSimulationMainLoopDependencies_ACU) {}
 
   async run(input: WorldSimulationMainLoopInput_ACU): Promise<WorldSimulationMainLoopResult_ACU> {
     const cursorKey = cursorKey_ACU(input.identity);
     const resumed = readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey);
+    if (resumed?.evidenceSnapshot) {
+      mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumed.evidenceSnapshot);
+    }
     const outcomes = latestOutcomes_ACU(resumed?.subagentOutcomes ?? []);
     const candidates: WorldSimulationCandidate_ACU[] = resumed?.candidates ? [...resumed.candidates] : [];
     const perAgent = new Map<string, number>(Object.entries(resumed?.perAgent ?? {}));
@@ -123,6 +178,7 @@ export class WorldSimulationMainLoop_ACU {
         reviewerFeedback,
         candidates: unique,
         subagentOutcomes: outcomes,
+        evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
       });
     };
 
@@ -251,7 +307,7 @@ export class WorldSimulationMainLoop_ACU {
           delegationsUsed += 1;
           perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
           upsertLatestOutcome_ACU(outcomes, outcome);
-          if (outcome.candidate) candidates.push(outcome.candidate);
+          if (outcome.candidate) upsertCandidateRevision_ACU(candidates, outcome.candidate);
           const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
           const entryId = runningEntries.get(accepted[index])!;
           updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
@@ -328,9 +384,13 @@ export class WorldSimulationMainLoop_ACU {
       } catch (error) {
         const message = compact_ACU(error);
         persist(iteration + 1, message);
-        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '已接受候选无法应用', detail: message, agentName: director, ok: false });
-        await persistEntry(blockId, `block-candidate-transaction-${iteration}`);
-        return { outcome: 'blocked', summary: '已接受候选无法应用', unresolved: [message], outcomes };
+        const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: '候选事务应用失败，等待修订', detail: message, agentName: director, ok: false, status: 'failed' });
+        await persistEntry(failedId, `candidate-transaction-failed-${iteration}`);
+        transcript.push(
+          { role: 'assistant', content: raw || '(empty)' },
+          { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须补齐持久化必填字段。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` },
+        );
+        continue;
       }
       let guidanceOutcome: WorldSimulationSubagentOutcome_ACU;
       const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });

@@ -318,6 +318,10 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
       raw.upsert.forEach((item, index) => {
         if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
         if (!text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
+        const labelField = module === 'seeds' ? 'title' : 'name';
+        if (!text_ACU(item[labelField])) {
+          invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
+        }
         if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
           invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
         }
@@ -445,10 +449,14 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
-    lines.push('dimensions、seeds、actors 必须使用 {"upsert":[{"id":"...","expectedRevision":0,...}]}；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
+    lines.push('dimensions、seeds、actors 必须使用 upsert 对象；dimensions/actors 条目必须含非空 name，seeds 条目必须含非空 title；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
     const firstModule = writableModules[0];
-    const patchExample = firstModule === 'dimensions' || firstModule === 'seeds' || firstModule === 'actors'
-      ? { upsert: [{ id: '条目ID', expectedRevision: 0 }] }
+    const patchExample = firstModule === 'dimensions'
+      ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
+      : firstModule === 'seeds'
+        ? { upsert: [{ id: '条目ID', title: '种子标题', expectedRevision: 0 }] }
+        : firstModule === 'actors'
+          ? { upsert: [{ id: '条目ID', name: '角色名称', expectedRevision: 0 }] }
       : firstModule === 'chronicle'
         ? { append: [{}] }
         : firstModule === 'guidance'

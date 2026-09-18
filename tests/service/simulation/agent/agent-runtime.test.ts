@@ -367,6 +367,91 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.run.mock.calls[1][0].delegation.instruction).toContain('EVIDENCE_GAP');
   });
 
+  it('同一 specialist 对同一逻辑条目的修订候选替换旧候选', async () => {
+    const { registry, evidence, promptContext } = fixture('replace-revised-candidate');
+    const baseEntry = {
+      id: 'dimension-1', name: '边境压力', kind: 'pressure', value: 1, trend: 'rising',
+      rationale: '锚点证据', evidenceRefs: [evidence], expectedRevision: 0,
+    };
+    const original = {
+      candidateId: 'candidate:dimension-original', agentName: 'macro-dynamics-analyst',
+      patch: { dimensions: { upsert: [baseEntry] } }, summary: '初版维度候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const revised = {
+      ...original,
+      candidateId: 'candidate:dimension-revised',
+      patch: { dimensions: { upsert: [{ ...baseEntry, value: 2, rationale: '修订后的锚点解释' }] } },
+      summary: '修订维度候选',
+    };
+    const subagents = {
+      run: vi.fn()
+        .mockResolvedValueOnce({ agentName: original.agentName, status: 'candidate' as const, summary: original.summary, candidate: original, evidenceRefs: [evidence], uncertainties: [] })
+        .mockResolvedValueOnce({ agentName: revised.agentName, status: 'candidate' as const, summary: revised.summary, candidate: revised, evidenceRefs: [evidence], uncertainties: [] }),
+      runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '修订候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: original.agentName, instruction: '生成初版维度', reads: [] }] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: revised.agentName, instruction: '修订同一维度', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交修订维度', evidenceRefs: [evidence] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-replace-revised', chatIdentity: 'chat-replace-revised', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-replace-revised', stageId: 'stage-replace-revised', stageRevision: 1 };
+
+    const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'commit' });
+    expect(subagents.runReviewer.mock.calls[0][0].candidates).toEqual([revised]);
+    if (result.outcome !== 'commit') throw new Error('expected commit');
+    expect(result.commitCandidate.acceptedCandidates).toEqual([revised]);
+  });
+
+  it('候选事务失败后回灌错误并重新派工修正', async () => {
+    const { registry, evidence, promptContext } = fixture('transaction-redelegate');
+    const entry = {
+      id: 'dimension-transaction', name: '事务维度', kind: 'pressure', value: 1, trend: 'rising',
+      rationale: '锚点证据', evidenceRefs: [evidence],
+    };
+    const stale = {
+      candidateId: 'candidate:stale-revision', agentName: 'macro-dynamics-analyst',
+  patch: { dimensions: { upsert: [{ ...entry, expectedRevision: 1 }] } }, summary: '错误 revision 候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const corrected = {
+      ...stale,
+      candidateId: 'candidate:corrected-revision',
+      patch: { dimensions: { upsert: [{ ...entry, expectedRevision: 0 }] } },
+      summary: '修正 revision 候选',
+    };
+    const subagents = {
+      run: vi.fn()
+        .mockResolvedValueOnce({ agentName: stale.agentName, status: 'candidate' as const, summary: stale.summary, candidate: stale, evidenceRefs: [evidence], uncertainties: [] })
+        .mockResolvedValueOnce({ agentName: corrected.agentName, status: 'candidate' as const, summary: corrected.summary, candidate: corrected, evidenceRefs: [evidence], uncertainties: [] }),
+      runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: stale.agentName, instruction: '生成候选', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '首次提交', evidenceRefs: [evidence] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: corrected.agentName, instruction: '根据事务错误修订', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交修订候选', evidenceRefs: [evidence] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-transaction-redelegate', chatIdentity: 'chat-transaction-redelegate', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-transaction-redelegate', stageId: 'stage-transaction-redelegate', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 4;
+
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
+    expect(JSON.stringify(invoke.mock.calls[2][1])).toContain('revision 冲突');
+    expect(JSON.stringify(invoke.mock.calls[2][1])).toContain('重新派工');
+    expect(subagents.run).toHaveBeenCalledTimes(2);
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
+  });
+
   it('显式 block 后保留同一 task/cursor 的候选并在恢复时避免重复派工', async () => {
     const { registry, evidence, promptContext } = fixture('resume-after-block');
     const candidate = {
@@ -401,8 +486,11 @@ describe('世界推演 Agent runtime', () => {
       `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`,
     )).toMatchObject({ candidates: [candidate], nextIteration: 3 });
 
-    const resumed = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+    const resumedRegistry = createWorldSimulationEvidenceRegistry_ACU(registry.runId);
+    expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries).toHaveLength(0);
+    const resumed = await loop.run({ identity, settings: runSettings, promptContext, registry: resumedRegistry, tools });
     expect(resumed.outcome).toBe('commit');
+    expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries.some(entry => entry.evidenceRef === evidence)).toBe(true);
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
     expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();

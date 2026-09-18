@@ -66,6 +66,25 @@ describe('世界推演 Agent 协议', () => {
     });
   });
 
+  it('在 specialist 边界拒绝缺少持久化标识字段的实体 upsert', () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('missing-entity-label');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
+    const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    let error: unknown;
+    try {
+      parseWorldSimulationSpecialistResult_ACU({
+        status: 'candidate', agentName: 'macro-dynamics-analyst',
+        patch: { dimensions: { upsert: [{ id: 'dimension-1', expectedRevision: 0 }] } },
+        summary: '缺少名称的维度候选', evidenceRefs: [ref], uncertainties: [],
+      }, snapshot);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(compactWorldSimulationProtocolError_ACU(error)).toMatchObject({
+      reasonCode: 'INVALID_SPECIALIST_PATCH', path: '$.patch.dimensions.upsert[0].name', expected: 'non-empty string',
+    });
+  });
+
   it('只对具备强语义证据的常见状态别名做受控归一化', () => {
     const registry = createWorldSimulationEvidenceRegistry_ACU('status-alias');
     const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
