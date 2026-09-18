@@ -2,7 +2,7 @@ import { WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationEnvelope_ACU, 
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from './api-preset';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationPlannerProtocolInstruction_ACU } from './agent/agent-defaults';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent/agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationPlannerOutput_ACU, recordWorldSimulationProtocolFailure_ACU } from './agent/agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationPlannerOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationPlannerProtocolRejection_ACU } from './agent/agent-protocol';
 import { executeWorldSimulationFinalRequest_ACU } from './agent/final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './agent/prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent/agent-token-budget';
@@ -82,7 +82,7 @@ export class WorldSimulationStagePlanner_ACU {
           if (!failure.retry) throw error;
           transcript.push(
             { role: 'assistant', content: raw || '(empty)' },
-            { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` },
+            { role: 'user', content: renderWorldSimulationPlannerProtocolRejection_ACU(failure.issue) },
           );
           continue;
         }

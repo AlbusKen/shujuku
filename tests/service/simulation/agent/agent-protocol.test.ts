@@ -14,6 +14,8 @@ import {
   parseWorldSimulationSpecialistResult_ACU,
   recordWorldSimulationProtocolFailure_ACU,
   renderWorldSimulationDirectorProtocolRejection_ACU,
+  renderWorldSimulationPlannerProtocolRejection_ACU,
+  renderWorldSimulationReviewerProtocolRejection_ACU,
   renderWorldSimulationSpecialistProtocolRejection_ACU,
 } from '../../../../src/service/simulation/agent/agent-protocol';
 
@@ -74,6 +76,26 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('agentName 必须精确为 macro-dynamics-analyst');
     expect(message).toContain('patch 顶层只能使用：clock | dimensions');
     expect(message).toContain('"status":"candidate"');
+  });
+
+  it('reviewer 协议拒绝回灌明确 verdict、finding 结构与三种合法模板', () => {
+    const message = renderWorldSimulationReviewerProtocolRejection_ACU({ reasonCode: 'INVALID_REVIEW_VERDICT', path: '$.verdict', expected: 'accept | revise | reject', actual: 'approved' });
+    expect(message).toContain('verdict 必须精确为 accept、revise、reject');
+    expect(message).toContain('不得使用 approve、approved、pass、success、done 等别名');
+    expect(message).toContain('severity 必须精确为 blocking、major、minor');
+    expect(message).toContain('"verdict":"accept"');
+    expect(message).toContain('"verdict":"revise"');
+    expect(message).toContain('"verdict":"reject"');
+    expect(message).toContain('WORLD_SIMULATION_ENGINE_SEAM');
+  });
+
+  it('planner 协议拒绝回灌包含完整 plan 字段与账本模块白名单', () => {
+    const message = renderWorldSimulationPlannerProtocolRejection_ACU({ reasonCode: 'MISSING_FIELD', path: '$.plan', expected: 'required field', actual: undefined });
+    expect(message).toContain('顶层必须且只能包含 action、summary、plan');
+    expect(message).toContain('schemaVersion、title、objective、impactScope');
+    expect(message).toContain(`expectedLedgerChanges 只能使用：clock | dimensions | seeds | actors | chronicle | guidance`);
+    expect(message).toContain('"action":"plan"');
+    expect(message).toContain('WORLD_SIMULATION_ENGINE_SEAM');
   });
 
   it('主输出把多个 read/search 对象收敛为原子工具批次，并拒绝未知字段', () => {

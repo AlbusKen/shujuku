@@ -136186,6 +136186,19 @@ $CONTENT
         lines.push('failed 必须包含 reasonCode、message。blocked 必须包含非空 unresolved 数组。');
         return lines.join('\n');
     }
+    function worldSimulationReviewerProtocolInstruction_ACU() {
+        return [
+            '只输出一个审核 JSON 对象，不附加 Markdown、解释、思考标签或其他字段。',
+            '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds。',
+            'verdict 必须精确为 accept、revise、reject 之一；禁止使用 approve、approved、pass、success、done 等别名。',
+            'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual，severity 必须精确为 blocking、major、minor 之一。',
+            'accept 必须至少接受一个候选；reject 的 acceptedCandidateIds 必须为空；revise 可保留已通过候选并用 findings 说明待修正项。',
+            `accept 示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer)}`,
+            'revise 示例：{"verdict":"revise","summary":"候选仍需修正","findings":[{"severity":"major","reasonCode":"CAUSE_GAP","path":"$.clock","expected":"时间与因果连续","actual":"缺少因果说明"}],"acceptedCandidateIds":[]}',
+            'reject 示例：{"verdict":"reject","summary":"候选不满足证据约束","findings":[{"severity":"blocking","reasonCode":"EVIDENCE_GAP","path":"$","expected":"可验证证据","actual":"缺失"}],"acceptedCandidateIds":[]}',
+            '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
+        ].join('\n');
+    }
     function protocolFor_ACU(kind, name, writableModules) {
         if (kind === 'director')
             return worldSimulationDirectorProtocolInstruction_ACU();
@@ -136194,7 +136207,7 @@ $CONTENT
         if (name === 'guidance-reviewer')
             return `${worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules)}\ncandidate 的 patch 只能包含 guidance。`;
         if (kind === 'reviewer')
-            return '仅输出 verdict、summary、findings、acceptedCandidateIds 组成的审核 JSON。';
+            return worldSimulationReviewerProtocolInstruction_ACU();
         return worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules);
     }
     function buildRolePrompt_ACU(name) {
@@ -138128,6 +138141,55 @@ $CONTENT
         lines.push(JSON.stringify({ status: 'blocked', agentName, unresolved: ['仍需解决的问题'] }));
         return lines.join('\n');
     }
+    function renderWorldSimulationReviewerProtocolRejection_ACU(issue) {
+        return [
+            `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+            '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds。',
+            'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
+            'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
+            'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
+            JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
+            JSON.stringify({
+                verdict: 'revise',
+                summary: '候选仍需修正',
+                findings: [{ severity: 'major', reasonCode: 'CAUSE_GAP', path: '$.clock', expected: '时间与因果连续', actual: '缺少因果说明' }],
+                acceptedCandidateIds: [],
+            }),
+            JSON.stringify({
+                verdict: 'reject',
+                summary: '候选不满足证据约束',
+                findings: [{ severity: 'blocking', reasonCode: 'EVIDENCE_GAP', path: '$', expected: '可验证证据', actual: '缺失' }],
+                acceptedCandidateIds: [],
+            }),
+        ].join('\n');
+    }
+    function renderWorldSimulationPlannerProtocolRejection_ACU(issue) {
+        return [
+            `你上一次的阶段规划输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+            '顶层必须且只能包含 action、summary、plan；action 必须精确为 plan，summary 必须是非空字符串，plan 不得省略、设为 null 或只返回摘要。',
+            `plan 必须完整包含 schemaVersion、title、objective、impactScope、factsToVerify、plannedTools、plannedSpecialists、expectedLedgerChanges、convergenceConditions、blockingConditions、completedSteps、nextStep。expectedLedgerChanges 只能使用：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。`,
+            JSON.stringify({
+                action: 'plan',
+                summary: '锁定本轮幕后推演焦点',
+                plan: {
+                    schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
+                    title: '推演本轮幕后动态',
+                    objective: '根据最新剧情推算幕后世界演变',
+                    impactScope: ['当前世界状态'],
+                    factsToVerify: ['时间是否推进'],
+                    plannedTools: ['read'],
+                    plannedSpecialists: ['macro-dynamics-analyst'],
+                    expectedLedgerChanges: ['clock'],
+                    convergenceConditions: ['证据与候选闭合'],
+                    blockingConditions: ['缺少锚点'],
+                    completedSteps: [],
+                    nextStep: '读取当前账本',
+                },
+            }),
+        ].join('\n');
+    }
     function mergeDraftValue_ACU(base, continuation, path, depth) {
         if (depth > 16)
             fail_ACU('DRAFT_MERGE_DEPTH', path, 'nesting depth at most 16', depth);
@@ -138644,8 +138706,9 @@ $CONTENT
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                 const requestContext = { ...context, evidenceRegistry: requestSnapshot };
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+                const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
                 const sent = await executeWorldSimulationFinalRequest_ACU({
-                    messages: [...rendered.messages, ...transcript],
+                    messages: [...rendered.messages, protocolGuard, ...transcript],
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
                     invoke: value => this.dependencies.invoke(agentName, value, preset),
@@ -138691,7 +138754,7 @@ $CONTENT
                     const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
                     if (!failure.retry)
                         throw error;
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `终审输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请只输出修正后的 JSON。` });
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationReviewerProtocolRejection_ACU(failure.issue) });
                 }
             }
         }
@@ -139300,7 +139363,7 @@ $CONTENT
                         }
                         if (!failure.retry)
                             throw error;
-                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `阶段规划输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请根据上方协议重新输出一个完整 JSON 对象；不得省略 plan，不得附加解释或 Markdown。` });
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationPlannerProtocolRejection_ACU(failure.issue) });
                         continue;
                     }
                     const revision = 1;

@@ -400,6 +400,57 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   return lines.join('\n');
 }
 
+export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU): string {
+  return [
+    `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+    '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds。',
+    'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
+    'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
+    'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
+    JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
+    JSON.stringify({
+      verdict: 'revise',
+      summary: '候选仍需修正',
+      findings: [{ severity: 'major', reasonCode: 'CAUSE_GAP', path: '$.clock', expected: '时间与因果连续', actual: '缺少因果说明' }],
+      acceptedCandidateIds: [],
+    }),
+    JSON.stringify({
+      verdict: 'reject',
+      summary: '候选不满足证据约束',
+      findings: [{ severity: 'blocking', reasonCode: 'EVIDENCE_GAP', path: '$', expected: '可验证证据', actual: '缺失' }],
+      acceptedCandidateIds: [],
+    }),
+  ].join('\n');
+}
+
+export function renderWorldSimulationPlannerProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU): string {
+  return [
+    `你上一次的阶段规划输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+    '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+    '顶层必须且只能包含 action、summary、plan；action 必须精确为 plan，summary 必须是非空字符串，plan 不得省略、设为 null 或只返回摘要。',
+    `plan 必须完整包含 schemaVersion、title、objective、impactScope、factsToVerify、plannedTools、plannedSpecialists、expectedLedgerChanges、convergenceConditions、blockingConditions、completedSteps、nextStep。expectedLedgerChanges 只能使用：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。`,
+    JSON.stringify({
+      action: 'plan',
+      summary: '锁定本轮幕后推演焦点',
+      plan: {
+        schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
+        title: '推演本轮幕后动态',
+        objective: '根据最新剧情推算幕后世界演变',
+        impactScope: ['当前世界状态'],
+        factsToVerify: ['时间是否推进'],
+        plannedTools: ['read'],
+        plannedSpecialists: ['macro-dynamics-analyst'],
+        expectedLedgerChanges: ['clock'],
+        convergenceConditions: ['证据与候选闭合'],
+        blockingConditions: ['缺少锚点'],
+        completedSteps: [],
+        nextStep: '读取当前账本',
+      },
+    }),
+  ].join('\n');
+}
+
 function mergeDraftValue_ACU(base: unknown, continuation: unknown, path: string, depth: number): unknown {
   if (depth > 16) fail_ACU('DRAFT_MERGE_DEPTH', path, 'nesting depth at most 16', depth);
   if (base === undefined) return continuation;

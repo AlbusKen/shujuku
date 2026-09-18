@@ -55,6 +55,36 @@ describe('世界推演 Agent runtime', () => {
     })).rejects.toThrow('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
   });
 
+  it('causality reviewer 对非法 verdict 回灌完整协议并在重试后收敛', async () => {
+    const { registry, evidence, promptContext } = fixture('reviewer-protocol-repair');
+    const candidate = {
+      candidateId: 'candidate:reviewer-repair',
+      agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } },
+      summary: '时间推进',
+      evidenceRefs: [evidence],
+      uncertainties: [],
+      writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const responses = [
+      JSON.stringify({ verdict: 'approved', summary: '错误别名', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
+      JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+
+    await expect(runtime.runReviewer({ candidates: [candidate], settings: settings(), promptContext, registry, tools }))
+      .resolves.toMatchObject({ verdict: 'accept', summary: '审核通过', acceptedCandidateIds: [candidate.candidateId] });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const initialMessages = invoke.mock.calls[0][1] as readonly { role: string; content: string }[];
+    expect(initialMessages.some(message => message.role === 'system' && message.content.includes('verdict 必须精确为 accept、revise、reject'))).toBe(true);
+    const retryMessages = invoke.mock.calls[1][1] as readonly { role: string; content: string }[];
+    const rejection = retryMessages.find(message => message.role === 'user' && message.content.includes('INVALID_REVIEW_VERDICT'))?.content ?? '';
+    expect(rejection).toContain('"verdict":"accept"');
+    expect(rejection).toContain('"verdict":"revise"');
+    expect(rejection).toContain('"verdict":"reject"');
+  });
+
   it('specialist 协议重试回灌明确枚举、角色、写入范围与合法 JSON 模板', async () => {
     const { registry, promptContext } = fixture('specialist-repair');
     const responses = [

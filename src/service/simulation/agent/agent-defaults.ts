@@ -65,11 +65,25 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
   return lines.join('\n');
 }
 
+export function worldSimulationReviewerProtocolInstruction_ACU(): string {
+  return [
+    '只输出一个审核 JSON 对象，不附加 Markdown、解释、思考标签或其他字段。',
+    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds。',
+    'verdict 必须精确为 accept、revise、reject 之一；禁止使用 approve、approved、pass、success、done 等别名。',
+    'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual，severity 必须精确为 blocking、major、minor 之一。',
+    'accept 必须至少接受一个候选；reject 的 acceptedCandidateIds 必须为空；revise 可保留已通过候选并用 findings 说明待修正项。',
+    `accept 示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer)}`,
+    'revise 示例：{"verdict":"revise","summary":"候选仍需修正","findings":[{"severity":"major","reasonCode":"CAUSE_GAP","path":"$.clock","expected":"时间与因果连续","actual":"缺少因果说明"}],"acceptedCandidateIds":[]}',
+    'reject 示例：{"verdict":"reject","summary":"候选不满足证据约束","findings":[{"severity":"blocking","reasonCode":"EVIDENCE_GAP","path":"$","expected":"可验证证据","actual":"缺失"}],"acceptedCandidateIds":[]}',
+    '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
+  ].join('\n');
+}
+
 function protocolFor_ACU(kind: string, name: WorldSimulationAgentName_ACU, writableModules: readonly string[]): string {
   if (kind === 'director') return worldSimulationDirectorProtocolInstruction_ACU();
   if (kind === 'planner') return worldSimulationPlannerProtocolInstruction_ACU();
   if (name === 'guidance-reviewer') return `${worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules)}\ncandidate 的 patch 只能包含 guidance。`;
-  if (kind === 'reviewer') return '仅输出 verdict、summary、findings、acceptedCandidateIds 组成的审核 JSON。';
+  if (kind === 'reviewer') return worldSimulationReviewerProtocolInstruction_ACU();
   return worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules);
 }
 

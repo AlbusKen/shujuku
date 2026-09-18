@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
-import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU } from '../../../../src/service/simulation/model';
 import { createWorldSimulationPlaceholderResolvers_ACU } from '../../../../src/service/simulation/agent/agent-placeholder-resolver';
 import { parseWorldSimulationMainAction_ACU, parseWorldSimulationPlannerOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU } from '../../../../src/service/simulation/agent/agent-protocol';
@@ -67,5 +67,17 @@ describe('世界推演提示词装配契约', () => {
     expect(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner.plan.expectedLedgerChanges.every((item) => (
       WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]
     ).includes(item))).toBe(true);
+  });
+
+  it('因果 reviewer 默认协议固化 verdict、finding 与候选接受约束', () => {
+    const instruction = worldSimulationReviewerProtocolInstruction_ACU();
+    const reviewerPrompt = buildDefaultWorldSimulationAgentPrompts_ACU()['causality-reviewer'].map(item => item.content).join('\n');
+    expect(instruction).toContain('verdict 必须精确为 accept、revise、reject');
+    expect(instruction).toContain('severity 必须精确为 blocking、major、minor');
+    expect(instruction).toContain('accept 必须至少接受一个候选');
+    expect(instruction).toContain('"verdict":"accept"');
+    expect(instruction).toContain('"verdict":"revise"');
+    expect(instruction).toContain('"verdict":"reject"');
+    expect(reviewerPrompt).toContain(instruction);
   });
 });

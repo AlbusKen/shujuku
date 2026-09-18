@@ -5,10 +5,10 @@ import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegist
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationDelegation_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -134,8 +134,9 @@ export class WorldSimulationSubagentRuntime_ACU {
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const requestContext = { ...context, evidenceRegistry: requestSnapshot };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+      const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
       const sent = await executeWorldSimulationFinalRequest_ACU({
-        messages: [...rendered.messages, ...transcript],
+        messages: [...rendered.messages, protocolGuard, ...transcript],
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => this.dependencies.invoke(agentName, value, preset),
@@ -175,7 +176,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
         if (!failure.retry) throw error;
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `终审输出未通过协议：${failure.issue.reasonCode} ${failure.issue.path}。请只输出修正后的 JSON。` });
+        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationReviewerProtocolRejection_ACU(failure.issue) });
       }
     }
   }

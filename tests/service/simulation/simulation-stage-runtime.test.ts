@@ -65,7 +65,11 @@ describe('世界推演阶段 runtime', () => {
     const retryMessages = invoke.mock.calls[1][0] as Array<{ role: string; content: string }>;
     expect(retryMessages.at(-2)).toMatchObject({ role: 'assistant', content: expect.stringContaining('只有摘要') });
     expect(retryMessages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('MISSING_FIELD $.plan') });
-    expect(retryMessages.at(-1)?.content).toContain('完整 JSON');
+    expect(retryMessages.at(-1)?.content).toContain('顶层必须且只能包含 action、summary、plan');
+    expect(retryMessages.at(-1)?.content).toContain('schemaVersion、title、objective、impactScope');
+    expect(retryMessages.at(-1)?.content).toContain('expectedLedgerChanges 只能使用：clock | dimensions | seeds | actors | chronicle | guidance');
+    expect(retryMessages.at(-1)?.content).toContain('"action":"plan"');
+    expect(retryMessages.at(-1)?.content).toContain('WORLD_SIMULATION_ENGINE_SEAM');
     const entries = readWorldSimulationSessionLog_ACU('chat-planner');
     expect(entries.map(item => item.kind)).toEqual(['stage_plan', 'protocol_retry']);
     expect(entries[0]).toMatchObject({ title: '阶段', detail: '已补全', status: 'done' });
