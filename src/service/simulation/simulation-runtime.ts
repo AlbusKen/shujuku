@@ -139,7 +139,12 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         chatIdentity: identity.chatIdentity,
         persistSessionEvent,
       });
-      const plannedRevision = (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
+      const activeStage = envelope.stages.find(stage => stage.stageId === identity.stageId);
+      const resumableRevision = envelope.task?.status === 'paused'
+        ? activeStage?.revisions.find(revision => revision.revision === identity.stageRevision && revision.frozen)
+        : undefined;
+      const plannedRevision = resumableRevision
+        ?? (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
       const promptContext = buildPromptContext_ACU({
         identity, anchor, instruction, envelope,
         stagePlan: plannedRevision.plan, registry, chat,
@@ -236,6 +241,10 @@ export class WorldSimulationRuntime_ACU {
 
   async sendAgentMessage(text: string, triggerConversationMessageId?: string): Promise<WorldSimulationOrchestratorResult_ACU | null> {
     const instruction = text.trim();
+    const envelope = new FirstFloorWorldSimulationStore_ACU().read();
+    if ((!instruction || /^(继续|恢复(?:任务)?|resume|continue)$/i.test(instruction)) && envelope?.task?.status === 'paused' && envelope.task.activeRun) {
+      return this.resume();
+    }
     if (!instruction) return null;
     const resolved = resolveLatestWorldSimulationAssistant_ACU(this.getChat());
     if (resolved.kind !== 'resolved') return null;

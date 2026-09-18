@@ -287,6 +287,66 @@ function normalizeSpecialistStatus_ACU(value: Record<string, unknown>): Record<s
   return value;
 }
 
+function invalidSpecialistPatch_ACU(path: string, expected: string, actual: unknown): never {
+  fail_ACU('INVALID_SPECIALIST_PATCH', path, expected, actual);
+}
+
+function specialistStringList_ACU(value: unknown, path: string): void {
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) {
+    invalidSpecialistPatch_ACU(path, 'string array with non-empty items', value);
+  }
+}
+
+function specialistPatchRecord_ACU(value: unknown, path: string, allowed: readonly string[]): Record<string, unknown> {
+  if (!isRecord_ACU(value)) invalidSpecialistPatch_ACU(path, 'object', value);
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) invalidSpecialistPatch_ACU(`${path}.${key}`, 'no additional fields', value[key]);
+  }
+  return value;
+}
+
+function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<string, unknown> {
+  if (!isRecord_ACU(value) || !Object.keys(value).length) invalidSpecialistPatch_ACU('$.patch', 'non-empty ledger patch object', value);
+  for (const [module, patch] of Object.entries(value)) {
+    const path = `$.patch.${module}`;
+    if (!(WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]).includes(module)) {
+      invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
+    }
+    if (module === 'dimensions' || module === 'seeds' || module === 'actors') {
+      const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
+      if (!Array.isArray(raw.upsert) || !raw.upsert.length) invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
+      raw.upsert.forEach((item, index) => {
+        if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
+        if (!text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
+        if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
+          invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+        }
+      });
+      continue;
+    }
+    if (module === 'chronicle') {
+      const raw = specialistPatchRecord_ACU(patch, path, ['append']);
+      if (!Array.isArray(raw.append) || !raw.append.length) invalidSpecialistPatch_ACU(`${path}.append`, 'non-empty array', raw.append);
+      continue;
+    }
+    if (module === 'clock') {
+      const raw = specialistPatchRecord_ACU(patch, path, ['storyTime', 'elapsed', 'precision', 'evidenceRefs']);
+      if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+      if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string') invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
+      if (raw.elapsed !== undefined && typeof raw.elapsed !== 'string') invalidSpecialistPatch_ACU(`${path}.elapsed`, 'string', raw.elapsed);
+      if (raw.precision !== undefined && !['exact', 'approximate', 'unknown'].includes(String(raw.precision))) invalidSpecialistPatch_ACU(`${path}.precision`, 'exact | approximate | unknown', raw.precision);
+      if (raw.evidenceRefs !== undefined) specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
+      continue;
+    }
+    const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs']);
+    if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+    for (const key of ['signals', 'excludedFacts', 'evidenceRefs'] as const) {
+      if (raw[key] !== undefined) specialistStringList_ACU(raw[key], `${path}.${key}`);
+    }
+  }
+  return value;
+}
+
 export function parseWorldSimulationSpecialistResult_ACU(value: unknown, evidenceRegistry?: WorldSimulationEvidenceRegistrySnapshot_ACU): WorldSimulationSpecialistResult_ACU {
   if (!isRecord_ACU(value)) fail_ACU('OBJECT_REQUIRED', '$', 'specialist result object', value);
   const normalized = normalizeSpecialistStatus_ACU(value);
@@ -294,8 +354,8 @@ export function parseWorldSimulationSpecialistResult_ACU(value: unknown, evidenc
   const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
   if (status === 'candidate') {
     const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
-    if (!isRecord_ACU(raw.patch) || !Object.keys(raw.patch).length) fail_ACU('PATCH_REQUIRED', '$.patch', 'non-empty object', raw.patch);
-    return { status, agentName, patch: raw.patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
+    const patch = validateWorldSimulationSpecialistPatch_ACU(raw.patch);
+    return { status, agentName, patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
   }
   if (status === 'no_change') {
     const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'summary', 'evidenceRefs', 'uncertainties']);
@@ -385,10 +445,19 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
+    lines.push('dimensions、seeds、actors 必须使用 {"upsert":[{"id":"...","expectedRevision":0,...}]}；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
+    const firstModule = writableModules[0];
+    const patchExample = firstModule === 'dimensions' || firstModule === 'seeds' || firstModule === 'actors'
+      ? { upsert: [{ id: '条目ID', expectedRevision: 0 }] }
+      : firstModule === 'chronicle'
+        ? { append: [{}] }
+        : firstModule === 'guidance'
+          ? { signals: ['角色可感知信号'] }
+          : { elapsed: '1小时' };
     lines.push(JSON.stringify({
       status: 'candidate',
       agentName,
-      patch: { [writableModules[0]]: {} },
+      patch: { [firstModule]: patchExample },
       summary: '基于已颁发证据形成候选',
       evidenceRefs: ['evidence:已颁发引用'],
       uncertainties: [],

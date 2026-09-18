@@ -263,7 +263,7 @@ export class WorldSimulationMainLoop_ACU {
       }
 
       if (action.kind === 'block') {
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+        persist(iteration + 1, action.reason);
         const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: action.reason, detail: action.unresolved.join('；'), agentName: director, ok: false });
         await persistEntry(blockId, `block-${iteration}`);
         return { outcome: 'blocked', summary: action.reason, unresolved: action.unresolved, outcomes };
@@ -310,21 +310,30 @@ export class WorldSimulationMainLoop_ACU {
       const acceptedIds = new Set(reviewer.acceptedCandidateIds);
       const acceptedCandidates = available.filter(item => acceptedIds.has(item.candidateId));
       if (reviewer.verdict === 'reject' || !acceptedCandidates.length || reviewer.findings.some(item => item.severity === 'blocking')) {
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+        persist(iteration + 1, reviewer.summary);
         const unresolved = reviewer.findings.filter(item => item.severity !== 'minor').map(item => `${item.reasonCode}:${item.path}`);
         const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
         await persistEntry(blockId, `block-reviewer-${iteration}`);
         return { outcome: 'blocked', summary: reviewer.summary, unresolved: unresolved.length ? unresolved : ['reviewer rejected all candidates'], outcomes };
       }
       const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
-      let guidanceOutcome: WorldSimulationSubagentOutcome_ACU;
-      const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });
+      let acceptedLedger: WorldSimulationLedger_ACU;
       try {
-        const acceptedLedger = applyWorldSimulationCandidates_ACU(
+        acceptedLedger = applyWorldSimulationCandidates_ACU(
           input.promptContext.worldState as WorldSimulationLedger_ACU,
           acceptedCandidates,
           new Set(causalEvidenceRefs),
         );
+      } catch (error) {
+        const message = compact_ACU(error);
+        persist(iteration + 1, message);
+        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '已接受候选无法应用', detail: message, agentName: director, ok: false });
+        await persistEntry(blockId, `block-candidate-transaction-${iteration}`);
+        return { outcome: 'blocked', summary: '已接受候选无法应用', unresolved: [message], outcomes };
+      }
+      let guidanceOutcome: WorldSimulationSubagentOutcome_ACU;
+      const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });
+      try {
         guidanceOutcome = await this.dependencies.subagents.runGuidanceReviewer({
           acceptedLedger,
           candidates: acceptedCandidates,
@@ -338,18 +347,18 @@ export class WorldSimulationMainLoop_ACU {
       } catch (error) {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: 'guidance 审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
         await persistEntry(guidanceEntryId, `guidance-review-${iteration}-failed`);
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
         const message = compact_ACU(error);
+        persist(iteration + 1, message);
         const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 未完成', detail: message, agentName: 'guidance-reviewer', ok: false });
         await persistEntry(blockId, `block-guidance-${iteration}`);
         return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
       }
       upsertLatestOutcome_ACU(outcomes, guidanceOutcome);
       if (guidanceOutcome.status === 'blocked' || guidanceOutcome.status === 'failed') {
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
         const unresolved = guidanceOutcome.unresolved?.length ? guidanceOutcome.unresolved : [guidanceOutcome.reasonCode ?? guidanceOutcome.summary];
+        persist(iteration + 1, guidanceOutcome.summary);
         const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance 审核阻断', detail: guidanceOutcome.summary, agentName: 'guidance-reviewer', ok: false });
         await persistEntry(blockId, `block-guidance-outcome-${iteration}`);
         return { outcome: 'blocked', summary: guidanceOutcome.summary, unresolved, outcomes };

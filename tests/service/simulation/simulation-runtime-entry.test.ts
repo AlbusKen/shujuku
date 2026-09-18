@@ -105,7 +105,7 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
     });
   });
 
-  it('已进入 blocking 状态的 paused 任务在快照中可见并可直接恢复', async () => {
+  it('已暂停任务在快照、恢复按钮和“继续”消息中复用冻结身份', async () => {
     const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
@@ -124,7 +124,12 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
     const snapshot = runtime.readUiSnapshot();
     expect(snapshot.envelope?.task).toMatchObject({ status: 'paused', stopReason: '证据不足' });
     await runtime.resume();
-    expect(resume).toHaveBeenCalledWith({ anchor });
+    await runtime.sendAgentMessage('继续', 'turn-continue');
+    await runtime.sendAgentMessage('resume', 'turn-resume');
+    expect(resume).toHaveBeenCalledTimes(3);
+    expect(resume).toHaveBeenNthCalledWith(1, { anchor });
+    expect(resume).toHaveBeenNthCalledWith(2, { anchor });
+    expect(start).not.toHaveBeenCalled();
   });
 
   it('只有显式保存设置才创建 envelope，并经过严格宿主保存', async () => {

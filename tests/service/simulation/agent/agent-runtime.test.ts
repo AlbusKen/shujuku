@@ -3,7 +3,7 @@ import { buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedge
 import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { WorldSimulationMainLoop_ACU } from '../../../../src/service/simulation/agent/agent-main-loop';
-import { resetWorldSimulationRunCacheForTests_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
+import { readWorldSimulationRunState_ACU, resetWorldSimulationRunCacheForTests_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
@@ -316,6 +316,47 @@ describe('世界推演 Agent runtime', () => {
     if (result.outcome !== 'commit') throw new Error('expected commit');
     expect(result.summary).toBe('修订后提交');
     expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
+    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
+  });
+
+  it('显式 block 后保留同一 task/cursor 的候选并在恢复时避免重复派工', async () => {
+    const { registry, evidence, promptContext } = fixture('resume-after-block');
+    const candidate = {
+      candidateId: 'candidate:block-resume', agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } }, summary: '阻断前候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
+      JSON.stringify({ action: 'block', reason: '等待继续', unresolved: ['用户确认'] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '恢复后提交', evidenceRefs: [evidence] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = {
+      runId: 'run-block-resume', chatIdentity: 'chat-block-resume', triggerKind: 'agent_chat_message' as const,
+      triggerConversationMessageId: 'turn-1', anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 4,
+      taskId: 'task-block-resume', stageId: 'stage-block-resume', stageRevision: 2,
+    };
+    const runSettings = settings();
+
+    await expect(loop.run({ identity, settings: runSettings, promptContext, registry, tools }))
+      .resolves.toMatchObject({ outcome: 'blocked', summary: '等待继续' });
+    expect(readWorldSimulationRunState_ACU(
+      identity.chatIdentity,
+      identity.taskId,
+      `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`,
+    )).toMatchObject({ candidates: [candidate], nextIteration: 3 });
+
+    const resumed = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+    expect(resumed.outcome).toBe('commit');
+    expect(subagents.run).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledOnce();
     expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
   });
 

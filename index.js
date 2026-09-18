@@ -138030,6 +138030,76 @@ $CONTENT
             return { ...value, status: 'blocked' };
         return value;
     }
+    function invalidSpecialistPatch_ACU(path, expected, actual) {
+        fail_ACU('INVALID_SPECIALIST_PATCH', path, expected, actual);
+    }
+    function specialistStringList_ACU(value, path) {
+        if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) {
+            invalidSpecialistPatch_ACU(path, 'string array with non-empty items', value);
+        }
+    }
+    function specialistPatchRecord_ACU(value, path, allowed) {
+        if (!isRecord_ACU$3(value))
+            invalidSpecialistPatch_ACU(path, 'object', value);
+        for (const key of Object.keys(value)) {
+            if (!allowed.includes(key))
+                invalidSpecialistPatch_ACU(`${path}.${key}`, 'no additional fields', value[key]);
+        }
+        return value;
+    }
+    function validateWorldSimulationSpecialistPatch_ACU(value) {
+        if (!isRecord_ACU$3(value) || !Object.keys(value).length)
+            invalidSpecialistPatch_ACU('$.patch', 'non-empty ledger patch object', value);
+        for (const [module, patch] of Object.entries(value)) {
+            const path = `$.patch.${module}`;
+            if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(module)) {
+                invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
+            }
+            if (module === 'dimensions' || module === 'seeds' || module === 'actors') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
+                if (!Array.isArray(raw.upsert) || !raw.upsert.length)
+                    invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
+                raw.upsert.forEach((item, index) => {
+                    if (!isRecord_ACU$3(item))
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
+                    if (!text_ACU$1(item.id))
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
+                    if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+                    }
+                });
+                continue;
+            }
+            if (module === 'chronicle') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['append']);
+                if (!Array.isArray(raw.append) || !raw.append.length)
+                    invalidSpecialistPatch_ACU(`${path}.append`, 'non-empty array', raw.append);
+                continue;
+            }
+            if (module === 'clock') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['storyTime', 'elapsed', 'precision', 'evidenceRefs']);
+                if (!Object.keys(raw).length)
+                    invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+                if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string')
+                    invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
+                if (raw.elapsed !== undefined && typeof raw.elapsed !== 'string')
+                    invalidSpecialistPatch_ACU(`${path}.elapsed`, 'string', raw.elapsed);
+                if (raw.precision !== undefined && !['exact', 'approximate', 'unknown'].includes(String(raw.precision)))
+                    invalidSpecialistPatch_ACU(`${path}.precision`, 'exact | approximate | unknown', raw.precision);
+                if (raw.evidenceRefs !== undefined)
+                    specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
+                continue;
+            }
+            const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs']);
+            if (!Object.keys(raw).length)
+                invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+            for (const key of ['signals', 'excludedFacts', 'evidenceRefs']) {
+                if (raw[key] !== undefined)
+                    specialistStringList_ACU(raw[key], `${path}.${key}`);
+            }
+        }
+        return value;
+    }
     function parseWorldSimulationSpecialistResult_ACU(value, evidenceRegistry) {
         if (!isRecord_ACU$3(value))
             fail_ACU('OBJECT_REQUIRED', '$', 'specialist result object', value);
@@ -138038,9 +138108,8 @@ $CONTENT
         const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
         if (status === 'candidate') {
             const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
-            if (!isRecord_ACU$3(raw.patch) || !Object.keys(raw.patch).length)
-                fail_ACU('PATCH_REQUIRED', '$.patch', 'non-empty object', raw.patch);
-            return { status, agentName, patch: raw.patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
+            const patch = validateWorldSimulationSpecialistPatch_ACU(raw.patch);
+            return { status, agentName, patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
         }
         if (status === 'no_change') {
             const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'summary', 'evidenceRefs', 'uncertainties']);
@@ -138127,10 +138196,19 @@ $CONTENT
         ];
         if (writableModules.length) {
             lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
+            lines.push('dimensions、seeds、actors 必须使用 {"upsert":[{"id":"...","expectedRevision":0,...}]}；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
+            const firstModule = writableModules[0];
+            const patchExample = firstModule === 'dimensions' || firstModule === 'seeds' || firstModule === 'actors'
+                ? { upsert: [{ id: '条目ID', expectedRevision: 0 }] }
+                : firstModule === 'chronicle'
+                    ? { append: [{}] }
+                    : firstModule === 'guidance'
+                        ? { signals: ['角色可感知信号'] }
+                        : { elapsed: '1小时' };
             lines.push(JSON.stringify({
                 status: 'candidate',
                 agentName,
-                patch: { [writableModules[0]]: {} },
+                patch: { [firstModule]: patchExample },
                 summary: '基于已颁发证据形成候选',
                 evidenceRefs: ['evidence:已颁发引用'],
                 uncertainties: [],
@@ -138488,7 +138566,7 @@ $CONTENT
                     continue;
                 }
                 if (action.kind === 'block') {
-                    clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+                    persist(iteration + 1, action.reason);
                     const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: action.reason, detail: action.unresolved.join('；'), agentName: director, ok: false });
                     await persistEntry(blockId, `block-${iteration}`);
                     return { outcome: 'blocked', summary: action.reason, unresolved: action.unresolved, outcomes };
@@ -138533,17 +138611,27 @@ $CONTENT
                 const acceptedIds = new Set(reviewer.acceptedCandidateIds);
                 const acceptedCandidates = available.filter(item => acceptedIds.has(item.candidateId));
                 if (reviewer.verdict === 'reject' || !acceptedCandidates.length || reviewer.findings.some(item => item.severity === 'blocking')) {
-                    clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+                    persist(iteration + 1, reviewer.summary);
                     const unresolved = reviewer.findings.filter(item => item.severity !== 'minor').map(item => `${item.reasonCode}:${item.path}`);
                     const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'reviewer 拒绝候选', detail: reviewer.summary, agentName: 'causality-reviewer', ok: false });
                     await persistEntry(blockId, `block-reviewer-${iteration}`);
                     return { outcome: 'blocked', summary: reviewer.summary, unresolved: unresolved.length ? unresolved : ['reviewer rejected all candidates'], outcomes };
                 }
                 const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
+                let acceptedLedger;
+                try {
+                    acceptedLedger = applyWorldSimulationCandidates_ACU(input.promptContext.worldState, acceptedCandidates, new Set(causalEvidenceRefs));
+                }
+                catch (error) {
+                    const message = compact_ACU(error);
+                    persist(iteration + 1, message);
+                    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '已接受候选无法应用', detail: message, agentName: director, ok: false });
+                    await persistEntry(blockId, `block-candidate-transaction-${iteration}`);
+                    return { outcome: 'blocked', summary: '已接受候选无法应用', unresolved: [message], outcomes };
+                }
                 let guidanceOutcome;
                 const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });
                 try {
-                    const acceptedLedger = applyWorldSimulationCandidates_ACU(input.promptContext.worldState, acceptedCandidates, new Set(causalEvidenceRefs));
                     guidanceOutcome = await this.dependencies.subagents.runGuidanceReviewer({
                         acceptedLedger,
                         candidates: acceptedCandidates,
@@ -138558,18 +138646,18 @@ $CONTENT
                 catch (error) {
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: 'guidance 审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
                     await persistEntry(guidanceEntryId, `guidance-review-${iteration}-failed`);
-                    clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
                     endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
                     const message = compact_ACU(error);
+                    persist(iteration + 1, message);
                     const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 未完成', detail: message, agentName: 'guidance-reviewer', ok: false });
                     await persistEntry(blockId, `block-guidance-${iteration}`);
                     return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
                 }
                 upsertLatestOutcome_ACU(outcomes, guidanceOutcome);
                 if (guidanceOutcome.status === 'blocked' || guidanceOutcome.status === 'failed') {
-                    clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
                     endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
                     const unresolved = guidanceOutcome.unresolved?.length ? guidanceOutcome.unresolved : [guidanceOutcome.reasonCode ?? guidanceOutcome.summary];
+                    persist(iteration + 1, guidanceOutcome.summary);
                     const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance 审核阻断', detail: guidanceOutcome.summary, agentName: 'guidance-reviewer', ok: false });
                     await persistEntry(blockId, `block-guidance-outcome-${iteration}`);
                     return { outcome: 'blocked', summary: guidanceOutcome.summary, unresolved, outcomes };
@@ -139869,7 +139957,12 @@ $CONTENT
                     chatIdentity: identity.chatIdentity,
                     persistSessionEvent,
                 });
-                const plannedRevision = (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
+                const activeStage = envelope.stages.find(stage => stage.stageId === identity.stageId);
+                const resumableRevision = envelope.task?.status === 'paused'
+                    ? activeStage?.revisions.find(revision => revision.revision === identity.stageRevision && revision.frozen)
+                    : undefined;
+                const plannedRevision = resumableRevision
+                    ?? (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
                 const promptContext = buildPromptContext_ACU({
                     identity, anchor, instruction, envelope,
                     stagePlan: plannedRevision.plan, registry, chat,
@@ -139950,6 +140043,10 @@ $CONTENT
         }
         async sendAgentMessage(text, triggerConversationMessageId) {
             const instruction = text.trim();
+            const envelope = new FirstFloorWorldSimulationStore_ACU().read();
+            if ((!instruction || /^(继续|恢复(?:任务)?|resume|continue)$/i.test(instruction)) && envelope?.task?.status === 'paused' && envelope.task.activeRun) {
+                return this.resume();
+            }
             if (!instruction)
                 return null;
             const resolved = resolveLatestWorldSimulationAssistant_ACU(this.getChat());

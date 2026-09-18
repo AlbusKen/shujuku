@@ -43,9 +43,27 @@ describe('世界推演 Agent 协议', () => {
     expect(parseWorldSimulationMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'macro', instruction: '分析', reads: ['$CLOCK'] }] })).toMatchObject({ kind: 'delegate' });
     expect(parseWorldSimulationPlannerOutput_ACU({ action: 'plan', summary: '已规划', plan })).toMatchObject({ action: 'plan', plan: { title: '阶段一' } });
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] }, snapshot)).toMatchObject({ status: 'candidate' });
-    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: {} }, summary: '越权', evidenceRefs: ['E1'], uncertainties: [] }, snapshot)).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
+    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '越权', evidenceRefs: ['E1'], uncertainties: [] }, snapshot)).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'finalize', outcome: 'commit', summary: '完成', evidenceRefs: [ref] })).toThrowError(/EVIDENCE_REGISTRY_REQUIRED/);
     expect(parseWorldSimulationReviewerResult_ACU({ verdict: 'revise', summary: '需修正', findings: [{ severity: 'major', reasonCode: 'TIME_GAP', path: '$.clock', expected: '连续', actual: '跳跃' }], acceptedCandidateIds: [] })).toMatchObject({ verdict: 'revise' });
+  });
+
+  it('在 specialist 边界拒绝非法模块 patch 并保留精确修正路径', () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('invalid-specialist-patch');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
+    const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    let error: unknown;
+    try {
+      parseWorldSimulationSpecialistResult_ACU({
+        status: 'candidate', agentName: 'seed-lifecycle-analyst',
+        patch: { seeds: [{ id: 'seed-1' }] }, summary: '非法种子候选', evidenceRefs: [ref], uncertainties: [],
+      }, snapshot);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(compactWorldSimulationProtocolError_ACU(error)).toMatchObject({
+      reasonCode: 'INVALID_SPECIALIST_PATCH', path: '$.patch.seeds', expected: 'object',
+    });
   });
 
   it('只对具备强语义证据的常见状态别名做受控归一化', () => {
