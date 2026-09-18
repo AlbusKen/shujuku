@@ -34,7 +34,7 @@ describe('世界推演 Agent runtime', () => {
   it('specialist 协议重试回灌明确枚举、角色、写入范围与合法 JSON 模板', async () => {
     const { registry, promptContext } = fixture('specialist-repair');
     const responses = [
-      JSON.stringify({ status: 'success', agentName: 'macro-dynamics-analyst', summary: '缺少 patch', evidenceRefs: [], uncertainties: [] }),
+      JSON.stringify({ status: 'successful', agentName: 'macro-dynamics-analyst', summary: '非法状态', evidenceRefs: [], uncertainties: [] }),
       JSON.stringify({ status: 'no_change', agentName: 'macro-dynamics-analyst', summary: '无需修改', evidenceRefs: [], uncertainties: [] }),
     ];
     const invoke = vi.fn(async () => responses.shift()!);
@@ -84,6 +84,41 @@ describe('世界推演 Agent runtime', () => {
     expect(result.outcomes.map(item => item.status)).toEqual(['candidate', 'failed', 'no_change']);
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
     expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
+  });
+
+  it('同一 specialist 后续成功结果替换旧失败，不让历史协议错误永久污染收敛', async () => {
+    const { registry, evidence, promptContext } = fixture('latest-outcome-wins');
+    const candidate = {
+      candidateId: 'candidate:latest', agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } }, summary: '重试后形成候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn()
+        .mockRejectedValueOnce(new Error('INVALID_SPECIALIST_STATUS: $.status'))
+        .mockResolvedValueOnce({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] }),
+      runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '采用最新候选', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '首次分析', reads: [] }] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '按协议重试', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交最新结果', evidenceRefs: [evidence] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-latest', chatIdentity: 'chat-latest', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-latest', stageId: 'stage-latest', stageRevision: 1 };
+
+    const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
+
+    expect(result.outcome).toBe('commit');
+    expect(result.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentName: candidate.agentName, status: 'candidate' }),
+      expect.objectContaining({ agentName: 'guidance-reviewer', status: 'no_change' }),
+    ]));
+    expect(result.outcomes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentName: candidate.agentName, status: 'failed' }),
+    ]));
+    expect(subagents.run).toHaveBeenCalledTimes(2);
   });
 
   it('存在失败派工时不允许伪装 no_change', async () => {

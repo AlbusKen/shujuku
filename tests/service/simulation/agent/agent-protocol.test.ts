@@ -53,8 +53,11 @@ describe('世界推演 Agent 协议', () => {
     const candidate = { agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] };
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'success', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'completed', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
+    expect(parseWorldSimulationSpecialistResult_ACU({ status: 'ok', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'unchanged', agentName: 'macro', summary: '无变化', evidenceRefs: [], uncertainties: [] }, snapshot)).toMatchObject({ status: 'no_change' });
     expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'success', agentName: 'macro', summary: '缺少 patch', evidenceRefs: [], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
+    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'success', agentName: 'macro', patch: {}, summary: '空 patch', evidenceRefs: [], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
+    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'unchanged', agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '冲突结构', evidenceRefs: [ref], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
   });
 
   it('block 缺少机械 unresolved 列表时从有效 reason 安全推导', () => {
@@ -75,9 +78,12 @@ describe('世界推演 Agent 协议', () => {
 
   it('主输出把多个 read/search 对象收敛为原子工具批次，并拒绝未知字段', () => {
     const output = parseWorldSimulationMainOutput_ACU(
-      '{"action":"read","reads":["$CLOCK"]}\n{"action":"search","query":"边境","scope":["world"],"maxResults":5}\n{"action":"finalize","outcome":"commit","summary":"不能混入"}',
+      '{"action":"read","reads":["ledger:current"]}\n{"action":"search","query":"边境","scope":["world"],"maxResults":5}\n{"action":"finalize","outcome":"commit","summary":"不能混入"}',
     );
     expect(output).toMatchObject({ kind: 'tools', calls: [{ kind: 'read' }, { kind: 'search', maxResults: 5 }] });
+    expect(parseWorldSimulationMainAction_ACU({ action: 'read', reads: 'ledger:current' })).toEqual({ kind: 'read', reads: ['ledger:current'] });
+    expect(parseWorldSimulationMainAction_ACU({ action: 'read', address: 'summary:current' })).toEqual({ kind: 'read', reads: ['summary:current'] });
+    expect(parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['$WORLD_LEDGER'] })).toEqual({ kind: 'read', reads: ['ledger:current'] });
     expect(parseWorldSimulationMainOutput_ACU(
       '<WORLD_SIMULATION_ENGINE_SEAM:READ>{"action":"read","reads":["ledger:current"],"evidenceRef":"evidence:run:2","purpose":"核对账本"}</WORLD_SIMULATION_ENGINE_SEAM:READ>',
     )).toEqual({ kind: 'tools', calls: [{ kind: 'read', reads: ['ledger:current'] }] });
@@ -85,7 +91,9 @@ describe('世界推演 Agent 协议', () => {
       '<WORLD_SIMULATION_ENGINE_SEAM:READ>{"address":"ledger:current"}</WORLD_SIMULATION_ENGINE_SEAM:READ>',
     )).toEqual({ kind: 'tools', calls: [{ kind: 'read', reads: ['ledger:current'] }] });
     expect(() => parseWorldSimulationMainOutput_ACU('{"address":"unknown:address"}')).toThrowError(/INVALID_ACTION/);
-    expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['$CLOCK'], extra: true })).toThrowError(/UNKNOWN_FIELD/);
+    expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['unknown:address'] })).toThrowError(/INVALID_TOOL_ADDRESS/);
+    expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: [] })).toThrowError(/REQUIRED_TEXT_LIST/);
+    expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['ledger:current'], extra: true })).toThrowError(/UNKNOWN_FIELD/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'search', query: '边境', maxResults: 0 })).toThrowError(/INVALID_MAX_RESULTS/);
   });
 

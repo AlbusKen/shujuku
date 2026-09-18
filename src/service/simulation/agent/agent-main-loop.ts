@@ -10,7 +10,7 @@ import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolIns
 import type { WorldSimulationCandidate_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
+import { compactWorldSimulationProtocolError_ACU, createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
 import { clearWorldSimulationRunState_ACU, readWorldSimulationRunState_ACU, saveWorldSimulationRunState_ACU } from './agent-run-cache';
 import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
@@ -37,6 +37,18 @@ export interface WorldSimulationMainLoopInput_ACU {
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const cursorKey_ACU = (identity: WorldSimulationRunIdentity_ACU): string => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
 const fingerprint_ACU = (outcome: WorldSimulationSubagentOutcome_ACU): string => sha256HexSync_ACU(JSON.stringify([outcome.agentName, outcome.status, outcome.summary, outcome.candidate?.candidateId])).slice(0, 24);
+
+function upsertLatestOutcome_ACU(items: WorldSimulationSubagentOutcome_ACU[], outcome: WorldSimulationSubagentOutcome_ACU): void {
+  const previous = items.findIndex(item => item.agentName === outcome.agentName);
+  if (previous >= 0) items.splice(previous, 1);
+  items.push(outcome);
+}
+
+function latestOutcomes_ACU(items: readonly WorldSimulationSubagentOutcome_ACU[]): WorldSimulationSubagentOutcome_ACU[] {
+  const latest: WorldSimulationSubagentOutcome_ACU[] = [];
+  for (const item of items) upsertLatestOutcome_ACU(latest, item);
+  return latest;
+}
 
 
 function resultContext_ACU(
@@ -69,7 +81,7 @@ export class WorldSimulationMainLoop_ACU {
   async run(input: WorldSimulationMainLoopInput_ACU): Promise<WorldSimulationMainLoopResult_ACU> {
     const cursorKey = cursorKey_ACU(input.identity);
     const resumed = readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey);
-    const outcomes: WorldSimulationSubagentOutcome_ACU[] = resumed?.subagentOutcomes ? [...resumed.subagentOutcomes] : [];
+    const outcomes = latestOutcomes_ACU(resumed?.subagentOutcomes ?? []);
     const candidates: WorldSimulationCandidate_ACU[] = resumed?.candidates ? [...resumed.candidates] : [];
     const perAgent = new Map<string, number>(Object.entries(resumed?.perAgent ?? {}));
     let delegationsUsed = resumed?.delegationsUsed ?? 0;
@@ -215,7 +227,7 @@ export class WorldSimulationMainLoop_ACU {
           const used = perAgent.get(delegation.agentName) ?? 0;
           const allowedKind = definition && (definition.kind === 'specialist' || definition.kind === 'researcher');
           if (!allowedKind || delegationsUsed + accepted.length >= input.settings.agentRunBudget.maxDelegations || used >= input.settings.agentRunBudget.maxSameAgent || accepted.length >= input.settings.agentRunBudget.maxConcurrent) {
-            outcomes.push({ agentName: delegation.agentName, status: 'failed', summary: '派工被预算或角色门禁拒绝', evidenceRefs: [], uncertainties: [], reasonCode: 'WORLD_SIMULATION_DELEGATION_REJECTED' });
+            upsertLatestOutcome_ACU(outcomes, { agentName: delegation.agentName, status: 'failed', summary: '派工被预算或角色门禁拒绝', evidenceRefs: [], uncertainties: [], reasonCode: 'WORLD_SIMULATION_DELEGATION_REJECTED' });
             continue;
           }
           accepted.push(delegation);
@@ -227,14 +239,16 @@ export class WorldSimulationMainLoop_ACU {
           try {
             return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
           } catch (error) {
-            return { agentName: delegation.agentName, status: 'failed' as const, summary: compact_ACU(error), evidenceRefs: [], uncertainties: [], reasonCode: 'WORLD_SIMULATION_SUBAGENT_FAILED' };
+            const issue = compactWorldSimulationProtocolError_ACU(error);
+            const reasonCode = issue.reasonCode === 'PROTOCOL_UNKNOWN_ERROR' ? 'WORLD_SIMULATION_SUBAGENT_FAILED' : issue.reasonCode;
+            return { agentName: delegation.agentName, status: 'failed' as const, summary: compact_ACU(error), evidenceRefs: [], uncertainties: [], reasonCode };
           }
         }));
         for (let index = 0; index < settled.length; index += 1) {
           const outcome = settled[index];
           delegationsUsed += 1;
           perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
-          outcomes.push(outcome);
+          upsertLatestOutcome_ACU(outcomes, outcome);
           if (outcome.candidate) candidates.push(outcome.candidate);
           const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
           const entryId = runningEntries.get(accepted[index])!;
@@ -329,7 +343,7 @@ export class WorldSimulationMainLoop_ACU {
         await persistEntry(blockId, `block-guidance-${iteration}`);
         return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
       }
-      outcomes.push(guidanceOutcome);
+      upsertLatestOutcome_ACU(outcomes, guidanceOutcome);
       if (guidanceOutcome.status === 'blocked' || guidanceOutcome.status === 'failed') {
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);

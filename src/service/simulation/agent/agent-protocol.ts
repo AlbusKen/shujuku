@@ -156,18 +156,41 @@ function isAuthorizedToolAddress_ACU(address: string): boolean {
     : address === allowed);
 }
 
+const LEGACY_TOOL_ADDRESS_ALIASES_ACU: Readonly<Record<string, string>> = {
+  '$WORLD_LEDGER': 'ledger:current',
+  '$CLOCK': 'ledger:current',
+  '$WORLD_SUMMARY': 'summary:current',
+};
+
+function normalizeToolAddress_ACU(value: unknown): string {
+  const address = text_ACU(value);
+  return LEGACY_TOOL_ADDRESS_ALIASES_ACU[address] ?? address;
+}
+
 function normalizeLegacyToolAction_ACU(value: Record<string, unknown>): Record<string, unknown> {
   if (text_ACU(value.action)) return value;
   const keys = Object.keys(value);
   const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
   if (keys.some(key => !allowed.has(key))) return value;
-  const address = text_ACU(value.address);
+  const address = normalizeToolAddress_ACU(value.address);
   if (address && isAuthorizedToolAddress_ACU(address)) return { action: 'read', reads: [address] };
   if (Array.isArray(value.reads)) {
-    const reads = texts_ACU(value.reads);
+    const reads = value.reads.map(normalizeToolAddress_ACU).filter(Boolean);
     if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU)) return { action: 'read', reads };
   }
   return value;
+}
+
+function normalizeReadAction_ACU(value: Record<string, unknown>): Record<string, unknown> {
+  if (text_ACU(value.action) !== 'read') return value;
+  const normalized = normalizeToolRequestMetadata_ACU(value, 'read');
+  if (normalized.reads === undefined && normalized.address !== undefined) {
+    const { address: _address, ...rest } = normalized;
+    return { ...rest, reads: [normalizeToolAddress_ACU(normalized.address)] };
+  }
+  if (typeof normalized.reads === 'string') return { ...normalized, reads: [normalizeToolAddress_ACU(normalized.reads)] };
+  if (Array.isArray(normalized.reads)) return { ...normalized, reads: normalized.reads.map(normalizeToolAddress_ACU) };
+  return normalized;
 }
 
 export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate = true, evidenceRegistry?: WorldSimulationEvidenceRegistrySnapshot_ACU): WorldSimulationMainAction_ACU {
@@ -175,8 +198,11 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
   const normalizedValue = normalizeLegacyToolAction_ACU(value);
   const action = text_ACU(normalizedValue.action);
   if (action === 'read') {
-    const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'reads']);
-    return { kind: 'read', reads: requiredList_ACU(raw.reads, '$.reads') };
+    const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
+    const reads = requiredList_ACU(raw.reads, '$.reads');
+    const invalid = reads.find(address => !isAuthorizedToolAddress_ACU(address));
+    if (invalid) fail_ACU('INVALID_TOOL_ADDRESS', '$.reads', WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | '), invalid);
+    return { kind: 'read', reads };
   }
   if (action === 'search') {
     const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
@@ -254,9 +280,10 @@ export function parseWorldSimulationPlannerOutput_ACU(value: unknown): WorldSimu
 function normalizeSpecialistStatus_ACU(value: Record<string, unknown>): Record<string, unknown> {
   const status = text_ACU(value.status);
   const hasNonEmptyPatch = isRecord_ACU(value.patch) && Object.keys(value.patch).length > 0;
-  if (['success', 'completed', 'done'].includes(status) && hasNonEmptyPatch) return { ...value, status: 'candidate' };
+  if (['success', 'completed', 'complete', 'done', 'ok'].includes(status) && hasNonEmptyPatch) return { ...value, status: 'candidate' };
   if (status === 'unchanged' && !Object.prototype.hasOwnProperty.call(value, 'patch')) return { ...value, status: 'no_change' };
-  if (status === 'error') return { ...value, status: 'failed' };
+  if (status === 'error' || status === 'failure') return { ...value, status: 'failed' };
+  if (status === 'block' && Object.prototype.hasOwnProperty.call(value, 'unresolved')) return { ...value, status: 'blocked' };
   return value;
 }
 

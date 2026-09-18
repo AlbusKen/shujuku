@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
-import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU } from '../../../../src/service/simulation/model';
 import { createWorldSimulationPlaceholderResolvers_ACU } from '../../../../src/service/simulation/agent/agent-placeholder-resolver';
 import { parseWorldSimulationMainAction_ACU, parseWorldSimulationPlannerOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU } from '../../../../src/service/simulation/agent/agent-protocol';
@@ -46,6 +46,17 @@ describe('世界推演提示词装配契约', () => {
     expect(parseWorldSimulationPlannerOutput_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner)).toMatchObject({ action: 'plan' });
     expect(parseWorldSimulationSpecialistResult_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.specialist, snapshot)).toMatchObject({ status: 'candidate' });
     expect(parseWorldSimulationReviewerResult_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer)).toMatchObject({ verdict: 'accept' });
+  });
+
+  it('director 协议明确无直接写权限是职责隔离，并要求空账本通过 specialist 初始化', () => {
+    const instruction = worldSimulationDirectorProtocolInstruction_ACU();
+    const directorPrompt = buildDefaultWorldSimulationAgentPrompts_ACU()['world-director'].map(item => item.content).join('\n');
+    expect(instruction).toContain('writableModules=[] 是职责隔离，不是权限故障或阻断条件');
+    expect(instruction).toContain('revision=0');
+    expect(instruction).toContain('必须 delegate 给有对应 writableModules 的 specialist');
+    expect(instruction).toContain('历史会话中的 MISSING_FIELD、REQUIRED_TEXT_LIST、INVALID_SPECIALIST_STATUS');
+    expect(instruction).toContain('"reads":["ledger:current","summary:current"]');
+    expect(directorPrompt).toContain('你没有直接 ledger patch 权限，但拥有取证、派工、审核与收敛权限；这不是故障');
   });
 
   it('规划协议指令固化账本模块白名单并禁止历史遗留命名', () => {
