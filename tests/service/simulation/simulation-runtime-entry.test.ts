@@ -8,10 +8,34 @@ import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 const start = vi.fn(async () => ({ status: 'skipped' as const, reason: 'disabled' as const }));
 const resume = vi.fn(async () => ({ status: 'skipped' as const, reason: 'duplicate' as const }));
 const cancel = vi.fn(() => true);
-const orchestrator = { start, resume, cancel } as any;
+let inFlight = false;
+const isInFlight = vi.fn(() => inFlight);
+const interrupt = vi.fn(async () => { const was = inFlight; inFlight = false; return was; });
+const deriveEnvelopeView = vi.fn((envelope: any) => {
+  const task = envelope?.task;
+  if (!envelope || !task || !['drafting', 'running', 'stopping_after_inflight'].includes(task.status) || inFlight) return envelope;
+  return { ...envelope, task: { ...task, status: 'paused', stopReason: 'interrupted' } };
+});
+const orchestrator = { start, resume, cancel, isInFlight, interrupt, deriveEnvelopeView } as any;
+
+const stagePlan = { schemaVersion: 1 as const, title: 'p', objective: 'o', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: [], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '' };
+
+function pausedEnvelope(anchor: ReturnType<typeof resolveWorldSimulationAnchor_ACU>, status: 'paused' | 'running' = 'paused') {
+  const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+  const identity = {
+    runId: 'run', chatIdentity: 'chat-a', triggerKind: 'agent_chat_message' as const, triggerConversationMessageId: 'turn-1',
+    anchorMessageId: anchor.messageId, anchorMessageKey: anchor.messageKey, anchorSwipeId: anchor.swipeId,
+    anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1,
+  };
+  envelope.task = { taskId: 'task', originInstruction: '推进', status, createdAt: 1, updatedAt: 1, activeRun: identity, stopReason: status === 'paused' ? 'manual' : null };
+  envelope.activeStageId = 'stage';
+  envelope.stages = [{ stageId: 'stage', stageNumber: 1, status: 'running', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: stagePlan }] }];
+  return { envelope, identity };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
+  inFlight = false;
   resetWorldSimulationSessionLogForTests_ACU();
   _set_SillyTavern_API_ACU(undefined);
 });
@@ -144,5 +168,143 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
 
     expect(saveChat).toHaveBeenCalledTimes(1);
     expect(chat[0]._qrf_world_simulation).toMatchObject({ settings: { autoTriggerEnabled: false }, task: null, ledger: { revision: 0 } });
+  });
+
+  it('在途时发送会先打断并等待结算，再按同锚点带指令恢复同一 run', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    chat[0]._qrf_world_simulation = pausedEnvelope(anchor, 'running').envelope;
+    inFlight = true;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await runtime.sendAgentMessage('把边境压力调高', 'turn-2');
+
+    expect(interrupt).toHaveBeenCalledWith('chat-a');
+    expect(interrupt.mock.invocationCallOrder[0]).toBeLessThan(resume.mock.invocationCallOrder[0]);
+    expect(resume).toHaveBeenCalledWith({ anchor, instruction: '把边境压力调高' });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('paused 任务锚点仍是最新 assistant 时，任意文本都恢复同一 run 而不新建任务', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }, { is_user: true, mes: '用户又说了一句' }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    chat[0]._qrf_world_simulation = pausedEnvelope(anchor).envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await runtime.sendAgentMessage('补充：北境是重点', 'turn-2');
+
+    expect(resume).toHaveBeenCalledWith({ anchor, instruction: '补充：北境是重点' });
+    expect(start).not.toHaveBeenCalled();
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it('paused 任务的锚点已不是最新 assistant 时，发送走 start 取代旧任务', async () => {
+    const chat: any[] = [
+      { is_user: false, message_id: 7, mes: 'old anchor', swipe_id: 0 },
+      { is_user: true, mes: 'user' },
+      { is_user: false, message_id: 8, mes: 'new assistant', swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const oldAnchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    chat[0]._qrf_world_simulation = pausedEnvelope(oldAnchor).envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await runtime.sendAgentMessage('推进新楼层', 'turn-3');
+
+    expect(resume).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ triggerKind: 'agent_chat_message', instruction: '推进新楼层', anchor: expect.objectContaining({ messageIndex: 2, messageId: 8 }) }));
+  });
+
+  it('paused 任务的锚点楼层已被删除时，快照不再整体失败，发送按最新 assistant 新建运行', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const staleIdentity = { ...pausedEnvelope(anchor).identity, anchorContentDigest: 'digest-of-deleted-floor', anchorMessageKey: 'number:99' };
+    const { envelope } = pausedEnvelope(anchor);
+    envelope.task!.activeRun = staleIdentity;
+    chat[0]._qrf_world_simulation = envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    const snapshot = runtime.readUiSnapshot();
+    expect(snapshot.anchor).toMatchObject({ messageIndex: 0, messageId: 7 });
+    await runtime.sendAgentMessage('重新推演', 'turn-4');
+    expect(resume).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ instruction: '重新推演', anchor: expect.objectContaining({ messageId: 7 }) }));
+  });
+
+  it('僵死 running（无在途 controller）在 UI 快照中派生为 paused/interrupted', () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    chat[0]._qrf_world_simulation = pausedEnvelope(anchor, 'running').envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    expect(runtime.readUiSnapshot().envelope?.task).toMatchObject({ status: 'paused', stopReason: 'interrupted' });
+    expect(chat[0]._qrf_world_simulation.task.status).toBe('running');
+  });
+
+  it('paused（含 blocked）任务允许保存设置；在途时以 retryable 冲突拒绝', async () => {
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    chat[0]._qrf_world_simulation = pausedEnvelope(anchor).envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+    const settings = buildDefaultWorldSimulationSettings_ACU();
+    settings.agentRunBudget.maxIterations = 7;
+
+    await runtime.saveSettings(settings);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+    expect(chat[0]._qrf_world_simulation).toMatchObject({ settings: { agentRunBudget: { maxIterations: 7 } }, task: { status: 'paused', activeRun: { runId: 'run' } } });
+
+    inFlight = true;
+    await expect(runtime.saveSettings(settings)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', retryable: true } });
+    expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('一键清空重置信封与账本、删除各楼层分桶字段、保留设置，并拒绝在途时清空', async () => {
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    const chat: any[] = [
+      { is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0, _qrf_world_simulation_state: { schemaVersion: 1, entries: {} }, _qrf_world_simulation_agent_run: { x: 1 } },
+      { is_user: true, mes: 'user' },
+      { is_user: false, message_id: 8, mes: 'assistant 2', swipe_id: 0, _qrf_world_simulation_agent_chat: { schemaVersion: 1, entries: {} }, _qrf_world_simulation_agent_materials: { schemaVersion: 1, entries: {} } },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const { envelope } = pausedEnvelope(anchor);
+    envelope.settings.autoTriggerEnabled = false;
+    envelope.ledger = { ...envelope.ledger, revision: 3 };
+    chat[0]._qrf_world_simulation = envelope;
+    beginWorldSimulationSessionRun_ACU('chat-a', '运行');
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    inFlight = true;
+    await expect(runtime.clearData()).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(saveChat).not.toHaveBeenCalled();
+
+    inFlight = false;
+    await expect(runtime.clearData()).resolves.toEqual({ clearedFloors: 2 });
+    expect(chat[0]._qrf_world_simulation).toMatchObject({ settings: { autoTriggerEnabled: false }, task: null, stages: [], activeStageId: null, timeline: [], lastError: null, ledger: { revision: 0 } });
+    for (const message of chat) {
+      expect(message).not.toHaveProperty('_qrf_world_simulation_state');
+      expect(message).not.toHaveProperty('_qrf_world_simulation_agent_run');
+      expect(message).not.toHaveProperty('_qrf_world_simulation_agent_chat');
+      expect(message).not.toHaveProperty('_qrf_world_simulation_agent_materials');
+    }
+    expect(chat[0].mes).toBe('anchor');
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    expect(runtime.readUiSnapshot().session).toMatchObject({ entries: [], running: false });
+  });
+
+  it('stop 等待编排器结算并返回是否确有在途运行', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a' } as any);
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+    inFlight = true;
+    await expect(runtime.stop()).resolves.toBe(true);
+    expect(interrupt).toHaveBeenCalledWith('chat-a');
+    await expect(runtime.stop()).resolves.toBe(false);
   });
 });

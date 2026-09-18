@@ -53,10 +53,6 @@ vi.mock('../../../src/presentation-v2/components/WorldbookAgentControlBar.vue', 
     template: '<div />',
   }),
 }));
-vi.mock('../../../src/presentation-v2/components/WorldSimulationWorkspace.vue', () => ({
-  default: defineComponent({ template: '<section data-world-simulation-workspace>世界推演 Agent 会话</section>' }),
-}));
-
 afterEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
@@ -73,7 +69,9 @@ describe('AgentPage', () => {
     await Promise.resolve();
 
     expect(el.textContent).toContain('Agent 世界书');
-    expect(el.textContent).toContain('世界推演 Agent 会话');
+    // 世界推演有独立的「世界推演」功能页；Agent 世界书页不再嵌入其工作区，右列保留空占位。
+    expect(el.textContent).not.toContain('世界推演');
+    expect(el.querySelector('.acu-panel-grid > [aria-hidden="true"]')).not.toBeNull();
     expect(el.textContent).toContain('Skill 全选');
     const toolbarButtons = Array.from(el.querySelectorAll<HTMLButtonElement>('.acu-v2-wb-entry-toolbar .acu-btn'))
       .map(button => button.textContent?.trim());

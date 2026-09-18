@@ -4,6 +4,8 @@
       <span class="acu-v2-agent-chat__badge" :class="`acu-v2-agent-chat__badge--${statusTone}`">{{ statusText }}</span>
       <span class="acu-v2-agent-chat__status-item">{{ stageText }}</span>
       <span v-if="revisionText" class="acu-v2-agent-chat__status-item">计划 {{ revisionText }}</span>
+      <!-- 冻结锚点：本轮推演写入的 assistant 楼层与 swipe，运行中不随新增楼层漂移。 -->
+      <span v-if="anchorText" class="acu-v2-agent-chat__status-item">锚点 {{ anchorText }}</span>
     </div>
 
     <WorldSimulationSessionFeed :entries="entries" :running="running" />
@@ -46,6 +48,7 @@ const props = defineProps<{
   statusText: string;
   stageText: string;
   revisionText: string;
+  anchorText: string;
 }>();
 
 const emit = defineEmits<{

@@ -67,6 +67,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
 
 const props = defineProps<{
   entries: WorldSimulationSessionEntry_ACU[];
@@ -110,10 +111,10 @@ const KIND_LABELS: Record<WorldSimulationSessionEntry_ACU['kind'], string> = {
   run_completed: '完成',
 };
 
-/** 会话流展示沿用世界推演角色目录的内部名；暂无中文展示名映射，先透出内部名。 */
+/** 会话流展示沿用「各 Agent 渠道」里的中文角色名，内部 agentName 不直接暴露给用户（与 ContinuationSessionFeed 同构）。 */
 function kindLabel(entry: WorldSimulationSessionEntry_ACU): string {
   if ((entry.kind === 'delegation' || entry.kind === 'stage_plan') && entry.agentName) {
-    return entry.agentName;
+    return worldSimulationAgentLabel_ACU(entry.agentName);
   }
   return KIND_LABELS[entry.kind];
 }
