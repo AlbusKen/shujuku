@@ -9,6 +9,30 @@ export const WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU = 1 as const;
 
 export interface WorldSimulationAnchorIdentity_ACU { chatIdentity: string; messageIndex: number; messageId: string | number; messageKey: string; swipeId: string; contentDigest: string; }
 export interface WorldSimulationBucketEntry_ACU<T> { anchor: WorldSimulationAnchorIdentity_ACU; value: T; updatedAt: number; }
+export const WORLD_SIMULATION_RUN_STATE_FIELD_ACU = '_qrf_world_simulation_agent_run';
+export const WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU = 1 as const;
+export interface WorldSimulationRunResumeState_ACU {
+  taskId: string;
+  cursorKey: string;
+  nextIteration: number;
+  delegationsUsed: number;
+  perAgent: Record<string, number>;
+  outcomes: WorldSimulationRunOutcome_ACU[];
+  candidateFingerprint: string;
+  candidateSummary: string;
+  reviewerFeedback: string;
+  candidates?: WorldSimulationCandidate_ACU[];
+  subagentOutcomes?: WorldSimulationSubagentOutcome_ACU[];
+  evidenceSnapshot?: import('../world-simulation-evidence-registry').WorldSimulationEvidenceRegistrySnapshot_ACU;
+}
+export interface WorldSimulationRunStateRecord_ACU {
+  schemaVersion: typeof WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU;
+  taskId: string;
+  cursorKey: string;
+  updatedAt: number;
+  state: WorldSimulationRunResumeState_ACU;
+}
+
 export interface WorldSimulationBucket_ACU<T> { schemaVersion: typeof WORLD_SIMULATION_BUCKET_SCHEMA_VERSION_ACU; entries: Record<string, WorldSimulationBucketEntry_ACU<T>>; }
 
 export const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff'] as const;

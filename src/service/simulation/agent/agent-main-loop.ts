@@ -8,11 +8,13 @@ import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPreset
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
+import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
 import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { compactWorldSimulationProtocolError_ACU, createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
 import { clearWorldSimulationRunState_ACU, readWorldSimulationRunState_ACU, saveWorldSimulationRunState_ACU } from './agent-run-cache';
+import { persistWorldSimulationRunState_ACU, restoreWorldSimulationRunState_ACU, clearWorldSimulationRunStateAtAnchor_ACU } from './agent-run-state-store';
 import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
@@ -32,6 +34,8 @@ export interface WorldSimulationMainLoopInput_ACU {
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
   persistSessionEvent?: (eventKey: string, event: WorldSimulationSessionInput_ACU) => Promise<unknown>;
+  anchor?: WorldSimulationAnchorIdentity_ACU;
+  chat?: any[];
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -133,14 +137,29 @@ export class WorldSimulationMainLoop_ACU {
   async run(input: WorldSimulationMainLoopInput_ACU): Promise<WorldSimulationMainLoopResult_ACU> {
     const cursorKey = cursorKey_ACU(input.identity);
     const resumed = readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey);
-    if (resumed?.evidenceSnapshot) {
-      mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumed.evidenceSnapshot);
+    const anchorState = input.anchor && !resumed
+      ? await restoreWorldSimulationRunState_ACU(input.anchor, input.identity.taskId, cursorKey, input.chat)
+      : null;
+    // 楼层记录与内存缓存语义等价：优先内存（活跃 run），楼层回退覆盖重启恢复。
+    const resumedState = resumed ?? anchorState;
+    if (resumedState?.evidenceSnapshot) {
+      mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumedState.evidenceSnapshot);
     }
-    const outcomes = latestOutcomes_ACU(resumed?.subagentOutcomes ?? []);
-    const candidates: WorldSimulationCandidate_ACU[] = resumed?.candidates ? [...resumed.candidates] : [];
-    const perAgent = new Map<string, number>(Object.entries(resumed?.perAgent ?? {}));
-    let delegationsUsed = resumed?.delegationsUsed ?? 0;
-    let iteration = Math.max(1, resumed?.nextIteration ?? 1);
+    // 预算窗口重置：恢复时持久化 nextIteration 已达上限且没有可继续的进度（无候选且无派工结果），
+    // 说明这是"预算耗尽后继续"而非正常推进；迭代与派工窗口重新起算，候选与证据全量保留。
+    // "iteration budget exhausted" 是预算耗尽终局 persist 的专属标记；恢复时命中即代表
+    // 用户显式要求以新窗口继续，迭代与派工预算全额重置，候选与证据保留。
+    const budgetExhausted = !!resumedState
+      && (resumedState.nextIteration > input.settings.agentRunBudget.maxIterations
+        || resumedState.reviewerFeedback === 'iteration budget exhausted');
+    const iterationStart = budgetExhausted ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
+    const delegationsStart = budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
+    const outcomes = latestOutcomes_ACU(resumedState?.subagentOutcomes ?? []);
+    const candidates: WorldSimulationCandidate_ACU[] = resumedState?.candidates ? [...resumedState.candidates] : [];
+    const perAgent = new Map<string, number>(Object.entries(resumedState?.perAgent ?? {}));
+    let delegationsUsed = delegationsStart;
+    let iteration = iterationStart;
+
     const transcript: Array<{ role: string; content: string }> = [];
     const director = 'world-director' as const;
     // Director may correct several different mechanical fields in sequence; repeated identical
@@ -160,13 +179,15 @@ export class WorldSimulationMainLoop_ACU {
     };
     const runEntryId = beginWorldSimulationSessionRun_ACU(
       input.identity.chatIdentity, '世界推演 Agent 运行',
-      resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed,
+      budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`,
+      !!resumedState,
     );
-    await persistEntry(runEntryId, resumed ? 'run-resumed' : 'run-started');
+    await persistEntry(runEntryId, resumedState ? 'run-resumed' : 'run-started');
+
 
     const persist = (nextIteration: number, reviewerFeedback = ''): void => {
       const unique = uniqueCandidates_ACU(candidates);
-      saveWorldSimulationRunState_ACU(input.identity.chatIdentity, {
+      const state = {
         taskId: input.identity.taskId,
         cursorKey,
         nextIteration,
@@ -179,7 +200,13 @@ export class WorldSimulationMainLoop_ACU {
         candidates: unique,
         subagentOutcomes: outcomes,
         evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
-      });
+      };
+      saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
+      if (input.anchor) {
+        void persistWorldSimulationRunState_ACU(input.anchor, state, input.chat).catch(() => {
+          // 楼层持久化失败不阻断运行；内存缓存已保存，下一次 persist 会重试落盘。
+        });
+      }
     };
 
 
@@ -333,7 +360,7 @@ export class WorldSimulationMainLoop_ACU {
           transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: 'no_change 未满足门禁：必须有授权证据，且已有派工结果全部为 no_change，不得存在候选、失败或 blocked。请继续取证或输出 blocked。' });
           continue;
         }
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
         const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: '世界推演无变化', detail: action.summary, agentName: director });
         await persistEntry(completedId, 'run-completed-no-change');
         return { outcome: 'no_change', summary: action.summary, outcomes };
@@ -426,7 +453,7 @@ export class WorldSimulationMainLoop_ACU {
       }
       const finalCandidates = guidanceOutcome.candidate ? [...acceptedCandidates, guidanceOutcome.candidate] : acceptedCandidates;
       const evidenceRefs = [...new Set([...causalEvidenceRefs, ...guidanceOutcome.evidenceRefs])];
-      clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+      await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
       const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs, reviewer };
       const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
       await persistEntry(completedId, 'run-completed-commit');

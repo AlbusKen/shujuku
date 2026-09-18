@@ -4,6 +4,8 @@ import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/ser
 import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { WorldSimulationMainLoop_ACU } from '../../../../src/service/simulation/agent/agent-main-loop';
 import { readWorldSimulationRunState_ACU, resetWorldSimulationRunCacheForTests_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
+import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simulation/simulation-store';
+import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
@@ -576,5 +578,100 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).not.toHaveBeenCalled();
     expect(subagents.runGuidanceReviewer).not.toHaveBeenCalled();
+  });
+
+  it('重启后内存清空，从锚点楼层恢复候选与证据直接提交', async () => {
+    const { registry, evidence, promptContext } = fixture('floor-resume');
+    const chat: any[] = [{ message_id: 1, mes: '锚点正文', swipe_id: 0, is_user: false, is_system: false }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-floor-resume', getCurrentChatId: () => 'chat-floor-resume', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const candidate = {
+      candidateId: 'candidate:floor-resume', agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } }, summary: '楼层恢复候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '楼层恢复后通过', findings: [], acceptedCandidateIds: candidates.map((item: any) => item.candidateId) })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
+      JSON.stringify({ action: 'block', reason: '等待继续', unresolved: ['用户确认'] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = {
+      runId: 'run-floor-resume', chatIdentity: 'chat-floor-resume', triggerKind: 'agent_chat_message' as const,
+      triggerConversationMessageId: 'turn-1', anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 4,
+      taskId: 'task-floor-resume', stageId: 'stage-floor-resume', stageRevision: 2,
+    };
+    const runSettings = settings();
+
+    await expect(loop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
+      .resolves.toMatchObject({ outcome: 'blocked', summary: '等待继续' });
+    // 等楼层持久化（fire-and-forget）完成后模拟重启：清空内存缓存与证据注册表。
+    await new Promise(resolve => setTimeout(resolve, 0));
+    resetWorldSimulationRunCacheForTests_ACU();
+    const resumedRegistry = createWorldSimulationEvidenceRegistry_ACU(registry.runId);
+    expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries).toHaveLength(0);
+
+    const resumedLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '楼层恢复后提交', evidenceRefs: [evidence] })), subagents, apiPreset, countTokens: async () => 1 });
+    const result = await resumedLoop.run({ identity, settings: runSettings, promptContext, registry: resumedRegistry, tools, anchor, chat });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '楼层恢复后提交' });
+    expect(subagents.run).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
+    expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries.some(entry => entry.evidenceRef === evidence)).toBe(true);
+    _set_SillyTavern_API_ACU(undefined);
+  });
+
+  it('预算耗尽后继续时重置迭代与派工窗口并保留候选', async () => {
+    const { registry, evidence, promptContext } = fixture('budget-reset-resume');
+    const chat: any[] = [{ message_id: 1, mes: '锚点正文', swipe_id: 0, is_user: false, is_system: false }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-budget-resume', getCurrentChatId: () => 'chat-budget-resume', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const candidate = {
+      candidateId: 'candidate:budget-resume', agentName: 'macro-dynamics-analyst',
+      patch: { clock: { elapsed: '1h' } }, summary: '预算重置候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '预算重置后通过', findings: [], acceptedCandidateIds: candidates.map((item: any) => item.candidateId) })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 2;
+    const identity = {
+      runId: 'run-budget-resume', chatIdentity: 'chat-budget-resume', triggerKind: 'agent_chat_message' as const,
+      triggerConversationMessageId: 'turn-1', anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 6,
+      taskId: 'task-budget-resume', stageId: 'stage-budget-resume', stageRevision: 3,
+    };
+
+    // 第一段：仅做一次读取即耗尽迭代预算，形成 'iteration budget exhausted' 恢复标记。
+    const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action:'read', reads: ['$CLOCK'] })), subagents, apiPreset, countTokens: async () => 1 });
+    await expect(firstLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
+      .resolves.toMatchObject({ outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    resetWorldSimulationRunCacheForTests_ACU();
+
+    // 第二段：模拟重启后恢复，预算窗口重置、候选与证据保留，可以继续派工直至提交。
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '继续推进', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '预算重置后提交', evidenceRefs: [evidence] }),
+    ];
+    const resumedLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const result = await resumedLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '预算重置后提交' });
+    expect(subagents.run).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
+    _set_SillyTavern_API_ACU(undefined);
   });
 });

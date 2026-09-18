@@ -129489,7 +129489,7 @@ $CONTENT
      * 所有写入都是全量校验后一次性生效的事务：任一条目不合规就拒绝整份 delta，
      * 绝不做部分落盘。核心防线是「漏写不等于删除」——删除必须显式 retire 并给出理由。
      */
-    function reject_ACU$4(message, details) {
+    function reject_ACU$5(message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
     }
     function collectTouchedModules_ACU(delta) {
@@ -129507,12 +129507,12 @@ $CONTENT
     function assertWritePermission_ACU(delta, allowedWrites) {
         for (const module of collectTouchedModules_ACU(delta)) {
             if (!allowedWrites.includes(module)) {
-                reject_ACU$4(`子代理试图写入未授权模块：${module}`, { module, allowedWrites: [...allowedWrites] });
+                reject_ACU$5(`子代理试图写入未授权模块：${module}`, { module, allowedWrites: [...allowedWrites] });
             }
         }
         for (const key of Object.keys(delta.expectedRevisions)) {
             if (!isAgentWritableModule_ACU(key))
-                reject_ACU$4(`expectedRevisions 含非法模块名：${key}`, { key });
+                reject_ACU$5(`expectedRevisions 含非法模块名：${key}`, { key });
         }
     }
     function assertExpectedRevisions_ACU(delta, snapshot) {
@@ -129522,7 +129522,7 @@ $CONTENT
             if (expected === undefined)
                 continue;
             if (expected !== snapshot.revisions[module]) {
-                reject_ACU$4(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module] });
+                reject_ACU$5(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module] });
             }
         }
     }
@@ -129544,18 +129544,18 @@ $CONTENT
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const item of items) {
             if (!item.id.trim())
-                reject_ACU$4('伏笔条目缺少 id');
+                reject_ACU$5('伏笔条目缺少 id');
             if (item.action === 'retire') {
                 const current = byId.get(item.id);
                 if (!current)
-                    reject_ACU$4(`retire 的伏笔不存在：${item.id}`, { id: item.id });
+                    reject_ACU$5(`retire 的伏笔不存在：${item.id}`, { id: item.id });
                 if (!item.reason.trim())
-                    reject_ACU$4(`retire 伏笔 ${item.id} 必须给出理由`, { id: item.id });
+                    reject_ACU$5(`retire 伏笔 ${item.id} 必须给出理由`, { id: item.id });
                 byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
                 continue;
             }
             if (!item.summary.trim())
-                reject_ACU$4(`伏笔 ${item.id} 的 summary 不能为空`, { id: item.id });
+                reject_ACU$5(`伏笔 ${item.id} 的 summary 不能为空`, { id: item.id });
             const previous = byId.get(item.id);
             byId.set(item.id, {
                 id: item.id,
@@ -129576,9 +129576,9 @@ $CONTENT
         for (const patch of patches) {
             const current = byId.get(patch.id);
             if (!current)
-                reject_ACU$4(`patch 的伏笔不存在：${patch.id}`, { id: patch.id });
+                reject_ACU$5(`patch 的伏笔不存在：${patch.id}`, { id: patch.id });
             if (current.retired)
-                reject_ACU$4(`伏笔 ${patch.id} 已退役，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+                reject_ACU$5(`伏笔 ${patch.id} 已退役，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
             byId.set(patch.id, {
                 ...current,
                 summary: patch.summary ?? current.summary,
@@ -129594,24 +129594,24 @@ $CONTENT
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const item of items) {
             if (!item.id.trim())
-                reject_ACU$4('信息差条目缺少 id');
+                reject_ACU$5('信息差条目缺少 id');
             if (item.action === 'retire') {
                 const current = byId.get(item.id);
                 if (!current)
-                    reject_ACU$4(`retire 的信息差条目不存在：${item.id}`, { id: item.id });
+                    reject_ACU$5(`retire 的信息差条目不存在：${item.id}`, { id: item.id });
                 if (!item.reason.trim())
-                    reject_ACU$4(`retire 信息差条目 ${item.id} 必须给出理由`, { id: item.id });
+                    reject_ACU$5(`retire 信息差条目 ${item.id} 必须给出理由`, { id: item.id });
                 byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
                 continue;
             }
             if (!item.topic.trim())
-                reject_ACU$4(`信息差条目 ${item.id} 的 topic 不能为空`, { id: item.id });
+                reject_ACU$5(`信息差条目 ${item.id} 的 topic 不能为空`, { id: item.id });
             // 未揭示的事件不允许携带揭示楼层，否则等于把计划写成了已发生事实。
             if (item.revealStatus === 'unrevealed' && item.revealIndex !== null) {
-                reject_ACU$4(`信息差条目 ${item.id} 标记为未揭示，揭示楼层必须为空`, { id: item.id, revealIndex: item.revealIndex });
+                reject_ACU$5(`信息差条目 ${item.id} 标记为未揭示，揭示楼层必须为空`, { id: item.id, revealIndex: item.revealIndex });
             }
             if (item.revealStatus !== 'unrevealed' && item.revealIndex === null) {
-                reject_ACU$4(`信息差条目 ${item.id} 已揭示，必须给出揭示楼层`, { id: item.id });
+                reject_ACU$5(`信息差条目 ${item.id} 已揭示，必须给出揭示楼层`, { id: item.id });
             }
             byId.set(item.id, {
                 id: item.id,
@@ -129633,9 +129633,9 @@ $CONTENT
         for (const patch of patches) {
             const current = byId.get(patch.id);
             if (!current)
-                reject_ACU$4(`patch 的信息差条目不存在：${patch.id}`, { id: patch.id });
+                reject_ACU$5(`patch 的信息差条目不存在：${patch.id}`, { id: patch.id });
             if (current.retired)
-                reject_ACU$4(`信息差条目 ${patch.id} 已退役，不可 patch`, { id: patch.id });
+                reject_ACU$5(`信息差条目 ${patch.id} 已退役，不可 patch`, { id: patch.id });
             const merged = {
                 ...current,
                 topic: patch.topic ?? current.topic,
@@ -129647,10 +129647,10 @@ $CONTENT
             };
             // 合并结果必须满足与 upsert 相同的一致性规则：把计划写成事实的典型症状在 patch 路径同样要拦。
             if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null) {
-                reject_ACU$4(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
+                reject_ACU$5(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
             }
             if (merged.revealStatus !== 'unrevealed' && merged.revealIndex === null) {
-                reject_ACU$4(`信息差条目 ${patch.id} patch 后已揭示，必须给出揭示楼层`, { id: patch.id });
+                reject_ACU$5(`信息差条目 ${patch.id} patch 后已揭示，必须给出揭示楼层`, { id: patch.id });
             }
             byId.set(patch.id, merged);
         }
@@ -129663,7 +129663,7 @@ $CONTENT
     function assertSingleActiveStoryScope_ACU(entries) {
         const active = entries.filter(entry => entry.scope === 'story' && !entry.retired);
         if (active.length > 1) {
-            reject_ACU$4(`全书方向（scope=story）只能有一条活跃条目，当前会变成 ${active.length} 条：${active.map(entry => entry.id).join('、')}。修订全书方向请 patch 既有条目，或在同一份写集里先 retire 旧条目`, { ids: active.map(entry => entry.id) });
+            reject_ACU$5(`全书方向（scope=story）只能有一条活跃条目，当前会变成 ${active.length} 条：${active.map(entry => entry.id).join('、')}。修订全书方向请 patch 既有条目，或在同一份写集里先 retire 旧条目`, { ids: active.map(entry => entry.id) });
         }
     }
     function hasVolumeContractField_ACU(entry) {
@@ -129677,25 +129677,25 @@ $CONTENT
     }
     function assertCompleteVolumeContract_ACU(volume, context) {
         if (!volume.narrativeRole)
-            reject_ACU$4(`卷台阶 ${volume.id} 缺少 narrativeRole`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 narrativeRole`, { id: volume.id, context });
         if (!volume.targetStageRange)
-            reject_ACU$4(`卷台阶 ${volume.id} 缺少 targetStageRange`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 targetStageRange`, { id: volume.id, context });
         if (!Number.isInteger(volume.targetStageRange.min) || !Number.isInteger(volume.targetStageRange.max)
             || volume.targetStageRange.min < 1 || volume.targetStageRange.max < volume.targetStageRange.min) {
-            reject_ACU$4(`卷台阶 ${volume.id} 的 targetStageRange 必须是 min≥1 且 max≥min 的整数范围`, { id: volume.id, context, targetStageRange: volume.targetStageRange });
+            reject_ACU$5(`卷台阶 ${volume.id} 的 targetStageRange 必须是 min≥1 且 max≥min 的整数范围`, { id: volume.id, context, targetStageRange: volume.targetStageRange });
         }
         if (!volume.targetTimeSpan?.trim())
-            reject_ACU$4(`卷台阶 ${volume.id} 缺少 targetTimeSpan`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 targetTimeSpan`, { id: volume.id, context });
         if (!volume.progressCeiling?.trim())
-            reject_ACU$4(`卷台阶 ${volume.id} 缺少 progressCeiling`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 progressCeiling`, { id: volume.id, context });
         if (!volume.sustainingThreads?.length)
-            reject_ACU$4(`卷台阶 ${volume.id} 至少需要一条 sustainingThreads`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 至少需要一条 sustainingThreads`, { id: volume.id, context });
         if (volume.sustainingThreads.some(thread => !thread.trim()))
-            reject_ACU$4(`卷台阶 ${volume.id} 的 sustainingThreads 不得包含空项`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 的 sustainingThreads 不得包含空项`, { id: volume.id, context });
         if (!volume.payoffTargets?.length)
-            reject_ACU$4(`卷台阶 ${volume.id} 至少需要一条 payoffTargets`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 至少需要一条 payoffTargets`, { id: volume.id, context });
         if (volume.payoffTargets.some(target => !target.trim()))
-            reject_ACU$4(`卷台阶 ${volume.id} 的 payoffTargets 不得包含空项`, { id: volume.id, context });
+            reject_ACU$5(`卷台阶 ${volume.id} 的 payoffTargets 不得包含空项`, { id: volume.id, context });
     }
     function assertVolumeCompletionContract_ACU(volume) {
         if (!volume.targetStageRange)
@@ -129704,16 +129704,16 @@ $CONTENT
         const stageCount = volume.stageNumbers.length;
         const withinTarget = stageCount >= volume.targetStageRange.min && stageCount <= volume.targetStageRange.max;
         if (!withinTarget && !volume.completionRationale?.trim()) {
-            reject_ACU$4(`卷台阶 ${volume.id} 实际承载 ${stageCount} 个阶段，偏离目标 ${volume.targetStageRange.min}–${volume.targetStageRange.max} 时必须给出 completionRationale`, { id: volume.id, stageCount, targetStageRange: volume.targetStageRange });
+            reject_ACU$5(`卷台阶 ${volume.id} 实际承载 ${stageCount} 个阶段，偏离目标 ${volume.targetStageRange.min}–${volume.targetStageRange.max} 时必须给出 completionRationale`, { id: volume.id, stageCount, targetStageRange: volume.targetStageRange });
         }
         for (const target of volume.payoffTargets ?? []) {
             if (!volume.completionState.includes(target)) {
-                reject_ACU$4(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 payoffTargets 的兑现证据：${target}`, { id: volume.id, target });
+                reject_ACU$5(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 payoffTargets 的兑现证据：${target}`, { id: volume.id, target });
             }
         }
         for (const thread of volume.sustainingThreads ?? []) {
             if (!volume.completionState.includes(thread)) {
-                reject_ACU$4(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 sustainingThreads 的完成、转入后续卷或 retire 去向：${thread}`, { id: volume.id, thread });
+                reject_ACU$5(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 sustainingThreads 的完成、转入后续卷或 retire 去向：${thread}`, { id: volume.id, thread });
             }
         }
     }
@@ -129722,7 +129722,7 @@ $CONTENT
             if (entry.retired || !hasVolumeContractField_ACU(entry))
                 continue;
             if (entry.scope !== 'volume') {
-                reject_ACU$4(`全书方向 ${entry.id} 不得携带卷级容量字段`, { id: entry.id, scope: entry.scope });
+                reject_ACU$5(`全书方向 ${entry.id} 不得携带卷级容量字段`, { id: entry.id, scope: entry.scope });
             }
             assertCompleteVolumeContract_ACU(entry, 'new');
         }
@@ -129740,37 +129740,37 @@ $CONTENT
                 continue;
             const newlyRegistered = volume.stageNumbers.filter(stageNumber => !prior.stageNumbers.includes(stageNumber));
             if (newlyRegistered.length && prior.status !== 'active') {
-                reject_ACU$4(`阶段进度只能登记到当前 active 卷，卷 ${volume.id} 在改写前状态为 ${prior.status}`, { id: volume.id, priorStatus: prior.status, stageNumbers: newlyRegistered });
+                reject_ACU$5(`阶段进度只能登记到当前 active 卷，卷 ${volume.id} 在改写前状态为 ${prior.status}`, { id: volume.id, priorStatus: prior.status, stageNumbers: newlyRegistered });
             }
             for (const stageNumber of newlyRegistered) {
                 if (!completedStageNumbers.has(stageNumber)) {
-                    reject_ACU$4(`卷台阶 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
+                    reject_ACU$5(`卷台阶 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
                 }
             }
             if (prior.status === 'done' && volume.status !== 'done') {
-                reject_ACU$4(`已完成卷 ${volume.id} 不可重新激活`, { id: volume.id, from: prior.status, to: volume.status });
+                reject_ACU$5(`已完成卷 ${volume.id} 不可重新激活`, { id: volume.id, from: prior.status, to: volume.status });
             }
             const order = { planned: 0, active: 1, done: 2 };
             if (order[volume.status] < order[prior.status]) {
-                reject_ACU$4(`卷台阶 ${volume.id} 状态只能 planned → active → done 单向推进`, { id: volume.id, from: prior.status, to: volume.status });
+                reject_ACU$5(`卷台阶 ${volume.id} 状态只能 planned → active → done 单向推进`, { id: volume.id, from: prior.status, to: volume.status });
             }
             if (order[volume.status] > order[prior.status] + 1) {
-                reject_ACU$4(`卷台阶 ${volume.id} 不可跳过 active 直接从 ${prior.status} 变为 ${volume.status}`, { id: volume.id, from: prior.status, to: volume.status });
+                reject_ACU$5(`卷台阶 ${volume.id} 不可跳过 active 直接从 ${prior.status} 变为 ${volume.status}`, { id: volume.id, from: prior.status, to: volume.status });
             }
         }
         if (previouslyActive.length > 1) {
-            reject_ACU$4(`写入前存在 ${previouslyActive.length} 个 active 卷，无法判定阶段承载归属`, { activeIds: previouslyActive.map(volume => volume.id) });
+            reject_ACU$5(`写入前存在 ${previouslyActive.length} 个 active 卷，无法判定阶段承载归属`, { activeIds: previouslyActive.map(volume => volume.id) });
         }
         for (const volume of volumes) {
             if (previousById.has(volume.id))
                 continue;
             assertCompleteVolumeContract_ACU(volume, 'new');
             if (volume.status === 'done') {
-                reject_ACU$4(`新卷 ${volume.id} 不可直接登记为 done`, { id: volume.id });
+                reject_ACU$5(`新卷 ${volume.id} 不可直接登记为 done`, { id: volume.id });
             }
             for (const stageNumber of volume.stageNumbers) {
                 if (!completedStageNumbers.has(stageNumber)) {
-                    reject_ACU$4(`新卷 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
+                    reject_ACU$5(`新卷 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
                 }
             }
         }
@@ -129779,29 +129779,29 @@ $CONTENT
             if (volume.status !== 'done')
                 continue;
             if (volume.completionStageNumber === null) {
-                reject_ACU$4(`卷台阶 ${volume.id} 标记 done 时必须提供 completionStageNumber`, { id: volume.id });
+                reject_ACU$5(`卷台阶 ${volume.id} 标记 done 时必须提供 completionStageNumber`, { id: volume.id });
             }
             if (!volume.stageNumbers.includes(volume.completionStageNumber)) {
-                reject_ACU$4(`卷台阶 ${volume.id} 的完成阶段必须已登记进 stageNumbers`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
+                reject_ACU$5(`卷台阶 ${volume.id} 的完成阶段必须已登记进 stageNumbers`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
             }
             if (!completedStageNumbers.has(volume.completionStageNumber)) {
-                reject_ACU$4(`卷台阶 ${volume.id} 的完成阶段尚未真实完成`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
+                reject_ACU$5(`卷台阶 ${volume.id} 的完成阶段尚未真实完成`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
             }
             if (!volume.completionState.trim()) {
-                reject_ACU$4(`卷台阶 ${volume.id} 标记 done 时必须说明已达到的卷末状态`, { id: volume.id });
+                reject_ACU$5(`卷台阶 ${volume.id} 标记 done 时必须说明已达到的卷末状态`, { id: volume.id });
             }
             assertVolumeCompletionContract_ACU(volume);
         }
         const unfinished = volumes.filter(volume => volume.status !== 'done');
         const active = volumes.filter(volume => volume.status === 'active');
         if (unfinished.length && active.length !== 1) {
-            reject_ACU$4(`存在未完成卷时必须恰有一个 active 卷，当前为 ${active.length} 个`, { activeIds: active.map(volume => volume.id) });
+            reject_ACU$5(`存在未完成卷时必须恰有一个 active 卷，当前为 ${active.length} 个`, { activeIds: active.map(volume => volume.id) });
         }
         const previousVolumes = previous.filter(entry => entry.scope === 'volume' && !entry.retired);
         if (previousVolumes.length && previousVolumes.every(volume => volume.status === 'done')) {
             for (const volume of active) {
                 if (!volume.continuationRationale.trim()) {
-                    reject_ACU$4(`在既有卷全部完成后追加或激活卷 ${volume.id} 时必须说明续卷依据`, { id: volume.id });
+                    reject_ACU$5(`在既有卷全部完成后追加或激活卷 ${volume.id} 时必须说明续卷依据`, { id: volume.id });
                 }
             }
         }
@@ -129816,29 +129816,29 @@ $CONTENT
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const item of items) {
             if (!item.id.trim())
-                reject_ACU$4('年代学条目缺少 id');
+                reject_ACU$5('年代学条目缺少 id');
             if (item.action === 'retire') {
                 const current = byId.get(item.id);
                 if (!current)
-                    reject_ACU$4(`retire 的年代学条目不存在：${item.id}`, { id: item.id });
+                    reject_ACU$5(`retire 的年代学条目不存在：${item.id}`, { id: item.id });
                 if (!item.reason.trim())
-                    reject_ACU$4(`retire 年代学条目 ${item.id} 必须给出理由`, { id: item.id });
+                    reject_ACU$5(`retire 年代学条目 ${item.id} 必须给出理由`, { id: item.id });
                 byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
                 continue;
             }
             if (!item.anchor.trim())
-                reject_ACU$4(`年代学条目 ${item.id} 的 anchor 不能为空`, { id: item.id });
+                reject_ACU$5(`年代学条目 ${item.id} 的 anchor 不能为空`, { id: item.id });
             if (!item.elapsed.trim())
-                reject_ACU$4(`年代学条目 ${item.id} 的 elapsed 不能为空；无法可靠量化就明确写「未知」或「约……」`, { id: item.id });
+                reject_ACU$5(`年代学条目 ${item.id} 的 elapsed 不能为空；无法可靠量化就明确写「未知」或「约……」`, { id: item.id });
             if (!item.transition.trim())
-                reject_ACU$4(`年代学条目 ${item.id} 的 transition 不能为空`, { id: item.id });
+                reject_ACU$5(`年代学条目 ${item.id} 的 transition 不能为空`, { id: item.id });
             const evidenceIndexes = normalizeEvidenceIndexes_ACU(item.evidenceIndexes);
             if (!evidenceIndexes || !evidenceIndexes.length) {
-                reject_ACU$4(`年代学条目 ${item.id} 的 evidenceIndexes 必须是非空的非负整数楼层数组`, { id: item.id, evidenceIndexes: item.evidenceIndexes });
+                reject_ACU$5(`年代学条目 ${item.id} 的 evidenceIndexes 必须是非空的非负整数楼层数组`, { id: item.id, evidenceIndexes: item.evidenceIndexes });
             }
             const future = evidenceIndexes.filter(index => index > settledIndex);
             if (future.length) {
-                reject_ACU$4(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
+                reject_ACU$5(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
             }
             byId.set(item.id, {
                 id: item.id,
@@ -129858,13 +129858,13 @@ $CONTENT
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const item of items) {
             if (!item.id.trim())
-                reject_ACU$4('总纲条目缺少 id');
+                reject_ACU$5('总纲条目缺少 id');
             if (item.action === 'retire') {
                 const current = byId.get(item.id);
                 if (!current)
-                    reject_ACU$4(`retire 的总纲条目不存在：${item.id}`, { id: item.id });
+                    reject_ACU$5(`retire 的总纲条目不存在：${item.id}`, { id: item.id });
                 if (!item.reason.trim())
-                    reject_ACU$4(`retire 总纲条目 ${item.id} 必须给出理由`, { id: item.id });
+                    reject_ACU$5(`retire 总纲条目 ${item.id} 必须给出理由`, { id: item.id });
                 byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
                 continue;
             }
@@ -129877,12 +129877,12 @@ $CONTENT
             const withheld = item.withheld.trim() || previous?.withheld || '';
             const status = item.statusProvided || !previous ? item.status : previous.status;
             if (!title)
-                reject_ACU$4(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
+                reject_ACU$5(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
             // direction 是这个模块存在的意义：没有方向的条目只是一个标题，对大纲毫无约束力。
             if (!direction)
-                reject_ACU$4(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
+                reject_ACU$5(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
             if (item.scope === 'volume' && !escalation) {
-                reject_ACU$4(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
+                reject_ACU$5(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
             }
             byId.set(item.id, {
                 id: item.id,
@@ -129918,9 +129918,9 @@ $CONTENT
         for (const patch of patches) {
             const current = byId.get(patch.id);
             if (!current)
-                reject_ACU$4(`patch 的总纲条目不存在：${patch.id}`, { id: patch.id });
+                reject_ACU$5(`patch 的总纲条目不存在：${patch.id}`, { id: patch.id });
             if (current.retired)
-                reject_ACU$4(`总纲条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+                reject_ACU$5(`总纲条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
             const merged = {
                 ...current,
                 title: patch.title ?? current.title,
@@ -129941,9 +129941,9 @@ $CONTENT
                 completionRationale: patch.completionRationale ?? current.completionRationale,
             };
             if (!merged.title.trim())
-                reject_ACU$4(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
+                reject_ACU$5(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
             if (!merged.direction.trim())
-                reject_ACU$4(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
+                reject_ACU$5(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
             byId.set(patch.id, merged);
         }
         const next = [...byId.values()];
@@ -130028,7 +130028,7 @@ $CONTENT
         if (!output.items.length)
             return snapshot;
         if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
-            reject_ACU$4('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs });
+            reject_ACU$5('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs });
         }
         const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
         const taken = new Set();
@@ -130036,18 +130036,18 @@ $CONTENT
             if (item.action === 'retire') {
                 const current = byId.get(item.id);
                 if (!current)
-                    reject_ACU$4(`retire 的百科条目不存在：${item.id}`, { id: item.id });
+                    reject_ACU$5(`retire 的百科条目不存在：${item.id}`, { id: item.id });
                 if (!item.reason.trim())
-                    reject_ACU$4(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
+                    reject_ACU$5(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
                 byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
                 continue;
             }
             if (!item.title.trim())
-                reject_ACU$4(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
+                reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
             if (!item.brief.trim())
-                reject_ACU$4(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
+                reject_ACU$5(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
             if (!item.url.trim())
-                reject_ACU$4(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
+                reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
             const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
             taken.add(id);
             const previous = byId.get(id);
@@ -130093,7 +130093,7 @@ $CONTENT
         for (const key of retireKeys) {
             const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
             if (!matched) {
-                reject_ACU$4(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
+                reject_ACU$5(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
             }
             retiredIds.add(matched.id);
         }
@@ -136452,7 +136452,7 @@ $CONTENT
     const LEGACY_TIMELINE_KINDS_ACU = { plan_confirmed: 'stage_started', stage_replanned: 'stage_completed' };
     const normalizeLegacyEnum_ACU = (allowed, legacy, value, path, phase) => {
         const mapped = typeof value === 'string' ? legacy[value] : undefined;
-        return mapped ?? enum_ACU(value, allowed, path, phase);
+        return mapped ?? enum_ACU$1(value, allowed, path, phase);
     };
     const ERROR_CODES_ACU = ['WORLD_SIMULATION_ENVELOPE_INVALID', 'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'WORLD_SIMULATION_CHAT_CHANGED', 'WORLD_SIMULATION_ANCHOR_INVALID', 'WORLD_SIMULATION_ANCHOR_STALE', 'WORLD_SIMULATION_REVISION_CONFLICT', 'WORLD_SIMULATION_PERSIST_FAILED', 'WORLD_SIMULATION_SNAPSHOT_INVALID', 'WORLD_SIMULATION_EVIDENCE_UNAUTHORIZED', 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'WORLD_SIMULATION_API_PRESET_MISSING', 'WORLD_SIMULATION_CONFIG_INVALID'];
     const ERROR_PHASES_ACU = ['load', 'persist', 'anchor', 'agent_persist', 'agent_loop', 'agent_delegate', 'handoff_summary'];
@@ -136470,9 +136470,9 @@ $CONTENT
         fail_ACU$3(`${path} 必须是 ${min}..${max} 的整数`, phase, { path, actual: value }); return value; }
     function boolean_ACU(value, path, phase) { if (typeof value !== 'boolean')
         fail_ACU$3(`${path} 必须是布尔值`, phase, { path }); return value; }
-    function enum_ACU(value, allowed, path, phase) { if (typeof value !== 'string' || !allowed.includes(value))
+    function enum_ACU$1(value, allowed, path, phase) { if (typeof value !== 'string' || !allowed.includes(value))
         fail_ACU$3(`${path} 枚举非法`, phase, { path, actual: value }); return value; }
-    function reject_ACU$3(code, phase, message, details) {
+    function reject_ACU$4(code, phase, message, details) {
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(code, phase, message, false, details));
     }
     function stringArray_ACU(value, path, phase) {
@@ -136517,7 +136517,7 @@ $CONTENT
             if (!isRecord_ACU$7(value))
                 fail_ACU$3(`settings.agentApiPresets.${key} 必须是对象`, phase);
             exactKeys_ACU$2(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
-            agentApiPresets[key] = { mode: enum_ACU(value.mode, ['current', 'fixed'], `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
+            agentApiPresets[key] = { mode: enum_ACU$1(value.mode, ['current', 'fixed'], `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
         }
         const agentPrompts = Object.keys(raw.agentPrompts).length === 0
             ? buildDefaultWorldSimulationAgentPrompts_ACU()
@@ -136537,7 +136537,7 @@ $CONTENT
                 wikipediaZh: boolean_ACU(webRaw.sources.wikipediaZh, 'settings.webResearch.sources.wikipediaZh', phase),
                 wikipediaEn: boolean_ACU(webRaw.sources.wikipediaEn, 'settings.webResearch.sources.wikipediaEn', phase),
             },
-            searchProvider: enum_ACU(webRaw.searchProvider, WORLD_SIMULATION_WEB_PROVIDERS_ACU, 'settings.webResearch.searchProvider', phase),
+            searchProvider: enum_ACU$1(webRaw.searchProvider, WORLD_SIMULATION_WEB_PROVIDERS_ACU, 'settings.webResearch.searchProvider', phase),
             searxngBaseUrl: string_ACU(webRaw.searxngBaseUrl, 'settings.webResearch.searxngBaseUrl', phase, true),
             pageCharLimit: integer_ACU(webRaw.pageCharLimit, 'settings.webResearch.pageCharLimit', phase, 500, 20000),
             blockedDomains: string_ACU(webRaw.blockedDomains, 'settings.webResearch.blockedDomains', phase, true),
@@ -136549,7 +136549,7 @@ $CONTENT
             agentReadFallbackTokens: integer_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', phase, 0, 100000),
             agentRunBudget: budget,
             webResearch,
-            apiPresetMode: enum_ACU(raw.apiPresetMode, ['current', 'fixed'], 'settings.apiPresetMode', phase),
+            apiPresetMode: enum_ACU$1(raw.apiPresetMode, ['current', 'fixed'], 'settings.apiPresetMode', phase),
             fixedApiPresetName: string_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName', phase, true),
             agentApiPresets,
             agentPrompts,
@@ -136565,14 +136565,14 @@ $CONTENT
         if (!isRecord_ACU$7(raw.clock))
             fail_ACU$3('ledger.clock 必须是对象', phase);
         exactKeys_ACU$2(raw.clock, ['storyTime', 'elapsed', 'precision', 'evidenceRefs'], [], 'ledger.clock', phase);
-        const clock = { storyTime: string_ACU(raw.clock.storyTime, 'ledger.clock.storyTime', phase, true), elapsed: string_ACU(raw.clock.elapsed, 'ledger.clock.elapsed', phase, true), precision: enum_ACU(raw.clock.precision, ['exact', 'approximate', 'unknown'], 'ledger.clock.precision', phase), evidenceRefs: stringArray_ACU(raw.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase) };
+        const clock = { storyTime: string_ACU(raw.clock.storyTime, 'ledger.clock.storyTime', phase, true), elapsed: string_ACU(raw.clock.elapsed, 'ledger.clock.elapsed', phase, true), precision: enum_ACU$1(raw.clock.precision, ['exact', 'approximate', 'unknown'], 'ledger.clock.precision', phase), evidenceRefs: stringArray_ACU(raw.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase) };
         if (!Array.isArray(raw.dimensions) || raw.dimensions.length > 32)
             fail_ACU$3('ledger.dimensions 容量非法', phase);
         const dimensions = raw.dimensions.map((item, index) => {
             if (!isRecord_ACU$7(item))
                 fail_ACU$3(`ledger.dimensions[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, ['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], [], `ledger.dimensions[${index}]`, phase);
-            return { id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase), name: string_ACU(item.name, `ledger.dimensions[${index}].name`, phase), kind: enum_ACU(item.kind, ['pressure', 'growth'], `ledger.dimensions[${index}].kind`, phase), value: integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100), trend: enum_ACU(item.trend, ['rising', 'stable', 'falling'], `ledger.dimensions[${index}].trend`, phase), rationale: string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase), revision: integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase) };
+            return { id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase), name: string_ACU(item.name, `ledger.dimensions[${index}].name`, phase), kind: enum_ACU$1(item.kind, ['pressure', 'growth'], `ledger.dimensions[${index}].kind`, phase), value: integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100), trend: enum_ACU$1(item.trend, ['rising', 'stable', 'falling'], `ledger.dimensions[${index}].trend`, phase), rationale: string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase), revision: integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase) };
         });
         if (!Array.isArray(raw.actors) || raw.actors.length > 128)
             fail_ACU$3('ledger.actors 容量非法', phase);
@@ -136580,7 +136580,7 @@ $CONTENT
             if (!isRecord_ACU$7(item))
                 fail_ACU$3(`ledger.actors[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, ['id', 'name', 'interests', 'location', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'], [], `ledger.actors[${index}]`, phase);
-            return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'], `ledger.actors[${index}].visibility`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
+            return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU$1(item.visibility, ['hidden', 'limited', 'public'], `ledger.actors[${index}].visibility`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
         });
         uniqueIds_ACU(dimensions, 'ledger.dimensions', phase);
         uniqueIds_ACU(actors, 'ledger.actors', phase);
@@ -136595,13 +136595,13 @@ $CONTENT
             for (const actorId of linkedActors)
                 if (!actorIds.has(actorId))
                     fail_ACU$3(`ledger.seeds[${index}] 引用了不存在的 actor`, phase, { actorId });
-            const status = enum_ACU(item.status, ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'], `ledger.seeds[${index}].status`, phase);
+            const status = enum_ACU$1(item.status, ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'], `ledger.seeds[${index}].status`, phase);
             const retiredReason = item.retiredReason === null ? null : string_ACU(item.retiredReason, `ledger.seeds[${index}].retiredReason`, phase);
             if (status === 'retired' && !retiredReason)
                 fail_ACU$3(`ledger.seeds[${index}] 退役时必须提供原因`, phase);
             if (status !== 'retired' && retiredReason !== null)
                 fail_ACU$3(`ledger.seeds[${index}] 非退役状态不能携带退役原因`, phase);
-            return { id: stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase), title: string_ACU(item.title, `ledger.seeds[${index}].title`, phase), status, level: integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100), catalyst: string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'], `ledger.seeds[${index}].visibility`, phase), actorIds: linkedActors, evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase), retiredReason, revision: integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase) };
+            return { id: stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase), title: string_ACU(item.title, `ledger.seeds[${index}].title`, phase), status, level: integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100), catalyst: string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true), visibility: enum_ACU$1(item.visibility, ['hidden', 'limited', 'public'], `ledger.seeds[${index}].visibility`, phase), actorIds: linkedActors, evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase), retiredReason, revision: integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase) };
         });
         uniqueIds_ACU(seeds, 'ledger.seeds', phase);
         if (!Array.isArray(raw.chronicle) || raw.chronicle.length > 256)
@@ -136631,7 +136631,7 @@ $CONTENT
             fail_ACU$3(`${path}.schemaVersion 必须为 1`, phase);
         if (!Array.isArray(raw.expectedLedgerChanges))
             fail_ACU$3(`${path}.expectedLedgerChanges 必须是数组`, phase);
-        return { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: string_ACU(raw.title, `${path}.title`, phase), objective: string_ACU(raw.objective, `${path}.objective`, phase), impactScope: stringArray_ACU(raw.impactScope, `${path}.impactScope`, phase), factsToVerify: stringArray_ACU(raw.factsToVerify, `${path}.factsToVerify`, phase), plannedTools: stringArray_ACU(raw.plannedTools, `${path}.plannedTools`, phase), plannedSpecialists: stringArray_ACU(raw.plannedSpecialists, `${path}.plannedSpecialists`, phase), expectedLedgerChanges: raw.expectedLedgerChanges.map((item, index) => enum_ACU(item, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.expectedLedgerChanges[${index}]`, phase)), convergenceConditions: stringArray_ACU(raw.convergenceConditions, `${path}.convergenceConditions`, phase), blockingConditions: stringArray_ACU(raw.blockingConditions, `${path}.blockingConditions`, phase), completedSteps: stringArray_ACU(raw.completedSteps, `${path}.completedSteps`, phase), nextStep: string_ACU(raw.nextStep, `${path}.nextStep`, phase, true) };
+        return { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: string_ACU(raw.title, `${path}.title`, phase), objective: string_ACU(raw.objective, `${path}.objective`, phase), impactScope: stringArray_ACU(raw.impactScope, `${path}.impactScope`, phase), factsToVerify: stringArray_ACU(raw.factsToVerify, `${path}.factsToVerify`, phase), plannedTools: stringArray_ACU(raw.plannedTools, `${path}.plannedTools`, phase), plannedSpecialists: stringArray_ACU(raw.plannedSpecialists, `${path}.plannedSpecialists`, phase), expectedLedgerChanges: raw.expectedLedgerChanges.map((item, index) => enum_ACU$1(item, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.expectedLedgerChanges[${index}]`, phase)), convergenceConditions: stringArray_ACU(raw.convergenceConditions, `${path}.convergenceConditions`, phase), blockingConditions: stringArray_ACU(raw.blockingConditions, `${path}.blockingConditions`, phase), completedSteps: stringArray_ACU(raw.completedSteps, `${path}.completedSteps`, phase), nextStep: string_ACU(raw.nextStep, `${path}.nextStep`, phase, true) };
     }
     function validateWorldSimulationEnvelope_ACU(raw, phase = 'load') {
         if (!isRecord_ACU$7(raw))
@@ -136651,7 +136651,7 @@ $CONTENT
                 if (!isRecord_ACU$7(revision))
                     fail_ACU$3(`stages[${stageIndex}].revisions[${revisionIndex}] 必须是对象`, phase);
                 exactKeys_ACU$2(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'plan'], [], `stages[${stageIndex}].revisions[${revisionIndex}]`, phase);
-                return { revision: integer_ACU(revision.revision, `stages[${stageIndex}].revisions[${revisionIndex}].revision`, phase, 1), createdAt: integer_ACU(revision.createdAt, `stages[${stageIndex}].revisions[${revisionIndex}].createdAt`, phase), reason: enum_ACU(revision.reason, REVISION_REASONS_ACU, `stages[${stageIndex}].revisions[${revisionIndex}].reason`, phase), replanInstruction: string_ACU(revision.replanInstruction, `stages[${stageIndex}].revisions[${revisionIndex}].replanInstruction`, phase, true), frozen: boolean_ACU(revision.frozen, `stages[${stageIndex}].revisions[${revisionIndex}].frozen`, phase), plan: validatePlan_ACU(revision.plan, `stages[${stageIndex}].revisions[${revisionIndex}].plan`, phase) };
+                return { revision: integer_ACU(revision.revision, `stages[${stageIndex}].revisions[${revisionIndex}].revision`, phase, 1), createdAt: integer_ACU(revision.createdAt, `stages[${stageIndex}].revisions[${revisionIndex}].createdAt`, phase), reason: enum_ACU$1(revision.reason, REVISION_REASONS_ACU, `stages[${stageIndex}].revisions[${revisionIndex}].reason`, phase), replanInstruction: string_ACU(revision.replanInstruction, `stages[${stageIndex}].revisions[${revisionIndex}].replanInstruction`, phase, true), frozen: boolean_ACU(revision.frozen, `stages[${stageIndex}].revisions[${revisionIndex}].frozen`, phase), plan: validatePlan_ACU(revision.plan, `stages[${stageIndex}].revisions[${revisionIndex}].plan`, phase) };
             });
             const activeRevision = integer_ACU(stage.activeRevision, `stages[${stageIndex}].activeRevision`, phase, 1);
             if (!revisions.some(revision => revision.revision === activeRevision))
@@ -136674,7 +136674,7 @@ $CONTENT
                     fail_ACU$3('task.activeRun 必须是对象或 null', phase);
                 exactKeys_ACU$2(run, ['runId', 'chatIdentity', 'triggerKind', 'triggerConversationMessageId', 'anchorMessageId', 'anchorMessageKey', 'anchorSwipeId', 'anchorContentDigest', 'baseLedgerRevision', 'taskId', 'stageId', 'stageRevision'], [], 'task.activeRun', phase);
                 const anchorMessageId = typeof run.anchorMessageId === 'number' ? integer_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase) : string_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase);
-                task.activeRun = { runId: stableId_ACU(run.runId, 'task.activeRun.runId', phase), chatIdentity: string_ACU(run.chatIdentity, 'task.activeRun.chatIdentity', phase), triggerKind: enum_ACU(run.triggerKind, ['assistant_completed', 'agent_chat_message'], 'task.activeRun.triggerKind', phase), triggerConversationMessageId: run.triggerConversationMessageId === null ? null : string_ACU(run.triggerConversationMessageId, 'task.activeRun.triggerConversationMessageId', phase), anchorMessageId, anchorMessageKey: string_ACU(run.anchorMessageKey, 'task.activeRun.anchorMessageKey', phase), anchorSwipeId: string_ACU(run.anchorSwipeId, 'task.activeRun.anchorSwipeId', phase), anchorContentDigest: string_ACU(run.anchorContentDigest, 'task.activeRun.anchorContentDigest', phase), baseLedgerRevision: integer_ACU(run.baseLedgerRevision, 'task.activeRun.baseLedgerRevision', phase), taskId: stableId_ACU(run.taskId, 'task.activeRun.taskId', phase), stageId: stableId_ACU(run.stageId, 'task.activeRun.stageId', phase), stageRevision: integer_ACU(run.stageRevision, 'task.activeRun.stageRevision', phase, 1) };
+                task.activeRun = { runId: stableId_ACU(run.runId, 'task.activeRun.runId', phase), chatIdentity: string_ACU(run.chatIdentity, 'task.activeRun.chatIdentity', phase), triggerKind: enum_ACU$1(run.triggerKind, ['assistant_completed', 'agent_chat_message'], 'task.activeRun.triggerKind', phase), triggerConversationMessageId: run.triggerConversationMessageId === null ? null : string_ACU(run.triggerConversationMessageId, 'task.activeRun.triggerConversationMessageId', phase), anchorMessageId, anchorMessageKey: string_ACU(run.anchorMessageKey, 'task.activeRun.anchorMessageKey', phase), anchorSwipeId: string_ACU(run.anchorSwipeId, 'task.activeRun.anchorSwipeId', phase), anchorContentDigest: string_ACU(run.anchorContentDigest, 'task.activeRun.anchorContentDigest', phase), baseLedgerRevision: integer_ACU(run.baseLedgerRevision, 'task.activeRun.baseLedgerRevision', phase), taskId: stableId_ACU(run.taskId, 'task.activeRun.taskId', phase), stageId: stableId_ACU(run.stageId, 'task.activeRun.stageId', phase), stageRevision: integer_ACU(run.stageRevision, 'task.activeRun.stageRevision', phase, 1) };
                 if (task.activeRun.taskId !== task.taskId)
                     fail_ACU$3('task.activeRun.taskId 与 task 不一致', phase);
                 const runStage = stages.find(stage => stage.stageId === task.activeRun.stageId);
@@ -136690,7 +136690,7 @@ $CONTENT
             if (!isRecord_ACU$7(entry))
                 fail_ACU$3(`timeline[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(entry, ['id', 'at', 'kind', 'taskId'], ['stageId', 'revision', 'runId', 'message', 'errorCode'], `timeline[${index}]`, phase);
-            return { id: stableId_ACU(entry.id, `timeline[${index}].id`, phase), at: integer_ACU(entry.at, `timeline[${index}].at`, phase), kind: normalizeLegacyEnum_ACU(TIMELINE_KINDS_ACU, LEGACY_TIMELINE_KINDS_ACU, entry.kind, `timeline[${index}].kind`, phase), taskId: stableId_ACU(entry.taskId, `timeline[${index}].taskId`, phase), ...(entry.stageId === undefined ? {} : { stageId: stableId_ACU(entry.stageId, `timeline[${index}].stageId`, phase) }), ...(entry.revision === undefined ? {} : { revision: integer_ACU(entry.revision, `timeline[${index}].revision`, phase, 1) }), ...(entry.runId === undefined ? {} : { runId: stableId_ACU(entry.runId, `timeline[${index}].runId`, phase) }), ...(entry.message === undefined ? {} : { message: string_ACU(entry.message, `timeline[${index}].message`, phase, true) }), ...(entry.errorCode === undefined ? {} : { errorCode: enum_ACU(entry.errorCode, ERROR_CODES_ACU, `timeline[${index}].errorCode`, phase) }) };
+            return { id: stableId_ACU(entry.id, `timeline[${index}].id`, phase), at: integer_ACU(entry.at, `timeline[${index}].at`, phase), kind: normalizeLegacyEnum_ACU(TIMELINE_KINDS_ACU, LEGACY_TIMELINE_KINDS_ACU, entry.kind, `timeline[${index}].kind`, phase), taskId: stableId_ACU(entry.taskId, `timeline[${index}].taskId`, phase), ...(entry.stageId === undefined ? {} : { stageId: stableId_ACU(entry.stageId, `timeline[${index}].stageId`, phase) }), ...(entry.revision === undefined ? {} : { revision: integer_ACU(entry.revision, `timeline[${index}].revision`, phase, 1) }), ...(entry.runId === undefined ? {} : { runId: stableId_ACU(entry.runId, `timeline[${index}].runId`, phase) }), ...(entry.message === undefined ? {} : { message: string_ACU(entry.message, `timeline[${index}].message`, phase, true) }), ...(entry.errorCode === undefined ? {} : { errorCode: enum_ACU$1(entry.errorCode, ERROR_CODES_ACU, `timeline[${index}].errorCode`, phase) }) };
         });
         let lastError = null;
         if (raw.lastError !== null) {
@@ -136701,8 +136701,8 @@ $CONTENT
             if (details !== undefined && !isRecord_ACU$7(details))
                 fail_ACU$3('lastError.details 必须是对象', phase);
             lastError = {
-                code: enum_ACU(raw.lastError.code, ERROR_CODES_ACU, 'lastError.code', phase),
-                phase: enum_ACU(raw.lastError.phase, ERROR_PHASES_ACU, 'lastError.phase', phase),
+                code: enum_ACU$1(raw.lastError.code, ERROR_CODES_ACU, 'lastError.code', phase),
+                phase: enum_ACU$1(raw.lastError.phase, ERROR_PHASES_ACU, 'lastError.phase', phase),
                 message: string_ACU(raw.lastError.message, 'lastError.message', phase),
                 retryable: boolean_ACU(raw.lastError.retryable, 'lastError.retryable', phase),
             };
@@ -136721,26 +136721,26 @@ $CONTENT
         if (!guard)
             return;
         if (guard.taskId !== undefined && (envelope?.task?.taskId ?? null) !== guard.taskId)
-            reject_ACU$3('WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '任务身份已变化');
+            reject_ACU$4('WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '任务身份已变化');
         if (guard.stageId !== undefined && (envelope?.activeStageId ?? null) !== guard.stageId)
-            reject_ACU$3('WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '阶段身份已变化');
+            reject_ACU$4('WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '阶段身份已变化');
         if (guard.revision !== undefined && activeRevision_ACU(envelope) !== guard.revision)
-            reject_ACU$3('WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '阶段 revision 已变化');
+            reject_ACU$4('WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '阶段 revision 已变化');
     }
     function captureContext_ACU(guard) {
         const chat = getChatArray_ACU();
         const firstMessage = Array.isArray(chat) && isRecord_ACU$7(chat[0]) ? chat[0] : null;
         const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
         if (!firstMessage || !chatIdentity)
-            reject_ACU$3('WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天首楼不可用');
+            reject_ACU$4('WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天首楼不可用');
         if (guard?.chatIdentity && guard.chatIdentity !== chatIdentity)
-            reject_ACU$3('WORLD_SIMULATION_CHAT_CHANGED', 'persist', '目标聊天已变化');
+            reject_ACU$4('WORLD_SIMULATION_CHAT_CHANGED', 'persist', '目标聊天已变化');
         return { chat, firstMessage, chatIdentity };
     }
     function assertContext_ACU(context) {
         const active = getChatArray_ACU();
         if (active !== context.chat || active[0] !== context.firstMessage || getActiveChatStorageIdentity_ACU(active) !== context.chatIdentity)
-            reject_ACU$3('WORLD_SIMULATION_CHAT_CHANGED', 'persist', '目标聊天已切换，拒绝写入');
+            reject_ACU$4('WORLD_SIMULATION_CHAT_CHANGED', 'persist', '目标聊天已切换，拒绝写入');
     }
     function readRaw_ACU(firstMessage) {
         const raw = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
@@ -136785,12 +136785,12 @@ $CONTENT
                         await saveChatToHostStrict_ACU();
                     }
                     catch (rollbackError) {
-                        reject_ACU$3('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '世界推演状态保存与回滚均失败', { primaryMessage: error instanceof Error ? error.message : String(error), rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) });
+                        reject_ACU$4('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '世界推演状态保存与回滚均失败', { primaryMessage: error instanceof Error ? error.message : String(error), rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) });
                     }
                 }
                 if (error instanceof WorldSimulationValidationError_ACU)
                     throw error;
-                reject_ACU$3('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '世界推演状态保存失败', { message: error instanceof Error ? error.message : String(error) });
+                reject_ACU$4('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '世界推演状态保存失败', { message: error instanceof Error ? error.message : String(error) });
             }
         }
         enqueue_ACU(operation, guard) {
@@ -136821,7 +136821,7 @@ $CONTENT
             ? messages[messageIndex]
             : null;
         if (!chatIdentity || !message || !isAssistantMessage_ACU(message)) {
-            reject_ACU$3('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '世界推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex });
+            reject_ACU$4('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '世界推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex });
         }
         const rawMessageId = message.message_id;
         const messageId = typeof rawMessageId === 'string' || typeof rawMessageId === 'number' ? rawMessageId : messageIndex;
@@ -136839,7 +136839,7 @@ $CONTENT
             || current.messageKey !== anchor.messageKey
             || current.swipeId !== anchor.swipeId
             || current.contentDigest !== anchor.contentDigest) {
-            reject_ACU$3('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '世界推演冻结锚点已变化，拒绝继续写入', {
+            reject_ACU$4('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '世界推演冻结锚点已变化，拒绝继续写入', {
                 expected: anchor,
                 actual: current,
             });
@@ -136854,18 +136854,18 @@ $CONTENT
         if (rawBucket === undefined)
             return null;
         if (!isRecord_ACU$7(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU$7(rawBucket.entries)) {
-            reject_ACU$3('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 分桶结构损坏`);
+            reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 分桶结构损坏`);
         }
         const rawEntry = rawBucket.entries[buildWorldSimulationBucketKey_ACU(anchor)];
         if (rawEntry === undefined)
             return null;
         if (!isRecord_ACU$7(rawEntry) || !isRecord_ACU$7(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
-            reject_ACU$3('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目损坏`);
+            reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目损坏`);
         }
         const storedAnchor = rawEntry.anchor;
         if (storedAnchor.chatIdentity !== anchor.chatIdentity || storedAnchor.messageKey !== anchor.messageKey
             || storedAnchor.swipeId !== anchor.swipeId || storedAnchor.contentDigest !== anchor.contentDigest) {
-            reject_ACU$3('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 身份不一致`);
+            reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 身份不一致`);
         }
         return validateValue(rawEntry.value);
     }
@@ -136895,7 +136895,7 @@ $CONTENT
                 message[field] = previous;
             if (error instanceof WorldSimulationValidationError_ACU)
                 throw error;
-            reject_ACU$3('WORLD_SIMULATION_PERSIST_FAILED', 'agent_persist', `${field} 保存失败，已还原楼层字段`, {
+            reject_ACU$4('WORLD_SIMULATION_PERSIST_FAILED', 'agent_persist', `${field} 保存失败，已还原楼层字段`, {
                 message: error instanceof Error ? error.message : String(error),
             });
         }
@@ -136974,6 +136974,8 @@ $CONTENT
     const WORLD_SIMULATION_BUCKET_SCHEMA_VERSION_ACU = 1;
     const WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU = 1;
     const WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU = 1;
+    const WORLD_SIMULATION_RUN_STATE_FIELD_ACU = '_qrf_world_simulation_agent_run';
+    const WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU = 1;
     const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff'];
 
     const TEXT_LIMIT_ACU = 8000;
@@ -136982,45 +136984,45 @@ $CONTENT
     function isRecord_ACU$6(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
-    function reject_ACU$2(message, details) {
+    function reject_ACU$3(message, details) {
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
     }
     function requiredText_ACU$1(value, path) {
         if (typeof value !== 'string' || !value.trim())
-            reject_ACU$2(`${path} 必须是非空字符串`, { path });
+            reject_ACU$3(`${path} 必须是非空字符串`, { path });
         return value;
     }
-    function nonNegativeInteger_ACU(value, path) {
+    function nonNegativeInteger_ACU$1(value, path) {
         if (typeof value !== 'number' || !Number.isInteger(value) || value < 0)
-            reject_ACU$2(`${path} 必须是非负整数`, { path });
+            reject_ACU$3(`${path} 必须是非负整数`, { path });
         return value;
     }
     function validateMessage_ACU(raw, path) {
         if (!isRecord_ACU$6(raw))
-            reject_ACU$2(`${path} 必须是对象`, { path });
+            reject_ACU$3(`${path} 必须是对象`, { path });
         const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok']);
         for (const key of Object.keys(raw)) {
             if (!allowed.has(key))
-                reject_ACU$2(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
+                reject_ACU$3(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
         }
         const kind = raw.kind;
         if (typeof kind !== 'string' || !WORLD_SIMULATION_MESSAGE_KINDS_ACU.includes(kind)) {
-            reject_ACU$2(`${path}.kind 非法`, { path: `${path}.kind` });
+            reject_ACU$3(`${path}.kind 非法`, { path: `${path}.kind` });
         }
         const message = {
-            id: nonNegativeInteger_ACU(raw.id, `${path}.id`),
+            id: nonNegativeInteger_ACU$1(raw.id, `${path}.id`),
             kind: kind,
             text: requiredText_ACU$1(raw.text, `${path}.text`),
             digest: typeof raw.digest === 'string' ? raw.digest : '',
             turnKey: typeof raw.turnKey === 'string' ? raw.turnKey : '',
-            at: nonNegativeInteger_ACU(raw.at, `${path}.at`),
+            at: nonNegativeInteger_ACU$1(raw.at, `${path}.at`),
         };
         if (raw.readKey !== undefined)
             message.readKey = requiredText_ACU$1(raw.readKey, `${path}.readKey`);
         if (raw.eventKind !== undefined) {
             const eventKind = requiredText_ACU$1(raw.eventKind, `${path}.eventKind`);
             if (!WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU.includes(eventKind)) {
-                reject_ACU$2(`${path}.eventKind 非法`, { path: `${path}.eventKind` });
+                reject_ACU$3(`${path}.eventKind 非法`, { path: `${path}.eventKind` });
             }
             message.eventKind = eventKind;
         }
@@ -137028,7 +137030,7 @@ $CONTENT
             message.title = requiredText_ACU$1(raw.title, `${path}.title`);
         if (raw.status !== undefined) {
             if (raw.status !== 'running' && raw.status !== 'done' && raw.status !== 'failed') {
-                reject_ACU$2(`${path}.status 非法`, { path: `${path}.status` });
+                reject_ACU$3(`${path}.status 非法`, { path: `${path}.status` });
             }
             message.status = raw.status;
         }
@@ -137036,83 +137038,83 @@ $CONTENT
             message.agentName = requiredText_ACU$1(raw.agentName, `${path}.agentName`);
         if (raw.ok !== undefined) {
             if (typeof raw.ok !== 'boolean')
-                reject_ACU$2(`${path}.ok 必须是布尔值`, { path: `${path}.ok` });
+                reject_ACU$3(`${path}.ok 必须是布尔值`, { path: `${path}.ok` });
             message.ok = raw.ok;
         }
         return message;
     }
     function validateCompaction_ACU(raw, path) {
         if (!isRecord_ACU$6(raw))
-            reject_ACU$2(`${path} 必须是对象`, { path });
+            reject_ACU$3(`${path} 必须是对象`, { path });
         return {
-            compactedThroughId: nonNegativeInteger_ACU(raw.compactedThroughId, `${path}.compactedThroughId`),
+            compactedThroughId: nonNegativeInteger_ACU$1(raw.compactedThroughId, `${path}.compactedThroughId`),
             report: requiredText_ACU$1(raw.report, `${path}.report`),
-            at: nonNegativeInteger_ACU(raw.at, `${path}.at`),
+            at: nonNegativeInteger_ACU$1(raw.at, `${path}.at`),
         };
     }
     function validateSegment_ACU(raw, path) {
         if (!isRecord_ACU$6(raw))
-            reject_ACU$2(`${path} 必须是对象`, { path });
+            reject_ACU$3(`${path} 必须是对象`, { path });
         const allowed = new Set(['schemaVersion', 'segmentId', 'runId', 'taskId', 'stageId', 'stageRevision', 'messages', 'compaction', 'updatedAt']);
         for (const key of ['schemaVersion', 'segmentId', 'runId', 'taskId', 'stageId', 'stageRevision', 'messages', 'updatedAt']) {
             if (!Object.prototype.hasOwnProperty.call(raw, key))
-                reject_ACU$2(`${path}.${key} 缺失`, { path: `${path}.${key}` });
+                reject_ACU$3(`${path}.${key} 缺失`, { path: `${path}.${key}` });
         }
         for (const key of Object.keys(raw))
             if (!allowed.has(key))
-                reject_ACU$2(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
+                reject_ACU$3(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
         if (raw.schemaVersion !== WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU)
-            reject_ACU$2(`${path}.schemaVersion 非法`);
+            reject_ACU$3(`${path}.schemaVersion 非法`);
         if (!Array.isArray(raw.messages) || raw.messages.length === 0)
-            reject_ACU$2(`${path}.messages 不能为空`);
+            reject_ACU$3(`${path}.messages 不能为空`);
         return {
             schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
             segmentId: requiredText_ACU$1(raw.segmentId, `${path}.segmentId`),
             runId: requiredText_ACU$1(raw.runId, `${path}.runId`),
             taskId: requiredText_ACU$1(raw.taskId, `${path}.taskId`),
             stageId: requiredText_ACU$1(raw.stageId, `${path}.stageId`),
-            stageRevision: nonNegativeInteger_ACU(raw.stageRevision, `${path}.stageRevision`),
+            stageRevision: nonNegativeInteger_ACU$1(raw.stageRevision, `${path}.stageRevision`),
             messages: raw.messages.map((message, index) => validateMessage_ACU(message, `${path}.messages[${index}]`)),
             ...(raw.compaction === undefined ? {} : { compaction: validateCompaction_ACU(raw.compaction, `${path}.compaction`) }),
-            updatedAt: nonNegativeInteger_ACU(raw.updatedAt, `${path}.updatedAt`),
+            updatedAt: nonNegativeInteger_ACU$1(raw.updatedAt, `${path}.updatedAt`),
         };
     }
     function validateWorldSimulationConversationFloorRecord_ACU(raw) {
         if (!isRecord_ACU$6(raw))
-            reject_ACU$2('会话楼层记录必须是对象');
+            reject_ACU$3('会话楼层记录必须是对象');
         const keys = Object.keys(raw);
         if (keys.some(key => !['schemaVersion', 'segments', 'updatedAt'].includes(key)))
-            reject_ACU$2('会话楼层记录存在未知字段');
+            reject_ACU$3('会话楼层记录存在未知字段');
         if (raw.schemaVersion !== WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU || !Array.isArray(raw.segments)) {
-            reject_ACU$2('会话楼层记录结构非法');
+            reject_ACU$3('会话楼层记录结构非法');
         }
         const segments = raw.segments.map((segment, index) => validateSegment_ACU(segment, `segments[${index}]`));
         const ids = new Set();
         for (const segment of segments) {
             if (ids.has(segment.segmentId))
-                reject_ACU$2('会话楼层记录存在重复 segmentId', { segmentId: segment.segmentId });
+                reject_ACU$3('会话楼层记录存在重复 segmentId', { segmentId: segment.segmentId });
             ids.add(segment.segmentId);
         }
         return {
             schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
             segments,
-            updatedAt: nonNegativeInteger_ACU(raw.updatedAt, 'updatedAt'),
+            updatedAt: nonNegativeInteger_ACU$1(raw.updatedAt, 'updatedAt'),
         };
     }
     function legacyConversationEnvelope_ACU(raw) {
         if (!isRecord_ACU$6(raw) || raw.version !== 1 || !Array.isArray(raw.entries))
             return null;
         if (Object.keys(raw).some(key => !['version', 'entries'].includes(key)))
-            reject_ACU$2('旧版会话 envelope 存在未知字段');
+            reject_ACU$3('旧版会话 envelope 存在未知字段');
         const entries = [];
         const locations = new Set();
         for (const [entryIndex, candidate] of raw.entries.entries()) {
             if (!isRecord_ACU$6(candidate) || !isRecord_ACU$6(candidate.swipe) || !Array.isArray(candidate.messages)) {
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 结构非法`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 结构非法`);
             }
             if (Object.keys(candidate).some(key => !['swipe', 'nextId', 'messages'].includes(key))
                 || Object.keys(candidate.swipe).some(key => !['messageIndex', 'messageKey', 'swipeIndex', 'baseTextHash'].includes(key))) {
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 存在未知字段`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 存在未知字段`);
             }
             const swipe = candidate.swipe;
             if (!Number.isInteger(swipe.messageIndex) || swipe.messageIndex < 0
@@ -137120,11 +137122,11 @@ $CONTENT
                 || !Number.isInteger(swipe.swipeIndex) || swipe.swipeIndex < 0
                 || typeof swipe.baseTextHash !== 'string' || !swipe.baseTextHash.trim()
                 || !Number.isInteger(candidate.nextId) || candidate.nextId < 1) {
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 身份非法`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 身份非法`);
             }
             const location = `${swipe.messageIndex}|${swipe.messageKey}|${swipe.swipeIndex}`;
             if (locations.has(location))
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 位置重复`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 位置重复`);
             locations.add(location);
             const messages = candidate.messages.map((message, messageIndex) => {
                 if (!isRecord_ACU$6(message) || !Number.isInteger(message.id) || message.id < 1
@@ -137132,17 +137134,17 @@ $CONTENT
                     || typeof message.kind !== 'string' || typeof message.status !== 'string'
                     || typeof message.title !== 'string' || !message.title.trim()
                     || typeof message.detail !== 'string' || !message.detail.trim()) {
-                    reject_ACU$2(`旧版会话 entries[${entryIndex}].messages[${messageIndex}] 非法`);
+                    reject_ACU$3(`旧版会话 entries[${entryIndex}].messages[${messageIndex}] 非法`);
                 }
                 if (Object.keys(message).some(key => !['id', 'at', 'kind', 'status', 'title', 'detail', 'requestId', 'agentName'].includes(key))) {
-                    reject_ACU$2(`旧版会话 entries[${entryIndex}].messages[${messageIndex}] 存在未知字段`);
+                    reject_ACU$3(`旧版会话 entries[${entryIndex}].messages[${messageIndex}] 存在未知字段`);
                 }
                 return message;
             });
             const ids = new Set(messages.map(message => message.id));
             const highestId = messages.reduce((max, message) => Math.max(max, message.id), 0);
             if (ids.size !== messages.length || candidate.nextId <= highestId) {
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 消息 ID 非法`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 消息 ID 非法`);
             }
             entries.push({ swipe: swipe, nextId: candidate.nextId, messages });
         }
@@ -137172,12 +137174,12 @@ $CONTENT
         for (const [entryIndex, legacyEntry] of legacy.entries.entries()) {
             const content = contentForLegacySwipe_ACU(message, legacyEntry.swipe.swipeIndex);
             if (content === null)
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 无法解析对应 swipe 正文`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 无法解析对应 swipe 正文`);
             const rawId = message.message_id;
             const messageId = typeof rawId === 'string' || typeof rawId === 'number' ? rawId : legacyEntry.swipe.messageIndex;
             const expectedMessageKey = `${typeof messageId}:${String(messageId)}`;
             if (legacyEntry.swipe.messageIndex !== messageIndex || legacyEntry.swipe.messageKey !== expectedMessageKey) {
-                reject_ACU$2(`旧版会话 entries[${entryIndex}] 与宿主楼层身份不一致`);
+                reject_ACU$3(`旧版会话 entries[${entryIndex}] 与宿主楼层身份不一致`);
             }
             const anchor = {
                 chatIdentity,
@@ -137317,13 +137319,13 @@ $CONTENT
             currentBucket = previous;
         }
         else
-            reject_ACU$2(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
+            reject_ACU$3(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
         const key = buildWorldSimulationBucketKey_ACU(input.anchor);
         const existing = currentBucket.entries[key]
             ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
             : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
         if (existing.segments.some(segment => segment.segmentId === input.segmentId)) {
-            reject_ACU$2('重复 segmentId，拒绝重复持久化', { segmentId: input.segmentId });
+            reject_ACU$3('重复 segmentId，拒绝重复持久化', { segmentId: input.segmentId });
         }
         const segment = {
             schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
@@ -137331,7 +137333,7 @@ $CONTENT
             runId: requiredText_ACU$1(input.runId, 'runId'),
             taskId: requiredText_ACU$1(input.taskId, 'taskId'),
             stageId: requiredText_ACU$1(input.stageId, 'stageId'),
-            stageRevision: nonNegativeInteger_ACU(input.stageRevision, 'stageRevision'),
+            stageRevision: nonNegativeInteger_ACU$1(input.stageRevision, 'stageRevision'),
             messages: added,
             ...(input.compaction ? { compaction: validateCompaction_ACU(input.compaction, 'compaction') } : {}),
             updatedAt: at,
@@ -137411,34 +137413,34 @@ $CONTENT
     function isRecord_ACU$5(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
-    function reject_ACU$1(message, details) {
+    function reject_ACU$2(message, details) {
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
     }
     function validateEvidenceRefs_ACU(value) {
         if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) {
-            reject_ACU$1('材料快照 evidenceRefs 必须是非空字符串数组');
+            reject_ACU$2('材料快照 evidenceRefs 必须是非空字符串数组');
         }
         return [...value];
     }
     function validateWorldSimulationMaterialsSnapshot_ACU(raw) {
         if (!isRecord_ACU$5(raw))
-            reject_ACU$1('世界推演材料快照必须是对象');
+            reject_ACU$2('世界推演材料快照必须是对象');
         const allowed = new Set(['schemaVersion', 'ledgerRevision', 'ledger', 'evidenceRefs', 'updatedAt']);
         for (const key of allowed)
             if (!Object.prototype.hasOwnProperty.call(raw, key))
-                reject_ACU$1(`材料快照缺少字段：${key}`);
+                reject_ACU$2(`材料快照缺少字段：${key}`);
         for (const key of Object.keys(raw))
             if (!allowed.has(key))
-                reject_ACU$1(`材料快照存在未知字段：${key}`);
+                reject_ACU$2(`材料快照存在未知字段：${key}`);
         if (raw.schemaVersion !== WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU)
-            reject_ACU$1('材料快照 schemaVersion 非法');
+            reject_ACU$2('材料快照 schemaVersion 非法');
         if (typeof raw.ledgerRevision !== 'number' || !Number.isInteger(raw.ledgerRevision) || raw.ledgerRevision < 0)
-            reject_ACU$1('材料快照 ledgerRevision 非法');
+            reject_ACU$2('材料快照 ledgerRevision 非法');
         if (typeof raw.updatedAt !== 'number' || !Number.isInteger(raw.updatedAt) || raw.updatedAt < 0)
-            reject_ACU$1('材料快照 updatedAt 非法');
+            reject_ACU$2('材料快照 updatedAt 非法');
         const ledger = validateWorldSimulationLedger_ACU(raw.ledger, 'agent_persist');
         if (ledger.revision !== raw.ledgerRevision)
-            reject_ACU$1('材料快照 ledgerRevision 与账本不一致');
+            reject_ACU$2('材料快照 ledgerRevision 与账本不一致');
         return { schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU, ledgerRevision: raw.ledgerRevision, ledger, evidenceRefs: validateEvidenceRefs_ACU(raw.evidenceRefs), updatedAt: raw.updatedAt };
     }
     function readWorldSimulationLedgerAtAnchor_ACU(anchor, chat) {
@@ -137488,7 +137490,7 @@ $CONTENT
         const validatedLedger = validateWorldSimulationLedger_ACU(ledger, 'agent_persist');
         const unauthorized = findUnauthorizedWorldSimulationEvidenceRefs_ACU(evidenceRefs, evidenceRegistry);
         if (unauthorized.length)
-            reject_ACU$1('材料快照包含当前 run 未授权 evidenceRefs', { unauthorized });
+            reject_ACU$2('材料快照包含当前 run 未授权 evidenceRefs', { unauthorized });
         const snapshot = {
             schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
             ledgerRevision: validatedLedger.revision,
@@ -137709,8 +137711,8 @@ $CONTENT
     const SCAN_LIMIT_ACU = 6;
     const TERMINALS_ACU = ['commit', 'no_change', 'blocked'];
     const isRecord_ACU$3 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-    const text_ACU$1 = (value) => typeof value === 'string' ? value.trim() : '';
-    const texts_ACU = (value) => Array.isArray(value) ? value.map(text_ACU$1).filter(Boolean) : [];
+    const text_ACU$2 = (value) => typeof value === 'string' ? value.trim() : '';
+    const texts_ACU = (value) => Array.isArray(value) ? value.map(text_ACU$2).filter(Boolean) : [];
     function fail_ACU(reasonCode, path, expected, actual) {
         const issue = { reasonCode, path, expected, actual };
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', `${reasonCode}: ${path} 应为 ${expected}`, true, { ...issue }));
@@ -137874,7 +137876,7 @@ $CONTENT
         fail_ACU('JSON_NOT_FOUND', '$', 'balanced or salvageable JSON object', text.slice(0, 300));
     }
     function requiredText_ACU(value, path) {
-        const result = text_ACU$1(value);
+        const result = text_ACU$2(value);
         if (!result)
             fail_ACU('REQUIRED_TEXT', path, 'non-empty string', value);
         return result;
@@ -137920,11 +137922,11 @@ $CONTENT
         '$WORLD_SUMMARY': 'summary:current',
     };
     function normalizeToolAddress_ACU(value) {
-        const address = text_ACU$1(value);
+        const address = text_ACU$2(value);
         return LEGACY_TOOL_ADDRESS_ALIASES_ACU[address] ?? address;
     }
     function normalizeLegacyToolAction_ACU(value) {
-        if (text_ACU$1(value.action))
+        if (text_ACU$2(value.action))
             return value;
         const keys = Object.keys(value);
         const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
@@ -137941,7 +137943,7 @@ $CONTENT
         return value;
     }
     function normalizeReadAction_ACU(value) {
-        if (text_ACU$1(value.action) !== 'read')
+        if (text_ACU$2(value.action) !== 'read')
             return value;
         const normalized = normalizeToolRequestMetadata_ACU(value, 'read');
         if (normalized.reads === undefined && normalized.address !== undefined) {
@@ -137958,7 +137960,7 @@ $CONTENT
         if (!isRecord_ACU$3(value))
             fail_ACU('OBJECT_REQUIRED', '$', 'object', value);
         const normalizedValue = normalizeLegacyToolAction_ACU(value);
-        const action = text_ACU$1(normalizedValue.action);
+        const action = text_ACU$2(normalizedValue.action);
         if (action === 'read') {
             const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
             const reads = requiredList_ACU(raw.reads, '$.reads');
@@ -137992,13 +137994,13 @@ $CONTENT
         }
         if (action === 'finalize') {
             const raw = closedObject_ACU(normalizedValue, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
-            const outcome = text_ACU$1(raw.outcome);
+            const outcome = text_ACU$2(raw.outcome);
             if (!TERMINALS_ACU.includes(outcome))
                 fail_ACU('INVALID_OUTCOME', '$.outcome', TERMINALS_ACU.join(' | '), raw.outcome);
             return { kind: 'finalize', outcome: outcome, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
         }
         if (action === 'block') {
-            const reason = text_ACU$1(normalizedValue.reason);
+            const reason = text_ACU$2(normalizedValue.reason);
             const blockValue = !Object.prototype.hasOwnProperty.call(normalizedValue, 'unresolved') && reason
                 ? { ...normalizedValue, unresolved: [reason] }
                 : normalizedValue;
@@ -138044,13 +138046,13 @@ $CONTENT
     }
     function parseWorldSimulationPlannerOutput_ACU(value) {
         const raw = closedObject_ACU(value, '$', ['action', 'summary', 'plan']);
-        const action = text_ACU$1(raw.action);
+        const action = text_ACU$2(raw.action);
         if (action !== 'plan')
             fail_ACU('INVALID_PLANNER_ACTION', '$.action', 'plan', raw.action);
         return { action, summary: requiredText_ACU(raw.summary, '$.summary'), plan: stagePlan_ACU(raw.plan) };
     }
     function normalizeSpecialistStatus_ACU(value) {
-        const status = text_ACU$1(value.status);
+        const status = text_ACU$2(value.status);
         const hasNonEmptyPatch = isRecord_ACU$3(value.patch) && Object.keys(value.patch).length > 0;
         if (['success', 'completed', 'complete', 'done', 'ok'].includes(status) && hasNonEmptyPatch)
             return { ...value, status: 'candidate' };
@@ -138094,10 +138096,10 @@ $CONTENT
                 raw.upsert.forEach((item, index) => {
                     if (!isRecord_ACU$3(item))
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
-                    if (!text_ACU$1(item.id))
+                    if (!text_ACU$2(item.id))
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
                     const labelField = module === 'seeds' ? 'title' : 'name';
-                    if (!text_ACU$1(item[labelField])) {
+                    if (!text_ACU$2(item[labelField])) {
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
                     }
                     if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
@@ -138140,7 +138142,7 @@ $CONTENT
         if (!isRecord_ACU$3(value))
             fail_ACU('OBJECT_REQUIRED', '$', 'specialist result object', value);
         const normalized = normalizeSpecialistStatus_ACU(value);
-        const status = text_ACU$1(normalized.status);
+        const status = text_ACU$2(normalized.status);
         const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
         if (status === 'candidate') {
             const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
@@ -138163,14 +138165,14 @@ $CONTENT
     }
     function parseWorldSimulationReviewerResult_ACU(value) {
         const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds']);
-        const verdict = text_ACU$1(raw.verdict);
+        const verdict = text_ACU$2(raw.verdict);
         if (!['accept', 'revise', 'reject'].includes(verdict))
             fail_ACU('INVALID_REVIEW_VERDICT', '$.verdict', 'accept | revise | reject', raw.verdict);
         if (!Array.isArray(raw.findings))
             fail_ACU('FINDINGS_REQUIRED', '$.findings', 'array', raw.findings);
         const findings = raw.findings.map((item, index) => {
             const finding = closedObject_ACU(item, `$.findings[${index}]`, ['severity', 'reasonCode', 'path', 'expected', 'actual']);
-            const severity = text_ACU$1(finding.severity);
+            const severity = text_ACU$2(finding.severity);
             if (!['blocking', 'major', 'minor'].includes(severity))
                 fail_ACU('INVALID_FINDING_SEVERITY', `$.findings[${index}].severity`, 'blocking | major | minor', finding.severity);
             return { severity: severity, reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
@@ -138333,7 +138335,7 @@ $CONTENT
     function compactWorldSimulationProtocolError_ACU(error) {
         if (error instanceof WorldSimulationValidationError_ACU && error.error.code === 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID') {
             const details = error.error.details ?? {};
-            return { reasonCode: text_ACU$1(details.reasonCode) || 'PROTOCOL_INVALID', path: text_ACU$1(details.path) || '$', expected: text_ACU$1(details.expected) || 'valid protocol value', actual: details.actual };
+            return { reasonCode: text_ACU$2(details.reasonCode) || 'PROTOCOL_INVALID', path: text_ACU$2(details.path) || '$', expected: text_ACU$2(details.expected) || 'valid protocol value', actual: details.actual };
         }
         return { reasonCode: 'PROTOCOL_UNKNOWN_ERROR', path: '$', expected: 'valid protocol output', actual: error instanceof Error ? error.message : String(error) };
     }
@@ -138373,6 +138375,246 @@ $CONTENT
     }
     function clearWorldSimulationRunState_ACU(chatIdentity) { states_ACU.delete(chatIdentity); }
     function resetWorldSimulationRunCacheForTests_ACU() { states_ACU.clear(); }
+
+    const RUN_STATE_FIELD_ACU = WORLD_SIMULATION_RUN_STATE_FIELD_ACU;
+    const meta_ACU = new Map();
+    function record_ACU$1(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function reject_ACU$1(message, details) {
+        throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
+    }
+    function nonNegativeInteger_ACU(value, path) {
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 0)
+            reject_ACU$1(`${path} 必须是非负整数`, { path, actual: value });
+        return value;
+    }
+    function text_ACU$1(value, path) {
+        if (typeof value !== 'string' || !value.trim())
+            reject_ACU$1(`${path} 必须是非空字符串`, { path });
+        return value;
+    }
+    function textOrEmpty_ACU(value, path) {
+        if (typeof value !== 'string')
+            reject_ACU$1(`${path} 必须是字符串`, { path });
+        return value;
+    }
+    function numberRecord_ACU(value, path) {
+        if (!record_ACU$1(value))
+            reject_ACU$1(`${path} 必须是对象`, { path });
+        for (const [key, item] of Object.entries(value)) {
+            nonNegativeInteger_ACU(item, `${path}.${key}`);
+        }
+        return value;
+    }
+    function outcomes_ACU(value, path) {
+        if (!Array.isArray(value))
+            reject_ACU$1(`${path} 必须是数组`, { path });
+        return value.map((item, index) => {
+            if (!record_ACU$1(item))
+                reject_ACU$1(`${path}[${index}] 必须是对象`, { path: `${path}[${index}]` });
+            const allowed = new Set(['agentName', 'status', 'summary', 'fingerprint']);
+            for (const key of ['agentName', 'status', 'summary', 'fingerprint']) {
+                if (!Object.prototype.hasOwnProperty.call(item, key))
+                    reject_ACU$1(`${path}[${index}].${key} 缺失`, { path: `${path}[${index}].${key}` });
+            }
+            for (const key of Object.keys(item)) {
+                if (!allowed.has(key))
+                    reject_ACU$1(`${path}[${index}].${key} 是未知字段`, { path: `${path}[${index}].${key}` });
+            }
+            return {
+                agentName: text_ACU$1(item.agentName, `${path}[${index}].agentName`),
+                status: enum_ACU(item.status, ['candidate', 'no_change', 'failed', 'blocked'], `${path}[${index}].status`),
+                summary: text_ACU$1(item.summary, `${path}[${index}].summary`),
+                fingerprint: text_ACU$1(item.fingerprint, `${path}[${index}].fingerprint`),
+            };
+        });
+    }
+    function enum_ACU(value, allowed, path) {
+        if (typeof value !== 'string' || !allowed.includes(value))
+            reject_ACU$1(`${path} 枚举非法`, { path, actual: value });
+        return value;
+    }
+    function candidates_ACU(value, path) {
+        if (!Array.isArray(value))
+            reject_ACU$1(`${path} 必须是数组`, { path });
+        return value.map((item, index) => {
+            if (!record_ACU$1(item))
+                reject_ACU$1(`${path}[${index}] 必须是对象`, { path: `${path}[${index}]` });
+            const allowed = new Set(['candidateId', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties', 'writableModules']);
+            for (const key of ['candidateId', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties', 'writableModules']) {
+                if (!Object.prototype.hasOwnProperty.call(item, key))
+                    reject_ACU$1(`${path}[${index}].${key} 缺失`, { path: `${path}[${index}].${key}` });
+            }
+            for (const key of Object.keys(item)) {
+                if (!allowed.has(key))
+                    reject_ACU$1(`${path}[${index}].${key} 是未知字段`, { path: `${path}[${index}].${key}` });
+            }
+            if (!record_ACU$1(item.patch)) {
+                reject_ACU$1(`${path}[${index}].patch 必须是对象`, { path: `${path}[${index}].patch` });
+            }
+            return {
+                candidateId: text_ACU$1(item.candidateId, `${path}[${index}].candidateId`),
+                agentName: text_ACU$1(item.agentName, `${path}[${index}].agentName`),
+                patch: item.patch,
+                summary: text_ACU$1(item.summary, `${path}[${index}].summary`),
+                evidenceRefs: textArray_ACU(item.evidenceRefs, `${path}[${index}].evidenceRefs`),
+                uncertainties: textArray_ACU(item.uncertainties, `${path}[${index}].uncertainties`),
+                writableModules: textArray_ACU(item.writableModules, `${path}[${index}].writableModules`),
+            };
+        });
+    }
+    function subagentOutcomes_ACU(value, path) {
+        if (!Array.isArray(value))
+            reject_ACU$1(`${path} 必须是数组`, { path });
+        return value.map((item, index) => {
+            if (!record_ACU$1(item))
+                reject_ACU$1(`${path}[${index}] 必须是对象`, { path: `${path}[${index}]` });
+            const allowed = new Set(['agentName', 'status', 'summary', 'candidate', 'evidenceRefs', 'uncertainties', 'reasonCode', 'unresolved']);
+            for (const key of ['agentName', 'status', 'summary', 'evidenceRefs', 'uncertainties']) {
+                if (!Object.prototype.hasOwnProperty.call(item, key))
+                    reject_ACU$1(`${path}[${index}].${key} 缺失`, { path: `${path}[${index}].${key}` });
+            }
+            for (const key of Object.keys(item)) {
+                if (!allowed.has(key))
+                    reject_ACU$1(`${path}[${index}].${key} 是未知字段`, { path: `${path}[${index}].${key}` });
+            }
+            return {
+                agentName: text_ACU$1(item.agentName, `${path}[${index}].agentName`),
+                status: enum_ACU(item.status, ['candidate', 'no_change', 'failed', 'blocked'], `${path}[${index}].status`),
+                summary: text_ACU$1(item.summary, `${path}[${index}].summary`),
+                ...(item.candidate === undefined ? {} : { candidate: candidates_ACU([item.candidate], `${path}[${index}].candidate`)[0] }),
+                evidenceRefs: textArray_ACU(item.evidenceRefs, `${path}[${index}].evidenceRefs`),
+                uncertainties: textArray_ACU(item.uncertainties, `${path}[${index}].uncertainties`),
+                ...(item.reasonCode === undefined ? {} : { reasonCode: text_ACU$1(item.reasonCode, `${path}[${index}].reasonCode`) }),
+                ...(item.unresolved === undefined ? {} : { unresolved: textArray_ACU(item.unresolved, `${path}[${index}].unresolved`) }),
+            };
+        });
+    }
+    function textArray_ACU(value, path) {
+        if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim()))
+            reject_ACU$1(`${path} 必须是非空字符串数组`, { path });
+        return [...value];
+    }
+    function evidenceSnapshot_ACU(value, path) {
+        if (!record_ACU$1(value))
+            reject_ACU$1(`${path} 必须是对象`, { path });
+        const allowed = new Set(['runId', 'entries']);
+        for (const key of ['runId', 'entries']) {
+            if (!Object.prototype.hasOwnProperty.call(value, key))
+                reject_ACU$1(`${path}.${key} 缺失`, { path: `${path}.${key}` });
+        }
+        for (const key of Object.keys(value)) {
+            if (!allowed.has(key))
+                reject_ACU$1(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
+        }
+        if (!Array.isArray(value.entries))
+            reject_ACU$1(`${path}.entries 必须是数组`, { path: `${path}.entries` });
+        const operations = ['initial', 'read', 'search', 'directory'];
+        const statuses = ['ok', 'empty', 'failed', 'truncated', 'dependency_unavailable'];
+        return {
+            runId: text_ACU$1(value.runId, `${path}.runId`),
+            entries: value.entries.map((entry, index) => {
+                if (!record_ACU$1(entry))
+                    reject_ACU$1(`${path}.entries[${index}] 必须是对象`, { path: `${path}.entries[${index}]` });
+                const entryAllowed = new Set(['evidenceRef', 'operation', 'address', 'status', 'summary', 'exact']);
+                for (const key of ['operation', 'address', 'status', 'summary', 'exact']) {
+                    if (!Object.prototype.hasOwnProperty.call(entry, key))
+                        reject_ACU$1(`${path}.entries[${index}].${key} 缺失`, { path: `${path}.entries[${index}].${key}` });
+                }
+                for (const key of Object.keys(entry)) {
+                    if (!entryAllowed.has(key))
+                        reject_ACU$1(`${path}.entries[${index}].${key} 是未知字段`, { path: `${path}.entries[${index}].${key}` });
+                }
+                const evidenceRef = entry.evidenceRef === undefined || entry.evidenceRef === null ? undefined : text_ACU$1(entry.evidenceRef, `${path}.entries[${index}].evidenceRef`);
+                if (typeof entry.exact !== 'boolean')
+                    reject_ACU$1(`${path}.entries[${index}].exact 必须是布尔值`, { path: `${path}.entries[${index}].exact` });
+                return {
+                    ...(evidenceRef === undefined ? {} : { evidenceRef }),
+                    operation: enum_ACU(entry.operation, operations, `${path}.entries[${index}].operation`),
+                    address: text_ACU$1(entry.address, `${path}.entries[${index}].address`),
+                    status: enum_ACU(entry.status, statuses, `${path}.entries[${index}].status`),
+                    summary: text_ACU$1(entry.summary, `${path}.entries[${index}].summary`),
+                    exact: entry.exact,
+                };
+            }),
+        };
+    }
+    function state_ACU(raw, path) {
+        if (!record_ACU$1(raw))
+            reject_ACU$1(`${path} 必须是对象`, { path });
+        const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot']);
+        for (const key of ['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback']) {
+            if (!Object.prototype.hasOwnProperty.call(raw, key))
+                reject_ACU$1(`${path}.${key} 缺失`, { path: `${path}.${key}` });
+        }
+        for (const key of Object.keys(raw)) {
+            if (!allowed.has(key))
+                reject_ACU$1(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
+        }
+        return {
+            taskId: text_ACU$1(raw.taskId, `${path}.taskId`),
+            cursorKey: text_ACU$1(raw.cursorKey, `${path}.cursorKey`),
+            nextIteration: nonNegativeInteger_ACU(raw.nextIteration, `${path}.nextIteration`),
+            delegationsUsed: nonNegativeInteger_ACU(raw.delegationsUsed, `${path}.delegationsUsed`),
+            perAgent: numberRecord_ACU(raw.perAgent, `${path}.perAgent`),
+            outcomes: outcomes_ACU(raw.outcomes, `${path}.outcomes`),
+            candidateFingerprint: text_ACU$1(raw.candidateFingerprint, `${path}.candidateFingerprint`),
+            candidateSummary: textOrEmpty_ACU(raw.candidateSummary, `${path}.candidateSummary`),
+            reviewerFeedback: textOrEmpty_ACU(raw.reviewerFeedback, `${path}.reviewerFeedback`),
+            ...(raw.candidates === undefined ? {} : { candidates: candidates_ACU(raw.candidates, `${path}.candidates`) }),
+            ...(raw.subagentOutcomes === undefined ? {} : { subagentOutcomes: subagentOutcomes_ACU(raw.subagentOutcomes, `${path}.subagentOutcomes`) }),
+            ...(raw.evidenceSnapshot === undefined ? {} : { evidenceSnapshot: evidenceSnapshot_ACU(raw.evidenceSnapshot, `${path}.evidenceSnapshot`) }),
+        };
+    }
+    function validateWorldSimulationRunStateRecord_ACU(raw) {
+        if (!record_ACU$1(raw))
+            reject_ACU$1('世界推演 run 恢复状态必须是对象');
+        const allowed = new Set(['schemaVersion', 'taskId', 'cursorKey', 'updatedAt', 'state']);
+        for (const key of ['schemaVersion', 'taskId', 'cursorKey', 'updatedAt', 'state']) {
+            if (!Object.prototype.hasOwnProperty.call(raw, key))
+                reject_ACU$1(`run 恢复状态缺少字段：${key}`, { path: key });
+        }
+        for (const key of Object.keys(raw)) {
+            if (!allowed.has(key))
+                reject_ACU$1(`run 恢复状态存在未知字段：${key}`, { path: key });
+        }
+        if (raw.schemaVersion !== WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU)
+            reject_ACU$1('run 恢复状态 schemaVersion 非法');
+        const taskId = text_ACU$1(raw.taskId, 'taskId');
+        const cursorKey = text_ACU$1(raw.cursorKey, 'cursorKey');
+        const updatedAt = nonNegativeInteger_ACU(raw.updatedAt, 'updatedAt');
+        const state = state_ACU(raw.state, 'state');
+        if (state.taskId !== taskId || state.cursorKey !== cursorKey)
+            reject_ACU$1('run 恢复状态身份与外层不一致', { taskId, cursorKey });
+        return { schemaVersion: WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU, taskId, cursorKey, updatedAt, state };
+    }
+    async function persistWorldSimulationRunState_ACU(anchor, state, chat) {
+        const record = {
+            schemaVersion: WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU,
+            taskId: state.taskId,
+            cursorKey: state.cursorKey,
+            updatedAt: Date.now(),
+            state,
+        };
+        await writeWorldSimulationBucketEntry_ACU(RUN_STATE_FIELD_ACU, anchor, record, chat);
+        meta_ACU.set(anchor.chatIdentity, { taskId: state.taskId, cursorKey: state.cursorKey, updatedAt: record.updatedAt });
+    }
+    async function restoreWorldSimulationRunState_ACU(anchor, taskId, cursorKey, chat) {
+        // 信任 persist 时校验过的锚点身份；恢复时不重复解析宿主楼层，避免宿主消息对象
+        // 差异导致合法楼层记录被静默丢弃（fail-closed 语义由外层 cursorKey/taskId 校验兜底）。
+        const record = readWorldSimulationBucketEntry_ACU(RUN_STATE_FIELD_ACU, anchor, validateWorldSimulationRunStateRecord_ACU, chat);
+        if (!record)
+            return null;
+        if (record.taskId !== taskId || record.cursorKey !== cursorKey)
+            return null;
+        return record.state;
+    }
+    async function clearWorldSimulationRunStateAtAnchor_ACU(anchor, chat) {
+        if (!anchor)
+            return;
+        meta_ACU.delete(anchor.chatIdentity);
+    }
 
     async function executeWorldSimulationFinalRequest_ACU(input) {
         if (!Number.isFinite(input.historyBudgetTokens) || input.historyBudgetTokens <= 0)
@@ -138485,14 +138727,28 @@ $CONTENT
         async run(input) {
             const cursorKey = cursorKey_ACU(input.identity);
             const resumed = readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey);
-            if (resumed?.evidenceSnapshot) {
-                mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumed.evidenceSnapshot);
+            const anchorState = input.anchor && !resumed
+                ? await restoreWorldSimulationRunState_ACU(input.anchor, input.identity.taskId, cursorKey, input.chat)
+                : null;
+            // 楼层记录与内存缓存语义等价：优先内存（活跃 run），楼层回退覆盖重启恢复。
+            const resumedState = resumed ?? anchorState;
+            if (resumedState?.evidenceSnapshot) {
+                mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumedState.evidenceSnapshot);
             }
-            const outcomes = latestOutcomes_ACU(resumed?.subagentOutcomes ?? []);
-            const candidates = resumed?.candidates ? [...resumed.candidates] : [];
-            const perAgent = new Map(Object.entries(resumed?.perAgent ?? {}));
-            let delegationsUsed = resumed?.delegationsUsed ?? 0;
-            let iteration = Math.max(1, resumed?.nextIteration ?? 1);
+            // 预算窗口重置：恢复时持久化 nextIteration 已达上限且没有可继续的进度（无候选且无派工结果），
+            // 说明这是"预算耗尽后继续"而非正常推进；迭代与派工窗口重新起算，候选与证据全量保留。
+            // "iteration budget exhausted" 是预算耗尽终局 persist 的专属标记；恢复时命中即代表
+            // 用户显式要求以新窗口继续，迭代与派工预算全额重置，候选与证据保留。
+            const budgetExhausted = !!resumedState
+                && (resumedState.nextIteration > input.settings.agentRunBudget.maxIterations
+                    || resumedState.reviewerFeedback === 'iteration budget exhausted');
+            const iterationStart = budgetExhausted ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
+            const delegationsStart = budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
+            const outcomes = latestOutcomes_ACU(resumedState?.subagentOutcomes ?? []);
+            const candidates = resumedState?.candidates ? [...resumedState.candidates] : [];
+            const perAgent = new Map(Object.entries(resumedState?.perAgent ?? {}));
+            let delegationsUsed = delegationsStart;
+            let iteration = iterationStart;
             const transcript = [];
             const director = 'world-director';
             // Director may correct several different mechanical fields in sequence; repeated identical
@@ -138512,11 +138768,11 @@ $CONTENT
                     agentName: entry.agentName, ok: entry.ok, status: entry.status,
                 });
             };
-            const runEntryId = beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resumed ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumed);
-            await persistEntry(runEntryId, resumed ? 'run-resumed' : 'run-started');
+            const runEntryId = beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumedState);
+            await persistEntry(runEntryId, resumedState ? 'run-resumed' : 'run-started');
             const persist = (nextIteration, reviewerFeedback = '') => {
                 const unique = uniqueCandidates_ACU(candidates);
-                saveWorldSimulationRunState_ACU(input.identity.chatIdentity, {
+                const state = {
                     taskId: input.identity.taskId,
                     cursorKey,
                     nextIteration,
@@ -138529,7 +138785,13 @@ $CONTENT
                     candidates: unique,
                     subagentOutcomes: outcomes,
                     evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
-                });
+                };
+                saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
+                if (input.anchor) {
+                    void persistWorldSimulationRunState_ACU(input.anchor, state, input.chat).catch(() => {
+                        // 楼层持久化失败不阻断运行；内存缓存已保存，下一次 persist 会重试落盘。
+                    });
+                }
             };
             for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
@@ -138678,7 +138940,7 @@ $CONTENT
                         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: 'no_change 未满足门禁：必须有授权证据，且已有派工结果全部为 no_change，不得存在候选、失败或 blocked。请继续取证或输出 blocked。' });
                         continue;
                     }
-                    clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+                    await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
                     const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: '世界推演无变化', detail: action.summary, agentName: director });
                     await persistEntry(completedId, 'run-completed-no-change');
                     return { outcome: 'no_change', summary: action.summary, outcomes };
@@ -138763,7 +139025,7 @@ $CONTENT
                 }
                 const finalCandidates = guidanceOutcome.candidate ? [...acceptedCandidates, guidanceOutcome.candidate] : acceptedCandidates;
                 const evidenceRefs = [...new Set([...causalEvidenceRefs, ...guidanceOutcome.evidenceRefs])];
-                clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+                await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
                 const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs, reviewer };
                 const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
                 await persistEntry(completedId, 'run-completed-commit');
@@ -140096,6 +140358,8 @@ $CONTENT
                                 registry,
                                 tools,
                                 persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
+                                anchor,
+                                chat: getChatArray_ACU(),
                             }),
                         });
                         return engine.run({ identity: runIdentity });

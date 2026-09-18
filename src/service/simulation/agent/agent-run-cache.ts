@@ -1,14 +1,7 @@
-import type { WorldSimulationCandidate_ACU, WorldSimulationRunOutcome_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
-import type { WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
+import type { WorldSimulationRunResumeState_ACU } from './agent-model';
 
-export interface WorldSimulationRunResumeState_ACU {
-  taskId: string; cursorKey: string; nextIteration: number; delegationsUsed: number;
-  perAgent: Record<string, number>; outcomes: WorldSimulationRunOutcome_ACU[];
-  candidateFingerprint: string; candidateSummary: string; reviewerFeedback: string;
-  candidates?: WorldSimulationCandidate_ACU[];
-  subagentOutcomes?: WorldSimulationSubagentOutcome_ACU[];
-  evidenceSnapshot?: WorldSimulationEvidenceRegistrySnapshot_ACU;
-}
+export type { WorldSimulationRunResumeState_ACU } from './agent-model';
+
 const states_ACU = new Map<string, WorldSimulationRunResumeState_ACU>();
 
 function clone_ACU(state: WorldSimulationRunResumeState_ACU): WorldSimulationRunResumeState_ACU {

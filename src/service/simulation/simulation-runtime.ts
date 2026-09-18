@@ -180,6 +180,8 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               registry,
               tools,
               persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
+              anchor,
+              chat: getChatArray_ACU(),
             }),
           });
           return engine.run({ identity: runIdentity });
