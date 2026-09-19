@@ -58,4 +58,23 @@ describe('world simulation transaction', () => {
     expect(messages).toMatch(/revision 冲突/);
     expect(violations.length).toBeGreaterThanOrEqual(3);
   });
+
+  it('preflight 对模拟账本聚合回报 actors/seeds 的类型与跨字段违规', () => {
+    const violations = preflightWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [
+      candidate({
+        actors: { upsert: [{ id: 'actor-1', name: '角色', interests: '不是数组', location: '', resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', expectedRevision: 0 }] },
+        seeds: { upsert: [
+          { id: 'seed-1', title: '暗流', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: [], evidenceRefs: ['e1'], retiredReason: '', expectedRevision: 0 },
+          { id: 'seed-2', title: '暗流二', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: [], evidenceRefs: ['e1'], retiredReason: '不该带原因', expectedRevision: 0 },
+          { id: 'seed-3', title: '暗流三', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: ['actor-missing'], evidenceRefs: ['e1'], retiredReason: null, expectedRevision: 0 },
+        ] },
+      }),
+    ], new Set(['e1']));
+    const messages = violations.map(item => item.message).join('\n');
+    expect(messages).toMatch(/actors\[0\]\.interests 必须是字符串数组/);
+    expect(messages).toMatch(/seeds\[0\]\.retiredReason 必须是非空字符串/);
+    expect(messages).toMatch(/seeds\[1\] 非退役状态不能携带退役原因/);
+    expect(messages).toMatch(/seeds\[2\] 引用了不存在的 actor/);
+    expect(violations.length).toBeGreaterThanOrEqual(4);
+  });
 });

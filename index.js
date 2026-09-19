@@ -136220,6 +136220,7 @@ $CONTENT
             `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。`,
             'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
             'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
+            '派工可能被预算门禁静默拦截：被拦派工不会调用子代理也不出卡片，拦截原因与剩余预算会回灌给你；整轮派工被清空不消耗迭代次数，但连续整轮被拦会直接终止。预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
             'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
             '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
             '初始化示例：{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"根据锚点与当前账本形成时钟、维度、暗流或行动者候选","reads":["ledger:current","anchor:message"]}]}',
@@ -136240,6 +136241,8 @@ $CONTENT
             lines.push('dimensions、seeds、actors 必须使用 {"upsert":[...]}；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision。');
             lines.push(`upsert 条目必须包含该模块全部必填字段（${formatWorldSimulationLedgerRequiredFields_ACU()}），不能只补单字段。`);
             lines.push('枚举与取值硬约束（违反即被事务层拒绝）：dimensions[].kind 只能是 pressure | growth；dimensions[].trend 只能是 rising | stable | falling；dimensions[].value 必须是 0 到 100 的整数；seeds[].status 只能是 established | incubating | active | converging | resolved | retired；seeds[].level 必须是 0 到 100 的整数；seeds[].visibility 与 actors[].visibility 只能是 hidden | limited | public。');
+            lines.push('数组硬约束：actors 的 interests、resources、goals、constraints、informationSources、knownFacts 必须全部是字符串数组（允许空数组 []），禁止写成逗号分隔字符串；seeds 的 actorIds 必须也是字符串数组，且只能引用本次 patch 或账本中已存在的 actor id。');
+            lines.push('seeds[].retiredReason 跨字段硬约束：status 为 retired 时必须是非空字符串；status 不是 retired 时必须为 null，禁止写空字符串或其他值——空字符串与非退役带都会被事务层拒绝。');
             lines.push('expectedRevision 是乐观并发控制：新建条目填 0；修改账本已有条目时填该条目在账本中的当前 revision。不确定时先 read ledger:current 核对，禁止猜测、省略或写成字符串。');
             if (writableModules.includes('chronicle'))
                 lines.push('chronicle 必须使用 {"append":[...]}。');
@@ -136972,6 +136975,136 @@ $CONTENT
     }
     function validateWorldSimulationLedger_ACU(raw, phase = 'load') {
         return validateLedger_ACU(raw, phase);
+    }
+    /**
+     * 预检专用聚合诊断：对模拟应用后的账本逐模块、逐条目体检，收集全部违规一次性返回。
+     * 只用于候选入库预检的诊断回灌；正式提交路径仍由 validateWorldSimulationLedger_ACU 首错 fail-closed。
+     */
+    function collectWorldSimulationLedgerViolations_ACU(raw) {
+        const violations = [];
+        const probe = (check) => {
+            try {
+                check();
+            }
+            catch (error) {
+                violations.push(error instanceof Error ? error.message : String(error));
+            }
+        };
+        const phase = 'agent_persist';
+        if (!isRecord_ACU$7(raw))
+            return ['ledger 必须是对象'];
+        probe(() => exactKeys_ACU$2(raw, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'], [], 'ledger', phase));
+        probe(() => { if (raw.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU)
+            fail_ACU$3('ledger.schemaVersion 必须为 1', phase); });
+        probe(() => { integer_ACU(raw.revision, 'ledger.revision', phase); });
+        probe(() => {
+            if (!isRecord_ACU$7(raw.clock))
+                fail_ACU$3('ledger.clock 必须是对象', phase);
+            exactKeys_ACU$2(raw.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
+            string_ACU(raw.clock.storyTime, 'ledger.clock.storyTime', phase, true);
+            string_ACU(raw.clock.elapsed, 'ledger.clock.elapsed', phase, true);
+            enum_ACU$1(raw.clock.precision, ['exact', 'approximate', 'unknown'], 'ledger.clock.precision', phase);
+            stringArray_ACU(raw.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase);
+        });
+        if (Array.isArray(raw.dimensions))
+            raw.dimensions.forEach((item, index) => probe(() => {
+                if (!isRecord_ACU$7(item))
+                    fail_ACU$3(`ledger.dimensions[${index}] 必须是对象`, phase);
+                exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
+                stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase);
+                string_ACU(item.name, `ledger.dimensions[${index}].name`, phase);
+                enum_ACU$1(item.kind, ['pressure', 'growth'], `ledger.dimensions[${index}].kind`, phase);
+                integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100);
+                enum_ACU$1(item.trend, ['rising', 'stable', 'falling'], `ledger.dimensions[${index}].trend`, phase);
+                string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true);
+                stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase);
+                integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase);
+            }));
+        else
+            probe(() => fail_ACU$3('ledger.dimensions 必须是数组', phase));
+        if (Array.isArray(raw.actors))
+            raw.actors.forEach((item, index) => probe(() => {
+                if (!isRecord_ACU$7(item))
+                    fail_ACU$3(`ledger.actors[${index}] 必须是对象`, phase);
+                exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
+                stableId_ACU(item.id, `ledger.actors[${index}].id`, phase);
+                string_ACU(item.name, `ledger.actors[${index}].name`, phase);
+                stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase);
+                string_ACU(item.location, `ledger.actors[${index}].location`, phase, true);
+                stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase);
+                stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase);
+                stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase);
+                stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase);
+                stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase);
+                enum_ACU$1(item.visibility, ['hidden', 'limited', 'public'], `ledger.actors[${index}].visibility`, phase);
+                integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase);
+            }));
+        else
+            probe(() => fail_ACU$3('ledger.actors 必须是数组', phase));
+        const actorIds = new Set();
+        if (Array.isArray(raw.actors))
+            for (const item of raw.actors)
+                if (isRecord_ACU$7(item) && typeof item.id === 'string')
+                    actorIds.add(item.id);
+        if (Array.isArray(raw.seeds))
+            raw.seeds.forEach((item, index) => probe(() => {
+                if (!isRecord_ACU$7(item))
+                    fail_ACU$3(`ledger.seeds[${index}] 必须是对象`, phase);
+                exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
+                const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
+                for (const actorId of linkedActors)
+                    if (!actorIds.has(actorId))
+                        fail_ACU$3(`ledger.seeds[${index}] 引用了不存在的 actor`, phase, { actorId });
+                const status = enum_ACU$1(item.status, ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'], `ledger.seeds[${index}].status`, phase);
+                const retiredReason = item.retiredReason === null ? null : string_ACU(item.retiredReason, `ledger.seeds[${index}].retiredReason`, phase);
+                if (status === 'retired' && !retiredReason)
+                    fail_ACU$3(`ledger.seeds[${index}] 退役时必须提供原因`, phase);
+                if (status !== 'retired' && retiredReason !== null)
+                    fail_ACU$3(`ledger.seeds[${index}] 非退役状态不能携带退役原因`, phase);
+                stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase);
+                string_ACU(item.title, `ledger.seeds[${index}].title`, phase);
+                integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100);
+                string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true);
+                enum_ACU$1(item.visibility, ['hidden', 'limited', 'public'], `ledger.seeds[${index}].visibility`, phase);
+                stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase);
+                integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase);
+            }));
+        else
+            probe(() => fail_ACU$3('ledger.seeds 必须是数组', phase));
+        const knownIds = new Set(actorIds);
+        if (Array.isArray(raw.dimensions))
+            for (const item of raw.dimensions)
+                if (isRecord_ACU$7(item) && typeof item.id === 'string')
+                    knownIds.add(item.id);
+        if (Array.isArray(raw.seeds))
+            for (const item of raw.seeds)
+                if (isRecord_ACU$7(item) && typeof item.id === 'string')
+                    knownIds.add(item.id);
+        if (Array.isArray(raw.chronicle))
+            raw.chronicle.forEach((item, index) => probe(() => {
+                if (!isRecord_ACU$7(item))
+                    fail_ACU$3(`ledger.chronicle[${index}] 必须是对象`, phase);
+                exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
+                const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
+                for (const relatedId of related)
+                    if (!knownIds.has(relatedId))
+                        fail_ACU$3(`ledger.chronicle[${index}] 引用了不存在的对象`, phase, { relatedId });
+                stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase);
+                string_ACU(item.at, `ledger.chronicle[${index}].at`, phase);
+                string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase);
+                stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase);
+            }));
+        else
+            probe(() => fail_ACU$3('ledger.chronicle 必须是数组', phase));
+        probe(() => {
+            if (!isRecord_ACU$7(raw.guidance))
+                fail_ACU$3('ledger.guidance 必须是对象', phase);
+            exactKeys_ACU$2(raw.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
+            stringArray_ACU(raw.guidance.signals, 'ledger.guidance.signals', phase);
+            stringArray_ACU(raw.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase);
+            stringArray_ACU(raw.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
+        });
+        return violations;
     }
 
     const WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU = ['run_started', 'run_resumed', 'user_message', 'thought', 'main_action', 'protocol_retry', 'tool_read', 'delegation', 'stage_plan', 'handoff', 'finalize', 'block', 'run_failed', 'run_completed'];
@@ -137934,12 +138067,9 @@ $CONTENT
             }
         }
         if (!violations.length) {
-            try {
-                next.revision = validatedBase.revision + 1;
-                validateWorldSimulationLedger_ACU(next, 'agent_persist');
-            }
-            catch (error) {
-                violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error) });
+            next.revision = validatedBase.revision + 1;
+            for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
+                violations.push({ candidateId: '', agentName: '', module: '', path: '$', message });
             }
         }
         return violations;
@@ -138927,6 +139057,7 @@ $CONTENT
     }
 
     const compact_ACU = (error) => error instanceof Error ? error.message : String(error);
+    const SILENT_DELEGATION_REJECT_LIMIT_ACU = 2;
     const cursorKey_ACU = (identity) => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
     const fingerprint_ACU = (outcome) => sha256HexSync_ACU(JSON.stringify([outcome.agentName, outcome.status, outcome.summary, outcome.candidate?.candidateId])).slice(0, 24);
     function upsertLatestOutcome_ACU(items, outcome) {
@@ -139049,6 +139180,7 @@ $CONTENT
             const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
             const readGateState = createWorldSimulationReadGateState_ACU();
             const toolUsage = { readsUsed: 0 };
+            let silentDelegationRejections = 0;
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
             const persistEntry = async (entryId, eventKey) => {
                 if (!input.persistSessionEvent)
@@ -139181,13 +139313,20 @@ $CONTENT
                 }
                 if (action.kind === 'delegate') {
                     const accepted = [];
+                    const rejected = [];
                     const runningEntries = new Map();
                     for (const delegation of action.delegations) {
                         const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === delegation.agentName);
                         const used = perAgent.get(delegation.agentName) ?? 0;
                         const allowedKind = definition && (definition.kind === 'specialist' || definition.kind === 'researcher');
-                        if (!allowedKind || delegationsUsed + accepted.length >= input.settings.agentRunBudget.maxDelegations || used >= input.settings.agentRunBudget.maxSameAgent || accepted.length >= input.settings.agentRunBudget.maxConcurrent) {
-                            upsertLatestOutcome_ACU(outcomes, { agentName: delegation.agentName, status: 'failed', summary: '派工被预算或角色门禁拒绝', evidenceRefs: [], uncertainties: [], reasonCode: 'WORLD_SIMULATION_DELEGATION_REJECTED' });
+                        const reason = !allowedKind ? `角色 ${delegation.agentName} 不可派工`
+                            : delegationsUsed + accepted.length >= input.settings.agentRunBudget.maxDelegations ? `总派工预算已耗尽（${delegationsUsed + accepted.length}/${input.settings.agentRunBudget.maxDelegations}）`
+                                : used >= input.settings.agentRunBudget.maxSameAgent ? `同角色派工预算已耗尽（${used}/${input.settings.agentRunBudget.maxSameAgent}）`
+                                    : accepted.length >= input.settings.agentRunBudget.maxConcurrent ? `并行派工预算已耗尽（${accepted.length}/${input.settings.agentRunBudget.maxConcurrent}）`
+                                        : '';
+                        // 预算/角色门禁静默拦截：不调用子代理、不出会话卡片、不记 outcome，原因仅回灌 transcript。
+                        if (reason) {
+                            rejected.push({ agentName: delegation.agentName, reason });
                             continue;
                         }
                         accepted.push(delegation);
@@ -139195,6 +139334,23 @@ $CONTENT
                             kind: 'delegation', title: `${delegation.agentName} 正在工作`, detail: delegation.instruction, agentName: delegation.agentName, status: 'running',
                         }));
                     }
+                    const budgetUsageText = `当前用量：总派工 ${delegationsUsed}/${input.settings.agentRunBudget.maxDelegations}${[...perAgent.entries()].map(([name, count]) => `；${name} ${count}/${input.settings.agentRunBudget.maxSameAgent}`).join('')}`;
+                    const rejectionText = `派工被预算门禁静默拦截（未调用任何子代理）：\n${rejected.map(item => `- ${item.agentName}：${item.reason}`).join('\n')}\n${budgetUsageText}\n请改派仍有预算的角色、基于现有候选 finalize，或在证据不足时输出 block。`;
+                    if (!accepted.length) {
+                        // 整轮派工被门禁清空：不消耗迭代轮数；连续整轮被拦达到上限即终止，防止无声空转。
+                        silentDelegationRejections += 1;
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `${rejectionText}（整轮拦截 ${silentDelegationRejections}/${SILENT_DELEGATION_REJECT_LIMIT_ACU}，达到上限即终止）` });
+                        if (silentDelegationRejections >= SILENT_DELEGATION_REJECT_LIMIT_ACU) {
+                            persist(iteration, 'delegation gate exhausted');
+                            const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '派工预算耗尽，连续整轮被门禁拦截', detail: rejectionText, agentName: director, ok: false });
+                            await persistEntry(blockId, 'block-delegation-gate');
+                            return { outcome: 'blocked', summary: '派工被预算门禁连续拦截，无可派工角色', unresolved: rejected.map(item => `${item.agentName}: ${item.reason}`), outcomes };
+                        }
+                        persist(iteration);
+                        iteration -= 1;
+                        continue;
+                    }
+                    silentDelegationRejections = 0;
                     const settled = await Promise.all(accepted.map(async (delegation) => {
                         try {
                             return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
@@ -139228,6 +139384,9 @@ $CONTENT
                         await persistEntry(entryId, `delegation-${iteration}-${index + 1}`);
                     }
                     const transcriptPayload = [{ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) }];
+                    if (rejected.length) {
+                        transcriptPayload.push({ role: 'user', content: rejectionText });
+                    }
                     const preflightFailures = settled.filter(item => item.reasonCode === 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED');
                     if (preflightFailures.length) {
                         transcriptPayload.push({ role: 'user', content: `\u5019\u9009\u5165\u5e93\u9884\u68c0\u62d2\u7edd\uff1a\n${preflightFailures.map(item => `${item.agentName} ${item.summary}`).join('\n')}\n\u8bf7\u6309\u5168\u90e8\u8fdd\u89c4\u4e00\u6b21\u6027\u4fee\u6b63\u540e\u91cd\u65b0\u6d3e\u5de5\u3002\u5b8c\u6574\u5fc5\u586b\u5b57\u6bb5\u6a21\u677f\uff1a${formatWorldSimulationLedgerRequiredFields_ACU()}\u3002\u4e0d\u5f97\u628a\u672c\u6b21\u9884\u68c0\u5931\u8d25\u5f53\u4f5c\u4efb\u52a1\u7ec8\u5c40\u3002` });

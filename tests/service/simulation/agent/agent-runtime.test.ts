@@ -810,4 +810,63 @@ describe('世界推演 Agent runtime', () => {
     ]);
   });
 
+  it('整轮派工被预算门禁静默拦截时不消耗迭代且连续两次后终止', async () => {
+    const { registry, promptContext } = fixture('delegation-gate-silent');
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析时间', reads: [] }] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '再次分析时间', reads: [] }] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-gate-silent', chatIdentity: 'chat-gate-silent', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-gate-silent', stageId: 'stage-gate-silent', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxSameAgent = 0;
+
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'blocked', summary: '派工被预算门禁连续拦截，无可派工角色' });
+    expect(result.unresolved?.join('\n')).toContain('同角色派工预算已耗尽');
+    expect(subagents.run).not.toHaveBeenCalled();
+    expect(subagents.runReviewer).not.toHaveBeenCalled();
+    // 第二次请求已携带第一次拦截的回灌说明。
+    expect(JSON.stringify(invoke.mock.calls[1][1])).toContain('静默拦截');
+    expect(JSON.stringify(invoke.mock.calls[1][1])).toContain('不消耗迭代');
+    // 静默拦截不出派工卡片，会话中仅保留主 Agent 动作与终止 block。
+    expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).some(item => item.kind === 'delegation')).toBe(false);
+    // 被清空轮不计迭代：run state 的 nextIteration 不越过首轮。
+    expect(readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`)?.nextIteration).toBe(1);
+  });
+
+  it('部分派工被并行预算拦截时只回灌原因且不调用被拦角色', async () => {
+    const { registry, evidence, promptContext } = fixture('delegation-gate-partial');
+    const subagents = {
+      run: vi.fn(async ({ delegation }: any) => ({ agentName: delegation.agentName, status: 'no_change' as const, summary: '无变化', evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [
+        { agentName: 'world-analyst', instruction: '分析时间', reads: [] },
+        { agentName: 'lore-researcher', instruction: '分析暗流', reads: [] },
+      ] }),
+      JSON.stringify({ action: 'block', reason: '被拦后收敛', unresolved: ['等待下一轮预算'] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-gate-partial', chatIdentity: 'chat-gate-partial', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-gate-partial', stageId: 'stage-gate-partial', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxConcurrent = 1;
+
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'blocked', summary: '被拦后收敛' });
+    expect(subagents.run).toHaveBeenCalledOnce();
+    expect(subagents.run.mock.calls[0][0].delegation.agentName).toBe('world-analyst');
+    const secondCall = JSON.stringify(invoke.mock.calls[1][1]);
+    expect(secondCall).toContain('静默拦截');
+    expect(secondCall).toContain('并行派工预算已耗尽');
+    expect(secondCall).toContain('lore-researcher');
+    expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).filter(item => item.kind === 'delegation')).toHaveLength(1);
+  });
+
 });

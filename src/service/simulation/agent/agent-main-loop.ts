@@ -39,6 +39,7 @@ export interface WorldSimulationMainLoopInput_ACU {
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const SILENT_DELEGATION_REJECT_LIMIT_ACU = 2;
 const cursorKey_ACU = (identity: WorldSimulationRunIdentity_ACU): string => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
 const fingerprint_ACU = (outcome: WorldSimulationSubagentOutcome_ACU): string => sha256HexSync_ACU(JSON.stringify([outcome.agentName, outcome.status, outcome.summary, outcome.candidate?.candidateId])).slice(0, 24);
 
@@ -167,6 +168,7 @@ export class WorldSimulationMainLoop_ACU {
     const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
+    let silentDelegationRejections = 0;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
     const persistEntry = async (entryId: number, eventKey: string): Promise<void> => {
       if (!input.persistSessionEvent) return;
@@ -307,13 +309,20 @@ export class WorldSimulationMainLoop_ACU {
 
       if (action.kind === 'delegate') {
         const accepted = [] as typeof action.delegations;
+        const rejected = [] as Array<{ agentName: string; reason: string }>;
         const runningEntries = new Map<(typeof action.delegations)[number], number>();
         for (const delegation of action.delegations) {
           const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === delegation.agentName);
           const used = perAgent.get(delegation.agentName) ?? 0;
           const allowedKind = definition && (definition.kind === 'specialist' || definition.kind === 'researcher');
-          if (!allowedKind || delegationsUsed + accepted.length >= input.settings.agentRunBudget.maxDelegations || used >= input.settings.agentRunBudget.maxSameAgent || accepted.length >= input.settings.agentRunBudget.maxConcurrent) {
-            upsertLatestOutcome_ACU(outcomes, { agentName: delegation.agentName, status: 'failed', summary: '派工被预算或角色门禁拒绝', evidenceRefs: [], uncertainties: [], reasonCode: 'WORLD_SIMULATION_DELEGATION_REJECTED' });
+          const reason = !allowedKind ? `角色 ${delegation.agentName} 不可派工`
+            : delegationsUsed + accepted.length >= input.settings.agentRunBudget.maxDelegations ? `总派工预算已耗尽（${delegationsUsed + accepted.length}/${input.settings.agentRunBudget.maxDelegations}）`
+            : used >= input.settings.agentRunBudget.maxSameAgent ? `同角色派工预算已耗尽（${used}/${input.settings.agentRunBudget.maxSameAgent}）`
+            : accepted.length >= input.settings.agentRunBudget.maxConcurrent ? `并行派工预算已耗尽（${accepted.length}/${input.settings.agentRunBudget.maxConcurrent}）`
+            : '';
+          // 预算/角色门禁静默拦截：不调用子代理、不出会话卡片、不记 outcome，原因仅回灌 transcript。
+          if (reason) {
+            rejected.push({ agentName: delegation.agentName, reason });
             continue;
           }
           accepted.push(delegation);
@@ -321,6 +330,23 @@ export class WorldSimulationMainLoop_ACU {
             kind: 'delegation', title: `${delegation.agentName} 正在工作`, detail: delegation.instruction, agentName: delegation.agentName, status: 'running',
           }));
         }
+        const budgetUsageText = `当前用量：总派工 ${delegationsUsed}/${input.settings.agentRunBudget.maxDelegations}${[...perAgent.entries()].map(([name, count]) => `；${name} ${count}/${input.settings.agentRunBudget.maxSameAgent}`).join('')}`;
+        const rejectionText = `派工被预算门禁静默拦截（未调用任何子代理）：\n${rejected.map(item => `- ${item.agentName}：${item.reason}`).join('\n')}\n${budgetUsageText}\n请改派仍有预算的角色、基于现有候选 finalize，或在证据不足时输出 block。`;
+        if (!accepted.length) {
+          // 整轮派工被门禁清空：不消耗迭代轮数；连续整轮被拦达到上限即终止，防止无声空转。
+          silentDelegationRejections += 1;
+          transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `${rejectionText}（整轮拦截 ${silentDelegationRejections}/${SILENT_DELEGATION_REJECT_LIMIT_ACU}，达到上限即终止）` });
+          if (silentDelegationRejections >= SILENT_DELEGATION_REJECT_LIMIT_ACU) {
+            persist(iteration, 'delegation gate exhausted');
+            const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '派工预算耗尽，连续整轮被门禁拦截', detail: rejectionText, agentName: director, ok: false });
+            await persistEntry(blockId, 'block-delegation-gate');
+            return { outcome: 'blocked', summary: '派工被预算门禁连续拦截，无可派工角色', unresolved: rejected.map(item => `${item.agentName}: ${item.reason}`), outcomes };
+          }
+          persist(iteration);
+          iteration -= 1;
+          continue;
+        }
+        silentDelegationRejections = 0;
         const settled = await Promise.all(accepted.map(async delegation => {
           try {
             return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
@@ -352,6 +378,9 @@ export class WorldSimulationMainLoop_ACU {
           await persistEntry(entryId, `delegation-${iteration}-${index + 1}`);
         }
         const transcriptPayload: Array<{ role: string; content: string }> = [{ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) }];
+        if (rejected.length) {
+          transcriptPayload.push({ role: 'user', content: rejectionText });
+        }
         const preflightFailures = settled.filter(item => item.reasonCode === 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED');
         if (preflightFailures.length) {
           transcriptPayload.push({ role: 'user', content: `\u5019\u9009\u5165\u5e93\u9884\u68c0\u62d2\u7edd\uff1a\n${preflightFailures.map(item => `${item.agentName} ${item.summary}`).join('\n')}\n\u8bf7\u6309\u5168\u90e8\u8fdd\u89c4\u4e00\u6b21\u6027\u4fee\u6b63\u540e\u91cd\u65b0\u6d3e\u5de5\u3002\u5b8c\u6574\u5fc5\u586b\u5b57\u6bb5\u6a21\u677f\uff1a${formatWorldSimulationLedgerRequiredFields_ACU()}\u3002\u4e0d\u5f97\u628a\u672c\u6b21\u9884\u68c0\u5931\u8d25\u5f53\u4f5c\u4efb\u52a1\u7ec8\u5c40\u3002` });

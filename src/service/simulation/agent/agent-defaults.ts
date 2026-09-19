@@ -38,6 +38,7 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
     `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。`,
     'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
     'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
+    '派工可能被预算门禁静默拦截：被拦派工不会调用子代理也不出卡片，拦截原因与剩余预算会回灌给你；整轮派工被清空不消耗迭代次数，但连续整轮被拦会直接终止。预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
     'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
     '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
     '初始化示例：{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"根据锚点与当前账本形成时钟、维度、暗流或行动者候选","reads":["ledger:current","anchor:message"]}]}',
@@ -62,6 +63,8 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
     lines.push('dimensions、seeds、actors 必须使用 {"upsert":[...]}；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision。');
     lines.push(`upsert 条目必须包含该模块全部必填字段（${formatWorldSimulationLedgerRequiredFields_ACU()}），不能只补单字段。`);
     lines.push('枚举与取值硬约束（违反即被事务层拒绝）：dimensions[].kind 只能是 pressure | growth；dimensions[].trend 只能是 rising | stable | falling；dimensions[].value 必须是 0 到 100 的整数；seeds[].status 只能是 established | incubating | active | converging | resolved | retired；seeds[].level 必须是 0 到 100 的整数；seeds[].visibility 与 actors[].visibility 只能是 hidden | limited | public。');
+    lines.push('数组硬约束：actors 的 interests、resources、goals、constraints、informationSources、knownFacts 必须全部是字符串数组（允许空数组 []），禁止写成逗号分隔字符串；seeds 的 actorIds 必须也是字符串数组，且只能引用本次 patch 或账本中已存在的 actor id。');
+    lines.push('seeds[].retiredReason 跨字段硬约束：status 为 retired 时必须是非空字符串；status 不是 retired 时必须为 null，禁止写空字符串或其他值——空字符串与非退役带都会被事务层拒绝。');
     lines.push('expectedRevision 是乐观并发控制：新建条目填 0；修改账本已有条目时填该条目在账本中的当前 revision。不确定时先 read ledger:current 核对，禁止猜测、省略或写成字符串。');
     if (writableModules.includes('chronicle')) lines.push('chronicle 必须使用 {"append":[...]}。');
     if (writableModules.includes('clock')) lines.push('clock 必须是非空对象。');

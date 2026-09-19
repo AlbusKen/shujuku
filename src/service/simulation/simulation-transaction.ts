@@ -1,7 +1,7 @@
 import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
 import { WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationLedger_ACU } from './model';
-import { validateWorldSimulationLedger_ACU } from './simulation-store';
+import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'] as const;
 type Module_ACU = typeof MODULES_ACU[number];
@@ -250,11 +250,9 @@ export function preflightWorldSimulationCandidates_ACU(
     }
   }
   if (!violations.length) {
-    try {
-      next.revision = validatedBase.revision + 1;
-      validateWorldSimulationLedger_ACU(next, 'agent_persist');
-    } catch (error) {
-      violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error) });
+    next.revision = validatedBase.revision + 1;
+    for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
+      violations.push({ candidateId: '', agentName: '', module: '', path: '$', message });
     }
   }
   return violations;
