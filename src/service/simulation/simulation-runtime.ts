@@ -1,5 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationConversationSegment_ACU, appendWorldSimulationSessionEvent_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
@@ -294,8 +295,13 @@ export class WorldSimulationRuntime_ACU {
 
   async handleAssistantCompletion(intent: Parameters<typeof resolveWorldSimulationAssistantCompletion_ACU>[0]): Promise<WorldSimulationOrchestratorResult_ACU | null> {
     const resolved = await resolveWorldSimulationAssistantCompletion_ACU(intent, { getChat: this.getChat, delay: ms => new Promise(resolve => setTimeout(resolve, ms)) });
-    if (resolved.kind !== 'resolved') return null;
-    return this.orchestrator.start({ triggerKind: 'assistant_completed', anchor: resolved.anchor, instruction: '根据最新 assistant 正文推进世界状态' });
+    if (resolved.kind !== 'resolved') {
+      logWarn_ACU(`世界推演自动触发跳过：锚点解析失败（${resolved.reason}）`);
+      return null;
+    }
+    const outcome = await this.orchestrator.start({ triggerKind: 'assistant_completed', anchor: resolved.anchor, instruction: '根据最新 assistant 正文推进世界状态' });
+    if (outcome.status === 'skipped') logDebug_ACU(`世界推演自动触发跳过：orchestrator skipped（${outcome.reason}）`);
+    return outcome;
   }
 
   /**

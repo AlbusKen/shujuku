@@ -50,4 +50,15 @@ export function consumeWorldSimulationInternalAiGenerationEnded_ACU(generationSe
   requests_ACU.delete(match.identity.requestId);
   return match.identity;
 }
+/**
+ * 主正文 GENERATION_ENDED 到达时，是否仍存在可能错配消费共享生成上下文栈的内部请求：
+ * - mainApiActive：GENERATION_STARTED 同步归属窗口打开，下一次 STARTED 可能被绑到内部记录；
+ * - generationSeq 已绑定：其 GENERATION_ENDED 尚未到达，届时会从共享栈弹栈。
+ * 任一为真时，当前 ENDED 的上下文配对不可信，禁止据此触发自动推演。
+ */
+export function hasWorldSimulationInternalAiInflight_ACU(): boolean {
+  purge_ACU();
+  for (const record of requests_ACU.values()) if (record.mainApiActive || record.generationSeq !== null) return true;
+  return false;
+}
 export function resetWorldSimulationInternalAiEventsForTests_ACU(): void { requests_ACU.clear(); }

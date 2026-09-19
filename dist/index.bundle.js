@@ -135881,6 +135881,19 @@ $CONTENT
         requests_ACU.delete(match.identity.requestId);
         return match.identity;
     }
+    /**
+     * 主正文 GENERATION_ENDED 到达时，是否仍存在可能错配消费共享生成上下文栈的内部请求：
+     * - mainApiActive：GENERATION_STARTED 同步归属窗口打开，下一次 STARTED 可能被绑到内部记录；
+     * - generationSeq 已绑定：其 GENERATION_ENDED 尚未到达，届时会从共享栈弹栈。
+     * 任一为真时，当前 ENDED 的上下文配对不可信，禁止据此触发自动推演。
+     */
+    function hasWorldSimulationInternalAiInflight_ACU() {
+        purge_ACU();
+        for (const record of requests_ACU.values())
+            if (record.mainApiActive || record.generationSeq !== null)
+                return true;
+        return false;
+    }
     function resetWorldSimulationInternalAiEventsForTests_ACU() { requests_ACU.clear(); }
 
     const WORLD_SIMULATION_AGENT_NAMES_ACU = [
@@ -140580,9 +140593,14 @@ $CONTENT
         }
         async handleAssistantCompletion(intent) {
             const resolved = await resolveWorldSimulationAssistantCompletion_ACU(intent, { getChat: this.getChat, delay: ms => new Promise(resolve => setTimeout(resolve, ms)) });
-            if (resolved.kind !== 'resolved')
+            if (resolved.kind !== 'resolved') {
+                logWarn_ACU(`世界推演自动触发跳过：锚点解析失败（${resolved.reason}）`);
                 return null;
-            return this.orchestrator.start({ triggerKind: 'assistant_completed', anchor: resolved.anchor, instruction: '根据最新 assistant 正文推进世界状态' });
+            }
+            const outcome = await this.orchestrator.start({ triggerKind: 'assistant_completed', anchor: resolved.anchor, instruction: '根据最新 assistant 正文推进世界状态' });
+            if (outcome.status === 'skipped')
+                logDebug_ACU(`世界推演自动触发跳过：orchestrator skipped（${outcome.reason}）`);
+            return outcome;
         }
         /**
          * Agent 会话发送。与智能续写 sendAgentMessage 同语义：
@@ -141160,11 +141178,19 @@ $CONTENT
                                 generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
                             }
                             : undefined;
-                        if (generationContext && !generationContext.dryRun && !quietLike && !automaticTrigger && eventMessageId !== undefined) {
-                            const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(eventMessageId, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU(), generationContext.seq);
+                        // [触发修复] generationContext 缺失（60s TTL 过期或共享栈被其他生成错配弹走）不再静默跳过：
+                        // 与自动填表门控语义对齐（shouldProcessAutoTableUpdateForGenerationEnded_ACU 对 null 上下文放行），
+                        // 只在确证 dryRun/quiet/自动触发生成，或世界推演内部调用仍在途（本次上下文可能已被内部事件错配消费）时放弃。
+                        const simulationInternalInFlight = hasWorldSimulationInternalAiInflight_ACU();
+                        const simulationContextBlocked = !!generationContext && (generationContext.dryRun || quietLike || automaticTrigger);
+                        if (!simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
+                            const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(eventMessageId, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU(), generationContext?.seq);
                             void getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent).catch(error => {
                                 logWarn_ACU(`世界推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
                             });
+                        }
+                        else {
+                            logDebug_ACU(`世界推演自动触发跳过：${eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
                         }
                         if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                             handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);

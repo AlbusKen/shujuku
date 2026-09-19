@@ -38,7 +38,7 @@ import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
-import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU } from '../../service/simulation/simulation-internal-ai-events';
+import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
@@ -506,16 +506,23 @@ export   function mainInitialize_ACU() {
                       generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
                   }
                   : undefined;
-                if (generationContext && !generationContext.dryRun && !quietLike && !automaticTrigger && eventMessageId !== undefined) {
+                // [触发修复] generationContext 缺失（60s TTL 过期或共享栈被其他生成错配弹走）不再静默跳过：
+                // 与自动填表门控语义对齐（shouldProcessAutoTableUpdateForGenerationEnded_ACU 对 null 上下文放行），
+                // 只在确证 dryRun/quiet/自动触发生成，或世界推演内部调用仍在途（本次上下文可能已被内部事件错配消费）时放弃。
+                const simulationInternalInFlight = hasWorldSimulationInternalAiInflight_ACU();
+                const simulationContextBlocked = !!generationContext && (generationContext.dryRun || quietLike || automaticTrigger);
+                if (!simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
                   const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(
                     eventMessageId,
                     currentChatFileIdentifier_ACU,
                     getCurrentIsolationKey_ACU(),
-                    generationContext.seq,
+                    generationContext?.seq,
                   );
                   void getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent).catch(error => {
                     logWarn_ACU(`世界推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
                   });
+                } else {
+                  logDebug_ACU(`世界推演自动触发跳过：${eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
                 }
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);
