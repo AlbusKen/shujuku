@@ -135930,6 +135930,19 @@ $CONTENT
     function createWorldSimulationError_ACU(code, phase, message, retryable = false, details) { return details ? { code, phase, message, retryable, details } : { code, phase, message, retryable }; }
     const WORLD_SIMULATION_WEB_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'];
     const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'];
+    const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
+        clock: ['storyTime', 'elapsed', 'precision', 'evidenceRefs'],
+        dimensions: ['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'],
+        seeds: ['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'evidenceRefs', 'retiredReason', 'revision'],
+        actors: ['id', 'name', 'interests', 'location', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'],
+        chronicle: ['id', 'at', 'summary', 'relatedIds', 'evidenceRefs'],
+        guidance: ['signals', 'excludedFacts', 'evidenceRefs'],
+    };
+    function formatWorldSimulationLedgerRequiredFields_ACU() {
+        return Object.keys(WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU)
+            .map(module => `${module}: ${WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU[module].join(',')}`)
+            .join('；');
+    }
 
     const WORLD_SIMULATION_EVIDENCE_STATUSES_ACU = ['ok', 'empty', 'failed', 'truncated', 'dependency_unavailable'];
     function compact_ACU$1(value) {
@@ -136226,6 +136239,7 @@ $CONTENT
             lines.push(`candidate 必须包含非空 patch、summary、evidenceRefs、uncertainties；patch 顶层只能使用：${writableModules.join(' | ')}。`);
             lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
             lines.push('dimensions、seeds、actors 必须使用 {"upsert":[...]}；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision。');
+            lines.push(`upsert 条目必须包含该模块全部必填字段（${formatWorldSimulationLedgerRequiredFields_ACU()}），不能只补单字段。`);
             lines.push('expectedRevision 是乐观并发控制：新建条目填 0；修改账本已有条目时填该条目在账本中的当前 revision。不确定时先 read ledger:current 核对，禁止猜测、省略或写成字符串。');
             lines.push('chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
         }
@@ -136477,11 +136491,15 @@ $CONTENT
     const WORLD_SIMULATION_STATE_FIELD_ACU$1 = '_qrf_world_simulation_state';
     function isRecord_ACU$7(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function fail_ACU$3(message, phase, details) { throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_ENVELOPE_INVALID', phase, message, false, details)); }
-    function exactKeys_ACU$2(raw, required, optional, path, phase) { const allowed = new Set([...required, ...optional]); for (const key of required)
-        if (!Object.prototype.hasOwnProperty.call(raw, key))
-            fail_ACU$3(`缺少持久化字段：${path}.${key}`, phase, { path: `${path}.${key}` }); for (const key of Object.keys(raw))
-        if (!allowed.has(key))
-            fail_ACU$3(`存在未知持久化字段：${path}.${key}`, phase, { path: `${path}.${key}` }); }
+    function exactKeys_ACU$2(raw, required, optional, path, phase) {
+        const allowed = new Set([...required, ...optional]);
+        const missing = required.filter(key => !Object.prototype.hasOwnProperty.call(raw, key));
+        if (missing.length)
+            fail_ACU$3(`${path} 缺少必填字段：${missing.join(',')}`, phase, { path, missingFields: missing });
+        const unknown = Object.keys(raw).filter(key => !allowed.has(key));
+        if (unknown.length)
+            fail_ACU$3(`${path} 存在未知持久化字段：${unknown.join(',')}`, phase, { path, unknownFields: unknown });
+    }
     function string_ACU(value, path, phase, allowEmpty = false) { if (typeof value !== 'string' || (!allowEmpty && !value.trim()))
         fail_ACU$3(`${path} 必须是${allowEmpty ? '' : '非空'}字符串`, phase, { path }); return value; }
     function integer_ACU(value, path, phase, min = 0, max = Number.MAX_SAFE_INTEGER) { if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max)
@@ -136582,14 +136600,14 @@ $CONTENT
             fail_ACU$3('ledger.schemaVersion 必须为 1', phase);
         if (!isRecord_ACU$7(raw.clock))
             fail_ACU$3('ledger.clock 必须是对象', phase);
-        exactKeys_ACU$2(raw.clock, ['storyTime', 'elapsed', 'precision', 'evidenceRefs'], [], 'ledger.clock', phase);
+        exactKeys_ACU$2(raw.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
         const clock = { storyTime: string_ACU(raw.clock.storyTime, 'ledger.clock.storyTime', phase, true), elapsed: string_ACU(raw.clock.elapsed, 'ledger.clock.elapsed', phase, true), precision: enum_ACU$1(raw.clock.precision, ['exact', 'approximate', 'unknown'], 'ledger.clock.precision', phase), evidenceRefs: stringArray_ACU(raw.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase) };
         if (!Array.isArray(raw.dimensions) || raw.dimensions.length > 32)
             fail_ACU$3('ledger.dimensions 容量非法', phase);
         const dimensions = raw.dimensions.map((item, index) => {
             if (!isRecord_ACU$7(item))
                 fail_ACU$3(`ledger.dimensions[${index}] 必须是对象`, phase);
-            exactKeys_ACU$2(item, ['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], [], `ledger.dimensions[${index}]`, phase);
+            exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
             return { id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase), name: string_ACU(item.name, `ledger.dimensions[${index}].name`, phase), kind: enum_ACU$1(item.kind, ['pressure', 'growth'], `ledger.dimensions[${index}].kind`, phase), value: integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100), trend: enum_ACU$1(item.trend, ['rising', 'stable', 'falling'], `ledger.dimensions[${index}].trend`, phase), rationale: string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase), revision: integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase) };
         });
         if (!Array.isArray(raw.actors) || raw.actors.length > 128)
@@ -136597,7 +136615,7 @@ $CONTENT
         const actors = raw.actors.map((item, index) => {
             if (!isRecord_ACU$7(item))
                 fail_ACU$3(`ledger.actors[${index}] 必须是对象`, phase);
-            exactKeys_ACU$2(item, ['id', 'name', 'interests', 'location', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'], [], `ledger.actors[${index}]`, phase);
+            exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
             return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU$1(item.visibility, ['hidden', 'limited', 'public'], `ledger.actors[${index}].visibility`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
         });
         uniqueIds_ACU(dimensions, 'ledger.dimensions', phase);
@@ -136608,7 +136626,7 @@ $CONTENT
         const seeds = raw.seeds.map((item, index) => {
             if (!isRecord_ACU$7(item))
                 fail_ACU$3(`ledger.seeds[${index}] 必须是对象`, phase);
-            exactKeys_ACU$2(item, ['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'evidenceRefs', 'retiredReason', 'revision'], [], `ledger.seeds[${index}]`, phase);
+            exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
             const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
             for (const actorId of linkedActors)
                 if (!actorIds.has(actorId))
@@ -136628,7 +136646,7 @@ $CONTENT
         const chronicle = raw.chronicle.map((item, index) => {
             if (!isRecord_ACU$7(item))
                 fail_ACU$3(`ledger.chronicle[${index}] 必须是对象`, phase);
-            exactKeys_ACU$2(item, ['id', 'at', 'summary', 'relatedIds', 'evidenceRefs'], [], `ledger.chronicle[${index}]`, phase);
+            exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
             const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
             for (const relatedId of related)
                 if (!knownIds.has(relatedId))
@@ -136638,7 +136656,7 @@ $CONTENT
         uniqueIds_ACU(chronicle, 'ledger.chronicle', phase);
         if (!isRecord_ACU$7(raw.guidance))
             fail_ACU$3('ledger.guidance 必须是对象', phase);
-        exactKeys_ACU$2(raw.guidance, ['signals', 'excludedFacts', 'evidenceRefs'], [], 'ledger.guidance', phase);
+        exactKeys_ACU$2(raw.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
         return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(raw.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, guidance: { signals: stringArray_ACU(raw.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(raw.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(raw.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) } };
     }
     function validatePlan_ACU(raw, path, phase) {
@@ -136864,47 +136882,67 @@ $CONTENT
         }
         return current;
     }
+    /** 按身份四元组重扫当前下标；正文 digest / swipe 变化时仍 fail-closed。 */
+    function resolveCurrentWorldSimulationAnchor_ACU(anchor, chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
+        if (!chatIdentity) {
+            reject_ACU$4('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '世界推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex: anchor.messageIndex });
+        }
+        for (let index = 0; index < messages.length; index += 1) {
+            const message = messages[index];
+            if (!isRecord_ACU$7(message) || !isAssistantMessage_ACU(message))
+                continue;
+            const current = resolveWorldSimulationAnchor_ACU(index, messages);
+            if (current.chatIdentity === anchor.chatIdentity
+                && current.messageKey === anchor.messageKey
+                && current.swipeId === anchor.swipeId
+                && current.contentDigest === anchor.contentDigest) {
+                return current;
+            }
+        }
+        reject_ACU$4('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '世界推演冻结锚点已变化，拒绝继续写入', { expected: anchor });
+    }
     function readWorldSimulationBucketEntry_ACU(field, anchor, validateValue, chat) {
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-        assertWorldSimulationAnchorCurrent_ACU(anchor, messages);
-        const message = messages[anchor.messageIndex];
+        const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, messages);
+        const message = messages[currentAnchor.messageIndex];
         const rawBucket = message[field];
         if (rawBucket === undefined)
             return null;
         if (!isRecord_ACU$7(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU$7(rawBucket.entries)) {
             reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 分桶结构损坏`);
         }
-        const rawEntry = rawBucket.entries[buildWorldSimulationBucketKey_ACU(anchor)];
+        const rawEntry = rawBucket.entries[buildWorldSimulationBucketKey_ACU(currentAnchor)];
         if (rawEntry === undefined)
             return null;
         if (!isRecord_ACU$7(rawEntry) || !isRecord_ACU$7(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
             reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目损坏`);
         }
         const storedAnchor = rawEntry.anchor;
-        if (storedAnchor.chatIdentity !== anchor.chatIdentity || storedAnchor.messageKey !== anchor.messageKey
-            || storedAnchor.swipeId !== anchor.swipeId || storedAnchor.contentDigest !== anchor.contentDigest) {
+        if (storedAnchor.chatIdentity !== currentAnchor.chatIdentity || storedAnchor.messageKey !== currentAnchor.messageKey
+            || storedAnchor.swipeId !== currentAnchor.swipeId || storedAnchor.contentDigest !== currentAnchor.contentDigest) {
             reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 身份不一致`);
         }
         return validateValue(rawEntry.value);
     }
     async function writeWorldSimulationBucketEntry_ACU(field, anchor, value, chat) {
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-        assertWorldSimulationAnchorCurrent_ACU(anchor, messages);
-        const message = messages[anchor.messageIndex];
+        const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, messages);
+        const message = messages[currentAnchor.messageIndex];
         const previous = message[field];
         const previousBucket = isRecord_ACU$7(previous) && previous.schemaVersion === 1 && isRecord_ACU$7(previous.entries)
             ? previous
             : { schemaVersion: 1, entries: {} };
-        const key = buildWorldSimulationBucketKey_ACU(anchor);
+        const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
         const candidate = {
             schemaVersion: 1,
-            entries: { ...previousBucket.entries, [key]: { anchor: { ...anchor }, value, updatedAt: Date.now() } },
+            entries: { ...previousBucket.entries, [key]: { anchor: { ...currentAnchor }, value, updatedAt: Date.now() } },
         };
         try {
             message[field] = candidate;
-            assertWorldSimulationAnchorCurrent_ACU(anchor, messages);
             await saveChatToHostStrict_ACU();
-            assertWorldSimulationAnchorCurrent_ACU(anchor, messages);
+            resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, messages);
         }
         catch (error) {
             if (previous === undefined)
@@ -137281,6 +137319,36 @@ $CONTENT
             ? text
             : `${text.slice(0, TEXT_LIMIT_ACU)}\n（本条内容超出 ${TEXT_LIMIT_ACU} 字上限，已截断）`;
     }
+    function conversationAppendFingerprint_ACU(items) {
+        return sha256HexSync_ACU(JSON.stringify(items.map(item => [
+            item.kind,
+            truncateText_ACU(String(item.text ?? '')),
+            String(item.digest ?? ''),
+            String(item.turnKey ?? ''),
+        ])));
+    }
+    function nextWorldSimulationUserInstructionSegmentId_ACU(runId, segments) {
+        const prefix = `user:${runId}:`;
+        const legacyId = `user:${runId}`;
+        let maxSeq = -1;
+        for (const segment of segments) {
+            if (segment.segmentId === legacyId) {
+                maxSeq = Math.max(maxSeq, 0);
+                continue;
+            }
+            if (!segment.segmentId.startsWith(prefix))
+                continue;
+            const rawSeq = segment.segmentId.slice(prefix.length);
+            if (!/^\d+$/.test(rawSeq))
+                continue;
+            maxSeq = Math.max(maxSeq, Number(rawSeq));
+        }
+        return `${prefix}${maxSeq + 1}`;
+    }
+    function peekCurrentConversationSegments_ACU(anchor, messages) {
+        const record = readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_CONVERSATION_FIELD_ACU, anchor, validateWorldSimulationConversationFloorRecord_ACU, messages);
+        return record?.segments ?? [];
+    }
     async function serializeConversationWrite_ACU(chatIdentity, operation) {
         const previous = conversationWriteQueues_ACU.get(chatIdentity) ?? Promise.resolve();
         const current = previous.catch(() => undefined).then(() => operation());
@@ -137325,9 +137393,10 @@ $CONTENT
                 message.ok = item.ok;
             return message;
         });
-        const hostMessage = messages[input.anchor.messageIndex];
+        const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, messages);
+        const hostMessage = messages[currentAnchor.messageIndex];
         const previous = hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
-        const migrated = previous === undefined ? null : migrateLegacyWorldSimulationConversationBucket_ACU(previous, hostMessage, input.anchor.chatIdentity, input.anchor.messageIndex);
+        const migrated = previous === undefined ? null : migrateLegacyWorldSimulationConversationBucket_ACU(previous, hostMessage, currentAnchor.chatIdentity, currentAnchor.messageIndex);
         let currentBucket;
         if (previous === undefined)
             currentBucket = { schemaVersion: 1, entries: {} };
@@ -137338,12 +137407,22 @@ $CONTENT
         }
         else
             reject_ACU$3(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
-        const key = buildWorldSimulationBucketKey_ACU(input.anchor);
+        const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
         const existing = currentBucket.entries[key]
             ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
             : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
-        if (existing.segments.some(segment => segment.segmentId === input.segmentId)) {
+        const incomingFingerprint = conversationAppendFingerprint_ACU(added);
+        const sameId = existing.segments.find(segment => segment.segmentId === input.segmentId);
+        if (sameId) {
+            if (input.idempotent && conversationAppendFingerprint_ACU(sameId.messages) === incomingFingerprint)
+                return true;
             reject_ACU$3('重复 segmentId，拒绝重复持久化', { segmentId: input.segmentId });
+        }
+        if (input.idempotent) {
+            const sameContent = existing.segments.find(segment => (segment.runId === input.runId
+                && conversationAppendFingerprint_ACU(segment.messages) === incomingFingerprint));
+            if (sameContent)
+                return true;
         }
         const segment = {
             schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
@@ -137361,17 +137440,16 @@ $CONTENT
             entries: {
                 ...currentBucket.entries,
                 [key]: {
-                    anchor: { ...input.anchor },
+                    anchor: { ...currentAnchor },
                     value: { ...existing, segments: [...existing.segments, segment], updatedAt: at },
                     updatedAt: at,
                 },
             },
         };
         try {
-            assertWorldSimulationAnchorCurrent_ACU(input.anchor, messages);
             hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = candidate;
             await saveChatToHostStrict_ACU();
-            assertWorldSimulationAnchorCurrent_ACU(input.anchor, messages);
+            resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, messages);
         }
         catch (error) {
             if (previous === undefined)
@@ -137384,6 +137462,22 @@ $CONTENT
     }
     async function appendWorldSimulationConversationSegment_ACU(input, chat) {
         return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => appendWorldSimulationConversationSegmentUnlocked_ACU(input, chat));
+    }
+    async function appendWorldSimulationUserInstruction_ACU(input, chat) {
+        return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
+            const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+            const segments = peekCurrentConversationSegments_ACU(input.anchor, messages);
+            return appendWorldSimulationConversationSegmentUnlocked_ACU({
+                anchor: input.anchor,
+                segmentId: nextWorldSimulationUserInstructionSegmentId_ACU(input.runId, segments),
+                runId: input.runId,
+                taskId: input.taskId,
+                stageId: input.stageId,
+                stageRevision: input.stageRevision,
+                appends: [{ kind: 'user', text: input.text, turnKey: input.triggerConversationMessageId ?? input.runId }],
+                idempotent: input.idempotent === true,
+            }, messages);
+        });
     }
     function conversationKindForSessionEvent_ACU(kind) {
         if (kind === 'user_message')
@@ -137564,7 +137658,7 @@ $CONTENT
             fail_ACU$2(`${path} 必须是字符串数组且元素不能为空`);
         return [...value];
     }
-    function applyUpserts_ACU(current, raw, path) {
+    function applyUpserts_ACU(current, raw, path, requiredFields) {
         if (!isRecord_ACU$4(raw))
             fail_ACU$2(`${path} 必须是对象`);
         exactKeys_ACU$1(raw, ['upsert'], path);
@@ -137578,6 +137672,10 @@ $CONTENT
             if (seen.has(item.id))
                 fail_ACU$2(`${path}.upsert 存在重复 ID`, { id: item.id });
             seen.add(item.id);
+            const missing = requiredFields.filter(key => key !== 'revision' && !Object.prototype.hasOwnProperty.call(item, key));
+            if (missing.length) {
+                fail_ACU$2(`${path}.upsert[${index}] 缺少必填字段：${missing.join(',')}`, { path: `${path}.upsert[${index}]`, missingFields: missing });
+            }
             const expectedRevision = item.expectedRevision;
             if (!Number.isInteger(expectedRevision) || expectedRevision < 0)
                 fail_ACU$2(`${path}.upsert[${index}].expectedRevision 非法`);
@@ -137681,13 +137779,13 @@ $CONTENT
                         next.clock = applyClock_ACU(next.clock, patch);
                         break;
                     case 'dimensions':
-                        next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions');
+                        next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions);
                         break;
                     case 'seeds':
-                        next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds');
+                        next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds);
                         break;
                     case 'actors':
-                        next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors');
+                        next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors);
                         break;
                     case 'chronicle':
                         next.chronicle = applyChronicle_ACU(next.chronicle, patch);
@@ -139018,7 +139116,7 @@ $CONTENT
                     persist(iteration + 1, message);
                     const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: '候选事务应用失败，等待修订', detail: message, agentName: director, ok: false, status: 'failed' });
                     await persistEntry(failedId, `candidate-transaction-failed-${iteration}`);
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须补齐持久化必填字段。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` });
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须一次性补齐该模块全部持久化必填字段。完整必填字段模板：${formatWorldSimulationLedgerRequiredFields_ACU()}。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` });
                     continue;
                 }
                 let guidanceOutcome;
@@ -139413,7 +139511,6 @@ $CONTENT
             return { schemaVersion: 1, entries };
         const storedAnchor = source.anchor;
         if (storedAnchor.chatIdentity !== sourceAnchor.chatIdentity
-            || storedAnchor.messageIndex !== sourceAnchor.messageIndex
             || storedAnchor.messageId !== sourceAnchor.messageId
             || storedAnchor.messageKey !== sourceAnchor.messageKey
             || storedAnchor.swipeId !== sourceAnchor.swipeId
@@ -139469,11 +139566,11 @@ $CONTENT
         if (chatIdentity !== input.identity.chatIdentity || chatIdentity !== input.anchor.chatIdentity) {
             reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交目标聊天已变化');
         }
+        const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, chat);
         const firstMessage = isRecord_ACU$2(chat[0]) ? chat[0] : null;
-        const anchorMessage = isRecord_ACU$2(chat[input.anchor.messageIndex]) ? chat[input.anchor.messageIndex] : null;
+        const anchorMessage = isRecord_ACU$2(chat[currentAnchor.messageIndex]) ? chat[currentAnchor.messageIndex] : null;
         if (!firstMessage || !anchorMessage)
             reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交目标楼层不可用');
-        assertWorldSimulationAnchorCurrent_ACU(input.anchor, chat);
         const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
         const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
         assertRun_ACU(envelope, input);
@@ -139482,7 +139579,7 @@ $CONTENT
         const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
         const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
         const persistedAnchor = {
-            ...input.anchor,
+            ...currentAnchor,
             contentDigest: sha256HexSync_ACU(newContent),
         };
         const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger);
@@ -139495,7 +139592,7 @@ $CONTENT
         };
         const nextStateBucket = bucketWithEntry_ACU(anchorMessage[WORLD_SIMULATION_STATE_FIELD_ACU], persistedAnchor, ledger, input.completedAt, WORLD_SIMULATION_STATE_FIELD_ACU);
         const nextMaterialsBucket = bucketWithEntry_ACU(anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU], persistedAnchor, materials, input.completedAt, WORLD_SIMULATION_MATERIALS_FIELD_ACU);
-        const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU], anchorMessage, input.anchor, persistedAnchor, input.completedAt);
+        const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU], anchorMessage, currentAnchor, persistedAnchor, input.completedAt);
         const snapshots = [
             { target: firstMessage, key: WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(firstMessage, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU), value: rawEnvelope },
             { target: anchorMessage, key: WORLD_SIMULATION_STATE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_STATE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_STATE_FIELD_ACU] },
@@ -139521,7 +139618,7 @@ $CONTENT
             if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
                 reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存后聊天上下文已变化');
             }
-            assertWorldSimulationAnchorCurrent_ACU(persistedAnchor, chat);
+            resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat);
         }
         catch (error) {
             for (const snapshot of snapshots)
@@ -139711,7 +139808,7 @@ $CONTENT
                     await this.dependencies.assertAnchorCurrent(input.anchor);
                     assertRunCurrent_ACU(envelope, identity);
                     if (instruction && this.dependencies.appendUserMessage) {
-                        await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction });
+                        await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction, idempotent: true });
                     }
                     if (controller.signal.aborted)
                         throw new Error('WORLD_SIMULATION_ABORTED');
@@ -140382,7 +140479,8 @@ $CONTENT
     let internalRequestSequence_ACU = 0;
     const allocateId_ACU = (kind) => `${kind}-${Date.now().toString(36)}-${++allocatedId_ACU}`;
     const anchorText_ACU = (anchor, chat) => {
-        const message = chat[anchor.messageIndex];
+        const current = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
+        const message = chat[current.messageIndex];
         return typeof message?.mes === 'string' ? message.mes : typeof message?.message === 'string' ? message.message : '';
     };
     async function invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal) {
@@ -140431,24 +140529,25 @@ $CONTENT
             store,
             now: () => Date.now(),
             allocateId: allocateId_ACU,
-            assertAnchorCurrent: anchor => { assertWorldSimulationAnchorCurrent_ACU(anchor, getChatArray_ACU()); },
+            assertAnchorCurrent: anchor => { resolveCurrentWorldSimulationAnchor_ACU(anchor, getChatArray_ACU()); },
             commitProjection: commitWorldSimulationProjection_ACU,
-            appendUserMessage: async ({ identity, anchor, text }) => {
+            appendUserMessage: async ({ identity, anchor, text, idempotent }) => {
                 // 与智能续写 recordUserMessage 同语义：用户指令先写会话流（实时显示），再持久化到楼层锚定会话。
                 logWorldSimulationSession_ACU(identity.chatIdentity, { kind: 'user_message', title: '你的消息', detail: text });
-                await appendWorldSimulationConversationSegment_ACU({
+                await appendWorldSimulationUserInstruction_ACU({
                     anchor,
-                    segmentId: `user:${identity.runId}`,
                     runId: identity.runId,
                     taskId: identity.taskId,
                     stageId: identity.stageId,
                     stageRevision: identity.stageRevision,
-                    appends: [{ kind: 'user', text, turnKey: identity.triggerConversationMessageId ?? identity.runId }],
+                    triggerConversationMessageId: identity.triggerConversationMessageId,
+                    text,
+                    idempotent,
                 }, getChatArray_ACU());
             },
             prepare: async ({ identity, anchor, instruction, envelope, signal }) => {
                 const chat = getChatArray_ACU();
-                assertWorldSimulationAnchorCurrent_ACU(anchor, chat);
+                const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
                 const registry = createWorldSimulationEvidenceRegistry_ACU(identity.runId);
                 recordWorldSimulationEvidence_ACU(registry, {
                     operation: 'initial',
@@ -140458,10 +140557,10 @@ $CONTENT
                     exact: true,
                 });
                 const baseContext = buildPromptContext_ACU({
-                    identity, anchor, instruction, envelope, stagePlan: {}, registry, chat,
+                    identity, anchor: currentAnchor, instruction, envelope, stagePlan: {}, registry, chat,
                 });
                 const persistSessionEvent = (eventKey, event, stageRevision = identity.stageRevision) => appendWorldSimulationSessionEvent_ACU({
-                    anchor,
+                    anchor: currentAnchor,
                     runId: identity.runId,
                     taskId: identity.taskId,
                     stageId: identity.stageId,
@@ -140481,7 +140580,7 @@ $CONTENT
                 const plannedRevision = resumableRevision
                     ?? (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
                 const promptContext = buildPromptContext_ACU({
-                    identity, anchor, instruction, envelope,
+                    identity, anchor: currentAnchor, instruction, envelope,
                     stagePlan: plannedRevision.plan, registry, chat,
                 });
                 const tools = createWorldSimulationHostToolDependencies_ACU({
@@ -140514,7 +140613,7 @@ $CONTENT
                                 registry,
                                 tools,
                                 persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
-                                anchor,
+                                anchor: currentAnchor,
                                 chat: getChatArray_ACU(),
                             }),
                         });

@@ -31,4 +31,12 @@ describe('world simulation transaction', () => {
     base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '', evidenceRefs: [], revision: 1 });
     expect(() => applyWorldSimulationCandidates_ACU(base, [candidate({ dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: [] }] } })], new Set(['e1']))).toThrow(/revision 冲突/);
   });
+
+  it('dimensions upsert 缺 kind/value/trend 时一次报出全部缺失字段', () => {
+    expect(() => applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } })],
+      new Set(['e1']),
+    )).toThrow(/缺少必填字段：kind,value,trend/);
+  });
 });

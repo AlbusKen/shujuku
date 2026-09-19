@@ -5,9 +5,9 @@ import {
   createWorldSimulationError_ACU,
 } from '../model';
 import {
-  assertWorldSimulationAnchorCurrent_ACU,
   buildWorldSimulationBucketKey_ACU,
   readWorldSimulationBucketEntry_ACU,
+  resolveCurrentWorldSimulationAnchor_ACU,
   resolveWorldSimulationAnchor_ACU,
 } from '../simulation-store';
 import {
@@ -323,6 +323,50 @@ function truncateText_ACU(text: string): string {
     : `${text.slice(0, TEXT_LIMIT_ACU)}\n（本条内容超出 ${TEXT_LIMIT_ACU} 字上限，已截断）`;
 }
 
+function conversationAppendFingerprint_ACU(
+  items: readonly { kind: string; text: string; digest?: string; turnKey?: string }[],
+): string {
+  return sha256HexSync_ACU(JSON.stringify(items.map(item => [
+    item.kind,
+    truncateText_ACU(String(item.text ?? '')),
+    String(item.digest ?? ''),
+    String(item.turnKey ?? ''),
+  ])));
+}
+
+export function nextWorldSimulationUserInstructionSegmentId_ACU(
+  runId: string,
+  segments: readonly { segmentId: string }[],
+): string {
+  const prefix = `user:${runId}:`;
+  const legacyId = `user:${runId}`;
+  let maxSeq = -1;
+  for (const segment of segments) {
+    if (segment.segmentId === legacyId) {
+      maxSeq = Math.max(maxSeq, 0);
+      continue;
+    }
+    if (!segment.segmentId.startsWith(prefix)) continue;
+    const rawSeq = segment.segmentId.slice(prefix.length);
+    if (!/^\d+$/.test(rawSeq)) continue;
+    maxSeq = Math.max(maxSeq, Number(rawSeq));
+  }
+  return `${prefix}${maxSeq + 1}`;
+}
+
+function peekCurrentConversationSegments_ACU(
+  anchor: WorldSimulationAnchorIdentity_ACU,
+  messages: any[],
+): readonly { segmentId: string }[] {
+  const record = readWorldSimulationBucketEntry_ACU(
+    WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
+    anchor,
+    validateWorldSimulationConversationFloorRecord_ACU,
+    messages,
+  );
+  return record?.segments ?? [];
+}
+
 export interface AppendWorldSimulationConversationInput_ACU {
   anchor: WorldSimulationAnchorIdentity_ACU;
   segmentId: string;
@@ -332,6 +376,7 @@ export interface AppendWorldSimulationConversationInput_ACU {
   stageRevision: number;
   appends: readonly WorldSimulationConversationAppend_ACU[];
   compaction?: WorldSimulationConversationCompaction_ACU;
+  idempotent?: boolean;
 }
 
 async function serializeConversationWrite_ACU<T>(chatIdentity: string, operation: () => Promise<T>): Promise<T> {
@@ -373,10 +418,11 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
     if (item.ok !== undefined) message.ok = item.ok;
     return message;
   });
-  const hostMessage = messages[input.anchor.messageIndex] as Record<string, unknown>;
+  const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, messages);
+  const hostMessage = messages[currentAnchor.messageIndex] as Record<string, unknown>;
   const previous = hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
   const migrated = previous === undefined ? null : migrateLegacyWorldSimulationConversationBucket_ACU(
-    previous, hostMessage, input.anchor.chatIdentity, input.anchor.messageIndex,
+    previous, hostMessage, currentAnchor.chatIdentity, currentAnchor.messageIndex,
   );
   let currentBucket: WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>;
   if (previous === undefined) currentBucket = { schemaVersion: 1, entries: {} };
@@ -384,12 +430,22 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
   else if (isRecord_ACU(previous) && previous.schemaVersion === 1 && isRecord_ACU(previous.entries)) {
     currentBucket = previous as unknown as WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>;
   } else reject_ACU(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
-  const key = buildWorldSimulationBucketKey_ACU(input.anchor);
+  const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
   const existing = currentBucket.entries[key]
     ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
     : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
-  if (existing.segments.some(segment => segment.segmentId === input.segmentId)) {
+  const incomingFingerprint = conversationAppendFingerprint_ACU(added);
+  const sameId = existing.segments.find(segment => segment.segmentId === input.segmentId);
+  if (sameId) {
+    if (input.idempotent && conversationAppendFingerprint_ACU(sameId.messages) === incomingFingerprint) return true;
     reject_ACU('重复 segmentId，拒绝重复持久化', { segmentId: input.segmentId });
+  }
+  if (input.idempotent) {
+    const sameContent = existing.segments.find(segment => (
+      segment.runId === input.runId
+      && conversationAppendFingerprint_ACU(segment.messages) === incomingFingerprint
+    ));
+    if (sameContent) return true;
   }
   const segment: WorldSimulationConversationSegment_ACU = {
     schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
@@ -407,17 +463,16 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
     entries: {
       ...currentBucket.entries,
       [key]: {
-        anchor: { ...input.anchor },
+        anchor: { ...currentAnchor },
         value: { ...existing, segments: [...existing.segments, segment], updatedAt: at },
         updatedAt: at,
       },
     },
   };
   try {
-    assertWorldSimulationAnchorCurrent_ACU(input.anchor, messages);
     hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = candidate;
     await saveChatToHostStrict_ACU();
-    assertWorldSimulationAnchorCurrent_ACU(input.anchor, messages);
+    resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, messages);
   } catch (error) {
     if (previous === undefined) delete hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
     else hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = previous;
@@ -433,6 +488,36 @@ export async function appendWorldSimulationConversationSegment_ACU(
   return serializeConversationWrite_ACU(input.anchor.chatIdentity, () =>
     appendWorldSimulationConversationSegmentUnlocked_ACU(input, chat));
 }
+
+export async function appendWorldSimulationUserInstruction_ACU(
+  input: {
+    runId: string;
+    taskId: string;
+    stageId: string;
+    stageRevision: number;
+    triggerConversationMessageId?: string | null;
+    anchor: WorldSimulationAnchorIdentity_ACU;
+    text: string;
+    idempotent?: boolean;
+  },
+  chat?: any[],
+): Promise<boolean> {
+  return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
+    const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+    const segments = peekCurrentConversationSegments_ACU(input.anchor, messages);
+    return appendWorldSimulationConversationSegmentUnlocked_ACU({
+      anchor: input.anchor,
+      segmentId: nextWorldSimulationUserInstructionSegmentId_ACU(input.runId, segments),
+      runId: input.runId,
+      taskId: input.taskId,
+      stageId: input.stageId,
+      stageRevision: input.stageRevision,
+      appends: [{ kind: 'user', text: input.text, turnKey: input.triggerConversationMessageId ?? input.runId }],
+      idempotent: input.idempotent === true,
+    }, messages);
+  });
+}
+
 
 export interface AppendWorldSimulationSessionEventInput_ACU {
   anchor: WorldSimulationAnchorIdentity_ACU;

@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU } from '../../../../src/service/simulation/agent/agent-model';
-import { appendWorldSimulationConversationSegment_ACU, appendWorldSimulationSessionEvent_ACU, readWorldSimulationConversation_ACU } from '../../../../src/service/simulation/agent/agent-conversation-store';
+import {
+  appendWorldSimulationConversationSegment_ACU,
+  appendWorldSimulationSessionEvent_ACU,
+  appendWorldSimulationUserInstruction_ACU,
+  nextWorldSimulationUserInstructionSegmentId_ACU,
+  readWorldSimulationConversation_ACU,
+} from '../../../../src/service/simulation/agent/agent-conversation-store';
 import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simulation/simulation-store';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 
@@ -155,4 +161,147 @@ describe('world simulation conversation segments', () => {
     expect(new Set(messages.map(item => item.id)).size).toBe(3);
     expect(saveChat).toHaveBeenCalledTimes(3);
   });
+
+  it('楼层位移后会话段追加仍命中原楼层', async () => {
+    const chat: any[] = [
+      { message_id: 1, mes: 'first-floor', swipe_id: 0 },
+      { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const staleAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    await appendWorldSimulationConversationSegment_ACU({
+      anchor: staleAnchor,
+      segmentId: 'seg-kept',
+      runId: 'run-shift',
+      taskId: 'task-shift',
+      stageId: 'stage-shift',
+      stageRevision: 1,
+      appends: [{ kind: 'user', text: 'kept-instruction' }],
+    }, chat);
+
+    chat.splice(1, 0, { is_user: true, mes: 'inserted-floor' });
+
+    await appendWorldSimulationConversationSegment_ACU({
+      anchor: staleAnchor,
+      segmentId: 'seg-after-shift',
+      runId: 'run-shift',
+      taskId: 'task-shift',
+      stageId: 'stage-shift',
+      stageRevision: 1,
+      appends: [{ kind: 'user', text: 'after-shift' }],
+    }, chat);
+
+    expect(readWorldSimulationConversation_ACU(chat).messages.map(item => item.text)).toEqual([
+      'kept-instruction',
+      'after-shift',
+    ]);
+    expect(chat[2][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeDefined();
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeUndefined();
+  });
+
+  it('锚点楼层 digest 变化时会话段追加 fail-closed', async () => {
+    const chat: any[] = [
+      { message_id: 1, mes: 'first-floor', swipe_id: 0 },
+      { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const staleAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    await appendWorldSimulationConversationSegment_ACU({
+      anchor: staleAnchor,
+      segmentId: 'seg-kept',
+      runId: 'run-digest',
+      taskId: 'task-digest',
+      stageId: 'stage-digest',
+      stageRevision: 1,
+      appends: [{ kind: 'user', text: 'kept-instruction' }],
+    }, chat);
+    const previous = chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
+    saveChat.mockClear();
+    chat[1].mes = 'anchor-body-edited';
+
+    await expect(appendWorldSimulationConversationSegment_ACU({
+      anchor: staleAnchor,
+      segmentId: 'seg-after-edit',
+      runId: 'run-digest',
+      taskId: 'task-digest',
+      stageId: 'stage-digest',
+      stageRevision: 1,
+      appends: [{ kind: 'user', text: 'must-not-write' }],
+    }, chat)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' } });
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(previous);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('同一 runId 连续三次用户指令生成独立段', async () => {
+    const chat: any[] = [
+      { message_id: 1, mes: 'first-floor', swipe_id: 0 },
+      { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    const base = { runId: 'run-c', taskId: 'task-c', stageId: 'stage-c', stageRevision: 1, anchor };
+    await appendWorldSimulationUserInstruction_ACU({ ...base, text: '继续' }, chat);
+    await appendWorldSimulationUserInstruction_ACU({ ...base, text: '修正' }, chat);
+    await appendWorldSimulationUserInstruction_ACU({ ...base, text: '再改 X' }, chat);
+
+    expect(readWorldSimulationConversation_ACU(chat).messages.map(item => item.text)).toEqual(['继续', '修正', '再改 X']);
+    const entry = Object.values(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU].entries)[0] as { value: { segments: { segmentId: string }[] } };
+    expect(entry.value.segments.map(segment => segment.segmentId)).toEqual(['user:run-c:0', 'user:run-c:1', 'user:run-c:2']);
+    expect(nextWorldSimulationUserInstructionSegmentId_ACU('run-c', entry.value.segments)).toBe('user:run-c:3');
+    expect(nextWorldSimulationUserInstructionSegmentId_ACU('run-c', [{ segmentId: 'user:run-c' }])).toBe('user:run-c:1');
+  });
+
+  it('resume 路径重复同一指令幂等成功且不产生重复段', async () => {
+    const chat: any[] = [
+      { message_id: 1, mes: 'first-floor', swipe_id: 0 },
+      { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    const input = {
+      runId: 'run-d',
+      taskId: 'task-d',
+      stageId: 'stage-d',
+      stageRevision: 1,
+      anchor,
+      text: '继续',
+      triggerConversationMessageId: 'turn-d',
+      idempotent: true,
+    };
+    await appendWorldSimulationUserInstruction_ACU(input, chat);
+    saveChat.mockClear();
+    await expect(appendWorldSimulationUserInstruction_ACU(input, chat)).resolves.toBe(true);
+    expect(readWorldSimulationConversation_ACU(chat).messages.map(item => item.text)).toEqual(['继续']);
+    const entry = Object.values(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU].entries)[0] as { value: { segments: unknown[] } };
+    expect(entry.value.segments).toHaveLength(1);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('start 路径重复同 segmentId 仍硬拒绝', async () => {
+    const chat: any[] = [
+      { message_id: 1, mes: 'first-floor', swipe_id: 0 },
+      { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
+    ];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    const input = {
+      anchor,
+      segmentId: 'user:run-e:0',
+      runId: 'run-e',
+      taskId: 'task-e',
+      stageId: 'stage-e',
+      stageRevision: 1,
+      appends: [{ kind: 'user' as const, text: '启动指令' }],
+    };
+    await appendWorldSimulationConversationSegment_ACU(input, chat);
+    const previous = chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
+    saveChat.mockClear();
+    await expect(appendWorldSimulationConversationSegment_ACU(input, chat)).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_SNAPSHOT_INVALID' },
+    });
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(previous);
+    expect(readWorldSimulationConversation_ACU(chat).messages).toHaveLength(1);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
 });

@@ -1,5 +1,5 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
-import type { WorldSimulationLedger_ACU, WorldSimulationRunIdentity_ACU, WorldSimulationSettings_ACU } from '../model';
+import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldSimulationLedger_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
 import { applyWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
@@ -416,7 +416,7 @@ export class WorldSimulationMainLoop_ACU {
         await persistEntry(failedId, `candidate-transaction-failed-${iteration}`);
         transcript.push(
           { role: 'assistant', content: raw || '(empty)' },
-          { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须补齐持久化必填字段。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` },
+          { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须一次性补齐该模块全部持久化必填字段。完整必填字段模板：${formatWorldSimulationLedgerRequiredFields_ACU()}。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` },
         );
         continue;
       }

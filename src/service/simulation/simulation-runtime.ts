@@ -3,7 +3,7 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
-import { appendWorldSimulationConversationSegment_ACU, appendWorldSimulationSessionEvent_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
+import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU } from './agent/agent-module-store';
 import { clearWorldSimulationRunState_ACU } from './agent/agent-run-cache';
 import { clearWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
@@ -29,7 +29,7 @@ import {
 } from './simulation-orchestrator';
 import { WorldSimulationStagePlanner_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
-import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU } from './simulation-store';
+import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import { createWorldSimulationHostToolDependencies_ACU } from './world-simulation-host-tools';
@@ -41,7 +41,8 @@ let allocatedId_ACU = 0;
 let internalRequestSequence_ACU = 0;
 const allocateId_ACU = (kind: 'task' | 'stage' | 'run' | 'timeline'): string => `${kind}-${Date.now().toString(36)}-${++allocatedId_ACU}`;
 const anchorText_ACU = (anchor: WorldSimulationAnchorIdentity_ACU, chat: any[]): string => {
-  const message = chat[anchor.messageIndex];
+  const current = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
+  const message = chat[current.messageIndex];
   return typeof message?.mes === 'string' ? message.mes : typeof message?.message === 'string' ? message.message : '';
 };
 
@@ -107,24 +108,25 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
     store,
     now: () => Date.now(),
     allocateId: allocateId_ACU,
-    assertAnchorCurrent: anchor => { assertWorldSimulationAnchorCurrent_ACU(anchor, getChatArray_ACU()); },
+    assertAnchorCurrent: anchor => { resolveCurrentWorldSimulationAnchor_ACU(anchor, getChatArray_ACU()); },
     commitProjection: commitWorldSimulationProjection_ACU,
-    appendUserMessage: async ({ identity, anchor, text }) => {
+    appendUserMessage: async ({ identity, anchor, text, idempotent }) => {
       // 与智能续写 recordUserMessage 同语义：用户指令先写会话流（实时显示），再持久化到楼层锚定会话。
       logWorldSimulationSession_ACU(identity.chatIdentity, { kind: 'user_message', title: '你的消息', detail: text });
-      await appendWorldSimulationConversationSegment_ACU({
+      await appendWorldSimulationUserInstruction_ACU({
         anchor,
-        segmentId: `user:${identity.runId}`,
         runId: identity.runId,
         taskId: identity.taskId,
         stageId: identity.stageId,
         stageRevision: identity.stageRevision,
-        appends: [{ kind: 'user', text, turnKey: identity.triggerConversationMessageId ?? identity.runId }],
+        triggerConversationMessageId: identity.triggerConversationMessageId,
+        text,
+        idempotent,
       }, getChatArray_ACU());
     },
     prepare: async ({ identity, anchor, instruction, envelope, signal }) => {
       const chat = getChatArray_ACU();
-      assertWorldSimulationAnchorCurrent_ACU(anchor, chat);
+      const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
       const registry = createWorldSimulationEvidenceRegistry_ACU(identity.runId);
       recordWorldSimulationEvidence_ACU(registry, {
         operation: 'initial',
@@ -134,12 +136,12 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         exact: true,
       });
       const baseContext = buildPromptContext_ACU({
-        identity, anchor, instruction, envelope, stagePlan: {}, registry, chat,
+        identity, anchor: currentAnchor, instruction, envelope, stagePlan: {}, registry, chat,
       });
 
       const persistSessionEvent = (eventKey: string, event: import('./agent/agent-session-log').WorldSimulationSessionInput_ACU, stageRevision = identity.stageRevision) =>
         appendWorldSimulationSessionEvent_ACU({
-          anchor,
+          anchor: currentAnchor,
           runId: identity.runId,
           taskId: identity.taskId,
           stageId: identity.stageId,
@@ -160,7 +162,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
       const plannedRevision = resumableRevision
         ?? (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
       const promptContext = buildPromptContext_ACU({
-        identity, anchor, instruction, envelope,
+        identity, anchor: currentAnchor, instruction, envelope,
         stagePlan: plannedRevision.plan, registry, chat,
       });
       const tools = createWorldSimulationHostToolDependencies_ACU({
@@ -194,7 +196,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               registry,
               tools,
               persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
-              anchor,
+              anchor: currentAnchor,
               chat: getChatArray_ACU(),
             }),
           });

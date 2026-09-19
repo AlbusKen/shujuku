@@ -19,7 +19,7 @@ import {
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU } from './model';
 import { applyWorldSimulationProjection_ACU, buildWorldSimulationProjection_ACU, readWorldSimulationMessageContent_ACU, writeWorldSimulationActiveSwipeContent_ACU } from './simulation-projection';
 import { applyWorldSimulationCandidates_ACU } from './simulation-transaction';
-import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, assertWorldSimulationAnchorCurrent_ACU, buildWorldSimulationBucketKey_ACU, validateWorldSimulationEnvelope_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
+import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 
 interface CommitInput_ACU {
   identity: WorldSimulationRunIdentity_ACU;
@@ -130,7 +130,6 @@ function conversationBucketWithMigratedEntry_ACU(
   if (source === undefined) return { schemaVersion: 1, entries };
   const storedAnchor = source.anchor;
   if (storedAnchor.chatIdentity !== sourceAnchor.chatIdentity
-    || storedAnchor.messageIndex !== sourceAnchor.messageIndex
     || storedAnchor.messageId !== sourceAnchor.messageId
     || storedAnchor.messageKey !== sourceAnchor.messageKey
     || storedAnchor.swipeId !== sourceAnchor.swipeId
@@ -191,10 +190,10 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   if (chatIdentity !== input.identity.chatIdentity || chatIdentity !== input.anchor.chatIdentity) {
     reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交目标聊天已变化');
   }
+  const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, chat);
   const firstMessage = isRecord_ACU(chat[0]) ? chat[0] : null;
-  const anchorMessage = isRecord_ACU(chat[input.anchor.messageIndex]) ? chat[input.anchor.messageIndex] : null;
+  const anchorMessage = isRecord_ACU(chat[currentAnchor.messageIndex]) ? chat[currentAnchor.messageIndex] : null;
   if (!firstMessage || !anchorMessage) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交目标楼层不可用');
-  assertWorldSimulationAnchorCurrent_ACU(input.anchor, chat);
 
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
   const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
@@ -208,7 +207,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
   const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
   const persistedAnchor: WorldSimulationAnchorIdentity_ACU = {
-    ...input.anchor,
+    ...currentAnchor,
     contentDigest: sha256HexSync_ACU(newContent),
   };
   const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger);
@@ -230,7 +229,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(
     anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU],
     anchorMessage,
-    input.anchor,
+    currentAnchor,
     persistedAnchor,
     input.completedAt,
   );
@@ -259,7 +258,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
       reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存后聊天上下文已变化');
     }
-    assertWorldSimulationAnchorCurrent_ACU(persistedAnchor, chat);
+    resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat);
   } catch (error) {
     for (const snapshot of snapshots) restoreField_ACU(snapshot.target, snapshot.key, snapshot.existed, snapshot.value);
     const stillActive = getChatArray_ACU() === chat && getActiveChatStorageIdentity_ACU(chat) === input.identity.chatIdentity;

@@ -180,6 +180,8 @@ describe('世界推演 Agent 协议', () => {
     expect(specialist).toContain('非负整数 expectedRevision');
     expect(specialist).toContain('新建条目填 0');
     expect(specialist).toContain('当前 revision');
+    expect(specialist).toContain('不能只补单字段');
+    expect(specialist).toContain('dimensions: id,name,kind,value,trend,rationale,evidenceRefs,revision');
     const noWrite = worldSimulationSpecialistProtocolInstruction_ACU('lore-researcher', []);
     expect(noWrite).toContain('不得输出 candidate');
     expect(noWrite).not.toContain('expectedRevision');

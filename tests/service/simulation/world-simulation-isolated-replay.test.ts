@@ -7,7 +7,7 @@ import { WorldSimulationStagePlanner_ACU } from '../../../src/service/simulation
 import { WorldSimulationStageExecutionEngine_ACU } from '../../../src/service/simulation/simulation-stage-execution-engine';
 import { WorldSimulationMainLoop_ACU } from '../../../src/service/simulation/agent/agent-main-loop';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../src/service/simulation/agent/agent-subagent-runtime';
-import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
+import { appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
 import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 import { resetWorldSimulationRunCacheForTests_ACU } from '../../../src/service/simulation/agent/agent-run-cache';
@@ -262,15 +262,16 @@ function buildReplay(options: ReplayOptions) {
     allocateId: kind => `${kind}-replay-${++sequence}`,
     prepare,
     assertAnchorCurrent: anchor => { assertWorldSimulationAnchorCurrent_ACU(anchor, chat); },
-    appendUserMessage: async ({ identity, anchor, text }) => {
-      await appendWorldSimulationConversationSegment_ACU({
+    appendUserMessage: async ({ identity, anchor, text, idempotent }) => {
+      await appendWorldSimulationUserInstruction_ACU({
         anchor,
-        segmentId: `user:${identity.runId}`,
         runId: identity.runId,
         taskId: identity.taskId,
         stageId: identity.stageId,
         stageRevision: identity.stageRevision,
-        appends: [{ kind: 'user', text, turnKey: identity.triggerConversationMessageId ?? identity.runId }],
+        triggerConversationMessageId: identity.triggerConversationMessageId,
+        text,
+        idempotent,
       }, chat);
     },
     commitProjection,

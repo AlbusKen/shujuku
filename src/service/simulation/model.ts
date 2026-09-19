@@ -49,6 +49,21 @@ export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_
 export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'] as const;
 export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
 
+export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
+  clock: ['storyTime', 'elapsed', 'precision', 'evidenceRefs'],
+  dimensions: ['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'],
+  seeds: ['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'evidenceRefs', 'retiredReason', 'revision'],
+  actors: ['id', 'name', 'interests', 'location', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'],
+  chronicle: ['id', 'at', 'summary', 'relatedIds', 'evidenceRefs'],
+  guidance: ['signals', 'excludedFacts', 'evidenceRefs'],
+} as const;
+
+export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
+  return (Object.keys(WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU) as WorldSimulationLedgerModule_ACU[])
+    .map(module => `${module}: ${WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU[module].join(',')}`)
+    .join('；');
+}
+
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';
 export type WorldSimulationTimelineKind_ACU = 'task_created' | 'plan_ready' | 'stage_started' | 'stage_completed' | 'paused' | 'resumed' | 'stopped' | 'committed' | 'no_change' | 'blocked' | 'failed';
 

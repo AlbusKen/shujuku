@@ -26,7 +26,7 @@ export interface WorldSimulationOrchestratorDependencies_ACU {
   allocateId(kind: 'task' | 'stage' | 'run' | 'timeline'): string;
   prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal }): Promise<WorldSimulationPreparedRun_ACU>;
   assertAnchorCurrent(anchor: WorldSimulationAnchorIdentity_ACU): void | Promise<void>;
-  appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string }): Promise<void>;
+  appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string; idempotent?: boolean }): Promise<void>;
   commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string }): Promise<void>;
 }
 /**
@@ -205,7 +205,7 @@ export class WorldSimulationOrchestrator_ACU {
         await this.dependencies.assertAnchorCurrent(input.anchor);
         assertRunCurrent_ACU(envelope, identity);
         if (instruction && this.dependencies.appendUserMessage) {
-          await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction });
+          await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction, idempotent: true });
         }
         if (controller.signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
         const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task!.originInstruction, envelope, signal: controller.signal });

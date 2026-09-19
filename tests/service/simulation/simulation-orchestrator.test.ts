@@ -176,7 +176,7 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(appendUserMessage).not.toHaveBeenCalled();
     await f.orchestrator.resume({ anchor: anchor(), instruction: '把边境压力调高' });
     expect(appendUserMessage).toHaveBeenCalledOnce();
-    expect(appendUserMessage.mock.calls[0][0]).toMatchObject({ text: '把边境压力调高', anchor: anchor() });
+    expect(appendUserMessage.mock.calls[0][0]).toMatchObject({ text: '把边境压力调高', anchor: anchor(), idempotent: true });
   });
 
   it('在途期间到达的自动触发排队为最新一次，结算后自动为该楼层开始运行', async () => {

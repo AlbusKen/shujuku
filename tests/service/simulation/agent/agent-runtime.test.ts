@@ -454,6 +454,52 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
   });
 
+  it('候选事务因字段缺失失败时回灌完整必填字段模板', async () => {
+    const { registry, evidence, promptContext } = fixture('transaction-missing-fields');
+    const incomplete = {
+      candidateId: 'candidate:missing-fields', agentName: 'macro-dynamics-analyst',
+      patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: [evidence] }] } },
+      summary: '缺字段候选', evidenceRefs: [evidence], uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+    };
+    const complete = {
+      ...incomplete,
+      candidateId: 'candidate:complete-fields',
+      patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'rising', rationale: '', evidenceRefs: [evidence], expectedRevision: 0 }] } },
+      summary: '补齐字段候选',
+    };
+    const subagents = {
+      run: vi.fn()
+        .mockResolvedValueOnce({ agentName: incomplete.agentName, status: 'candidate' as const, summary: incomplete.summary, candidate: incomplete, evidenceRefs: [evidence], uncertainties: [] })
+        .mockResolvedValueOnce({ agentName: complete.agentName, status: 'candidate' as const, summary: complete.summary, candidate: complete, evidenceRefs: [evidence], uncertainties: [] }),
+      runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
+      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: incomplete.agentName, instruction: '生成候选', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '首次提交', evidenceRefs: [evidence] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: complete.agentName, instruction: '根据事务错误修订', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交修订候选', evidenceRefs: [evidence] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-transaction-missing-fields', chatIdentity: 'chat-transaction-missing-fields', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-transaction-missing-fields', stageId: 'stage-transaction-missing-fields', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 4;
+
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
+    const feedback = JSON.stringify(invoke.mock.calls[2][1]);
+    expect(feedback).toContain('缺少必填字段：kind,value,trend');
+    expect(feedback).toContain('完整必填字段模板');
+    expect(feedback).toContain('dimensions: id,name,kind,value,trend,rationale,evidenceRefs,revision');
+    expect(feedback).toContain('clock: storyTime,elapsed,precision,evidenceRefs');
+    expect(feedback).toContain('seeds:');
+    expect(feedback).toContain('actors:');
+    expect(feedback).toContain('chronicle:');
+    expect(feedback).toContain('guidance:');
+  });
+
   it('显式 block 后保留同一 task/cursor 的候选并在恢复时避免重复派工', async () => {
     const { registry, evidence, promptContext } = fixture('resume-after-block');
     const candidate = {

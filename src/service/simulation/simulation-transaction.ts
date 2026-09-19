@@ -1,7 +1,6 @@
 import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
-import type { WorldSimulationLedger_ACU } from './model';
-import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU } from './model';
+import { WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationLedger_ACU } from './model';
 import { validateWorldSimulationLedger_ACU } from './simulation-store';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'] as const;
@@ -24,7 +23,7 @@ function refs_ACU(value: unknown, path: string): string[] {
   return [...value] as string[];
 }
 
-function applyUpserts_ACU<T extends { id: string; revision: number }>(current: readonly T[], raw: unknown, path: string): T[] {
+function applyUpserts_ACU<T extends { id: string; revision: number }>(current: readonly T[], raw: unknown, path: string, requiredFields: readonly string[]): T[] {
   if (!isRecord_ACU(raw)) fail_ACU(`${path} 必须是对象`);
   exactKeys_ACU(raw, ['upsert'], path);
   if (!Array.isArray(raw.upsert) || raw.upsert.length === 0) fail_ACU(`${path}.upsert 必须是非空数组`);
@@ -34,6 +33,10 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(current: r
     if (!isRecord_ACU(item) || typeof item.id !== 'string' || !item.id) fail_ACU(`${path}.upsert[${index}].id 非法`);
     if (seen.has(item.id)) fail_ACU(`${path}.upsert 存在重复 ID`, { id: item.id });
     seen.add(item.id);
+    const missing = requiredFields.filter(key => key !== 'revision' && !Object.prototype.hasOwnProperty.call(item, key));
+    if (missing.length) {
+      fail_ACU(`${path}.upsert[${index}] 缺少必填字段：${missing.join(',')}`, { path: `${path}.upsert[${index}]`, missingFields: missing });
+    }
     const expectedRevision = item.expectedRevision;
     if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) fail_ACU(`${path}.upsert[${index}].expectedRevision 非法`);
     const existingIndex = result.findIndex(entry => entry.id === item.id);
@@ -116,9 +119,9 @@ export function applyWorldSimulationCandidates_ACU(
       if (!(MODULES_ACU as readonly string[]).includes(module) || !writable.has(module)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
       switch (module as Module_ACU) {
         case 'clock': next.clock = applyClock_ACU(next.clock, patch); break;
-        case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions'); break;
-        case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds'); break;
-        case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors'); break;
+        case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions); break;
+        case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds); break;
+        case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors); break;
         case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
         case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
       }
