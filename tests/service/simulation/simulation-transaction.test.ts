@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
-import { applyWorldSimulationCandidates_ACU } from '../../../src/service/simulation/simulation-transaction';
+import { applyWorldSimulationCandidates_ACU, preflightWorldSimulationCandidates_ACU } from '../../../src/service/simulation/simulation-transaction';
 
 const candidate = (patch: Record<string, unknown>, evidenceRefs = ['e1']) => ({
-  candidateId: 'candidate:one', agentName: 'macro-dynamics-analyst', patch,
-  summary: '候选', evidenceRefs, uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+  candidateId: 'candidate:one', agentName: 'world-analyst', patch,
+  summary: '候选', evidenceRefs, uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
 });
 
 describe('world simulation transaction', () => {
@@ -38,5 +38,24 @@ describe('world simulation transaction', () => {
       [candidate({ dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } })],
       new Set(['e1']),
     )).toThrow(/缺少必填字段：kind,value,trend/);
+  });
+
+  it('preflight 聚合返回多候选多模块违规且不抛错', () => {
+    const base = buildEmptyWorldSimulationLedger_ACU();
+    base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '', evidenceRefs: [], revision: 1 });
+    const analyst = (candidateId: string, patch: Record<string, unknown>) => ({
+      candidateId, agentName: 'world-analyst', patch, summary: '候选',
+      evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    });
+    const violations = preflightWorldSimulationCandidates_ACU(base, [
+      analyst('candidate:clock', { clock: { elapsed: '1h', precision: 'illegal', evidenceRefs: ['e1'] } }),
+      analyst('candidate:dimension-missing', { dimensions: { upsert: [{ id: 'new-dim', name: '新维度', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } }),
+      analyst('candidate:dimension-revision', { dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: ['e1'] }] } }),
+    ], new Set(['e1']));
+    const messages = violations.map(item => item.message).join('\n');
+    expect(messages).toMatch(/precision 非法/);
+    expect(messages).toMatch(/缺少必填字段：kind,value,trend/);
+    expect(messages).toMatch(/revision 冲突/);
+    expect(violations.length).toBeGreaterThanOrEqual(3);
   });
 });

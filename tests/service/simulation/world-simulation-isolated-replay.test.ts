@@ -29,7 +29,7 @@ const plan = {
   impactScope: ['world'],
   factsToVerify: ['冻结锚点仍有效'],
   plannedTools: ['anchor:message'],
-  plannedSpecialists: ['macro-dynamics-analyst', 'seed-lifecycle-analyst'],
+  plannedSpecialists: ['world-analyst', 'lore-researcher'],
   expectedLedgerChanges: ['clock', 'guidance'] as const,
   convergenceConditions: ['形成可审计终局'],
   blockingConditions: ['证据不足'],
@@ -117,11 +117,7 @@ function buildReplay(options: ReplayOptions) {
       clock: { elapsed: '1h', precision: 'approximate', evidenceRefs: [initialEvidence] },
     };
     const clockSummary = '钟楼事件使世界时间推进一小时';
-    const clockCandidateId = candidateId('macro-dynamics-analyst', clockPatch, [initialEvidence], clockSummary);
-    const guidancePatch = {
-      guidance: { signals: ['远处钟声响起'], excludedFacts: [], evidenceRefs: [initialEvidence] },
-    };
-
+    const clockCandidateId = candidateId('world-analyst', clockPatch, [initialEvidence], clockSummary);
     const scripts = new Map<WorldSimulationAgentName_ACU, string[]>([
       ['world-stage-planner', [JSON.stringify({ action: 'plan', summary: '隔离阶段计划已冻结', plan })]],
       ['world-director', [
@@ -133,10 +129,10 @@ function buildReplay(options: ReplayOptions) {
                 action: 'delegate',
                 delegations: options.mode === 'commit_partial'
                   ? [
-                      { agentName: 'macro-dynamics-analyst', instruction: '分析时间推进', reads: [] },
-                      { agentName: 'seed-lifecycle-analyst', instruction: '分析暗流变化', reads: [] },
+                      { agentName: 'world-analyst', instruction: '分析时间推进', reads: [] },
+                      { agentName: 'lore-researcher', instruction: '分析暗流变化', reads: [] },
                     ]
-                  : [{ agentName: 'macro-dynamics-analyst', instruction: '核验是否变化', reads: [] }],
+                  : [{ agentName: 'world-analyst', instruction: '核验是否变化', reads: [] }],
               }),
               JSON.stringify({
                 action: 'finalize',
@@ -146,25 +142,25 @@ function buildReplay(options: ReplayOptions) {
               }),
             ]),
       ]],
-      ['macro-dynamics-analyst', [options.mode === 'no_change'
+      ['world-analyst', [options.mode === 'no_change'
         ? JSON.stringify({
             status: 'no_change',
-            agentName: 'macro-dynamics-analyst',
+            agentName: 'world-analyst',
             summary: '当前证据不足以支持状态变化',
             evidenceRefs: [initialEvidence],
             uncertainties: [],
           })
         : JSON.stringify({
             status: 'candidate',
-            agentName: 'macro-dynamics-analyst',
+            agentName: 'world-analyst',
             patch: clockPatch,
             summary: clockSummary,
             evidenceRefs: [initialEvidence],
             uncertainties: [],
           })]],
-      ['seed-lifecycle-analyst', [JSON.stringify({
+      ['lore-researcher', [JSON.stringify({
         status: 'failed',
-        agentName: 'seed-lifecycle-analyst',
+        agentName: 'lore-researcher',
         reasonCode: 'SEED_EVIDENCE_MISSING',
         message: '暗流证据不足',
       })]],
@@ -173,14 +169,7 @@ function buildReplay(options: ReplayOptions) {
         summary: '仅采用证据完整的时间候选',
         findings: [],
         acceptedCandidateIds: [clockCandidateId],
-      })]],
-      ['guidance-reviewer', [JSON.stringify({
-        status: 'candidate',
-        agentName: 'guidance-reviewer',
-        patch: guidancePatch,
-        summary: '生成不泄露隐藏事实的感知信号',
-        evidenceRefs: [initialEvidence],
-        uncertainties: [],
+        guidance: { signals: ['远处钟声响起'], excludedFacts: [] },
       })]],
     ]);
     const invoke = vi.fn(async (role: WorldSimulationAgentName_ACU) => {
@@ -332,11 +321,10 @@ describe('T9 世界推演隔离 API replay', () => {
     });
     if (!result || result.status !== 'completed' || result.result.outcome !== 'commit') throw new Error('expected committed replay');
     expect(result.result.outcomes.map(item => [item.agentName, item.status, item.reasonCode])).toEqual([
-      ['macro-dynamics-analyst', 'candidate', undefined],
-      ['seed-lifecycle-analyst', 'failed', 'SEED_EVIDENCE_MISSING'],
-      ['guidance-reviewer', 'candidate', undefined],
+      ['world-analyst', 'candidate', undefined],
+      ['lore-researcher', 'failed', 'SEED_EVIDENCE_MISSING'],
     ]);
-    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['macro-dynamics-analyst', 'guidance-reviewer']);
+    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['world-analyst', 'causality-reviewer']);
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { elapsed: '1h' }, guidance: { signals: ['远处钟声响起'] } }, task: { status: 'completed', activeRun: null } });
     expect(replay.commitProjection).toHaveBeenCalledOnce();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);

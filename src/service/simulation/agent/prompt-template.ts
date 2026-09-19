@@ -1,5 +1,5 @@
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationErrorPhase_ACU, type WorldSimulationPromptSegment_ACU, type WorldSimulationSettings_ACU } from '../model';
-import { WORLD_SIMULATION_AGENT_NAMES_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { WORLD_SIMULATION_AGENT_NAMES_ACU, WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU, buildDefaultWorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, worldSimulationSeamMarker_ACU, type WorldSimulationAgentPrompts_ACU, type WorldSimulationEngineSeam_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
 const SEAM_ROLES_ACU: Record<WorldSimulationEngineSeam_ACU, string> = { ROOT: 'system', ROLE_RULES: 'system', PROTOCOL: 'system', WORKFLOW: 'system', HISTORY: 'user', RUNTIME_CONTEXT: 'user', ACKNOWLEDGEMENT: 'assistant', EXECUTION_BOUNDARY: 'user' };
@@ -37,9 +37,18 @@ export function validateWorldSimulationPromptSegments_ACU(value: unknown, agentN
 export function validateWorldSimulationAgentPrompts_ACU(value: unknown, phase: WorldSimulationErrorPhase_ACU = 'load'): WorldSimulationAgentPrompts_ACU {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail_ACU('agentPrompts 必须是对象', undefined, phase);
   const raw = value as Record<string, unknown>;
-  if (Object.keys(raw).some(key => !(WORLD_SIMULATION_AGENT_NAMES_ACU as readonly string[]).includes(key))) fail_ACU('agentPrompts 包含未知角色', undefined, phase);
+  const retired = new Set<string>(WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU);
+  if (Object.keys(raw).some(key => !(WORLD_SIMULATION_AGENT_NAMES_ACU as readonly string[]).includes(key) && !retired.has(key))) fail_ACU('agentPrompts 包含未知角色', undefined, phase);
+  const hasRetired = Object.keys(raw).some(key => retired.has(key));
   const result = {} as WorldSimulationAgentPrompts_ACU;
-  for (const name of WORLD_SIMULATION_AGENT_NAMES_ACU) result[name] = validateWorldSimulationPromptSegments_ACU(raw[name], name, phase);
+  for (const name of WORLD_SIMULATION_AGENT_NAMES_ACU) {
+    if (raw[name] === undefined) {
+      if (!hasRetired) fail_ACU('提示词必须是非空数组', { agentName: name }, phase);
+      result[name] = buildDefaultWorldSimulationAgentPrompt_ACU(name);
+      continue;
+    }
+    result[name] = validateWorldSimulationPromptSegments_ACU(raw[name], name, phase);
+  }
   return result;
 }
 

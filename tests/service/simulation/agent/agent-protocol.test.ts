@@ -56,7 +56,7 @@ describe('世界推演 Agent 协议', () => {
     let error: unknown;
     try {
       parseWorldSimulationSpecialistResult_ACU({
-        status: 'candidate', agentName: 'seed-lifecycle-analyst',
+        status: 'candidate', agentName: 'lore-researcher',
         patch: { seeds: [{ id: 'seed-1' }] }, summary: '非法种子候选', evidenceRefs: [ref], uncertainties: [],
       }, snapshot);
     } catch (caught) {
@@ -74,7 +74,7 @@ describe('世界推演 Agent 协议', () => {
     let error: unknown;
     try {
       parseWorldSimulationSpecialistResult_ACU({
-        status: 'candidate', agentName: 'macro-dynamics-analyst',
+        status: 'candidate', agentName: 'world-analyst',
         patch: { dimensions: { upsert: [{ id: 'dimension-1', expectedRevision: 0 }] } },
         summary: '缺少名称的维度候选', evidenceRefs: [ref], uncertainties: [],
       }, snapshot);
@@ -109,9 +109,9 @@ describe('世界推演 Agent 协议', () => {
   });
 
   it('specialist 协议拒绝回灌包含角色、枚举、写入范围与合法模板', () => {
-    const message = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'INVALID_SPECIALIST_STATUS', path: '$.status', expected: 'candidate | no_change | failed | blocked', actual: 'success' }, 'macro-dynamics-analyst', ['clock', 'dimensions']);
+    const message = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'INVALID_SPECIALIST_STATUS', path: '$.status', expected: 'candidate | no_change | failed | blocked', actual: 'success' }, 'world-analyst', ['clock', 'dimensions']);
     expect(message).toContain('status 必须精确为 candidate、no_change、failed、blocked');
-    expect(message).toContain('agentName 必须精确为 macro-dynamics-analyst');
+    expect(message).toContain('agentName 必须精确为 world-analyst');
     expect(message).toContain('patch 顶层只能使用：clock | dimensions');
     expect(message).toContain('"status":"candidate"');
     expect(message).toContain('非负整数 expectedRevision');
@@ -175,7 +175,7 @@ describe('世界推演 Agent 协议', () => {
   });
 
   it('初始提示词即声明 specialist upsert/expectedRevision 契约与 director 动作字段白名单', () => {
-    const specialist = worldSimulationSpecialistProtocolInstruction_ACU('macro-dynamics-analyst', ['clock', 'dimensions', 'chronicle']);
+    const specialist = worldSimulationSpecialistProtocolInstruction_ACU('world-analyst', ['clock', 'dimensions', 'chronicle']);
     expect(specialist).toContain('"upsert"');
     expect(specialist).toContain('非负整数 expectedRevision');
     expect(specialist).toContain('新建条目填 0');
@@ -193,7 +193,7 @@ describe('世界推演 Agent 协议', () => {
 
   it('默认提示词模板已接线 specialist upsert 契约与 director 字段白名单', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const specialist = prompts['macro-dynamics-analyst'].map(segment => segment.content).join('\n');
+    const specialist = prompts['world-analyst'].map(segment => segment.content).join('\n');
     expect(specialist).toContain('非负整数 expectedRevision');
     expect(specialist).toContain('新建条目填 0');
     expect(specialist).toContain('ledger:current');

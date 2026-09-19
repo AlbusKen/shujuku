@@ -12,7 +12,6 @@ import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidenc
 const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) };
 const tools = { read: vi.fn(async () => ({ status: 'empty' as const, summary: 'empty' })), search: vi.fn(async () => ({ status: 'empty' as const, hits: [], summary: 'empty' })) };
 const settings = () => ({ ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(), agentRunBudget: { maxIterations: 3, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1 } });
-const guidanceNoChange = () => ({ agentName: 'guidance-reviewer', status: 'no_change' as const, summary: '无需公开投影', evidenceRefs: [], uncertainties: [] });
 function fixture(runId = 'runtime') {
   const registry = createWorldSimulationEvidenceRegistry_ACU(runId);
   const evidence = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'anchor:message', status: 'ok', summary: '锚点', exact: true }).evidenceRef!;
@@ -25,11 +24,11 @@ describe('世界推演 Agent runtime', () => {
 
   it('specialist 只能在 catalog 声明的 ledger modules 内产出候选', async () => {
     const { registry, evidence, promptContext } = fixture('specialist');
-    const invoke = vi.fn(async () => JSON.stringify({ status: 'candidate', agentName: 'macro-dynamics-analyst', patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence], uncertainties: [] }));
+    const invoke = vi.fn(async () => JSON.stringify({ status: 'candidate', agentName: 'world-analyst', patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence], uncertainties: [] }));
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
-    const result = await runtime.run({ delegation: { agentName: 'macro-dynamics-analyst', instruction: '分析时间', reads: [] }, settings: settings(), promptContext, registry, tools });
+    const result = await runtime.run({ delegation: { agentName: 'world-analyst', instruction: '分析时间', reads: [] }, settings: settings(), promptContext, registry, tools });
     expect(result.status).toBe('candidate');
-    expect(result.candidate).toMatchObject({ agentName: 'macro-dynamics-analyst', writableModules: ['clock', 'dimensions', 'chronicle'] });
+    expect(result.candidate).toMatchObject({ agentName: 'world-analyst', writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'] });
     expect(result.candidate?.candidateId).toMatch(/^candidate:/);
   });
 
@@ -39,20 +38,20 @@ describe('世界推演 Agent runtime', () => {
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
 
     await expect(runtime.run({
-      delegation: { agentName: 'actor-information-analyst', instruction: '核对行动者信息', reads: [] },
+      delegation: { agentName: 'lore-researcher', instruction: '核对行动者信息', reads: [] },
       settings: settings(), promptContext, registry, tools,
-    })).resolves.toMatchObject({ agentName: 'actor-information-analyst', status: 'no_change', summary: '无需修改' });
+    })).resolves.toMatchObject({ agentName: 'lore-researcher', status: 'no_change', summary: '无需修改' });
   });
 
   it('specialist 显式伪造不同身份时仍 fail-closed', async () => {
     const { registry, promptContext } = fixture('specialist-forged-identity');
     const invoke = vi.fn(async () => JSON.stringify({
-      status: 'no_change', agentName: 'seed-lifecycle-analyst', summary: '伪造身份', evidenceRefs: [], uncertainties: [],
+      status: 'no_change', agentName: 'world-analyst', summary: '伪造身份', evidenceRefs: [], uncertainties: [],
     }));
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1, protocolRetries: 0 });
 
     await expect(runtime.run({
-      delegation: { agentName: 'actor-information-analyst', instruction: '核对行动者信息', reads: [] },
+      delegation: { agentName: 'lore-researcher', instruction: '核对行动者信息', reads: [] },
       settings: settings(), promptContext, registry, tools,
     })).rejects.toThrow('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
   });
@@ -61,12 +60,12 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('reviewer-protocol-repair');
     const candidate = {
       candidateId: 'candidate:reviewer-repair',
-      agentName: 'macro-dynamics-analyst',
+      agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } },
       summary: '时间推进',
       evidenceRefs: [evidence],
       uncertainties: [],
-      writableModules: ['clock', 'dimensions', 'chronicle'],
+      writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const responses = [
       JSON.stringify({ verdict: 'approved', summary: '错误别名', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
@@ -90,43 +89,42 @@ describe('世界推演 Agent runtime', () => {
   it('specialist 协议重试回灌明确枚举、角色、写入范围与合法 JSON 模板', async () => {
     const { registry, promptContext } = fixture('specialist-repair');
     const responses = [
-      JSON.stringify({ status: 'successful', agentName: 'macro-dynamics-analyst', summary: '非法状态', evidenceRefs: [], uncertainties: [] }),
-      JSON.stringify({ status: 'no_change', agentName: 'macro-dynamics-analyst', summary: '无需修改', evidenceRefs: [], uncertainties: [] }),
+      JSON.stringify({ status: 'successful', agentName: 'world-analyst', summary: '非法状态', evidenceRefs: [], uncertainties: [] }),
+      JSON.stringify({ status: 'no_change', agentName: 'world-analyst', summary: '无需修改', evidenceRefs: [], uncertainties: [] }),
     ];
     const invoke = vi.fn(async () => responses.shift()!);
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
     await expect(runtime.run({
-      delegation: { agentName: 'macro-dynamics-analyst', instruction: '分析时间', reads: [] },
+      delegation: { agentName: 'world-analyst', instruction: '分析时间', reads: [] },
       settings: settings(), promptContext, registry, tools,
     })).resolves.toMatchObject({ status: 'no_change', summary: '无需修改' });
     expect(invoke).toHaveBeenCalledTimes(2);
     const retryMessages = invoke.mock.calls[1][1] as readonly { role: string; content: string }[];
     const rejection = retryMessages.find(message => message.role === 'user' && message.content.includes('INVALID_SPECIALIST_STATUS'))?.content ?? '';
     expect(rejection).toContain('status 必须精确为 candidate、no_change、failed、blocked');
-    expect(rejection).toContain('agentName 必须精确为 macro-dynamics-analyst');
-    expect(rejection).toContain('patch 顶层只能使用：clock | dimensions | chronicle');
+    expect(rejection).toContain('agentName 必须精确为 world-analyst');
+    expect(rejection).toContain('patch 顶层只能使用：clock | dimensions | seeds | actors | chronicle');
     expect(rejection).toContain('"status":"candidate"');
   });
 
   it('并行派工部分失败时仍可由 reviewer 部分采用成功候选', async () => {
     const { registry, evidence, promptContext } = fixture('partial');
     const candidate = {
-      candidateId: 'candidate:accepted', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:accepted', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async ({ delegation }: any) => {
-        if (delegation.agentName === 'seed-lifecycle-analyst') throw new Error('seed failed');
+        if (delegation.agentName === 'lore-researcher') throw new Error('seed failed');
         return { agentName: delegation.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] };
       }),
       runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '采用可信候选', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [
-        { agentName: 'macro-dynamics-analyst', instruction: '分析时间', reads: [] },
-        { agentName: 'seed-lifecycle-analyst', instruction: '分析暗流', reads: [] },
+        { agentName: 'world-analyst', instruction: '分析时间', reads: [] },
+        { agentName: 'lore-researcher', instruction: '分析暗流', reads: [] },
       ] }),
       JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交部分成功结果', evidenceRefs: [evidence] }),
     ];
@@ -137,24 +135,22 @@ describe('世界推演 Agent runtime', () => {
     expect(result.outcome).toBe('commit');
     if (result.outcome !== 'commit') throw new Error('expected commit');
     expect(result.commitCandidate.acceptedCandidates).toEqual([candidate]);
-    expect(result.outcomes.map(item => item.status)).toEqual(['candidate', 'failed', 'no_change']);
+    expect(result.outcomes.map(item => item.status)).toEqual(['candidate', 'failed']);
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
   });
 
   it('同一 specialist 后续成功结果替换旧失败，不让历史协议错误永久污染收敛', async () => {
     const { registry, evidence, promptContext } = fixture('latest-outcome-wins');
     const candidate = {
-      candidateId: 'candidate:latest', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:latest', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '重试后形成候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn()
         .mockRejectedValueOnce(new Error('INVALID_SPECIALIST_STATUS: $.status'))
         .mockResolvedValueOnce({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] }),
       runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '采用最新候选', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '首次分析', reads: [] }] }),
@@ -169,7 +165,6 @@ describe('世界推演 Agent runtime', () => {
     expect(result.outcome).toBe('commit');
     expect(result.outcomes).toEqual(expect.arrayContaining([
       expect.objectContaining({ agentName: candidate.agentName, status: 'candidate' }),
-      expect.objectContaining({ agentName: 'guidance-reviewer', status: 'no_change' }),
     ]));
     expect(result.outcomes).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ agentName: candidate.agentName, status: 'failed' }),
@@ -182,10 +177,9 @@ describe('世界推演 Agent runtime', () => {
     const subagents = {
       run: vi.fn(async () => { throw new Error('all failed'); }),
       runReviewer: vi.fn(),
-      runGuidanceReviewer: vi.fn(),
     };
     const responses = [
-      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'macro-dynamics-analyst', instruction: '分析', reads: [] }] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析', reads: [] }] }),
       JSON.stringify({ action: 'finalize', outcome: 'no_change', summary: '无变化', evidenceRefs: [evidence] }),
       JSON.stringify({ action: 'block', reason: '证据不足', unresolved: ['specialist failed'] }),
     ];
@@ -194,12 +188,11 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'blocked', summary: '证据不足' });
     expect(subagents.runReviewer).not.toHaveBeenCalled();
-    expect(subagents.runGuidanceReviewer).not.toHaveBeenCalled();
   });
 
   it('主 Agent 协议错误只做有限修正并可在下一轮收敛', async () => {
     const { registry, promptContext } = fixture('director-repair');
-    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
     const responses = [
       JSON.stringify({ action: 'unknown' }),
       JSON.stringify({ action: 'block', reason: '修正后阻断', unresolved: ['missing evidence'] }),
@@ -215,7 +208,7 @@ describe('世界推演 Agent runtime', () => {
 
   it('主 Agent 可连续修正不同 finalize 机械错误且重复指纹门禁不变', async () => {
     const { registry, promptContext } = fixture('director-sequential-repair');
-    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
     const responses = [
       JSON.stringify({ action: 'finalize', summary: '缺少 outcome', evidenceRefs: [] }),
       JSON.stringify({ action: 'finalize', outcome: 'no_change', candidateId: 'candidate:wrong', summary: '混入审核字段', evidenceRefs: [] }),
@@ -236,7 +229,7 @@ describe('世界推演 Agent runtime', () => {
 
   it('主 Agent 响应未返回时立即显示 running 卡片，完成后原位更新', async () => {
     const { registry, promptContext } = fixture('director-live');
-    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
     let resolveInvoke!: (value: string) => void;
     const invoke = vi.fn(() => new Promise<string>(resolve => { resolveInvoke = resolve; }));
     const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
@@ -259,7 +252,7 @@ describe('世界推演 Agent runtime', () => {
 
   it('工具读取未返回时立即显示 running 卡片，完成后原位更新', async () => {
     const { registry, promptContext } = fixture('tool-live');
-    const subagents = { run: vi.fn(), runReviewer: vi.fn(), runGuidanceReviewer: vi.fn() };
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
     const responses = [
       JSON.stringify({ action: 'read', reads: ['ledger:current'] }),
       JSON.stringify({ action: 'block', reason: '取证完成后暂停', unresolved: ['next'] }),
@@ -290,9 +283,9 @@ describe('世界推演 Agent runtime', () => {
   it('reviewer 要求 revise 时返回主循环修正而不是误提交', async () => {
     const { registry, evidence, promptContext } = fixture('review-revise');
     const candidate = {
-      candidateId: 'candidate:revise', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:revise', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
@@ -304,7 +297,6 @@ describe('世界推演 Agent runtime', () => {
           acceptedCandidateIds: [candidate.candidateId],
         })
         .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '修订后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
@@ -318,16 +310,15 @@ describe('世界推演 Agent runtime', () => {
     if (result.outcome !== 'commit') throw new Error('expected commit');
     expect(result.summary).toBe('修订后提交');
     expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
   });
 
   it('reviewer 驳回候选后主 Agent 重新派工修订而不是结束任务', async () => {
     const { registry, evidence, promptContext } = fixture('review-reject-redelegate');
     const rejectedCandidate = {
-      candidateId: 'candidate:rejected', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:rejected', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } },
       summary: '缺少锚点证据的时间候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const revisedCandidate = {
       ...rejectedCandidate,
@@ -347,7 +338,6 @@ describe('世界推演 Agent runtime', () => {
           acceptedCandidateIds: [],
         })
         .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '修订候选通过', findings: [], acceptedCandidateIds: [revisedCandidate.candidateId] }),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: rejectedCandidate.agentName, instruction: '分析时间推进', reads: [] }] }),
@@ -365,7 +355,6 @@ describe('世界推演 Agent runtime', () => {
     expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
     expect(subagents.run).toHaveBeenCalledTimes(2);
     expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
     expect(subagents.run.mock.calls[1][0].delegation.instruction).toContain('EVIDENCE_GAP');
   });
 
@@ -376,9 +365,9 @@ describe('世界推演 Agent runtime', () => {
       rationale: '锚点证据', evidenceRefs: [evidence], expectedRevision: 0,
     };
     const original = {
-      candidateId: 'candidate:dimension-original', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:dimension-original', agentName: 'world-analyst',
       patch: { dimensions: { upsert: [baseEntry] } }, summary: '初版维度候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const revised = {
       ...original,
@@ -391,7 +380,6 @@ describe('世界推演 Agent runtime', () => {
         .mockResolvedValueOnce({ agentName: original.agentName, status: 'candidate' as const, summary: original.summary, candidate: original, evidenceRefs: [evidence], uncertainties: [] })
         .mockResolvedValueOnce({ agentName: revised.agentName, status: 'candidate' as const, summary: revised.summary, candidate: revised, evidenceRefs: [evidence], uncertainties: [] }),
       runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '修订候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: original.agentName, instruction: '生成初版维度', reads: [] }] }),
@@ -416,9 +404,9 @@ describe('世界推演 Agent runtime', () => {
       rationale: '锚点证据', evidenceRefs: [evidence],
     };
     const stale = {
-      candidateId: 'candidate:stale-revision', agentName: 'macro-dynamics-analyst',
-  patch: { dimensions: { upsert: [{ ...entry, expectedRevision: 1 }] } }, summary: '错误 revision 候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      candidateId: 'candidate:stale-revision', agentName: 'world-analyst',
+      patch: { dimensions: { upsert: [{ ...entry, expectedRevision: 1 }] } }, summary: '错误 revision 候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const corrected = {
       ...stale,
@@ -431,7 +419,6 @@ describe('世界推演 Agent runtime', () => {
         .mockResolvedValueOnce({ agentName: stale.agentName, status: 'candidate' as const, summary: stale.summary, candidate: stale, evidenceRefs: [evidence], uncertainties: [] })
         .mockResolvedValueOnce({ agentName: corrected.agentName, status: 'candidate' as const, summary: corrected.summary, candidate: corrected, evidenceRefs: [evidence], uncertainties: [] }),
       runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: stale.agentName, instruction: '生成候选', reads: [] }] }),
@@ -448,18 +435,19 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
 
     expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
-    expect(JSON.stringify(invoke.mock.calls[2][1])).toContain('revision 冲突');
-    expect(JSON.stringify(invoke.mock.calls[2][1])).toContain('重新派工');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('revision 冲突');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('重新派工');
     expect(subagents.run).toHaveBeenCalledTimes(2);
-    expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(1);
+    expect(subagents.runReviewer.mock.calls[0][0].candidates).toEqual([corrected]);
   });
 
   it('候选事务因字段缺失失败时回灌完整必填字段模板', async () => {
     const { registry, evidence, promptContext } = fixture('transaction-missing-fields');
     const incomplete = {
-      candidateId: 'candidate:missing-fields', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:missing-fields', agentName: 'world-analyst',
       patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: [evidence] }] } },
-      summary: '缺字段候选', evidenceRefs: [evidence], uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      summary: '缺字段候选', evidenceRefs: [evidence], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const complete = {
       ...incomplete,
@@ -472,7 +460,6 @@ describe('世界推演 Agent runtime', () => {
         .mockResolvedValueOnce({ agentName: incomplete.agentName, status: 'candidate' as const, summary: incomplete.summary, candidate: incomplete, evidenceRefs: [evidence], uncertainties: [] })
         .mockResolvedValueOnce({ agentName: complete.agentName, status: 'candidate' as const, summary: complete.summary, candidate: complete, evidenceRefs: [evidence], uncertainties: [] }),
       runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: incomplete.agentName, instruction: '生成候选', reads: [] }] }),
@@ -503,14 +490,13 @@ describe('世界推演 Agent runtime', () => {
   it('显式 block 后保留同一 task/cursor 的候选并在恢复时避免重复派工', async () => {
     const { registry, evidence, promptContext } = fixture('resume-after-block');
     const candidate = {
-      candidateId: 'candidate:block-resume', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:block-resume', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '阻断前候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
@@ -541,20 +527,18 @@ describe('世界推演 Agent runtime', () => {
     expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries.some(entry => entry.evidenceRef === evidence)).toBe(true);
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
   });
 
   it('同一 task/stage identity 恢复候选且不重复派工', async () => {
     const { registry, evidence, promptContext } = fixture('resume-same-identity');
     const candidate = {
-      candidateId: 'candidate:resume', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:resume', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '恢复候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
@@ -578,7 +562,6 @@ describe('世界推演 Agent runtime', () => {
     if (resumed.outcome !== 'commit') throw new Error('expected resumed commit');
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
     expect(resumed.commitCandidate).toMatchObject({
       runId: identity.runId,
       taskId: identity.taskId,
@@ -592,14 +575,13 @@ describe('世界推演 Agent runtime', () => {
   it('stage cursor 改变后不复用旧候选', async () => {
     const { registry, evidence, promptContext } = fixture('resume-cursor-isolation');
     const candidate = {
-      candidateId: 'candidate:stale-cursor', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:stale-cursor', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '旧 cursor 候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn(),
-      runGuidanceReviewer: vi.fn(),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
@@ -623,7 +605,6 @@ describe('世界推演 Agent runtime', () => {
     expect(result).toMatchObject({ outcome: 'blocked', unresolved: ['iteration budget exhausted'] });
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).not.toHaveBeenCalled();
-    expect(subagents.runGuidanceReviewer).not.toHaveBeenCalled();
   });
 
   it('重启后内存清空，从锚点楼层恢复候选与证据直接提交', async () => {
@@ -633,14 +614,13 @@ describe('世界推演 Agent runtime', () => {
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-floor-resume', getCurrentChatId: () => 'chat-floor-resume', saveChat } as any);
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const candidate = {
-      candidateId: 'candidate:floor-resume', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:floor-resume', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '楼层恢复候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '楼层恢复后通过', findings: [], acceptedCandidateIds: candidates.map((item: any) => item.candidateId) })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
@@ -669,7 +649,6 @@ describe('世界推演 Agent runtime', () => {
     expect(result).toMatchObject({ outcome: 'commit', summary: '楼层恢复后提交' });
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
     expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries.some(entry => entry.evidenceRef === evidence)).toBe(true);
     _set_SillyTavern_API_ACU(undefined);
   });
@@ -681,14 +660,13 @@ describe('世界推演 Agent runtime', () => {
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-budget-resume', getCurrentChatId: () => 'chat-budget-resume', saveChat } as any);
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const candidate = {
-      candidateId: 'candidate:budget-resume', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:budget-resume', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '预算重置候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '预算重置后通过', findings: [], acceptedCandidateIds: candidates.map((item: any) => item.candidateId) })),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const runSettings = settings();
     runSettings.agentRunBudget.maxIterations = 2;
@@ -717,7 +695,6 @@ describe('世界推演 Agent runtime', () => {
     expect(result).toMatchObject({ outcome: 'commit', summary: '预算重置后提交' });
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.runReviewer).toHaveBeenCalledOnce();
-    expect(subagents.runGuidanceReviewer).toHaveBeenCalledOnce();
     _set_SillyTavern_API_ACU(undefined);
   });
 
@@ -728,16 +705,15 @@ describe('世界推演 Agent runtime', () => {
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-transcript-resume', getCurrentChatId: () => 'chat-transcript-resume', saveChat } as any);
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const candidate = {
-      candidateId: 'candidate:transcript-resume', agentName: 'macro-dynamics-analyst',
+      candidateId: 'candidate:transcript-resume', agentName: 'world-analyst',
       patch: { clock: { elapsed: '1h' } }, summary: '对话恢复候选', evidenceRefs: [evidence],
-      uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn()
         .mockResolvedValueOnce({ verdict: 'reject' as const, summary: '候选缺少时间证据', findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.elapsed', expected: '锚点支持', actual: '缺失' }], acceptedCandidateIds: [] })
         .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
-      runGuidanceReviewer: vi.fn(async () => guidanceNoChange()),
     };
     const runSettings = settings();
     const identity = {
@@ -769,6 +745,69 @@ describe('世界推演 Agent runtime', () => {
     expect(JSON.stringify(resumedInvoke.mock.calls[0][1])).toContain('reviewer 驳回或要求修订候选');
     expect(JSON.stringify(resumedInvoke.mock.calls[0][1])).toContain('EVIDENCE_GAP');
     _set_SillyTavern_API_ACU(undefined);
+  });
+
+  it('候选入库预检失败时不入库并回灌全部违规', async () => {
+    const { registry, evidence, promptContext } = fixture('preflight-reject');
+    const badCandidate = {
+      candidateId: 'candidate:preflight-bad', agentName: 'world-analyst',
+      patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: [evidence] }] } },
+      summary: '缺字段维度', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: badCandidate.agentName, status: 'candidate' as const, summary: badCandidate.summary, candidate: badCandidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析维度', reads: [] }] }),
+      JSON.stringify({ action: 'block', reason: '等待修正', unresolved: ['preflight'] }),
+    ];
+    const invoke = vi.fn(async () => responses.shift()!);
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-preflight', chatIdentity: 'chat-preflight', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-preflight', stageId: 'stage-preflight', stageRevision: 1 };
+    const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
+    expect(result).toMatchObject({ outcome: 'blocked', summary: '等待修正' });
+    expect(result.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentName: 'world-analyst', status: 'failed', reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' }),
+    ]));
+    expect(subagents.runReviewer).not.toHaveBeenCalled();
+    expect(JSON.stringify(invoke.mock.calls)).toContain('候选入库预检拒绝');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('缺少必填字段');
+  });
+
+  it('causality-reviewer accept 时可把 guidance 合入最终候选', async () => {
+    const { registry, evidence, promptContext } = fixture('reviewer-guidance');
+    const candidate = {
+      candidateId: 'candidate:guidance-source', agentName: 'world-analyst',
+      patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(async () => ({
+        verdict: 'accept' as const, summary: '审核通过并压缩感知', findings: [],
+        acceptedCandidateIds: [candidate.candidateId],
+        guidance: { signals: ['远处钟声响起'], excludedFacts: ['幕后真相'] },
+      })),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交含 guidance', evidenceRefs: [evidence] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-guidance', chatIdentity: 'chat-guidance', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-guidance', stageId: 'stage-guidance', stageRevision: 1 };
+    const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
+    expect(result.outcome).toBe('commit');
+    if (result.outcome !== 'commit') throw new Error('expected commit');
+    expect(result.commitCandidate.acceptedCandidates).toEqual([
+      candidate,
+      expect.objectContaining({
+        agentName: 'causality-reviewer',
+        writableModules: ['guidance'],
+        patch: { guidance: expect.objectContaining({ signals: ['远处钟声响起'], excludedFacts: ['幕后真相'] }) },
+      }),
+    ]);
   });
 
 });

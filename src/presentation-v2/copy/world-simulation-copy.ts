@@ -10,12 +10,8 @@ export const WORLD_SIMULATION_AGENT_ORDER_ACU: readonly WorldSimulationAgentName
 export const WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU: Record<WorldSimulationAgentName_ACU, string> = {
   'world-director': '主 Agent',
   'world-stage-planner': '阶段规划',
-  'macro-dynamics-analyst': '宏观动态',
-  'seed-lifecycle-analyst': '暗流演变',
-  'actor-information-analyst': '行动者情报',
-  'causality-planner': '因果编排',
+  'world-analyst': '世界推演',
   'causality-reviewer': '因果审核',
-  'guidance-reviewer': '可感知指引审核',
   'lore-researcher': '设定研究',
 };
 

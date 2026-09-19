@@ -9,10 +9,10 @@ import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, ren
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
 describe('世界推演提示词装配契约', () => {
-  it('装配九角色及唯一有序固定 seam', () => {
+  it('装配五角色及唯一有序固定 seam', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
-    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(9);
+    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(5);
     for (const segments of Object.values(prompts)) {
       const positions = WORLD_SIMULATION_ENGINE_SEAMS_ACU.map(seam => segments.findIndex(segment => segment.content.includes(worldSimulationSeamMarker_ACU(seam))));
       expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -75,6 +75,7 @@ describe('世界推演提示词装配契约', () => {
     expect(instruction).toContain('verdict 必须精确为 accept、revise、reject');
     expect(instruction).toContain('severity 必须精确为 blocking、major、minor');
     expect(instruction).toContain('accept 必须至少接受一个候选');
+    expect(instruction).toContain('verdict 为 accept 时可额外包含 guidance');
     expect(instruction).toContain('"verdict":"accept"');
     expect(instruction).toContain('"verdict":"revise"');
     expect(instruction).toContain('"verdict":"reject"');

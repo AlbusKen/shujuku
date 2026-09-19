@@ -1,6 +1,6 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldSimulationLedger_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
-import { applyWorldSimulationCandidates_ACU } from '../simulation-transaction';
+import { applyWorldSimulationCandidates_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
@@ -23,7 +23,7 @@ import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_AC
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
-  subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run' | 'runReviewer' | 'runGuidanceReviewer'>;
+  subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run' | 'runReviewer'>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
 }
@@ -331,17 +331,32 @@ export class WorldSimulationMainLoop_ACU {
           }
         }));
         for (let index = 0; index < settled.length; index += 1) {
-          const outcome = settled[index];
+          let outcome = settled[index];
           delegationsUsed += 1;
           perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
+          if (outcome.candidate) {
+            const authorized = new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
+            const violations = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState as WorldSimulationLedger_ACU, [outcome.candidate], authorized);
+            if (violations.length) {
+              const detail = violations.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
+              outcome = { agentName: outcome.agentName, status: 'failed', summary: `\u5019\u9009\u9884\u68c0\u5931\u8d25\uff1a${detail}`, evidenceRefs: outcome.evidenceRefs, uncertainties: [], reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' };
+              settled[index] = outcome;
+            } else {
+              upsertCandidateRevision_ACU(candidates, outcome.candidate);
+            }
+          }
           upsertLatestOutcome_ACU(outcomes, outcome);
-          if (outcome.candidate) upsertCandidateRevision_ACU(candidates, outcome.candidate);
           const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
           const entryId = runningEntries.get(accepted[index])!;
           updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, { title: `${outcome.agentName} ${outcome.status}`, detail: outcome.summary, ok, status: ok ? 'done' : 'failed' });
           await persistEntry(entryId, `delegation-${iteration}-${index + 1}`);
         }
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) });
+        const transcriptPayload: Array<{ role: string; content: string }> = [{ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) }];
+        const preflightFailures = settled.filter(item => item.reasonCode === 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED');
+        if (preflightFailures.length) {
+          transcriptPayload.push({ role: 'user', content: `\u5019\u9009\u5165\u5e93\u9884\u68c0\u62d2\u7edd\uff1a\n${preflightFailures.map(item => `${item.agentName} ${item.summary}`).join('\n')}\n\u8bf7\u6309\u5168\u90e8\u8fdd\u89c4\u4e00\u6b21\u6027\u4fee\u6b63\u540e\u91cd\u65b0\u6d3e\u5de5\u3002\u5b8c\u6574\u5fc5\u586b\u5b57\u6bb5\u6a21\u677f\uff1a${formatWorldSimulationLedgerRequiredFields_ACU()}\u3002\u4e0d\u5f97\u628a\u672c\u6b21\u9884\u68c0\u5931\u8d25\u5f53\u4f5c\u4efb\u52a1\u7ec8\u5c40\u3002` });
+        }
+        transcript.push(...transcriptPayload);
         persist(iteration + 1);
         continue;
       }
@@ -402,11 +417,20 @@ export class WorldSimulationMainLoop_ACU {
         continue;
       }
       const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
-      let acceptedLedger: WorldSimulationLedger_ACU;
+      const guidanceCandidate = reviewer.guidance ? {
+        candidateId: `candidate:guidance:${sha256HexSync_ACU(JSON.stringify([reviewer.guidance, action.summary])).slice(0, 24)}`,
+        agentName: 'causality-reviewer',
+        patch: { guidance: { signals: reviewer.guidance.signals, excludedFacts: reviewer.guidance.excludedFacts, evidenceRefs: causalEvidenceRefs } },
+        summary: '审核员压缩的可感知 guidance',
+        evidenceRefs: causalEvidenceRefs,
+        uncertainties: [] as string[],
+        writableModules: ['guidance'],
+      } : null;
+      const finalCandidates = guidanceCandidate ? [...acceptedCandidates, guidanceCandidate] : acceptedCandidates;
       try {
-        acceptedLedger = applyWorldSimulationCandidates_ACU(
+        applyWorldSimulationCandidates_ACU(
           input.promptContext.worldState as WorldSimulationLedger_ACU,
-          acceptedCandidates,
+          finalCandidates,
           new Set(causalEvidenceRefs),
         );
       } catch (error) {
@@ -420,43 +444,9 @@ export class WorldSimulationMainLoop_ACU {
         );
         continue;
       }
-      let guidanceOutcome: WorldSimulationSubagentOutcome_ACU;
-      const guidanceEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '可感知 guidance 审核正在工作', detail: '正在将已接受的幕后账本压缩为角色可感知信号，不新增事实', agentName: 'guidance-reviewer', status: 'running' });
-      try {
-        guidanceOutcome = await this.dependencies.subagents.runGuidanceReviewer({
-          acceptedLedger,
-          candidates: acceptedCandidates,
-          settings: input.settings,
-          promptContext: requestContext,
-          registry: input.registry,
-        });
-        const guidanceOk = guidanceOutcome.status === 'candidate' || guidanceOutcome.status === 'no_change';
-        updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: `guidance 审核：${guidanceOutcome.status}`, detail: guidanceOutcome.summary, ok: guidanceOk, status: guidanceOk ? 'done' : 'failed' });
-        await persistEntry(guidanceEntryId, `guidance-review-${iteration}`);
-      } catch (error) {
-        updateWorldSimulationSession_ACU(input.identity.chatIdentity, guidanceEntryId, { title: 'guidance 审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
-        await persistEntry(guidanceEntryId, `guidance-review-${iteration}-failed`);
-        endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
-        const message = compact_ACU(error);
-        persist(iteration + 1, message);
-        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance reviewer 未完成', detail: message, agentName: 'guidance-reviewer', ok: false });
-        await persistEntry(blockId, `block-guidance-${iteration}`);
-        return { outcome: 'blocked', summary: 'guidance reviewer 未完成', unresolved: [message], outcomes };
-      }
-      upsertLatestOutcome_ACU(outcomes, guidanceOutcome);
-      if (guidanceOutcome.status === 'blocked' || guidanceOutcome.status === 'failed') {
-        endWorldSimulationSessionRun_ACU(input.identity.chatIdentity);
-        const unresolved = guidanceOutcome.unresolved?.length ? guidanceOutcome.unresolved : [guidanceOutcome.reasonCode ?? guidanceOutcome.summary];
-        persist(iteration + 1, guidanceOutcome.summary);
-        const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: 'guidance 审核阻断', detail: guidanceOutcome.summary, agentName: 'guidance-reviewer', ok: false });
-        await persistEntry(blockId, `block-guidance-outcome-${iteration}`);
-        return { outcome: 'blocked', summary: guidanceOutcome.summary, unresolved, outcomes };
-      }
-      const finalCandidates = guidanceOutcome.candidate ? [...acceptedCandidates, guidanceOutcome.candidate] : acceptedCandidates;
-      const evidenceRefs = [...new Set([...causalEvidenceRefs, ...guidanceOutcome.evidenceRefs])];
       await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-      const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs, reviewer };
-      const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${finalCandidates.length}/${available.length}+guidance）`, detail: action.summary, agentName: director });
+      const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: causalEvidenceRefs, reviewer };
+      const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}${guidanceCandidate ? '+guidance' : ''}）`, detail: action.summary, agentName: director });
       await persistEntry(completedId, 'run-completed-commit');
       return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
     }

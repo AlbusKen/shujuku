@@ -28,8 +28,8 @@ function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
   envelope.stages = [{ stageId: identity.stageId, stageNumber: 1, status: 'running', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: { schemaVersion: 1, title: '阶段', objective: '推进', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock', 'guidance'], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '提交' } }] }];
   chat[0]._qrf_world_simulation = envelope;
   const acceptedCandidates: any[] = [
-    { candidateId: 'candidate:clock', agentName: 'macro-dynamics-analyst', patch: { clock: { elapsed: '1h', evidenceRefs: ['e1'] } }, summary: '时间推进', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock', 'dimensions', 'chronicle'] },
-    { candidateId: 'candidate:guidance', agentName: 'guidance-reviewer', patch: { guidance: { signals: ['远处钟声响起'], evidenceRefs: ['e1'] } }, summary: '安全投影', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['guidance'] },
+    { candidateId: 'candidate:clock', agentName: 'world-analyst', patch: { clock: { elapsed: '1h', evidenceRefs: ['e1'] } }, summary: '时间推进', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'] },
+    { candidateId: 'candidate:guidance', agentName: 'causality-reviewer', patch: { guidance: { signals: ['远处钟声响起'], evidenceRefs: ['e1'] } }, summary: '安全投影', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['guidance'] },
   ];
   const commitCandidate: any = {
     runId: identity.runId,

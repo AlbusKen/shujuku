@@ -90,7 +90,14 @@ export type WorldSimulationSpecialistResult_ACU =
   | { status: 'failed'; agentName: string; reasonCode: string; message: string }
   | { status: 'blocked'; agentName: string; unresolved: string[] };
 export interface WorldSimulationReviewerFinding_ACU extends WorldSimulationProtocolIssue_ACU { severity: 'blocking' | 'major' | 'minor'; }
-export interface WorldSimulationReviewerResult_ACU { verdict: 'accept' | 'revise' | 'reject'; summary: string; findings: WorldSimulationReviewerFinding_ACU[]; acceptedCandidateIds: string[]; }
+export interface WorldSimulationReviewerResult_ACU {
+  verdict: 'accept' | 'revise' | 'reject';
+  summary: string;
+  findings: WorldSimulationReviewerFinding_ACU[];
+  acceptedCandidateIds: string[];
+  /** verdict 为 accept 时可选：把已接受幕后事实压缩为角色可感知信号，不新增事实。 */
+  guidance?: { signals: string[]; excludedFacts: string[] };
+}
 export interface WorldSimulationSubagentOutcome_ACU {
   agentName: string;
   status: WorldSimulationSpecialistResult_ACU['status'];

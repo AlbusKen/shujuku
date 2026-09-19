@@ -1,5 +1,5 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
-import type { WorldSimulationLedger_ACU, WorldSimulationSettings_ACU } from '../model';
+import type { WorldSimulationSettings_ACU } from '../model';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
@@ -18,7 +18,6 @@ export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAg
 export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; }
 export interface WorldSimulationSubagentRunInput_ACU { delegation: WorldSimulationDelegation_ACU; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; }
 export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; }
-export interface WorldSimulationGuidanceReviewInput_ACU { acceptedLedger: WorldSimulationLedger_ACU; candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; }
 
 function candidate_ACU(result: Extract<WorldSimulationSpecialistResult_ACU, { status: 'candidate' }>, writableModules: readonly string[]): WorldSimulationCandidate_ACU {
   const keys = Object.keys(result.patch);
@@ -181,47 +180,4 @@ export class WorldSimulationSubagentRuntime_ACU {
     }
   }
 
-  async runGuidanceReviewer(input: WorldSimulationGuidanceReviewInput_ACU): Promise<WorldSimulationSubagentOutcome_ACU> {
-    const agentName = 'guidance-reviewer' as const;
-    const definition = findWorldSimulationAgentDefinition_ACU(agentName);
-    if (!definition || definition.writableModules.length !== 1 || definition.writableModules[0] !== 'guidance') {
-      throw new Error('WORLD_SIMULATION_GUIDANCE_REVIEWER_CATALOG_INVALID');
-    }
-    const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
-    const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
-    const transcript: Array<{ role: string; content: string }> = [];
-    for (;;) {
-      const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
-      const requestContext: WorldSimulationPlaceholderContext_ACU = {
-        ...withTask_ACU(input.promptContext, { objective: '仅将已接受账本压缩为可感知 guidance，不新增事实' }, input.candidates),
-        worldState: input.acceptedLedger,
-        worldChronicle: input.acceptedLedger.chronicle,
-        projectionPreview: { guidance: input.acceptedLedger.guidance },
-        evidenceRegistry: requestSnapshot,
-      };
-      const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
-      const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, definition.writableModules) };
-      const sent = await executeWorldSimulationFinalRequest_ACU({
-        messages: [...rendered.messages, protocolGuard, ...transcript],
-        historyBudgetTokens: input.settings.agentHistoryTokenBudget,
-        count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-        invoke: value => this.dependencies.invoke(agentName, value, preset),
-      });
-      if (sent.status === 'rejected') throw new Error(sent.reason);
-      const raw = String(sent.response ?? '');
-      try {
-        const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
-        const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
-        if (result.agentName !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
-        if (result.status === 'candidate') return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
-        if (result.status === 'no_change') return { agentName, status: 'no_change', summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
-        if (result.status === 'blocked') return { agentName, status: 'blocked', summary: 'guidance blocked', evidenceRefs: [], uncertainties: [], unresolved: result.unresolved };
-        return { agentName, status: 'failed', summary: result.message, evidenceRefs: [], uncertainties: [], reasonCode: result.reasonCode };
-      } catch (error) {
-        const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
-        if (!failure.retry) throw error;
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, definition.writableModules) });
-      }
-    }
-  }
 }

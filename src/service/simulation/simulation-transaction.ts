@@ -23,25 +23,63 @@ function refs_ACU(value: unknown, path: string): string[] {
   return [...value] as string[];
 }
 
-function applyUpserts_ACU<T extends { id: string; revision: number }>(current: readonly T[], raw: unknown, path: string, requiredFields: readonly string[]): T[] {
-  if (!isRecord_ACU(raw)) fail_ACU(`${path} 必须是对象`);
-  exactKeys_ACU(raw, ['upsert'], path);
-  if (!Array.isArray(raw.upsert) || raw.upsert.length === 0) fail_ACU(`${path}.upsert 必须是非空数组`);
+function applyUpserts_ACU<T extends { id: string; revision: number }>(
+  current: readonly T[],
+  raw: unknown,
+  path: string,
+  requiredFields: readonly string[],
+  onViolation?: (message: string, details?: Record_ACU) => void,
+): T[] {
+  const reject = (message: string, details?: Record_ACU): boolean => {
+    if (onViolation) {
+      onViolation(message, details);
+      return true;
+    }
+    fail_ACU(message, details);
+  };
+  const rejectRevision = (message: string, details?: Record_ACU): boolean => {
+    if (onViolation) {
+      onViolation(message, details);
+      return true;
+    }
+    revisionFail_ACU(message, details);
+  };
+  if (!isRecord_ACU(raw)) {
+    reject(`${path} 必须是对象`);
+    return current.map(item => clone_ACU(item));
+  }
+  if (onViolation) {
+    for (const key of Object.keys(raw)) if (key !== 'upsert') reject(`${path} 存在未知字段`, { path: `${path}.${key}` });
+  } else {
+    exactKeys_ACU(raw, ['upsert'], path);
+  }
+  if (!Array.isArray(raw.upsert) || raw.upsert.length === 0) {
+    reject(`${path}.upsert 必须是非空数组`);
+    return current.map(item => clone_ACU(item));
+  }
   const result = current.map(item => clone_ACU(item));
   const seen = new Set<string>();
   for (const [index, item] of raw.upsert.entries()) {
-    if (!isRecord_ACU(item) || typeof item.id !== 'string' || !item.id) fail_ACU(`${path}.upsert[${index}].id 非法`);
-    if (seen.has(item.id)) fail_ACU(`${path}.upsert 存在重复 ID`, { id: item.id });
+    if (!isRecord_ACU(item) || typeof item.id !== 'string' || !item.id) {
+      if (reject(`${path}.upsert[${index}].id 非法`)) continue;
+    }
+    if (seen.has(item.id)) {
+      if (reject(`${path}.upsert 存在重复 ID`, { id: item.id })) continue;
+    }
     seen.add(item.id);
     const missing = requiredFields.filter(key => key !== 'revision' && !Object.prototype.hasOwnProperty.call(item, key));
     if (missing.length) {
-      fail_ACU(`${path}.upsert[${index}] 缺少必填字段：${missing.join(',')}`, { path: `${path}.upsert[${index}]`, missingFields: missing });
+      if (reject(`${path}.upsert[${index}] 缺少必填字段：${missing.join(',')}`, { path: `${path}.upsert[${index}]`, missingFields: missing })) continue;
     }
     const expectedRevision = item.expectedRevision;
-    if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) fail_ACU(`${path}.upsert[${index}].expectedRevision 非法`);
+    if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) {
+      if (reject(`${path}.upsert[${index}].expectedRevision 非法`)) continue;
+    }
     const existingIndex = result.findIndex(entry => entry.id === item.id);
     const actual = existingIndex < 0 ? 0 : result[existingIndex].revision;
-    if (actual !== expectedRevision) revisionFail_ACU(`${path} 条目 revision 冲突`, { id: item.id, expectedRevision, actualRevision: actual });
+    if (actual !== expectedRevision) {
+      if (rejectRevision(`${path} 条目 revision 冲突`, { id: item.id, expectedRevision, actualRevision: actual })) continue;
+    }
     const next = { ...item, revision: actual + 1 } as Record_ACU;
     delete next.expectedRevision;
     if (existingIndex < 0) result.push(next as T); else result[existingIndex] = next as T;
@@ -129,4 +167,95 @@ export function applyWorldSimulationCandidates_ACU(
   }
   next.revision = validatedBase.revision + 1;
   return validateWorldSimulationLedger_ACU(next, 'agent_persist');
+}
+
+export interface WorldSimulationCandidateViolation_ACU {
+  candidateId: string;
+  agentName: string;
+  module: string;
+  path: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export function preflightWorldSimulationCandidates_ACU(
+  base: WorldSimulationLedger_ACU,
+  candidates: readonly WorldSimulationCandidate_ACU[],
+  authorizedEvidenceRefs: ReadonlySet<string>,
+): WorldSimulationCandidateViolation_ACU[] {
+  const violations: WorldSimulationCandidateViolation_ACU[] = [];
+  let validatedBase: WorldSimulationLedger_ACU;
+  try {
+    validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
+  } catch (error) {
+    violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error) });
+    return violations;
+  }
+  if (!candidates.length) {
+    violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: 'commit 必须包含至少一个候选' });
+    return violations;
+  }
+  const next = clone_ACU(validatedBase);
+  const candidateIds = new Set<string>();
+  for (const candidate of candidates) {
+    const push = (module: string, path: string, message: string, details?: Record_ACU): void => {
+      violations.push({ candidateId: candidate.candidateId, agentName: candidate.agentName, module, path, message, details });
+    };
+    if (!candidate.candidateId || candidateIds.has(candidate.candidateId)) {
+      push('', '$', 'commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
+      continue;
+    }
+    candidateIds.add(candidate.candidateId);
+    if (!isRecord_ACU(candidate.patch) || !Object.keys(candidate.patch).length) {
+      push('', '$.patch', 'candidate.patch 必须是非空对象');
+      continue;
+    }
+    const declared = new Set(candidate.evidenceRefs);
+    for (const ref of declared) if (!authorizedEvidenceRefs.has(ref)) push('', '$.evidenceRefs', `候选声明了未授权 evidenceRef: ${ref}`, { evidenceRef: ref });
+    try {
+      for (const ref of collectEvidenceRefs_ACU(candidate.patch)) {
+        if (!declared.has(ref) || !authorizedEvidenceRefs.has(ref)) push('', '$.patch', `patch 使用了未声明或未授权的 evidenceRef: ${ref}`, { evidenceRef: ref });
+      }
+    } catch (error) {
+      push('', '$.patch', error instanceof Error ? error.message : String(error));
+    }
+    const definition = findWorldSimulationAgentDefinition_ACU(candidate.agentName);
+    if (!definition) {
+      push('', '$.agentName', `候选 Agent 不在世界推演角色目录中: ${candidate.agentName}`);
+      continue;
+    }
+    const writable = new Set<string>(definition.writableModules);
+    const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
+    if (forgedPermissions.length) push('', '$.writableModules', `候选声明了角色目录未授权的写入模块: ${forgedPermissions.join(',')}`, { forgedPermissions });
+    for (const [module, patch] of Object.entries(candidate.patch)) {
+      if (!(MODULES_ACU as readonly string[]).includes(module) || !writable.has(module)) {
+        push(module, `$.patch.${module}`, '候选越权写入 ledger 模块');
+        continue;
+      }
+      const collectUpsert = (message: string, details?: Record_ACU): void => {
+        push(module, typeof details?.path === 'string' ? details.path : `$.patch.${module}`, message, details);
+      };
+      try {
+        switch (module as Module_ACU) {
+          case 'clock': next.clock = applyClock_ACU(next.clock, patch); break;
+          case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, collectUpsert); break;
+          case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, collectUpsert); break;
+          case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, collectUpsert); break;
+          case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
+          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
+        }
+      } catch (error) {
+        push(module, `$.patch.${module}`, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+  if (!violations.length) {
+    try {
+      next.revision = validatedBase.revision + 1;
+      validateWorldSimulationLedger_ACU(next, 'agent_persist');
+    } catch (error) {
+      violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return violations;
 }

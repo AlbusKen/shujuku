@@ -27,7 +27,7 @@ describe('世界推演内部 AI 事件在途判定', () => {
   });
 
   it('已绑定 generationSeq 但 ENDED 未消费前算在途；settle 不提前释放已绑定记录', () => {
-    beginWorldSimulationInternalAiRequest_ACU({ requestId: 'run:r:1', runId: 'run', role: 'macro-dynamics-analyst' });
+    beginWorldSimulationInternalAiRequest_ACU({ requestId: 'run:r:1', runId: 'run', role: 'world-analyst' });
     beginWorldSimulationInternalAiMainApiInvocation_ACU('run:r:1');
     const record = bindWorldSimulationInternalAiGenerationStarted_ACU(42);
     endWorldSimulationInternalAiMainApiInvocation_ACU('run:r:1');

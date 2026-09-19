@@ -68,13 +68,13 @@ describe('WorldSimulationSessionFeed', () => {
 
   it('派工卡片用中文角色名展示，未知 agentName 回退原名', () => {
     const el = mountFeed([
-      entry_ACU({ id: 1, kind: 'delegation', title: '正在推演宏观动态', agentName: 'macro-dynamics-analyst', ok: true, status: 'done' }),
+      entry_ACU({ id: 1, kind: 'delegation', title: '正在推演世界', agentName: 'world-analyst', ok: true, status: 'done' }),
       entry_ACU({ id: 2, kind: 'stage_plan', title: '阶段计划就绪', agentName: 'world-stage-planner', ok: true, status: 'done' }),
       entry_ACU({ id: 3, kind: 'delegation', title: '自定义代理', agentName: 'custom-agent', ok: true, status: 'done' }),
     ]);
     const badges = Array.from(el.querySelectorAll('.acu-v2-session-feed__badge')).map(item => item.textContent?.trim());
 
-    expect(badges).toEqual(['宏观动态', '阶段规划', 'custom-agent']);
-    expect(el.textContent).not.toContain('macro-dynamics-analyst');
+    expect(badges).toEqual(['世界推演', '阶段规划', 'custom-agent']);
+    expect(el.textContent).not.toContain('world-analyst');
   });
 });

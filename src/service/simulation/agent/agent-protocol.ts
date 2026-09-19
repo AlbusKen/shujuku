@@ -377,7 +377,7 @@ export function parseWorldSimulationSpecialistResult_ACU(value: unknown, evidenc
 }
 
 export function parseWorldSimulationReviewerResult_ACU(value: unknown): WorldSimulationReviewerResult_ACU {
-  const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds']);
+  const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds'], ['guidance']);
   const verdict = text_ACU(raw.verdict);
   if (!['accept', 'revise', 'reject'].includes(verdict)) fail_ACU('INVALID_REVIEW_VERDICT', '$.verdict', 'accept | revise | reject', raw.verdict);
   if (!Array.isArray(raw.findings)) fail_ACU('FINDINGS_REQUIRED', '$.findings', 'array', raw.findings);
@@ -387,7 +387,23 @@ export function parseWorldSimulationReviewerResult_ACU(value: unknown): WorldSim
     if (!['blocking', 'major', 'minor'].includes(severity)) fail_ACU('INVALID_FINDING_SEVERITY', `$.findings[${index}].severity`, 'blocking | major | minor', finding.severity);
     return { severity: severity as 'blocking' | 'major' | 'minor', reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
   });
-  return { verdict: verdict as WorldSimulationReviewerResult_ACU['verdict'], summary: requiredText_ACU(raw.summary, '$.summary'), findings, acceptedCandidateIds: texts_ACU(raw.acceptedCandidateIds) };
+  let guidance: { signals: string[]; excludedFacts: string[] } | undefined;
+  if (raw.guidance !== undefined) {
+    if (verdict !== 'accept') fail_ACU('REVIEW_GUIDANCE_REQUIRES_ACCEPT', '$.guidance', 'guidance only when verdict is accept', raw.guidance);
+    const parsed = closedObject_ACU(raw.guidance, '$.guidance', ['signals', 'excludedFacts']);
+    const signals = texts_ACU(parsed.signals);
+    const excludedFacts = texts_ACU(parsed.excludedFacts);
+    if (!Array.isArray(parsed.signals) || signals.length !== parsed.signals.length) fail_ACU('TEXT_LIST', '$.guidance.signals', 'string array', parsed.signals);
+    if (!Array.isArray(parsed.excludedFacts) || excludedFacts.length !== parsed.excludedFacts.length) fail_ACU('TEXT_LIST', '$.guidance.excludedFacts', 'string array', parsed.excludedFacts);
+    guidance = { signals, excludedFacts };
+  }
+  return {
+    verdict: verdict as WorldSimulationReviewerResult_ACU['verdict'],
+    summary: requiredText_ACU(raw.summary, '$.summary'),
+    findings,
+    acceptedCandidateIds: texts_ACU(raw.acceptedCandidateIds),
+    ...(guidance ? { guidance } : {}),
+  };
 }
 
 function collectActionObjects_ACU(raw: string | null | undefined, prefill: string): Record<string, unknown>[] {
@@ -428,7 +444,7 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
     '{"action":"read","reads":["ledger:current","summary:current"]}',
     '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
   ];
-  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"macro-dynamics-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
+  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
   lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
   lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
   lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
@@ -482,10 +498,11 @@ export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldS
   return [
     `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
     '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
-    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds。',
+    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时可额外包含 guidance。',
     'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
     'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
     'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
+    'accept 时可额外包含 guidance：{"signals":["..."],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；没有可压缩内容时省略该字段。',
     JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
     JSON.stringify({
       verdict: 'revise',
@@ -518,7 +535,7 @@ export function renderWorldSimulationPlannerProtocolRejection_ACU(issue: WorldSi
         impactScope: ['当前世界状态'],
         factsToVerify: ['时间是否推进'],
         plannedTools: ['read'],
-        plannedSpecialists: ['macro-dynamics-analyst'],
+        plannedSpecialists: ['world-analyst'],
         expectedLedgerChanges: ['clock'],
         convergenceConditions: ['证据与候选闭合'],
         blockingConditions: ['缺少锚点'],
