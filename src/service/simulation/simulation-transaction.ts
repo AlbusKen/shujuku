@@ -1,7 +1,16 @@
 import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
-import { WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
+import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
+import {
+  coerceWorldSimulationContact_ACU,
+  coerceWorldSimulationGuidanceVoice_ACU,
+  coerceWorldSimulationInteger_ACU,
+  coerceWorldSimulationStringArray_ACU,
+  normalizeWorldSimulationUpsertItem_ACU,
+  type WorldSimulationPatchFixSeverity_ACU,
+  type WorldSimulationUpsertModule_ACU,
+} from './simulation-patch-normalize';
 import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
@@ -20,8 +29,9 @@ function exactKeys_ACU(raw: Record_ACU, allowed: readonly string[], path: string
 }
 function clone_ACU<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function refs_ACU(value: unknown, path: string): string[] {
-  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) fail_ACU(`${path} 必须是字符串数组且元素不能为空`);
-  return [...value] as string[];
+  const coerced = coerceWorldSimulationStringArray_ACU(value);
+  if (!coerced.ok) fail_ACU(`${path} 必须是字符串数组且元素不能为空`);
+  return coerced.value;
 }
 
 function resolveDynamics_ACU(settings?: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU['dynamics'] {
@@ -32,7 +42,8 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(
   current: readonly T[],
   raw: unknown,
   path: string,
-  requiredFields: readonly string[],
+  module: WorldSimulationUpsertModule_ACU,
+  clockDay: number,
   onViolation?: (message: string, details?: Record_ACU) => void,
 ): T[] {
   const reject = (message: string, details?: Record_ACU): boolean => {
@@ -40,21 +51,15 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(
       onViolation(message, details);
       return true;
     }
+    if (details?.revisionConflict) revisionFail_ACU(message, details);
     fail_ACU(message, details);
-  };
-  const rejectRevision = (message: string, details?: Record_ACU): boolean => {
-    if (onViolation) {
-      onViolation(message, details);
-      return true;
-    }
-    revisionFail_ACU(message, details);
   };
   if (!isRecord_ACU(raw)) {
     reject(`${path} 必须是对象`);
     return current.map(item => clone_ACU(item));
   }
   if (onViolation) {
-    for (const key of Object.keys(raw)) if (key !== 'upsert') reject(`${path} 存在未知字段`, { path: `${path}.${key}` });
+    for (const key of Object.keys(raw)) if (key !== 'upsert') reject(`${path} 存在未知字段`, { path: `${path}.${key}`, severity: 'blocking' });
   } else {
     exactKeys_ACU(raw, ['upsert'], path);
   }
@@ -65,29 +70,29 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(
   const result = current.map(item => clone_ACU(item));
   const seen = new Set<string>();
   for (const [index, item] of raw.upsert.entries()) {
-    if (!isRecord_ACU(item) || typeof item.id !== 'string' || !item.id) {
-      if (reject(`${path}.upsert[${index}].id 非法`)) continue;
+    const itemPath = `${path}.upsert[${index}]`;
+    const existingIndex = isRecord_ACU(item) && typeof item.id === 'string' ? result.findIndex(entry => entry.id === item.id) : -1;
+    const existing = existingIndex < 0 ? null : result[existingIndex] as unknown as Record_ACU;
+    const normalized = normalizeWorldSimulationUpsertItem_ACU({ module, item, existing, path: itemPath, clockDay });
+    let blocked = false;
+    for (const note of normalized.notes) {
+      if (onViolation) {
+        onViolation(note.message, { path: note.path, severity: note.severity, ...note.details });
+        if (note.severity === 'blocking') blocked = true;
+        continue;
+      }
+      if (note.severity === 'blocking') {
+        reject(note.message, { path: note.path, ...note.details });
+      }
     }
-    if (seen.has(item.id)) {
-      if (reject(`${path}.upsert 存在重复 ID`, { id: item.id })) continue;
+    if (blocked || !normalized.item) continue;
+    const id = String(normalized.item.id);
+    if (seen.has(id)) {
+      if (reject(`${path}.upsert 存在重复 ID`, { id, severity: 'blocking' })) continue;
     }
-    seen.add(item.id);
-    const missing = requiredFields.filter(key => key !== 'revision' && !Object.prototype.hasOwnProperty.call(item, key));
-    if (missing.length) {
-      if (reject(`${path}.upsert[${index}] 缺少必填字段：${missing.join(',')}`, { path: `${path}.upsert[${index}]`, missingFields: missing })) continue;
-    }
-    const expectedRevision = item.expectedRevision;
-    if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) {
-      if (reject(`${path}.upsert[${index}].expectedRevision 非法`)) continue;
-    }
-    const existingIndex = result.findIndex(entry => entry.id === item.id);
-    const actual = existingIndex < 0 ? 0 : result[existingIndex].revision;
-    if (actual !== expectedRevision) {
-      if (rejectRevision(`${path} 条目 revision 冲突`, { id: item.id, expectedRevision, actualRevision: actual })) continue;
-    }
-    const next = { ...item, revision: actual + 1 } as Record_ACU;
-    delete next.expectedRevision;
-    if (existingIndex < 0) result.push(next as T); else result[existingIndex] = next as T;
+    seen.add(id);
+    if (existingIndex < 0) result.push(normalized.item as T);
+    else result[existingIndex] = normalized.item as T;
   }
   return result;
 }
@@ -108,8 +113,9 @@ function applyClock_ACU(current: WorldSimulationLedger_ACU['clock'], raw: unknow
   if (!Object.keys(raw).length) fail_ACU('patch.clock 不能为空');
   let days = 0;
   if (raw.days !== undefined) {
-    if (!Number.isInteger(raw.days) || (raw.days as number) < 0) fail_ACU('patch.clock.days 必须是非负整数（clockAdvance 只允许单调向前推进，禁止直接写 day）');
-    days = raw.days as number;
+    const coerced = coerceWorldSimulationInteger_ACU(raw.days);
+    if (!coerced.ok || coerced.value < 0) fail_ACU('patch.clock.days 必须是非负整数（clockAdvance 只允许单调向前推进，禁止直接写 day）');
+    days = coerced.value;
   }
   if (days > dynamics.maxClockAdvanceDays) {
     const advanceRefs = raw.evidenceRefs;
@@ -134,8 +140,9 @@ function guidanceSignals_ACU(value: unknown, path: string): WorldGuidanceSignal_
     if (!isRecord_ACU(item)) fail_ACU(`${path}[${index}] 必须是对象`);
     exactKeys_ACU(item, ['text', 'voice', 'sourceId'], `${path}[${index}]`);
     if (typeof item.text !== 'string' || !item.text.trim()) fail_ACU(`${path}[${index}].text 必须是非空字符串`);
-    if (!(WORLD_GUIDANCE_SIGNAL_VOICES_ACU as readonly string[]).includes(String(item.voice))) fail_ACU(`${path}[${index}].voice 非法`, { actual: item.voice });
-    const signal: WorldGuidanceSignal_ACU = { text: item.text, voice: item.voice as WorldGuidanceSignal_ACU['voice'] };
+    const voice = coerceWorldSimulationGuidanceVoice_ACU(item.voice);
+    if (!voice.ok) fail_ACU(`${path}[${index}].voice 非法`, { actual: item.voice });
+    const signal: WorldGuidanceSignal_ACU = { text: item.text, voice: voice.value };
     if (item.sourceId !== undefined) {
       if (typeof item.sourceId !== 'string' || !item.sourceId.trim()) fail_ACU(`${path}[${index}].sourceId 必须是非空字符串`);
       signal.sourceId = item.sourceId;
@@ -180,7 +187,10 @@ function applyPlayer_ACU(current: WorldSimulationLedger_ACU['player'], raw: unkn
     locationUpdatedAtDay: current.locationUpdatedAtDay,
     regionVisits: clone_ACU(current.regionVisits),
     contact: raw.contact === undefined ? current.contact
-      : (WORLD_PLAYER_CONTACTS_ACU as readonly string[]).includes(String(raw.contact)) ? raw.contact as WorldSimulationLedger_ACU['player']['contact'] : fail_ACU('patch.player.contact 非法'),
+      : (() => {
+        const contact = coerceWorldSimulationContact_ACU(raw.contact);
+        return contact.ok ? contact.value : fail_ACU('patch.player.contact 非法');
+      })(),
     evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.player.evidenceRefs'),
   };
 }
@@ -237,12 +247,12 @@ export function applyWorldSimulationCandidates_ACU(
       if (!(MODULES_ACU as readonly string[]).includes(module) || !writable.has(module)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
       switch (module as Module_ACU) {
         case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
-        case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions); break;
-        case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds); break;
-        case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors); break;
+        case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day); break;
+        case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day); break;
+        case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day); break;
         case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
         case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
-        case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors); break;
+        case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day); break;
         case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
       }
     }
@@ -258,7 +268,13 @@ export interface WorldSimulationCandidateViolation_ACU {
   module: string;
   path: string;
   message: string;
+  severity: WorldSimulationPatchFixSeverity_ACU;
   details?: Record<string, unknown>;
+}
+
+export interface WorldSimulationCandidatePreflightReport_ACU {
+  blocking: WorldSimulationCandidateViolation_ACU[];
+  autoFixed: WorldSimulationCandidateViolation_ACU[];
 }
 
 export function preflightWorldSimulationCandidates_ACU(
@@ -266,25 +282,28 @@ export function preflightWorldSimulationCandidates_ACU(
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorizedEvidenceRefs: ReadonlySet<string>,
   settings?: WorldSimulationSettings_ACU,
-): WorldSimulationCandidateViolation_ACU[] {
+): WorldSimulationCandidatePreflightReport_ACU {
   const dynamics = resolveDynamics_ACU(settings);
-  const violations: WorldSimulationCandidateViolation_ACU[] = [];
+  const blocking: WorldSimulationCandidateViolation_ACU[] = [];
+  const autoFixed: WorldSimulationCandidateViolation_ACU[] = [];
   let validatedBase: WorldSimulationLedger_ACU;
   try {
     validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
   } catch (error) {
-    violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error) });
-    return violations;
+    blocking.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error), severity: 'blocking' });
+    return { blocking, autoFixed };
   }
   if (!candidates.length) {
-    violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: 'commit 必须包含至少一个候选' });
-    return violations;
+    blocking.push({ candidateId: '', agentName: '', module: '', path: '$', message: 'commit 必须包含至少一个候选', severity: 'blocking' });
+    return { blocking, autoFixed };
   }
   const next = clone_ACU(validatedBase);
   const candidateIds = new Set<string>();
   for (const candidate of candidates) {
     const push = (module: string, path: string, message: string, details?: Record_ACU): void => {
-      violations.push({ candidateId: candidate.candidateId, agentName: candidate.agentName, module, path, message, details });
+      const severity: WorldSimulationPatchFixSeverity_ACU = details?.severity === 'autoFixed' ? 'autoFixed' : 'blocking';
+      const bucket = severity === 'autoFixed' ? autoFixed : blocking;
+      bucket.push({ candidateId: candidate.candidateId, agentName: candidate.agentName, module, path, message, severity, details });
     };
     if (!candidate.candidateId || candidateIds.has(candidate.candidateId)) {
       push('', '$', 'commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
@@ -323,12 +342,12 @@ export function preflightWorldSimulationCandidates_ACU(
       try {
         switch (module as Module_ACU) {
           case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
-          case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, collectUpsert); break;
-          case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, collectUpsert); break;
-          case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, collectUpsert); break;
+          case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collectUpsert); break;
+          case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collectUpsert); break;
+          case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collectUpsert); break;
           case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
           case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
-          case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, collectUpsert); break;
+          case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert); break;
           case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
         }
       } catch (error) {
@@ -336,12 +355,10 @@ export function preflightWorldSimulationCandidates_ACU(
       }
     }
   }
-  if (!violations.length) {
-    checkCrossField_ACU(next, (message, details) => violations.push({ candidateId: '', agentName: '', module: '', path: '$.patch', message, details }));
-    next.revision = validatedBase.revision + 1;
-    for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
-      violations.push({ candidateId: '', agentName: '', module: '', path: '$', message });
-    }
+  checkCrossField_ACU(next, (message, details) => blocking.push({ candidateId: '', agentName: '', module: '', path: '$.patch', message, severity: 'blocking', details }));
+  next.revision = validatedBase.revision + 1;
+  for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
+    blocking.push({ candidateId: '', agentName: '', module: '', path: '$', message, severity: 'blocking' });
   }
-  return violations;
+  return { blocking, autoFixed };
 }

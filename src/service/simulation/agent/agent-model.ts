@@ -26,6 +26,10 @@ export interface WorldSimulationRunResumeState_ACU {
   evidenceSnapshot?: import('../world-simulation-evidence-registry').WorldSimulationEvidenceRegistrySnapshot_ACU;
   /** 主 Agent 对话 transcript（assistant 原始输出与 user 反馈）。随 persist 增量落楼层，恢复时回填。 */
   transcript?: Array<{ role: string; content: string }>;
+  /** 预算终局标记：恢复时重置迭代/派工窗口。旧状态缺字段按 false。 */
+  budgetExhausted?: boolean;
+  /** 预算终局交接摘要。恢复后注入 transcript 开头；旧状态缺字段按无摘要。 */
+  handoffSummary?: string;
 }
 export interface WorldSimulationRunStateRecord_ACU {
   schemaVersion: typeof WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU;

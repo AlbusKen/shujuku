@@ -3,7 +3,7 @@ import { buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedge
 import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { WorldSimulationMainLoop_ACU } from '../../../../src/service/simulation/agent/agent-main-loop';
-import { readWorldSimulationRunState_ACU, resetWorldSimulationRunCacheForTests_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
+import { readWorldSimulationRunState_ACU, resetWorldSimulationRunCacheForTests_ACU, saveWorldSimulationRunState_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
 import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simulation/simulation-store';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
@@ -437,35 +437,28 @@ describe('世界推演 Agent runtime', () => {
     expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
     expect(JSON.stringify(invoke.mock.calls)).toContain('revision 冲突');
     expect(JSON.stringify(invoke.mock.calls)).toContain('重新派工');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('完整必填字段模板');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('核心字段 dimensions:id,name');
     expect(subagents.run).toHaveBeenCalledTimes(2);
     expect(subagents.runReviewer).toHaveBeenCalledTimes(1);
     expect(subagents.runReviewer.mock.calls[0][0].candidates).toEqual([corrected]);
   });
 
-  it('候选事务因字段缺失失败时回灌完整必填字段模板', async () => {
+  it('候选缺 kind/value/trend 时预检通过并直接入库', async () => {
     const { registry, evidence, promptContext } = fixture('transaction-missing-fields');
     const incomplete = {
       candidateId: 'candidate:missing-fields', agentName: 'world-analyst',
       patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: [evidence] }] } },
       summary: '缺字段候选', evidenceRefs: [evidence], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
-    const complete = {
-      ...incomplete,
-      candidateId: 'candidate:complete-fields',
-      patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'rising', rationale: '', evidenceRefs: [evidence], expectedRevision: 0 }] } },
-      summary: '补齐字段候选',
-    };
     const subagents = {
       run: vi.fn()
-        .mockResolvedValueOnce({ agentName: incomplete.agentName, status: 'candidate' as const, summary: incomplete.summary, candidate: incomplete, evidenceRefs: [evidence], uncertainties: [] })
-        .mockResolvedValueOnce({ agentName: complete.agentName, status: 'candidate' as const, summary: complete.summary, candidate: complete, evidenceRefs: [evidence], uncertainties: [] }),
+        .mockResolvedValueOnce({ agentName: incomplete.agentName, status: 'candidate' as const, summary: incomplete.summary, candidate: incomplete, evidenceRefs: [evidence], uncertainties: [] }),
       runReviewer: vi.fn(async ({ candidates }: any) => ({ verdict: 'accept' as const, summary: '候选通过', findings: [], acceptedCandidateIds: candidates.map((candidate: any) => candidate.candidateId) })),
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: incomplete.agentName, instruction: '生成候选', reads: [] }] }),
       JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '首次提交', evidenceRefs: [evidence] }),
-      JSON.stringify({ action: 'delegate', delegations: [{ agentName: complete.agentName, instruction: '根据事务错误修订', reads: [] }] }),
-      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交修订候选', evidenceRefs: [evidence] }),
     ];
     const invoke = vi.fn(async () => responses.shift()!);
     const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
@@ -475,16 +468,11 @@ describe('世界推演 Agent runtime', () => {
 
     const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
 
-    expect(result).toMatchObject({ outcome: 'commit', summary: '提交修订候选' });
-    const feedback = JSON.stringify(invoke.mock.calls[2][1]);
-    expect(feedback).toContain('缺少必填字段：kind,value,trend');
-    expect(feedback).toContain('完整必填字段模板');
-    expect(feedback).toContain('dimensions: id,name,kind,value,trend,rationale,evidenceRefs,revision');
-    expect(feedback).toContain('clock: day,slot,storyTime,precision,evidenceRefs');
-    expect(feedback).toContain('seeds:');
-    expect(feedback).toContain('actors:');
-    expect(feedback).toContain('chronicle:');
-    expect(feedback).toContain('guidance:');
+    expect(result).toMatchObject({ outcome: 'commit', summary: '首次提交' });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(subagents.run).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+    expect(JSON.stringify(invoke.mock.calls)).not.toContain('缺少必填字段：kind,value,trend');
   });
 
   it('显式 block 后保留同一 task/cursor 的候选并在恢复时避免重复派工', async () => {
@@ -681,6 +669,9 @@ describe('世界推演 Agent runtime', () => {
     const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action:'read', reads: ['$CLOCK'] })), subagents, apiPreset, countTokens: async () => 1 });
     await expect(firstLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
       .resolves.toMatchObject({ outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽' });
+    const exhausted = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
+    expect(exhausted).toMatchObject({ budgetExhausted: true, reviewerFeedback: 'iteration budget exhausted' });
+    expect(exhausted?.handoffSummary).toContain('交接');
     await new Promise(resolve => setTimeout(resolve, 0));
     resetWorldSimulationRunCacheForTests_ACU();
 
@@ -732,6 +723,9 @@ describe('世界推演 Agent runtime', () => {
     const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
     await expect(firstLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
       .resolves.toMatchObject({ outcome: 'blocked', summary: '等待继续' });
+    const paused = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
+    expect(paused?.nextIteration).toBeGreaterThan(runSettings.agentRunBudget.maxIterations);
+    expect(paused?.budgetExhausted).toBeUndefined();
     await new Promise(resolve => setTimeout(resolve, 0));
     resetWorldSimulationRunCacheForTests_ACU();
 
@@ -751,8 +745,8 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('preflight-reject');
     const badCandidate = {
       candidateId: 'candidate:preflight-bad', agentName: 'world-analyst',
-      patch: { dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: [evidence] }] } },
-      summary: '缺字段维度', evidenceRefs: [evidence],
+      patch: { seeds: { upsert: [{ id: 'seed-bad', title: '坏种子', actorIds: ['actor-missing'] }] } },
+      summary: '引用不存在角色', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -773,7 +767,7 @@ describe('世界推演 Agent runtime', () => {
     ]));
     expect(subagents.runReviewer).not.toHaveBeenCalled();
     expect(JSON.stringify(invoke.mock.calls)).toContain('候选入库预检拒绝');
-    expect(JSON.stringify(invoke.mock.calls)).toContain('缺少必填字段');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('引用了不存在的 actor');
   });
 
   it('causality-reviewer accept 时可把 guidance 合入最终候选', async () => {
@@ -810,14 +804,10 @@ describe('世界推演 Agent runtime', () => {
     ]);
   });
 
-  it('整轮派工被预算门禁静默拦截时不消耗迭代且连续两次后终止', async () => {
+  it('整轮派工被预算门禁拦截时当轮显式 block 并写入预算终局', async () => {
     const { registry, promptContext } = fixture('delegation-gate-silent');
     const subagents = { run: vi.fn(), runReviewer: vi.fn() };
-    const responses = [
-      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析时间', reads: [] }] }),
-      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '再次分析时间', reads: [] }] }),
-    ];
-    const invoke = vi.fn(async () => responses.shift()!);
+    const invoke = vi.fn(async () => JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析时间', reads: [] }] }));
     const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
     const identity = { runId: 'run-gate-silent', chatIdentity: 'chat-gate-silent', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-gate-silent', stageId: 'stage-gate-silent', stageRevision: 1 };
     const runSettings = settings();
@@ -825,17 +815,16 @@ describe('世界推演 Agent runtime', () => {
 
     const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
 
-    expect(result).toMatchObject({ outcome: 'blocked', summary: '派工被预算门禁连续拦截，无可派工角色' });
+    expect(result).toMatchObject({ outcome: 'blocked', summary: '派工被预算门禁拦截，无可派工角色' });
     expect(result.unresolved?.join('\n')).toContain('同角色派工预算已耗尽');
     expect(subagents.run).not.toHaveBeenCalled();
     expect(subagents.runReviewer).not.toHaveBeenCalled();
-    // 第二次请求已携带第一次拦截的回灌说明。
-    expect(JSON.stringify(invoke.mock.calls[1][1])).toContain('静默拦截');
-    expect(JSON.stringify(invoke.mock.calls[1][1])).toContain('不消耗迭代');
-    // 静默拦截不出派工卡片，会话中仅保留主 Agent 动作与终止 block。
+    expect(invoke).toHaveBeenCalledOnce();
     expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).some(item => item.kind === 'delegation')).toBe(false);
-    // 被清空轮不计迭代：run state 的 nextIteration 不越过首轮。
-    expect(readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`)?.nextIteration).toBe(1);
+    expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).some(item => item.kind === 'block')).toBe(true);
+    const state = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
+    expect(state).toMatchObject({ budgetExhausted: true, reviewerFeedback: 'delegation gate exhausted' });
+    expect(state?.handoffSummary).toContain('交接');
   });
 
   it('部分派工被并行预算拦截时只回灌原因且不调用被拦角色', async () => {
@@ -863,10 +852,130 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.run).toHaveBeenCalledOnce();
     expect(subagents.run.mock.calls[0][0].delegation.agentName).toBe('world-analyst');
     const secondCall = JSON.stringify(invoke.mock.calls[1][1]);
-    expect(secondCall).toContain('静默拦截');
+    expect(secondCall).toContain('预算门禁拦截');
     expect(secondCall).toContain('并行派工预算已耗尽');
     expect(secondCall).toContain('lore-researcher');
     expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).filter(item => item.kind === 'delegation')).toHaveLength(1);
+  });
+
+  it('预检失败不扣派工预算，连续预检失败也不会耗尽 maxDelegations', async () => {
+    const { registry, evidence, promptContext } = fixture('preflight-no-budget');
+    const badCandidate = {
+      candidateId: 'candidate:preflight-budget', agentName: 'world-analyst',
+      patch: { seeds: { upsert: [{ id: 'seed-bad', title: '坏种子', actorIds: ['actor-missing'] }] } },
+      summary: '预检失败', evidenceRefs: [evidence], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    };
+    const goodCandidate = {
+      candidateId: 'candidate:preflight-ok', agentName: 'world-analyst',
+      patch: { clock: { days: 1 } }, summary: '预检通过', evidenceRefs: [evidence], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn()
+        .mockResolvedValueOnce({ agentName: 'world-analyst', status: 'candidate' as const, summary: badCandidate.summary, candidate: badCandidate, evidenceRefs: [evidence], uncertainties: [] })
+        .mockResolvedValueOnce({ agentName: 'world-analyst', status: 'candidate' as const, summary: badCandidate.summary, candidate: { ...badCandidate, candidateId: 'candidate:preflight-budget-2' }, evidenceRefs: [evidence], uncertainties: [] })
+        .mockResolvedValueOnce({ agentName: 'world-analyst', status: 'candidate' as const, summary: goodCandidate.summary, candidate: goodCandidate, evidenceRefs: [evidence], uncertainties: [] }),
+      runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '通过', findings: [], acceptedCandidateIds: [goodCandidate.candidateId] })),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '第一次', reads: [] }] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '第二次', reads: [] }] }),
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '第三次', reads: [] }] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '预检后提交', evidenceRefs: [evidence] }),
+    ];
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-preflight-budget', chatIdentity: 'chat-preflight-budget', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-preflight-budget', stageId: 'stage-preflight-budget', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxDelegations = 1;
+    runSettings.agentRunBudget.maxIterations = 5;
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+    expect(result).toMatchObject({ outcome: 'commit', summary: '预检后提交' });
+    expect(subagents.run).toHaveBeenCalledTimes(3);
+    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+  });
+
+  it('allowDelegate=false 时 delegate 当轮显式 block，不走协议重试', async () => {
+    const { registry, promptContext } = fixture('delegation-budget-exhausted');
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
+    const invoke = vi.fn(async () => JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析', reads: [] }] }));
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = { runId: 'run-delegation-budget', chatIdentity: 'chat-delegation-budget', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-delegation-budget', stageId: 'stage-delegation-budget', stageRevision: 1 };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxDelegations = 0;
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
+    expect(result).toMatchObject({ outcome: 'blocked', summary: '派工预算已耗尽', unresolved: ['delegation budget exhausted'] });
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(subagents.run).not.toHaveBeenCalled();
+    const state = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
+    expect(state).toMatchObject({ budgetExhausted: true, reviewerFeedback: 'delegation budget exhausted' });
+    expect(state?.handoffSummary).toContain('交接');
+    expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).some(item => item.kind === 'block' && item.title === '派工预算已耗尽')).toBe(true);
+  });
+
+  it('三种预算终局恢复后都重置窗口并注入交接摘要', async () => {
+    const { registry, evidence, promptContext } = fixture('budget-terminals-resume');
+    const candidate = {
+      candidateId: 'candidate:budget-terminals', agentName: 'world-analyst',
+      patch: { clock: { days: 1 } }, summary: '恢复候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    };
+    const cursor = (identity: { stageId: string; stageRevision: number; baseLedgerRevision: number }) => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
+    const resumeAndCommit = async (chatIdentity: string, taskId: string, stageId: string, extras: { reviewerFeedback: string; budgetExhausted?: boolean }) => {
+      const identity = { runId: `run-${chatIdentity}`, chatIdentity, triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId, stageId, stageRevision: 1 };
+      saveWorldSimulationRunState_ACU(chatIdentity, {
+        taskId, cursorKey: cursor(identity), nextIteration: 4, delegationsUsed: 4,
+        perAgent: { 'world-analyst': 4 }, outcomes: [], candidateFingerprint: 'c', candidateSummary: candidate.summary,
+        reviewerFeedback: extras.reviewerFeedback, candidates: [candidate],
+        ...(extras.budgetExhausted ? { budgetExhausted: true } : {}),
+        handoffSummary: '【更早世界推演会话交接】\n- 预置摘要',
+      });
+      const subagents = {
+        run: vi.fn(),
+        runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
+      };
+      const invoke = vi.fn(async () => JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '终局后提交', evidenceRefs: [evidence] }));
+      const runSettings = settings();
+      runSettings.agentRunBudget.maxIterations = 2;
+      const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 }).run({ identity, settings: runSettings, promptContext, registry, tools });
+      expect(result).toMatchObject({ outcome: 'commit', summary: '终局后提交' });
+      expect(JSON.stringify(invoke.mock.calls[0][1])).toContain('预置摘要');
+      expect(subagents.run).not.toHaveBeenCalled();
+    };
+    await resumeAndCommit('chat-term-flag', 'task-term-flag', 'stage-term-flag', { reviewerFeedback: '', budgetExhausted: true });
+    await resumeAndCommit('chat-term-iteration', 'task-term-iteration', 'stage-term-iteration', { reviewerFeedback: 'iteration budget exhausted' });
+    await resumeAndCommit('chat-term-gate', 'task-term-gate', 'stage-term-gate', { reviewerFeedback: 'delegation gate exhausted' });
+  });
+
+  it('Director 自由文本 block 不写 budgetExhausted，恢复时不重置窗口', async () => {
+    const { registry, evidence, promptContext } = fixture('director-block-no-reset');
+    const candidate = {
+      candidateId: 'candidate:director-block', agentName: 'world-analyst',
+      patch: { clock: { days: 1 } }, summary: '自由文本阻断候选', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(async () => ({ verdict: 'accept' as const, summary: '通过', findings: [], acceptedCandidateIds: [candidate.candidateId] })),
+    };
+    const identity = { runId: 'run-director-block', chatIdentity: 'chat-director-block', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-director-block', stageId: 'stage-director-block', stageRevision: 1 };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '分析', reads: [] }] }),
+      JSON.stringify({ action: 'block', reason: '等待继续', unresolved: ['用户确认'] }),
+    ];
+    const first = new WorldSimulationMainLoop_ACU({
+      invoke: vi.fn(async () => responses.shift()!),
+      subagents, apiPreset, countTokens: async () => 1,
+    });
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 4;
+    await expect(first.run({ identity, settings: runSettings, promptContext, registry, tools })).resolves.toMatchObject({ outcome: 'blocked', summary: '等待继续' });
+    const paused = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
+    expect(paused?.budgetExhausted).toBeUndefined();
+    expect(paused?.delegationsUsed).toBe(1);
+    expect(paused?.nextIteration).toBeGreaterThan(1);
+    const invoke = vi.fn(async () => JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '自由文本后提交', evidenceRefs: [evidence] }));
+    const resumed = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 }).run({ identity, settings: runSettings, promptContext, registry, tools });
+    expect(resumed).toMatchObject({ outcome: 'commit', summary: '自由文本后提交' });
+    expect(subagents.run).toHaveBeenCalledOnce();
   });
 
 });

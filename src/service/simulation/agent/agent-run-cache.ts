@@ -12,6 +12,7 @@ function clone_ACU(state: WorldSimulationRunResumeState_ACU): WorldSimulationRun
     candidates: state.candidates?.map(item => ({ ...item, patch: { ...item.patch }, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], writableModules: [...item.writableModules] })),
     subagentOutcomes: state.subagentOutcomes?.map(item => ({ ...item, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], unresolved: item.unresolved ? [...item.unresolved] : undefined, candidate: item.candidate ? { ...item.candidate, patch: { ...item.candidate.patch }, evidenceRefs: [...item.candidate.evidenceRefs], uncertainties: [...item.candidate.uncertainties], writableModules: [...item.candidate.writableModules] } : undefined })),
     evidenceSnapshot: state.evidenceSnapshot ? { runId: state.evidenceSnapshot.runId, entries: state.evidenceSnapshot.entries.map(entry => ({ ...entry })) } : undefined,
+    transcript: state.transcript?.map(item => ({ ...item })),
   };
 }
 export function saveWorldSimulationRunState_ACU(chatIdentity: string, state: WorldSimulationRunResumeState_ACU): void { if (chatIdentity) states_ACU.set(chatIdentity, clone_ACU(state)); }

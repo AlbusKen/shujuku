@@ -37127,7 +37127,7 @@ $CONTENT
         });
     }
 
-    function isRecord_ACU$i(value) {
+    function isRecord_ACU$j(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function createResult_ACU() {
@@ -37143,7 +37143,7 @@ $CONTENT
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
             return result;
         }
-        if (!isRecord_ACU$i(sheet)) {
+        if (!isRecord_ACU$j(sheet)) {
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
             return result;
         }
@@ -37182,7 +37182,7 @@ $CONTENT
     }
     function validateCanonicalCheckpointData_ACU(data, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$i(data)) {
+        if (!isRecord_ACU$j(data)) {
             addIssue_ACU$1(result, 'data', context, 'invalid_data');
             return result;
         }
@@ -37210,7 +37210,7 @@ $CONTENT
      */
     function validateMigrationProvenanceV1_ACU(provenance) {
         const issues = [];
-        if (!isRecord_ACU$i(provenance)) {
+        if (!isRecord_ACU$j(provenance)) {
             return { valid: false, issues: ['provenance_not_object'] };
         }
         if (provenance.version !== 1)
@@ -37233,7 +37233,7 @@ $CONTENT
             issues.push('invalid_source_ai_floors');
         }
         const lastChangedBySheet = provenance.legacyLastChangedAiFloorBySheet;
-        if (!isRecord_ACU$i(lastChangedBySheet)
+        if (!isRecord_ACU$j(lastChangedBySheet)
             || Object.keys(lastChangedBySheet).some(sheetKey => !sheetKey.startsWith('sheet_') || !isNonNegativeInteger_ACU$1(lastChangedBySheet[sheetKey]))) {
             issues.push('invalid_last_changed_floor_by_sheet');
         }
@@ -37249,7 +37249,7 @@ $CONTENT
     }
     function validateCanonicalCheckpoint_ACU(checkpoint, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$i(checkpoint)) {
+        if (!isRecord_ACU$j(checkpoint)) {
             addIssue_ACU$1(result, 'full', context, 'checkpoint_not_object');
             return result;
         }
@@ -37270,7 +37270,7 @@ $CONTENT
             if (checkpoint.fallbackProvenance !== undefined) {
                 const provenance = checkpoint.fallbackProvenance;
                 let valid = false;
-                if (isRecord_ACU$i(provenance)) {
+                if (isRecord_ACU$j(provenance)) {
                     const rangeStart = provenance.rangeStartMessageIndex;
                     const rangeEnd = provenance.rangeEndMessageIndex;
                     const createdAt = provenance.createdAt;
@@ -39842,12 +39842,12 @@ $CONTENT
         };
     }
 
-    function isRecord_ACU$h(value) {
+    function isRecord_ACU$i(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fingerprint_ACU$1(value) {
         const text = JSON.stringify(value, (_key, item) => {
-            if (!isRecord_ACU$h(item))
+            if (!isRecord_ACU$i(item))
                 return item;
             return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
         });
@@ -39883,7 +39883,7 @@ $CONTENT
         return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
     }
     function resolveRequiredHeaderIndexes_ACU(result, sheetKey, sheet, header, omitLeadingRowId = false) {
-        const ddl = isRecord_ACU$h(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+        const ddl = isRecord_ACU$i(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
         if (!ddl)
             return new Map();
         const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
@@ -40029,11 +40029,11 @@ $CONTENT
      * It deliberately does not touch populated tables or malformed seed pools.
      */
     function normalizeHeaderOnlyRowIdColumns_ACU(data) {
-        if (!isRecord_ACU$h(data))
+        if (!isRecord_ACU$i(data))
             return data;
         let normalized = null;
         for (const [sheetKey, sheet] of Object.entries(data)) {
-            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$h(sheet))
+            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$i(sheet))
                 continue;
             const action = headerOnlyRowIdNormalizationAction_ACU(sheet);
             if (!action)
@@ -40065,7 +40065,7 @@ $CONTENT
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无数据模板缺少 row_id，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
             return { header: ['row_id', ...header], insertsRowId: true };
         }
-        const ddl = isRecord_ACU$h(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddl = isRecord_ACU$i(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
         const ddlText = typeof ddl === 'string' ? ddl : '';
         const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
         // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
@@ -40086,7 +40086,7 @@ $CONTENT
     }
     function auditTableDataForUpgrade_ACU(data) {
         const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU$1(data), sourceData: data };
-        if (!isRecord_ACU$h(data)) {
+        if (!isRecord_ACU$i(data)) {
             addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
             result.status = 'unrecoverable';
             return result;
@@ -40098,7 +40098,7 @@ $CONTENT
             return result;
         }
         for (const [sheetKey, rawSheet] of sheets) {
-            if (!isRecord_ACU$h(rawSheet)) {
+            if (!isRecord_ACU$i(rawSheet)) {
                 addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
                 continue;
             }
@@ -40131,7 +40131,7 @@ $CONTENT
         return result;
     }
 
-    function isRecord_ACU$g(value) {
+    function isRecord_ACU$h(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function cloneData_ACU(data) {
@@ -40199,9 +40199,9 @@ $CONTENT
         const candidateData = cloneData_ACU(audit.sourceData);
         const idRemap = [];
         const overflowCells = [];
-        if (isRecord_ACU$g(candidateData) && audit.status !== 'unrecoverable') {
+        if (isRecord_ACU$h(candidateData) && audit.status !== 'unrecoverable') {
             Object.entries(candidateData).forEach(([sheetKey, sheet]) => {
-                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$g(sheet))
+                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$h(sheet))
                     return;
                 repairSheet_ACU(sheet, sheetKey, audit, idRemap, overflowCells);
             });
@@ -86382,7 +86382,7 @@ $CONTENT
             return true;
         return /(?:timeout|timed out|network(?:\s+error)?|connection reset|socket hang up)/i.test(message);
     }
-    function isRecord_ACU$f(value) {
+    function isRecord_ACU$g(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function copyRecordWithoutPrototype_ACU(value) {
@@ -86419,13 +86419,13 @@ $CONTENT
         if (Array.isArray(parsed)) {
             rootType = 'sequence';
             for (const item of parsed) {
-                if (!isRecord_ACU$f(item))
+                if (!isRecord_ACU$g(item))
                     continue;
                 for (const key of Object.keys(item))
                     merged[key] = item[key];
             }
         }
-        else if (isRecord_ACU$f(parsed)) {
+        else if (isRecord_ACU$g(parsed)) {
             rootType = 'mapping';
             for (const key of Object.keys(parsed))
                 merged[key] = parsed[key];
@@ -86435,13 +86435,13 @@ $CONTENT
         }
         let diagnostic = { reason: 'none', rootType };
         for (const key of pluginKeys) {
-            if (key === 'stream_options' && isRecord_ACU$f(pluginFields[key])) {
+            if (key === 'stream_options' && isRecord_ACU$g(pluginFields[key])) {
                 const current = merged[key];
-                if (current !== undefined && !isRecord_ACU$f(current)) {
+                if (current !== undefined && !isRecord_ACU$g(current)) {
                     diagnostic = { reason: 'stream_options_replaced', rootType };
                 }
                 merged[key] = {
-                    ...(isRecord_ACU$f(current) ? copyRecordWithoutPrototype_ACU(current) : {}),
+                    ...(isRecord_ACU$g(current) ? copyRecordWithoutPrototype_ACU(current) : {}),
                     ...copyRecordWithoutPrototype_ACU(pluginFields[key]),
                 };
                 continue;
@@ -87562,11 +87562,11 @@ $CONTENT
     function _set_contentOptimizationAbortRequested_ACU(v) { contentOptimizationAbortRequested_ACU = v; }
 
     /** Legacy quick-reply loop fields are retired and must not be persisted again. */
-    function isRecord_ACU$e(value) {
+    function isRecord_ACU$f(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function stripLegacyLoopPromptFieldsInPlace_ACU(source) {
-        if (!isRecord_ACU$e(source) || !isRecord_ACU$e(source.loopSettings))
+        if (!isRecord_ACU$f(source) || !isRecord_ACU$f(source.loopSettings))
             return false;
         const loopSettings = source.loopSettings;
         const hadLegacyFields = Object.prototype.hasOwnProperty.call(loopSettings, 'quickReplyContent')
@@ -87576,10 +87576,10 @@ $CONTENT
         return hadLegacyFields;
     }
     function stripLegacyLoopPromptFields_ACU(source) {
-        if (!isRecord_ACU$e(source))
+        if (!isRecord_ACU$f(source))
             return source;
         const result = { ...source };
-        if (!isRecord_ACU$e(source.loopSettings))
+        if (!isRecord_ACU$f(source.loopSettings))
             return result;
         result.loopSettings = { ...source.loopSettings };
         stripLegacyLoopPromptFieldsInPlace_ACU(result);
@@ -122860,7 +122860,7 @@ $CONTENT
     function fail_ACU$8(code, phase, message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
     }
-    function isRecord_ACU$d(value) {
+    function isRecord_ACU$e(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function assertExactKeys_ACU(value, keys, path, optionalKeys = []) {
@@ -122978,7 +122978,7 @@ $CONTENT
         return value.length ? [...new Set(value)] : undefined;
     }
     function validateTurn_ACU(raw, path, strict, role, state, nodeIndex, turnIndex) {
-        if (!isRecord_ACU$d(raw)) {
+        if (!isRecord_ACU$e(raw)) {
             fail_ACU$8('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
         }
         assertExactKeys_ACU(raw, TURN_KEYS_ACU, path, TURN_OPTIONAL_KEYS_ACU);
@@ -123022,7 +123022,7 @@ $CONTENT
     }
     function validateNode_ACU(raw, index, turnIds, role, state, turnOffset) {
         const path = `nodes[${index}]`;
-        if (!isRecord_ACU$d(raw)) {
+        if (!isRecord_ACU$e(raw)) {
             fail_ACU$8('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
         }
         assertExactKeys_ACU(raw, NODE_KEYS_ACU, path);
@@ -123068,7 +123068,7 @@ $CONTENT
         return 'development';
     }
     function validateStageOutlineWithState_ACU(raw, range, state) {
-        if (!isRecord_ACU$d(raw)) {
+        if (!isRecord_ACU$e(raw)) {
             fail_ACU$8('CONTINUATION_OUTLINE_NOT_OBJECT', 'outline_validate', '阶段大纲必须是单一 JSON 对象');
         }
         assertExactKeys_ACU(raw, OUTLINE_KEYS_ACU, 'outline', OUTLINE_OPTIONAL_KEYS_ACU);
@@ -123404,7 +123404,7 @@ $CONTENT
     const ERROR_PHASES_ACU$1 = ['load', 'persist', 'outline_prompt', 'outline_call', 'outline_parse', 'outline_validate', 'turn_prompt', 'turn_call', 'host_send', 'generation_evaluate', 'replan', 'agent_loop', 'agent_delegate', 'agent_persist'];
     const ERROR_CODES_ACU$1 = ['CONTINUATION_CONFIG_MISSING', 'CONTINUATION_CONFIG_NOT_INTEGER', 'CONTINUATION_CONFIG_OUT_OF_RANGE', 'CONTINUATION_STAGE_SIZE_INVALID', 'CONTINUATION_CUSTOM_RANGE_INVALID', 'CONTINUATION_ENVELOPE_INVALID', 'CONTINUATION_CHAT_UNAVAILABLE', 'CONTINUATION_CHAT_CHANGED', 'CONTINUATION_WRITE_GUARD_MISMATCH', 'CONTINUATION_PERSIST_FAILED', 'CONTINUATION_PROMPT_INVALID', 'CONTINUATION_PROMPT_EMPTY', 'CONTINUATION_API_PRESET_MISSING', 'CONTINUATION_MIGRATION_INVALID', 'CONTINUATION_OUTLINE_NOT_OBJECT', 'CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'CONTINUATION_OUTLINE_FIELD_MISSING', 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'CONTINUATION_OUTLINE_STRING_EMPTY', 'CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'CONTINUATION_OUTLINE_NODES_EMPTY', 'CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'CONTINUATION_OUTLINE_PACING_INVALID', 'CONTINUATION_REPLAN_CONTEXT_INVALID', 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'CONTINUATION_OUTLINE_JSON_INVALID', 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'CONTINUATION_OUTLINE_RETRY_EXHAUSTED', 'CONTINUATION_REVISION_FROZEN', 'CONTINUATION_TURN_INSTRUCTION_EMPTY', 'CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'CONTINUATION_INTERNAL_REQUEST_STALE', 'CONTINUATION_OPERATION_BUSY', 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', 'CONTINUATION_TASK_NOT_FOUND', 'CONTINUATION_TASK_STATE_INVALID', 'CONTINUATION_HOST_INPUT_UNAVAILABLE', 'CONTINUATION_GENERATION_TAGS_MISSING', 'CONTINUATION_GENERATION_FAILED', 'CONTINUATION_GENERATION_TOO_SHORT', 'CONTINUATION_AGENT_PROTOCOL_INVALID', 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', 'CONTINUATION_AGENT_BLOCKED', 'CONTINUATION_AGENT_SUBAGENT_FAILED', 'CONTINUATION_AGENT_WRITE_REJECTED', 'CONTINUATION_AGENT_OUTLINE_REPLANNED', 'CONTINUATION_AGENT_SNAPSHOT_INVALID'];
     const TIMELINE_KINDS_ACU$1 = ['task_created', 'outline_ready', 'turn_sent', 'turn_completed', 'turn_retry', 'stage_completed', 'paused', 'stopped', 'failed'];
-    function isRecord_ACU$c(value) {
+    function isRecord_ACU$d(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fail_ACU$7(code, message, details, phase = 'persist') {
@@ -123454,7 +123454,7 @@ $CONTENT
         if (!Array.isArray(value))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `字段必须是数组：${path}`, { path });
         return value.map((rule, index) => {
-            if (!isRecord_ACU$c(rule))
+            if (!isRecord_ACU$d(rule))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `规则必须是对象：${path}[${index}]`, { path: `${path}[${index}]` });
             requireKeys_ACU(rule, ['start', 'end'], `${path}[${index}]`);
             return { start: requireString_ACU(rule.start, `${path}[${index}].start`), end: requireString_ACU(rule.end, `${path}[${index}].end`) };
@@ -123466,7 +123466,7 @@ $CONTENT
      * @returns 逐组校验后的提示词集合
      */
     function validateAgentPrompts_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentPrompts 必须是对象');
         requireKeys_ACU(raw, CONTINUATION_AGENT_PROMPT_KEYS_ACU, 'settings.agentPrompts');
         return {
@@ -123485,14 +123485,14 @@ $CONTENT
      * 随后仍由 validateAgentPrompts_ACU 执行完整持久化校验。
      */
     function migrateV17AgentPromptsToV18_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             return raw;
         const currentMain = raw.main;
         if (!Array.isArray(currentMain))
             return raw;
         let changed = false;
         const main = currentMain.map(segment => {
-            if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string' || !segment.content.includes(AGENT_HISTORY_READ_RULE_V17_ACU)) {
+            if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string' || !segment.content.includes(AGENT_HISTORY_READ_RULE_V17_ACU)) {
                 return segment;
             }
             changed = true;
@@ -123509,11 +123509,11 @@ $CONTENT
      * history; retaining one static root system segment protects the cache prefix.
      */
     function migrateV18AgentPromptsToV19_ACU(raw) {
-        if (!isRecord_ACU$c(raw) || !Array.isArray(raw.main))
+        if (!isRecord_ACU$d(raw) || !Array.isArray(raw.main))
             return raw;
         let changed = false;
         const main = raw.main.map(segment => {
-            if (!isRecord_ACU$c(segment)
+            if (!isRecord_ACU$d(segment)
                 || segment.role !== 'system'
                 || !isV18DefaultMainAgentNonRootSystemSegment_ACU(segment.content)) {
                 return segment;
@@ -123528,13 +123528,13 @@ $CONTENT
      * 并定向更新未改写的排布问答与历史导语。用户定制正文保持原样。
      */
     function migrateV19AgentPromptsToV20_ACU(raw) {
-        if (!isRecord_ACU$c(raw) || !Array.isArray(raw.main))
+        if (!isRecord_ACU$d(raw) || !Array.isArray(raw.main))
             return raw;
         let changed = false;
         const layoutAnswer = currentDefaultMainAgentLayoutAnswer_ACU();
         const historyGuide = currentDefaultMainAgentHistoryGuide_ACU();
         const main = raw.main.flatMap(segment => {
-            if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                 return [segment];
             if (isV19DefaultMainAgentRuntimeSegment_ACU(segment.content)) {
                 changed = true;
@@ -123557,7 +123557,7 @@ $CONTENT
      * 其他角色、用户新增段与用户定制正文保持原样。
      */
     function migrateV20AgentPromptsToV21_ACU(raw) {
-        if (!isRecord_ACU$c(raw) || !Array.isArray(raw.arcArchitect))
+        if (!isRecord_ACU$d(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
         const current = buildDefaultAgentArcArchitectPrompt_ACU();
         // 目标段一律按语义槽位定位。V25 在契约段之后插入了卷级容量段，若仍按下标取 current[7]，
@@ -123572,7 +123572,7 @@ $CONTENT
         ]);
         let changed = false;
         const arcArchitect = raw.arcArchitect.map(segment => {
-            if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                 return segment;
             const content = replacements.get(segment.content);
             if (content === undefined || content === segment.content)
@@ -123584,7 +123584,7 @@ $CONTENT
     }
     /** V21 → V22 只替换已知默认段中的卷数规则，保留用户其余提示词定制。 */
     function migrateV21AgentPromptsToV22_ACU(raw) {
-        if (!isRecord_ACU$c(raw) || !Array.isArray(raw.arcArchitect))
+        if (!isRecord_ACU$d(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
         const replacements = new Map([
             ['开局立长篇总纲时，默认给出一条 story 条目和 6-10 条 volume 条目；只有用户明确要求短篇或素材容量明显不足时才可少于 6 卷，并在 summary 说明依据。禁止为了省事把完整长篇压成 3-5 个笼统部分。第一卷 status 设 active，其余 planned。', '开局立总纲或全量重构时，卷数必须严格遵守本次请求末尾注入的【总纲卷数计划】：短线 7–8 卷、中线 10–14 卷、长线 20 卷，或自定义的精确卷数。资料不足时可以把远期卷标为待定方向，但不得缩减卷数；第一卷 status 设 active，其余 planned。'],
@@ -123592,7 +123592,7 @@ $CONTENT
         ]);
         let changed = false;
         const arcArchitect = raw.arcArchitect.map(segment => {
-            if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                 return segment;
             let content = segment.content;
             for (const [from, to] of replacements)
@@ -123606,14 +123606,14 @@ $CONTENT
     }
     /** V22 → V23 对齐卷生命周期契约，只替换未改写的默认规则片段。 */
     function migrateV22AgentPromptsToV23_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             return raw;
         const replaceDefaults = (segments, replacements) => {
             if (!Array.isArray(segments))
                 return segments;
             let changed = false;
             const next = segments.map(segment => {
-                if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+                if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                     return segment;
                 let content = segment.content;
                 for (const [from, to] of replacements)
@@ -123641,7 +123641,7 @@ $CONTENT
         const nextRule = '8. 让阶段目标只承载故事总纲当前 active 卷尚未完成的一段，不触碰总纲里标注为禁止提前释放的底牌；单个阶段结束只留下跨阶段悬念，不擅自收束整卷。只有活动卷规划上下文显示卷级收束条件已被真实完成阶段满足时，才交由 arc-architect 切卷；所有既有卷完成时先扩充后续 active 卷。';
         let changed = false;
         const outlinePrompt = raw.map(segment => {
-            if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                 return segment;
             const content = segment.content.replace(oldRule, nextRule);
             if (content === segment.content)
@@ -123714,7 +123714,7 @@ $CONTENT
         return prompts;
     }
     function promptSegmentEquals_ACU(left, right) {
-        if (!isRecord_ACU$c(left) || !isRecord_ACU$c(right))
+        if (!isRecord_ACU$d(left) || !isRecord_ACU$d(right))
             return false;
         const leftKeys = Object.keys(left);
         const rightKeys = Object.keys(right);
@@ -123722,7 +123722,7 @@ $CONTENT
     }
     /** V23 → V24 仅升级完整未改写的默认 Agent 段，保留插入段与任意用户改写。 */
     function migrateV23AgentPromptsToV24_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             return raw;
         const v23Defaults = buildV23AgentPromptsForMigration_ACU();
         const v24Defaults = buildV24AgentPromptsForMigration_ACU();
@@ -123745,9 +123745,9 @@ $CONTENT
     }
     /** V24 → V25 只向仍保留默认总纲输出契约的提示词组插入卷级容量契约。 */
     function migrateV24AgentPromptsToV25_ACU(raw) {
-        if (!isRecord_ACU$c(raw) || !Array.isArray(raw.arcArchitect))
+        if (!isRecord_ACU$d(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
-        if (raw.arcArchitect.some(segment => isRecord_ACU$c(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU))
+        if (raw.arcArchitect.some(segment => isRecord_ACU$d(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU))
             return raw;
         const current = buildDefaultAgentArcArchitectPrompt_ACU();
         const capacityIndex = current.findIndex(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
@@ -123774,7 +123774,7 @@ $CONTENT
      * 锚段被用户改写时跳过该组，不向自定义提示词注入默认内容。
      */
     function migrateV25AgentPromptsToV26_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             return raw;
         const defaults = buildDefaultContinuationAgentPrompts_ACU();
         const next = { ...raw };
@@ -123788,7 +123788,7 @@ $CONTENT
             if (insertIndex <= 0)
                 continue;
             const chronologySegment = defaultsGroup[insertIndex];
-            if (segments.some(segment => isRecord_ACU$c(segment) && segment.content === chronologySegment.content))
+            if (segments.some(segment => isRecord_ACU$d(segment) && segment.content === chronologySegment.content))
                 continue;
             const anchor = defaultsGroup[insertIndex - 1];
             const anchorIndex = segments.findIndex(segment => promptSegmentEquals_ACU(segment, anchor));
@@ -123821,7 +123821,7 @@ $CONTENT
         ]);
         let changed = false;
         let next = raw.map(segment => {
-            if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                 return segment;
             const replacement = replacements.get(segment.content);
             if (!replacement)
@@ -123829,8 +123829,8 @@ $CONTENT
             changed = true;
             return { ...segment, role: replacement.role, content: replacement.content };
         });
-        if (!next.some(segment => isRecord_ACU$c(segment) && segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)) {
-            const index = next.findIndex(segment => isRecord_ACU$c(segment)
+        if (!next.some(segment => isRecord_ACU$d(segment) && segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)) {
+            const index = next.findIndex(segment => isRecord_ACU$d(segment)
                 && segment.role === 'user'
                 && segment.content === V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU
                 && segment.enabled === true
@@ -123862,7 +123862,7 @@ $CONTENT
             if (!entries.length || !Array.isArray(segments))
                 continue;
             const migrated = segments.map(segment => {
-                if (!isRecord_ACU$c(segment) || typeof segment.content !== 'string')
+                if (!isRecord_ACU$d(segment) || typeof segment.content !== 'string')
                     return segment;
                 const content = segment.content;
                 const entry = entries.find(item => item.length === content.length && item.hash === hashAgentPromptContent_ACU(content));
@@ -123894,12 +123894,12 @@ $CONTENT
             const segments = raw[key];
             if (!Array.isArray(segments))
                 continue;
-            if (segments.some(segment => isRecord_ACU$c(segment) && typeof segment.content === 'string' && segment.content.includes('$AGENT_TASK')))
+            if (segments.some(segment => isRecord_ACU$d(segment) && typeof segment.content === 'string' && segment.content.includes('$AGENT_TASK')))
                 continue;
             const defaultTask = findAgentPromptSlot_ACU(defaults[key], 'task');
             if (!defaultTask)
                 continue;
-            const corruptedIndex = segments.findIndex(segment => isRecord_ACU$c(segment)
+            const corruptedIndex = segments.findIndex(segment => isRecord_ACU$d(segment)
                 && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU
                 && segment.deletable === false);
             if (corruptedIndex < 0)
@@ -123909,7 +123909,7 @@ $CONTENT
             repaired[corruptedIndex] = { ...corrupted, role: defaultTask.role, content: defaultTask.content };
             // 容量契约本身随误迁一起丢了，按默认形态补回到任务段之前。
             const capacityElsewhere = repaired.some((segment, index) => index !== corruptedIndex
-                && isRecord_ACU$c(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+                && isRecord_ACU$d(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
             const defaultCapacity = defaults[key].find(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
             if (!capacityElsewhere && defaultCapacity)
                 repaired.splice(corruptedIndex, 0, { ...defaultCapacity });
@@ -123923,7 +123923,7 @@ $CONTENT
      * 谱系替换把锚段对齐到当前默认后，此前因锚段不匹配而没插进去的卷级容量段与年代学段才能补上。
      */
     function migrateV27AgentPromptsToV28_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             return raw;
         const lineage = replaceAgentPromptsByLineage_ACU(raw);
         const repaired = repairAgentPromptTaskSegments_ACU(lineage.next);
@@ -123938,7 +123938,7 @@ $CONTENT
             return raw;
         let changed = false;
         const next = raw.map(segment => {
-            if (!isRecord_ACU$c(segment) || segment.content !== V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)
+            if (!isRecord_ACU$d(segment) || segment.content !== V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)
                 return segment;
             changed = true;
             return { ...segment, content: V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU };
@@ -123951,7 +123951,7 @@ $CONTENT
      * @returns 逐角色校验后的渠道配置
      */
     function validateAgentApiPresets_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentApiPresets 必须是对象');
         // 新增渠道角色时存量信封必然缺键。提示词组有版本强刷兜底，渠道配置没有——不在这里补默认
         // 就会让所有旧信封报「缺少持久化字段」而整体加载失败。缺失即 inherit，与新建默认一致。
@@ -123963,7 +123963,7 @@ $CONTENT
         const result = {};
         for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
             const choice = raw[role];
-            if (!isRecord_ACU$c(choice))
+            if (!isRecord_ACU$d(choice))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role} 必须是对象`);
             requireKeys_ACU(choice, ['mode', 'presetName'], `settings.agentApiPresets.${role}`);
             if (!['inherit', 'current', 'fixed'].includes(choice.mode))
@@ -123993,10 +123993,10 @@ $CONTENT
         fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
     }
     function validateWebResearchSettings_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch 必须是对象');
         requireKeys_ACU(raw, ['enabled', 'sources', 'searchProvider', 'searxngBaseUrl', 'maxToolRounds', 'maxPages', 'pageCharLimit', 'blockedDomains'], 'settings.webResearch');
-        if (!isRecord_ACU$c(raw.sources))
+        if (!isRecord_ACU$d(raw.sources))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch.sources 必须是对象');
         requireKeys_ACU(raw.sources, ['moegirl', 'wikipediaZh', 'wikipediaEn', 'baidu'], 'settings.webResearch.sources');
         if (!CONTINUATION_WEB_SEARCH_PROVIDERS_ACU.includes(raw.searchProvider)) {
@@ -124025,7 +124025,7 @@ $CONTENT
         };
     }
     function validateFinalReviewSettings_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.finalReview 必须是对象');
         requireKeys_ACU(raw, ['enabled', 'readTokenBudget', 'maxExtraReads'], 'settings.finalReview');
         return {
@@ -124039,7 +124039,7 @@ $CONTENT
      * 下界区分「必须至少一次」（迭代/同代理/并发）与「0 即显式关闭」（派工/读取/工具轮）。
      */
     function validateAgentRunBudget_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentRunBudget 必须是对象');
         requireKeys_ACU(raw, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], 'settings.agentRunBudget');
         const bounded = (value, path, minimum, maximum) => {
@@ -124067,7 +124067,7 @@ $CONTENT
         return validateSettings_ACU$1(raw);
     }
     function validateSettings_ACU$1(raw) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
         // V7 及更早的信封带 turnInstructionPrompt 且没有 agentPrompts。严格键校验会把它判成未知字段，
         // 所以先就地迁移：丢掉退役字段、补上 Agent 提示词，再进入正常校验。
@@ -124075,11 +124075,11 @@ $CONTENT
             delete raw.turnInstructionPrompt;
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentPrompts'))
             raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-        if (isRecord_ACU$c(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
+        if (isRecord_ACU$d(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
             raw.agentPrompts.finalReviewer = buildDefaultContinuationAgentPrompts_ACU().finalReviewer;
         }
         // 网页检索子代理晚于其余提示词组加入；存量信封缺键即补默认，不必整组重刷。
-        if (isRecord_ACU$c(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
+        if (isRecord_ACU$d(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
             raw.agentPrompts.webResearcher = buildDefaultContinuationAgentPrompts_ACU().webResearcher;
         }
         if (!Object.prototype.hasOwnProperty.call(raw, 'webResearch'))
@@ -124264,7 +124264,7 @@ $CONTENT
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'timeline 必须是数组');
         return raw.map((entry, index) => {
             const path = `activeTask.timeline[${index}]`;
-            if (!isRecord_ACU$c(entry))
+            if (!isRecord_ACU$d(entry))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `时间线条目必须是对象：${path}`);
             for (const key of Object.keys(entry))
                 if (!['id', 'at', 'kind', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId', 'messageIndex', 'errorCode'].includes(key))
@@ -124284,13 +124284,13 @@ $CONTENT
     function validatePendingHostTurn_ACU(raw) {
         if (raw === null || raw === undefined)
             return null;
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn 必须是对象或 null');
         requireKeys_ACU(raw, ['identity', 'capture', 'retryCount', 'status'], 'activeTask.pendingHostTurn');
-        if (!isRecord_ACU$c(raw.identity))
+        if (!isRecord_ACU$d(raw.identity))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.identity 必须是对象');
         requireKeys_ACU(raw.identity, ['chatIdentity', 'taskId', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId'], 'activeTask.pendingHostTurn.identity');
-        if (!isRecord_ACU$c(raw.capture))
+        if (!isRecord_ACU$d(raw.capture))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.capture 必须是对象');
         requireKeys_ACU(raw.capture, ['capturedAt', 'capturedChatLength', 'capturedAiFloorCount', 'generationSeq'], 'activeTask.pendingHostTurn.capture');
         return {
@@ -124314,7 +124314,7 @@ $CONTENT
         };
     }
     function validateTask_ACU(raw, settings) {
-        if (!isRecord_ACU$c(raw))
+        if (!isRecord_ACU$d(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'activeTask 必须是对象或 null');
         const requiredKeys = ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'runStartedAt', 'deadlineAt', 'runStageCount', 'activeStageId', 'stages', 'timeline', 'stopReason', 'lastError'];
         const allowedKeys = [...requiredKeys, 'pendingHostTurn', 'stageBudgetBaseCount'];
@@ -124335,7 +124335,7 @@ $CONTENT
         const stageIds = new Set();
         const stages = raw.stages.map((stage, index) => {
             const path = `activeTask.stages[${index}]`;
-            if (!isRecord_ACU$c(stage))
+            if (!isRecord_ACU$d(stage))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `阶段必须是对象：${path}`);
             // 阶段纪要统计链（chronicle*）在 V17 彻底退役；旧信封先就地丢弃再进入严格键校验。
             for (const legacyKey of ['chronicleStartCount', 'chronicleEndCount', 'chronicleAddedCount', 'chronicleRange']) {
@@ -124354,7 +124354,7 @@ $CONTENT
             const revisionNumbers = new Set();
             const revisions = stage.revisions.map((revision, revisionIndex) => {
                 const revisionPath = `${path}.revisions[${revisionIndex}]`;
-                if (!isRecord_ACU$c(revision))
+                if (!isRecord_ACU$d(revision))
                     fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `revision 必须是对象：${revisionPath}`);
                 requireKeys_ACU(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'outline'], revisionPath);
                 const number = requireInteger_ACU(revision.revision, `${revisionPath}.revision`, 1);
@@ -124373,7 +124373,7 @@ $CONTENT
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');
         const stopReason = raw.stopReason === null ? null : requireEnum_ACU(raw.stopReason, STOP_REASONS_ACU, 'activeTask.stopReason');
         const lastError = raw.lastError === null ? null : (() => {
-            if (!isRecord_ACU$c(raw.lastError))
+            if (!isRecord_ACU$d(raw.lastError))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'lastError 必须是对象');
             const requiredErrorKeys = ['code', 'message', 'phase', 'retryable'];
             for (const key of requiredErrorKeys)
@@ -124389,7 +124389,7 @@ $CONTENT
                 retryable: requireBoolean_ACU(raw.lastError.retryable, 'activeTask.lastError.retryable'),
             };
             if ('details' in raw.lastError) {
-                if (!isRecord_ACU$c(raw.lastError.details))
+                if (!isRecord_ACU$d(raw.lastError.details))
                     fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'lastError.details 必须是对象');
                 error.details = { ...raw.lastError.details };
             }
@@ -124399,7 +124399,7 @@ $CONTENT
     }
     function validateContinuationEnvelope_ACU(raw, phase = 'load') {
         try {
-            if (!isRecord_ACU$c(raw))
+            if (!isRecord_ACU$d(raw))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', '智能续写状态必须是对象');
             requireKeys_ACU(raw, ['schemaVersion', 'settings', 'activeTask'], 'envelope');
             if (raw.schemaVersion !== CONTINUATION_SCHEMA_VERSION_ACU)
@@ -124567,14 +124567,14 @@ $CONTENT
     function readLegacyRules_ACU(value) {
         if (!Array.isArray(value))
             return [];
-        return value.filter(isRecord_ACU$c).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
+        return value.filter(isRecord_ACU$d).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
     }
     /** One-way migration: retained settings only; prompt rotation fields are intentionally excluded. */
     function buildLegacyContinuationMigration_ACU(legacyPlotSettings, baseSettings) {
         const settings = baseSettings ?? buildDefaultContinuationSettings_ACU();
-        if (!isRecord_ACU$c(legacyPlotSettings))
+        if (!isRecord_ACU$d(legacyPlotSettings))
             return { settings, didMigrate: false };
-        const loopSettings = isRecord_ACU$c(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
+        const loopSettings = isRecord_ACU$d(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
         settings.loopTags = typeof loopSettings.loopTags === 'string' ? loopSettings.loopTags : settings.loopTags;
         settings.loopDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.loopDelay, settings.loopDelaySeconds);
         settings.retryDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.retryDelay, settings.retryDelaySeconds);
@@ -125834,7 +125834,7 @@ $CONTENT
         turn: '【新的一轮】',
         handoff: '【早期会话交接报告】',
     };
-    function isRecord_ACU$b(value) {
+    function isRecord_ACU$c(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function isKind_ACU(value) {
@@ -125849,7 +125849,7 @@ $CONTENT
         return { schemaVersion: AGENT_CONVERSATION_SCHEMA_VERSION_ACU, nextId: 1, updatedAt: 0, messages: [] };
     }
     function validateMessage_ACU$1(raw) {
-        if (!isRecord_ACU$b(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         if (!isKind_ACU(raw.kind))
             return null;
@@ -125877,7 +125877,7 @@ $CONTENT
      * @returns 合法快照或 null
      */
     function validateAgentConversationSnapshot_ACU(raw) {
-        if (!isRecord_ACU$b(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         if (raw.schemaVersion !== AGENT_CONVERSATION_SCHEMA_VERSION_ACU)
             return null;
@@ -125906,7 +125906,7 @@ $CONTENT
             && Object.keys(raw).every(key => allowed.has(key));
     }
     function validateCompactionMark_ACU(raw) {
-        if (!isRecord_ACU$b(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         const compactedThroughId = typeof raw.compactedThroughId === 'number' && Number.isInteger(raw.compactedThroughId) && raw.compactedThroughId > 0 ? raw.compactedThroughId : 0;
         const report = typeof raw.report === 'string' ? raw.report : '';
@@ -125917,7 +125917,7 @@ $CONTENT
             // V1 是已经写入聊天记录的历史格式；兼容读取，直到下一次成功压缩才升级。
             return { compactedThroughId, report, at };
         }
-        if (raw.schemaVersion !== 2 || !isRecord_ACU$b(raw.summaryState) || !isRecord_ACU$b(raw.metrics))
+        if (raw.schemaVersion !== 2 || !isRecord_ACU$c(raw.summaryState) || !isRecord_ACU$c(raw.metrics))
             return null;
         const state = raw.summaryState;
         const stateKeys = ['currentGoal', 'effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
@@ -125988,7 +125988,7 @@ $CONTENT
      * @returns 合法段记录或 null
      */
     function validateAgentConversationFloorRecord_ACU(raw) {
-        if (!isRecord_ACU$b(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         if (raw.schemaVersion !== AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU)
             return null;
@@ -126338,7 +126338,7 @@ $CONTENT
      * 因此这里不需要任何失效协调机制。
      */
     const IMPORTANCE_WEIGHTS_ACU = { high: 3, mid: 2, low: 1 };
-    function isRecord_ACU$a(value) {
+    function isRecord_ACU$b(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function readText_ACU$1(value) {
@@ -126384,7 +126384,7 @@ $CONTENT
         return [...new Set(numbers)].sort((left, right) => left - right);
     }
     function validateHookEntry_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const id = readText_ACU$1(raw.id).trim();
         const summary = readText_ACU$1(raw.summary).trim();
@@ -126403,7 +126403,7 @@ $CONTENT
         };
     }
     function validateInfoGapEntry_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const id = readText_ACU$1(raw.id).trim();
         const topic = readText_ACU$1(raw.topic).trim();
@@ -126418,7 +126418,7 @@ $CONTENT
             objectiveFact: readText_ACU$1(raw.objectiveFact),
             readerKnown: readText_ACU$1(raw.readerKnown),
             characterKnowledge: knowledge.flatMap(item => {
-                if (!isRecord_ACU$a(item))
+                if (!isRecord_ACU$b(item))
                     return [];
                 const name = readText_ACU$1(item.name).trim();
                 return name ? [{ name, knows: readText_ACU$1(item.knows) }] : [];
@@ -126453,7 +126453,7 @@ $CONTENT
         if (!Object.prototype.hasOwnProperty.call(raw, 'targetStageRange'))
             return undefined;
         const value = raw.targetStageRange;
-        if (!isRecord_ACU$a(value))
+        if (!isRecord_ACU$b(value))
             return null;
         const { min, max } = value;
         if (!Number.isInteger(min) || min < 1 || !Number.isInteger(max) || max < 1 || min > max)
@@ -126461,7 +126461,7 @@ $CONTENT
         return { min: min, max: max };
     }
     function validateStoryArcEntry_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const id = readText_ACU$1(raw.id).trim();
         const title = readText_ACU$1(raw.title).trim();
@@ -126506,7 +126506,7 @@ $CONTENT
      * 因此不存在「宽容旧形态」的需要——字段一旦出现就必须结构完整，坏条目不做静默降级。
      */
     function validateChronologyEntry_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const id = readText_ACU$1(raw.id).trim();
         const anchor = readText_ACU$1(raw.anchor).trim();
@@ -126552,7 +126552,7 @@ $CONTENT
      * 旧条目的 extract 字段故意不读取：升级后不再让网页原文继续扩张聊天快照。
      */
     function validateWebRefEntry_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const id = readText_ACU$1(raw.id).trim();
         const title = readText_ACU$1(raw.title).trim();
@@ -126578,7 +126578,7 @@ $CONTENT
         };
     }
     function validateConstraintEntry_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const id = readText_ACU$1(raw.id).trim();
         const text = readText_ACU$1(raw.text).trim();
@@ -126591,11 +126591,11 @@ $CONTENT
      * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
      */
     function validateAgentModuleSnapshot_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
             return null;
-        if (!isRecord_ACU$a(raw.revisions))
+        if (!isRecord_ACU$b(raw.revisions))
             return null;
         if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints))
             return null;
@@ -126645,12 +126645,12 @@ $CONTENT
      * 只在严格路径全程无命中时作为兜底使用——静默回退成空快照会让用户误以为数据从未写入。
      */
     function salvageAgentModuleSnapshot_ACU(raw) {
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             return null;
         const problems = [];
         if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
             problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
-        const revisions = isRecord_ACU$a(raw.revisions) ? raw.revisions : {};
+        const revisions = isRecord_ACU$b(raw.revisions) ? raw.revisions : {};
         const pick = (list, validate, label) => {
             if (!Array.isArray(list)) {
                 if (list !== undefined)
@@ -126789,7 +126789,7 @@ $CONTENT
         const targetIndex = messages.length - 1;
         if (targetIndex < 0)
             rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
-        if (!isRecord_ACU$a(raw))
+        if (!isRecord_ACU$b(raw))
             rejectSnapshotEdit_ACU('资料快照必须是 JSON 对象');
         const current = readAgentModuleSnapshot_ACU(messages);
         const merged = {
@@ -130131,7 +130131,7 @@ $CONTENT
     function failProtocol_ACU(reason, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', reason, true, details));
     }
-    function isRecord_ACU$9(value) {
+    function isRecord_ACU$a(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function readText_ACU(value) {
@@ -130224,7 +130224,7 @@ $CONTENT
         const records = [];
         for (const extracted of extractJsonObjects_ACU(candidate)) {
             const parsed = parseJsonLenient_ACU(extracted);
-            if (isRecord_ACU$9(parsed))
+            if (isRecord_ACU$a(parsed))
                 records.push(parsed);
         }
         return records;
@@ -130293,7 +130293,7 @@ $CONTENT
             if (!salvaged)
                 continue;
             const parsed = parseJsonLenient_ACU(salvaged.json);
-            if (isRecord_ACU$9(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
+            if (isRecord_ACU$a(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
                 return { payload: parsed, truncated: true };
             }
         }
@@ -130305,7 +130305,7 @@ $CONTENT
         if (!Array.isArray(value) || !value.length)
             failProtocol_ACU('delegate 动作必须提供非空的 delegations 数组');
         return value.map((raw, index) => {
-            if (!isRecord_ACU$9(raw))
+            if (!isRecord_ACU$a(raw))
                 failProtocol_ACU(`delegations[${index}] 必须是对象`);
             const agentName = readText_ACU(raw.agentName);
             const prompt = readText_ACU(raw.prompt);
@@ -130537,7 +130537,7 @@ $CONTENT
      * @param payload 已解析的 JSON 载荷
      */
     function parseAgentResearcherOutput_ACU(payload) {
-        const rawDelta = isRecord_ACU$9(payload.delta) ? payload.delta : payload;
+        const rawDelta = isRecord_ACU$a(payload.delta) ? payload.delta : payload;
         const list = rawDelta.webRefs ?? rawDelta.entries ?? rawDelta.items;
         if (list === undefined || list === null) {
             return { summary: readText_ACU(payload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions), items: [] };
@@ -130545,7 +130545,7 @@ $CONTENT
         if (!Array.isArray(list))
             failProtocol_ACU('delta.webRefs 必须是数组');
         const items = list.map((raw, index) => {
-            if (!isRecord_ACU$9(raw))
+            if (!isRecord_ACU$a(raw))
                 failProtocol_ACU(`delta.webRefs[${index}] 必须是对象`);
             const actionText = readText_ACU(raw.action) || 'upsert';
             if (actionText !== 'upsert' && actionText !== 'retire')
@@ -130573,7 +130573,7 @@ $CONTENT
         return { summary: readText_ACU(payload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions), items };
     }
     function parseWebRefsExpectedRevision_ACU(value) {
-        if (!isRecord_ACU$9(value))
+        if (!isRecord_ACU$a(value))
             return undefined;
         const raw = value.webRefs;
         return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
@@ -130598,7 +130598,7 @@ $CONTENT
                 failProtocol_ACU('finalize 动作必须提供非空 instruction');
             const rawConstraints = payload.constraints;
             let constraints = null;
-            if (isRecord_ACU$9(rawConstraints)) {
+            if (isRecord_ACU$a(rawConstraints)) {
                 // 兼容旧全量形态：current 视为「确保存在」（已存在的条目由事务层幂等跳过），retired 同 retire。
                 const add = [...new Set([...readTextList_ACU(rawConstraints.add), ...readTextList_ACU(rawConstraints.current)])];
                 const retire = [...new Set([...readTextList_ACU(rawConstraints.retire), ...readTextList_ACU(rawConstraints.retired)])];
@@ -130621,7 +130621,7 @@ $CONTENT
     function parseCharacterKnowledge_ACU(value) {
         const knowledge = Array.isArray(value) ? value : [];
         return knowledge.flatMap(item => {
-            if (!isRecord_ACU$9(item))
+            if (!isRecord_ACU$a(item))
                 return [];
             const name = readText_ACU(item.name);
             return name ? [{ name, knows: readText_ACU(item.knows) }] : [];
@@ -130694,7 +130694,7 @@ $CONTENT
         catch (error) {
             if (!sink || !(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_PROTOCOL_INVALID')
                 throw error;
-            sink.push({ module, index, id: isRecord_ACU$9(raw) ? readText_ACU(raw.id) : '', reason: error.error.message });
+            sink.push({ module, index, id: isRecord_ACU$a(raw) ? readText_ACU(raw.id) : '', reason: error.error.message });
         }
     }
     function parseHookItems_ACU(value, rejected) {
@@ -130705,7 +130705,7 @@ $CONTENT
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'hooks', index, raw, () => {
-            if (!isRecord_ACU$9(raw))
+            if (!isRecord_ACU$a(raw))
                 failProtocol_ACU(`delta.hooks[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -130737,7 +130737,7 @@ $CONTENT
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'infoGap', index, raw, () => {
-            if (!isRecord_ACU$9(raw))
+            if (!isRecord_ACU$a(raw))
                 failProtocol_ACU(`delta.infoGap[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -130771,7 +130771,7 @@ $CONTENT
         });
     }
     function parseTargetStageRange_ACU(value, path) {
-        if (!isRecord_ACU$9(value))
+        if (!isRecord_ACU$a(value))
             failProtocol_ACU(`${path} 必须是包含 min / max 的对象`);
         const { min, max } = value;
         if (!Number.isInteger(min) || min < 1 || !Number.isInteger(max) || max < 1) {
@@ -130856,7 +130856,7 @@ $CONTENT
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'storyArc', index, raw, () => {
-            if (!isRecord_ACU$9(raw))
+            if (!isRecord_ACU$a(raw))
                 failProtocol_ACU(`delta.storyArc[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -130924,7 +130924,7 @@ $CONTENT
             failProtocol_ACU('delta.chronology 必须是数组');
         const items = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'chronology', index, raw, () => {
-            if (!isRecord_ACU$9(raw))
+            if (!isRecord_ACU$a(raw))
                 failProtocol_ACU(`delta.chronology[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action !== 'upsert' && action !== 'retire')
@@ -130972,7 +130972,7 @@ $CONTENT
         return items;
     }
     function parseExpectedRevisions_ACU(value) {
-        if (!isRecord_ACU$9(value))
+        if (!isRecord_ACU$a(value))
             return {};
         const result = {};
         for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs']) {
@@ -131012,9 +131012,9 @@ $CONTENT
                     sawAlternative = true;
                 merged.push(...candidate);
             }
-            else if (isRecord_ACU$9(candidate) && Object.keys(candidate).length) {
+            else if (isRecord_ACU$a(candidate) && Object.keys(candidate).length) {
                 sawAlternative = true;
-                merged.push(...Object.entries(candidate).map(([id, value]) => (isRecord_ACU$9(value) ? { id, action: 'upsert', ...value } : value)));
+                merged.push(...Object.entries(candidate).map(([id, value]) => (isRecord_ACU$a(value) ? { id, action: 'upsert', ...value } : value)));
             }
         });
         // 只有标准位置且为空/缺失时保持原值，让“未提供”与“提供了空数组”的语义与其他模块一致。
@@ -131023,7 +131023,7 @@ $CONTENT
         return merged;
     }
     function parseAgentMaintainerOutputDraft_ACU(payload) {
-        const rawDelta = isRecord_ACU$9(payload.delta) ? payload.delta : {};
+        const rawDelta = isRecord_ACU$a(payload.delta) ? payload.delta : {};
         const rejected = [];
         const hooks = parseHookItems_ACU(rawDelta.hooks, rejected);
         const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap, rejected);
@@ -131254,7 +131254,7 @@ $CONTENT
     function buildEmptyAgentWorldbookSnapshot_ACU(available = true) {
         return { entries: [], available };
     }
-    function isRecord_ACU$8(value) {
+    function isRecord_ACU$9(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function readEntryKeys_ACU(entry) {
@@ -131263,7 +131263,7 @@ $CONTENT
     }
     /** 与 pipeline 的 isSelected 语义一致：插件侧勾选表缺书/缺列表都视为全选。 */
     function isEntrySelected_ACU(bookName, uid, enabledEntriesMap) {
-        if (!isRecord_ACU$8(enabledEntriesMap) || !Object.keys(enabledEntriesMap).length)
+        if (!isRecord_ACU$9(enabledEntriesMap) || !Object.keys(enabledEntriesMap).length)
             return true;
         const list = enabledEntriesMap[bookName];
         if (typeof list === 'undefined' || !Array.isArray(list))
@@ -131304,7 +131304,7 @@ $CONTENT
             const entries = [];
             for (const bookName of bookNames) {
                 for (const raw of entriesByBook[bookName] ?? []) {
-                    if (!isRecord_ACU$8(raw))
+                    if (!isRecord_ACU$9(raw))
                         continue;
                     if (raw.enabled !== true)
                         continue;
@@ -135947,11 +135947,7 @@ $CONTENT
         rumors: ['id', 'fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'],
     };
     function formatWorldSimulationLedgerRequiredFields_ACU() {
-        const modules = Object.keys(WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU);
-        return [
-            ...modules.map(module => `${module}: ${WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU[module].join(',')}`),
-            `player: ${WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU.join(',')}`,
-        ].join('；');
+        return '核心字段 dimensions:id,name；seeds:id,title；actors:id,name；rumors:id,fact。其余字段由服务端按缺省补齐（数组[]、可空null、revision 由入库层接管）；更新已有条目可只提交变更字段';
     }
 
     const WORLD_SIMULATION_EVIDENCE_STATUSES_ACU = ['ok', 'empty', 'failed', 'truncated', 'dependency_unavailable'];
@@ -136213,7 +136209,7 @@ $CONTENT
         return results;
     }
 
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v4';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v5';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -136239,7 +136235,7 @@ $CONTENT
             `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。`,
             'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
             'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
-            '派工可能被预算门禁静默拦截：被拦派工不会调用子代理也不出卡片，拦截原因与剩余预算会回灌给你；整轮派工被清空不消耗迭代次数，但连续整轮被拦会直接终止。预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
+            '派工预算耗尽即终止并输出 block 卡片，不会静默拦截或空转重试。被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
             'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
             '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
             '初始化示例：{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"根据锚点与当前账本形成时钟、维度、暗流或行动者候选","reads":["ledger:current","anchor:message"]}]}',
@@ -136257,13 +136253,10 @@ $CONTENT
         if (writableModules.length) {
             lines.push(`candidate 必须包含非空 patch、summary、evidenceRefs、uncertainties；patch 顶层只能使用：${writableModules.join(' | ')}。`);
             lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
-            lines.push('dimensions、seeds、actors 必须使用 {"upsert":[...]}；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision。');
-            lines.push(`upsert 条目必须包含该模块全部必填字段（${formatWorldSimulationLedgerRequiredFields_ACU()}），不能只补单字段。`);
-            lines.push('枚举与取值硬约束（违反即被事务层拒绝）：dimensions[].kind 只能是 pressure | growth；dimensions[].trend 只能是 rising | stable | falling；dimensions[].value 必须是 0 到 100 的整数；seeds[].status 只能是 established | incubating | active | converging | resolved | retired；seeds[].level 必须是 0 到 100 的整数；seeds[].visibility 与 actors[].visibility 只能是 hidden | limited | public。');
-            lines.push('seeds[].exposePolicy 只能是 on_collision | gradual | public；actors[].life 只能是 alive | missing | dead；guidance.signals 元素必须是 {text 非空, voice 为 encounter|rumor|ambient, sourceId 可选}。');
-            lines.push('数组硬约束：actors 的 interests、resources、goals、constraints、informationSources、knownFacts 必须全部是字符串数组（允许空数组 []），禁止写成逗号分隔字符串；seeds 的 actorIds 必须也是字符串数组，且只能引用本次 patch 或账本中已存在的 actor id。');
-            lines.push('seeds[].retiredReason 跨字段硬约束：status 为 retired 时必须是非空字符串；status 不是 retired 时必须为 null，禁止写空字符串或其他值——空字符串与非退役带都会被事务层拒绝。');
-            lines.push('expectedRevision 是乐观并发控制：新建条目填 0；修改账本已有条目时填该条目在账本中的当前 revision。不确定时先 read ledger:current 核对，禁止猜测、省略或写成字符串。');
+            lines.push('dimensions、seeds、actors、rumors 必须使用 {"upsert":[...]}；每条至少含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。');
+            lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
+            lines.push('expectedRevision 可省略：新建默认 0，更新默认当前 revision。');
+            lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId?}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
             if (writableModules.includes('chronicle'))
                 lines.push('chronicle 必须使用 {"append":[...]}。');
             if (writableModules.includes('clock'))
@@ -136273,7 +136266,7 @@ $CONTENT
                 lines.push('contact 维护纪律：正文出现闭关/昏迷/囚禁/荒野独行等无社交渠道信号置 secluded，城镇/客栈/人群置 open，无明确信号保守维持原值。');
             }
             if (writableModules.includes('rumors'))
-                lines.push('rumors 必须使用 {"upsert":[...]}，必填含 id、fact、originDay、earliestRevealDay、channels、relatedActorIds、status、revealedAtDay、revision；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert，channels 非空且 earliestRevealDay >= diedAtDay。');
+                lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
             if (writableModules.includes('guidance'))
                 lines.push('guidance 必须是非空对象。');
         }
@@ -136375,7 +136368,18 @@ $CONTENT
         'causality-reviewer': '3160:99faa038',
         'lore-researcher': '2105:b9f9a7cf',
     };
-    const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }, { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) }]]));
+    const WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU = {
+        'world-director': '3777:3d6ed466',
+        'world-stage-planner': '2655:855187ab',
+        'world-analyst': '4988:ceb0ce76',
+        'causality-reviewer': '3577:29593a91',
+        'lore-researcher': '2127:364d5521',
+    };
+    const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
+            { version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] },
+            { version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+        ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults) {
         const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
         const migrated = {};
@@ -136556,7 +136560,7 @@ $CONTENT
     const ERROR_CODES_ACU = ['WORLD_SIMULATION_ENVELOPE_INVALID', 'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'WORLD_SIMULATION_CHAT_CHANGED', 'WORLD_SIMULATION_ANCHOR_INVALID', 'WORLD_SIMULATION_ANCHOR_STALE', 'WORLD_SIMULATION_REVISION_CONFLICT', 'WORLD_SIMULATION_PERSIST_FAILED', 'WORLD_SIMULATION_SNAPSHOT_INVALID', 'WORLD_SIMULATION_EVIDENCE_UNAUTHORIZED', 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'WORLD_SIMULATION_API_PRESET_MISSING', 'WORLD_SIMULATION_CONFIG_INVALID'];
     const ERROR_PHASES_ACU = ['load', 'persist', 'anchor', 'agent_persist', 'agent_loop', 'agent_delegate', 'handoff_summary'];
     const WORLD_SIMULATION_STATE_FIELD_ACU$1 = '_qrf_world_simulation_state';
-    function isRecord_ACU$7(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+    function isRecord_ACU$8(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function fail_ACU$3(message, phase, details) { throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_ENVELOPE_INVALID', phase, message, false, details)); }
     function exactKeys_ACU$2(raw, required, optional, path, phase) {
         const allowed = new Set([...required, ...optional]);
@@ -136623,7 +136627,7 @@ $CONTENT
     function validateLocationRef_ACU(value, path, phase) {
         if (value === null)
             return null;
-        if (!isRecord_ACU$7(value))
+        if (!isRecord_ACU$8(value))
             fail_ACU$3(`${path} 必须是对象或 null`, phase, { path });
         exactKeys_ACU$2(value, ['region'], ['place'], path, phase);
         const region = normalizeWorldRegionName_ACU(string_ACU(value.region, `${path}.region`, phase));
@@ -136636,7 +136640,7 @@ $CONTENT
             fail_ACU$3(`${path} 必须是数组`, phase, { path });
         return value.map((item, index) => {
             const itemPath = `${path}[${index}]`;
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`${itemPath} 必须是对象`, phase, { path: itemPath });
             exactKeys_ACU$2(item, ['text', 'voice'], ['sourceId'], itemPath, phase);
             const signal = {
@@ -136649,12 +136653,12 @@ $CONTENT
         });
     }
     function migrateV1Ledger_ACU(raw) {
-        const clockRaw = isRecord_ACU$7(raw.clock) ? raw.clock : {};
+        const clockRaw = isRecord_ACU$8(raw.clock) ? raw.clock : {};
         const day = Number.isInteger(clockRaw.day) && clockRaw.day >= 1
             ? clockRaw.day
             : parseClockDay_ACU(clockRaw.elapsed, clockRaw.storyTime);
-        const fill = (item, extras) => isRecord_ACU$7(item) ? { ...item, ...Object.fromEntries(Object.entries(extras).filter(([key]) => !Object.prototype.hasOwnProperty.call(item, key))) } : item;
-        const guidanceRaw = isRecord_ACU$7(raw.guidance) ? raw.guidance : {};
+        const fill = (item, extras) => isRecord_ACU$8(item) ? { ...item, ...Object.fromEntries(Object.entries(extras).filter(([key]) => !Object.prototype.hasOwnProperty.call(item, key))) } : item;
+        const guidanceRaw = isRecord_ACU$8(raw.guidance) ? raw.guidance : {};
         const signals = Array.isArray(guidanceRaw.signals)
             ? guidanceRaw.signals.map(item => typeof item === 'string' ? { text: item, voice: 'ambient' } : item)
             : guidanceRaw.signals;
@@ -136671,18 +136675,18 @@ $CONTENT
             seeds: Array.isArray(raw.seeds) ? raw.seeds.map(item => fill(item, { location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision' })) : raw.seeds,
             actors: Array.isArray(raw.actors) ? raw.actors.map(item => fill(item, { locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null })) : raw.actors,
             rumors: Array.isArray(raw.rumors) ? raw.rumors : [],
-            player: isRecord_ACU$7(raw.player) ? raw.player : { location: null, locationUpdatedAtDay: day, regionVisits: [], contact: 'open', evidenceRefs: [] },
+            player: isRecord_ACU$8(raw.player) ? raw.player : { location: null, locationUpdatedAtDay: day, regionVisits: [], contact: 'open', evidenceRefs: [] },
             guidance: { ...guidanceRaw, signals },
         };
     }
     function validatePlayer_ACU(raw, phase) {
-        if (!isRecord_ACU$7(raw))
+        if (!isRecord_ACU$8(raw))
             fail_ACU$3('ledger.player 必须是对象', phase, { path: 'ledger.player' });
         exactKeys_ACU$2(raw, [...WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU], [], 'ledger.player', phase);
         if (!Array.isArray(raw.regionVisits) || raw.regionVisits.length > WORLD_PLAYER_REGION_VISITS_CAP_ACU)
             fail_ACU$3('ledger.player.regionVisits 容量非法', phase);
         const regionVisits = raw.regionVisits.map((item, index) => {
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`ledger.player.regionVisits[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, ['region', 'day'], [], `ledger.player.regionVisits[${index}]`, phase);
             const region = normalizeWorldRegionName_ACU(string_ACU(item.region, `ledger.player.regionVisits[${index}].region`, phase));
@@ -136702,7 +136706,7 @@ $CONTENT
         if (!Array.isArray(raw) || raw.length > 128)
             fail_ACU$3('ledger.rumors 容量非法', phase);
         const rumors = raw.map((item, index) => {
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`ledger.rumors[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, [], `ledger.rumors[${index}]`, phase);
             const originDay = integer_ACU(item.originDay, `ledger.rumors[${index}].originDay`, phase, 1);
@@ -136741,10 +136745,10 @@ $CONTENT
         return rumors;
     }
     function validateSettings_ACU(raw, phase) {
-        if (!isRecord_ACU$7(raw))
+        if (!isRecord_ACU$8(raw))
             fail_ACU$3('settings 必须是对象', phase, { path: 'settings' });
         exactKeys_ACU$2(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics'], 'settings', phase);
-        if (!isRecord_ACU$7(raw.agentRunBudget))
+        if (!isRecord_ACU$8(raw.agentRunBudget))
             fail_ACU$3('settings.agentRunBudget 必须是对象', phase);
         exactKeys_ACU$2(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
         const budget = {
@@ -136755,12 +136759,12 @@ $CONTENT
             maxReads: integer_ACU(raw.agentRunBudget.maxReads, 'settings.agentRunBudget.maxReads', phase, 0, 200),
             maxExtraReads: integer_ACU(raw.agentRunBudget.maxExtraReads, 'settings.agentRunBudget.maxExtraReads', phase, 0, 20),
         };
-        if (!isRecord_ACU$7(raw.agentApiPresets) || !isRecord_ACU$7(raw.agentPrompts))
+        if (!isRecord_ACU$8(raw.agentApiPresets) || !isRecord_ACU$8(raw.agentPrompts))
             fail_ACU$3('settings 的 Agent 配置必须是对象', phase);
         const agentApiPresets = {};
         for (const [key, value] of Object.entries(raw.agentApiPresets)) {
             stableId_ACU(key, `settings.agentApiPresets.${key}`, phase);
-            if (!isRecord_ACU$7(value))
+            if (!isRecord_ACU$8(value))
                 fail_ACU$3(`settings.agentApiPresets.${key} 必须是对象`, phase);
             exactKeys_ACU$2(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
             agentApiPresets[key] = { mode: enum_ACU$1(value.mode, ['current', 'fixed'], `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
@@ -136773,7 +136777,7 @@ $CONTENT
             ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU$3('settings.agentReadTokenBudget 百分比非法', phase))
             : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);
         const webRaw = raw.webResearch === undefined ? buildDefaultWorldSimulationSettings_ACU().webResearch : raw.webResearch;
-        if (!isRecord_ACU$7(webRaw) || !isRecord_ACU$7(webRaw.sources))
+        if (!isRecord_ACU$8(webRaw) || !isRecord_ACU$8(webRaw.sources))
             fail_ACU$3('settings.webResearch 必须是对象', phase);
         exactKeys_ACU$2(webRaw, ['enabled', 'sources', 'searchProvider', 'searxngBaseUrl', 'pageCharLimit', 'blockedDomains'], [], 'settings.webResearch', phase);
         exactKeys_ACU$2(webRaw.sources, ['moegirl', 'wikipediaZh', 'wikipediaEn'], [], 'settings.webResearch.sources', phase);
@@ -136792,7 +136796,7 @@ $CONTENT
         const defaultDynamics = buildDefaultWorldSimulationSettings_ACU().dynamics;
         let dynamics = defaultDynamics;
         if (raw.dynamics !== undefined) {
-            if (!isRecord_ACU$7(raw.dynamics)) {
+            if (!isRecord_ACU$8(raw.dynamics)) {
                 dynamics = defaultDynamics;
             }
             else {
@@ -136822,13 +136826,13 @@ $CONTENT
         };
     }
     function validateLedger_ACU(raw, phase) {
-        if (!isRecord_ACU$7(raw))
+        if (!isRecord_ACU$8(raw))
             fail_ACU$3('ledger 必须是对象', phase);
         const normalized = raw.schemaVersion === 1 ? migrateV1Ledger_ACU(raw) : raw;
         exactKeys_ACU$2(normalized, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance'], [], 'ledger', phase);
         if (normalized.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU)
             fail_ACU$3(`ledger.schemaVersion 必须为 ${WORLD_LEDGER_SCHEMA_VERSION_ACU}`, phase);
-        if (!isRecord_ACU$7(normalized.clock))
+        if (!isRecord_ACU$8(normalized.clock))
             fail_ACU$3('ledger.clock 必须是对象', phase);
         exactKeys_ACU$2(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
         const clock = {
@@ -136841,7 +136845,7 @@ $CONTENT
         if (!Array.isArray(normalized.dimensions) || normalized.dimensions.length > 32)
             fail_ACU$3('ledger.dimensions 容量非法', phase);
         const dimensions = normalized.dimensions.map((item, index) => {
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`ledger.dimensions[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
             return { id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase), name: string_ACU(item.name, `ledger.dimensions[${index}].name`, phase), kind: enum_ACU$1(item.kind, ['pressure', 'growth'], `ledger.dimensions[${index}].kind`, phase), value: integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100), trend: enum_ACU$1(item.trend, ['rising', 'stable', 'falling'], `ledger.dimensions[${index}].trend`, phase), rationale: string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase), revision: integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase) };
@@ -136849,7 +136853,7 @@ $CONTENT
         if (!Array.isArray(normalized.actors) || normalized.actors.length > 128)
             fail_ACU$3('ledger.actors 容量非法', phase);
         const actors = normalized.actors.map((item, index) => {
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`ledger.actors[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
             const life = enum_ACU$1(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
@@ -136872,7 +136876,7 @@ $CONTENT
         if (!Array.isArray(normalized.seeds) || normalized.seeds.length > 128)
             fail_ACU$3('ledger.seeds 容量非法', phase);
         const seeds = normalized.seeds.map((item, index) => {
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`ledger.seeds[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
             const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
@@ -136892,7 +136896,7 @@ $CONTENT
             fail_ACU$3('ledger.chronicle 容量非法', phase);
         const knownIds = new Set([...dimensions.map(item => item.id), ...actors.map(item => item.id), ...seeds.map(item => item.id)]);
         const chronicle = normalized.chronicle.map((item, index) => {
-            if (!isRecord_ACU$7(item))
+            if (!isRecord_ACU$8(item))
                 fail_ACU$3(`ledger.chronicle[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
             const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
@@ -136904,13 +136908,13 @@ $CONTENT
         uniqueIds_ACU(chronicle, 'ledger.chronicle', phase);
         const rumors = validateRumors_ACU(normalized.rumors, actorIds, phase);
         const player = validatePlayer_ACU(normalized.player, phase);
-        if (!isRecord_ACU$7(normalized.guidance))
+        if (!isRecord_ACU$8(normalized.guidance))
             fail_ACU$3('ledger.guidance 必须是对象', phase);
         exactKeys_ACU$2(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
         return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) } };
     }
     function validatePlan_ACU(raw, path, phase) {
-        if (!isRecord_ACU$7(raw))
+        if (!isRecord_ACU$8(raw))
             fail_ACU$3(`${path} 必须是对象`, phase);
         exactKeys_ACU$2(raw, ['schemaVersion', 'title', 'objective', 'impactScope', 'factsToVerify', 'plannedTools', 'plannedSpecialists', 'expectedLedgerChanges', 'convergenceConditions', 'blockingConditions', 'completedSteps', 'nextStep'], [], path, phase);
         if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
@@ -136920,7 +136924,7 @@ $CONTENT
         return { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: string_ACU(raw.title, `${path}.title`, phase), objective: string_ACU(raw.objective, `${path}.objective`, phase), impactScope: stringArray_ACU(raw.impactScope, `${path}.impactScope`, phase), factsToVerify: stringArray_ACU(raw.factsToVerify, `${path}.factsToVerify`, phase), plannedTools: stringArray_ACU(raw.plannedTools, `${path}.plannedTools`, phase), plannedSpecialists: stringArray_ACU(raw.plannedSpecialists, `${path}.plannedSpecialists`, phase), expectedLedgerChanges: raw.expectedLedgerChanges.map((item, index) => enum_ACU$1(item, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.expectedLedgerChanges[${index}]`, phase)), convergenceConditions: stringArray_ACU(raw.convergenceConditions, `${path}.convergenceConditions`, phase), blockingConditions: stringArray_ACU(raw.blockingConditions, `${path}.blockingConditions`, phase), completedSteps: stringArray_ACU(raw.completedSteps, `${path}.completedSteps`, phase), nextStep: string_ACU(raw.nextStep, `${path}.nextStep`, phase, true) };
     }
     function validateWorldSimulationEnvelope_ACU(raw, phase = 'load') {
-        if (!isRecord_ACU$7(raw))
+        if (!isRecord_ACU$8(raw))
             fail_ACU$3('世界推演状态必须是对象', phase);
         exactKeys_ACU$2(raw, ['schemaVersion', 'settings', 'task', 'stages', 'activeStageId', 'timeline', 'lastError', 'ledger', 'updatedAt'], [], 'envelope', phase);
         if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
@@ -136928,13 +136932,13 @@ $CONTENT
         if (!Array.isArray(raw.stages))
             fail_ACU$3('stages 必须是数组', phase);
         const stages = raw.stages.map((stage, stageIndex) => {
-            if (!isRecord_ACU$7(stage))
+            if (!isRecord_ACU$8(stage))
                 fail_ACU$3(`stages[${stageIndex}] 必须是对象`, phase);
             exactKeys_ACU$2(stage, ['stageId', 'stageNumber', 'status', 'activeRevision', 'revisions'], [], `stages[${stageIndex}]`, phase);
             if (!Array.isArray(stage.revisions) || !stage.revisions.length)
                 fail_ACU$3(`stages[${stageIndex}].revisions 不能为空`, phase);
             const revisions = stage.revisions.map((revision, revisionIndex) => {
-                if (!isRecord_ACU$7(revision))
+                if (!isRecord_ACU$8(revision))
                     fail_ACU$3(`stages[${stageIndex}].revisions[${revisionIndex}] 必须是对象`, phase);
                 exactKeys_ACU$2(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'plan'], [], `stages[${stageIndex}].revisions[${revisionIndex}]`, phase);
                 return { revision: integer_ACU(revision.revision, `stages[${stageIndex}].revisions[${revisionIndex}].revision`, phase, 1), createdAt: integer_ACU(revision.createdAt, `stages[${stageIndex}].revisions[${revisionIndex}].createdAt`, phase), reason: enum_ACU$1(revision.reason, REVISION_REASONS_ACU, `stages[${stageIndex}].revisions[${revisionIndex}].reason`, phase), replanInstruction: string_ACU(revision.replanInstruction, `stages[${stageIndex}].revisions[${revisionIndex}].replanInstruction`, phase, true), frozen: boolean_ACU(revision.frozen, `stages[${stageIndex}].revisions[${revisionIndex}].frozen`, phase), plan: validatePlan_ACU(revision.plan, `stages[${stageIndex}].revisions[${revisionIndex}].plan`, phase) };
@@ -136950,13 +136954,13 @@ $CONTENT
             fail_ACU$3('activeStageId 不存在', phase);
         let task = null;
         if (raw.task !== null) {
-            if (!isRecord_ACU$7(raw.task))
+            if (!isRecord_ACU$8(raw.task))
                 fail_ACU$3('task 必须是对象或 null', phase);
             exactKeys_ACU$2(raw.task, ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'activeRun', 'stopReason'], [], 'task', phase);
             task = { taskId: stableId_ACU(raw.task.taskId, 'task.taskId', phase), originInstruction: string_ACU(raw.task.originInstruction, 'task.originInstruction', phase), status: normalizeLegacyEnum_ACU(TASK_STATUSES_ACU, LEGACY_TASK_STATUSES_ACU, raw.task.status, 'task.status', phase), createdAt: integer_ACU(raw.task.createdAt, 'task.createdAt', phase), updatedAt: integer_ACU(raw.task.updatedAt, 'task.updatedAt', phase), activeRun: null, stopReason: raw.task.stopReason === null ? null : string_ACU(raw.task.stopReason, 'task.stopReason', phase) };
             if (raw.task.activeRun !== null) {
                 const run = raw.task.activeRun;
-                if (!isRecord_ACU$7(run))
+                if (!isRecord_ACU$8(run))
                     fail_ACU$3('task.activeRun 必须是对象或 null', phase);
                 exactKeys_ACU$2(run, ['runId', 'chatIdentity', 'triggerKind', 'triggerConversationMessageId', 'anchorMessageId', 'anchorMessageKey', 'anchorSwipeId', 'anchorContentDigest', 'baseLedgerRevision', 'taskId', 'stageId', 'stageRevision'], [], 'task.activeRun', phase);
                 const anchorMessageId = typeof run.anchorMessageId === 'number' ? integer_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase) : string_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase);
@@ -136973,18 +136977,18 @@ $CONTENT
         if (!Array.isArray(raw.timeline))
             fail_ACU$3('timeline 必须是数组', phase);
         const timeline = raw.timeline.map((entry, index) => {
-            if (!isRecord_ACU$7(entry))
+            if (!isRecord_ACU$8(entry))
                 fail_ACU$3(`timeline[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(entry, ['id', 'at', 'kind', 'taskId'], ['stageId', 'revision', 'runId', 'message', 'errorCode'], `timeline[${index}]`, phase);
             return { id: stableId_ACU(entry.id, `timeline[${index}].id`, phase), at: integer_ACU(entry.at, `timeline[${index}].at`, phase), kind: normalizeLegacyEnum_ACU(TIMELINE_KINDS_ACU, LEGACY_TIMELINE_KINDS_ACU, entry.kind, `timeline[${index}].kind`, phase), taskId: stableId_ACU(entry.taskId, `timeline[${index}].taskId`, phase), ...(entry.stageId === undefined ? {} : { stageId: stableId_ACU(entry.stageId, `timeline[${index}].stageId`, phase) }), ...(entry.revision === undefined ? {} : { revision: integer_ACU(entry.revision, `timeline[${index}].revision`, phase, 1) }), ...(entry.runId === undefined ? {} : { runId: stableId_ACU(entry.runId, `timeline[${index}].runId`, phase) }), ...(entry.message === undefined ? {} : { message: string_ACU(entry.message, `timeline[${index}].message`, phase, true) }), ...(entry.errorCode === undefined ? {} : { errorCode: enum_ACU$1(entry.errorCode, ERROR_CODES_ACU, `timeline[${index}].errorCode`, phase) }) };
         });
         let lastError = null;
         if (raw.lastError !== null) {
-            if (!isRecord_ACU$7(raw.lastError))
+            if (!isRecord_ACU$8(raw.lastError))
                 fail_ACU$3('lastError 必须是对象或 null', phase);
             exactKeys_ACU$2(raw.lastError, ['code', 'phase', 'message', 'retryable'], ['details'], 'lastError', phase);
             const details = raw.lastError.details;
-            if (details !== undefined && !isRecord_ACU$7(details))
+            if (details !== undefined && !isRecord_ACU$8(details))
                 fail_ACU$3('lastError.details 必须是对象', phase);
             lastError = {
                 code: enum_ACU$1(raw.lastError.code, ERROR_CODES_ACU, 'lastError.code', phase),
@@ -136992,7 +136996,7 @@ $CONTENT
                 message: string_ACU(raw.lastError.message, 'lastError.message', phase),
                 retryable: boolean_ACU(raw.lastError.retryable, 'lastError.retryable', phase),
             };
-            if (isRecord_ACU$7(details)) {
+            if (isRecord_ACU$8(details)) {
                 lastError.details = { ...details };
             }
         }
@@ -137015,7 +137019,7 @@ $CONTENT
     }
     function captureContext_ACU(guard) {
         const chat = getChatArray_ACU();
-        const firstMessage = Array.isArray(chat) && isRecord_ACU$7(chat[0]) ? chat[0] : null;
+        const firstMessage = Array.isArray(chat) && isRecord_ACU$8(chat[0]) ? chat[0] : null;
         const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
         if (!firstMessage || !chatIdentity)
             reject_ACU$4('WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天首楼不可用');
@@ -137103,7 +137107,7 @@ $CONTENT
     function resolveWorldSimulationAnchor_ACU(messageIndex, chat) {
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
         const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
-        const message = Number.isInteger(messageIndex) && messageIndex >= 0 && isRecord_ACU$7(messages[messageIndex])
+        const message = Number.isInteger(messageIndex) && messageIndex >= 0 && isRecord_ACU$8(messages[messageIndex])
             ? messages[messageIndex]
             : null;
         if (!chatIdentity || !message || !isAssistantMessage_ACU(message)) {
@@ -137141,7 +137145,7 @@ $CONTENT
         }
         for (let index = 0; index < messages.length; index += 1) {
             const message = messages[index];
-            if (!isRecord_ACU$7(message) || !isAssistantMessage_ACU(message))
+            if (!isRecord_ACU$8(message) || !isAssistantMessage_ACU(message))
                 continue;
             const current = resolveWorldSimulationAnchor_ACU(index, messages);
             if (current.chatIdentity === anchor.chatIdentity
@@ -137160,13 +137164,13 @@ $CONTENT
         const rawBucket = message[field];
         if (rawBucket === undefined)
             return null;
-        if (!isRecord_ACU$7(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU$7(rawBucket.entries)) {
+        if (!isRecord_ACU$8(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU$8(rawBucket.entries)) {
             reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 分桶结构损坏`);
         }
         const rawEntry = rawBucket.entries[buildWorldSimulationBucketKey_ACU(currentAnchor)];
         if (rawEntry === undefined)
             return null;
-        if (!isRecord_ACU$7(rawEntry) || !isRecord_ACU$7(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
+        if (!isRecord_ACU$8(rawEntry) || !isRecord_ACU$8(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
             reject_ACU$4('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目损坏`);
         }
         const storedAnchor = rawEntry.anchor;
@@ -137181,7 +137185,7 @@ $CONTENT
         const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, messages);
         const message = messages[currentAnchor.messageIndex];
         const previous = message[field];
-        const previousBucket = isRecord_ACU$7(previous) && previous.schemaVersion === 1 && isRecord_ACU$7(previous.entries)
+        const previousBucket = isRecord_ACU$8(previous) && previous.schemaVersion === 1 && isRecord_ACU$8(previous.entries)
             ? previous
             : { schemaVersion: 1, entries: {} };
         const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
@@ -137224,10 +137228,10 @@ $CONTENT
             }
         };
         const phase = 'agent_persist';
-        if (!isRecord_ACU$7(raw))
+        if (!isRecord_ACU$8(raw))
             return ['ledger 必须是对象'];
         const normalized = raw.schemaVersion === 1 ? migrateV1Ledger_ACU(raw) : raw;
-        if (!isRecord_ACU$7(normalized))
+        if (!isRecord_ACU$8(normalized))
             return ['ledger 必须是对象'];
         probe(() => {
             exactKeys_ACU$2(normalized, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance'], [], 'ledger', phase);
@@ -137236,7 +137240,7 @@ $CONTENT
             integer_ACU(normalized.revision, 'ledger.revision', phase);
         });
         probe(() => {
-            if (!isRecord_ACU$7(normalized.clock))
+            if (!isRecord_ACU$8(normalized.clock))
                 fail_ACU$3('ledger.clock 必须是对象', phase);
             exactKeys_ACU$2(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
             integer_ACU(normalized.clock.day, 'ledger.clock.day', phase, 1);
@@ -137251,7 +137255,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.dimensions.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$7(item))
+                    if (!isRecord_ACU$8(item))
                         fail_ACU$3(`ledger.dimensions[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
                     dimensions.push({ id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase) });
@@ -137273,7 +137277,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.actors.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$7(item))
+                    if (!isRecord_ACU$8(item))
                         fail_ACU$3(`ledger.actors[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
                     const life = enum_ACU$1(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
@@ -137312,7 +137316,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.seeds.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$7(item))
+                    if (!isRecord_ACU$8(item))
                         fail_ACU$3(`ledger.seeds[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
                     const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
@@ -137347,7 +137351,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.chronicle.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$7(item))
+                    if (!isRecord_ACU$8(item))
                         fail_ACU$3(`ledger.chronicle[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
                     const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
@@ -137365,7 +137369,7 @@ $CONTENT
         probe(() => { validateRumors_ACU(normalized.rumors, actorIds, phase); });
         probe(() => { validatePlayer_ACU(normalized.player, phase); });
         probe(() => {
-            if (!isRecord_ACU$7(normalized.guidance))
+            if (!isRecord_ACU$8(normalized.guidance))
                 fail_ACU$3('ledger.guidance 必须是对象', phase);
             exactKeys_ACU$2(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
             validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase);
@@ -137377,7 +137381,7 @@ $CONTENT
 
     const WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU = ['run_started', 'run_resumed', 'user_message', 'thought', 'main_action', 'protocol_retry', 'tool_read', 'delegation', 'stage_plan', 'handoff', 'finalize', 'block', 'run_failed', 'run_completed'];
     const partitions_ACU = new Map();
-    const clean_ACU$1 = (value, limit) => { const text = String(value ?? '').replace(/[\r\n]+/g, ' ').trim(); return text.length <= limit ? text : `${text.slice(0, limit)}…`; };
+    const clean_ACU$2 = (value, limit) => { const text = String(value ?? '').replace(/[\r\n]+/g, ' ').trim(); return text.length <= limit ? text : `${text.slice(0, limit)}…`; };
     function partition_ACU(chatIdentity) {
         const key = chatIdentity.trim();
         if (!key)
@@ -137404,7 +137408,7 @@ $CONTENT
         const ok = input.ok !== false;
         const id = partition.nextId++;
         const at = typeof input.at === 'number' && Number.isFinite(input.at) && input.at >= 0 ? input.at : Date.now();
-        partition.entries.push({ id, at, kind: input.kind, title: clean_ACU$1(input.title, 300), detail: clean_ACU$1(input.detail, 2000), agentName: clean_ACU$1(input.agentName, 128), ok, status: input.status ?? (ok ? 'done' : 'failed') });
+        partition.entries.push({ id, at, kind: input.kind, title: clean_ACU$2(input.title, 300), detail: clean_ACU$2(input.detail, 2000), agentName: clean_ACU$2(input.agentName, 128), ok, status: input.status ?? (ok ? 'done' : 'failed') });
         if (partition.entries.length > 300)
             partition.entries = partition.entries.slice(-300);
         if (['run_completed', 'run_failed', 'block'].includes(input.kind))
@@ -137418,9 +137422,9 @@ $CONTENT
         if (!entry)
             return;
         if (patch.title !== undefined)
-            entry.title = clean_ACU$1(patch.title, 300);
+            entry.title = clean_ACU$2(patch.title, 300);
         if (patch.detail !== undefined)
-            entry.detail = clean_ACU$1(patch.detail, 2000);
+            entry.detail = clean_ACU$2(patch.detail, 2000);
         if (patch.ok !== undefined)
             entry.ok = patch.ok;
         entry.status = patch.status ?? (patch.ok === undefined ? entry.status : patch.ok ? 'done' : 'failed');
@@ -137452,7 +137456,7 @@ $CONTENT
     const TEXT_LIMIT_ACU = 8000;
     let sessionEventSequence_ACU = 0;
     const conversationWriteQueues_ACU = new Map();
-    function isRecord_ACU$6(value) {
+    function isRecord_ACU$7(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function reject_ACU$3(message, details) {
@@ -137469,7 +137473,7 @@ $CONTENT
         return value;
     }
     function validateMessage_ACU(raw, path) {
-        if (!isRecord_ACU$6(raw))
+        if (!isRecord_ACU$7(raw))
             reject_ACU$3(`${path} 必须是对象`, { path });
         const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok']);
         for (const key of Object.keys(raw)) {
@@ -137515,7 +137519,7 @@ $CONTENT
         return message;
     }
     function validateCompaction_ACU(raw, path) {
-        if (!isRecord_ACU$6(raw))
+        if (!isRecord_ACU$7(raw))
             reject_ACU$3(`${path} 必须是对象`, { path });
         return {
             compactedThroughId: nonNegativeInteger_ACU$1(raw.compactedThroughId, `${path}.compactedThroughId`),
@@ -137524,7 +137528,7 @@ $CONTENT
         };
     }
     function validateSegment_ACU(raw, path) {
-        if (!isRecord_ACU$6(raw))
+        if (!isRecord_ACU$7(raw))
             reject_ACU$3(`${path} 必须是对象`, { path });
         const allowed = new Set(['schemaVersion', 'segmentId', 'runId', 'taskId', 'stageId', 'stageRevision', 'messages', 'compaction', 'updatedAt']);
         for (const key of ['schemaVersion', 'segmentId', 'runId', 'taskId', 'stageId', 'stageRevision', 'messages', 'updatedAt']) {
@@ -137551,7 +137555,7 @@ $CONTENT
         };
     }
     function validateWorldSimulationConversationFloorRecord_ACU(raw) {
-        if (!isRecord_ACU$6(raw))
+        if (!isRecord_ACU$7(raw))
             reject_ACU$3('会话楼层记录必须是对象');
         const keys = Object.keys(raw);
         if (keys.some(key => !['schemaVersion', 'segments', 'updatedAt'].includes(key)))
@@ -137573,14 +137577,14 @@ $CONTENT
         };
     }
     function legacyConversationEnvelope_ACU(raw) {
-        if (!isRecord_ACU$6(raw) || raw.version !== 1 || !Array.isArray(raw.entries))
+        if (!isRecord_ACU$7(raw) || raw.version !== 1 || !Array.isArray(raw.entries))
             return null;
         if (Object.keys(raw).some(key => !['version', 'entries'].includes(key)))
             reject_ACU$3('旧版会话 envelope 存在未知字段');
         const entries = [];
         const locations = new Set();
         for (const [entryIndex, candidate] of raw.entries.entries()) {
-            if (!isRecord_ACU$6(candidate) || !isRecord_ACU$6(candidate.swipe) || !Array.isArray(candidate.messages)) {
+            if (!isRecord_ACU$7(candidate) || !isRecord_ACU$7(candidate.swipe) || !Array.isArray(candidate.messages)) {
                 reject_ACU$3(`旧版会话 entries[${entryIndex}] 结构非法`);
             }
             if (Object.keys(candidate).some(key => !['swipe', 'nextId', 'messages'].includes(key))
@@ -137600,7 +137604,7 @@ $CONTENT
                 reject_ACU$3(`旧版会话 entries[${entryIndex}] 位置重复`);
             locations.add(location);
             const messages = candidate.messages.map((message, messageIndex) => {
-                if (!isRecord_ACU$6(message) || !Number.isInteger(message.id) || message.id < 1
+                if (!isRecord_ACU$7(message) || !Number.isInteger(message.id) || message.id < 1
                     || typeof message.at !== 'number' || !Number.isFinite(message.at)
                     || typeof message.kind !== 'string' || typeof message.status !== 'string'
                     || typeof message.title !== 'string' || !message.title.trim()
@@ -137689,7 +137693,7 @@ $CONTENT
         const diagnostics = [];
         for (let index = 0; index < messages.length; index += 1) {
             const message = messages[index];
-            if (!isRecord_ACU$6(message) || message.is_user === true || message.is_system === true)
+            if (!isRecord_ACU$7(message) || message.is_user === true || message.is_system === true)
                 continue;
             const anchor = resolveWorldSimulationAnchor_ACU(index, messages);
             try {
@@ -137817,7 +137821,7 @@ $CONTENT
             currentBucket = { schemaVersion: 1, entries: {} };
         else if (migrated)
             currentBucket = migrated;
-        else if (isRecord_ACU$6(previous) && previous.schemaVersion === 1 && isRecord_ACU$6(previous.entries)) {
+        else if (isRecord_ACU$7(previous) && previous.schemaVersion === 1 && isRecord_ACU$7(previous.entries)) {
             currentBucket = previous;
         }
         else
@@ -137937,7 +137941,7 @@ $CONTENT
         }, chat);
     }
 
-    function isRecord_ACU$5(value) {
+    function isRecord_ACU$6(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function reject_ACU$2(message, details) {
@@ -137950,7 +137954,7 @@ $CONTENT
         return [...value];
     }
     function validateWorldSimulationMaterialsSnapshot_ACU(raw) {
-        if (!isRecord_ACU$5(raw))
+        if (!isRecord_ACU$6(raw))
             reject_ACU$2('世界推演材料快照必须是对象');
         const allowed = new Set(['schemaVersion', 'ledgerRevision', 'ledger', 'evidenceRefs', 'updatedAt']);
         for (const key of allowed)
@@ -137986,7 +137990,7 @@ $CONTENT
         let sawBrokenSnapshot = false;
         for (let index = messages.length - 1; index >= 0; index -= 1) {
             const message = messages[index];
-            if (!isRecord_ACU$5(message) || message.is_user === true || message.is_system === true)
+            if (!isRecord_ACU$6(message) || message.is_user === true || message.is_system === true)
                 continue;
             let anchor;
             try {
@@ -138037,6 +138041,7 @@ $CONTENT
             candidates: state.candidates?.map(item => ({ ...item, patch: { ...item.patch }, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], writableModules: [...item.writableModules] })),
             subagentOutcomes: state.subagentOutcomes?.map(item => ({ ...item, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], unresolved: item.unresolved ? [...item.unresolved] : undefined, candidate: item.candidate ? { ...item.candidate, patch: { ...item.candidate.patch }, evidenceRefs: [...item.candidate.evidenceRefs], uncertainties: [...item.candidate.uncertainties], writableModules: [...item.candidate.writableModules] } : undefined })),
             evidenceSnapshot: state.evidenceSnapshot ? { runId: state.evidenceSnapshot.runId, entries: state.evidenceSnapshot.entries.map(entry => ({ ...entry })) } : undefined,
+            transcript: state.transcript?.map(item => ({ ...item })),
         };
     }
     function saveWorldSimulationRunState_ACU(chatIdentity, state) { if (chatIdentity)
@@ -138054,6 +138059,390 @@ $CONTENT
     function clearWorldSimulationRunState_ACU(chatIdentity) { states_ACU.delete(chatIdentity); }
     function resetWorldSimulationRunCacheForTests_ACU() { states_ACU.clear(); }
 
+    const isRecord_ACU$5 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+    function coerceWorldSimulationStringArray_ACU(value) {
+        if (Array.isArray(value)) {
+            if (!value.every(item => typeof item === 'string'))
+                return { ok: false };
+            const cleaned = value.map(item => item.trim()).filter(Boolean);
+            return { ok: true, value: cleaned, autoFixed: cleaned.length !== value.length || value.some((item, index) => item !== cleaned[index] && cleaned.includes(item.trim())) };
+        }
+        if (typeof value === 'string') {
+            return { ok: true, value: value.split(',').map(item => item.trim()).filter(Boolean), autoFixed: true };
+        }
+        return { ok: false };
+    }
+    function coerceWorldSimulationInteger_ACU(value) {
+        if (typeof value === 'number' && Number.isInteger(value))
+            return { ok: true, value, autoFixed: false };
+        if (typeof value === 'string' && /^[+-]?\d+$/.test(value.trim())) {
+            const parsed = Number(value.trim());
+            if (Number.isInteger(parsed))
+                return { ok: true, value: parsed, autoFixed: true };
+        }
+        return { ok: false };
+    }
+    function coerceWorldSimulationEnum_ACU(value, allowed) {
+        if (typeof value !== 'string')
+            return { ok: false };
+        const trimmed = value.trim();
+        if (allowed.includes(trimmed))
+            return { ok: true, value: trimmed, autoFixed: trimmed !== value };
+        const lowered = trimmed.toLowerCase();
+        const matched = allowed.find(item => item === lowered);
+        return matched ? { ok: true, value: matched, autoFixed: true } : { ok: false };
+    }
+    function note_ACU(notes, severity, path, message, details) {
+        notes.push(details ? { severity, path, message, details } : { severity, path, message });
+    }
+    function takeText_ACU(value, allowEmpty) {
+        if (typeof value !== 'string')
+            return undefined;
+        const trimmed = value.trim();
+        if (!trimmed && !allowEmpty)
+            return undefined;
+        return allowEmpty ? value : trimmed;
+    }
+    function applyString_ACU(target, key, raw, path, notes, allowEmpty) {
+        if (raw === undefined)
+            return true;
+        if (typeof raw !== 'string') {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 必须是字符串`);
+            return false;
+        }
+        const next = allowEmpty ? raw : raw.trim();
+        if (!allowEmpty && !next) {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 必须是非空字符串`);
+            return false;
+        }
+        if (next !== raw)
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 已去除首尾空白`);
+        target[key] = next;
+        return true;
+    }
+    function applyInteger_ACU(target, key, raw, path, notes, min, max = Number.MAX_SAFE_INTEGER) {
+        if (raw === undefined)
+            return true;
+        const coerced = coerceWorldSimulationInteger_ACU(raw);
+        if (!coerced.ok || coerced.value < min || coerced.value > max) {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 必须是 ${min}..${max} 的整数`, { actual: raw });
+            return false;
+        }
+        if (coerced.autoFixed)
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 已从数字字符串归一为整数`);
+        target[key] = coerced.value;
+        return true;
+    }
+    function applyEnum_ACU(target, key, raw, path, notes, allowed) {
+        if (raw === undefined)
+            return true;
+        const coerced = coerceWorldSimulationEnum_ACU(raw, allowed);
+        if (!coerced.ok) {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 枚举非法`, { actual: raw, expected: allowed.join(' | ') });
+            return false;
+        }
+        if (coerced.autoFixed)
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 已按 trim/大小写归一`);
+        target[key] = coerced.value;
+        return true;
+    }
+    function applyStringArray_ACU(target, key, raw, path, notes) {
+        if (raw === undefined)
+            return true;
+        const coerced = coerceWorldSimulationStringArray_ACU(raw);
+        if (!coerced.ok) {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 必须是字符串数组`);
+            return false;
+        }
+        if (coerced.autoFixed)
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 已归一为字符串数组`);
+        target[key] = coerced.value;
+        return true;
+    }
+    function applyNullableInteger_ACU(target, key, raw, path, notes, min) {
+        if (raw === undefined)
+            return true;
+        if (raw === null) {
+            target[key] = null;
+            return true;
+        }
+        if (raw === '') {
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 空字符串已归一为 null`);
+            target[key] = null;
+            return true;
+        }
+        return applyInteger_ACU(target, key, raw, path, notes, min);
+    }
+    function applyNullableString_ACU(target, key, raw, path, notes) {
+        if (raw === undefined)
+            return true;
+        if (raw === null) {
+            target[key] = null;
+            return true;
+        }
+        if (typeof raw !== 'string') {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 必须是字符串或 null`);
+            return false;
+        }
+        if (!raw.trim()) {
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 空字符串已归一为 null`);
+            target[key] = null;
+            return true;
+        }
+        target[key] = raw;
+        return true;
+    }
+    function applyLocation_ACU(target, key, raw, path, notes) {
+        if (raw === undefined)
+            return true;
+        if (raw === null) {
+            target[key] = null;
+            return true;
+        }
+        if (!isRecord_ACU$5(raw)) {
+            note_ACU(notes, 'blocking', `${path}.${key}`, `${path}.${key} 必须是对象或 null`);
+            return false;
+        }
+        const unknown = Object.keys(raw).filter(item => item !== 'region' && item !== 'place');
+        if (unknown.length)
+            note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 已丢弃未知字段：${unknown.join(',')}`, { unknownFields: unknown });
+        const region = takeText_ACU(raw.region, false);
+        if (!region) {
+            note_ACU(notes, 'blocking', `${path}.${key}.region`, `${path}.${key}.region 必须是非空字符串`);
+            return false;
+        }
+        const location = { region };
+        if (raw.place !== undefined) {
+            if (typeof raw.place !== 'string') {
+                note_ACU(notes, 'blocking', `${path}.${key}.place`, `${path}.${key}.place 必须是字符串`);
+                return false;
+            }
+            location.place = raw.place;
+        }
+        target[key] = location;
+        return true;
+    }
+    function fillMissing_ACU(target, defaults, path, notes) {
+        for (const [key, value] of Object.entries(defaults)) {
+            if (!Object.prototype.hasOwnProperty.call(target, key)) {
+                target[key] = value;
+                note_ACU(notes, 'autoFixed', `${path}.${key}`, `${path}.${key} 已按缺省补齐`);
+            }
+        }
+    }
+    function stripUnknown_ACU(target, allowed, path, notes) {
+        const unknown = Object.keys(target).filter(key => !allowed.includes(key));
+        if (!unknown.length)
+            return;
+        for (const key of unknown)
+            delete target[key];
+        note_ACU(notes, 'autoFixed', path, `${path} 已丢弃未知字段：${unknown.join(',')}`, { unknownFields: unknown });
+    }
+    function resolveExpectedRevision_ACU(raw, actual, path, notes) {
+        if (raw === undefined) {
+            note_ACU(notes, 'autoFixed', `${path}.expectedRevision`, `${path}.expectedRevision 已按${actual === 0 ? '新建 0' : '当前 revision'}补齐`);
+            return actual;
+        }
+        const coerced = coerceWorldSimulationInteger_ACU(raw);
+        if (!coerced.ok || coerced.value < 0) {
+            note_ACU(notes, 'blocking', `${path}.expectedRevision`, `${path}.expectedRevision 非法`, { actual: raw });
+            return null;
+        }
+        if (coerced.autoFixed)
+            note_ACU(notes, 'autoFixed', `${path}.expectedRevision`, `${path}.expectedRevision 已从数字字符串归一为整数`);
+        if (coerced.value !== actual) {
+            note_ACU(notes, 'blocking', path, `${path} 条目 revision 冲突`, { expectedRevision: coerced.value, actualRevision: actual, revisionConflict: true });
+            return null;
+        }
+        return coerced.value;
+    }
+    function beginItem_ACU(item, existing, path, notes, labelField) {
+        const id = takeText_ACU(item.id, false);
+        if (!id) {
+            note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
+            return null;
+        }
+        if (!existing) {
+            const label = takeText_ACU(item[labelField], false);
+            if (!label) {
+                note_ACU(notes, 'blocking', `${path}.${labelField}`, `${path}.${labelField} 必须是非空字符串`);
+                return null;
+            }
+            return { id, [labelField]: label };
+        }
+        const next = { ...existing, id };
+        if (item[labelField] !== undefined && !applyString_ACU(next, labelField, item[labelField], path, notes, false))
+            return null;
+        return next;
+    }
+    function finishItem_ACU(next, allowed, actual, path, notes) {
+        stripUnknown_ACU(next, allowed, path, notes);
+        next.revision = actual + 1;
+        return next;
+    }
+    const DIMENSION_KIND_ACU = ['pressure', 'growth'];
+    const DIMENSION_TREND_ACU = ['rising', 'stable', 'falling'];
+    const SEED_STATUS_ACU = ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'];
+    const VISIBILITY_ACU = ['hidden', 'limited', 'public'];
+    function normalizeDimension_ACU(item, existing, path, notes) {
+        const next = beginItem_ACU(item, existing, path, notes, 'name');
+        if (!next)
+            return null;
+        if (!applyEnum_ACU(next, 'kind', item.kind, path, notes, DIMENSION_KIND_ACU))
+            return null;
+        if (!applyInteger_ACU(next, 'value', item.value, path, notes, 0, 100))
+            return null;
+        if (!applyEnum_ACU(next, 'trend', item.trend, path, notes, DIMENSION_TREND_ACU))
+            return null;
+        if (!applyString_ACU(next, 'rationale', item.rationale, path, notes, true))
+            return null;
+        if (!applyStringArray_ACU(next, 'evidenceRefs', item.evidenceRefs, path, notes))
+            return null;
+        if (!existing)
+            fillMissing_ACU(next, { kind: 'pressure', value: 0, trend: 'stable', rationale: '', evidenceRefs: [] }, path, notes);
+        return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, existing ? Number(existing.revision) : 0, path, notes);
+    }
+    function normalizeSeed_ACU(item, existing, path, notes) {
+        const next = beginItem_ACU(item, existing, path, notes, 'title');
+        if (!next)
+            return null;
+        if (!applyEnum_ACU(next, 'status', item.status, path, notes, SEED_STATUS_ACU))
+            return null;
+        if (!applyInteger_ACU(next, 'level', item.level, path, notes, 0, 100))
+            return null;
+        if (!applyString_ACU(next, 'catalyst', item.catalyst, path, notes, true))
+            return null;
+        if (!applyEnum_ACU(next, 'visibility', item.visibility, path, notes, VISIBILITY_ACU))
+            return null;
+        if (!applyStringArray_ACU(next, 'actorIds', item.actorIds, path, notes))
+            return null;
+        if (!applyLocation_ACU(next, 'location', item.location, path, notes))
+            return null;
+        if (!applyNullableInteger_ACU(next, 'expiresAtDay', item.expiresAtDay, path, notes, 1))
+            return null;
+        if (!applyNullableString_ACU(next, 'missedOutcome', item.missedOutcome, path, notes))
+            return null;
+        if (!applyEnum_ACU(next, 'exposePolicy', item.exposePolicy, path, notes, WORLD_SEED_EXPOSE_POLICIES_ACU))
+            return null;
+        if (!applyStringArray_ACU(next, 'evidenceRefs', item.evidenceRefs, path, notes))
+            return null;
+        if (!applyNullableString_ACU(next, 'retiredReason', item.retiredReason, path, notes))
+            return null;
+        if (!existing)
+            fillMissing_ACU(next, { status: 'established', level: 0, catalyst: '', visibility: 'hidden', actorIds: [], location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision', evidenceRefs: [], retiredReason: null }, path, notes);
+        if (next.status !== 'retired' && next.retiredReason === '') {
+            next.retiredReason = null;
+            note_ACU(notes, 'autoFixed', `${path}.retiredReason`, `${path}.retiredReason 非退役空字符串已归一为 null`);
+        }
+        if (next.status === 'retired' && (next.retiredReason === null || next.retiredReason === '')) {
+            note_ACU(notes, 'blocking', `${path}.retiredReason`, `${path} 退役时必须提供原因`);
+            return null;
+        }
+        if (next.status !== 'retired' && next.retiredReason !== null) {
+            note_ACU(notes, 'blocking', path, `${path} 非退役状态不能携带退役原因`);
+            return null;
+        }
+        return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, existing ? Number(existing.revision) : 0, path, notes);
+    }
+    function normalizeActor_ACU(item, existing, path, notes) {
+        const next = beginItem_ACU(item, existing, path, notes, 'name');
+        if (!next)
+            return null;
+        if (!applyStringArray_ACU(next, 'interests', item.interests, path, notes))
+            return null;
+        if (!applyString_ACU(next, 'location', item.location, path, notes, true))
+            return null;
+        if (!applyLocation_ACU(next, 'locationRef', item.locationRef, path, notes))
+            return null;
+        if (!applyEnum_ACU(next, 'life', item.life, path, notes, WORLD_ACTOR_LIFE_ACU))
+            return null;
+        if (!applyNullableInteger_ACU(next, 'diedAtDay', item.diedAtDay, path, notes, 1))
+            return null;
+        if (!applyNullableString_ACU(next, 'deathSummary', item.deathSummary, path, notes))
+            return null;
+        if (!applyStringArray_ACU(next, 'resources', item.resources, path, notes))
+            return null;
+        if (!applyStringArray_ACU(next, 'goals', item.goals, path, notes))
+            return null;
+        if (!applyStringArray_ACU(next, 'constraints', item.constraints, path, notes))
+            return null;
+        if (!applyStringArray_ACU(next, 'informationSources', item.informationSources, path, notes))
+            return null;
+        if (!applyStringArray_ACU(next, 'knownFacts', item.knownFacts, path, notes))
+            return null;
+        if (!applyEnum_ACU(next, 'visibility', item.visibility, path, notes, VISIBILITY_ACU))
+            return null;
+        if (!existing)
+            fillMissing_ACU(next, { interests: [], location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden' }, path, notes);
+        if (next.life === 'dead') {
+            if (next.diedAtDay === null || !next.deathSummary) {
+                note_ACU(notes, 'blocking', path, `${path} dead 状态必须提供 diedAtDay 与 deathSummary`);
+                return null;
+            }
+        }
+        else if (next.diedAtDay !== null || next.deathSummary !== null) {
+            note_ACU(notes, 'blocking', path, `${path} 非 dead 状态不能携带死亡字段`);
+            return null;
+        }
+        return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, existing ? Number(existing.revision) : 0, path, notes);
+    }
+    function normalizeRumor_ACU(item, existing, path, notes, clockDay) {
+        const next = beginItem_ACU(item, existing, path, notes, 'fact');
+        if (!next)
+            return null;
+        if (!applyInteger_ACU(next, 'originDay', item.originDay, path, notes, 1))
+            return null;
+        if (!applyInteger_ACU(next, 'earliestRevealDay', item.earliestRevealDay, path, notes, 1))
+            return null;
+        if (!applyStringArray_ACU(next, 'channels', item.channels, path, notes))
+            return null;
+        if (!applyStringArray_ACU(next, 'relatedActorIds', item.relatedActorIds, path, notes))
+            return null;
+        if (!applyEnum_ACU(next, 'status', item.status, path, notes, WORLD_RUMOR_STATUSES_ACU))
+            return null;
+        if (!applyNullableInteger_ACU(next, 'revealedAtDay', item.revealedAtDay, path, notes, 1))
+            return null;
+        if (!existing) {
+            const originDay = typeof next.originDay === 'number' ? next.originDay : clockDay;
+            fillMissing_ACU(next, { originDay, earliestRevealDay: originDay, channels: [], relatedActorIds: [], status: 'latent', revealedAtDay: null }, path, notes);
+        }
+        if (typeof next.earliestRevealDay === 'number' && typeof next.originDay === 'number' && next.earliestRevealDay < next.originDay) {
+            note_ACU(notes, 'blocking', path, `${path} earliestRevealDay 必须 >= originDay`, { originDay: next.originDay, earliestRevealDay: next.earliestRevealDay });
+            return null;
+        }
+        if (next.status === 'revealed' && next.revealedAtDay === null) {
+            note_ACU(notes, 'blocking', `${path}.revealedAtDay`, `${path} revealed 状态必须提供 revealedAtDay`);
+            return null;
+        }
+        if (next.status !== 'revealed' && next.revealedAtDay !== null) {
+            note_ACU(notes, 'blocking', `${path}.revealedAtDay`, `${path} 非 revealed 状态不能携带 revealedAtDay`);
+            return null;
+        }
+        return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, existing ? Number(existing.revision) : 0, path, notes);
+    }
+    function normalizeWorldSimulationUpsertItem_ACU(input) {
+        const notes = [];
+        if (!isRecord_ACU$5(input.item)) {
+            note_ACU(notes, 'blocking', `${input.path}`, `${input.path} 必须是对象`);
+            return { item: null, notes };
+        }
+        const actual = input.existing && typeof input.existing.revision === 'number' ? input.existing.revision : 0;
+        if (resolveExpectedRevision_ACU(input.item.expectedRevision, actual, input.path, notes) === null) {
+            return { item: null, notes };
+        }
+        const item = input.module === 'dimensions' ? normalizeDimension_ACU(input.item, input.existing, input.path, notes)
+            : input.module === 'seeds' ? normalizeSeed_ACU(input.item, input.existing, input.path, notes)
+                : input.module === 'actors' ? normalizeActor_ACU(input.item, input.existing, input.path, notes)
+                    : normalizeRumor_ACU(input.item, input.existing, input.path, notes, input.clockDay);
+        return { item, notes };
+    }
+    function coerceWorldSimulationContact_ACU(value) {
+        return coerceWorldSimulationEnum_ACU(value, WORLD_PLAYER_CONTACTS_ACU);
+    }
+    function coerceWorldSimulationGuidanceVoice_ACU(value) {
+        return coerceWorldSimulationEnum_ACU(value, WORLD_GUIDANCE_SIGNAL_VOICES_ACU);
+    }
+
     const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'];
     function isRecord_ACU$4(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function fail_ACU$2(message, details) {
@@ -138069,27 +138458,23 @@ $CONTENT
     }
     function clone_ACU$5(value) { return JSON.parse(JSON.stringify(value)); }
     function refs_ACU(value, path) {
-        if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim()))
+        const coerced = coerceWorldSimulationStringArray_ACU(value);
+        if (!coerced.ok)
             fail_ACU$2(`${path} 必须是字符串数组且元素不能为空`);
-        return [...value];
+        return coerced.value;
     }
     function resolveDynamics_ACU(settings) {
         return settings?.dynamics ?? buildDefaultWorldSimulationSettings_ACU().dynamics;
     }
-    function applyUpserts_ACU(current, raw, path, requiredFields, onViolation) {
+    function applyUpserts_ACU(current, raw, path, module, clockDay, onViolation) {
         const reject = (message, details) => {
             if (onViolation) {
                 onViolation(message, details);
                 return true;
             }
+            if (details?.revisionConflict)
+                revisionFail_ACU(message, details);
             fail_ACU$2(message, details);
-        };
-        const rejectRevision = (message, details) => {
-            if (onViolation) {
-                onViolation(message, details);
-                return true;
-            }
-            revisionFail_ACU(message, details);
         };
         if (!isRecord_ACU$4(raw)) {
             reject(`${path} 必须是对象`);
@@ -138098,7 +138483,7 @@ $CONTENT
         if (onViolation) {
             for (const key of Object.keys(raw))
                 if (key !== 'upsert')
-                    reject(`${path} 存在未知字段`, { path: `${path}.${key}` });
+                    reject(`${path} 存在未知字段`, { path: `${path}.${key}`, severity: 'blocking' });
         }
         else {
             exactKeys_ACU$1(raw, ['upsert'], path);
@@ -138110,37 +138495,34 @@ $CONTENT
         const result = current.map(item => clone_ACU$5(item));
         const seen = new Set();
         for (const [index, item] of raw.upsert.entries()) {
-            if (!isRecord_ACU$4(item) || typeof item.id !== 'string' || !item.id) {
-                if (reject(`${path}.upsert[${index}].id 非法`))
+            const itemPath = `${path}.upsert[${index}]`;
+            const existingIndex = isRecord_ACU$4(item) && typeof item.id === 'string' ? result.findIndex(entry => entry.id === item.id) : -1;
+            const existing = existingIndex < 0 ? null : result[existingIndex];
+            const normalized = normalizeWorldSimulationUpsertItem_ACU({ module, item, existing, path: itemPath, clockDay });
+            let blocked = false;
+            for (const note of normalized.notes) {
+                if (onViolation) {
+                    onViolation(note.message, { path: note.path, severity: note.severity, ...note.details });
+                    if (note.severity === 'blocking')
+                        blocked = true;
+                    continue;
+                }
+                if (note.severity === 'blocking') {
+                    reject(note.message, { path: note.path, ...note.details });
+                }
+            }
+            if (blocked || !normalized.item)
+                continue;
+            const id = String(normalized.item.id);
+            if (seen.has(id)) {
+                if (reject(`${path}.upsert 存在重复 ID`, { id, severity: 'blocking' }))
                     continue;
             }
-            if (seen.has(item.id)) {
-                if (reject(`${path}.upsert 存在重复 ID`, { id: item.id }))
-                    continue;
-            }
-            seen.add(item.id);
-            const missing = requiredFields.filter(key => key !== 'revision' && !Object.prototype.hasOwnProperty.call(item, key));
-            if (missing.length) {
-                if (reject(`${path}.upsert[${index}] 缺少必填字段：${missing.join(',')}`, { path: `${path}.upsert[${index}]`, missingFields: missing }))
-                    continue;
-            }
-            const expectedRevision = item.expectedRevision;
-            if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
-                if (reject(`${path}.upsert[${index}].expectedRevision 非法`))
-                    continue;
-            }
-            const existingIndex = result.findIndex(entry => entry.id === item.id);
-            const actual = existingIndex < 0 ? 0 : result[existingIndex].revision;
-            if (actual !== expectedRevision) {
-                if (rejectRevision(`${path} 条目 revision 冲突`, { id: item.id, expectedRevision, actualRevision: actual }))
-                    continue;
-            }
-            const next = { ...item, revision: actual + 1 };
-            delete next.expectedRevision;
+            seen.add(id);
             if (existingIndex < 0)
-                result.push(next);
+                result.push(normalized.item);
             else
-                result[existingIndex] = next;
+                result[existingIndex] = normalized.item;
         }
         return result;
     }
@@ -138168,9 +138550,10 @@ $CONTENT
             fail_ACU$2('patch.clock 不能为空');
         let days = 0;
         if (raw.days !== undefined) {
-            if (!Number.isInteger(raw.days) || raw.days < 0)
+            const coerced = coerceWorldSimulationInteger_ACU(raw.days);
+            if (!coerced.ok || coerced.value < 0)
                 fail_ACU$2('patch.clock.days 必须是非负整数（clockAdvance 只允许单调向前推进，禁止直接写 day）');
-            days = raw.days;
+            days = coerced.value;
         }
         if (days > dynamics.maxClockAdvanceDays) {
             const advanceRefs = raw.evidenceRefs;
@@ -138197,9 +138580,10 @@ $CONTENT
             exactKeys_ACU$1(item, ['text', 'voice', 'sourceId'], `${path}[${index}]`);
             if (typeof item.text !== 'string' || !item.text.trim())
                 fail_ACU$2(`${path}[${index}].text 必须是非空字符串`);
-            if (!WORLD_GUIDANCE_SIGNAL_VOICES_ACU.includes(String(item.voice)))
+            const voice = coerceWorldSimulationGuidanceVoice_ACU(item.voice);
+            if (!voice.ok)
                 fail_ACU$2(`${path}[${index}].voice 非法`, { actual: item.voice });
-            const signal = { text: item.text, voice: item.voice };
+            const signal = { text: item.text, voice: voice.value };
             if (item.sourceId !== undefined) {
                 if (typeof item.sourceId !== 'string' || !item.sourceId.trim())
                     fail_ACU$2(`${path}[${index}].sourceId 必须是非空字符串`);
@@ -138251,7 +138635,10 @@ $CONTENT
             locationUpdatedAtDay: current.locationUpdatedAtDay,
             regionVisits: clone_ACU$5(current.regionVisits),
             contact: raw.contact === undefined ? current.contact
-                : WORLD_PLAYER_CONTACTS_ACU.includes(String(raw.contact)) ? raw.contact : fail_ACU$2('patch.player.contact 非法'),
+                : (() => {
+                    const contact = coerceWorldSimulationContact_ACU(raw.contact);
+                    return contact.ok ? contact.value : fail_ACU$2('patch.player.contact 非法');
+                })(),
             evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.player.evidenceRefs'),
         };
     }
@@ -138320,13 +138707,13 @@ $CONTENT
                         next.clock = applyClock_ACU(next.clock, patch, dynamics);
                         break;
                     case 'dimensions':
-                        next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions);
+                        next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day);
                         break;
                     case 'seeds':
-                        next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds);
+                        next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day);
                         break;
                     case 'actors':
-                        next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors);
+                        next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day);
                         break;
                     case 'chronicle':
                         next.chronicle = applyChronicle_ACU(next.chronicle, patch);
@@ -138335,7 +138722,7 @@ $CONTENT
                         next.guidance = applyGuidance_ACU(next.guidance, patch);
                         break;
                     case 'rumors':
-                        next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors);
+                        next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day);
                         break;
                     case 'player':
                         next.player = applyPlayer_ACU(next.player, patch);
@@ -138349,24 +138736,27 @@ $CONTENT
     }
     function preflightWorldSimulationCandidates_ACU(base, candidates, authorizedEvidenceRefs, settings) {
         const dynamics = resolveDynamics_ACU(settings);
-        const violations = [];
+        const blocking = [];
+        const autoFixed = [];
         let validatedBase;
         try {
             validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
         }
         catch (error) {
-            violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error) });
-            return violations;
+            blocking.push({ candidateId: '', agentName: '', module: '', path: '$', message: error instanceof Error ? error.message : String(error), severity: 'blocking' });
+            return { blocking, autoFixed };
         }
         if (!candidates.length) {
-            violations.push({ candidateId: '', agentName: '', module: '', path: '$', message: 'commit 必须包含至少一个候选' });
-            return violations;
+            blocking.push({ candidateId: '', agentName: '', module: '', path: '$', message: 'commit 必须包含至少一个候选', severity: 'blocking' });
+            return { blocking, autoFixed };
         }
         const next = clone_ACU$5(validatedBase);
         const candidateIds = new Set();
         for (const candidate of candidates) {
             const push = (module, path, message, details) => {
-                violations.push({ candidateId: candidate.candidateId, agentName: candidate.agentName, module, path, message, details });
+                const severity = details?.severity === 'autoFixed' ? 'autoFixed' : 'blocking';
+                const bucket = severity === 'autoFixed' ? autoFixed : blocking;
+                bucket.push({ candidateId: candidate.candidateId, agentName: candidate.agentName, module, path, message, severity, details });
             };
             if (!candidate.candidateId || candidateIds.has(candidate.candidateId)) {
                 push('', '$', 'commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
@@ -138413,13 +138803,13 @@ $CONTENT
                             next.clock = applyClock_ACU(next.clock, patch, dynamics);
                             break;
                         case 'dimensions':
-                            next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, collectUpsert);
+                            next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collectUpsert);
                             break;
                         case 'seeds':
-                            next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, collectUpsert);
+                            next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collectUpsert);
                             break;
                         case 'actors':
-                            next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, collectUpsert);
+                            next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collectUpsert);
                             break;
                         case 'chronicle':
                             next.chronicle = applyChronicle_ACU(next.chronicle, patch);
@@ -138428,7 +138818,7 @@ $CONTENT
                             next.guidance = applyGuidance_ACU(next.guidance, patch);
                             break;
                         case 'rumors':
-                            next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, collectUpsert);
+                            next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert);
                             break;
                         case 'player':
                             next.player = applyPlayer_ACU(next.player, patch);
@@ -138440,14 +138830,12 @@ $CONTENT
                 }
             }
         }
-        if (!violations.length) {
-            checkCrossField_ACU(next, (message, details) => violations.push({ candidateId: '', agentName: '', module: '', path: '$.patch', message, details }));
-            next.revision = validatedBase.revision + 1;
-            for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
-                violations.push({ candidateId: '', agentName: '', module: '', path: '$', message });
-            }
+        checkCrossField_ACU(next, (message, details) => blocking.push({ candidateId: '', agentName: '', module: '', path: '$.patch', message, severity: 'blocking', details }));
+        next.revision = validatedBase.revision + 1;
+        for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
+            blocking.push({ candidateId: '', agentName: '', module: '', path: '$', message, severity: 'blocking' });
         }
-        return violations;
+        return { blocking, autoFixed };
     }
 
     const defaults_ACU$1 = { resolvePreset: resolveApiConfigByPreset_ACU };
@@ -138475,6 +138863,74 @@ $CONTENT
     function resolveWorldSimulationAgentApiPreset_ACU(settings, role, phase, dependencies = defaults_ACU$1) {
         const choice = settings.agentApiPresets[role];
         return choice ? resolveWorldSimulationApiPreset_ACU({ apiPresetMode: choice.mode, fixedApiPresetName: choice.presetName }, phase, dependencies) : resolveWorldSimulationApiPreset_ACU(settings, phase, dependencies);
+    }
+
+    const LIST_FIELDS_ACU = ['effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
+    const clean_ACU$1 = (value) => typeof value === 'string' ? value.trim() : '';
+    const list_ACU = (value) => Array.isArray(value) ? [...new Set(value.map(clean_ACU$1).filter(Boolean))] : [];
+    const empty_ACU = () => ({ currentGoal: '', effectiveConstraints: [], decisions: [], completedItems: [], pendingItems: [], blockers: [], continuityFacts: [], readKeys: [], recentTurns: [] });
+    function deterministic_ACU(previous, messages) {
+        const state = previous
+            ? {
+                currentGoal: previous.currentGoal,
+                effectiveConstraints: [...previous.effectiveConstraints],
+                decisions: [...previous.decisions],
+                completedItems: [...previous.completedItems],
+                pendingItems: [...previous.pendingItems],
+                blockers: [...previous.blockers],
+                continuityFacts: [...previous.continuityFacts],
+                readKeys: [...previous.readKeys],
+                recentTurns: [...previous.recentTurns],
+            }
+            : empty_ACU();
+        for (const message of messages) {
+            const summary = clean_ACU$1(message.digest) || clean_ACU$1(message.text);
+            if (message.kind === 'user')
+                state.effectiveConstraints.push(summary);
+            else if (message.kind === 'agent')
+                state.decisions.push(summary);
+            else if (message.kind === 'tool' || message.kind === 'runtime')
+                state.continuityFacts.push(summary);
+            else if (message.kind === 'turn') {
+                state.currentGoal = summary;
+                state.recentTurns.push(clean_ACU$1(message.turnKey) || summary);
+            }
+            if (message.readKey)
+                state.readKeys.push(message.readKey);
+        }
+        for (const field of LIST_FIELDS_ACU)
+            state[field] = list_ACU(state[field]).slice(-8);
+        return state;
+    }
+    function renderWorldSimulationHandoff_ACU(state, degradationReason = '') {
+        const sections = [['当前目标', state.currentGoal ? [state.currentGoal] : []], ['有效约束', state.effectiveConstraints], ['已执行决策', state.decisions], ['已完成', state.completedItems], ['待办', state.pendingItems], ['阻塞', state.blockers], ['连续性事实', state.continuityFacts], ['资料地址', state.readKeys], ['近期轮次', state.recentTurns]];
+        const body = sections.filter(([, items]) => items.length).map(([title, items]) => `【${title}】\n${items.map(item => `- ${item}`).join('\n')}`).join('\n');
+        return `${degradationReason ? `【摘要降级】${degradationReason}\n` : ''}【更早世界推演会话交接】\n${body || '没有可保留的早期事项。'}`;
+    }
+    async function summarizeWorldSimulationHandoff_ACU(input) {
+        let state = deterministic_ACU(input.previous, input.messages);
+        let degradationReason = input.semanticAdapter ? '' : 'deterministic_adapter';
+        if (input.semanticAdapter)
+            try {
+                const proposed = await input.semanticAdapter.summarize({ previous: input.previous, messages: input.messages, allowedReadKeys: state.readKeys });
+                state.currentGoal = clean_ACU$1(proposed.currentGoal) || state.currentGoal;
+                for (const field of LIST_FIELDS_ACU)
+                    if (field !== 'readKeys' && field !== 'recentTurns')
+                        state[field] = list_ACU(proposed[field]).length ? list_ACU(proposed[field]) : state[field];
+            }
+            catch {
+                degradationReason = 'semantic_summary_failed';
+            }
+        let report = renderWorldSimulationHandoff_ACU(state, degradationReason);
+        for (const field of [...LIST_FIELDS_ACU].reverse())
+            while (await input.countTokens(report) > input.maxTokens && state[field].length) {
+                state[field] = state[field].slice(1);
+                report = renderWorldSimulationHandoff_ACU(state, degradationReason);
+            }
+        const reportTokens = await input.countTokens(report);
+        if (reportTokens > input.maxTokens)
+            throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_CONFIG_INVALID', 'handoff_summary', '交接摘要无法压缩到预算内', false, { reportTokens, maxTokens: input.maxTokens }));
+        return { state, report, reportTokens, degraded: Boolean(degradationReason), ...(degradationReason ? { degradationReason } : {}) };
     }
 
     function serialize_ACU(value) {
@@ -138861,7 +139317,7 @@ $CONTENT
         fail_ACU('INVALID_SPECIALIST_PATCH', path, expected, actual);
     }
     function specialistStringList_ACU(value, path) {
-        if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) {
+        if (!coerceWorldSimulationStringArray_ACU(value).ok) {
             invalidSpecialistPatch_ACU(path, 'string array with non-empty items', value);
         }
     }
@@ -138874,7 +139330,7 @@ $CONTENT
             specialistPatchRecord_ACU(item, `${path}[${index}]`, ['text', 'voice', 'sourceId']);
             if (!text_ACU$2(item.text))
                 invalidSpecialistPatch_ACU(`${path}[${index}].text`, 'non-empty string', item.text);
-            if (!WORLD_GUIDANCE_SIGNAL_VOICES_ACU.includes(String(item.voice))) {
+            if (!coerceWorldSimulationEnum_ACU(item.voice, WORLD_GUIDANCE_SIGNAL_VOICES_ACU).ok) {
                 invalidSpecialistPatch_ACU(`${path}[${index}].voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), item.voice);
             }
             if (item.sourceId !== undefined && !text_ACU$2(item.sourceId))
@@ -138929,11 +139385,14 @@ $CONTENT
                     if (!text_ACU$2(item.id))
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
                     const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
-                    if (!text_ACU$2(item[labelField])) {
+                    if (item[labelField] !== undefined && !text_ACU$2(item[labelField])) {
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
                     }
-                    if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
-                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+                    if (item.expectedRevision !== undefined) {
+                        const revision = coerceWorldSimulationInteger_ACU(item.expectedRevision);
+                        if (!revision.ok || revision.value < 0) {
+                            invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+                        }
                     }
                 });
                 continue;
@@ -138948,8 +139407,11 @@ $CONTENT
                 const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs']);
                 if (!Object.keys(raw).length)
                     invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-                if (raw.days !== undefined && (!Number.isInteger(raw.days) || Number(raw.days) < 0))
-                    invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
+                if (raw.days !== undefined) {
+                    const days = coerceWorldSimulationInteger_ACU(raw.days);
+                    if (!days.ok || days.value < 0)
+                        invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
+                }
                 if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string')
                     invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
                 if (raw.slot !== undefined && typeof raw.slot !== 'string')
@@ -138962,7 +139424,7 @@ $CONTENT
                 const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs']);
                 if (!Object.keys(raw).length)
                     invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-                if (raw.contact !== undefined && !WORLD_PLAYER_CONTACTS_ACU.includes(String(raw.contact))) {
+                if (raw.contact !== undefined && !coerceWorldSimulationEnum_ACU(raw.contact, WORLD_PLAYER_CONTACTS_ACU).ok) {
                     invalidSpecialistPatch_ACU(`${path}.contact`, WORLD_PLAYER_CONTACTS_ACU.join(' | '), raw.contact);
                 }
                 if (raw.evidenceRefs !== undefined)
@@ -139106,7 +139568,7 @@ $CONTENT
         ];
         if (writableModules.length) {
             lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
-            lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id、name（seeds 用 title，rumors 用 fact）与非负整数 expectedRevision：新建条目填 0，修改账本已有条目填该条目当前 revision，不确定时先 read ledger:current 核对；chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
+            lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
             const firstModule = writableModules[0];
             const patchExample = firstModule === 'dimensions'
                 ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
@@ -139394,7 +139856,7 @@ $CONTENT
     function state_ACU(raw, path) {
         if (!record_ACU$1(raw))
             reject_ACU$1(`${path} 必须是对象`, { path });
-        const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot', 'transcript']);
+        const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot', 'transcript', 'budgetExhausted', 'handoffSummary']);
         // transcript 为新增可选字段：旧楼层记录没有它，属合法存量；新记录带它时须逐条校验。
         if (raw.transcript !== undefined) {
             if (!Array.isArray(raw.transcript))
@@ -139427,6 +139889,8 @@ $CONTENT
             ...(raw.subagentOutcomes === undefined ? {} : { subagentOutcomes: subagentOutcomes_ACU(raw.subagentOutcomes, `${path}.subagentOutcomes`) }),
             ...(raw.evidenceSnapshot === undefined ? {} : { evidenceSnapshot: evidenceSnapshot_ACU(raw.evidenceSnapshot, `${path}.evidenceSnapshot`) }),
             ...(raw.transcript === undefined ? {} : { transcript: raw.transcript.map(item => ({ role: item.role, content: item.content })) }),
+            ...(raw.budgetExhausted === undefined ? {} : { budgetExhausted: raw.budgetExhausted === true ? true : (typeof raw.budgetExhausted === 'boolean' ? false : reject_ACU$1(`${path}.budgetExhausted 必须是布尔值`, { path: `${path}.budgetExhausted`, actual: raw.budgetExhausted })) }),
+            ...(raw.handoffSummary === undefined ? {} : { handoffSummary: typeof raw.handoffSummary === 'string' ? raw.handoffSummary : reject_ACU$1(`${path}.handoffSummary 必须是字符串`, { path: `${path}.handoffSummary` }) }),
         };
     }
     function validateWorldSimulationRunStateRecord_ACU(raw) {
@@ -139496,7 +139960,7 @@ $CONTENT
     }
 
     const compact_ACU = (error) => error instanceof Error ? error.message : String(error);
-    const SILENT_DELEGATION_REJECT_LIMIT_ACU = 2;
+    const LEGACY_BUDGET_FEEDBACK_ACU = new Set(['iteration budget exhausted', 'delegation gate exhausted']);
     const cursorKey_ACU = (identity) => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
     const fingerprint_ACU = (outcome) => sha256HexSync_ACU(JSON.stringify([outcome.agentName, outcome.status, outcome.summary, outcome.candidate?.candidateId])).slice(0, 24);
     function upsertLatestOutcome_ACU(items, outcome) {
@@ -139598,28 +140062,31 @@ $CONTENT
             if (resumedState?.evidenceSnapshot) {
                 mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumedState.evidenceSnapshot);
             }
-            // 预算窗口重置：恢复时持久化 nextIteration 已达上限且没有可继续的进度（无候选且无派工结果），
-            // 说明这是"预算耗尽后继续"而非正常推进；迭代与派工窗口重新起算，候选与证据全量保留。
-            // "iteration budget exhausted" 是预算耗尽终局 persist 的专属标记；恢复时命中即代表
-            // 用户显式要求以新窗口继续，迭代与派工预算全额重置，候选与证据保留。
+            // 预算窗口重置：结构化 budgetExhausted 或旧字面值命中时，迭代/派工/同角色窗口重新起算。
+            // 候选与证据全量保留；交接摘要注入 transcript 开头一次。
+            // 末轮 persist(iteration+1) 会使 nextIteration 越过 maxIterations；这不是预算终局，
+            // 只把迭代游标拉回第 1 轮，保留派工/同角色计数，避免「继续」直接掉进迭代耗尽。
             const budgetExhausted = !!resumedState
-                && (resumedState.nextIteration > input.settings.agentRunBudget.maxIterations
-                    || resumedState.reviewerFeedback === 'iteration budget exhausted');
-            const iterationStart = budgetExhausted ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
+                && (resumedState.budgetExhausted === true || LEGACY_BUDGET_FEEDBACK_ACU.has(resumedState.reviewerFeedback));
+            const overflowed = !!resumedState
+                && resumedState.nextIteration > input.settings.agentRunBudget.maxIterations;
+            const iterationStart = budgetExhausted || overflowed ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
             const delegationsStart = budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
             const outcomes = latestOutcomes_ACU(resumedState?.subagentOutcomes ?? []);
             const candidates = resumedState?.candidates ? [...resumedState.candidates] : [];
-            const perAgent = new Map(Object.entries(resumedState?.perAgent ?? {}));
+            const perAgent = new Map(budgetExhausted ? [] : Object.entries(resumedState?.perAgent ?? {}));
             let delegationsUsed = delegationsStart;
             let iteration = iterationStart;
             const transcript = resumedState?.transcript ? [...resumedState.transcript] : [];
+            if (resumedState?.handoffSummary && !transcript.some(item => item.content === resumedState.handoffSummary)) {
+                transcript.unshift({ role: 'user', content: resumedState.handoffSummary });
+            }
             const director = 'world-director';
             // Director may correct several different mechanical fields in sequence; repeated identical
             // failures remain capped by the repair state's per-fingerprint guard.
             const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
             const readGateState = createWorldSimulationReadGateState_ACU();
             const toolUsage = { readsUsed: 0 };
-            let silentDelegationRejections = 0;
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
             const persistEntry = async (entryId, eventKey) => {
                 if (!input.persistSessionEvent)
@@ -139634,7 +140101,7 @@ $CONTENT
             };
             const runEntryId = beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumedState);
             await persistEntry(runEntryId, resumedState ? 'run-resumed' : 'run-started');
-            const persist = (nextIteration, reviewerFeedback = '') => {
+            const persist = (nextIteration, reviewerFeedback = '', extras = {}) => {
                 const unique = uniqueCandidates_ACU(candidates);
                 const state = {
                     taskId: input.identity.taskId,
@@ -139650,6 +140117,8 @@ $CONTENT
                     subagentOutcomes: outcomes,
                     evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
                     transcript: [...transcript],
+                    ...(extras.budgetExhausted ? { budgetExhausted: true } : {}),
+                    ...(extras.handoffSummary ? { handoffSummary: extras.handoffSummary } : {}),
                 };
                 saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
                 if (input.anchor) {
@@ -139657,6 +140126,35 @@ $CONTENT
                         // 楼层持久化失败不阻断运行；内存缓存已保存，下一次 persist 会重试落盘。
                     });
                 }
+            };
+            const summarizeHandoff_ACU = async () => {
+                try {
+                    const messages = transcript.map((item, index) => ({
+                        id: index + 1,
+                        kind: item.role === 'assistant' ? 'agent' : 'user',
+                        text: item.content,
+                        digest: item.content.slice(0, 240),
+                        turnKey: `turn-${index + 1}`,
+                        at: 0,
+                    }));
+                    const result = await summarizeWorldSimulationHandoff_ACU({
+                        previous: null,
+                        messages,
+                        maxTokens: 2000,
+                        countTokens: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+                    });
+                    return result.report;
+                }
+                catch {
+                    return undefined;
+                }
+            };
+            const blockOnBudget_ACU = async (nextIteration, reviewerFeedback, title, detail, unresolved, eventKey) => {
+                const handoffSummary = await summarizeHandoff_ACU();
+                persist(nextIteration, reviewerFeedback, { budgetExhausted: true, ...(handoffSummary ? { handoffSummary } : {}) });
+                const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title, detail, agentName: director, ok: false });
+                await persistEntry(blockId, eventKey);
+                return { outcome: 'blocked', summary: title, unresolved, outcomes };
             };
             for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
@@ -139700,6 +140198,13 @@ $CONTENT
                     action = parseWorldSimulationMainOutput_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[director], allowDelegate, requestSnapshot);
                 }
                 catch (error) {
+                    const exhausted = compactWorldSimulationProtocolError_ACU(error);
+                    if (exhausted.reasonCode === 'DELEGATION_BUDGET_EXHAUSTED') {
+                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮派工预算耗尽`, detail: `${exhausted.reasonCode} ${exhausted.path}`, ok: false, status: 'failed' });
+                        await persistEntry(mainEntryId, `main-${iteration}-delegation-budget`);
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: '派工预算已耗尽，当轮终止。' });
+                        return blockOnBudget_ACU(iteration, 'delegation budget exhausted', '派工预算已耗尽', `${exhausted.reasonCode} ${exhausted.path}`, ['delegation budget exhausted'], 'block-delegation-budget');
+                    }
                     const failure = recordWorldSimulationProtocolFailure_ACU(protocolRepair, error);
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮协议未通过`, detail: `${failure.issue.reasonCode} ${failure.issue.path}`, ok: false, status: 'failed' });
                     await persistEntry(mainEntryId, `main-${iteration}-protocol-failed`);
@@ -139763,7 +140268,7 @@ $CONTENT
                                 : used >= input.settings.agentRunBudget.maxSameAgent ? `同角色派工预算已耗尽（${used}/${input.settings.agentRunBudget.maxSameAgent}）`
                                     : accepted.length >= input.settings.agentRunBudget.maxConcurrent ? `并行派工预算已耗尽（${accepted.length}/${input.settings.agentRunBudget.maxConcurrent}）`
                                         : '';
-                        // 预算/角色门禁静默拦截：不调用子代理、不出会话卡片、不记 outcome，原因仅回灌 transcript。
+                        // 预算/角色门禁拦截：不调用被拦子代理、不出会话卡片、不记 outcome，原因回灌 transcript。
                         if (reason) {
                             rejected.push({ agentName: delegation.agentName, reason });
                             continue;
@@ -139774,22 +140279,11 @@ $CONTENT
                         }));
                     }
                     const budgetUsageText = `当前用量：总派工 ${delegationsUsed}/${input.settings.agentRunBudget.maxDelegations}${[...perAgent.entries()].map(([name, count]) => `；${name} ${count}/${input.settings.agentRunBudget.maxSameAgent}`).join('')}`;
-                    const rejectionText = `派工被预算门禁静默拦截（未调用任何子代理）：\n${rejected.map(item => `- ${item.agentName}：${item.reason}`).join('\n')}\n${budgetUsageText}\n请改派仍有预算的角色、基于现有候选 finalize，或在证据不足时输出 block。`;
+                    const rejectionText = `派工被预算门禁拦截（未调用被拦子代理）：\n${rejected.map(item => `- ${item.agentName}：${item.reason}`).join('\n')}\n${budgetUsageText}\n预算耗尽即终止。请改派仍有预算的角色、基于现有候选 finalize，或在证据不足时输出 block。`;
                     if (!accepted.length) {
-                        // 整轮派工被门禁清空：不消耗迭代轮数；连续整轮被拦达到上限即终止，防止无声空转。
-                        silentDelegationRejections += 1;
-                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `${rejectionText}（整轮拦截 ${silentDelegationRejections}/${SILENT_DELEGATION_REJECT_LIMIT_ACU}，达到上限即终止）` });
-                        if (silentDelegationRejections >= SILENT_DELEGATION_REJECT_LIMIT_ACU) {
-                            persist(iteration, 'delegation gate exhausted');
-                            const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '派工预算耗尽，连续整轮被门禁拦截', detail: rejectionText, agentName: director, ok: false });
-                            await persistEntry(blockId, 'block-delegation-gate');
-                            return { outcome: 'blocked', summary: '派工被预算门禁连续拦截，无可派工角色', unresolved: rejected.map(item => `${item.agentName}: ${item.reason}`), outcomes };
-                        }
-                        persist(iteration);
-                        iteration -= 1;
-                        continue;
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: rejectionText });
+                        return blockOnBudget_ACU(iteration, 'delegation gate exhausted', '派工被预算门禁拦截，无可派工角色', rejectionText, rejected.map(item => `${item.agentName}: ${item.reason}`), 'block-delegation-gate');
                     }
-                    silentDelegationRejections = 0;
                     const settled = await Promise.all(accepted.map(async (delegation) => {
                         try {
                             return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
@@ -139802,19 +140296,23 @@ $CONTENT
                     }));
                     for (let index = 0; index < settled.length; index += 1) {
                         let outcome = settled[index];
-                        delegationsUsed += 1;
-                        perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
                         if (outcome.candidate) {
                             const authorized = new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
-                            const violations = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState, [outcome.candidate], authorized, input.settings);
-                            if (violations.length) {
-                                const detail = violations.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
+                            const report = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState, [outcome.candidate], authorized, input.settings);
+                            if (report.blocking.length) {
+                                const detail = report.blocking.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
                                 outcome = { agentName: outcome.agentName, status: 'failed', summary: `\u5019\u9009\u9884\u68c0\u5931\u8d25\uff1a${detail}`, evidenceRefs: outcome.evidenceRefs, uncertainties: [], reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' };
                                 settled[index] = outcome;
                             }
                             else {
                                 upsertCandidateRevision_ACU(candidates, outcome.candidate);
+                                delegationsUsed += 1;
+                                perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
                             }
+                        }
+                        else {
+                            delegationsUsed += 1;
+                            perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
                         }
                         upsertLatestOutcome_ACU(outcomes, outcome);
                         const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
@@ -139912,10 +140410,7 @@ $CONTENT
                 await persistEntry(completedId, 'run-completed-commit');
                 return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
             }
-            persist(input.settings.agentRunBudget.maxIterations, 'iteration budget exhausted');
-            const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '迭代预算耗尽', detail: `maxIterations=${input.settings.agentRunBudget.maxIterations}`, agentName: director, ok: false });
-            await persistEntry(blockId, 'block-iteration-budget');
-            return { outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽', unresolved: ['iteration budget exhausted'], outcomes };
+            return blockOnBudget_ACU(input.settings.agentRunBudget.maxIterations, 'iteration budget exhausted', '世界推演主循环迭代预算耗尽', `maxIterations=${input.settings.agentRunBudget.maxIterations}`, ['iteration budget exhausted'], 'block-iteration-budget');
         }
     }
 

@@ -32,35 +32,37 @@ describe('world simulation transaction', () => {
     expect(() => applyWorldSimulationCandidates_ACU(base, [candidate({ dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: [] }] } })], new Set(['e1']))).toThrow(/revision 冲突/);
   });
 
-  it('dimensions upsert 缺 kind/value/trend 时一次报出全部缺失字段', () => {
-    expect(() => applyWorldSimulationCandidates_ACU(
+  it('dimensions upsert 缺 kind/value/trend 时按缺省补齐并可入库', () => {
+    const next = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ dimensions: { upsert: [{ id: 'pressure', name: '压力', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } })],
       new Set(['e1']),
-    )).toThrow(/缺少必填字段：kind,value,trend/);
+    );
+    expect(next.dimensions[0]).toMatchObject({ id: 'pressure', name: '压力', kind: 'pressure', value: 0, trend: 'stable', revision: 1 });
   });
 
-  it('preflight 聚合返回多候选多模块违规且不抛错', () => {
+  it('preflight 把可自动修复与必须人工修的违规分级返回', () => {
     const base = buildEmptyWorldSimulationLedger_ACU();
     base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '', evidenceRefs: [], revision: 1 });
     const analyst = (candidateId: string, patch: Record<string, unknown>) => ({
       candidateId, agentName: 'world-analyst', patch, summary: '候选',
       evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'],
     });
-    const violations = preflightWorldSimulationCandidates_ACU(base, [
+    const report = preflightWorldSimulationCandidates_ACU(base, [
       analyst('candidate:clock', { clock: { days: -1, evidenceRefs: ['e1'] } }),
       analyst('candidate:dimension-missing', { dimensions: { upsert: [{ id: 'new-dim', name: '新维度', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } }),
       analyst('candidate:dimension-revision', { dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: ['e1'] }] } }),
     ], new Set(['e1']));
-    const messages = violations.map(item => item.message).join('\n');
-    expect(messages).toMatch(/非负整数/);
-    expect(messages).toMatch(/缺少必填字段：kind,value,trend/);
-    expect(messages).toMatch(/revision 冲突/);
-    expect(violations.length).toBeGreaterThanOrEqual(3);
+    const blocking = report.blocking.map(item => item.message).join('\n');
+    const autoFixed = report.autoFixed.map(item => item.message).join('\n');
+    expect(blocking).toMatch(/非负整数/);
+    expect(blocking).toMatch(/revision 冲突/);
+    expect(autoFixed).toMatch(/缺省补齐|kind|value|trend/);
+    expect(report.blocking.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('preflight 对模拟账本聚合回报 actors/seeds 的类型与跨字段违规', () => {
-    const violations = preflightWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [
+  it('preflight 对类型偏差记 autoFixed，引用不存在 id 与跨字段硬约束仍 blocking', () => {
+    const report = preflightWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [
       candidate({
         actors: { upsert: [{ id: 'actor-1', name: '角色', interests: '不是数组', location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', expectedRevision: 0 }] },
         seeds: { upsert: [
@@ -70,12 +72,43 @@ describe('world simulation transaction', () => {
         ] },
       }),
     ], new Set(['e1']));
-    const messages = violations.map(item => item.message).join('\n');
-    expect(messages).toMatch(/actors\[0\]\.interests 必须是字符串数组/);
-    expect(messages).toMatch(/seeds\[0\]\.retiredReason 必须是非空字符串/);
-    expect(messages).toMatch(/seeds\[1\] 非退役状态不能携带退役原因/);
-    expect(messages).toMatch(/seeds\[2\] 引用了不存在的 actor/);
-    expect(violations.length).toBeGreaterThanOrEqual(4);
+    const autoFixed = report.autoFixed.map(item => item.message).join('\n');
+    const blocking = report.blocking.map(item => item.message).join('\n');
+    expect(autoFixed).toMatch(/interests/);
+    expect(autoFixed).toMatch(/retiredReason/);
+    expect(blocking).toMatch(/非退役状态不能携带退役原因/);
+    expect(blocking).toMatch(/引用了不存在的 actor/);
+    expect(report.blocking.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('部分更新只改变更字段并与账本现值合并', () => {
+    const base = buildEmptyWorldSimulationLedger_ACU();
+    base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '旧因', evidenceRefs: [], revision: 1 });
+    const next = applyWorldSimulationCandidates_ACU(
+      base,
+      [candidate({ dimensions: { upsert: [{ id: 'pressure', value: '8', trend: 'RISING' }] } })],
+      new Set(['e1']),
+    );
+    expect(next.dimensions[0]).toMatchObject({ id: 'pressure', name: '压力', kind: 'pressure', value: 8, trend: 'rising', rationale: '旧因', revision: 2 });
+  });
+
+  it('类型宽容接受逗号分隔数组与数字字符串，越权与伪造引用仍拒绝', () => {
+    const next = applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ actors: { upsert: [{ id: 'actor-1', name: '角色', interests: '刀, 盾', visibility: 'HIDDEN' }] } })],
+      new Set(['e1']),
+    );
+    expect(next.actors[0]).toMatchObject({ id: 'actor-1', interests: ['刀', '盾'], visibility: 'hidden', life: 'alive' });
+    expect(() => applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ seeds: { upsert: [{ id: 'seed-x', title: '暗流', actorIds: ['actor-missing'] }] } })],
+      new Set(['e1']),
+    )).toThrow(/引用了不存在的 actor/);
+    expect(() => applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ guidance: { signals: [{ text: '泄露', voice: 'ambient' }] } })],
+      new Set(['e1']),
+    )).toThrow(/越权/);
   });
 
   it('clockAdvance 单调推进 day，拒绝直接写 day 与负数 days', () => {

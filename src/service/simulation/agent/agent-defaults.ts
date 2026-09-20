@@ -2,7 +2,7 @@ import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_AC
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v4';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v5';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -38,7 +38,7 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
     `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。`,
     'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
     'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
-    '派工可能被预算门禁静默拦截：被拦派工不会调用子代理也不出卡片，拦截原因与剩余预算会回灌给你；整轮派工被清空不消耗迭代次数，但连续整轮被拦会直接终止。预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
+    '派工预算耗尽即终止并输出 block 卡片，不会静默拦截或空转重试。被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
     'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
     '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
     '初始化示例：{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"根据锚点与当前账本形成时钟、维度、暗流或行动者候选","reads":["ledger:current","anchor:message"]}]}',
@@ -60,20 +60,17 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
   if (writableModules.length) {
     lines.push(`candidate 必须包含非空 patch、summary、evidenceRefs、uncertainties；patch 顶层只能使用：${writableModules.join(' | ')}。`);
     lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
-    lines.push('dimensions、seeds、actors 必须使用 {"upsert":[...]}；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision。');
-    lines.push(`upsert 条目必须包含该模块全部必填字段（${formatWorldSimulationLedgerRequiredFields_ACU()}），不能只补单字段。`);
-    lines.push('枚举与取值硬约束（违反即被事务层拒绝）：dimensions[].kind 只能是 pressure | growth；dimensions[].trend 只能是 rising | stable | falling；dimensions[].value 必须是 0 到 100 的整数；seeds[].status 只能是 established | incubating | active | converging | resolved | retired；seeds[].level 必须是 0 到 100 的整数；seeds[].visibility 与 actors[].visibility 只能是 hidden | limited | public。');
-    lines.push('seeds[].exposePolicy 只能是 on_collision | gradual | public；actors[].life 只能是 alive | missing | dead；guidance.signals 元素必须是 {text 非空, voice 为 encounter|rumor|ambient, sourceId 可选}。');
-    lines.push('数组硬约束：actors 的 interests、resources、goals、constraints、informationSources、knownFacts 必须全部是字符串数组（允许空数组 []），禁止写成逗号分隔字符串；seeds 的 actorIds 必须也是字符串数组，且只能引用本次 patch 或账本中已存在的 actor id。');
-    lines.push('seeds[].retiredReason 跨字段硬约束：status 为 retired 时必须是非空字符串；status 不是 retired 时必须为 null，禁止写空字符串或其他值——空字符串与非退役带都会被事务层拒绝。');
-    lines.push('expectedRevision 是乐观并发控制：新建条目填 0；修改账本已有条目时填该条目在账本中的当前 revision。不确定时先 read ledger:current 核对，禁止猜测、省略或写成字符串。');
+    lines.push('dimensions、seeds、actors、rumors 必须使用 {"upsert":[...]}；每条至少含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。');
+    lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
+    lines.push('expectedRevision 可省略：新建默认 0，更新默认当前 revision。');
+    lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId?}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
     if (writableModules.includes('chronicle')) lines.push('chronicle 必须使用 {"append":[...]}。');
     if (writableModules.includes('clock')) lines.push('clock 必须以 clockAdvance 语义提交 {days, storyTime?, slot?, evidenceRefs?}；days 必须是非负整数，禁止直接写 day。');
     if (writableModules.includes('player')) {
       lines.push('player 是单例补丁，只允许 location、contact、evidenceRefs；禁止写 locationUpdatedAtDay 与 regionVisits。');
       lines.push('contact 维护纪律：正文出现闭关/昏迷/囚禁/荒野独行等无社交渠道信号置 secluded，城镇/客栈/人群置 open，无明确信号保守维持原值。');
     }
-    if (writableModules.includes('rumors')) lines.push('rumors 必须使用 {"upsert":[...]}，必填含 id、fact、originDay、earliestRevealDay、channels、relatedActorIds、status、revealedAtDay、revision；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert，channels 非空且 earliestRevealDay >= diedAtDay。');
+    if (writableModules.includes('rumors')) lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
     if (writableModules.includes('guidance')) lines.push('guidance 必须是非空对象。');
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
@@ -175,8 +172,20 @@ const WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU: Record<WorldSimulationAgentNa
   'lore-researcher': '2105:b9f9a7cf',
 };
 
+const WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU: Record<WorldSimulationAgentName_ACU, string> = {
+  'world-director': '3777:3d6ed466',
+  'world-stage-planner': '2655:855187ab',
+  'world-analyst': '4988:ceb0ce76',
+  'causality-reviewer': '3577:29593a91',
+  'lore-researcher': '2127:364d5521',
+};
+
 export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
-  WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }, { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) }]]),
+  WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
+    { version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] },
+    { version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+  ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
 
 export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>): WorldSimulationAgentPrompts_ACU {

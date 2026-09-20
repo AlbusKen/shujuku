@@ -67,7 +67,7 @@ describe('世界推演 Agent 协议', () => {
     });
   });
 
-  it('在 specialist 边界拒绝缺少持久化标识字段的实体 upsert', () => {
+  it('在 specialist 边界拒绝缺少 id 的实体 upsert，但允许省略 name 与 expectedRevision', () => {
     const registry = createWorldSimulationEvidenceRegistry_ACU('missing-entity-label');
     const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
@@ -75,15 +75,20 @@ describe('世界推演 Agent 协议', () => {
     try {
       parseWorldSimulationSpecialistResult_ACU({
         status: 'candidate', agentName: 'world-analyst',
-        patch: { dimensions: { upsert: [{ id: 'dimension-1', expectedRevision: 0 }] } },
-        summary: '缺少名称的维度候选', evidenceRefs: [ref], uncertainties: [],
+        patch: { dimensions: { upsert: [{ expectedRevision: 0, name: '压力' }] } },
+        summary: '缺少 id 的维度候选', evidenceRefs: [ref], uncertainties: [],
       }, snapshot);
     } catch (caught) {
       error = caught;
     }
     expect(compactWorldSimulationProtocolError_ACU(error)).toMatchObject({
-      reasonCode: 'INVALID_SPECIALIST_PATCH', path: '$.patch.dimensions.upsert[0].name', expected: 'non-empty string',
+      reasonCode: 'INVALID_SPECIALIST_PATCH', path: '$.patch.dimensions.upsert[0].id', expected: 'non-empty string',
     });
+    expect(parseWorldSimulationSpecialistResult_ACU({
+      status: 'candidate', agentName: 'world-analyst',
+      patch: { dimensions: { upsert: [{ id: 'dimension-1', value: '12' }] } },
+      summary: '部分字段维度候选', evidenceRefs: [ref], uncertainties: [],
+    }, snapshot)).toMatchObject({ status: 'candidate' });
   });
 
   it('只对具备强语义证据的常见状态别名做受控归一化', () => {
@@ -114,8 +119,8 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('agentName 必须精确为 world-analyst');
     expect(message).toContain('patch 顶层只能使用：clock | dimensions');
     expect(message).toContain('"status":"candidate"');
-    expect(message).toContain('非负整数 expectedRevision');
-    expect(message).toContain('新建条目填 0');
+    expect(message).toContain('expectedRevision 可省略');
+    expect(message).toContain('新建 0');
   });
 
   it('reviewer 协议拒绝回灌明确 verdict、finding 结构与三种合法模板', () => {
@@ -177,11 +182,11 @@ describe('世界推演 Agent 协议', () => {
   it('初始提示词即声明 specialist upsert/expectedRevision 契约与 director 动作字段白名单', () => {
     const specialist = worldSimulationSpecialistProtocolInstruction_ACU('world-analyst', ['clock', 'dimensions', 'chronicle']);
     expect(specialist).toContain('"upsert"');
-    expect(specialist).toContain('非负整数 expectedRevision');
-    expect(specialist).toContain('新建条目填 0');
+    expect(specialist).toContain('expectedRevision 可省略');
+    expect(specialist).toContain('新建默认 0');
     expect(specialist).toContain('当前 revision');
-    expect(specialist).toContain('不能只补单字段');
-    expect(specialist).toContain('dimensions: id,name,kind,value,trend,rationale,evidenceRefs,revision');
+    expect(specialist).toContain('可只提交变更字段');
+    expect(specialist).toContain('核心字段 dimensions:id,name');
     const noWrite = worldSimulationSpecialistProtocolInstruction_ACU('lore-researcher', []);
     expect(noWrite).toContain('不得输出 candidate');
     expect(noWrite).not.toContain('expectedRevision');
@@ -194,9 +199,10 @@ describe('世界推演 Agent 协议', () => {
   it('默认提示词模板已接线 specialist upsert 契约与 director 字段白名单', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const specialist = prompts['world-analyst'].map(segment => segment.content).join('\n');
-    expect(specialist).toContain('非负整数 expectedRevision');
-    expect(specialist).toContain('新建条目填 0');
-    expect(specialist).toContain('ledger:current');
+    expect(specialist).toContain('expectedRevision 可省略');
+    expect(specialist).toContain('新建默认 0');
+    expect(specialist).toContain('核心字段 dimensions:id,name');
+    expect(specialist).toContain('可只提交变更字段');
     const director = prompts['world-director'].map(segment => segment.content).join('\n');
     expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');
     expect(director).toContain('block 只能包含 action、reason、unresolved');

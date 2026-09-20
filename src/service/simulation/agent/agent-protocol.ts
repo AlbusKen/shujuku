@@ -1,4 +1,5 @@
 import { WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationStagePlan_ACU } from '../model';
+import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerceWorldSimulationStringArray_ACU } from '../simulation-patch-normalize';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
@@ -292,7 +293,7 @@ function invalidSpecialistPatch_ACU(path: string, expected: string, actual: unkn
 }
 
 function specialistStringList_ACU(value: unknown, path: string): void {
-  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) {
+  if (!coerceWorldSimulationStringArray_ACU(value).ok) {
     invalidSpecialistPatch_ACU(path, 'string array with non-empty items', value);
   }
 }
@@ -303,7 +304,7 @@ function specialistGuidanceSignals_ACU(value: unknown, path: string): void {
     if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}[${index}]`, 'object', item);
     specialistPatchRecord_ACU(item, `${path}[${index}]`, ['text', 'voice', 'sourceId']);
     if (!text_ACU(item.text)) invalidSpecialistPatch_ACU(`${path}[${index}].text`, 'non-empty string', item.text);
-    if (!(WORLD_GUIDANCE_SIGNAL_VOICES_ACU as readonly string[]).includes(String(item.voice))) {
+    if (!coerceWorldSimulationEnum_ACU(item.voice, WORLD_GUIDANCE_SIGNAL_VOICES_ACU).ok) {
       invalidSpecialistPatch_ACU(`${path}[${index}].voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), item.voice);
     }
     if (item.sourceId !== undefined && !text_ACU(item.sourceId)) invalidSpecialistPatch_ACU(`${path}[${index}].sourceId`, 'non-empty string', item.sourceId);
@@ -350,11 +351,14 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
         if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
         if (!text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
         const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
-        if (!text_ACU(item[labelField])) {
+        if (item[labelField] !== undefined && !text_ACU(item[labelField])) {
           invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
         }
-        if (!Number.isInteger(item.expectedRevision) || Number(item.expectedRevision) < 0) {
-          invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+        if (item.expectedRevision !== undefined) {
+          const revision = coerceWorldSimulationInteger_ACU(item.expectedRevision);
+          if (!revision.ok || revision.value < 0) {
+            invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+          }
         }
       });
       continue;
@@ -367,7 +371,10 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
     if (module === 'clock') {
       const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs']);
       if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-      if (raw.days !== undefined && (!Number.isInteger(raw.days) || Number(raw.days) < 0)) invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
+      if (raw.days !== undefined) {
+        const days = coerceWorldSimulationInteger_ACU(raw.days);
+        if (!days.ok || days.value < 0) invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
+      }
       if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string') invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
       if (raw.slot !== undefined && typeof raw.slot !== 'string') invalidSpecialistPatch_ACU(`${path}.slot`, 'string', raw.slot);
       if (raw.evidenceRefs !== undefined) specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
@@ -376,7 +383,7 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
     if (module === 'player') {
       const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs']);
       if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-      if (raw.contact !== undefined && !(WORLD_PLAYER_CONTACTS_ACU as readonly string[]).includes(String(raw.contact))) {
+      if (raw.contact !== undefined && !coerceWorldSimulationEnum_ACU(raw.contact, WORLD_PLAYER_CONTACTS_ACU).ok) {
         invalidSpecialistPatch_ACU(`${path}.contact`, WORLD_PLAYER_CONTACTS_ACU.join(' | '), raw.contact);
       }
       if (raw.evidenceRefs !== undefined) specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
@@ -512,7 +519,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
-    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id、name（seeds 用 title，rumors 用 fact）与非负整数 expectedRevision：新建条目填 0，修改账本已有条目填该条目当前 revision，不确定时先 read ledger:current 核对；chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
+    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
     const firstModule = writableModules[0];
     const patchExample = firstModule === 'dimensions'
       ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }

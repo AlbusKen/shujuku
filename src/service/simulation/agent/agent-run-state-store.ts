@@ -179,7 +179,7 @@ function evidenceSnapshot_ACU(value: unknown, path: string): WorldSimulationEvid
 
 function state_ACU(raw: unknown, path: string): WorldSimulationRunResumeState_ACU {
   if (!record_ACU(raw)) reject_ACU(`${path} 必须是对象`, { path });
-  const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot', 'transcript']);
+  const allowed = new Set(['taskId', 'cursorKey', 'nextIteration', 'delegationsUsed', 'perAgent', 'outcomes', 'candidateFingerprint', 'candidateSummary', 'reviewerFeedback', 'candidates', 'subagentOutcomes', 'evidenceSnapshot', 'transcript', 'budgetExhausted', 'handoffSummary']);
   // transcript 为新增可选字段：旧楼层记录没有它，属合法存量；新记录带它时须逐条校验。
   if (raw.transcript !== undefined) {
     if (!Array.isArray(raw.transcript)) reject_ACU(`${path}.transcript 必须是数组`, { path: `${path}.transcript` });
@@ -209,6 +209,8 @@ function state_ACU(raw: unknown, path: string): WorldSimulationRunResumeState_AC
     ...(raw.subagentOutcomes === undefined ? {} : { subagentOutcomes: subagentOutcomes_ACU(raw.subagentOutcomes, `${path}.subagentOutcomes`) }),
     ...(raw.evidenceSnapshot === undefined ? {} : { evidenceSnapshot: evidenceSnapshot_ACU(raw.evidenceSnapshot, `${path}.evidenceSnapshot`) }),
     ...(raw.transcript === undefined ? {} : { transcript: (raw.transcript as Array<{ role: string; content: string }>).map(item => ({ role: item.role, content: item.content })) }),
+    ...(raw.budgetExhausted === undefined ? {} : { budgetExhausted: raw.budgetExhausted === true ? true : (typeof raw.budgetExhausted === 'boolean' ? false : reject_ACU(`${path}.budgetExhausted 必须是布尔值`, { path: `${path}.budgetExhausted`, actual: raw.budgetExhausted })) }),
+    ...(raw.handoffSummary === undefined ? {} : { handoffSummary: typeof raw.handoffSummary === 'string' ? raw.handoffSummary : reject_ACU(`${path}.handoffSummary 必须是字符串`, { path: `${path}.handoffSummary` }) }),
   };
 }
 

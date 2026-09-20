@@ -80,11 +80,7 @@ export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
 } as const;
 
 export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
-  const modules = Object.keys(WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU) as Array<keyof typeof WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU>;
-  return [
-    ...modules.map(module => `${module}: ${WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU[module].join(',')}`),
-    `player: ${WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU.join(',')}`,
-  ].join('；');
+  return '核心字段 dimensions:id,name；seeds:id,title；actors:id,name；rumors:id,fact。其余字段由服务端按缺省补齐（数组[]、可空null、revision 由入库层接管）；更新已有条目可只提交变更字段';
 }
 
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';

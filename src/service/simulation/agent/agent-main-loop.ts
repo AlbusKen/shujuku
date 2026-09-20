@@ -7,8 +7,9 @@ import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_A
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolInstruction_ACU } from './agent-defaults';
-import type { WorldSimulationCandidate_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
+import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
+import { summarizeWorldSimulationHandoff_ACU } from './agent-handoff-summarizer';
 import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { compactWorldSimulationProtocolError_ACU, createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
@@ -39,7 +40,7 @@ export interface WorldSimulationMainLoopInput_ACU {
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
-const SILENT_DELEGATION_REJECT_LIMIT_ACU = 2;
+const LEGACY_BUDGET_FEEDBACK_ACU = new Set(['iteration budget exhausted', 'delegation gate exhausted']);
 const cursorKey_ACU = (identity: WorldSimulationRunIdentity_ACU): string => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
 const fingerprint_ACU = (outcome: WorldSimulationSubagentOutcome_ACU): string => sha256HexSync_ACU(JSON.stringify([outcome.agentName, outcome.status, outcome.summary, outcome.candidate?.candidateId])).slice(0, 24);
 
@@ -146,29 +147,32 @@ export class WorldSimulationMainLoop_ACU {
     if (resumedState?.evidenceSnapshot) {
       mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumedState.evidenceSnapshot);
     }
-    // 预算窗口重置：恢复时持久化 nextIteration 已达上限且没有可继续的进度（无候选且无派工结果），
-    // 说明这是"预算耗尽后继续"而非正常推进；迭代与派工窗口重新起算，候选与证据全量保留。
-    // "iteration budget exhausted" 是预算耗尽终局 persist 的专属标记；恢复时命中即代表
-    // 用户显式要求以新窗口继续，迭代与派工预算全额重置，候选与证据保留。
+    // 预算窗口重置：结构化 budgetExhausted 或旧字面值命中时，迭代/派工/同角色窗口重新起算。
+    // 候选与证据全量保留；交接摘要注入 transcript 开头一次。
+    // 末轮 persist(iteration+1) 会使 nextIteration 越过 maxIterations；这不是预算终局，
+    // 只把迭代游标拉回第 1 轮，保留派工/同角色计数，避免「继续」直接掉进迭代耗尽。
     const budgetExhausted = !!resumedState
-      && (resumedState.nextIteration > input.settings.agentRunBudget.maxIterations
-        || resumedState.reviewerFeedback === 'iteration budget exhausted');
-    const iterationStart = budgetExhausted ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
+      && (resumedState.budgetExhausted === true || LEGACY_BUDGET_FEEDBACK_ACU.has(resumedState.reviewerFeedback));
+    const overflowed = !!resumedState
+      && resumedState.nextIteration > input.settings.agentRunBudget.maxIterations;
+    const iterationStart = budgetExhausted || overflowed ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
     const delegationsStart = budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
     const outcomes = latestOutcomes_ACU(resumedState?.subagentOutcomes ?? []);
     const candidates: WorldSimulationCandidate_ACU[] = resumedState?.candidates ? [...resumedState.candidates] : [];
-    const perAgent = new Map<string, number>(Object.entries(resumedState?.perAgent ?? {}));
+    const perAgent = new Map<string, number>(budgetExhausted ? [] : Object.entries(resumedState?.perAgent ?? {}));
     let delegationsUsed = delegationsStart;
     let iteration = iterationStart;
 
     const transcript: Array<{ role: string; content: string }> = resumedState?.transcript ? [...resumedState.transcript] : [];
+    if (resumedState?.handoffSummary && !transcript.some(item => item.content === resumedState.handoffSummary)) {
+      transcript.unshift({ role: 'user', content: resumedState.handoffSummary });
+    }
     const director = 'world-director' as const;
     // Director may correct several different mechanical fields in sequence; repeated identical
     // failures remain capped by the repair state's per-fingerprint guard.
     const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
-    let silentDelegationRejections = 0;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
     const persistEntry = async (entryId: number, eventKey: string): Promise<void> => {
       if (!input.persistSessionEvent) return;
@@ -187,9 +191,9 @@ export class WorldSimulationMainLoop_ACU {
     await persistEntry(runEntryId, resumedState ? 'run-resumed' : 'run-started');
 
 
-    const persist = (nextIteration: number, reviewerFeedback = ''): void => {
+    const persist = (nextIteration: number, reviewerFeedback = '', extras: { budgetExhausted?: boolean; handoffSummary?: string } = {}): void => {
       const unique = uniqueCandidates_ACU(candidates);
-      const state = {
+      const state: WorldSimulationRunResumeState_ACU = {
         taskId: input.identity.taskId,
         cursorKey,
         nextIteration,
@@ -203,6 +207,8 @@ export class WorldSimulationMainLoop_ACU {
         subagentOutcomes: outcomes,
         evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
         transcript: [...transcript],
+        ...(extras.budgetExhausted ? { budgetExhausted: true } : {}),
+        ...(extras.handoffSummary ? { handoffSummary: extras.handoffSummary } : {}),
       };
       saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
       if (input.anchor) {
@@ -212,6 +218,42 @@ export class WorldSimulationMainLoop_ACU {
       }
     };
 
+    const summarizeHandoff_ACU = async (): Promise<string | undefined> => {
+      try {
+        const messages: WorldSimulationConversationMessage_ACU[] = transcript.map((item, index) => ({
+          id: index + 1,
+          kind: item.role === 'assistant' ? 'agent' : 'user',
+          text: item.content,
+          digest: item.content.slice(0, 240),
+          turnKey: `turn-${index + 1}`,
+          at: 0,
+        }));
+        const result = await summarizeWorldSimulationHandoff_ACU({
+          previous: null,
+          messages,
+          maxTokens: 2000,
+          countTokens: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+        });
+        return result.report;
+      } catch {
+        return undefined;
+      }
+    };
+
+    const blockOnBudget_ACU = async (
+      nextIteration: number,
+      reviewerFeedback: string,
+      title: string,
+      detail: string,
+      unresolved: string[],
+      eventKey: string,
+    ): Promise<WorldSimulationMainLoopResult_ACU> => {
+      const handoffSummary = await summarizeHandoff_ACU();
+      persist(nextIteration, reviewerFeedback, { budgetExhausted: true, ...(handoffSummary ? { handoffSummary } : {}) });
+      const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title, detail, agentName: director, ok: false });
+      await persistEntry(blockId, eventKey);
+      return { outcome: 'blocked', summary: title, unresolved, outcomes };
+    };
 
     for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
@@ -256,6 +298,20 @@ export class WorldSimulationMainLoop_ACU {
       try {
         action = parseWorldSimulationMainOutput_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[director], allowDelegate, requestSnapshot);
       } catch (error) {
+        const exhausted = compactWorldSimulationProtocolError_ACU(error);
+        if (exhausted.reasonCode === 'DELEGATION_BUDGET_EXHAUSTED') {
+          updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮派工预算耗尽`, detail: `${exhausted.reasonCode} ${exhausted.path}`, ok: false, status: 'failed' });
+          await persistEntry(mainEntryId, `main-${iteration}-delegation-budget`);
+          transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: '派工预算已耗尽，当轮终止。' });
+          return blockOnBudget_ACU(
+            iteration,
+            'delegation budget exhausted',
+            '派工预算已耗尽',
+            `${exhausted.reasonCode} ${exhausted.path}`,
+            ['delegation budget exhausted'],
+            'block-delegation-budget',
+          );
+        }
         const failure = recordWorldSimulationProtocolFailure_ACU(protocolRepair, error);
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮协议未通过`, detail: `${failure.issue.reasonCode} ${failure.issue.path}`, ok: false, status: 'failed' });
         await persistEntry(mainEntryId, `main-${iteration}-protocol-failed`);
@@ -320,7 +376,7 @@ export class WorldSimulationMainLoop_ACU {
             : used >= input.settings.agentRunBudget.maxSameAgent ? `同角色派工预算已耗尽（${used}/${input.settings.agentRunBudget.maxSameAgent}）`
             : accepted.length >= input.settings.agentRunBudget.maxConcurrent ? `并行派工预算已耗尽（${accepted.length}/${input.settings.agentRunBudget.maxConcurrent}）`
             : '';
-          // 预算/角色门禁静默拦截：不调用子代理、不出会话卡片、不记 outcome，原因仅回灌 transcript。
+          // 预算/角色门禁拦截：不调用被拦子代理、不出会话卡片、不记 outcome，原因回灌 transcript。
           if (reason) {
             rejected.push({ agentName: delegation.agentName, reason });
             continue;
@@ -331,22 +387,18 @@ export class WorldSimulationMainLoop_ACU {
           }));
         }
         const budgetUsageText = `当前用量：总派工 ${delegationsUsed}/${input.settings.agentRunBudget.maxDelegations}${[...perAgent.entries()].map(([name, count]) => `；${name} ${count}/${input.settings.agentRunBudget.maxSameAgent}`).join('')}`;
-        const rejectionText = `派工被预算门禁静默拦截（未调用任何子代理）：\n${rejected.map(item => `- ${item.agentName}：${item.reason}`).join('\n')}\n${budgetUsageText}\n请改派仍有预算的角色、基于现有候选 finalize，或在证据不足时输出 block。`;
+        const rejectionText = `派工被预算门禁拦截（未调用被拦子代理）：\n${rejected.map(item => `- ${item.agentName}：${item.reason}`).join('\n')}\n${budgetUsageText}\n预算耗尽即终止。请改派仍有预算的角色、基于现有候选 finalize，或在证据不足时输出 block。`;
         if (!accepted.length) {
-          // 整轮派工被门禁清空：不消耗迭代轮数；连续整轮被拦达到上限即终止，防止无声空转。
-          silentDelegationRejections += 1;
-          transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `${rejectionText}（整轮拦截 ${silentDelegationRejections}/${SILENT_DELEGATION_REJECT_LIMIT_ACU}，达到上限即终止）` });
-          if (silentDelegationRejections >= SILENT_DELEGATION_REJECT_LIMIT_ACU) {
-            persist(iteration, 'delegation gate exhausted');
-            const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '派工预算耗尽，连续整轮被门禁拦截', detail: rejectionText, agentName: director, ok: false });
-            await persistEntry(blockId, 'block-delegation-gate');
-            return { outcome: 'blocked', summary: '派工被预算门禁连续拦截，无可派工角色', unresolved: rejected.map(item => `${item.agentName}: ${item.reason}`), outcomes };
-          }
-          persist(iteration);
-          iteration -= 1;
-          continue;
+          transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: rejectionText });
+          return blockOnBudget_ACU(
+            iteration,
+            'delegation gate exhausted',
+            '派工被预算门禁拦截，无可派工角色',
+            rejectionText,
+            rejected.map(item => `${item.agentName}: ${item.reason}`),
+            'block-delegation-gate',
+          );
         }
-        silentDelegationRejections = 0;
         const settled = await Promise.all(accepted.map(async delegation => {
           try {
             return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
@@ -358,18 +410,21 @@ export class WorldSimulationMainLoop_ACU {
         }));
         for (let index = 0; index < settled.length; index += 1) {
           let outcome = settled[index];
-          delegationsUsed += 1;
-          perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
           if (outcome.candidate) {
             const authorized = new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
-            const violations = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState as WorldSimulationLedger_ACU, [outcome.candidate], authorized, input.settings);
-            if (violations.length) {
-              const detail = violations.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
+            const report = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState as WorldSimulationLedger_ACU, [outcome.candidate], authorized, input.settings);
+            if (report.blocking.length) {
+              const detail = report.blocking.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
               outcome = { agentName: outcome.agentName, status: 'failed', summary: `\u5019\u9009\u9884\u68c0\u5931\u8d25\uff1a${detail}`, evidenceRefs: outcome.evidenceRefs, uncertainties: [], reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' };
               settled[index] = outcome;
             } else {
               upsertCandidateRevision_ACU(candidates, outcome.candidate);
+              delegationsUsed += 1;
+              perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
             }
+          } else {
+            delegationsUsed += 1;
+            perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
           }
           upsertLatestOutcome_ACU(outcomes, outcome);
           const ok = outcome.status === 'candidate' || outcome.status === 'no_change';
@@ -481,9 +536,13 @@ export class WorldSimulationMainLoop_ACU {
       return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
     }
 
-    persist(input.settings.agentRunBudget.maxIterations, 'iteration budget exhausted');
-    const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: '迭代预算耗尽', detail: `maxIterations=${input.settings.agentRunBudget.maxIterations}`, agentName: director, ok: false });
-    await persistEntry(blockId, 'block-iteration-budget');
-    return { outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽', unresolved: ['iteration budget exhausted'], outcomes };
+    return blockOnBudget_ACU(
+      input.settings.agentRunBudget.maxIterations,
+      'iteration budget exhausted',
+      '世界推演主循环迭代预算耗尽',
+      `maxIterations=${input.settings.agentRunBudget.maxIterations}`,
+      ['iteration budget exhausted'],
+      'block-iteration-budget',
+    );
   }
 }
