@@ -63,4 +63,20 @@ describe('世界推演工具与 EvidenceRegistry', () => {
     expect(second[0].evidenceRef).toBeUndefined();
     expect(readCalls).toEqual(['web:url:first']);
   });
+
+  it('player:current 与 rumors:current 从账本切片读取', async () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('player-tools');
+    const dependencies = createWorldSimulationToolDependencies_ACU({
+      anchorMessage: '', summary: '',
+      ledger: { player: { location: { region: 'qingyang' }, contact: 'open' }, rumors: [{ id: 'rumor-1', status: 'ripe' }] },
+      stagePlan: {}, candidates: [], chronicle: [], projectionPreview: {},
+    });
+    const results = await runWorldSimulationToolBatch_ACU({
+      registry, dependencies,
+      calls: [{ kind: 'read', reads: ['player:current', 'rumors:current'] }],
+    });
+    expect(results.map(item => item.status)).toEqual(['ok', 'ok']);
+    expect(results[0].content).toContain('qingyang');
+    expect(results[1].content).toContain('rumor-1');
+  });
 });

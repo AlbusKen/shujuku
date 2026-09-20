@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
-import { buildDefaultWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationBucket_ACU } from './agent/agent-model';
 import { validateWorldSimulationAgentPrompts_ACU } from './agent/prompt-template';
@@ -10,12 +10,24 @@ import {
   WORLD_SIMULATION_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_LEDGER_MODULES_ACU,
   WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU,
+  WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU,
+  WORLD_GUIDANCE_SIGNAL_VOICES_ACU,
+  WORLD_SEED_EXPOSE_POLICIES_ACU,
+  WORLD_ACTOR_LIFE_ACU,
+  WORLD_RUMOR_STATUSES_ACU,
+  WORLD_PLAYER_CONTACTS_ACU,
+  WORLD_PLAYER_REGION_VISITS_CAP_ACU,
   WorldSimulationValidationError_ACU,
   createWorldSimulationError_ACU,
+  normalizeWorldRegionName_ACU,
   type WorldSimulationEnvelope_ACU,
   type WorldSimulationErrorPhase_ACU,
   type WorldSimulationLedger_ACU,
   type WorldSimulationWriteGuard_ACU,
+  type WorldGuidanceSignal_ACU,
+  type WorldLocationRef_ACU,
+  type WorldPlayer_ACU,
+  type WorldRumor_ACU,
   WORLD_SIMULATION_WEB_PROVIDERS_ACU,
 } from './model';
 
@@ -24,7 +36,7 @@ export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
 const TASK_STATUSES_ACU = ['drafting', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'] as const;
 const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'] as const;
 const REVISION_REASONS_ACU = ['initial', 'automatic_replan', 'manual_replan', 'resume_repair'] as const;
-const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed'] as const;
+const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed', 'swept'] as const;
 // 计划确认流程退役后的旧数据归一化：读取历史存量聊天时不再 fail-closed。
 const LEGACY_TASK_STATUSES_ACU: Record<string, NonNullable<WorldSimulationEnvelope_ACU['task']>['status']> = { awaiting_plan_review: 'paused' };
 const LEGACY_STAGE_STATUSES_ACU: Record<string, WorldSimulationEnvelope_ACU['stages'][number]['status']> = { awaiting_review: 'planning' };
@@ -75,9 +87,137 @@ function uniqueIds_ACU(items: readonly { id: string }[], path: string, phase: Wo
   }
 }
 
+function nullableString_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): string | null {
+  if (value === null) return null;
+  return string_ACU(value, path, phase);
+}
+
+function nullableInteger_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU, min = 0): number | null {
+  if (value === null) return null;
+  return integer_ACU(value, path, phase, min);
+}
+
+function parseClockDay_ACU(elapsed: unknown, storyTime: unknown): number {
+  for (const source of [elapsed, storyTime]) {
+    if (typeof source !== 'string') continue;
+    const match = source.match(/\d+/);
+    if (!match) continue;
+    const day = Number(match[0]);
+    if (Number.isInteger(day) && day >= 1) return day;
+  }
+  return 1;
+}
+
+function validateLocationRef_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldLocationRef_ACU | null {
+  if (value === null) return null;
+  if (!isRecord_ACU(value)) fail_ACU(`${path} 必须是对象或 null`, phase, { path });
+  exactKeys_ACU(value, ['region'], ['place'], path, phase);
+  const region = normalizeWorldRegionName_ACU(string_ACU(value.region, `${path}.region`, phase));
+  if (!region) fail_ACU(`${path}.region 必须是非空字符串`, phase, { path });
+  return value.place === undefined ? { region } : { region, place: string_ACU(value.place, `${path}.place`, phase, true) };
+}
+
+function validateGuidanceSignals_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldGuidanceSignal_ACU[] {
+  if (!Array.isArray(value)) fail_ACU(`${path} 必须是数组`, phase, { path });
+  return value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${itemPath} 必须是对象`, phase, { path: itemPath });
+    exactKeys_ACU(item, ['text', 'voice'], ['sourceId'], itemPath, phase);
+    const signal: WorldGuidanceSignal_ACU = {
+      text: string_ACU(item.text, `${itemPath}.text`, phase),
+      voice: enum_ACU(item.voice, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, `${itemPath}.voice`, phase),
+    };
+    if (item.sourceId !== undefined) signal.sourceId = string_ACU(item.sourceId, `${itemPath}.sourceId`, phase);
+    return signal;
+  });
+}
+
+function migrateV1Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
+  const clockRaw = isRecord_ACU(raw.clock) ? raw.clock : {};
+  const day = Number.isInteger(clockRaw.day) && (clockRaw.day as number) >= 1
+    ? clockRaw.day as number
+    : parseClockDay_ACU(clockRaw.elapsed, clockRaw.storyTime);
+  const fill = (item: unknown, extras: Record<string, unknown>): unknown => isRecord_ACU(item) ? { ...item, ...Object.fromEntries(Object.entries(extras).filter(([key]) => !Object.prototype.hasOwnProperty.call(item, key))) } : item;
+  const guidanceRaw = isRecord_ACU(raw.guidance) ? raw.guidance : {};
+  const signals = Array.isArray(guidanceRaw.signals)
+    ? guidanceRaw.signals.map(item => typeof item === 'string' ? { text: item, voice: 'ambient' } : item)
+    : guidanceRaw.signals;
+  return {
+    ...raw,
+    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    clock: {
+      day,
+      slot: typeof clockRaw.slot === 'string' ? clockRaw.slot : '',
+      storyTime: typeof clockRaw.storyTime === 'string' ? clockRaw.storyTime : '',
+      precision: clockRaw.precision,
+      evidenceRefs: clockRaw.evidenceRefs,
+    },
+    seeds: Array.isArray(raw.seeds) ? raw.seeds.map(item => fill(item, { location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision' })) : raw.seeds,
+    actors: Array.isArray(raw.actors) ? raw.actors.map(item => fill(item, { locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null })) : raw.actors,
+    rumors: Array.isArray(raw.rumors) ? raw.rumors : [],
+    player: isRecord_ACU(raw.player) ? raw.player : { location: null, locationUpdatedAtDay: day, regionVisits: [], contact: 'open', evidenceRefs: [] },
+    guidance: { ...guidanceRaw, signals },
+  };
+}
+
+function validatePlayer_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldPlayer_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU('ledger.player 必须是对象', phase, { path: 'ledger.player' });
+  exactKeys_ACU(raw, [...WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU], [], 'ledger.player', phase);
+  if (!Array.isArray(raw.regionVisits) || raw.regionVisits.length > WORLD_PLAYER_REGION_VISITS_CAP_ACU) fail_ACU('ledger.player.regionVisits 容量非法', phase);
+  const regionVisits = raw.regionVisits.map((item, index) => {
+    if (!isRecord_ACU(item)) fail_ACU(`ledger.player.regionVisits[${index}] 必须是对象`, phase);
+    exactKeys_ACU(item, ['region', 'day'], [], `ledger.player.regionVisits[${index}]`, phase);
+    const region = normalizeWorldRegionName_ACU(string_ACU(item.region, `ledger.player.regionVisits[${index}].region`, phase));
+    if (!region) fail_ACU(`ledger.player.regionVisits[${index}].region 必须是非空字符串`, phase);
+    return { region, day: integer_ACU(item.day, `ledger.player.regionVisits[${index}].day`, phase, 1) };
+  });
+  return {
+    location: validateLocationRef_ACU(raw.location, 'ledger.player.location', phase),
+    locationUpdatedAtDay: integer_ACU(raw.locationUpdatedAtDay, 'ledger.player.locationUpdatedAtDay', phase),
+    regionVisits,
+    contact: enum_ACU(raw.contact, WORLD_PLAYER_CONTACTS_ACU, 'ledger.player.contact', phase),
+    evidenceRefs: stringArray_ACU(raw.evidenceRefs, 'ledger.player.evidenceRefs', phase),
+  };
+}
+
+function validateRumors_ACU(raw: unknown, actorIds: ReadonlySet<string>, phase: WorldSimulationErrorPhase_ACU): WorldRumor_ACU[] {
+  if (!Array.isArray(raw) || raw.length > 128) fail_ACU('ledger.rumors 容量非法', phase);
+  const rumors = raw.map((item, index) => {
+    if (!isRecord_ACU(item)) fail_ACU(`ledger.rumors[${index}] 必须是对象`, phase);
+    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, [], `ledger.rumors[${index}]`, phase);
+    const originDay = integer_ACU(item.originDay, `ledger.rumors[${index}].originDay`, phase, 1);
+    const earliestRevealDay = integer_ACU(item.earliestRevealDay, `ledger.rumors[${index}].earliestRevealDay`, phase, 1);
+    if (earliestRevealDay < originDay) fail_ACU(`ledger.rumors[${index}].earliestRevealDay 不能早于 originDay`, phase);
+    const status = enum_ACU(item.status, WORLD_RUMOR_STATUSES_ACU, `ledger.rumors[${index}].status`, phase);
+    const revealedAtDay = nullableInteger_ACU(item.revealedAtDay, `ledger.rumors[${index}].revealedAtDay`, phase, 1);
+    if (status === 'revealed' && revealedAtDay === null) fail_ACU(`ledger.rumors[${index}] revealed 状态必须提供 revealedAtDay`, phase);
+    if (status !== 'revealed' && revealedAtDay !== null) fail_ACU(`ledger.rumors[${index}] 非 revealed 状态不能携带 revealedAtDay`, phase);
+    const relatedActorIds = stringArray_ACU(item.relatedActorIds, `ledger.rumors[${index}].relatedActorIds`, phase);
+    for (const actorId of relatedActorIds) if (!actorIds.has(actorId)) fail_ACU(`ledger.rumors[${index}] 引用了不存在的 actor`, phase, { actorId });
+    const channels = stringArray_ACU(item.channels, `ledger.rumors[${index}].channels`, phase).map((channel, channelIndex) => {
+      const region = normalizeWorldRegionName_ACU(channel);
+      if (!region) fail_ACU(`ledger.rumors[${index}].channels[${channelIndex}] 必须是非空字符串`, phase);
+      return region;
+    });
+    return {
+      id: stableId_ACU(item.id, `ledger.rumors[${index}].id`, phase),
+      fact: string_ACU(item.fact, `ledger.rumors[${index}].fact`, phase),
+      originDay,
+      earliestRevealDay,
+      channels,
+      relatedActorIds,
+      status,
+      revealedAtDay,
+      revision: integer_ACU(item.revision, `ledger.rumors[${index}].revision`, phase),
+    };
+  });
+  uniqueIds_ACU(rumors, 'ledger.rumors', phase);
+  return rumors;
+}
+
 function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['settings'] {
   if (!isRecord_ACU(raw)) fail_ACU('settings 必须是对象', phase, { path: 'settings' });
-  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview'], 'settings', phase);
+  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics'], 'settings', phase);
   if (!isRecord_ACU(raw.agentRunBudget)) fail_ACU('settings.agentRunBudget 必须是对象', phase);
   exactKeys_ACU(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
   const budget = {
@@ -96,9 +236,10 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     exactKeys_ACU(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
     agentApiPresets[key] = { mode: enum_ACU(value.mode, ['current', 'fixed'] as const, `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
   }
-  const agentPrompts = Object.keys(raw.agentPrompts).length === 0
+  const validatedPrompts = Object.keys(raw.agentPrompts).length === 0
     ? buildDefaultWorldSimulationAgentPrompts_ACU()
     : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);
+  const agentPrompts = migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {});
   const readBudget = typeof raw.agentReadTokenBudget === 'string'
     ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU('settings.agentReadTokenBudget 百分比非法', phase))
     : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);
@@ -118,6 +259,22 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     pageCharLimit: integer_ACU(webRaw.pageCharLimit, 'settings.webResearch.pageCharLimit', phase, 500, 20000),
     blockedDomains: string_ACU(webRaw.blockedDomains, 'settings.webResearch.blockedDomains', phase, true),
   };
+  const defaultDynamics = buildDefaultWorldSimulationSettings_ACU().dynamics;
+  let dynamics = defaultDynamics;
+  if (raw.dynamics !== undefined) {
+    if (!isRecord_ACU(raw.dynamics)) {
+      dynamics = defaultDynamics;
+    } else {
+      const rumorTTLDays = Number.isInteger(raw.dynamics.rumorTTLDays) && (raw.dynamics.rumorTTLDays as number) >= 1 && (raw.dynamics.rumorTTLDays as number) <= 3650
+        ? raw.dynamics.rumorTTLDays as number : defaultDynamics.rumorTTLDays;
+      const maxClockAdvanceDays = Number.isInteger(raw.dynamics.maxClockAdvanceDays) && (raw.dynamics.maxClockAdvanceDays as number) >= 0 && (raw.dynamics.maxClockAdvanceDays as number) <= 3650
+        ? raw.dynamics.maxClockAdvanceDays as number : defaultDynamics.maxClockAdvanceDays;
+      const collisionEnforcement = raw.dynamics.collisionEnforcement === 'strict' || raw.dynamics.collisionEnforcement === 'relaxed'
+        ? raw.dynamics.collisionEnforcement : defaultDynamics.collisionEnforcement;
+      const missedSweepEnabled = typeof raw.dynamics.missedSweepEnabled === 'boolean' ? raw.dynamics.missedSweepEnabled : defaultDynamics.missedSweepEnabled;
+      dynamics = { rumorTTLDays, maxClockAdvanceDays, collisionEnforcement, missedSweepEnabled };
+    }
+  }
   return {
     autoTriggerEnabled: boolean_ACU(raw.autoTriggerEnabled, 'settings.autoTriggerEnabled', phase),
     agentHistoryTokenBudget: integer_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', phase, 0, 1000000),
@@ -130,32 +287,49 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     agentApiPresets,
     agentPrompts,
     ...(Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion') ? { promptForceDefaultVersion: string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) } : {}),
+    dynamics,
   };
 }
 
 function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationLedger_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('ledger 必须是对象', phase);
-  exactKeys_ACU(raw, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'], [], 'ledger', phase);
-  if (raw.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU) fail_ACU('ledger.schemaVersion 必须为 1', phase);
-  if (!isRecord_ACU(raw.clock)) fail_ACU('ledger.clock 必须是对象', phase);
-  exactKeys_ACU(raw.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
-  const clock = { storyTime: string_ACU(raw.clock.storyTime, 'ledger.clock.storyTime', phase, true), elapsed: string_ACU(raw.clock.elapsed, 'ledger.clock.elapsed', phase, true), precision: enum_ACU(raw.clock.precision, ['exact', 'approximate', 'unknown'] as const, 'ledger.clock.precision', phase), evidenceRefs: stringArray_ACU(raw.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase) };
-  if (!Array.isArray(raw.dimensions) || raw.dimensions.length > 32) fail_ACU('ledger.dimensions 容量非法', phase);
-  const dimensions = raw.dimensions.map((item, index) => {
+  const normalized = raw.schemaVersion === 1 ? migrateV1Ledger_ACU(raw) : raw;
+  exactKeys_ACU(normalized, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance'], [], 'ledger', phase);
+  if (normalized.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU) fail_ACU(`ledger.schemaVersion 必须为 ${WORLD_LEDGER_SCHEMA_VERSION_ACU}`, phase);
+  if (!isRecord_ACU(normalized.clock)) fail_ACU('ledger.clock 必须是对象', phase);
+  exactKeys_ACU(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
+  const clock = {
+    day: integer_ACU(normalized.clock.day, 'ledger.clock.day', phase, 1),
+    slot: string_ACU(normalized.clock.slot, 'ledger.clock.slot', phase, true),
+    storyTime: string_ACU(normalized.clock.storyTime, 'ledger.clock.storyTime', phase, true),
+    precision: enum_ACU(normalized.clock.precision, ['exact', 'approximate', 'unknown'] as const, 'ledger.clock.precision', phase),
+    evidenceRefs: stringArray_ACU(normalized.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase),
+  };
+  if (!Array.isArray(normalized.dimensions) || normalized.dimensions.length > 32) fail_ACU('ledger.dimensions 容量非法', phase);
+  const dimensions = normalized.dimensions.map((item, index) => {
     if (!isRecord_ACU(item)) fail_ACU(`ledger.dimensions[${index}] 必须是对象`, phase);
     exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
     return { id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase), name: string_ACU(item.name, `ledger.dimensions[${index}].name`, phase), kind: enum_ACU(item.kind, ['pressure', 'growth'] as const, `ledger.dimensions[${index}].kind`, phase), value: integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100), trend: enum_ACU(item.trend, ['rising', 'stable', 'falling'] as const, `ledger.dimensions[${index}].trend`, phase), rationale: string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase), revision: integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase) };
   });
-  if (!Array.isArray(raw.actors) || raw.actors.length > 128) fail_ACU('ledger.actors 容量非法', phase);
-  const actors = raw.actors.map((item, index) => {
+  if (!Array.isArray(normalized.actors) || normalized.actors.length > 128) fail_ACU('ledger.actors 容量非法', phase);
+  const actors = normalized.actors.map((item, index) => {
     if (!isRecord_ACU(item)) fail_ACU(`ledger.actors[${index}] 必须是对象`, phase);
     exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
-    return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
+    const life = enum_ACU(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
+    const diedAtDay = nullableInteger_ACU(item.diedAtDay, `ledger.actors[${index}].diedAtDay`, phase, 1);
+    const deathSummary = nullableString_ACU(item.deathSummary, `ledger.actors[${index}].deathSummary`, phase);
+    if (life === 'dead') {
+      if (diedAtDay === null) fail_ACU(`ledger.actors[${index}] dead 状态必须提供 diedAtDay`, phase);
+      if (!deathSummary) fail_ACU(`ledger.actors[${index}] dead 状态必须提供 deathSummary`, phase);
+    } else if (diedAtDay !== null || deathSummary !== null) {
+      fail_ACU(`ledger.actors[${index}] 非 dead 状态不能携带死亡字段`, phase);
+    }
+    return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), locationRef: validateLocationRef_ACU(item.locationRef, `ledger.actors[${index}].locationRef`, phase), life, diedAtDay, deathSummary, resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
   });
   uniqueIds_ACU(dimensions, 'ledger.dimensions', phase); uniqueIds_ACU(actors, 'ledger.actors', phase);
   const actorIds = new Set(actors.map(item => item.id));
-  if (!Array.isArray(raw.seeds) || raw.seeds.length > 128) fail_ACU('ledger.seeds 容量非法', phase);
-  const seeds = raw.seeds.map((item, index) => {
+  if (!Array.isArray(normalized.seeds) || normalized.seeds.length > 128) fail_ACU('ledger.seeds 容量非法', phase);
+  const seeds = normalized.seeds.map((item, index) => {
     if (!isRecord_ACU(item)) fail_ACU(`ledger.seeds[${index}] 必须是对象`, phase);
     exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
     const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
@@ -164,12 +338,12 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
     const retiredReason = item.retiredReason === null ? null : string_ACU(item.retiredReason, `ledger.seeds[${index}].retiredReason`, phase);
     if (status === 'retired' && !retiredReason) fail_ACU(`ledger.seeds[${index}] 退役时必须提供原因`, phase);
     if (status !== 'retired' && retiredReason !== null) fail_ACU(`ledger.seeds[${index}] 非退役状态不能携带退役原因`, phase);
-    return { id: stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase), title: string_ACU(item.title, `ledger.seeds[${index}].title`, phase), status, level: integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100), catalyst: string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.seeds[${index}].visibility`, phase), actorIds: linkedActors, evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase), retiredReason, revision: integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase) };
+    return { id: stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase), title: string_ACU(item.title, `ledger.seeds[${index}].title`, phase), status, level: integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100), catalyst: string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.seeds[${index}].visibility`, phase), actorIds: linkedActors, location: validateLocationRef_ACU(item.location, `ledger.seeds[${index}].location`, phase), expiresAtDay: nullableInteger_ACU(item.expiresAtDay, `ledger.seeds[${index}].expiresAtDay`, phase, 1), missedOutcome: nullableString_ACU(item.missedOutcome, `ledger.seeds[${index}].missedOutcome`, phase), exposePolicy: enum_ACU(item.exposePolicy, WORLD_SEED_EXPOSE_POLICIES_ACU, `ledger.seeds[${index}].exposePolicy`, phase), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase), retiredReason, revision: integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase) };
   });
   uniqueIds_ACU(seeds, 'ledger.seeds', phase);
-  if (!Array.isArray(raw.chronicle) || raw.chronicle.length > 256) fail_ACU('ledger.chronicle 容量非法', phase);
+  if (!Array.isArray(normalized.chronicle) || normalized.chronicle.length > 256) fail_ACU('ledger.chronicle 容量非法', phase);
   const knownIds = new Set([...dimensions.map(item => item.id), ...actors.map(item => item.id), ...seeds.map(item => item.id)]);
-  const chronicle = raw.chronicle.map((item, index) => {
+  const chronicle = normalized.chronicle.map((item, index) => {
     if (!isRecord_ACU(item)) fail_ACU(`ledger.chronicle[${index}] 必须是对象`, phase);
     exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
     const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
@@ -177,9 +351,11 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
     return { id: stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase), at: string_ACU(item.at, `ledger.chronicle[${index}].at`, phase), summary: string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase), relatedIds: related, evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase) };
   });
   uniqueIds_ACU(chronicle, 'ledger.chronicle', phase);
-  if (!isRecord_ACU(raw.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
-  exactKeys_ACU(raw.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
-  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(raw.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, guidance: { signals: stringArray_ACU(raw.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(raw.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(raw.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) } };
+  const rumors = validateRumors_ACU(normalized.rumors, actorIds, phase);
+  const player = validatePlayer_ACU(normalized.player, phase);
+  if (!isRecord_ACU(normalized.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
+  exactKeys_ACU(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
+  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) } };
 }
 
 function validatePlan_ACU(raw: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['stages'][number]['revisions'][number]['plan'] {
@@ -480,86 +656,130 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
   };
   const phase: WorldSimulationErrorPhase_ACU = 'agent_persist';
   if (!isRecord_ACU(raw)) return ['ledger 必须是对象'];
-  probe(() => exactKeys_ACU(raw, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'], [], 'ledger', phase));
-  probe(() => { if (raw.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU) fail_ACU('ledger.schemaVersion 必须为 1', phase); });
-  probe(() => { integer_ACU(raw.revision, 'ledger.revision', phase); });
+  const normalized = raw.schemaVersion === 1 ? migrateV1Ledger_ACU(raw) : raw;
+  if (!isRecord_ACU(normalized)) return ['ledger 必须是对象'];
   probe(() => {
-    if (!isRecord_ACU(raw.clock)) fail_ACU('ledger.clock 必须是对象', phase);
-    exactKeys_ACU(raw.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
-    string_ACU(raw.clock.storyTime, 'ledger.clock.storyTime', phase, true);
-    string_ACU(raw.clock.elapsed, 'ledger.clock.elapsed', phase, true);
-    enum_ACU(raw.clock.precision, ['exact', 'approximate', 'unknown'] as const, 'ledger.clock.precision', phase);
-    stringArray_ACU(raw.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase);
+    exactKeys_ACU(normalized, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance'], [], 'ledger', phase);
+    if (normalized.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU) fail_ACU(`ledger.schemaVersion 必须为 ${WORLD_LEDGER_SCHEMA_VERSION_ACU}`, phase);
+    integer_ACU(normalized.revision, 'ledger.revision', phase);
   });
-  if (Array.isArray(raw.dimensions)) raw.dimensions.forEach((item, index) => probe(() => {
-    if (!isRecord_ACU(item)) fail_ACU(`ledger.dimensions[${index}] 必须是对象`, phase);
-    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
-    stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase);
-    string_ACU(item.name, `ledger.dimensions[${index}].name`, phase);
-    enum_ACU(item.kind, ['pressure', 'growth'] as const, `ledger.dimensions[${index}].kind`, phase);
-    integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100);
-    enum_ACU(item.trend, ['rising', 'stable', 'falling'] as const, `ledger.dimensions[${index}].trend`, phase);
-    string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true);
-    stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase);
-    integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase);
-  }));
-  else probe(() => fail_ACU('ledger.dimensions 必须是数组', phase));
-  if (Array.isArray(raw.actors)) raw.actors.forEach((item, index) => probe(() => {
-    if (!isRecord_ACU(item)) fail_ACU(`ledger.actors[${index}] 必须是对象`, phase);
-    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
-    stableId_ACU(item.id, `ledger.actors[${index}].id`, phase);
-    string_ACU(item.name, `ledger.actors[${index}].name`, phase);
-    stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase);
-    string_ACU(item.location, `ledger.actors[${index}].location`, phase, true);
-    stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase);
-    stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase);
-    stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase);
-    stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase);
-    stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase);
-    enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase);
-    integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase);
-  }));
-  else probe(() => fail_ACU('ledger.actors 必须是数组', phase));
-  const actorIds = new Set<string>();
-  if (Array.isArray(raw.actors)) for (const item of raw.actors) if (isRecord_ACU(item) && typeof item.id === 'string') actorIds.add(item.id);
-  if (Array.isArray(raw.seeds)) raw.seeds.forEach((item, index) => probe(() => {
-    if (!isRecord_ACU(item)) fail_ACU(`ledger.seeds[${index}] 必须是对象`, phase);
-    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
-    const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
-    for (const actorId of linkedActors) if (!actorIds.has(actorId)) fail_ACU(`ledger.seeds[${index}] 引用了不存在的 actor`, phase, { actorId });
-    const status = enum_ACU(item.status, ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'] as const, `ledger.seeds[${index}].status`, phase);
-    const retiredReason = item.retiredReason === null ? null : string_ACU(item.retiredReason, `ledger.seeds[${index}].retiredReason`, phase);
-    if (status === 'retired' && !retiredReason) fail_ACU(`ledger.seeds[${index}] 退役时必须提供原因`, phase);
-    if (status !== 'retired' && retiredReason !== null) fail_ACU(`ledger.seeds[${index}] 非退役状态不能携带退役原因`, phase);
-    stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase);
-    string_ACU(item.title, `ledger.seeds[${index}].title`, phase);
-    integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100);
-    string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true);
-    enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.seeds[${index}].visibility`, phase);
-    stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase);
-    integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase);
-  }));
-  else probe(() => fail_ACU('ledger.seeds 必须是数组', phase));
-  const knownIds = new Set<string>(actorIds);
-  if (Array.isArray(raw.dimensions)) for (const item of raw.dimensions) if (isRecord_ACU(item) && typeof item.id === 'string') knownIds.add(item.id);
-  if (Array.isArray(raw.seeds)) for (const item of raw.seeds) if (isRecord_ACU(item) && typeof item.id === 'string') knownIds.add(item.id);
-  if (Array.isArray(raw.chronicle)) raw.chronicle.forEach((item, index) => probe(() => {
-    if (!isRecord_ACU(item)) fail_ACU(`ledger.chronicle[${index}] 必须是对象`, phase);
-    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
-    const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
-    for (const relatedId of related) if (!knownIds.has(relatedId)) fail_ACU(`ledger.chronicle[${index}] 引用了不存在的对象`, phase, { relatedId });
-    stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase);
-    string_ACU(item.at, `ledger.chronicle[${index}].at`, phase);
-    string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase);
-    stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase);
-  }));
-  else probe(() => fail_ACU('ledger.chronicle 必须是数组', phase));
   probe(() => {
-    if (!isRecord_ACU(raw.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
-    exactKeys_ACU(raw.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
-    stringArray_ACU(raw.guidance.signals, 'ledger.guidance.signals', phase);
-    stringArray_ACU(raw.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase);
-    stringArray_ACU(raw.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
+    if (!isRecord_ACU(normalized.clock)) fail_ACU('ledger.clock 必须是对象', phase);
+    exactKeys_ACU(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
+    integer_ACU(normalized.clock.day, 'ledger.clock.day', phase, 1);
+    string_ACU(normalized.clock.slot, 'ledger.clock.slot', phase, true);
+    string_ACU(normalized.clock.storyTime, 'ledger.clock.storyTime', phase, true);
+    enum_ACU(normalized.clock.precision, ['exact', 'approximate', 'unknown'] as const, 'ledger.clock.precision', phase);
+    stringArray_ACU(normalized.clock.evidenceRefs, 'ledger.clock.evidenceRefs', phase);
+  });
+  const dimensions: Array<{ id: string }> = [];
+  if (!Array.isArray(normalized.dimensions) || normalized.dimensions.length > 32) probe(() => fail_ACU('ledger.dimensions 容量非法', phase));
+  else {
+    for (const [index, item] of normalized.dimensions.entries()) {
+      probe(() => {
+        if (!isRecord_ACU(item)) fail_ACU(`ledger.dimensions[${index}] 必须是对象`, phase);
+        exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
+        dimensions.push({ id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase) });
+        string_ACU(item.name, `ledger.dimensions[${index}].name`, phase);
+        enum_ACU(item.kind, ['pressure', 'growth'] as const, `ledger.dimensions[${index}].kind`, phase);
+        integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100);
+        enum_ACU(item.trend, ['rising', 'stable', 'falling'] as const, `ledger.dimensions[${index}].trend`, phase);
+        string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true);
+        stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase);
+        integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase);
+      });
+    }
+    probe(() => uniqueIds_ACU(dimensions, 'ledger.dimensions', phase));
+  }
+  const actors: Array<{ id: string }> = [];
+  const actorIds = new Set<string>();
+  if (!Array.isArray(normalized.actors) || normalized.actors.length > 128) probe(() => fail_ACU('ledger.actors 容量非法', phase));
+  else {
+    for (const [index, item] of normalized.actors.entries()) {
+      probe(() => {
+        if (!isRecord_ACU(item)) fail_ACU(`ledger.actors[${index}] 必须是对象`, phase);
+        exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
+        const life = enum_ACU(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
+        const diedAtDay = nullableInteger_ACU(item.diedAtDay, `ledger.actors[${index}].diedAtDay`, phase, 1);
+        const deathSummary = nullableString_ACU(item.deathSummary, `ledger.actors[${index}].deathSummary`, phase);
+        if (life === 'dead') {
+          if (diedAtDay === null) fail_ACU(`ledger.actors[${index}] dead 状态必须提供 diedAtDay`, phase);
+          if (!deathSummary) fail_ACU(`ledger.actors[${index}] dead 状态必须提供 deathSummary`, phase);
+        } else if (diedAtDay !== null || deathSummary !== null) {
+          fail_ACU(`ledger.actors[${index}] 非 dead 状态不能携带死亡字段`, phase);
+        }
+        const id = stableId_ACU(item.id, `ledger.actors[${index}].id`, phase);
+        string_ACU(item.name, `ledger.actors[${index}].name`, phase);
+        stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase);
+        string_ACU(item.location, `ledger.actors[${index}].location`, phase, true);
+        validateLocationRef_ACU(item.locationRef, `ledger.actors[${index}].locationRef`, phase);
+        stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase);
+        stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase);
+        stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase);
+        stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase);
+        stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase);
+        enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase);
+        integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase);
+        actors.push({ id });
+        actorIds.add(id);
+      });
+    }
+    probe(() => uniqueIds_ACU(actors, 'ledger.actors', phase));
+  }
+  const seeds: Array<{ id: string }> = [];
+  if (!Array.isArray(normalized.seeds) || normalized.seeds.length > 128) probe(() => fail_ACU('ledger.seeds 容量非法', phase));
+  else {
+    for (const [index, item] of normalized.seeds.entries()) {
+      probe(() => {
+        if (!isRecord_ACU(item)) fail_ACU(`ledger.seeds[${index}] 必须是对象`, phase);
+        exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
+        const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
+        for (const actorId of linkedActors) if (!actorIds.has(actorId)) fail_ACU(`ledger.seeds[${index}] 引用了不存在的 actor`, phase, { actorId });
+        const status = enum_ACU(item.status, ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'] as const, `ledger.seeds[${index}].status`, phase);
+        const retiredReason = item.retiredReason === null ? null : string_ACU(item.retiredReason, `ledger.seeds[${index}].retiredReason`, phase);
+        if (status === 'retired' && !retiredReason) fail_ACU(`ledger.seeds[${index}] 退役时必须提供原因`, phase);
+        if (status !== 'retired' && retiredReason !== null) fail_ACU(`ledger.seeds[${index}] 非退役状态不能携带退役原因`, phase);
+        seeds.push({ id: stableId_ACU(item.id, `ledger.seeds[${index}].id`, phase) });
+        string_ACU(item.title, `ledger.seeds[${index}].title`, phase);
+        integer_ACU(item.level, `ledger.seeds[${index}].level`, phase, 0, 100);
+        string_ACU(item.catalyst, `ledger.seeds[${index}].catalyst`, phase, true);
+        enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.seeds[${index}].visibility`, phase);
+        validateLocationRef_ACU(item.location, `ledger.seeds[${index}].location`, phase);
+        nullableInteger_ACU(item.expiresAtDay, `ledger.seeds[${index}].expiresAtDay`, phase, 1);
+        nullableString_ACU(item.missedOutcome, `ledger.seeds[${index}].missedOutcome`, phase);
+        enum_ACU(item.exposePolicy, WORLD_SEED_EXPOSE_POLICIES_ACU, `ledger.seeds[${index}].exposePolicy`, phase);
+        stringArray_ACU(item.evidenceRefs, `ledger.seeds[${index}].evidenceRefs`, phase);
+        integer_ACU(item.revision, `ledger.seeds[${index}].revision`, phase);
+      });
+    }
+    probe(() => uniqueIds_ACU(seeds, 'ledger.seeds', phase));
+  }
+  const chronicle: Array<{ id: string }> = [];
+  const knownIds = new Set([...dimensions.map(item => item.id), ...actors.map(item => item.id), ...seeds.map(item => item.id)]);
+  if (!Array.isArray(normalized.chronicle) || normalized.chronicle.length > 256) probe(() => fail_ACU('ledger.chronicle 容量非法', phase));
+  else {
+    for (const [index, item] of normalized.chronicle.entries()) {
+      probe(() => {
+        if (!isRecord_ACU(item)) fail_ACU(`ledger.chronicle[${index}] 必须是对象`, phase);
+        exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
+        const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
+        for (const relatedId of related) if (!knownIds.has(relatedId)) fail_ACU(`ledger.chronicle[${index}] 引用了不存在的对象`, phase, { relatedId });
+        chronicle.push({ id: stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase) });
+        string_ACU(item.at, `ledger.chronicle[${index}].at`, phase);
+        string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase);
+        stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase);
+      });
+    }
+    probe(() => uniqueIds_ACU(chronicle, 'ledger.chronicle', phase));
+  }
+  probe(() => { validateRumors_ACU(normalized.rumors, actorIds, phase); });
+  probe(() => { validatePlayer_ACU(normalized.player, phase); });
+  probe(() => {
+    if (!isRecord_ACU(normalized.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
+    exactKeys_ACU(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
+    validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase);
+    stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase);
+    stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
   });
   return violations;
 }

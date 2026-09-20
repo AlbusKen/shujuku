@@ -9,7 +9,7 @@ import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTes
 const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) };
 const context = () => {
   const registry = createWorldSimulationEvidenceRegistry_ACU('stage');
-  return { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '', worldState: {}, anchorMessage: '', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
+  return { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '', worldState: {}, anchorMessage: '', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], worldCollisions: { playerRegion: null, playerContact: 'open' as const, secludedNote: null, collidedSeeds: [], ripeRumors: [] }, evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
 };
 const plan = { schemaVersion: 1 as const, title: '阶段', objective: '推进世界', impactScope: ['world'], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock' as const], convergenceConditions: ['完成'], blockingConditions: [], completedSteps: [], nextStep: '执行' };
 
@@ -67,7 +67,7 @@ describe('世界推演阶段 runtime', () => {
     expect(retryMessages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('MISSING_FIELD $.plan') });
     expect(retryMessages.at(-1)?.content).toContain('顶层必须且只能包含 action、summary、plan');
     expect(retryMessages.at(-1)?.content).toContain('schemaVersion、title、objective、impactScope');
-    expect(retryMessages.at(-1)?.content).toContain('expectedLedgerChanges 只能使用：clock | dimensions | seeds | actors | chronicle | guidance');
+    expect(retryMessages.at(-1)?.content).toContain('expectedLedgerChanges 只能使用：clock | dimensions | seeds | actors | chronicle | guidance | rumors | player');
     expect(retryMessages.at(-1)?.content).toContain('"action":"plan"');
     expect(retryMessages.at(-1)?.content).toContain('WORLD_SIMULATION_ENGINE_SEAM');
     const entries = readWorldSimulationSessionLog_ACU('chat-planner');

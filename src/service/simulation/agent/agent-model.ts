@@ -1,4 +1,4 @@
-import type { WorldSimulationLedger_ACU } from '../model';
+import type { WorldCollisionReport_ACU, WorldSimulationLedger_ACU } from '../model';
 
 export const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
 export const WORLD_SIMULATION_CONVERSATION_FIELD_ACU = '_qrf_world_simulation_agent_chat';
@@ -96,7 +96,7 @@ export interface WorldSimulationReviewerResult_ACU {
   findings: WorldSimulationReviewerFinding_ACU[];
   acceptedCandidateIds: string[];
   /** verdict 为 accept 时可选：把已接受幕后事实压缩为角色可感知信号，不新增事实。 */
-  guidance?: { signals: string[]; excludedFacts: string[] };
+  guidance?: { signals: import('../model').WorldGuidanceSignal_ACU[]; excludedFacts: string[] };
 }
 export interface WorldSimulationSubagentOutcome_ACU {
   agentName: string;
@@ -118,6 +118,7 @@ export interface WorldSimulationCommitCandidate_ACU {
   acceptedCandidates: WorldSimulationCandidate_ACU[];
   evidenceRefs: string[];
   reviewer: WorldSimulationReviewerResult_ACU;
+  collisionReport?: WorldCollisionReport_ACU;
 }
 export type WorldSimulationMainLoopResult_ACU =
   | { outcome: 'commit'; summary: string; commitCandidate: WorldSimulationCommitCandidate_ACU; outcomes: WorldSimulationSubagentOutcome_ACU[] }

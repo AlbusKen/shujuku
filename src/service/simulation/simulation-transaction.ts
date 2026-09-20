@@ -1,9 +1,10 @@
 import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
-import { WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationLedger_ACU } from './model';
+import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
+import { WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
 import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 
-const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance'] as const;
+const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 type Module_ACU = typeof MODULES_ACU[number];
 type Record_ACU = Record<string, unknown>;
 
@@ -21,6 +22,10 @@ function clone_ACU<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as
 function refs_ACU(value: unknown, path: string): string[] {
   if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item.trim())) fail_ACU(`${path} 必须是字符串数组且元素不能为空`);
   return [...value] as string[];
+}
+
+function resolveDynamics_ACU(settings?: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU['dynamics'] {
+  return settings?.dynamics ?? buildDefaultWorldSimulationSettings_ACU().dynamics;
 }
 
 function applyUpserts_ACU<T extends { id: string; revision: number }>(
@@ -97,19 +102,46 @@ function collectEvidenceRefs_ACU(value: unknown, output: string[] = []): string[
   return output;
 }
 
-function applyClock_ACU(current: WorldSimulationLedger_ACU['clock'], raw: unknown): WorldSimulationLedger_ACU['clock'] {
+function applyClock_ACU(current: WorldSimulationLedger_ACU['clock'], raw: unknown, dynamics: WorldSimulationSettings_ACU['dynamics']): WorldSimulationLedger_ACU['clock'] {
   if (!isRecord_ACU(raw)) fail_ACU('patch.clock 必须是对象');
-  exactKeys_ACU(raw, ['storyTime', 'elapsed', 'precision', 'evidenceRefs'], 'patch.clock');
+  exactKeys_ACU(raw, ['days', 'storyTime', 'slot', 'evidenceRefs'], 'patch.clock');
   if (!Object.keys(raw).length) fail_ACU('patch.clock 不能为空');
+  let days = 0;
+  if (raw.days !== undefined) {
+    if (!Number.isInteger(raw.days) || (raw.days as number) < 0) fail_ACU('patch.clock.days 必须是非负整数（clockAdvance 只允许单调向前推进，禁止直接写 day）');
+    days = raw.days as number;
+  }
+  if (days > dynamics.maxClockAdvanceDays) {
+    const advanceRefs = raw.evidenceRefs;
+    if (!Array.isArray(advanceRefs) || !advanceRefs.length || advanceRefs.some(item => typeof item !== 'string' || !item.trim())) {
+      fail_ACU(`patch.clock.days 超过 maxClockAdvanceDays=${dynamics.maxClockAdvanceDays}，必须提供非空 evidenceRefs`);
+    }
+  }
   return {
+    day: current.day + days,
+    slot: raw.slot === undefined ? current.slot
+      : typeof raw.slot === 'string' ? raw.slot : fail_ACU('patch.clock.slot 必须是字符串'),
     storyTime: raw.storyTime === undefined ? current.storyTime
       : typeof raw.storyTime === 'string' ? raw.storyTime : fail_ACU('patch.clock.storyTime 必须是字符串'),
-    elapsed: raw.elapsed === undefined ? current.elapsed
-      : typeof raw.elapsed === 'string' ? raw.elapsed : fail_ACU('patch.clock.elapsed 必须是字符串'),
-    precision: raw.precision === undefined ? current.precision
-      : ['exact', 'approximate', 'unknown'].includes(String(raw.precision)) ? raw.precision as WorldSimulationLedger_ACU['clock']['precision'] : fail_ACU('patch.clock.precision 非法'),
+    precision: current.precision,
     evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.clock.evidenceRefs'),
   };
+}
+
+function guidanceSignals_ACU(value: unknown, path: string): WorldGuidanceSignal_ACU[] {
+  if (!Array.isArray(value)) fail_ACU(`${path} 必须是数组`);
+  return value.map((item, index) => {
+    if (!isRecord_ACU(item)) fail_ACU(`${path}[${index}] 必须是对象`);
+    exactKeys_ACU(item, ['text', 'voice', 'sourceId'], `${path}[${index}]`);
+    if (typeof item.text !== 'string' || !item.text.trim()) fail_ACU(`${path}[${index}].text 必须是非空字符串`);
+    if (!(WORLD_GUIDANCE_SIGNAL_VOICES_ACU as readonly string[]).includes(String(item.voice))) fail_ACU(`${path}[${index}].voice 非法`, { actual: item.voice });
+    const signal: WorldGuidanceSignal_ACU = { text: item.text, voice: item.voice as WorldGuidanceSignal_ACU['voice'] };
+    if (item.sourceId !== undefined) {
+      if (typeof item.sourceId !== 'string' || !item.sourceId.trim()) fail_ACU(`${path}[${index}].sourceId 必须是非空字符串`);
+      signal.sourceId = item.sourceId;
+    }
+    return signal;
+  });
 }
 
 function applyGuidance_ACU(current: WorldSimulationLedger_ACU['guidance'], raw: unknown): WorldSimulationLedger_ACU['guidance'] {
@@ -117,10 +149,56 @@ function applyGuidance_ACU(current: WorldSimulationLedger_ACU['guidance'], raw: 
   exactKeys_ACU(raw, ['signals', 'excludedFacts', 'evidenceRefs'], 'patch.guidance');
   if (!Object.keys(raw).length) fail_ACU('patch.guidance 不能为空');
   return {
-    signals: raw.signals === undefined ? [...current.signals] : refs_ACU(raw.signals, 'patch.guidance.signals'),
+    signals: raw.signals === undefined ? [...current.signals] : guidanceSignals_ACU(raw.signals, 'patch.guidance.signals'),
     excludedFacts: raw.excludedFacts === undefined ? [...current.excludedFacts] : refs_ACU(raw.excludedFacts, 'patch.guidance.excludedFacts'),
     evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.guidance.evidenceRefs'),
   };
+}
+
+function applyPlayer_ACU(current: WorldSimulationLedger_ACU['player'], raw: unknown): WorldSimulationLedger_ACU['player'] {
+  if (!isRecord_ACU(raw)) fail_ACU('patch.player 必须是对象');
+  exactKeys_ACU(raw, ['location', 'contact', 'evidenceRefs'], 'patch.player');
+  if (!Object.keys(raw).length) fail_ACU('patch.player 不能为空');
+  let location: WorldSimulationLedger_ACU['player']['location'] = current.location ? { ...current.location } : null;
+  if (raw.location !== undefined) {
+    if (raw.location === null) {
+      location = null;
+    } else {
+      if (!isRecord_ACU(raw.location)) fail_ACU('patch.player.location 必须是对象或 null');
+      exactKeys_ACU(raw.location, ['region', 'place'], 'patch.player.location');
+      if (typeof raw.location.region !== 'string' || !raw.location.region.trim()) fail_ACU('patch.player.location.region 必须是非空字符串');
+      const nextLocation: NonNullable<WorldSimulationLedger_ACU['player']['location']> = { region: raw.location.region };
+      if (raw.location.place !== undefined) {
+        if (typeof raw.location.place !== 'string') fail_ACU('patch.player.location.place 必须是字符串');
+        nextLocation.place = raw.location.place;
+      }
+      location = nextLocation;
+    }
+  }
+  return {
+    location,
+    locationUpdatedAtDay: current.locationUpdatedAtDay,
+    regionVisits: clone_ACU(current.regionVisits),
+    contact: raw.contact === undefined ? current.contact
+      : (WORLD_PLAYER_CONTACTS_ACU as readonly string[]).includes(String(raw.contact)) ? raw.contact as WorldSimulationLedger_ACU['player']['contact'] : fail_ACU('patch.player.contact 非法'),
+    evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.player.evidenceRefs'),
+  };
+}
+
+function checkCrossField_ACU(next: WorldSimulationLedger_ACU, onViolation?: (message: string, details?: Record_ACU) => void): void {
+  const reject = (message: string, details?: Record_ACU): void => {
+    if (onViolation) onViolation(message, details);
+    else fail_ACU(message, details);
+  };
+  for (const rumor of next.rumors) {
+    if (rumor.earliestRevealDay < rumor.originDay) reject('rumors 条目 earliestRevealDay 必须 >= originDay', { id: rumor.id, originDay: rumor.originDay, earliestRevealDay: rumor.earliestRevealDay });
+    if (rumor.status === 'revealed' && !Number.isInteger(rumor.revealedAtDay)) reject('rumors 条目 status=revealed 必须携带整数 revealedAtDay', { id: rumor.id });
+  }
+  for (const actor of next.actors) {
+    if (actor.life !== 'dead') continue;
+    const companion = next.rumors.find(rumor => rumor.relatedActorIds.includes(actor.id) && rumor.channels.length > 0 && (actor.diedAtDay === null || rumor.earliestRevealDay >= actor.diedAtDay));
+    if (!companion) reject('actors 条目 life=dead 缺少伴随 rumor（relatedActorIds 含该 actor、channels 非空、earliestRevealDay >= diedAtDay）', { id: actor.id, diedAtDay: actor.diedAtDay });
+  }
 }
 
 function applyChronicle_ACU(current: WorldSimulationLedger_ACU['chronicle'], raw: unknown): WorldSimulationLedger_ACU['chronicle'] {
@@ -134,7 +212,9 @@ export function applyWorldSimulationCandidates_ACU(
   base: WorldSimulationLedger_ACU,
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorizedEvidenceRefs: ReadonlySet<string>,
+  settings?: WorldSimulationSettings_ACU,
 ): WorldSimulationLedger_ACU {
+  const dynamics = resolveDynamics_ACU(settings);
   const validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
   if (!candidates.length) fail_ACU('commit 必须包含至少一个候选');
   const candidateIds = new Set<string>();
@@ -156,15 +236,18 @@ export function applyWorldSimulationCandidates_ACU(
     for (const [module, patch] of Object.entries(candidate.patch)) {
       if (!(MODULES_ACU as readonly string[]).includes(module) || !writable.has(module)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
       switch (module as Module_ACU) {
-        case 'clock': next.clock = applyClock_ACU(next.clock, patch); break;
+        case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
         case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions); break;
         case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds); break;
         case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors); break;
         case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
         case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
+        case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors); break;
+        case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
       }
     }
   }
+  checkCrossField_ACU(next);
   next.revision = validatedBase.revision + 1;
   return validateWorldSimulationLedger_ACU(next, 'agent_persist');
 }
@@ -182,7 +265,9 @@ export function preflightWorldSimulationCandidates_ACU(
   base: WorldSimulationLedger_ACU,
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorizedEvidenceRefs: ReadonlySet<string>,
+  settings?: WorldSimulationSettings_ACU,
 ): WorldSimulationCandidateViolation_ACU[] {
+  const dynamics = resolveDynamics_ACU(settings);
   const violations: WorldSimulationCandidateViolation_ACU[] = [];
   let validatedBase: WorldSimulationLedger_ACU;
   try {
@@ -237,12 +322,14 @@ export function preflightWorldSimulationCandidates_ACU(
       };
       try {
         switch (module as Module_ACU) {
-          case 'clock': next.clock = applyClock_ACU(next.clock, patch); break;
+          case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
           case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, collectUpsert); break;
           case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, collectUpsert); break;
           case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, collectUpsert); break;
           case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
           case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
+          case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, collectUpsert); break;
+          case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
         }
       } catch (error) {
         push(module, `$.patch.${module}`, error instanceof Error ? error.message : String(error));
@@ -250,6 +337,7 @@ export function preflightWorldSimulationCandidates_ACU(
     }
   }
   if (!violations.length) {
+    checkCrossField_ACU(next, (message, details) => violations.push({ candidateId: '', agentName: '', module: '', path: '$.patch', message, details }));
     next.revision = validatedBase.revision + 1;
     for (const message of collectWorldSimulationLedgerViolations_ACU(next)) {
       violations.push({ candidateId: '', agentName: '', module: '', path: '$', message });

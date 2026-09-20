@@ -1,5 +1,5 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
-import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldSimulationLedger_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
+import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldCollisionReport_ACU, type WorldSimulationLedger_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
 import { applyWorldSimulationCandidates_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
@@ -362,7 +362,7 @@ export class WorldSimulationMainLoop_ACU {
           perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
           if (outcome.candidate) {
             const authorized = new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
-            const violations = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState as WorldSimulationLedger_ACU, [outcome.candidate], authorized);
+            const violations = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState as WorldSimulationLedger_ACU, [outcome.candidate], authorized, input.settings);
             if (violations.length) {
               const detail = violations.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
               outcome = { agentName: outcome.agentName, status: 'failed', summary: `\u5019\u9009\u9884\u68c0\u5931\u8d25\uff1a${detail}`, evidenceRefs: outcome.evidenceRefs, uncertainties: [], reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' };
@@ -449,7 +449,7 @@ export class WorldSimulationMainLoop_ACU {
       const guidanceCandidate = reviewer.guidance ? {
         candidateId: `candidate:guidance:${sha256HexSync_ACU(JSON.stringify([reviewer.guidance, action.summary])).slice(0, 24)}`,
         agentName: 'causality-reviewer',
-        patch: { guidance: { signals: reviewer.guidance.signals, excludedFacts: reviewer.guidance.excludedFacts, evidenceRefs: causalEvidenceRefs } },
+        patch: { guidance: { signals: reviewer.guidance.signals.map(item => typeof item === 'string' ? { text: item, voice: 'ambient' as const } : item), excludedFacts: reviewer.guidance.excludedFacts, evidenceRefs: causalEvidenceRefs } },
         summary: '审核员压缩的可感知 guidance',
         evidenceRefs: causalEvidenceRefs,
         uncertainties: [] as string[],
@@ -461,6 +461,7 @@ export class WorldSimulationMainLoop_ACU {
           input.promptContext.worldState as WorldSimulationLedger_ACU,
           finalCandidates,
           new Set(causalEvidenceRefs),
+          input.settings,
         );
       } catch (error) {
         const message = compact_ACU(error);
@@ -474,7 +475,7 @@ export class WorldSimulationMainLoop_ACU {
         continue;
       }
       await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-      const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: causalEvidenceRefs, reviewer };
+      const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: causalEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions as WorldCollisionReport_ACU };
       const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}${guidanceCandidate ? '+guidance' : ''}）`, detail: action.summary, agentName: director });
       await persistEntry(completedId, 'run-completed-commit');
       return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };

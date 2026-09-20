@@ -1,3 +1,11 @@
+import {
+  assertCollisionFulfillment_ACU,
+  filterUnreachableRumorSignals_ACU,
+  maintainWorldPlayer_ACU,
+  refreshWorldRumors_ACU,
+  sweepWorldLedger_ACU,
+} from './world-dynamics';
+
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
@@ -16,7 +24,7 @@ import {
   type WorldSimulationConversationFloorRecord_ACU,
   type WorldSimulationMaterialsSnapshot_ACU,
 } from './agent/agent-model';
-import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU } from './model';
+import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationTimelineEntry_ACU } from './model';
 import { applyWorldSimulationProjection_ACU, buildWorldSimulationProjection_ACU, readWorldSimulationMessageContent_ACU, writeWorldSimulationActiveSwipeContent_ACU } from './simulation-projection';
 import { applyWorldSimulationCandidates_ACU } from './simulation-transaction';
 import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
@@ -149,6 +157,7 @@ function completedEnvelope_ACU(
   envelope: WorldSimulationEnvelope_ACU,
   input: CommitInput_ACU,
   ledger: WorldSimulationEnvelope_ACU['ledger'],
+  extraTimeline: WorldSimulationTimelineEntry_ACU[] = [],
 ): WorldSimulationEnvelope_ACU {
   const next: WorldSimulationEnvelope_ACU = {
     ...envelope,
@@ -163,7 +172,7 @@ function completedEnvelope_ACU(
     stages: envelope.stages.map(stage => stage.stageId === input.identity.stageId
       ? { ...stage, status: 'completed' as const }
       : stage),
-    timeline: [...envelope.timeline, {
+    timeline: [...envelope.timeline, ...extraTimeline, {
       id: input.timelineId,
       at: input.completedAt,
       kind: 'committed' as const,
@@ -198,11 +207,36 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
   const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
   assertRun_ACU(envelope, input);
-  const ledger = applyWorldSimulationCandidates_ACU(
+  let ledger = applyWorldSimulationCandidates_ACU(
     envelope.ledger,
     input.commitCandidate.acceptedCandidates,
     new Set(input.commitCandidate.evidenceRefs),
+    envelope.settings,
   );
+  ledger = maintainWorldPlayer_ACU(ledger, envelope.ledger.player);
+  const sweep = sweepWorldLedger_ACU(ledger, envelope.settings);
+  ledger = sweep.ledger;
+  const extraTimeline: WorldSimulationTimelineEntry_ACU[] = [];
+  if (sweep.sweptSeedIds.length) extraTimeline.push({
+    id: `${input.timelineId}:swept`, at: input.completedAt, kind: 'swept',
+    taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,
+    message: sweep.sweptSeedIds.join(','),
+  });
+  const filtered = filterUnreachableRumorSignals_ACU(ledger.guidance, ledger);
+  ledger = { ...ledger, guidance: filtered.guidance };
+  ledger = refreshWorldRumors_ACU(ledger, ledger.guidance.signals.flatMap(signal => signal.voice === 'rumor' && signal.sourceId ? [signal.sourceId] : []), envelope.settings);
+  const collisionReport = input.commitCandidate.collisionReport;
+  if (collisionReport) {
+    const violations = assertCollisionFulfillment_ACU(collisionReport, ledger.guidance, ledger);
+    if (violations.length && envelope.settings.dynamics.collisionEnforcement === 'strict') {
+      reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `碰撞后验失败：${violations.join('；')}`, { violations });
+    }
+    if (violations.length) extraTimeline.push({
+      id: `${input.timelineId}:collision`, at: input.completedAt, kind: 'failed',
+      taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,
+      message: violations.join('；'), errorCode: 'WORLD_SIMULATION_SNAPSHOT_INVALID',
+    });
+  }
   const projection = buildWorldSimulationProjection_ACU(ledger);
   const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
   const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
@@ -210,7 +244,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     ...currentAnchor,
     contentDigest: sha256HexSync_ACU(newContent),
   };
-  const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger);
+  const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline);
   const materials: WorldSimulationMaterialsSnapshot_ACU = {
     schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
     ledgerRevision: ledger.revision,

@@ -7,6 +7,7 @@ import {
   resolveCurrentWorldSimulationAnchor_ACU,
   resolveWorldSimulationAnchor_ACU,
   validateWorldSimulationEnvelope_ACU,
+  validateWorldSimulationLedger_ACU,
   writeWorldSimulationBucketEntry_ACU,
 } from '../../../src/service/simulation/simulation-store';
 import { WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
@@ -63,6 +64,54 @@ describe('world simulation envelope store', () => {
     await expect(new FirstFloorWorldSimulationStore_ACU().replaceAtomically(candidate)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' } });
     expect(chat[0]._qrf_world_simulation).toEqual(previous);
     expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('读取 v1 账本时内存归一化为 v2，且不写回原对象', () => {
+    const raw: any = {
+      schemaVersion: 1,
+      revision: 0,
+      clock: { storyTime: '第三日黄昏', elapsed: '3日', precision: 'approximate', evidenceRefs: [] },
+      dimensions: [],
+      seeds: [],
+      actors: [],
+      chronicle: [],
+      guidance: { signals: ['风声'], excludedFacts: [], evidenceRefs: [] },
+    };
+    const snapshot = JSON.parse(JSON.stringify(raw));
+    const next = validateWorldSimulationLedger_ACU(raw);
+    expect(next.schemaVersion).toBe(2);
+    expect(next.clock.day).toBe(3);
+    expect(next.clock.slot).toBe('');
+    expect(next.rumors).toEqual([]);
+    expect(next.player).toMatchObject({ location: null, contact: 'open', locationUpdatedAtDay: 3, regionVisits: [] });
+    expect(next.guidance.signals).toEqual([{ text: '风声', voice: 'ambient' }]);
+    expect(raw).toEqual(snapshot);
+  });
+
+  it('无法从 elapsed/storyTime 解析 day 时回退为 1', () => {
+    const next = validateWorldSimulationLedger_ACU({
+      schemaVersion: 1,
+      revision: 0,
+      clock: { storyTime: '未知', elapsed: '很久以前', precision: 'unknown', evidenceRefs: [] },
+      dimensions: [],
+      seeds: [],
+      actors: [],
+      chronicle: [],
+      guidance: { signals: [], excludedFacts: [], evidenceRefs: [] },
+    });
+    expect(next.clock.day).toBe(1);
+  });
+
+  it('dynamics 非法字段逐项回退默认值', () => {
+    const envelope: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
+    envelope.settings.dynamics = { rumorTTLDays: -1, maxClockAdvanceDays: 7, collisionEnforcement: 'nope', missedSweepEnabled: true };
+    const next = validateWorldSimulationEnvelope_ACU(envelope);
+    expect(next.settings.dynamics).toEqual({
+      rumorTTLDays: 30,
+      maxClockAdvanceDays: 7,
+      collisionEnforcement: 'strict',
+      missedSweepEnabled: true,
+    });
   });
 });
 

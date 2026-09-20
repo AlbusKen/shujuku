@@ -285,7 +285,7 @@ describe('WorldSimulationPage', () => {
     const { host } = await mountPage();
     const groups = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'));
     const labels = groups.map(group => group.querySelector('.acu-disclosure-group__label')?.textContent?.trim());
-    expect(labels).toEqual(expect.arrayContaining(['Agent 运行预算', '设定研究（网页检索）', '各 Agent 渠道', '主 Agent（world-director）提示词', '因果审核（causality-reviewer）提示词', '占位符速查']));
+    expect(labels).toEqual(expect.arrayContaining(['Agent 运行预算', '设定研究（网页检索）', '世界动态', '各 Agent 渠道', '主 Agent（world-director）提示词', '因果审核（causality-reviewer）提示词', '占位符速查']));
     for (const group of groups) {
       expect(group.querySelector('.acu-disclosure-group__header')?.getAttribute('aria-expanded')).toBe('false');
     }
@@ -317,6 +317,66 @@ describe('WorldSimulationPage', () => {
     button(host, '确认清空')!.click();
     await nextTick();
     expect(clearData).toHaveBeenCalledTimes(1);
+  });
+
+  it('资料面板：编年对照、错过清单与传闻队列按账本只读展示', async () => {
+    const next = baseSnapshot();
+    next.envelope.ledger = {
+      ...next.envelope.ledger,
+      clock: { day: 47, slot: '', storyTime: '第47日', precision: 'exact', evidenceRefs: [] },
+      chronicle: [{ id: 'death-north', at: '第12日', summary: '铁匠死于北岭', relatedIds: ['rumor-tax'], evidenceRefs: [] }],
+      rumors: [{
+        id: 'rumor-tax', fact: '铁匠死在北岭', originDay: 12, earliestRevealDay: 17, channels: ['客栈'],
+        relatedActorIds: [], status: 'revealed', revealedAtDay: 47, revision: 1,
+      }],
+      seeds: [{
+        id: 'seed-miss', title: '矿洞时限', status: 'retired', level: 1, catalyst: '限期未至', visibility: 'hidden',
+        actorIds: [], location: { region: '北岭' }, expiresAtDay: 10, missedOutcome: '矿洞塌了',
+        exposePolicy: 'on_collision', evidenceRefs: [], retiredReason: 'missed', revision: 1,
+      }],
+      player: { location: { region: '客栈' }, locationUpdatedAtDay: 47, regionVisits: [{ region: '客栈', day: 22 }], contact: 'open', evidenceRefs: [] },
+    };
+    next.envelope.timeline = [{ id: 'run:swept', at: 't1', kind: 'swept', taskId: 'task', message: 'seed-miss' }];
+    snapshot.value = next;
+    const { host } = await mountPage();
+    expect(host.textContent).toContain('编年对照');
+    expect(host.textContent).toContain('错过清单');
+    expect(host.textContent).toContain('传闻队列');
+
+    button(host, '编年对照')!.click();
+    await nextTick();
+    expect(host.textContent).toContain('铁匠死于北岭');
+    expect(host.textContent).toContain('滞后 35 天');
+
+    button(host, '错过清单')!.click();
+    await nextTick();
+    expect(host.textContent).toContain('矿洞塌了');
+    expect(host.textContent).toContain('seed-miss');
+
+    button(host, '传闻队列')!.click();
+    await nextTick();
+    expect(host.textContent).toContain('接触状态：开放');
+    expect(host.textContent).toContain('铁匠死在北岭');
+    expect(host.textContent).toContain('得知日 第 47 天');
+  });
+
+  it('世界动态非法值在页面内报错且不落盘', async () => {
+    vi.useFakeTimers();
+    const { host } = await mountPage();
+    const groups = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'));
+    const dynamicsGroup = groups.find(group => group.textContent?.includes('世界动态'))!;
+    dynamicsGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+    await nextTick();
+    const ttlInput = Array.from(host.querySelectorAll<HTMLInputElement>('input.acu-input[type="number"]')).find(input => {
+      const label = input.closest('.acu-form-row')?.querySelector('.acu-form-row__label')?.textContent?.trim();
+      return label === '传闻等待上限（世界日）';
+    })!;
+    ttlInput.value = '0';
+    ttlInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(900);
+    expect(saveSettings).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('传闻等待上限 必须是 1 到 3650 之间的整数');
   });
 
   it('严格读取失败时展示结构化错误且不渲染会话输入与资料', async () => {

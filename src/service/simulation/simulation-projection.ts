@@ -1,13 +1,30 @@
-import type { WorldSimulationLedger_ACU } from './model';
+import type { WorldGuidanceSignalVoice_ACU, WorldSimulationLedger_ACU } from './model';
 
-const START_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
-const END_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
-const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*${START_ACU.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}[\\s\\S]*?${END_ACU.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?:\\r?\\n)*`, 'g');
+const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
+const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
+const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
+const END_ACU = '<!-- qrf-world-simulation-projection:v2:end -->';
+const escape_ACU = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*(?:${escape_ACU(START_V1_ACU)}[\\s\\S]*?${escape_ACU(END_V1_ACU)}|${escape_ACU(START_ACU)}[\\s\\S]*?${escape_ACU(END_ACU)})(?:\\r?\\n)*`, 'g');
+const SECTION_ORDER_ACU: WorldGuidanceSignalVoice_ACU[] = ['encounter', 'rumor', 'ambient'];
+const SECTION_LABELS_ACU: Record<WorldGuidanceSignalVoice_ACU, string> = {
+  encounter: '【此地此刻】',
+  rumor: '【风闻轶事】',
+  ambient: '【世界暗流】',
+};
 
 export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger_ACU): string | null {
-  const signals = ledger.guidance.signals.map(item => item.trim()).filter(Boolean);
-  if (!signals.length) return null;
-  return `${START_ACU}\n<与此同时>\n${signals.map(item => `- ${item}`).join('\n')}\n</与此同时>\n${END_ACU}`;
+  const grouped: Record<WorldGuidanceSignalVoice_ACU, string[]> = { encounter: [], rumor: [], ambient: [] };
+  for (const signal of ledger.guidance.signals) {
+    const text = signal.text.trim();
+    if (text) grouped[signal.voice].push(text);
+  }
+  const sections = SECTION_ORDER_ACU.flatMap(voice => {
+    const items = grouped[voice];
+    return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
+  });
+  if (!sections.length) return null;
+  return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
 }
 
 export function applyWorldSimulationProjection_ACU(content: string, projection: string | null): string {

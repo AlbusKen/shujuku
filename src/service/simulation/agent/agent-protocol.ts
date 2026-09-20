@@ -1,4 +1,4 @@
-import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationStagePlan_ACU } from '../model';
+import { WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationStagePlan_ACU } from '../model';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
@@ -297,6 +297,37 @@ function specialistStringList_ACU(value: unknown, path: string): void {
   }
 }
 
+function specialistGuidanceSignals_ACU(value: unknown, path: string): void {
+  if (!Array.isArray(value)) invalidSpecialistPatch_ACU(path, 'array of {text, voice, sourceId?}', value);
+  value.forEach((item, index) => {
+    if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}[${index}]`, 'object', item);
+    specialistPatchRecord_ACU(item, `${path}[${index}]`, ['text', 'voice', 'sourceId']);
+    if (!text_ACU(item.text)) invalidSpecialistPatch_ACU(`${path}[${index}].text`, 'non-empty string', item.text);
+    if (!(WORLD_GUIDANCE_SIGNAL_VOICES_ACU as readonly string[]).includes(String(item.voice))) {
+      invalidSpecialistPatch_ACU(`${path}[${index}].voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), item.voice);
+    }
+    if (item.sourceId !== undefined && !text_ACU(item.sourceId)) invalidSpecialistPatch_ACU(`${path}[${index}].sourceId`, 'non-empty string', item.sourceId);
+  });
+}
+
+function parseReviewerGuidanceSignals_ACU(value: unknown, path: string): WorldGuidanceSignal_ACU[] {
+  if (!Array.isArray(value)) fail_ACU('GUIDANCE_SIGNALS_REQUIRED', path, 'array of {text, voice, sourceId?}', value);
+  return value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    if (typeof item === 'string') {
+      const text = text_ACU(item);
+      if (!text) fail_ACU('TEXT_LIST', itemPath, 'non-empty string or signal object', item);
+      return { text, voice: 'ambient' as const };
+    }
+    const raw = closedObject_ACU(item, itemPath, ['text', 'voice'], ['sourceId']);
+    const voice = text_ACU(raw.voice);
+    if (!(WORLD_GUIDANCE_SIGNAL_VOICES_ACU as readonly string[]).includes(voice)) fail_ACU('INVALID_GUIDANCE_VOICE', `${itemPath}.voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), raw.voice);
+    const signal: WorldGuidanceSignal_ACU = { text: requiredText_ACU(raw.text, `${itemPath}.text`), voice: voice as WorldGuidanceSignal_ACU['voice'] };
+    if (raw.sourceId !== undefined) signal.sourceId = requiredText_ACU(raw.sourceId, `${itemPath}.sourceId`);
+    return signal;
+  });
+}
+
 function specialistPatchRecord_ACU(value: unknown, path: string, allowed: readonly string[]): Record<string, unknown> {
   if (!isRecord_ACU(value)) invalidSpecialistPatch_ACU(path, 'object', value);
   for (const key of Object.keys(value)) {
@@ -312,13 +343,13 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
     if (!(WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]).includes(module)) {
       invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
     }
-    if (module === 'dimensions' || module === 'seeds' || module === 'actors') {
+    if (module === 'dimensions' || module === 'seeds' || module === 'actors' || module === 'rumors') {
       const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
       if (!Array.isArray(raw.upsert) || !raw.upsert.length) invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
       raw.upsert.forEach((item, index) => {
         if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
         if (!text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
-        const labelField = module === 'seeds' ? 'title' : 'name';
+        const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
         if (!text_ACU(item[labelField])) {
           invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
         }
@@ -334,19 +365,35 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
       continue;
     }
     if (module === 'clock') {
-      const raw = specialistPatchRecord_ACU(patch, path, ['storyTime', 'elapsed', 'precision', 'evidenceRefs']);
+      const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs']);
       if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+      if (raw.days !== undefined && (!Number.isInteger(raw.days) || Number(raw.days) < 0)) invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
       if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string') invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
-      if (raw.elapsed !== undefined && typeof raw.elapsed !== 'string') invalidSpecialistPatch_ACU(`${path}.elapsed`, 'string', raw.elapsed);
-      if (raw.precision !== undefined && !['exact', 'approximate', 'unknown'].includes(String(raw.precision))) invalidSpecialistPatch_ACU(`${path}.precision`, 'exact | approximate | unknown', raw.precision);
+      if (raw.slot !== undefined && typeof raw.slot !== 'string') invalidSpecialistPatch_ACU(`${path}.slot`, 'string', raw.slot);
       if (raw.evidenceRefs !== undefined) specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
       continue;
     }
+    if (module === 'player') {
+      const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs']);
+      if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+      if (raw.contact !== undefined && !(WORLD_PLAYER_CONTACTS_ACU as readonly string[]).includes(String(raw.contact))) {
+        invalidSpecialistPatch_ACU(`${path}.contact`, WORLD_PLAYER_CONTACTS_ACU.join(' | '), raw.contact);
+      }
+      if (raw.evidenceRefs !== undefined) specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
+      if (raw.location !== undefined && raw.location !== null) {
+        if (!isRecord_ACU(raw.location)) invalidSpecialistPatch_ACU(`${path}.location`, 'object or null', raw.location);
+        specialistPatchRecord_ACU(raw.location, `${path}.location`, ['region', 'place']);
+        if (!text_ACU(raw.location.region)) invalidSpecialistPatch_ACU(`${path}.location.region`, 'non-empty string', raw.location.region);
+        if (raw.location.place !== undefined && typeof raw.location.place !== 'string') invalidSpecialistPatch_ACU(`${path}.location.place`, 'string', raw.location.place);
+      }
+      continue;
+    }
+    if (module !== 'guidance') invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
     const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs']);
     if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-    for (const key of ['signals', 'excludedFacts', 'evidenceRefs'] as const) {
-      if (raw[key] !== undefined) specialistStringList_ACU(raw[key], `${path}.${key}`);
-    }
+    if (raw.signals !== undefined) specialistGuidanceSignals_ACU(raw.signals, `${path}.signals`);
+    if (raw.excludedFacts !== undefined) specialistStringList_ACU(raw.excludedFacts, `${path}.excludedFacts`);
+    if (raw.evidenceRefs !== undefined) specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
   }
   return value;
 }
@@ -387,13 +434,12 @@ export function parseWorldSimulationReviewerResult_ACU(value: unknown): WorldSim
     if (!['blocking', 'major', 'minor'].includes(severity)) fail_ACU('INVALID_FINDING_SEVERITY', `$.findings[${index}].severity`, 'blocking | major | minor', finding.severity);
     return { severity: severity as 'blocking' | 'major' | 'minor', reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
   });
-  let guidance: { signals: string[]; excludedFacts: string[] } | undefined;
+  let guidance: WorldSimulationReviewerResult_ACU['guidance'] | undefined;
   if (raw.guidance !== undefined) {
     if (verdict !== 'accept') fail_ACU('REVIEW_GUIDANCE_REQUIRES_ACCEPT', '$.guidance', 'guidance only when verdict is accept', raw.guidance);
     const parsed = closedObject_ACU(raw.guidance, '$.guidance', ['signals', 'excludedFacts']);
-    const signals = texts_ACU(parsed.signals);
+    const signals = parseReviewerGuidanceSignals_ACU(parsed.signals, '$.guidance.signals');
     const excludedFacts = texts_ACU(parsed.excludedFacts);
-    if (!Array.isArray(parsed.signals) || signals.length !== parsed.signals.length) fail_ACU('TEXT_LIST', '$.guidance.signals', 'string array', parsed.signals);
     if (!Array.isArray(parsed.excludedFacts) || excludedFacts.length !== parsed.excludedFacts.length) fail_ACU('TEXT_LIST', '$.guidance.excludedFacts', 'string array', parsed.excludedFacts);
     guidance = { signals, excludedFacts };
   }
@@ -466,7 +512,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
-    lines.push('dimensions、seeds、actors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id、name（seeds 用 title）与非负整数 expectedRevision：新建条目填 0，修改账本已有条目填该条目当前 revision，不确定时先 read ledger:current 核对；chronicle 必须使用 {"append":[...]}；clock 与 guidance 必须是非空对象。');
+    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id、name（seeds 用 title，rumors 用 fact）与非负整数 expectedRevision：新建条目填 0，修改账本已有条目填该条目当前 revision，不确定时先 read ledger:current 核对；chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
     const firstModule = writableModules[0];
     const patchExample = firstModule === 'dimensions'
       ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
@@ -477,8 +523,12 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
       : firstModule === 'chronicle'
         ? { append: [{}] }
         : firstModule === 'guidance'
-          ? { signals: ['角色可感知信号'] }
-          : { elapsed: '1小时' };
+          ? { signals: [{ text: '角色可感知信号', voice: 'ambient' }] }
+          : firstModule === 'player'
+            ? { contact: 'open' }
+            : firstModule === 'rumors'
+              ? { upsert: [{ id: '条目ID', fact: '传闻事实', expectedRevision: 0 }] }
+              : { days: 1 };
     lines.push(JSON.stringify({
       status: 'candidate',
       agentName,
@@ -502,7 +552,7 @@ export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldS
     'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
     'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
     'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
-    'accept 时可额外包含 guidance：{"signals":["..."],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；没有可压缩内容时省略该字段。',
+    'accept 时可额外包含 guidance：{"signals":[{"text":"...","voice":"ambient"}],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；没有可压缩内容时省略该字段。',
     JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
     JSON.stringify({
       verdict: 'revise',

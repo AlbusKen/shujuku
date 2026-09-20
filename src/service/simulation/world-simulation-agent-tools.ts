@@ -6,6 +6,7 @@ import type { WorldSimulationTokenCounter_ACU } from './agent/agent-token-budget
 export const WORLD_SIMULATION_TOOL_ADDRESSES_ACU = [
   'anchor:message', 'summary:current', 'worldbook:entry:', 'encyclopedia:entry:', 'web:url:',
   'ledger:current', 'stage-plan:current', 'candidates:current', 'chronicle:current', 'projection:preview',
+  'player:current', 'rumors:current',
 ] as const;
 export interface WorldSimulationToolReadResult_ACU { status: WorldSimulationEvidenceStatus_ACU; content?: string; summary?: string; exact?: boolean; truncated?: boolean; directory?: boolean; }
 export interface WorldSimulationToolSearchHit_ACU { address: string; summary: string; }
@@ -33,12 +34,19 @@ export interface WorldSimulationToolContext_ACU {
 
 function summary_ACU(value: unknown): string { return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 300); }
 function content_ACU(value: unknown): string { return typeof value === 'string' ? value : JSON.stringify(value ?? null); }
+function ledgerSlice_ACU(ledger: unknown, key: 'player' | 'rumors'): unknown {
+  return ledger !== null && typeof ledger === 'object' && !Array.isArray(ledger) && Object.prototype.hasOwnProperty.call(ledger, key)
+    ? (ledger as Record<string, unknown>)[key]
+    : null;
+}
 
 export function createWorldSimulationToolDependencies_ACU(context: WorldSimulationToolContext_ACU): WorldSimulationToolDependencies_ACU {
   const local = new Map<string, unknown>([
     ['anchor:message', context.anchorMessage], ['summary:current', context.summary], ['ledger:current', context.ledger],
     ['stage-plan:current', context.stagePlan], ['candidates:current', context.candidates], ['chronicle:current', context.chronicle],
     ['projection:preview', context.projectionPreview],
+    ['player:current', ledgerSlice_ACU(context.ledger, 'player')],
+    ['rumors:current', ledgerSlice_ACU(context.ledger, 'rumors')],
   ]);
   return {
     async read(address) {

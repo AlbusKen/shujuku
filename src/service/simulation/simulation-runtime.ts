@@ -32,6 +32,7 @@ import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-exec
 import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
+import { detectWorldCollisions_ACU } from './world-dynamics';
 import { createWorldSimulationHostToolDependencies_ACU } from './world-simulation-host-tools';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from './world-simulation-evidence-registry';
 import { beginWorldSimulationInternalAiMainApiInvocation_ACU, beginWorldSimulationInternalAiRequest_ACU, endWorldSimulationInternalAiMainApiInvocation_ACU, settleWorldSimulationInternalAiRequest_ACU } from './simulation-internal-ai-events';
@@ -97,8 +98,9 @@ function buildPromptContext_ACU(input: {
     worldStagePlan: input.stagePlan,
     worldChronicle: input.envelope.ledger.chronicle,
     worldCandidates: [],
+    worldCollisions: detectWorldCollisions_ACU(input.envelope.ledger),
     evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
-    projectionPreview: {},
+    projectionPreview: buildWorldSimulationProjection_ACU(input.envelope.ledger),
   };
 }
 
@@ -172,7 +174,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         stagePlan: plannedRevision.plan,
         candidates: [],
         chronicle: envelope.ledger.chronicle,
-        projectionPreview: {},
+        projectionPreview: promptContext.projectionPreview,
         webResearch: envelope.settings.webResearch,
       });
       const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1]) =>

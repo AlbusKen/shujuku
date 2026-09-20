@@ -14,6 +14,7 @@ export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettin
     agentApiPresets: {},
     agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(),
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
+    dynamics: { rumorTTLDays: 30, maxClockAdvanceDays: 14, collisionEnforcement: 'strict', missedSweepEnabled: true },
   };
 }
 
@@ -21,12 +22,14 @@ export function buildEmptyWorldSimulationLedger_ACU(): WorldSimulationLedger_ACU
   return {
     schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
     revision: 0,
-    clock: { storyTime: '', elapsed: '', precision: 'unknown', evidenceRefs: [] },
+    clock: { day: 1, slot: '', storyTime: '', precision: 'unknown', evidenceRefs: [] },
     dimensions: [],
     seeds: [],
     actors: [],
     chronicle: [],
     guidance: { signals: [], excludedFacts: [], evidenceRefs: [] },
+    rumors: [],
+    player: { location: null, locationUpdatedAtDay: 1, regionVisits: [], contact: 'open', evidenceRefs: [] },
   };
 }
 

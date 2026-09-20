@@ -43,8 +43,8 @@ describe('世界推演 Agent 协议', () => {
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
     expect(parseWorldSimulationMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'macro', instruction: '分析', reads: ['$CLOCK'] }] })).toMatchObject({ kind: 'delegate' });
     expect(parseWorldSimulationPlannerOutput_ACU({ action: 'plan', summary: '已规划', plan })).toMatchObject({ action: 'plan', plan: { title: '阶段一' } });
-    expect(parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] }, snapshot)).toMatchObject({ status: 'candidate' });
-    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '越权', evidenceRefs: ['E1'], uncertainties: [] }, snapshot)).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
+    expect(parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { days: 1 } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] }, snapshot)).toMatchObject({ status: 'candidate' });
+    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { days: 1 } }, summary: '越权', evidenceRefs: ['E1'], uncertainties: [] }, snapshot)).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'finalize', outcome: 'commit', summary: '完成', evidenceRefs: [ref] })).toThrowError(/EVIDENCE_REGISTRY_REQUIRED/);
     expect(parseWorldSimulationReviewerResult_ACU({ verdict: 'revise', summary: '需修正', findings: [{ severity: 'major', reasonCode: 'TIME_GAP', path: '$.clock', expected: '连续', actual: '跳跃' }], acceptedCandidateIds: [] })).toMatchObject({ verdict: 'revise' });
   });
@@ -90,14 +90,14 @@ describe('世界推演 Agent 协议', () => {
     const registry = createWorldSimulationEvidenceRegistry_ACU('status-alias');
     const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
-    const candidate = { agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] };
+    const candidate = { agentName: 'macro', patch: { clock: { days: 1 } }, summary: '候选', evidenceRefs: [ref], uncertainties: [] };
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'success', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'completed', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'ok', ...candidate }, snapshot)).toMatchObject({ status: 'candidate' });
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'unchanged', agentName: 'macro', summary: '无变化', evidenceRefs: [], uncertainties: [] }, snapshot)).toMatchObject({ status: 'no_change' });
     expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'success', agentName: 'macro', summary: '缺少 patch', evidenceRefs: [], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
     expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'success', agentName: 'macro', patch: {}, summary: '空 patch', evidenceRefs: [], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
-    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'unchanged', agentName: 'macro', patch: { clock: { elapsed: '一天' } }, summary: '冲突结构', evidenceRefs: [ref], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
+    expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'unchanged', agentName: 'macro', patch: { clock: { days: 1 } }, summary: '冲突结构', evidenceRefs: [ref], uncertainties: [] }, snapshot)).toThrowError(/INVALID_SPECIALIST_STATUS/);
   });
 
   it('block 缺少机械 unresolved 列表时从有效 reason 安全推导', () => {
@@ -133,7 +133,7 @@ describe('世界推演 Agent 协议', () => {
     const message = renderWorldSimulationPlannerProtocolRejection_ACU({ reasonCode: 'MISSING_FIELD', path: '$.plan', expected: 'required field', actual: undefined });
     expect(message).toContain('顶层必须且只能包含 action、summary、plan');
     expect(message).toContain('schemaVersion、title、objective、impactScope');
-    expect(message).toContain(`expectedLedgerChanges 只能使用：clock | dimensions | seeds | actors | chronicle | guidance`);
+    expect(message).toContain(`expectedLedgerChanges 只能使用：clock | dimensions | seeds | actors | chronicle | guidance | rumors | player`);
     expect(message).toContain('"action":"plan"');
     expect(message).toContain('WORLD_SIMULATION_ENGINE_SEAM');
   });
@@ -205,8 +205,8 @@ describe('世界推演 Agent 协议', () => {
   it('草稿合并只拼接数组和递归对象，标量冲突时 fail-closed', () => {
     expect(mergeWorldSimulationJsonDrafts_ACU(
       { status: 'candidate', patch: { actors: [{ id: 'A' }] } },
-      { status: 'candidate', patch: { actors: [{ id: 'B' }], clock: { elapsed: '一天' } } },
-    )).toEqual({ status: 'candidate', patch: { actors: [{ id: 'A' }, { id: 'B' }], clock: { elapsed: '一天' } } });
+      { status: 'candidate', patch: { actors: [{ id: 'B' }], clock: { days: 1 } } },
+    )).toEqual({ status: 'candidate', patch: { actors: [{ id: 'A' }, { id: 'B' }], clock: { days: 1 } } });
     expect(() => mergeWorldSimulationJsonDrafts_ACU({ status: 'candidate' }, { status: 'failed' })).toThrowError(/DRAFT_MERGE_CONFLICT/);
   });
 
@@ -229,7 +229,7 @@ describe('世界推演 Agent 协议', () => {
     expect(compactWorldSimulationProtocolError_ACU(error)).toMatchObject({
       reasonCode: 'INVALID_LEDGER_MODULE',
       path: '$.plan.expectedLedgerChanges',
-      expected: 'clock | dimensions | seeds | actors | chronicle | guidance',
+      expected: 'clock | dimensions | seeds | actors | chronicle | guidance | rumors | player',
       actual: 'ledger',
     });
   });

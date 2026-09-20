@@ -15,7 +15,7 @@ const settings = () => ({ ...buildDefaultWorldSimulationSettings_ACU(), agentPro
 function fixture(runId = 'runtime') {
   const registry = createWorldSimulationEvidenceRegistry_ACU(runId);
   const evidence = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'anchor:message', status: 'ok', summary: '锚点', exact: true }).evidenceRef!;
-  const promptContext = { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '', worldState: buildEmptyWorldSimulationLedger_ACU(), anchorMessage: '正文', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
+  const promptContext = { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '', worldState: buildEmptyWorldSimulationLedger_ACU(), anchorMessage: '正文', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], worldCollisions: { playerRegion: null, playerContact: 'open' as const, secludedNote: null, collidedSeeds: [], ripeRumors: [] }, evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
   return { registry, evidence, promptContext };
 }
 
@@ -24,11 +24,11 @@ describe('世界推演 Agent runtime', () => {
 
   it('specialist 只能在 catalog 声明的 ledger modules 内产出候选', async () => {
     const { registry, evidence, promptContext } = fixture('specialist');
-    const invoke = vi.fn(async () => JSON.stringify({ status: 'candidate', agentName: 'world-analyst', patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence], uncertainties: [] }));
+    const invoke = vi.fn(async () => JSON.stringify({ status: 'candidate', agentName: 'world-analyst', patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence], uncertainties: [] }));
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
     const result = await runtime.run({ delegation: { agentName: 'world-analyst', instruction: '分析时间', reads: [] }, settings: settings(), promptContext, registry, tools });
     expect(result.status).toBe('candidate');
-    expect(result.candidate).toMatchObject({ agentName: 'world-analyst', writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'] });
+    expect(result.candidate).toMatchObject({ agentName: 'world-analyst', writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'] });
     expect(result.candidate?.candidateId).toMatch(/^candidate:/);
   });
 
@@ -61,7 +61,7 @@ describe('世界推演 Agent runtime', () => {
     const candidate = {
       candidateId: 'candidate:reviewer-repair',
       agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } },
+      patch: { clock: { days: 1 } },
       summary: '时间推进',
       evidenceRefs: [evidence],
       uncertainties: [],
@@ -111,7 +111,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('partial');
     const candidate = {
       candidateId: 'candidate:accepted', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -143,7 +143,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('latest-outcome-wins');
     const candidate = {
       candidateId: 'candidate:latest', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '重试后形成候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '重试后形成候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -284,7 +284,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('review-revise');
     const candidate = {
       candidateId: 'candidate:revise', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -316,14 +316,14 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('review-reject-redelegate');
     const rejectedCandidate = {
       candidateId: 'candidate:rejected', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } },
+      patch: { clock: { days: 1 } },
       summary: '缺少锚点证据的时间候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const revisedCandidate = {
       ...rejectedCandidate,
       candidateId: 'candidate:revised',
-      patch: { clock: { elapsed: '30m' } },
+      patch: { clock: { days: 1, storyTime: '30m' } },
       summary: '按审核意见修正后的时间候选',
     };
     const subagents = {
@@ -334,7 +334,7 @@ describe('世界推演 Agent runtime', () => {
         .mockResolvedValueOnce({
           verdict: 'reject' as const,
           summary: '候选时间跨度缺少锚点证据',
-          findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.elapsed', expected: '时间跨度由锚点证据支持', actual: '1h 缺少直接依据' }],
+          findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.days', expected: '时间跨度由锚点证据支持', actual: '缺少直接依据' }],
           acceptedCandidateIds: [],
         })
         .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '修订候选通过', findings: [], acceptedCandidateIds: [revisedCandidate.candidateId] }),
@@ -480,7 +480,7 @@ describe('世界推演 Agent runtime', () => {
     expect(feedback).toContain('缺少必填字段：kind,value,trend');
     expect(feedback).toContain('完整必填字段模板');
     expect(feedback).toContain('dimensions: id,name,kind,value,trend,rationale,evidenceRefs,revision');
-    expect(feedback).toContain('clock: storyTime,elapsed,precision,evidenceRefs');
+    expect(feedback).toContain('clock: day,slot,storyTime,precision,evidenceRefs');
     expect(feedback).toContain('seeds:');
     expect(feedback).toContain('actors:');
     expect(feedback).toContain('chronicle:');
@@ -491,7 +491,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('resume-after-block');
     const candidate = {
       candidateId: 'candidate:block-resume', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '阻断前候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '阻断前候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -533,7 +533,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('resume-same-identity');
     const candidate = {
       candidateId: 'candidate:resume', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '恢复候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '恢复候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -576,7 +576,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('resume-cursor-isolation');
     const candidate = {
       candidateId: 'candidate:stale-cursor', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '旧 cursor 候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '旧 cursor 候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -615,7 +615,7 @@ describe('世界推演 Agent runtime', () => {
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const candidate = {
       candidateId: 'candidate:floor-resume', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '楼层恢复候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '楼层恢复候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -661,7 +661,7 @@ describe('世界推演 Agent runtime', () => {
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const candidate = {
       candidateId: 'candidate:budget-resume', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '预算重置候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '预算重置候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -706,13 +706,13 @@ describe('世界推演 Agent runtime', () => {
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const candidate = {
       candidateId: 'candidate:transcript-resume', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '对话恢复候选', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '对话恢复候选', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
       run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
       runReviewer: vi.fn()
-        .mockResolvedValueOnce({ verdict: 'reject' as const, summary: '候选缺少时间证据', findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.elapsed', expected: '锚点支持', actual: '缺失' }], acceptedCandidateIds: [] })
+        .mockResolvedValueOnce({ verdict: 'reject' as const, summary: '候选缺少时间证据', findings: [{ severity: 'blocking' as const, reasonCode: 'EVIDENCE_GAP', path: '$.clock.days', expected: '锚点支持', actual: '缺失' }], acceptedCandidateIds: [] })
         .mockResolvedValueOnce({ verdict: 'accept' as const, summary: '恢复后通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
     };
     const runSettings = settings();
@@ -780,7 +780,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, evidence, promptContext } = fixture('reviewer-guidance');
     const candidate = {
       candidateId: 'candidate:guidance-source', agentName: 'world-analyst',
-      patch: { clock: { elapsed: '1h' } }, summary: '时间推进', evidenceRefs: [evidence],
+      patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'],
     };
     const subagents = {
@@ -788,7 +788,7 @@ describe('世界推演 Agent runtime', () => {
       runReviewer: vi.fn(async () => ({
         verdict: 'accept' as const, summary: '审核通过并压缩感知', findings: [],
         acceptedCandidateIds: [candidate.candidateId],
-        guidance: { signals: ['远处钟声响起'], excludedFacts: ['幕后真相'] },
+        guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }], excludedFacts: ['幕后真相'] },
       })),
     };
     const responses = [
@@ -805,7 +805,7 @@ describe('世界推演 Agent runtime', () => {
       expect.objectContaining({
         agentName: 'causality-reviewer',
         writableModules: ['guidance'],
-        patch: { guidance: expect.objectContaining({ signals: ['远处钟声响起'], excludedFacts: ['幕后真相'] }) },
+        patch: { guidance: expect.objectContaining({ signals: [{ text: '远处钟声响起', voice: 'ambient' }], excludedFacts: ['幕后真相'] }) },
       }),
     ]);
   });

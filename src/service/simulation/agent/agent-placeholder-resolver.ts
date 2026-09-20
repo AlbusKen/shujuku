@@ -15,6 +15,7 @@ export interface WorldSimulationPlaceholderContext_ACU {
   worldStagePlan: unknown;
   worldChronicle: unknown;
   worldCandidates: unknown;
+  worldCollisions: unknown;
   evidenceRegistry: WorldSimulationEvidenceRegistrySnapshot_ACU;
   projectionPreview: unknown;
 }
@@ -40,6 +41,7 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     '$WORLD_STAGE_PLAN': () => serialize_ACU(context.worldStagePlan),
     '$WORLD_CHRONICLE': () => serialize_ACU(context.worldChronicle),
     '$WORLD_CANDIDATES': () => serialize_ACU(context.worldCandidates),
+    '$WORLD_COLLISIONS': () => serialize_ACU(context.worldCollisions),
     '$CURRENT_EVIDENCE_REGISTRY': () => serialize_ACU(context.evidenceRegistry),
     '$PROJECTION_PREVIEW': () => serialize_ACU(context.projectionPreview),
   };

@@ -114,7 +114,7 @@ function buildReplay(options: ReplayOptions) {
       exact: true,
     }).evidenceRef!;
     const clockPatch = {
-      clock: { elapsed: '1h', precision: 'approximate', evidenceRefs: [initialEvidence] },
+      clock: { days: 1, storyTime: '1h', evidenceRefs: [initialEvidence] },
     };
     const clockSummary = '钟楼事件使世界时间推进一小时';
     const clockCandidateId = candidateId('world-analyst', clockPatch, [initialEvidence], clockSummary);
@@ -169,7 +169,7 @@ function buildReplay(options: ReplayOptions) {
         summary: '仅采用证据完整的时间候选',
         findings: [],
         acceptedCandidateIds: [clockCandidateId],
-        guidance: { signals: ['远处钟声响起'], excludedFacts: [] },
+        guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }], excludedFacts: [] },
       })]],
     ]);
     const invoke = vi.fn(async (role: WorldSimulationAgentName_ACU) => {
@@ -197,6 +197,7 @@ function buildReplay(options: ReplayOptions) {
         worldStagePlan: {},
         worldChronicle: input.envelope.ledger.chronicle,
         worldCandidates: [],
+        worldCollisions: { playerRegion: null, playerContact: 'open', secludedNote: null, collidedSeeds: [], ripeRumors: [] },
         evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry),
         projectionPreview: {},
       },
@@ -216,6 +217,7 @@ function buildReplay(options: ReplayOptions) {
       worldStagePlan: planned.revision.plan,
       worldChronicle: input.envelope.ledger.chronicle,
       worldCandidates: [],
+      worldCollisions: { playerRegion: null, playerContact: 'open', secludedNote: null, collidedSeeds: [], ripeRumors: [] },
       evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry),
       projectionPreview: {},
     };
@@ -325,7 +327,7 @@ describe('T9 世界推演隔离 API replay', () => {
       ['lore-researcher', 'failed', 'SEED_EVIDENCE_MISSING'],
     ]);
     expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['world-analyst', 'causality-reviewer']);
-    expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { elapsed: '1h' }, guidance: { signals: ['远处钟声响起'] } }, task: { status: 'completed', activeRun: null } });
+    expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } }, task: { status: 'completed', activeRun: null } });
     expect(replay.commitProjection).toHaveBeenCalledOnce();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
     expect(replay.toolRead).toHaveBeenCalledWith('anchor:message');

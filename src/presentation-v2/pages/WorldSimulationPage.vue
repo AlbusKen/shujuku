@@ -26,7 +26,7 @@
 
     <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
     <AcuPanelGrid class="acu-v2-world-simulation-page__layout">
-      <AcuPanel title="已有资料" description="当前分支的世界账本、候选轨迹、投影预览与读取诊断；账本只由 Agent 经审核后写入，这里只读。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
+      <AcuPanel title="已有资料" description="当前分支的世界账本、编年对照、错过清单、传闻队列、候选轨迹、投影预览与读取诊断；账本只由 Agent 经审核后写入，这里只读。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
         <WorldSimulationMaterialsPanel
           v-if="runtime.ready.value && runtime.snapshot.value"
           :conversation="runtime.snapshot.value.conversation"
@@ -36,6 +36,7 @@
           :anchor="runtime.anchor.value"
           :projection-preview="runtime.snapshot.value.projectionPreview"
           :busy="runtime.busy.value"
+          :timeline="runtime.envelope.value?.timeline ?? []"
           @refresh="refreshAll"
           @clear="clearData"
         />
@@ -125,6 +126,31 @@
               <AcuFormRow label="域名黑名单" hint="不得抓取的域名，逗号或换行分隔；内网与酒馆自身始终被拦。">
                 <AcuTextarea v-model="settingsDraft.webResearch.blockedDomains" :rows="3" />
               </AcuFormRow>
+            </div>
+          </AcuDisclosureGroup>
+
+          <AcuDisclosureGroup
+            class="acu-v2-world-simulation-page__group"
+            label="世界动态"
+            :meta="dynamicsGroupMeta"
+            :expanded="isGroupExpanded('dynamics')"
+            body-id="acu-world-simulation-group-dynamics"
+            @toggle="toggleGroup('dynamics')"
+          >
+            <p class="acu-v2-world-simulation-page__meta">控制传闻时效、时钟推进上限、碰撞兑现与过期清扫；改动在下一轮推演生效。</p>
+            <div class="acu-v2-world-simulation-page__settings-grid">
+              <AcuFormRow label="传闻等待上限（世界日）" hint="传闻进入待命后，等待玩家命中渠道的世界日上限。范围 1–3650。">
+                <AcuInput v-model="settingsDraft.dynamics.rumorTTLDays" type="number" :min="1" :max="3650" />
+              </AcuFormRow>
+              <AcuFormRow label="单次时钟推进上限（世界日）" hint="一次提交允许推进的天数；超过则必须附带证据。范围 0–3650。">
+                <AcuInput v-model="settingsDraft.dynamics.maxClockAdvanceDays" type="number" :min="0" :max="3650" />
+              </AcuFormRow>
+              <AcuFormRow label="碰撞兑现策略" hint="严格：撞上必须有当场反应，否则拒绝提交。宽松：只记警告。">
+                <AcuSelect v-model="settingsDraft.dynamics.collisionEnforcement" :options="collisionEnforcementOptions" />
+              </AcuFormRow>
+            </div>
+            <div class="acu-v2-world-simulation-page__toggles">
+              <AcuCheckbox v-model="settingsDraft.dynamics.missedSweepEnabled" label="启用过期清扫（关闭后过期暗流不会自动记为错过）" />
             </div>
           </AcuDisclosureGroup>
 
@@ -254,6 +280,11 @@ const webSearchProviderOptions = [
   { value: 'searxng', label: 'SearXNG（自建/公共实例）' },
 ];
 
+const collisionEnforcementOptions = [
+  { value: 'strict', label: '严格（未兑现则拒绝提交）' },
+  { value: 'relaxed', label: '宽松（仅警告）' },
+];
+
 /** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
 const INHERIT_CHANNEL_VALUE = '__inherit__';
 
@@ -330,6 +361,12 @@ const channelGroupMeta = computed(() => {
   if (!presets) return '';
   const customized = agentNames.filter(name => presets[name] !== undefined).length;
   return customized ? `${customized} 个单独指定` : '全部跟随默认';
+});
+
+const dynamicsGroupMeta = computed(() => {
+  const dynamics = settingsDraft.value?.dynamics;
+  if (!dynamics) return '';
+  return `TTL ${dynamics.rumorTTLDays} · 推进 ${dynamics.maxClockAdvanceDays} · ${dynamics.collisionEnforcement === 'strict' ? '严格' : '宽松'}${dynamics.missedSweepEnabled ? ' · 清扫开' : ' · 清扫关'}`;
 });
 
 function cloneSettings(settings: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU {
@@ -415,6 +452,12 @@ function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
       searxngBaseUrl: String(source.webResearch.searxngBaseUrl ?? '').trim(),
       pageCharLimit: requiredRangeInteger(source.webResearch.pageCharLimit, '单页阅读字数上限', 500, 20000),
       blockedDomains: String(source.webResearch.blockedDomains ?? ''),
+    },
+    dynamics: {
+      rumorTTLDays: requiredRangeInteger(source.dynamics.rumorTTLDays, '传闻等待上限', 1, 3650),
+      maxClockAdvanceDays: requiredRangeInteger(source.dynamics.maxClockAdvanceDays, '单次时钟推进上限', 0, 3650),
+      collisionEnforcement: source.dynamics.collisionEnforcement === 'relaxed' ? 'relaxed' : source.dynamics.collisionEnforcement === 'strict' ? 'strict' : (() => { throw new Error('碰撞兑现策略必须是严格或宽松'); })(),
+      missedSweepEnabled: typeof source.dynamics.missedSweepEnabled === 'boolean' ? source.dynamics.missedSweepEnabled : (() => { throw new Error('过期清扫开关无效'); })(),
     },
   };
   if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {

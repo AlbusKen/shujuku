@@ -29,7 +29,7 @@
       <div class="acu-v2-ws-materials__overview">
         <div><strong>冻结锚点</strong><span>{{ anchorText }}</span></div>
         <div><strong>账本修订</strong><span>{{ ledger ? `revision ${ledger.revision}` : '尚未建立' }}</span></div>
-        <div><strong>故事时间</strong><span>{{ ledger?.clock.storyTime || '未知' }}<template v-if="ledger?.clock.elapsed"> · 经过 {{ ledger.clock.elapsed }}</template></span></div>
+        <div><strong>故事时间</strong><span>{{ ledger?.clock.storyTime || '未知' }}<template v-if="ledger"> · 第 {{ ledger.clock.day }} 天</template><template v-if="ledger?.clock.slot"> · {{ ledger.clock.slot }}</template></span></div>
       </div>
       <p v-if="materials.snapshot" class="acu-v2-ws-materials__meta">
         最近结算：第 {{ (materials.adoptedIndex ?? 0) + 1 }} 楼 · revision {{ materials.snapshot.ledgerRevision }} · 证据引用 {{ materials.snapshot.evidenceRefs.length }} 条。
@@ -67,9 +67,48 @@
       <details class="acu-v2-ws-materials__block" open>
         <summary>可感知信号 · {{ ledger?.guidance.signals.length ?? 0 }} 条</summary>
         <p v-if="!ledger?.guidance.signals.length" class="acu-v2-ws-materials__empty">当前没有可投影信号。</p>
-        <ul v-else class="acu-v2-ws-materials__list"><li v-for="signal in ledger.guidance.signals" :key="signal">{{ signal }}</li></ul>
+        <ul v-else class="acu-v2-ws-materials__list"><li v-for="(signal, index) in ledger.guidance.signals" :key="signal.sourceId || String(index)">{{ signal.text }}</li></ul>
       </details>
       <pre class="acu-v2-ws-materials__projection">{{ projectionPreview || '当前没有系统投影。' }}</pre>
+    </template>
+
+    <template v-else-if="activeTab === 'chronicle'">
+      <p v-if="!chronicleRows.length" class="acu-v2-ws-materials__empty">编年还是空的。提交后会按发生日与玩家得知日对照。</p>
+      <div v-else class="acu-v2-ws-materials__cards">
+        <article v-for="row in chronicleRows" :key="row.id" class="acu-v2-ws-materials__card">
+          <p class="acu-v2-ws-materials__card-head"><strong>{{ row.summary }}</strong></p>
+          <p class="acu-v2-ws-materials__card-body">{{ row.at }}</p>
+          <p class="acu-v2-ws-materials__card-meta">{{ chronicleMeta(row) }}</p>
+        </article>
+      </div>
+    </template>
+
+    <template v-else-if="activeTab === 'missed'">
+      <p v-if="!missedItems.length" class="acu-v2-ws-materials__empty">当前没有错过的暗流或过期清扫记录。</p>
+      <div v-else class="acu-v2-ws-materials__cards">
+        <article v-for="item in missedItems" :key="`${item.source}:${item.id}`" class="acu-v2-ws-materials__card">
+          <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span class="acu-v2-ws-materials__badge">{{ item.source === 'timeline' ? '清扫' : '错过' }}</span></p>
+          <p class="acu-v2-ws-materials__card-body">{{ item.detail || '暂无摘要' }}</p>
+          <p class="acu-v2-ws-materials__card-meta">{{ missedMeta(item) }}</p>
+        </article>
+      </div>
+    </template>
+
+    <template v-else-if="activeTab === 'rumors'">
+      <p v-if="!rumorQueue" class="acu-v2-ws-materials__empty">当前没有可展示的传闻队列。</p>
+      <template v-else>
+        <p class="acu-v2-ws-materials__meta">接触状态：{{ CONTACT_LABELS[rumorQueue.contact] ?? rumorQueue.contact }} · 当前位置：{{ rumorQueue.playerRegion || '未知' }}</p>
+        <details v-for="group in rumorQueueGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
+          <summary>{{ group.label }} · {{ group.items.length }} 条</summary>
+          <p v-if="!group.items.length" class="acu-v2-ws-materials__empty">暂无记录。</p>
+          <div v-else class="acu-v2-ws-materials__cards">
+            <article v-for="item in group.items" :key="item.id" class="acu-v2-ws-materials__card">
+              <p class="acu-v2-ws-materials__card-head"><strong>{{ item.fact }}</strong><span class="acu-v2-ws-materials__badge">{{ RUMOR_STATUS_LABELS[item.status] ?? item.status }}</span></p>
+              <p class="acu-v2-ws-materials__card-meta">{{ rumorMeta(item) }}</p>
+            </article>
+          </div>
+        </details>
+      </template>
     </template>
 
     <!-- 读取诊断 -->
@@ -85,8 +124,9 @@ import { computed, ref } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
-import type { WorldSimulationLedger_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { WorldSimulationLedger_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
+import { buildWorldChronicleContrast_ACU, buildWorldMissedList_ACU, buildWorldRumorQueue_ACU, type WorldChronicleContrastRow_ACU, type WorldMissedItem_ACU, type WorldRumorQueueItem_ACU } from '../simulation/world-simulation-dynamics-views';
 
 const props = withDefaults(defineProps<{
   conversation: WorldSimulationConversationView_ACU;
@@ -96,12 +136,16 @@ const props = withDefaults(defineProps<{
   anchor: WorldSimulationAnchorIdentity_ACU | null;
   projectionPreview: string | null;
   busy?: boolean;
-}>(), { busy: false });
+  timeline?: WorldSimulationTimelineEntry_ACU[];
+}>(), { busy: false, timeline: () => [] });
 const emit = defineEmits<{ (event: 'refresh' | 'clear'): void }>();
 
 const TABS = [
   { id: 'state', label: '世界状态' },
   { id: 'candidates', label: '候选轨迹' },
+  { id: 'chronicle', label: '编年对照' },
+  { id: 'missed', label: '错过清单' },
+  { id: 'rumors', label: '传闻队列' },
   { id: 'projection', label: '投影预览' },
   { id: 'diagnostics', label: '读取诊断' },
 ] as const;
@@ -177,6 +221,48 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
     },
   ];
 });
+
+const CONTACT_LABELS: Record<string, string> = { open: '开放', secluded: '隔绝' };
+const RUMOR_STATUS_LABELS: Record<string, string> = { latent: '潜伏', ripe: '待命', revealed: '已得知', dead: '已失效' };
+const HIT_STATE_LABELS: Record<string, string> = { 'open-hit': '开放可命中', 'secluded-delay': '隔绝延迟中', waiting: '等待到访' };
+
+const chronicleRows = computed(() => (props.ledger ? buildWorldChronicleContrast_ACU(props.ledger) : []));
+const missedItems = computed(() => (props.ledger ? buildWorldMissedList_ACU(props.ledger, props.timeline) : []));
+const rumorQueue = computed(() => (props.ledger ? buildWorldRumorQueue_ACU(props.ledger) : null));
+const rumorQueueGroups = computed(() => {
+  const queue = rumorQueue.value;
+  if (!queue) return [];
+  return [
+    { key: 'latent', label: '潜伏', items: queue.latent },
+    { key: 'ripe', label: '待命', items: queue.ripe },
+    { key: 'revealed', label: '已得知', items: queue.revealed },
+    { key: 'dead', label: '已失效', items: queue.dead },
+  ];
+});
+
+function chronicleMeta(row: WorldChronicleContrastRow_ACU): string {
+  const occurred = row.occurredDay === null ? '发生日未知' : `发生日 第 ${row.occurredDay} 天`;
+  if (row.revealedAtDay === null || row.lagDays === null) return occurred;
+  return `${occurred} / 得知日 第 ${row.revealedAtDay} 天（滞后 ${row.lagDays} 天）`;
+}
+
+function missedMeta(item: WorldMissedItem_ACU): string {
+  const parts: string[] = [];
+  if (item.expiresAtDay !== null) parts.push(`过期日 第 ${item.expiresAtDay} 天`);
+  if (item.missedOutcome) parts.push(item.missedOutcome);
+  return parts.join(' · ') || '过期清扫';
+}
+
+function rumorMeta(item: WorldRumorQueueItem_ACU): string {
+  const channels = item.channels.length ? `渠道 ${item.channels.join('、')}` : '无渠道';
+  if (item.status === 'latent' && item.countdownDays !== null) {
+    return item.countdownDays > 0 ? `${channels} · ${item.countdownDays} 日后可揭` : `${channels} · 已到期待流转`;
+  }
+  if (item.status === 'ripe' && item.hitState) return `${channels} · ${HIT_STATE_LABELS[item.hitState] ?? item.hitState}`;
+  if (item.status === 'revealed' && item.revealedAtDay !== null) return `${channels} · 得知日 第 ${item.revealedAtDay} 天`;
+  return channels;
+}
+
 </script>
 
 <style scoped>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
-import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU } from '../../../../src/service/simulation/model';
 import { createWorldSimulationPlaceholderResolvers_ACU } from '../../../../src/service/simulation/agent/agent-placeholder-resolver';
 import { parseWorldSimulationMainAction_ACU, parseWorldSimulationPlannerOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU } from '../../../../src/service/simulation/agent/agent-protocol';
@@ -24,11 +24,13 @@ describe('世界推演提示词装配契约', () => {
     const prompt = buildDefaultWorldSimulationAgentPrompts_ACU()['world-director'];
     const registry = createWorldSimulationEvidenceRegistry_ACU('prompt');
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
-    const values = { task: '<x>&', history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '', worldState: {}, anchorMessage: '<anchor>', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], evidenceRegistry: snapshot, projectionPreview: {} };
+    const worldCollisions = { playerRegion: 'qingyang', playerContact: 'open' as const, secludedNote: null, collidedSeeds: ['seed-1'], ripeRumors: [] };
+    const values = { task: '<x>&', history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '', worldState: {}, anchorMessage: '<anchor>', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], worldCollisions, evidenceRegistry: snapshot, projectionPreview: {} };
     const resolvers = createWorldSimulationPlaceholderResolvers_ACU(values);
     const rendered = await renderWorldSimulationPrompt_ACU(prompt, 'world-director', resolvers);
     expect(rendered.messages.map(item => item.content).join('\n')).toContain('&lt;x&gt;&amp;');
     expect(rendered.messages.map(item => item.content).join('\n')).not.toMatch(/\$[A-Z][A-Z0-9_]*/);
+    expect(resolvers['$WORLD_COLLISIONS']()).toBe(JSON.stringify(worldCollisions));
     await expect(renderWorldSimulationPrompt_ACU(prompt, 'world-director', {})).rejects.toThrow(/resolver/);
     expect(() => validateWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentPrompts_ACU(), 'world-director': prompt.slice(1) })).toThrow(/seam/);
   });
@@ -63,7 +65,7 @@ describe('世界推演提示词装配契约', () => {
     const instruction = worldSimulationPlannerProtocolInstruction_ACU();
     expect(instruction).toContain(`plan.expectedLedgerChanges 只能使用这些账本模块：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}`);
     expect(instruction).toContain('禁止使用 ledger、world_state、relationships');
-    expect(WORLD_SIMULATION_LEDGER_MODULES_ACU).toEqual(['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance']);
+    expect(WORLD_SIMULATION_LEDGER_MODULES_ACU).toEqual(['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player']);
     expect(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner.plan.expectedLedgerChanges.every((item) => (
       WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]
     ).includes(item))).toBe(true);
@@ -81,4 +83,63 @@ describe('世界推演提示词装配契约', () => {
     expect(instruction).toContain('"verdict":"reject"');
     expect(reviewerPrompt).toContain(instruction);
   });
+
+  it('提示词 v4 含碰撞占位符与各角色动态世界硬约束', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v4');
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual(['world-simulation-v3', 'world-simulation-v4']);
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
+    const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');
+    const analystPrompt = prompts['world-analyst'].map(item => item.content).join('\n');
+    const reviewerPrompt = prompts['causality-reviewer'].map(item => item.content).join('\n');
+    expect(directorPrompt).toContain('$WORLD_COLLISIONS');
+    expect(plannerPrompt).toContain('$WORLD_COLLISIONS');
+    expect(plannerPrompt).toContain('临界暗流');
+    expect(worldSimulationPlannerProtocolInstruction_ACU()).toContain('$WORLD_COLLISIONS');
+
+    const director = worldSimulationDirectorProtocolInstruction_ACU();
+    expect(director).toContain('player:current');
+    expect(director).toContain('rumors:current');
+    expect(directorPrompt).toContain('碰撞报告');
+    expect(directorPrompt).toContain('secluded');
+    expect(directorPrompt).toContain('clockAdvance');
+    expect(directorPrompt).toContain('伴生');
+
+    const specialist = worldSimulationSpecialistProtocolInstruction_ACU(
+      'world-analyst',
+      WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'world-analyst')!.writableModules,
+    );
+    expect(specialist).toContain('clockAdvance');
+    expect(specialist).toContain('禁止直接写 day');
+    expect(specialist).toContain('locationUpdatedAtDay');
+    expect(specialist).toContain('regionVisits');
+    expect(specialist).toContain('secluded');
+    expect(specialist).toContain('exposePolicy');
+    expect(specialist).toContain('life');
+    expect(specialist).toContain('rumors');
+    expect(specialist).toContain('earliestRevealDay');
+    expect(specialist).toContain('sourceId');
+    expect(analystPrompt).toContain(specialist);
+
+    const reviewer = worldSimulationReviewerProtocolInstruction_ACU();
+    expect(reviewer).toContain('encounter');
+    expect(reviewer).toContain('sourceId');
+    expect(reviewer).toContain("contact='open'");
+    expect(reviewerPrompt).toContain(reviewer);
+    expect(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer.guidance.signals[0]).toMatchObject({
+      voice: 'rumor',
+      sourceId: expect.any(String),
+    });
+  });
+
+  it('指纹迁移：旧默认替换为当前默认，自定义提示词保留', () => {
+    const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const previous = structuredClone(defaults);
+    const stock = structuredClone(previous);
+    const custom = structuredClone(previous);
+    custom['world-director'][2].content = '用户 guidance：自定义动态世界';
+    expect(migrateWorldSimulationAgentPrompts_ACU(custom, previous)['world-director'][2].content).toContain('自定义动态世界');
+    expect(migrateWorldSimulationAgentPrompts_ACU(stock, previous)).toEqual(defaults);
+  });
+
 });
