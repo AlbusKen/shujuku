@@ -108,6 +108,7 @@ import {
   clearTableRuntimeWithoutReload_ACU,
   getCurrentProviderMode,
   getStorageRuntimeHealth_ACU,
+  isStorageRuntimeReadyForSyncRead_ACU,
   didSqliteFallbackAfterReload_ACU,
   getRuntimeLifecycleEpoch_ACU,
   hydrateStorageProviderFromSnapshot_ACU,
@@ -441,6 +442,121 @@ describe('table-storage-strategy', () => {
 
       await expect(switchStorageMode('sqlite')).rejects.toThrow('provider_not_ready_after_switch');
       expect(getCurrentProviderMode()).toBe('native');
+    });
+
+    it('Native→SQLite 切换成功后发布 ready health，同步读取门禁为 true', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(true);
+
+      mockStorageMode = 'sqlite';
+      await switchStorageMode('sqlite');
+
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      expect(getActiveStorageProvider()!.isReady()).toBe(true);
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: 'merged',
+      });
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(true);
+    });
+
+    it('Native→SQLite→Native 往返后同步读取门禁保持 true', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+
+      mockStorageMode = 'sqlite';
+      await switchStorageMode('sqlite');
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(true);
+
+      mockStorageMode = 'native';
+      await switchStorageMode('native');
+
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'ready', expectedMode: 'native', activeMode: 'native',
+      });
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(true);
+    });
+
+    it('空数据库切换到 SQLite 后 source=empty 且同步读取门禁为 true', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+
+      mockStorageMode = 'sqlite';
+      await expect(switchStorageMode('sqlite')).resolves.toBeUndefined();
+
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: 'empty',
+      });
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(true);
+    });
+
+    it('SQLite 切换加载失败时 degraded health，同步读取门禁为 false', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty', error: 'WASM 错误' };
+
+      mockStorageMode = 'sqlite';
+      await expect(switchStorageMode('sqlite')).rejects.toThrow('已自动回退');
+
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', failureCode: 'provider_fallback',
+      });
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(false);
+    });
+
+    it('SQLite 切换异常时 dispose 候选、degraded health，同步读取门禁为 false', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      sqliteLoadShouldThrow = new Error('意外错误');
+
+      mockStorageMode = 'sqlite';
+      await expect(switchStorageMode('sqlite')).rejects.toThrow('意外错误');
+
+      const sqliteCandidates = allCreatedProviders.filter(provider => provider.mode === 'sqlite');
+      expect(sqliteCandidates.length).toBeGreaterThan(0);
+      expect(sqliteCandidates.every(provider => provider.dispose.mock.calls.length > 0)).toBe(true);
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', failureCode: 'provider_fallback',
+      });
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(false);
+    });
+
+    it('SQLite 切换失败后再成功切换时恢复 ready 与同步读取门禁', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty', error: 'WASM 错误' };
+
+      mockStorageMode = 'sqlite';
+      await expect(switchStorageMode('sqlite')).rejects.toThrow('已自动回退');
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(false);
+
+      sqliteLoadResult = { loaded: true, source: 'merged' };
+      await switchStorageMode('sqlite');
+
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: 'merged',
+      });
+      expect(isStorageRuntimeReadyForSyncRead_ACU()).toBe(true);
+    });
+
+    it('切换成功后 ensureStorageProviderReady_ACU 复用当前 provider，不重复初始化', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      mockStorageMode = 'sqlite';
+      await switchStorageMode('sqlite');
+      const provider = getActiveStorageProvider()!;
+      const createdCount = allCreatedProviders.length;
+      const replayCount = mockLoadOrCreateJsonTableFromChatHistory.mock.calls.length;
+
+      await expect(ensureStorageProviderReady_ACU()).resolves.toBe(provider);
+
+      expect(allCreatedProviders).toHaveLength(createdCount);
+      expect(mockLoadOrCreateJsonTableFromChatHistory).toHaveBeenCalledTimes(replayCount);
     });
 
   });

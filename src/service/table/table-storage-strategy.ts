@@ -293,8 +293,9 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
 
   logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
 
+  let nextProvider: ITableStorageProvider | null = null;
   try {
-    const nextProvider = createProvider(mode);
+    nextProvider = createProvider(mode);
     const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
     logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
 
@@ -303,17 +304,29 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
       if (failure) {
         logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${failure}`);
         nextProvider.dispose();
+        nextProvider = null;
         replaceActiveProvider_ACU(createProvider('native'));
+        setRuntimeHealth_ACU({
+          status: 'degraded', expectedMode: mode, activeMode: 'native', source: result.source,
+          failureCode: 'provider_fallback', error: failure,
+        });
         throw new Error(`SQLite 模式切换失败: ${failure}。已自动回退到原生模式。`);
       }
     }
     replaceActiveProvider_ACU(nextProvider);
+    nextProvider = null;
+    setRuntimeHealth_ACU({ status: 'ready', expectedMode: mode, activeMode: mode, source: result.source });
   } catch (e: any) {
     if (e.message?.includes('已自动回退')) throw e;
 
     logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
+    nextProvider?.dispose();
     if (mode === 'sqlite') {
       replaceActiveProvider_ACU(createProvider('native'));
+      setRuntimeHealth_ACU({
+        status: 'degraded', expectedMode: mode, activeMode: 'native',
+        failureCode: 'provider_fallback', error: e?.message || String(e),
+      });
     }
     throw e;
   }
