@@ -4,7 +4,7 @@
  * 从 prompt-builder.ts 拆出（L195-L501 + L1519-L1604）
  */
 import { currentAbortController_ACU, trackAbortController_ACU, untrackAbortController_ACU, _set_currentAbortController_ACU } from '../../runtime/state-manager';
-import { getApiConfigByPreset_ACU, buildCustomApiRequestBody_ACU } from '../api-call';
+import { getApiConfigByPreset_ACU, buildCustomApiRequestBody_ACU, requireResolvedApiPreset_ACU } from '../api-call';
 import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-manager';
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
@@ -71,6 +71,7 @@ export class RetryableAiResponseError_ACU extends Error {
         ? String(options.tableApiPreset)
         : (settings_ACU.tableApiPreset || '');
     const apiPresetConfig = getApiConfigByPreset_ACU(effectiveTableApiPreset);
+    requireResolvedApiPreset_ACU(effectiveTableApiPreset, apiPresetConfig);
     const effectiveApiMode = apiPresetConfig.apiMode;
     const effectiveApiConfig = apiPresetConfig.apiConfig;
     const effectiveTavernProfile = apiPresetConfig.tavernProfile;

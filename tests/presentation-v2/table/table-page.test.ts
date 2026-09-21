@@ -5,6 +5,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
+import { readFileSync } from 'node:fs';
 
 const STORAGE_KEY = 'acu_v2_ui_state';
 
@@ -207,6 +208,9 @@ async function mountTablePage(opts: {
       refresh: vi.fn(async () => {}),
     }),
   }));
+  vi.doMock('../../../src/presentation-v2/components/DanglingReferenceBanner.vue', () => ({
+    default: { name: 'DanglingReferenceBanner', template: '<div class="dangling-banner-stub"></div>', props: ['scope'] },
+  }));
 
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
@@ -239,6 +243,12 @@ beforeEach(() => {
 });
 
 describe('TablePage', () => {
+  it('注入目标面板挂载世界书失效引用标记', () => {
+    const source = readFileSync('src/presentation-v2/pages/TablePage.vue', 'utf8');
+    expect(source).toContain('<DanglingReferenceBanner scope="worldbook" />');
+    expect(source).toContain("import DanglingReferenceBanner from '../components/DanglingReferenceBanner.vue'");
+  });
+
   it('左右分栏：左列含附加世界书条目与提示词，右列含标签筛选与注入目标', async () => {
     const { mount } = await mountTablePage();
 

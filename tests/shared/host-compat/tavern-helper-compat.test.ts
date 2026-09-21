@@ -67,6 +67,13 @@ describe('passthrough（旧版酒馆助手全量 API）', () => {
     const { api } = buildTavernHelperCompat_ACU(rawTH, () => null);
     expect(api.getTavernHelperVersion()).toBe('3.0.0');
   });
+
+  it('passthrough 路径仍暴露 invalidateLorebookListSnapshot，调用原生快照失效且安全', () => {
+    const rawTH = { getLorebooks: vi.fn().mockReturnValue(['书']) };
+    const { api } = buildTavernHelperCompat_ACU(rawTH, () => null);
+    expect(typeof api.invalidateLorebookListSnapshot).toBe('function');
+    expect(() => api.invalidateLorebookListSnapshot()).not.toThrow();
+  });
 });
 
 describe('mapped（新版改名 API）', () => {
@@ -226,6 +233,24 @@ describe('native（无酒馆助手，SillyTavern 原生兜底）', () => {
     const stApi = makeUsableStApi({ executeSlashCommandsWithOptions: vi.fn().mockResolvedValue({ pipe: 'p' }) });
     const { api } = buildTavernHelperCompat_ACU(undefined, () => stApi);
     expect(await api.triggerSlash('/trigger')).toBe('p');
+  });
+
+  it('native 路径的 invalidateLorebookListSnapshot 使 getLorebooks 重新拉取', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['旧书'], settings: '{}' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['新书'], settings: '{}' }) });
+    globalThis.fetch = fetchMock as any;
+    try {
+      const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+      expect(await api.getLorebooks()).toEqual(['旧书']);
+      expect(await api.getLorebooks()).toEqual(['旧书']);
+      api.invalidateLorebookListSnapshot();
+      expect(await api.getLorebooks()).toEqual(['新书']);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('rawTH 与 ST 都不可用时全部记为 missing', () => {

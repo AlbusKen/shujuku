@@ -212,14 +212,27 @@ export async function deleteLorebookEntries_ACU(bookName: string, uids: any[]): 
 
 // ═══ 世界书列表 ═══
 
+export function invalidateLorebookListSnapshot_ACU(): void {
+    const api = TavernHelper_API_ACU as { invalidateLorebookListSnapshot?: () => void; invalidateSettingsSnapshot?: () => void } | undefined;
+    if (typeof api?.invalidateLorebookListSnapshot === 'function') {
+        api.invalidateLorebookListSnapshot();
+        return;
+    }
+    if (typeof api?.invalidateSettingsSnapshot === 'function') {
+        api.invalidateSettingsSnapshot();
+    }
+}
+
 /**
  * 获取所有可用的世界书列表
  * 兼容层在初始化时已锁定世界书后端来源。
  * @returns 世界书名称数组，不可用时返回 []
  */
-export async function listLorebooks_ACU(): Promise<string[]> {
-    if (TavernHelper_API_ACU && typeof TavernHelper_API_ACU.getLorebooks === 'function') {
-        return await TavernHelper_API_ACU.getLorebooks();
+export async function listLorebooks_ACU(options?: { forceRefresh?: boolean }): Promise<string[]> {
+    if (options?.forceRefresh) invalidateLorebookListSnapshot_ACU();
+    const getLorebooks = (TavernHelper_API_ACU as unknown as { getLorebooks?: (opts?: { forceRefresh?: boolean }) => Promise<string[]> | string[] } | undefined)?.getLorebooks;
+    if (typeof getLorebooks === 'function') {
+        return await getLorebooks(options);
     }
     logWarn_ACU('[WorldbookGateway] listLorebooks 不可用，返回空数组');
     return [];

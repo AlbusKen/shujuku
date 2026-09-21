@@ -1,7 +1,12 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { FirstFloorContinuationStore_ACU } from './continuation-store';
-import { buildMigratedContinuationEnvelope_ACU, stripLegacyContinuationLoopFields_ACU, validateContinuationSettings_ACU } from './continuation-store';
+import {
+  CONTINUATION_GLOBAL_SETTINGS_KEY_ACU,
+  FirstFloorContinuationStore_ACU,
+  buildMigratedContinuationEnvelope_ACU,
+  stripLegacyContinuationLoopFields_ACU,
+  validateContinuationSettings_ACU,
+} from './continuation-store';
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } from './continuation-orchestrator';
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
@@ -152,7 +157,7 @@ function hasLegacyContinuationLoopFields_ACU(value: unknown): boolean {
 }
 
 /** 全局设置副本在 settings_ACU 上的字段名。写入走 saveSettings_ACU 与其他全局配置同通道持久化。 */
-const GLOBAL_CONTINUATION_SETTINGS_KEY_ACU = 'continuationGlobalSettings';
+const GLOBAL_CONTINUATION_SETTINGS_KEY_ACU = CONTINUATION_GLOBAL_SETTINGS_KEY_ACU;
 
 /**
  * 读取全局续写设置副本。深拷贝后过与信封同一套校验（含历史字段迁移与提示词版本强刷），

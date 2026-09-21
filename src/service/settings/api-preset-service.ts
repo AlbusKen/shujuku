@@ -9,6 +9,25 @@
 import { settings_ACU, currentChatFileIdentifier_ACU } from '../runtime/state-manager';
 import { saveSettings_ACU, type SaveSettingsResult_ACU } from './settings-service';
 import { logWarn_ACU } from '../../shared/utils';
+import { globalMeta_ACU } from '../../data/repositories/profile-repo';
+import {
+  CONTINUATION_GLOBAL_SETTINGS_KEY_ACU,
+  clearApiPresetReferencesInContinuationSettings_ACU,
+  mutateCurrentContinuationApiPresetSettings_ACU,
+  persistCurrentContinuationEnvelope_ACU,
+  renameApiPresetReferencesInContinuationSettings_ACU,
+  restoreCurrentContinuationApiPresetSettings_ACU,
+  snapshotCurrentContinuationApiPresetSettings_ACU,
+} from '../continuation/continuation-store';
+import type { ContinuationSettings_ACU } from '../continuation/model';
+import {
+  clearApiPresetReferencesInWorldSimulationSettings_ACU,
+  mutateCurrentWorldSimulationApiPresetSettings_ACU,
+  persistCurrentWorldSimulationEnvelope_ACU,
+  renameApiPresetReferencesInWorldSimulationSettings_ACU,
+  restoreCurrentWorldSimulationApiPresetSettings_ACU,
+  snapshotCurrentWorldSimulationApiPresetSettings_ACU,
+} from '../simulation/simulation-store';
 
 // ═══ 类型 ═══
 
@@ -286,6 +305,53 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? null));
 }
 
+function getKeywordApiPresetHolder_ACU(): { keywordApiPreset?: unknown } | null {
+  if (globalMeta_ACU?.vectorMemoryConfigGlobal && typeof globalMeta_ACU.vectorMemoryConfigGlobal === 'object' && !Array.isArray(globalMeta_ACU.vectorMemoryConfigGlobal)) {
+    return globalMeta_ACU.vectorMemoryConfigGlobal as { keywordApiPreset?: unknown };
+  }
+  if (settings_ACU.vectorMemoryConfig && typeof settings_ACU.vectorMemoryConfig === 'object' && !Array.isArray(settings_ACU.vectorMemoryConfig)) {
+    return settings_ACU.vectorMemoryConfig as { keywordApiPreset?: unknown };
+  }
+  return null;
+}
+
+function readKeywordApiPreset_ACU(): string {
+  const holder = getKeywordApiPresetHolder_ACU();
+  return typeof holder?.keywordApiPreset === 'string' ? holder.keywordApiPreset : '';
+}
+
+function writeKeywordApiPreset_ACU(value: string): void {
+  const holder = getKeywordApiPresetHolder_ACU();
+  if (holder) holder.keywordApiPreset = value;
+  if (
+    settings_ACU.vectorMemoryConfig
+    && typeof settings_ACU.vectorMemoryConfig === 'object'
+    && !Array.isArray(settings_ACU.vectorMemoryConfig)
+    && settings_ACU.vectorMemoryConfig !== holder
+  ) {
+    settings_ACU.vectorMemoryConfig.keywordApiPreset = value;
+  }
+}
+
+function readContinuationGlobalSettings_ACU(): ContinuationSettings_ACU | null {
+  const raw = (settings_ACU as Record<string, unknown>)[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw as ContinuationSettings_ACU;
+}
+
+function writeContinuationGlobalSettings_ACU(settings: ContinuationSettings_ACU): void {
+  (settings_ACU as Record<string, unknown>)[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU] = settings;
+}
+
+function persistCascadedEnvelopes_ACU(): void {
+  void persistCurrentContinuationEnvelope_ACU().catch(error => {
+    logWarn_ACU('[API预设] 续写信封引用已更新到当前聊天内存，但聊天保存失败。', error);
+  });
+  void persistCurrentWorldSimulationEnvelope_ACU().catch(error => {
+    logWarn_ACU('[API预设] 世界推演信封引用已更新到当前聊天内存，但聊天保存失败。', error);
+  });
+}
+
 function snapshotApiFields_ACU(): Record<string, unknown> {
   ensureApiSettingsShape_ACU();
   return {
@@ -301,6 +367,11 @@ function snapshotApiFields_ACU(): Record<string, unknown> {
     plotTaskApiPresetOverridesById: clone(settings_ACU.plotTaskApiPresetOverridesById),
     contentOptimizationApiPreset: settings_ACU.contentOptimizationSettings?.apiPreset,
     streamingEnabled: settings_ACU.streamingEnabled,
+    keywordApiPreset: readKeywordApiPreset_ACU(),
+    continuationGlobalSettings: clone(readContinuationGlobalSettings_ACU()),
+    continuationEnvelope: snapshotCurrentContinuationApiPresetSettings_ACU(),
+    simulationEnvelope: snapshotCurrentWorldSimulationApiPresetSettings_ACU(),
+    persistEnvelopes: false,
   };
 }
 
@@ -319,6 +390,14 @@ function restoreApiFields_ACU(snapshot: Record<string, unknown>): void {
     settings_ACU.contentOptimizationSettings.apiPreset = snapshot.contentOptimizationApiPreset;
   }
   settings_ACU.streamingEnabled = snapshot.streamingEnabled;
+  writeKeywordApiPreset_ACU(typeof snapshot.keywordApiPreset === 'string' ? snapshot.keywordApiPreset : '');
+  if (snapshot.continuationGlobalSettings === null) {
+    delete (settings_ACU as Record<string, unknown>)[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU];
+  } else if (snapshot.continuationGlobalSettings !== undefined) {
+    writeContinuationGlobalSettings_ACU(clone(snapshot.continuationGlobalSettings) as ContinuationSettings_ACU);
+  }
+  restoreCurrentContinuationApiPresetSettings_ACU(snapshot.continuationEnvelope);
+  restoreCurrentWorldSimulationApiPresetSettings_ACU(snapshot.simulationEnvelope);
 }
 
 function finalizeSave_ACU(snapshot: Record<string, unknown>): ApiPresetWriteResult_ACU {
@@ -333,18 +412,20 @@ function finalizeSave_ACU(snapshot: Record<string, unknown>): ApiPresetWriteResu
       message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
     };
   }
+  if (snapshot.persistEnvelopes === true) persistCascadedEnvelopes_ACU();
   return { ok: true, code: 'ok', changed: true, saveResult };
 }
 
-/** 清除所有指向指定预设的引用（table/plot/optimization/vector/chat binding） */
-export function clearApiPresetReferences_ACU(presetName: string): void {
+/** 清除所有指向指定预设的引用（table/plot/optimization/vector/chat binding/续写/推演 envelope） */
+export function clearApiPresetReferences_ACU(presetName: string): boolean {
   const target = String(presetName || '').trim();
-  if (!target) return;
+  if (!target) return false;
   if (settings_ACU.tableApiPreset === target) settings_ACU.tableApiPreset = '';
   if (settings_ACU.plotApiPreset === target) settings_ACU.plotApiPreset = '';
   if (settings_ACU.contentOptimizationSettings?.apiPreset === target) {
     settings_ACU.contentOptimizationSettings.apiPreset = '';
   }
+  if (readKeywordApiPreset_ACU() === target) writeKeywordApiPreset_ACU('');
   if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
     for (const key of Object.keys(settings_ACU.tableApiPresetOverridesByName)) {
       if (settings_ACU.tableApiPresetOverridesByName[key] === target) {
@@ -364,19 +445,32 @@ export function clearApiPresetReferences_ACU(presetName: string): void {
       if (binding?.presetName === target) delete settings_ACU.apiPresetBindingsByChat[chatKey];
     }
   }
+  const globalContinuation = readContinuationGlobalSettings_ACU();
+  if (globalContinuation) {
+    const nextGlobal = clearApiPresetReferencesInContinuationSettings_ACU(globalContinuation, target);
+    if (nextGlobal !== globalContinuation) writeContinuationGlobalSettings_ACU(nextGlobal);
+  }
+  const continuationMutated = mutateCurrentContinuationApiPresetSettings_ACU(
+    settings => clearApiPresetReferencesInContinuationSettings_ACU(settings, target),
+  );
+  const simulationMutated = mutateCurrentWorldSimulationApiPresetSettings_ACU(
+    settings => clearApiPresetReferencesInWorldSimulationSettings_ACU(settings, target),
+  );
+  return continuationMutated || simulationMutated;
 }
 
 /** 重命名预设时原子更新所有引用 */
-export function renameApiPresetReferences_ACU(oldName: string, newName: string): void {
+export function renameApiPresetReferences_ACU(oldName: string, newName: string): boolean {
   const oldN = String(oldName || '').trim();
   const newN = String(newName || '').trim();
-  if (!oldN || !newN || oldN === newN) return;
+  if (!oldN || !newN || oldN === newN) return false;
   const now = Date.now();
   if (settings_ACU.tableApiPreset === oldN) settings_ACU.tableApiPreset = newN;
   if (settings_ACU.plotApiPreset === oldN) settings_ACU.plotApiPreset = newN;
   if (settings_ACU.contentOptimizationSettings?.apiPreset === oldN) {
     settings_ACU.contentOptimizationSettings.apiPreset = newN;
   }
+  if (readKeywordApiPreset_ACU() === oldN) writeKeywordApiPreset_ACU(newN);
   if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
     for (const key of Object.keys(settings_ACU.tableApiPresetOverridesByName)) {
       if (settings_ACU.tableApiPresetOverridesByName[key] === oldN) {
@@ -399,6 +493,18 @@ export function renameApiPresetReferences_ACU(oldName: string, newName: string):
       }
     }
   }
+  const globalContinuation = readContinuationGlobalSettings_ACU();
+  if (globalContinuation) {
+    const nextGlobal = renameApiPresetReferencesInContinuationSettings_ACU(globalContinuation, oldN, newN);
+    if (nextGlobal !== globalContinuation) writeContinuationGlobalSettings_ACU(nextGlobal);
+  }
+  const continuationMutated = mutateCurrentContinuationApiPresetSettings_ACU(
+    settings => renameApiPresetReferencesInContinuationSettings_ACU(settings, oldN, newN),
+  );
+  const simulationMutated = mutateCurrentWorldSimulationApiPresetSettings_ACU(
+    settings => renameApiPresetReferencesInWorldSimulationSettings_ACU(settings, oldN, newN),
+  );
+  return continuationMutated || simulationMutated;
 }
 
 /** 设置当前聊天绑定并投影到运行配置 */
@@ -437,7 +543,9 @@ export function saveApiPreset_ACU(presetInput: ApiPreset_ACU, originalName = '')
 
   if (!settings_ACU.defaultApiPresetName) settings_ACU.defaultApiPresetName = preset.name;
   if (oldName && settings_ACU.defaultApiPresetName === oldName) settings_ACU.defaultApiPresetName = preset.name;
-  if (oldName && oldName !== preset.name) renameApiPresetReferences_ACU(oldName, preset.name);
+  if (oldName && oldName !== preset.name) {
+    snapshot.persistEnvelopes = renameApiPresetReferences_ACU(oldName, preset.name);
+  }
 
   // [兼容] 保存/重命名的预设是当前聊天活动预设、或当前无活动预设（保存第一个预设）时，
   // 自动绑定到当前聊天并投影其配置到运行 apiMode/apiConfig/tavernProfile。
@@ -479,7 +587,7 @@ export function deleteApiPreset_ACU(name: string): ApiPresetWriteResult_ACU {
   if (settings_ACU.defaultApiPresetName === target.name) {
     settings_ACU.defaultApiPresetName = settings_ACU.apiPresets[0]?.name ?? '';
   }
-  clearApiPresetReferences_ACU(target.name);
+  snapshot.persistEnvelopes = clearApiPresetReferences_ACU(target.name);
   // [兼容] 删除的是当前聊天活动预设时，重新投影到默认/剩余预设，保持旧 V2 store 语义。
   if (wasActive) {
     const fallbackName = settings_ACU.defaultApiPresetName || settings_ACU.apiPresets[0]?.name || '';

@@ -18,6 +18,7 @@ import {
   CONTINUATION_SCHEMA_VERSION_ACU,
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
+  type ContinuationAgentApiPresetRole_ACU,
   type ContinuationEnvelope_ACU,
   type ContinuationErrorCode_ACU,
   type ContinuationErrorPhase_ACU,
@@ -1174,4 +1175,132 @@ export function buildMigratedContinuationEnvelope_ACU(legacyPlotSettings: unknow
 
 export function stripLegacyContinuationLoopFields_ACU(source: unknown): unknown {
   return stripLegacyLoopPromptFields_ACU(source);
+}
+
+/** 全局续写设置副本在 settings_ACU 上的字段名。与 continuation-runtime 读写同一通道。 */
+export const CONTINUATION_GLOBAL_SETTINGS_KEY_ACU = 'continuationGlobalSettings';
+
+function cloneJson_ACU<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getContinuationFirstFloorMessage_ACU(): Record<string, unknown> | null {
+  try {
+    const chat = getChatArray_ACU();
+    const first = Array.isArray(chat) && chat[0] && typeof chat[0] === 'object' && !Array.isArray(chat[0])
+      ? chat[0] as Record<string, unknown>
+      : null;
+    return first;
+  } catch {
+    return null;
+  }
+}
+
+function replaceAgentPresetName_ACU(
+  settings: ContinuationSettings_ACU,
+  matcher: (presetName: string) => boolean,
+  nextValue: (choice: ContinuationSettings_ACU['agentApiPresets'][ContinuationAgentApiPresetRole_ACU]) => ContinuationSettings_ACU['agentApiPresets'][ContinuationAgentApiPresetRole_ACU],
+): ContinuationSettings_ACU['agentApiPresets'] | null {
+  const source = settings.agentApiPresets;
+  if (!source || typeof source !== 'object') return null;
+  let changed = false;
+  const agentApiPresets = { ...source };
+  for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
+    const choice = agentApiPresets[role];
+    if (!choice || typeof choice !== 'object' || !matcher(String(choice.presetName || ''))) continue;
+    agentApiPresets[role] = nextValue(choice);
+    changed = true;
+  }
+  return changed ? agentApiPresets : null;
+}
+
+export function renameApiPresetReferencesInContinuationSettings_ACU(
+  settings: ContinuationSettings_ACU,
+  oldName: string,
+  newName: string,
+): ContinuationSettings_ACU {
+  const oldN = String(oldName || '').trim();
+  const newN = String(newName || '').trim();
+  if (!settings || typeof settings !== 'object' || !oldN || !newN || oldN === newN) return settings;
+  const nextAgent = replaceAgentPresetName_ACU(
+    settings,
+    presetName => presetName === oldN,
+    choice => ({ ...choice, presetName: newN }),
+  );
+  const nextFixed = settings.fixedApiPresetName === oldN ? newN : settings.fixedApiPresetName;
+  if (nextFixed === settings.fixedApiPresetName && !nextAgent) return settings;
+  return {
+    ...settings,
+    fixedApiPresetName: nextFixed,
+    ...(nextAgent ? { agentApiPresets: nextAgent } : {}),
+  };
+}
+
+export function clearApiPresetReferencesInContinuationSettings_ACU(
+  settings: ContinuationSettings_ACU,
+  name: string,
+): ContinuationSettings_ACU {
+  const target = String(name || '').trim();
+  if (!settings || typeof settings !== 'object' || !target) return settings;
+  const nextAgent = replaceAgentPresetName_ACU(
+    settings,
+    presetName => presetName === target,
+    choice => ({
+      mode: choice.mode === 'fixed' ? 'current' : choice.mode,
+      presetName: '',
+    }),
+  );
+  const clearFixed = settings.fixedApiPresetName === target;
+  if (!clearFixed && !nextAgent) return settings;
+  return {
+    ...settings,
+    ...(clearFixed ? { apiPresetMode: 'current' as const, fixedApiPresetName: '' } : {}),
+    ...(nextAgent ? { agentApiPresets: nextAgent } : {}),
+  };
+}
+
+export function snapshotCurrentContinuationApiPresetSettings_ACU(): unknown {
+  const first = getContinuationFirstFloorMessage_ACU();
+  if (!first || !Object.prototype.hasOwnProperty.call(first, CONTINUATION_FIRST_FLOOR_FIELD_ACU)) return undefined;
+  try {
+    return cloneJson_ACU(first[CONTINUATION_FIRST_FLOOR_FIELD_ACU]);
+  } catch {
+    return undefined;
+  }
+}
+
+export function restoreCurrentContinuationApiPresetSettings_ACU(snapshot: unknown): void {
+  if (snapshot === undefined) return;
+  const first = getContinuationFirstFloorMessage_ACU();
+  if (!first) return;
+  if (snapshot === null) {
+    delete first[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
+    return;
+  }
+  first[CONTINUATION_FIRST_FLOOR_FIELD_ACU] = snapshot;
+}
+
+export function mutateCurrentContinuationApiPresetSettings_ACU(
+  mutator: (settings: ContinuationSettings_ACU) => ContinuationSettings_ACU,
+): boolean {
+  const first = getContinuationFirstFloorMessage_ACU();
+  if (!first || !Object.prototype.hasOwnProperty.call(first, CONTINUATION_FIRST_FLOOR_FIELD_ACU)) return false;
+  try {
+    const envelope = validateContinuationEnvelope_ACU(first[CONTINUATION_FIRST_FLOOR_FIELD_ACU]);
+    const nextSettings = mutator(envelope.settings);
+    if (nextSettings === envelope.settings) return false;
+    first[CONTINUATION_FIRST_FLOOR_FIELD_ACU] = { ...envelope, settings: nextSettings };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function persistCurrentContinuationEnvelope_ACU(): Promise<void> {
+  const first = getContinuationFirstFloorMessage_ACU();
+  if (!first || !Object.prototype.hasOwnProperty.call(first, CONTINUATION_FIRST_FLOOR_FIELD_ACU)) return;
+  const store = new FirstFloorContinuationStore_ACU();
+  const current = store.readPersisted();
+  if (!current) return;
+  await store.replaceAtomically(current);
 }

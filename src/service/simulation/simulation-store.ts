@@ -852,3 +852,116 @@ export function validateWorldSimulationChronicleArchiveSnapshot_ACU(raw: unknown
   }
   return { schemaVersion: WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU, records };
 }
+
+function cloneJson_ACU<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getWorldSimulationFirstFloorMessage_ACU(): Record<string, unknown> | null {
+  try {
+    const chat = getChatArray_ACU();
+    const first = Array.isArray(chat) && isRecord_ACU(chat[0]) ? chat[0] : null;
+    return first;
+  } catch {
+    return null;
+  }
+}
+
+export function renameApiPresetReferencesInWorldSimulationSettings_ACU(
+  settings: WorldSimulationEnvelope_ACU['settings'],
+  oldName: string,
+  newName: string,
+): WorldSimulationEnvelope_ACU['settings'] {
+  const oldN = String(oldName || '').trim();
+  const newN = String(newName || '').trim();
+  if (!settings || typeof settings !== 'object' || !oldN || !newN || oldN === newN) return settings;
+  let changed = false;
+  const nextFixed = settings.fixedApiPresetName === oldN ? newN : settings.fixedApiPresetName;
+  if (nextFixed !== settings.fixedApiPresetName) changed = true;
+  const sourcePresets = settings.agentApiPresets && typeof settings.agentApiPresets === 'object' ? settings.agentApiPresets : {};
+  const agentApiPresets: WorldSimulationEnvelope_ACU['settings']['agentApiPresets'] = {};
+  for (const [role, choice] of Object.entries(sourcePresets)) {
+    if (choice && typeof choice === 'object' && choice.presetName === oldN) {
+      agentApiPresets[role] = { ...choice, presetName: newN };
+      changed = true;
+    } else {
+      agentApiPresets[role] = choice;
+    }
+  }
+  return changed ? { ...settings, fixedApiPresetName: nextFixed, agentApiPresets } : settings;
+}
+
+export function clearApiPresetReferencesInWorldSimulationSettings_ACU(
+  settings: WorldSimulationEnvelope_ACU['settings'],
+  name: string,
+): WorldSimulationEnvelope_ACU['settings'] {
+  const target = String(name || '').trim();
+  if (!settings || typeof settings !== 'object' || !target) return settings;
+  let changed = false;
+  const clearFixed = settings.fixedApiPresetName === target;
+  const sourcePresets = settings.agentApiPresets && typeof settings.agentApiPresets === 'object' ? settings.agentApiPresets : {};
+  const agentApiPresets: WorldSimulationEnvelope_ACU['settings']['agentApiPresets'] = {};
+  for (const [role, choice] of Object.entries(sourcePresets)) {
+    if (choice && typeof choice === 'object' && choice.presetName === target) {
+      agentApiPresets[role] = {
+        mode: choice.mode === 'fixed' ? 'current' : choice.mode,
+        presetName: '',
+      };
+      changed = true;
+    } else {
+      agentApiPresets[role] = choice;
+    }
+  }
+  if (!clearFixed && !changed) return settings;
+  return {
+    ...settings,
+    ...(clearFixed ? { apiPresetMode: 'current' as const, fixedApiPresetName: '' } : {}),
+    agentApiPresets,
+  };
+}
+
+export function snapshotCurrentWorldSimulationApiPresetSettings_ACU(): unknown {
+  const first = getWorldSimulationFirstFloorMessage_ACU();
+  if (!first || !Object.prototype.hasOwnProperty.call(first, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU)) return undefined;
+  try {
+    return cloneJson_ACU(first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU]);
+  } catch {
+    return undefined;
+  }
+}
+
+export function restoreCurrentWorldSimulationApiPresetSettings_ACU(snapshot: unknown): void {
+  if (snapshot === undefined) return;
+  const first = getWorldSimulationFirstFloorMessage_ACU();
+  if (!first) return;
+  if (snapshot === null) {
+    delete first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
+    return;
+  }
+  first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] = snapshot;
+}
+
+export function mutateCurrentWorldSimulationApiPresetSettings_ACU(
+  mutator: (settings: WorldSimulationEnvelope_ACU['settings']) => WorldSimulationEnvelope_ACU['settings'],
+): boolean {
+  const first = getWorldSimulationFirstFloorMessage_ACU();
+  if (!first || !Object.prototype.hasOwnProperty.call(first, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU)) return false;
+  try {
+    const envelope = validateWorldSimulationEnvelope_ACU(first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU]);
+    const nextSettings = mutator(envelope.settings);
+    if (nextSettings === envelope.settings) return false;
+    first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] = { ...envelope, settings: nextSettings };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function persistCurrentWorldSimulationEnvelope_ACU(): Promise<void> {
+  const first = getWorldSimulationFirstFloorMessage_ACU();
+  if (!first || !Object.prototype.hasOwnProperty.call(first, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU)) return;
+  const store = new FirstFloorWorldSimulationStore_ACU();
+  const current = store.readPersisted();
+  if (!current) return;
+  await store.replaceAtomically(current);
+}

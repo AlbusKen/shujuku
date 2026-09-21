@@ -6,6 +6,7 @@ import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { CHAT_SHEET_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentChatFileIdentifier_ACU, _set_allChatMessages_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU } from '../runtime/state-manager';
 import { getLorebookEntries_ACU, deleteLorebookEntries_ACU, getCurrentCharacterWorldbookBinding_ACU, getCurrentCharPrimaryLorebook_ACU as gwGetCurrentCharPrimaryLorebook_ACU, listLorebooks_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
+import { toastr_API_ACU } from '../../shared/host-api';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
 import { applyPlotWorldbookSelectionForCurrentCharacter_ACU, applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU, saveSettings_ACU } from '../settings/settings-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
@@ -127,6 +128,44 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
     enforceCleanupOfCharacterWorldbook_ACU();
   }
 
+  const warnedMissingInjectionTargets_ACU = new Set<string>();
+
+  export function resetMissingInjectionTargetWarningsForTests_ACU(): void {
+    warnedMissingInjectionTargets_ACU.clear();
+  }
+
+  function rememberResolvedInjectionTarget_ACU(...names: Array<string | null>): void {
+    for (const name of names) {
+      if (name) warnedMissingInjectionTargets_ACU.delete(name);
+    }
+  }
+
+  function warnMissingInjectionTarget_ACU(name: string): void {
+    if (warnedMissingInjectionTargets_ACU.has(name)) return;
+    warnedMissingInjectionTargets_ACU.add(name);
+    const message = `注入目标世界书「${name}」不存在，本次注入已跳过。请在设置中重新选择。`;
+    logWarn_ACU(`[Worldbook] ${message}`);
+    try {
+      toastr_API_ACU?.warning?.(message, 'SP·数据库', { timeOut: 8000 });
+    } catch {
+      // toast 不可用时只保留日志
+    }
+  }
+
+  async function resolveExistingLorebookName_ACU(requestedName: string): Promise<string | null> {
+    const first = resolveLorebookNameFromList_ACU(requestedName, await listLorebooks_ACU());
+    if (first) {
+      rememberResolvedInjectionTarget_ACU(requestedName, first);
+      return first;
+    }
+    const retry = resolveLorebookNameFromList_ACU(requestedName, await listLorebooks_ACU({ forceRefresh: true }));
+    if (retry) {
+      rememberResolvedInjectionTarget_ACU(requestedName, retry);
+      return retry;
+    }
+    return null;
+  }
+
   // [新增] 获取数据注入目标世界书的函数
   export async function getInjectionTargetLorebook_ACU() {
       const worldbookConfig = getCurrentWorldbookConfig_ACU();
@@ -139,24 +178,19 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
           lorebookName = target || null;
       }
 
-      // [防御] 验证世界书是否真实存在于 SillyTavern 的世界书列表中
-      // 防止 SillyTavern API 返回残留/缓存的不存在世界书名称导致报错
-      // 验证不通过时静默返回 null，不输出警告（避免用户看到无意义的重复警告）
-      if (lorebookName) {
-          try {
-              const resolvedLorebookName = resolveLorebookNameFromList_ACU(lorebookName, await listLorebooks_ACU());
-              if (!resolvedLorebookName) {
-                  logDebug_ACU(`[Worldbook] 注入目标世界书 "${lorebookName}" 不存在于可用列表中，静默跳过。`);
-                  return null;
-              }
-              lorebookName = resolvedLorebookName;
-          } catch (e) {
-              // 验证失败时静默降级，不打扰用户
+      if (!lorebookName) return null;
+
+      try {
+          const resolvedLorebookName = await resolveExistingLorebookName_ACU(lorebookName);
+          if (!resolvedLorebookName) {
+              warnMissingInjectionTarget_ACU(lorebookName);
               return null;
           }
+          return resolvedLorebookName;
+      } catch (e) {
+          logWarn_ACU('[Worldbook] 校验注入目标世界书失败，本次注入已跳过。', e);
+          return null;
       }
-
-      return lorebookName;
   }
 
 

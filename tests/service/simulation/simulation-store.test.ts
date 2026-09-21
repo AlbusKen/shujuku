@@ -11,6 +11,8 @@ import {
   validateWorldSimulationEnvelope_ACU,
   validateWorldSimulationLedger_ACU,
   writeWorldSimulationBucketEntry_ACU,
+  renameApiPresetReferencesInWorldSimulationSettings_ACU,
+  clearApiPresetReferencesInWorldSimulationSettings_ACU,
 } from '../../../src/service/simulation/simulation-store';
 import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
@@ -237,5 +239,41 @@ describe('world simulation anchor rescan', () => {
       validateWorldSimulationChronicleArchiveSnapshot_ACU,
       chat,
     )).toBeNull();
+  });
+});
+
+describe('world simulation API preset reference cascade helpers', () => {
+  it('rename 同步改写 fixed 与匹配的 agent presetName', () => {
+    const settings = buildDefaultWorldSimulationSettings_ACU();
+    settings.apiPresetMode = 'fixed';
+    settings.fixedApiPresetName = 'old';
+    settings.agentApiPresets = {
+      planner: { mode: 'fixed', presetName: 'old' },
+      reviewer: { mode: 'current', presetName: 'old' },
+      narrator: { mode: 'fixed', presetName: 'keep' },
+    };
+    const next = renameApiPresetReferencesInWorldSimulationSettings_ACU(settings, 'old', 'new');
+    expect(next).not.toBe(settings);
+    expect(next.fixedApiPresetName).toBe('new');
+    expect(next.agentApiPresets.planner.presetName).toBe('new');
+    expect(next.agentApiPresets.reviewer).toEqual({ mode: 'current', presetName: 'new' });
+    expect(next.agentApiPresets.narrator).toEqual({ mode: 'fixed', presetName: 'keep' });
+  });
+
+  it('clear 置空引用并回退 current；非 fixed 渠道只清 presetName', () => {
+    const settings = buildDefaultWorldSimulationSettings_ACU();
+    settings.apiPresetMode = 'fixed';
+    settings.fixedApiPresetName = 'old';
+    settings.agentApiPresets = {
+      planner: { mode: 'fixed', presetName: 'old' },
+      reviewer: { mode: 'current', presetName: 'old' },
+      narrator: { mode: 'fixed', presetName: 'keep' },
+    };
+    const next = clearApiPresetReferencesInWorldSimulationSettings_ACU(settings, 'old');
+    expect(next.apiPresetMode).toBe('current');
+    expect(next.fixedApiPresetName).toBe('');
+    expect(next.agentApiPresets.planner).toEqual({ mode: 'current', presetName: '' });
+    expect(next.agentApiPresets.reviewer).toEqual({ mode: 'current', presetName: '' });
+    expect(next.agentApiPresets.narrator).toEqual({ mode: 'fixed', presetName: 'keep' });
   });
 });

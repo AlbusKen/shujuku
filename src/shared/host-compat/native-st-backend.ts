@@ -16,6 +16,7 @@
  */
 
 import { logDebug_ACU, logWarn_ACU } from '../utils';
+import { isLorebookReadNotFoundError_ACU } from '../lorebook-read-error';
 import {
     buildNativeEntryDefaults_ACU,
     nativeToOldEntry_ACU,
@@ -35,7 +36,7 @@ interface StSettingsSnapshot_ACU {
 }
 
 export interface NativeStBackend_ACU {
-    getLorebooks: () => Promise<string[]>;
+    getLorebooks: (options?: { forceRefresh?: boolean }) => Promise<string[]>;
     getLorebookEntries: (bookName: string) => Promise<OldFlatLorebookEntry_ACU[]>;
     setLorebookEntries: (bookName: string, entries: Array<Record<string, any>>) => Promise<void>;
     createLorebookEntries: (bookName: string, entries: Array<Record<string, any>>) => Promise<{ entries: OldFlatLorebookEntry_ACU[]; new_uids: number[] }>;
@@ -70,7 +71,8 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
         settingsSnapshotAt = 0;
     }
 
-    async function fetchSettingsSnapshot(): Promise<StSettingsSnapshot_ACU | null> {
+    async function fetchSettingsSnapshot(forceRefresh = false): Promise<StSettingsSnapshot_ACU | null> {
+        if (forceRefresh) invalidateSettingsSnapshot();
         const now = Date.now();
         if (settingsSnapshot && now - settingsSnapshotAt < SETTINGS_SNAPSHOT_TTL_MS_ACU) {
             return settingsSnapshot;
@@ -124,12 +126,20 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
         if (!api || typeof api.loadWorldInfo !== 'function') {
             throw new Error('SillyTavern loadWorldInfo 接口不可用');
         }
-        const data = await api.loadWorldInfo(bookName);
-        // 不存在时的文案必须匹配 classifyLorebookReadError_ACU 的中文 not-found 正则
-        if (!data || typeof data !== 'object' || !data.entries) {
-            throw new Error(`世界书 "${bookName}" 不存在`);
+        try {
+            const data = await api.loadWorldInfo(bookName);
+            // 不存在时的文案必须匹配 classifyLorebookReadError_ACU 的中文 not-found 正则
+            if (!data || typeof data !== 'object' || !data.entries) {
+                invalidateSettingsSnapshot();
+                throw new Error(`世界书 "${bookName}" 不存在`);
+            }
+            return data;
+        } catch (error) {
+            if (isLorebookReadNotFoundError_ACU(error)) {
+                invalidateSettingsSnapshot();
+            }
+            throw error;
         }
-        return data;
     }
 
     async function saveBook(bookName: string, data: any): Promise<void> {
@@ -206,8 +216,8 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
 
     // ═══ 世界书列表与角色绑定 ═══
 
-    async function getLorebooks(): Promise<string[]> {
-        const snapshot = await fetchSettingsSnapshot();
+    async function getLorebooks(options?: { forceRefresh?: boolean }): Promise<string[]> {
+        const snapshot = await fetchSettingsSnapshot(!!options?.forceRefresh);
         return snapshot?.worldNames ?? [];
     }
 

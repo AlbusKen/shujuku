@@ -34,6 +34,8 @@ import {
   buildMigratedContinuationEnvelope_ACU,
   buildLegacyContinuationMigration_ACU,
   stripLegacyContinuationLoopFields_ACU,
+  renameApiPresetReferencesInContinuationSettings_ACU,
+  clearApiPresetReferencesInContinuationSettings_ACU,
 } from '../../../src/service/continuation/continuation-store';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
@@ -881,5 +883,46 @@ describe('FirstFloorContinuationStore_ACU', () => {
     const migrated = buildMigratedContinuationEnvelope_ACU(legacy);
     expect(migrated).toMatchObject({ didMigrate: true, envelope: { schemaVersion: 1, activeTask: null } });
     expect(migrated.envelope.settings).not.toHaveProperty('quickReplyContent');
+  });
+});
+
+describe('continuation API preset reference cascade helpers', () => {
+  it('rename 同步改写 fixed 与匹配的 agent presetName，不改其它渠道', () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.apiPresetMode = 'fixed';
+    settings.fixedApiPresetName = 'old';
+    settings.agentApiPresets.main = { mode: 'fixed', presetName: 'old' };
+    settings.agentApiPresets.outline = { mode: 'inherit', presetName: 'old' };
+    settings.agentApiPresets.reviewer = { mode: 'fixed', presetName: 'keep' };
+
+    const next = renameApiPresetReferencesInContinuationSettings_ACU(settings, 'old', 'new');
+    expect(next).not.toBe(settings);
+    expect(next.fixedApiPresetName).toBe('new');
+    expect(next.agentApiPresets.main.presetName).toBe('new');
+    expect(next.agentApiPresets.outline).toEqual({ mode: 'inherit', presetName: 'new' });
+    expect(next.agentApiPresets.reviewer).toEqual({ mode: 'fixed', presetName: 'keep' });
+  });
+
+  it('clear 置空引用并回退 current；inherit 只清 presetName', () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.apiPresetMode = 'fixed';
+    settings.fixedApiPresetName = 'old';
+    settings.agentApiPresets.main = { mode: 'fixed', presetName: 'old' };
+    settings.agentApiPresets.outline = { mode: 'inherit', presetName: 'old' };
+    settings.agentApiPresets.reviewer = { mode: 'fixed', presetName: 'keep' };
+
+    const next = clearApiPresetReferencesInContinuationSettings_ACU(settings, 'old');
+    expect(next.apiPresetMode).toBe('current');
+    expect(next.fixedApiPresetName).toBe('');
+    expect(next.agentApiPresets.main).toEqual({ mode: 'current', presetName: '' });
+    expect(next.agentApiPresets.outline).toEqual({ mode: 'inherit', presetName: '' });
+    expect(next.agentApiPresets.reviewer).toEqual({ mode: 'fixed', presetName: 'keep' });
+  });
+
+  it('名称不匹配时返回同一对象', () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.fixedApiPresetName = 'keep';
+    expect(renameApiPresetReferencesInContinuationSettings_ACU(settings, 'old', 'new')).toBe(settings);
+    expect(clearApiPresetReferencesInContinuationSettings_ACU(settings, 'old')).toBe(settings);
   });
 });

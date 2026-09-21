@@ -43,7 +43,7 @@ export function createPlotWorldbookReadContext_ACU(
       return tableIndexBuildCount;
     },
     get availableBookNamesPromise() {
-      if (!availableBookNamesPromise) availableBookNamesPromise = Promise.resolve().then(listLorebooks_ACU);
+      if (!availableBookNamesPromise) availableBookNamesPromise = Promise.resolve().then(() => listLorebooks_ACU());
       return availableBookNamesPromise;
     },
     get characterLorebookNamesPromise() {

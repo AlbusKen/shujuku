@@ -56,6 +56,8 @@ import {
   getApiConfigByPreset_ACU,
   callAIWithPreset_ACU,
   AgentApiHttpError_ACU,
+  ApiPresetUnresolvedError_ACU,
+  requireResolvedApiPreset_ACU,
   callCustomOpenAI_ACU_Direct,
   buildCustomApiRequestBody_ACU,
   isRetryableAiRequestError_ACU,
@@ -91,10 +93,34 @@ describe('getApiConfigByPreset_ACU', () => {
     expect(config.tavernProfile).toBe('profileA');
   });
 
-  it('预设不存在时回退到当前配置', () => {
+  it('预设不存在时回退到当前配置并透出 resolved=false', () => {
     mockSettings.apiPresets = [];
     const config = getApiConfigByPreset_ACU('不存在');
     expect(config.apiMode).toBe('custom');
+    expect(config.resolved).toBe(false);
+  });
+
+  it('空预设名返回当前配置且不把 resolved=false 当作悬挂拒绝条件', () => {
+    const config = getApiConfigByPreset_ACU('');
+    expect(config.resolved).toBe(false);
+    expect(() => requireResolvedApiPreset_ACU('', config)).not.toThrow();
+  });
+});
+
+describe('requireResolvedApiPreset_ACU', () => {
+  it('非空名且 resolved=false 时抛出 ApiPresetUnresolvedError_ACU', () => {
+    expect(() => requireResolvedApiPreset_ACU('ghost', { resolved: false })).toThrow(ApiPresetUnresolvedError_ACU);
+    try {
+      requireResolvedApiPreset_ACU('ghost', { resolved: false });
+    } catch (error) {
+      expect(error).toMatchObject({ name: 'ApiPresetUnresolvedError_ACU', presetName: 'ghost', code: 'API_PRESET_UNRESOLVED' });
+      expect(String(error)).toContain('请在设置中重新选择');
+    }
+  });
+
+  it('resolved 缺失或 true 时不抛错，兼容旧 mock', () => {
+    expect(() => requireResolvedApiPreset_ACU('p1', {})).not.toThrow();
+    expect(() => requireResolvedApiPreset_ACU('p1', { resolved: true })).not.toThrow();
   });
 });
 
@@ -113,6 +139,26 @@ describe('callApi_ACU', () => {
     mockSettings.apiConfig = { useMainApi: true };
     mockIsGenerateRawAvailable.mockReturnValue(false);
     await expect(callApi_ACU([{ role: 'user', content: '你好' }], {})).rejects.toThrow('generateRaw');
+  });
+
+  it('悬挂剧情预设抛错且不发出网络请求', async () => {
+    mockSettings.plotApiPreset = 'ghost';
+    mockSettings.apiPresets = [];
+    await expect(callApi_ACU([{ role: 'user', content: '你好' }], {})).rejects.toBeInstanceOf(ApiPresetUnresolvedError_ACU);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
+    expect(mockSendConnectionManager).not.toHaveBeenCalled();
+  });
+
+  it('空预设名即使 resolved=false 也走当前配置', async () => {
+    mockSettings.plotApiPreset = '';
+    mockSettings.apiPresets = [];
+    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockFetch.mockResolvedValue({ ok: true, text: () => Promise.resolve('response') });
+    mockHandleApiResponse.mockResolvedValue('当前配置回复');
+    const result = await callApi_ACU([{ role: 'user', content: '你好' }], {});
+    expect(result).toBe('当前配置回复');
+    expect(mockFetch).toHaveBeenCalled();
   });
 
   it('自定义 API 模式使用 fetch', async () => {
@@ -153,6 +199,14 @@ describe('callAIWithPreset_ACU', () => {
   it('非数组返回 null', async () => {
     const result = await callAIWithPreset_ACU(null as any);
     expect(result).toBeNull();
+  });
+
+  it('悬挂预设名抛错且不发请求', async () => {
+    mockSettings.apiPresets = [];
+    await expect(callAIWithPreset_ACU([{ role: 'user', content: '你好' }], 'ghost')).rejects.toBeInstanceOf(ApiPresetUnresolvedError_ACU);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
+    expect(mockSendConnectionManager).not.toHaveBeenCalled();
   });
 
   it('tavern 模式调用 sendConnectionManagerRequest', async () => {
@@ -750,6 +804,14 @@ describe('callApiWithPlotPreset_ACU 温度透传', () => {
     const fetchBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(fetchBody.temperature).toBe(0.2);
     expect(fetchBody.top_p).toBe(0.6);
+  });
+
+  it('悬挂任务级预设抛错且不 fetch', async () => {
+    mockSettings.plotApiPreset = '';
+    mockSettings.apiPresets = [];
+    await expect(callApiWithPlotPreset_ACU([{ role: 'user', content: '你好' }], 'ghost')).rejects.toBeInstanceOf(ApiPresetUnresolvedError_ACU);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
   });
 });
 

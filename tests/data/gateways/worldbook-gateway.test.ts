@@ -32,6 +32,7 @@ import {
   getWorldBooks_ACU,
   getCurrentCharPrimaryLorebook_ACU,
   getCharLorebooks_ACU,
+  invalidateLorebookListSnapshot_ACU,
 } from '../../../src/data/gateways/worldbook-gateway';
 
 beforeEach(() => {
@@ -212,6 +213,22 @@ describe('listLorebooks_ACU', () => {
     mockSillyTavern.getWorldBooks = vi.fn().mockResolvedValue(['book3']);
     expect(await listLorebooks_ACU()).toEqual([]);
     expect(mockSillyTavern.getWorldBooks).not.toHaveBeenCalled();
+  });
+
+  it('forceRefresh 先失效快照再把选项传给 getLorebooks', async () => {
+    mockTavernHelper.invalidateLorebookListSnapshot = vi.fn();
+    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['fresh']);
+    expect(await listLorebooks_ACU({ forceRefresh: true })).toEqual(['fresh']);
+    expect(mockTavernHelper.invalidateLorebookListSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockTavernHelper.getLorebooks).toHaveBeenCalledWith({ forceRefresh: true });
+  });
+
+  it('invalidateLorebookListSnapshot_ACU 优先调用兼容层同名方法', () => {
+    mockTavernHelper.invalidateLorebookListSnapshot = vi.fn();
+    mockTavernHelper.invalidateSettingsSnapshot = vi.fn();
+    invalidateLorebookListSnapshot_ACU();
+    expect(mockTavernHelper.invalidateLorebookListSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockTavernHelper.invalidateSettingsSnapshot).not.toHaveBeenCalled();
   });
 });
 

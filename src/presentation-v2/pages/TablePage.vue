@@ -121,6 +121,7 @@
           :title="tableCopy.panels.injectionTarget.title"
           :description="tableCopy.panels.injectionTarget.description"
         >
+          <DanglingReferenceBanner scope="worldbook" />
           <WorldbookSelector
             :model-value="injectionTarget.selectorValue.value"
             :names="injectionWb.names.value"
@@ -167,6 +168,7 @@ import AcuPanelGrid from '../components/_lib/AcuPanelGrid.vue';
 import AcuRulePairList from '../components/_lib/AcuRulePairList.vue';
 import AcuToggle from '../components/_lib/AcuToggle.vue';
 import FormFillPromptDrawer from '../components/FormFillPromptDrawer.vue';
+import DanglingReferenceBanner from '../components/DanglingReferenceBanner.vue';
 import WorldbookSelector from '../components/WorldbookSelector.vue';
 import WorldbookEntryPickerBody from '../components/WorldbookEntryPickerBody.vue';
 import { useChatChangedTick } from '../composables/useChatChangedListener';

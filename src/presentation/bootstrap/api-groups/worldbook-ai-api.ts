@@ -4,7 +4,7 @@
  */
 
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
-import { callAIWithPreset_ACU } from '../../../service/ai/api-call';
+import { callAIWithPreset_ACU, isApiPresetUnresolvedError_ACU } from '../../../service/ai/api-call';
 import { getChatArray_ACU } from '../../../service/chat/chat-service';
 import { currentJsonTableData_ACU } from '../../../service/runtime/state-manager';
 import { setZeroTkOccupyMode_ACU } from '../../../service/settings/settings-service';
@@ -164,6 +164,7 @@ export function createWorldbookAiApi(_ctx: ApiGroupContext): Record<string, Func
                 // 委托给 service 层统一入口
                 return await callAIWithPreset_ACU(messages, presetName, maxTokensOverride);
             } catch (e) {
+                if (isApiPresetUnresolvedError_ACU(e)) throw e;
                 // 不打印原始错误对象以避免泄露上游响应正文
                 logError_ACU('[callAI] 调用失败，已返回 null');
                 return null;

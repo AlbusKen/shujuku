@@ -28,6 +28,29 @@ export class AgentApiHttpError_ACU extends Error {
   }
 }
 
+/** 非空预设名无法解析到真实预设。调用方必须 fail-closed，不得回退当前渠道发请求。 */
+export class ApiPresetUnresolvedError_ACU extends Error {
+  readonly code = 'API_PRESET_UNRESOLVED' as const;
+  readonly presetName: string;
+
+  constructor(presetName: string) {
+    super(`API 预设「${presetName}」不存在，请在设置中重新选择`);
+    this.name = 'ApiPresetUnresolvedError_ACU';
+    this.presetName = presetName;
+  }
+}
+
+export function isApiPresetUnresolvedError_ACU(error: unknown): error is ApiPresetUnresolvedError_ACU {
+  return !!error && typeof error === 'object' && (error as { name?: unknown }).name === 'ApiPresetUnresolvedError_ACU';
+}
+
+/** 空名表示用户显式选择当前配置，即使 resolved=false 也不拒绝。 */
+export function requireResolvedApiPreset_ACU(presetName: string, config: { resolved?: boolean }): void {
+  const name = String(presetName || '').trim();
+  if (!name || config.resolved !== false) return;
+  throw new ApiPresetUnresolvedError_ACU(name);
+}
+
 /** Only transient request failures are safe to retry. Response-content validation stays with callers. */
 export function isRetryableAiRequestError_ACU(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
@@ -305,6 +328,7 @@ export function buildCustomApiRequestBody_ACU(
 export async function callApiWithPlotPreset_ACU(messages: any[], presetName: string, abortSignal: AbortSignal | null = null) {
     const effectivePresetName = presetName || settings_ACU.plotApiPreset || '';
     const apiPresetConfig = getApiConfigByPreset_ACU(effectivePresetName);
+    requireResolvedApiPreset_ACU(effectivePresetName, apiPresetConfig);
     const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
     const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
 
@@ -356,7 +380,9 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
 
 export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal: AbortSignal | null = null) {
     // [新增] 获取剧情推进使用的API配置（支持API预设）
-    const apiPresetConfig = getApiConfigByPreset_ACU(settings_ACU.plotApiPreset);
+    const plotPresetName = settings_ACU.plotApiPreset || '';
+    const apiPresetConfig = getApiConfigByPreset_ACU(plotPresetName);
+    requireResolvedApiPreset_ACU(plotPresetName, apiPresetConfig);
     const effectiveApiMode = apiPresetConfig.apiMode;
     const effectiveApiConfig = apiPresetConfig.apiConfig;
 
@@ -417,6 +443,7 @@ export function getApiConfigByPreset_ACU(presetName: string) {
       apiMode: resolved.apiMode,
       apiConfig: resolved.apiConfig,
       tavernProfile: resolved.tavernProfile,
+      resolved: resolved.resolved,
     };
 }
 
@@ -463,6 +490,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
     }
 
     const apiPresetConfig = getApiConfigByPreset_ACU(presetName);
+    requireResolvedApiPreset_ACU(presetName, apiPresetConfig);
     const effectiveApiMode = apiPresetConfig.apiMode;
     const effectiveApiConfig = apiPresetConfig.apiConfig || {} as any;
     const effectiveTavernProfile = apiPresetConfig.tavernProfile;

@@ -83,10 +83,14 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
 }));
 
-vi.mock('../../../src/service/ai/api-call', () => ({
-  getApiConfigByPreset_ACU: mockGetApiConfigByPreset,
-  buildCustomApiRequestBody_ACU: mockBuildCustomBody,
-}));
+vi.mock('../../../src/service/ai/api-call', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/service/ai/api-call')>();
+  return {
+    ...actual,
+    getApiConfigByPreset_ACU: mockGetApiConfigByPreset,
+    buildCustomApiRequestBody_ACU: mockBuildCustomBody,
+  };
+});
 
 vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
   getPersonaDescription_ACU: mockGetPersonaDescription,
@@ -919,5 +923,44 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
     await callCustomOpenAI_ACU(dynamicContent, null, null);
 
     expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('global-preset');
+  });
+});
+
+describe('callCustomOpenAI_ACU — 悬挂预设 fail-closed', () => {
+  it('非空悬挂名抛错且不发请求', async () => {
+    mockSettings.tableApiPreset = 'ghost';
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { useMainApi: false, url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, temperature: 1 },
+      tavernProfile: '',
+      resolved: false,
+    });
+    await expect(callCustomOpenAI_ACU({})).rejects.toThrow('API 预设「ghost」不存在，请在设置中重新选择');
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
+  });
+
+  it('空名即使 resolved=false 仍走当前配置', async () => {
+    mockSettings.tableApiPreset = '';
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1 },
+      tavernProfile: '',
+      resolved: false,
+    });
+    mockGenerateRaw.mockResolvedValue('当前配置回复');
+    await expect(callCustomOpenAI_ACU({})).resolves.toBe('当前配置回复');
+    expect(mockGenerateRaw).toHaveBeenCalled();
+  });
+
+  it('mock 不含 resolved 字段时不误抛', async () => {
+    mockSettings.tableApiPreset = 'legacy-mock';
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1 },
+      tavernProfile: '',
+    });
+    mockGenerateRaw.mockResolvedValue('兼容回复');
+    await expect(callCustomOpenAI_ACU({})).resolves.toBe('兼容回复');
   });
 });

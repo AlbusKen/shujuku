@@ -120,7 +120,7 @@ export function createLorebookReadContext_ACU(options: CreateLorebookReadContext
     get availableBookNamesPromise() {
       if (!availableBookNamesPromise) {
         catalogCalls += 1;
-        availableBookNamesPromise = Promise.resolve().then(listLorebooks_ACU);
+        availableBookNamesPromise = Promise.resolve().then(() => listLorebooks_ACU());
       }
       return availableBookNamesPromise;
     },

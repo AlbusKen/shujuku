@@ -251,6 +251,7 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
     resolve('generateRaw', null, null);
 
     lastCapabilities_ACU = capabilities;
+    api.invalidateLorebookListSnapshot = () => native.invalidateSettingsSnapshot();
     logDebug_ACU(`[HostCompat] TavernHelper 兼容适配器已构建：${formatHostCapabilities_ACU(capabilities)}`);
     return { api, capabilities };
 }

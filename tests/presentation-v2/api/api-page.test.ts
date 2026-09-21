@@ -70,6 +70,18 @@ describe('ApiPage', () => {
 
     expect(source).toContain('<AcuPanelGrid class="acu-v2-api-page__grid">');
     expect(source).toContain('acu-v2-api-page__spacer');
+    expect(source).toContain('<DanglingReferenceBanner scope="api" />');
+  });
+
+  it('悬挂填表预设时在页面标记失效引用，不隐式改写', async () => {
+    const settings = createSettings() as any;
+    settings.tableApiPreset = 'ghost';
+    const { mount } = await mountApiPage(settings);
+    const page = document.querySelector('.acu-v2-api-page');
+    expect(page!.textContent).toContain('填表 API 预设「ghost」已不存在');
+    expect(page!.textContent).toContain('不会自动改写已保存的设置');
+    expect(settings.tableApiPreset).toBe('ghost');
+    mount.__resetAcuV2MountForTests();
   });
 
   it('渲染 API 预设面板，选择和编辑集中在同一面板', async () => {

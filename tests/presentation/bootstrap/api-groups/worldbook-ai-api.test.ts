@@ -9,9 +9,13 @@ const { mockCallAIWithPreset, mockSettings } = vi.hoisted(() => ({
   mockSettings: { streamingEnabled: false, tavernProfile: 'default' } as any,
 }));
 
-vi.mock('../../../../src/service/ai/api-call', () => ({
-  callAIWithPreset_ACU: mockCallAIWithPreset,
-}));
+vi.mock('../../../../src/service/ai/api-call', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../src/service/ai/api-call')>();
+  return {
+    ...actual,
+    callAIWithPreset_ACU: mockCallAIWithPreset,
+  };
+});
 vi.mock('../../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
   currentJsonTableData_ACU: null,
@@ -32,6 +36,7 @@ vi.mock('../../../../src/presentation/components/pipeline-ui-helpers', () => ({ 
 vi.mock('../../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 
 import { createWorldbookAiApi } from '../../../../src/presentation/bootstrap/api-groups/worldbook-ai-api';
+import { ApiPresetUnresolvedError_ACU } from '../../../../src/service/ai/api-call';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -79,5 +84,12 @@ describe('callAI 委托与输入边界', () => {
     mockCallAIWithPreset.mockRejectedValue(new Error('upstream failure'));
     const api = createWorldbookAiApi({} as any);
     await expect(api.callAI([{ role: 'user', content: 'hello' }])).resolves.toBeNull();
+  });
+
+  it('悬挂预设错误重新抛出，不吞成 null', async () => {
+    mockCallAIWithPreset.mockRejectedValue(new ApiPresetUnresolvedError_ACU('ghost'));
+    const api = createWorldbookAiApi({} as any);
+    await expect(api.callAI([{ role: 'user', content: 'hello' }], { presetName: 'ghost' }))
+      .rejects.toBeInstanceOf(ApiPresetUnresolvedError_ACU);
   });
 });
