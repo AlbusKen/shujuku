@@ -13,6 +13,7 @@ const {
     mockStore: {
       getItem: vi.fn((key: string) => store.get(key) ?? null),
       setItem: vi.fn((key: string, value: string) => { store.set(key, value); }),
+      removeItem: vi.fn((key: string) => { store.delete(key); }),
       _clear: () => store.clear(),
       _store: store,
     },
@@ -53,6 +54,7 @@ import {
   writeProfileSettingsToStorage_ACU,
   readProfileTemplateFromStorage_ACU,
   writeProfileTemplateToStorage_ACU,
+  deleteProfileFromStorage_ACU,
   saveCurrentProfileTemplate_ACU,
   sanitizeSettingsForProfileSave_ACU,
 } from '../../../src/data/repositories/profile-repo';
@@ -180,6 +182,30 @@ describe('writeProfileTemplateToStorage_ACU', () => {
   it('写入模板到存储', () => {
     writeProfileTemplateToStorage_ACU('code_1', '{"sheet_0":{}}');
     expect(mockStore.setItem).toHaveBeenCalledWith('acu_template_code_1', '{"sheet_0":{}}');
+  });
+});
+
+// ═══ deleteProfileFromStorage_ACU ═══
+describe('deleteProfileFromStorage_ACU', () => {
+  it('删除指定标签的设置与模板，不影响默认 Profile', () => {
+    mockStore._store.set('acu_settings_old', 'settings');
+    mockStore._store.set('acu_template_old', 'template');
+    mockStore._store.set('acu_settings_', 'default-settings');
+    mockStore._store.set('acu_template_', 'default-template');
+
+    deleteProfileFromStorage_ACU('old');
+
+    expect(mockStore.removeItem).toHaveBeenCalledWith('acu_settings_old');
+    expect(mockStore.removeItem).toHaveBeenCalledWith('acu_template_old');
+    expect(mockStore._store.has('acu_settings_old')).toBe(false);
+    expect(mockStore._store.has('acu_template_old')).toBe(false);
+    expect(mockStore._store.get('acu_settings_')).toBe('default-settings');
+    expect(mockStore._store.get('acu_template_')).toBe('default-template');
+  });
+
+  it('空标签拒绝删除，避免误删默认 Profile', () => {
+    expect(() => deleteProfileFromStorage_ACU('   ')).toThrow('不能删除默认 Profile');
+    expect(mockStore.removeItem).not.toHaveBeenCalled();
   });
 });
 

@@ -18,6 +18,7 @@ import {
   saveSettings_ACU,
   switchIsolationProfile_ACU,
 } from '../../service/settings/settings-service';
+import { cleanupLegacyIsolationProfiles_ACU } from '../../service/settings/legacy-isolation-cleanup-service';
 import { normalizeResetDefaultsOptions, hasSelectedResetDefaultsOption, resetAllDefaults_ACU, type ResetDefaultsCleanupOptions } from '../../service/table/reset-defaults-service';
 import { getCurrentStorageMode, isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
@@ -148,6 +149,12 @@ export function useDataManagement() {
   const isolationHistoryOptions = computed(() =>
     isolationHistory.value.map(code => ({ value: code, label: code })),
   );
+  const legacyIsolationCodes = computed(() => {
+    const codes = new Set(isolationHistory.value);
+    if (activeIsolationCode.value) codes.add(activeIsolationCode.value);
+    return [...codes];
+  });
+  const legacyIsolationCount = computed(() => legacyIsolationCodes.value.length);
   const rangeLabel = computed(() => {
     const start = normalizeFloorValue(deleteRange.startFloor);
     const end = normalizeFloorValue(deleteRange.endFloor);
@@ -264,6 +271,29 @@ export function useDataManagement() {
       logError_ACU('[ACU-V2] removeHistory failed', e);
       message.value = null;
       toast.error('移除历史标识失败，详情见运行日志。');
+    } finally {
+      busyAction.value = '';
+    }
+  }
+
+  async function cleanupLegacyIsolationProfiles(): Promise<void> {
+    if (busyAction.value) return;
+    busyAction.value = 'cleanup-legacy-isolation';
+    try {
+      const result = await cleanupLegacyIsolationProfiles_ACU();
+      refresh();
+      message.value = null;
+      if (result.failedCodes.length > 0) {
+        toast.warning(`已清理 ${result.removedCodes.length} 个旧隔离标签；${result.failedCodes.length} 个删除失败，已保留登记，可重试。`);
+      } else if (result.removedCodes.length === 0) {
+        toast.info('没有发现可清理的旧隔离标签。');
+      } else {
+        toast.success(`已清理 ${result.removedCodes.length} 个旧隔离标签，并切换到默认数据。`);
+      }
+    } catch (e: any) {
+      logError_ACU('[ACU-V2] cleanupLegacyIsolationProfiles failed', e);
+      message.value = null;
+      toast.error('清理旧隔离标签失败，详情见运行日志。');
     } finally {
       busyAction.value = '';
     }
@@ -766,6 +796,8 @@ export function useDataManagement() {
     v2RecoverySummary,
     v2IsolationDiagnostics,
     isolationHistoryOptions,
+    legacyIsolationCodes,
+    legacyIsolationCount,
     currentIsolationLabel,
     isolationModeLabel,
     deleteRange,
@@ -783,6 +815,7 @@ export function useDataManagement() {
     getCheckpointTargetStorageMode,
     applyIsolation,
     removeHistory,
+    cleanupLegacyIsolationProfiles,
     deleteCurrentIsolationEntries,
     importCombinedSettings,
     exportCombinedSettings,

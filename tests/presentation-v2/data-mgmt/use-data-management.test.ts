@@ -9,6 +9,13 @@ async function loadFlow() {
   const history = ['alpha', 'beta'];
   const switchIsolation = vi.fn(async (code: string) => { settings.dataIsolationCode = code; });
   const removeHistory = vi.fn((code: string) => history.splice(history.indexOf(code), 1));
+  const cleanupLegacyIsolation = vi.fn(async () => {
+    const removedCodes = [...history];
+    history.splice(0, history.length);
+    settings.dataIsolationCode = '';
+    settings.dataIsolationEnabled = false;
+    return { removedCodes, failedCodes: [], switchedToDefault: true };
+  });
   const deleteGenerated = vi.fn(async () => undefined);
   const applyTemplateScope = vi.fn();
   const overrideLatest = vi.fn(async () => 2);
@@ -23,6 +30,7 @@ async function loadFlow() {
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: settings, currentChatFileIdentifier_ACU: 'chat', currentJsonTableData_ACU: { sheet_a: {} }, getCurrentIsolationKey_ACU: () => settings.dataIsolationCode }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: applyTemplateScope, applyCombinedSettingsImport_ACU: vi.fn(), getDataIsolationHistory_ACU: () => [...history], removeDataIsolationHistory_ACU: removeHistory, saveSettings_ACU: vi.fn(), switchIsolationProfile_ACU: switchIsolation }));
+  vi.doMock('../../../src/service/settings/legacy-isolation-cleanup-service', () => ({ cleanupLegacyIsolationProfiles_ACU: cleanupLegacyIsolation }));
   vi.doMock('../../../src/service/settings/settings-write-service', () => ({
     resetAllPromptsToDefault_ACU: vi.fn(() => ({ ok: true, code: 'ok', changed: true })),
     snapshotSettingsFields_ACU: vi.fn(() => ({})),
@@ -47,7 +55,7 @@ async function loadFlow() {
   const toastSuccess = vi.spyOn(toast, 'success').mockImplementation(() => {});
   const toastError = vi.spyOn(toast, 'error').mockImplementation(() => {});
   const toastWarning = vi.spyOn(toast, 'warning').mockImplementation(() => {});
-  return { flow: useDataManagement(), settings, history, switchIsolation, removeHistory, deleteGenerated, applyTemplateScope, overrideLatest, deleteScoped, reloadProvider, loadOrCreate, refreshMerged, cleanupWorldbook, scan, prepare, commit, toast, toastSuccess, toastError, toastWarning };
+  return { flow: useDataManagement(), settings, history, switchIsolation, removeHistory, cleanupLegacyIsolation, deleteGenerated, applyTemplateScope, overrideLatest, deleteScoped, reloadProvider, loadOrCreate, refreshMerged, cleanupWorldbook, scan, prepare, commit, toast, toastSuccess, toastError, toastWarning };
 }
 
 beforeEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -79,6 +87,36 @@ describe('useDataManagement', () => {
     expect(d.loadOrCreate).toHaveBeenCalled();
     expect(d.refreshMerged).toHaveBeenCalled();
     expect(d.cleanupWorldbook).toHaveBeenCalled();
+  });
+
+  it('全局旧隔离标签清理成功后刷新历史并切换到默认状态', async () => {
+    const d = await loadFlow();
+    d.flow.refresh();
+    expect(d.flow.legacyIsolationCount.value).toBe(2);
+
+    await d.flow.cleanupLegacyIsolationProfiles();
+
+    expect(d.cleanupLegacyIsolation).toHaveBeenCalledOnce();
+    expect(d.flow.legacyIsolationCount.value).toBe(0);
+    expect(d.flow.currentIsolationLabel.value).toBe('默认数据（未隔离）');
+    expect(d.toastSuccess).toHaveBeenCalledWith('已清理 2 个旧隔离标签，并切换到默认数据。');
+  });
+
+  it('部分旧隔离标签清理失败时保留计数并展示警告', async () => {
+    const d = await loadFlow();
+    d.flow.refresh();
+    d.cleanupLegacyIsolation.mockResolvedValueOnce({
+      removedCodes: ['alpha'],
+      failedCodes: [{ code: 'beta', error: 'remove failed' }],
+      switchedToDefault: true,
+    });
+    d.settings.dataIsolationCode = '';
+    d.history.splice(0, d.history.length, 'beta');
+
+    await d.flow.cleanupLegacyIsolationProfiles();
+
+    expect(d.flow.legacyIsolationCount.value).toBe(1);
+    expect(d.toastWarning).toHaveBeenCalledWith('已清理 1 个旧隔离标签；1 个删除失败，已保留登记，可重试。');
   });
   it('V2 诊断与恢复只透传服务端冻结的 planId 和确认值', async () => {
     const d = await loadFlow();

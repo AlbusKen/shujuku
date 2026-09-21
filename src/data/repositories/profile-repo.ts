@@ -88,6 +88,24 @@ export function writeProfileTemplateToStorage_ACU(code: string, templateStr: str
     store.setItem(getProfileTemplateKey_ACU(code), String(templateStr || ''));
 }
 
+/**
+ * 删除非默认隔离标签对应的设置与表格模板。
+ *
+ * 空标识代表默认 Profile，必须保留；调用方只应传入待退役的旧隔离码。
+ */
+export function deleteProfileFromStorage_ACU(code: string): void {
+    const normalizedCode = normalizeIsolationCode_ACU(code);
+    if (!normalizedCode) {
+        throw new Error('不能删除默认 Profile。');
+    }
+    const store = getConfigStorage_ACU();
+    if (!store || typeof store.removeItem !== 'function') {
+        throw new Error('当前配置存储不支持删除 Profile。');
+    }
+    store.removeItem(getProfileSettingsKey_ACU(normalizedCode));
+    store.removeItem(getProfileTemplateKey_ACU(normalizedCode));
+}
+
 export function saveCurrentProfileTemplate_ACU(templateStr?: string, settings?: any): void {
     const tpl = templateStr !== undefined ? templateStr : TABLE_TEMPLATE_ACU;
     const code = normalizeIsolationCode_ACU(settings?.dataIsolationCode || '');
