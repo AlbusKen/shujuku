@@ -7310,6 +7310,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(capturedTableDataTexts[1]).not.toContain('UNIFIED_GROUP_ERROR_FEEDBACK');
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(result.committedBucketCount).toBe(0);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
       targetSheetKeys: [],
       updateGroupKeys: ['sheet_0', 'sheet_1'],

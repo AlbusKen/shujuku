@@ -2720,16 +2720,19 @@ async function processGroupedRuntimeChunkCore_ACU(
                 performanceParentSpanId: options.performanceParentSpanId,
             });
             if (applyResult.success) {
-                const nextCommittedBucketCount = committedBucketCount + 1;
-                options.onBucketCommitted?.({
-                    saveTargetIndex: bucket.saveTargetIndex,
-                    messageIndices: replacementMessageIndices,
-                    sheetKeys: replacementSheetKeys,
-                    committedBucketCount: nextCommittedBucketCount,
-                });
                 emitBucketProgress(bucketIndex, { phase: 'complete' });
                 bucketSucceeded = true;
-                committedBucketCount = nextCommittedBucketCount;
+                // progress-only / 空操作成功不能算「已提交 bucket」：toast 的已保留数必须对应实质改表。
+                if (applyResult.modifiedKeys.length > 0) {
+                    const nextCommittedBucketCount = committedBucketCount + 1;
+                    options.onBucketCommitted?.({
+                        saveTargetIndex: bucket.saveTargetIndex,
+                        messageIndices: replacementMessageIndices,
+                        sheetKeys: replacementSheetKeys,
+                        committedBucketCount: nextCommittedBucketCount,
+                    });
+                    committedBucketCount = nextCommittedBucketCount;
+                }
                 break;
             }
 
