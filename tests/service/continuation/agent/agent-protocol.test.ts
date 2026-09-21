@@ -9,6 +9,7 @@ import {
   parseAgentMaintainerOutput_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
+  parseAgentComposerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
   parseAgentRequirementsMaintainerOutput_ACU,
 } from '../../../../src/service/continuation/agent/agent-protocol';
@@ -157,7 +158,11 @@ describe('主 Agent 动作解析', () => {
 
   it('未知动作和已退役的大纲动作直接拒绝', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ finalize \/ block/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ open_round \/ finalize \/ block/);
+    expect(parseAgentMainAction_ACU({ action: 'open_round', focus: '接住守门人的回避', dispatchArcArchitect: true }, true)).toMatchObject({
+      kind: 'open_round', focus: '接住守门人的回避', dispatchArcArchitect: true, dispatchWebResearcher: false,
+    });
+    expect(() => parseAgentMainAction_ACU({ action: 'open_round', focus: '  ' }, true)).toThrowError(/非空 focus/);
   });
 });
 
@@ -257,6 +262,12 @@ describe('子代理输出解析', () => {
     expect(parseAgentReviewerOutput_ACU({ verdict: 'revise', reason: '与 H1 冲突', fixes: ['改为部分回收'] }))
       .toMatchObject({ verdict: 'revise', fixes: ['改为部分回收'] });
     expect(() => parseAgentReviewerOutput_ACU({ verdict: '说不清' })).toThrowError(/verdict 必须是/);
+  });
+
+  it('instruction-composer 拒绝空 instruction，并收下 constraints 增量', () => {
+    expect(parseAgentComposerOutput_ACU({ instruction: '从守门人的回避写起', summary: '试探', constraints: { add: ['不得揭穿'], retire: [] } }))
+      .toEqual({ instruction: '从守门人的回避写起', summary: '试探', constraints: { add: ['不得揭穿'], retire: [] } });
+    expect(() => parseAgentComposerOutput_ACU({ instruction: '  ', summary: '空' })).toThrowError(/非空 instruction/);
   });
 });
 

@@ -109,7 +109,7 @@ describe('百科资料库写集事务', () => {
 
   it('漏写 id 时按 WR-### 顺延分配，修订号 +1，不推进结算水位', () => {
     const snapshot = snapshotWith_ACU(entry_ACU());
-    const next = applyAgentWebRefsDelta_ACU(snapshot, { summary: '', expectedRevision: 2, items: [upsert(), upsert({ title: '希露菲', url: 'https://x/2', brief: '青梅竹马。' })] }, 2, 99);
+    const next = applyAgentWebRefsDelta_ACU(snapshot, { summary: '', expectedRevision: 2, items: [upsert(), upsert({ title: '希露菲', url: 'https://x/2', brief: '青梅竹马。' })] }, 2, 99).snapshot;
     expect(next.webRefs.map(item => item.id)).toEqual(['WR-001', 'WR-002', 'WR-003']);
     expect(next.revisions.webRefs).toBe(3);
     expect(next.settledThroughIndex).toBe(snapshot.settledThroughIndex);
@@ -127,11 +127,15 @@ describe('百科资料库写集事务', () => {
     expect(rejects({ summary: '', expectedRevision: 2, items: [{ ...upsert(), action: 'retire', id: 'WR-404', reason: 'x' }] }, 2)).toContain('不存在');
     expect(rejects({ summary: '', expectedRevision: 2, items: [{ ...upsert(), action: 'retire', id: 'WR-001', reason: '' }] }, 2)).toContain('理由');
     expect(rejects({ summary: '', expectedRevision: 1, items: [upsert()] }, 1)).toContain('revision 已变化');
+    const tolerant = applyAgentWebRefsDelta_ACU(snapshot, { summary: '', expectedRevision: 2, items: [upsert({ brief: '' })] }, 2, 99, { onViolation: () => undefined, agentName: 'web-researcher' });
+    expect(tolerant.appliedModules).toEqual([]);
+    expect(tolerant.snapshot.webRefs).toEqual(snapshot.webRefs);
+    expect(tolerant.pendingFixes[0]).toMatchObject({ module: 'webRefs', attempts: 1, agentName: 'web-researcher' });
   });
 
   it('对既有 id 重复 upsert 覆盖内容但保留首次入库时间', () => {
     const snapshot = snapshotWith_ACU(entry_ACU({ fetchedAt: 5 }));
-    const next = applyAgentWebRefsDelta_ACU(snapshot, { summary: '', expectedRevision: undefined, items: [upsert({ id: 'WR-001', title: '鲁迪', brief: '新简介。' })] }, undefined, 50);
+    const next = applyAgentWebRefsDelta_ACU(snapshot, { summary: '', expectedRevision: undefined, items: [upsert({ id: 'WR-001', title: '鲁迪', brief: '新简介。' })] }, undefined, 50).snapshot;
     expect(next.webRefs).toHaveLength(1);
     expect(next.webRefs[0]).toMatchObject({ title: '鲁迪', brief: '新简介。', fetchedAt: 5 });
   });

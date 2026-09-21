@@ -7,14 +7,14 @@
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_INSTRUCTION_COMPOSER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher' | 'requirementsMaintainer';
+  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher' | 'requirementsMaintainer' | 'instructionComposer';
 }
 
 /** 目录渲染的可选开关：网页检索关闭时，web-researcher 及其资料模块不进主 Agent 视野。 */
@@ -89,6 +89,13 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     triggers: ['主会话历史压缩后，被浓缩范围内仍有实质用户输入'],
     promptKey: 'requirementsMaintainer',
   },
+  {
+    name: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
+    kind: 'compose',
+    description: '通读结算后的资料、策划建议、审查结论、用户要求与活跃约束，产出本轮写作指令。由固定工作流调用，主 Agent 不能派工。',
+    triggers: ['固定工作流在策划与审查之后自动调用'],
+    promptKey: 'instructionComposer',
+  },
 ];
 
 export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] = [
@@ -143,6 +150,7 @@ const KIND_DISPLAY_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
   plan: '策划',
   review: '审查',
   research: '网页检索',
+  compose: '写作指令',
 };
 
 /** 按职责固定的写入说明，进子代理目录的「写入」行。 */
@@ -152,10 +160,12 @@ const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
   plan: '无（只返回建议）',
   review: '无（只返回判词）',
   research: '$WEB_REFS（职责固定；只写外部参考资料，不碰叙事模块）',
+  compose: '无（只产出写作指令；constraints 增量由运行时容错登记）',
 };
 
 function isDefinitionVisible_ACU(name: AgentSubagentName_ACU, options?: AgentCatalogOptions_ACU): boolean {
   if (name === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU) return false;
+  if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU) return false;
   if (name === AGENT_WEB_RESEARCHER_NAME_ACU) return options?.webResearchEnabled === true;
   return true;
 }

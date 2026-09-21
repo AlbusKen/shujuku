@@ -1,8 +1,9 @@
 /**
  * service/continuation/agent/agent-transaction.ts — 资料模块写集事务
  *
- * 所有写入都是全量校验后一次性生效的事务：任一条目不合规就拒绝整份 delta，
- * 绝不做部分落盘。核心防线是「漏写不等于删除」——删除必须显式 retire 并给出理由。
+ * 默认仍是整份拒绝：任一条目不合规就抛错，调用方拿不到部分结果。
+ * 传入 onViolation 且回调不抛时，按模块隔离：无违规模块入库并推进自己的 revision，
+ * 违规模块保持原值并写入 snapshot.pendingFixes。核心防线仍是「漏写不等于删除」。
  */
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
@@ -20,6 +21,7 @@ import {
   type AgentModuleDelta_ACU,
   type AgentModuleRevisions_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentPendingFix_ACU,
   type AgentResearcherOutput_ACU,
   type AgentStoryArcDeltaItem_ACU,
   type AgentStoryArcEntry_ACU,
@@ -50,17 +52,6 @@ function assertWritePermission_ACU(delta: AgentModuleDelta_ACU, allowedWrites: r
   }
   for (const key of Object.keys(delta.expectedRevisions)) {
     if (!isAgentWritableModule_ACU(key)) reject_ACU(`expectedRevisions 含非法模块名：${key}`, { key });
-  }
-}
-
-function assertExpectedRevisions_ACU(delta: AgentModuleDelta_ACU, snapshot: AgentModuleSnapshot_ACU): void {
-  for (const module of collectTouchedModules_ACU(delta)) {
-    const expected = delta.expectedRevisions[module];
-    // 未声明不拒绝：并发基准由运行时按渲染时刻捕获后补齐，不依赖子代理自报。
-    if (expected === undefined) continue;
-    if (expected !== snapshot.revisions[module]) {
-      reject_ACU(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module] });
-    }
   }
 }
 
@@ -473,13 +464,101 @@ function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: Ag
   return next;
 }
 
+export interface AgentModuleApplyOptions_ACU {
+  /** 不传则违规模块抛错，整次调用没有返回值。传入且不抛时，该模块记入 pendingFixes，其余模块继续。 */
+  onViolation?: (message: string, details?: Record<string, unknown>) => void;
+  agentName?: string;
+}
+
+export interface AgentModuleApplyResult_ACU {
+  snapshot: AgentModuleSnapshot_ACU;
+  pendingFixes: AgentPendingFix_ACU[];
+  appliedModules: AgentPendingFix_ACU['module'][];
+}
+
+function violationOf_ACU(error: unknown): { message: string; details?: Record<string, unknown> } {
+  if (error instanceof ContinuationValidationError_ACU) return { message: error.error.message, details: error.error.details };
+  return { message: error instanceof Error ? error.message : String(error) };
+}
+
+function clonePendingFixes_ACU(pending: readonly AgentPendingFix_ACU[]): AgentPendingFix_ACU[] {
+  return pending.map(item => ({ ...item, violations: item.violations.map(violation => ({ ...violation })) }));
+}
+
+function recordPendingFix_ACU(
+  pending: AgentPendingFix_ACU[],
+  module: AgentPendingFix_ACU['module'],
+  agentName: string,
+  message: string,
+  details: Record<string, unknown> | undefined,
+  index: number,
+): void {
+  const path = typeof details?.path === 'string' && details.path ? details.path : module;
+  const violation = { path, message };
+  const found = pending.findIndex(item => item.module === module);
+  if (found >= 0) {
+    const previous = pending[found];
+    pending[found] = {
+      module,
+      agentName: agentName || previous.agentName,
+      violations: [violation],
+      attempts: previous.attempts + 1,
+      firstFailedAtIndex: previous.firstFailedAtIndex,
+      lastError: message,
+    };
+    return;
+  }
+  pending.push({ module, agentName, violations: [violation], attempts: 1, firstFailedAtIndex: index, lastError: message });
+}
+
+function clearPendingModule_ACU(pending: AgentPendingFix_ACU[], module: AgentPendingFix_ACU['module']): void {
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    if (pending[index].module === module) pending.splice(index, 1);
+  }
+}
+
+function assertModuleRevision_ACU(module: keyof AgentModuleRevisions_ACU, delta: AgentModuleDelta_ACU, snapshot: AgentModuleSnapshot_ACU): void {
+  const expected = delta.expectedRevisions[module];
+  if (expected === undefined) return;
+  if (expected !== snapshot.revisions[module]) {
+    reject_ACU(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module], path: module });
+  }
+}
+
+function isolateModule_ACU<T>(
+  module: AgentPendingFix_ACU['module'],
+  current: T,
+  run: () => T,
+  pending: AgentPendingFix_ACU[],
+  applied: AgentModuleApplyResult_ACU['appliedModules'],
+  options: AgentModuleApplyOptions_ACU | undefined,
+  settledIndex: number,
+): T {
+  try {
+    const value = run();
+    clearPendingModule_ACU(pending, module);
+    applied.push(module);
+    return value;
+  } catch (error) {
+    if (!options?.onViolation) throw error;
+    const parsed = violationOf_ACU(error);
+    options.onViolation(parsed.message, parsed.details);
+    recordPendingFix_ACU(pending, module, options.agentName ?? '', parsed.message, parsed.details, settledIndex);
+    return current;
+  }
+}
+
+function unchangedApply_ACU(snapshot: AgentModuleSnapshot_ACU): AgentModuleApplyResult_ACU {
+  return { snapshot, pendingFixes: snapshot.pendingFixes, appliedModules: [] };
+}
+
 /**
  * 把一份子代理写集事务应用到快照上。
  * @param snapshot 当前快照
  * @param delta 子代理返回的写集
  * @param allowedWrites 该子代理被授权的模块名列表
  * @param settledIndex 本次结算的水位楼层，用于记录条目变动楼层
- * @returns 应用后的新快照，被写入模块的 revision 各自 +1
+ * @returns 被写入模块的 revision 各自 +1；容错模式下违规模块留在 pendingFixes
  */
 export function applyAgentModuleDelta_ACU(
   snapshot: AgentModuleSnapshot_ACU,
@@ -487,42 +566,69 @@ export function applyAgentModuleDelta_ACU(
   allowedWrites: readonly string[],
   settledIndex: number,
   completedStageNumbers: readonly number[] = [],
-): AgentModuleSnapshot_ACU {
+  options?: AgentModuleApplyOptions_ACU,
+): AgentModuleApplyResult_ACU {
   assertWritePermission_ACU(delta, allowedWrites);
-  assertExpectedRevisions_ACU(delta, snapshot);
   const touched = collectTouchedModules_ACU(delta);
-  if (!touched.length) return snapshot;
+  if (!touched.length) return unchangedApply_ACU(snapshot);
+  const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+  const applied: AgentModuleApplyResult_ACU['appliedModules'] = [];
   const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
   const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
   const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
   const chronologyTouched = delta.chronology.length > 0;
-  let hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
-  if (delta.hookPatches.length) hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
-  let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
-  if (delta.infoGapPatches.length) infoGap = applyInfoGapPatches_ACU(infoGap, delta.infoGapPatches);
-  let storyArc = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
-  if (delta.storyArcPatches.length) {
-    storyArc = applyStoryArcPatches_ACU(storyArc, delta.storyArcPatches);
-    assertSingleActiveStoryScope_ACU(storyArc);
-  }
-  if (storyArcTouched) assertVolumeLifecycle_ACU(snapshot.storyArc, storyArc, new Set(completedStageNumbers));
-  const chronology = chronologyTouched ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;
-  return {
+  const hooks = hooksTouched
+    ? isolateModule_ACU('hooks', snapshot.hooks, () => {
+      assertModuleRevision_ACU('hooks', delta, snapshot);
+      let next = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
+      if (delta.hookPatches.length) next = applyHookPatches_ACU(next, delta.hookPatches, settledIndex);
+      return next;
+    }, pending, applied, options, settledIndex)
+    : snapshot.hooks;
+  const infoGap = infoGapTouched
+    ? isolateModule_ACU('infoGap', snapshot.infoGap, () => {
+      assertModuleRevision_ACU('infoGap', delta, snapshot);
+      let next = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+      if (delta.infoGapPatches.length) next = applyInfoGapPatches_ACU(next, delta.infoGapPatches);
+      return next;
+    }, pending, applied, options, settledIndex)
+    : snapshot.infoGap;
+  const storyArc = storyArcTouched
+    ? isolateModule_ACU('storyArc', snapshot.storyArc, () => {
+      assertModuleRevision_ACU('storyArc', delta, snapshot);
+      let next = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
+      if (delta.storyArcPatches.length) {
+        next = applyStoryArcPatches_ACU(next, delta.storyArcPatches);
+        assertSingleActiveStoryScope_ACU(next);
+      }
+      assertVolumeLifecycle_ACU(snapshot.storyArc, next, new Set(completedStageNumbers));
+      return next;
+    }, pending, applied, options, settledIndex)
+    : snapshot.storyArc;
+  const chronology = chronologyTouched
+    ? isolateModule_ACU('chronology', snapshot.chronology, () => {
+      assertModuleRevision_ACU('chronology', delta, snapshot);
+      return applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex);
+    }, pending, applied, options, settledIndex)
+    : snapshot.chronology;
+  const next: AgentModuleSnapshot_ACU = {
     ...snapshot,
     hooks,
     infoGap,
     storyArc,
     chronology,
+    pendingFixes: pending,
     revisions: {
-      hooks: snapshot.revisions.hooks + (hooksTouched ? 1 : 0),
-      infoGap: snapshot.revisions.infoGap + (infoGapTouched ? 1 : 0),
+      hooks: snapshot.revisions.hooks + (applied.includes('hooks') ? 1 : 0),
+      infoGap: snapshot.revisions.infoGap + (applied.includes('infoGap') ? 1 : 0),
       constraints: snapshot.revisions.constraints,
-      storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
-      chronology: snapshot.revisions.chronology + (chronologyTouched ? 1 : 0),
+      storyArc: snapshot.revisions.storyArc + (applied.includes('storyArc') ? 1 : 0),
+      chronology: snapshot.revisions.chronology + (applied.includes('chronology') ? 1 : 0),
       webRefs: snapshot.revisions.webRefs,
       userRequirements: snapshot.revisions.userRequirements,
     },
   };
+  return { snapshot: next, pendingFixes: pending, appliedModules: applied };
 }
 
 /** 百科资料库条目 ID 前缀；模型漏写 id 时由运行时按此前缀顺延分配。 */
@@ -550,17 +656,19 @@ export function nextAgentWebRefId_ACU(existing: readonly AgentWebRefEntry_ACU[],
  * @param output 子代理运行时已把 pageRef 回填成完整条目的输出
  * @param expectedRevision 子代理读到资料那一刻的 webRefs 修订号；与当前不一致即拒绝
  * @param now 入库时间
- * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）
+ * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）。容错模式下失败模块不入库。
  */
 export function applyAgentWebRefsDelta_ACU(
   snapshot: AgentModuleSnapshot_ACU,
   output: AgentResearcherOutput_ACU,
   expectedRevision: number | undefined,
   now: number = Date.now(),
-): AgentModuleSnapshot_ACU {
-  if (!output.items.length) return snapshot;
+  options?: AgentModuleApplyOptions_ACU,
+): AgentModuleApplyResult_ACU {
+  if (!output.items.length) return unchangedApply_ACU(snapshot);
+  try {
   if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
-    reject_ACU('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs });
+    reject_ACU('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs, path: 'webRefs' });
   }
   const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
   const taken = new Set<string>();
@@ -593,11 +701,24 @@ export function applyAgentWebRefsDelta_ACU(
       retiredReason: '',
     });
   }
-  return {
+  const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+  clearPendingModule_ACU(pending, 'webRefs');
+  const next: AgentModuleSnapshot_ACU = {
     ...snapshot,
     webRefs: [...byId.values()],
+    pendingFixes: pending,
     revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
   };
+  return { snapshot: next, pendingFixes: pending, appliedModules: ['webRefs'] };
+  } catch (error) {
+    if (!options?.onViolation) throw error;
+    const parsed = violationOf_ACU(error);
+    options.onViolation(parsed.message, parsed.details);
+    const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+    recordPendingFix_ACU(pending, 'webRefs', options.agentName ?? '', parsed.message, parsed.details, snapshot.settledThroughIndex);
+    const next = { ...snapshot, pendingFixes: pending };
+    return { snapshot: next, pendingFixes: pending, appliedModules: [] };
+  }
 }
 
 /** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
@@ -613,14 +734,16 @@ function renderActiveConstraintList_ACU(snapshot: AgentModuleSnapshot_ACU): stri
  * @param add 新增的约束文本
  * @param retire 废除的约束（id 或原文）
  * @param settledIndex 登记时的水位楼层
- * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回
+ * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回。容错模式下失败不入库。
  */
 export function applyAgentConstraintRegistration_ACU(
   snapshot: AgentModuleSnapshot_ACU,
   add: readonly string[],
   retire: readonly string[],
   settledIndex: number,
-): AgentModuleSnapshot_ACU {
+  options?: AgentModuleApplyOptions_ACU,
+): AgentModuleApplyResult_ACU {
+  try {
   const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
   const retiredIds = new Set<string>();
   for (const key of retireKeys) {
@@ -643,7 +766,7 @@ export function applyAgentConstraintRegistration_ACU(
     existingTexts.add(text);
     addTexts.push(text);
   }
-  if (!retiredIds.size && !addTexts.length) return snapshot;
+  if (!retiredIds.size && !addTexts.length) return unchangedApply_ACU(snapshot);
   const nextRevision = snapshot.revisions.constraints + 1;
   const added: AgentConstraintEntry_ACU[] = addTexts.map((text, order) => ({
     id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
@@ -651,5 +774,22 @@ export function applyAgentConstraintRegistration_ACU(
     reason: '主 Agent 本轮裁决登记',
     createdIndex: settledIndex,
   }));
-  return { ...snapshot, constraints: [...remaining, ...added], revisions: { ...snapshot.revisions, constraints: nextRevision } };
+  const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+  clearPendingModule_ACU(pending, 'constraints');
+  const next: AgentModuleSnapshot_ACU = {
+    ...snapshot,
+    constraints: [...remaining, ...added],
+    pendingFixes: pending,
+    revisions: { ...snapshot.revisions, constraints: nextRevision },
+  };
+  return { snapshot: next, pendingFixes: pending, appliedModules: ['constraints'] };
+  } catch (error) {
+    if (!options?.onViolation) throw error;
+    const parsed = violationOf_ACU(error);
+    options.onViolation(parsed.message, parsed.details);
+    const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+    recordPendingFix_ACU(pending, 'constraints', options.agentName ?? '', parsed.message, parsed.details, settledIndex);
+    const next = { ...snapshot, pendingFixes: pending };
+    return { snapshot: next, pendingFixes: pending, appliedModules: [] };
+  }
 }

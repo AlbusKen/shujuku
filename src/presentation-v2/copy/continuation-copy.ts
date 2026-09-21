@@ -15,4 +15,17 @@ export const continuationCopy = {
         "启动后自动填入下一条提示词并发送，每次 AI 回复后继续。停止仅停止后续，不影响已发送内容。",
     },
   },
+  workflow: {
+    title: "固定工作流",
+    description: "主会话每轮只做开局决策。结算、策划、条件审查、容错提交、自动修复和写作指令由程序按固定顺序执行。这里只改配置，提示词仍在下方各角色分组里改。",
+    autoFix: "自动修复违规模块（连续失败达到上限后交给主会话）",
+  },
+  composer: {
+    title: "写作指令编排子代理（instruction-composer）提示词",
+    note: "固定工作流在策划与审查之后调用，是唯一产出本轮写作指令的角色。不进入主 Agent 可派工目录。契约 JSON 为 {instruction, summary, constraints}。",
+  },
+  pendingFix: {
+    title: "待修复模块",
+    empty: "",
+  },
 };

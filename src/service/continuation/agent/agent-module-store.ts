@@ -16,6 +16,8 @@ import {
   AGENT_HOT_HOOK_LIMIT_ACU,
   AGENT_MODULE_FIELD_ACU,
   AGENT_MODULE_SCHEMA_VERSION_ACU,
+  AGENT_MODULE_SCHEMA_VERSION_V1_ACU,
+  AGENT_PENDING_FIX_CAP_ACU,
   AGENT_REVEAL_STATUSES_ACU,
   AGENT_STORY_ARC_SCOPES_ACU,
   AGENT_STORY_ARC_STATUSES_ACU,
@@ -27,8 +29,10 @@ import {
   type AgentHookEntry_ACU,
   type AgentInfoGapEntry_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentPendingFix_ACU,
   type AgentStoryArcEntry_ACU,
   type AgentWebRefEntry_ACU,
+  isAgentWritableModule_ACU,
 } from './agent-model';
 
 const IMPORTANCE_WEIGHTS_ACU: Record<string, number> = { high: 3, mid: 2, low: 1 };
@@ -62,6 +66,7 @@ export function buildEmptyAgentModuleSnapshot_ACU(): AgentModuleSnapshot_ACU {
     chronology: [],
     webRefs: [],
     userRequirements: [],
+    pendingFixes: [],
   };
 }
 
@@ -276,13 +281,41 @@ function validateUserRequirementLine_ACU(raw: unknown): string | null {
   return text ? text : null;
 }
 
+/** 缺字段视为空数组。字段存在但不合法时返回 null，调用方决定拒绝或抢救。 */
+function validatePendingFixes_ACU(raw: unknown, present: boolean): AgentPendingFix_ACU[] | null {
+  if (!present) return [];
+  if (!Array.isArray(raw) || raw.length > AGENT_PENDING_FIX_CAP_ACU) return null;
+  const fixes: AgentPendingFix_ACU[] = [];
+  for (const item of raw) {
+    if (!isRecord_ACU(item) || !isAgentWritableModule_ACU(item.module)) return null;
+    if (typeof item.agentName !== 'string' || typeof item.lastError !== 'string') return null;
+    if (typeof item.attempts !== 'number' || !Number.isInteger(item.attempts) || item.attempts < 1 || item.attempts > 99) return null;
+    if (typeof item.firstFailedAtIndex !== 'number' || !Number.isInteger(item.firstFailedAtIndex) || item.firstFailedAtIndex < -1) return null;
+    if (!Array.isArray(item.violations) || item.violations.length > 32) return null;
+    const violations: AgentPendingFix_ACU['violations'] = [];
+    for (const violation of item.violations) {
+      if (!isRecord_ACU(violation) || typeof violation.path !== 'string' || typeof violation.message !== 'string' || !violation.message.trim()) return null;
+      violations.push({ path: violation.path, message: violation.message });
+    }
+    fixes.push({
+      module: item.module,
+      agentName: item.agentName,
+      violations,
+      attempts: item.attempts,
+      firstFailedAtIndex: item.firstFailedAtIndex,
+      lastError: item.lastError,
+    });
+  }
+  return fixes;
+}
+
 /**
  * 校验一份持久化快照。非法返回 null 而不抛错，让读取端可以继续向前寻找上一个合法快照，
  * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
  */
 export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapshot_ACU | null {
   if (!isRecord_ACU(raw)) return null;
-  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) return null;
+  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) return null;
   if (!isRecord_ACU(raw.revisions)) return null;
   if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints)) return null;
   const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
@@ -307,6 +340,9 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
   const userRequirementsRaw = Array.isArray(raw.userRequirements) ? raw.userRequirements : [];
   const validatedUserRequirements = userRequirementsRaw.map(validateUserRequirementLine_ACU);
   if (validatedUserRequirements.some(entry => entry === null)) return null;
+  const pendingPresent = Object.prototype.hasOwnProperty.call(raw, 'pendingFixes');
+  const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent);
+  if (!pendingFixes) return null;
   return {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex,
@@ -327,6 +363,7 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
     chronology: validatedChronology as AgentChronologyEntry_ACU[],
     webRefs: webRefs.flatMap(item => { const entry = validateWebRefEntry_ACU(item); return entry ? [entry] : []; }),
     userRequirements: validatedUserRequirements as string[],
+    pendingFixes,
   };
 }
 
@@ -337,7 +374,9 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
 function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSnapshot_ACU; problems: string[] } | null {
   if (!isRecord_ACU(raw)) return null;
   const problems: string[] = [];
-  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
+  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) {
+    problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
+  }
   const revisions = isRecord_ACU(raw.revisions) ? raw.revisions : {};
   const pick = <T>(list: unknown, validate: (item: unknown) => T | null, label: string): T[] => {
     if (!Array.isArray(list)) { if (list !== undefined) problems.push(`${label} 不是数组`); return []; }
@@ -347,6 +386,9 @@ function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSn
   };
   const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
   if (settledThroughIndex < 0) problems.push(`settledThroughIndex=${String(raw.settledThroughIndex)} 非法，按 0 处理`);
+  const pendingPresent = Object.prototype.hasOwnProperty.call(raw, 'pendingFixes');
+  const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent);
+  if (!pendingFixes) problems.push('pendingFixes 结构非法，已按空数组读取');
   const snapshot: AgentModuleSnapshot_ACU = {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex: Math.max(0, settledThroughIndex),
@@ -367,6 +409,7 @@ function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSn
     chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
     webRefs: pick(raw.webRefs, validateWebRefEntry_ACU, 'webRefs'),
     userRequirements: pick(raw.userRequirements, validateUserRequirementLine_ACU, 'userRequirements'),
+    pendingFixes: pendingFixes ?? [],
   };
   return { snapshot, problems };
 }

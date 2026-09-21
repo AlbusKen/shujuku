@@ -122,6 +122,14 @@
         本地资料由子代理结算写入，也可以在这里分模块手动修正。保存走与子代理相同的结构校验并推进修订号；
         每个模块独立保存，只提交本模块数据，不影响其他模块（含未保存的草稿）。
       </p>
+      <section v-if="pendingFixCards.length" class="acu-v2-continuation-materials__outline-summary">
+        <p class="acu-v2-continuation-materials__outline-heading"><strong>待修复</strong></p>
+        <article v-for="card in pendingFixCards" :key="card.module">
+          <p class="acu-v2-continuation-materials__card-head"><strong>{{ card.title }}</strong><span class="acu-v2-continuation-materials__badge">第 {{ card.attempts }} 次</span></p>
+          <p class="acu-v2-continuation-materials__card-body">{{ card.detail }}</p>
+          <p class="acu-v2-continuation-materials__card-meta">{{ card.meta }}</p>
+        </article>
+      </section>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         结算水位：楼层 {{ materials.snapshot.value.settledThroughIndex }} ·
         伏笔 {{ materials.snapshot.value.hooks.length }} 条 ·
@@ -398,6 +406,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import AcuTextarea from './_lib/AcuTextarea.vue';
 import { useContinuationMaterials } from '../composables/useContinuationMaterials';
+import { buildContinuationPendingFixCards_ACU } from '../continuation/pending-fix-cards';
 import type { ContinuationStage_ACU, ContinuationTask_ACU, StageOutline_ACU, StageRevision_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 
 const props = defineProps<{
@@ -441,6 +450,7 @@ const INFERRED_FIELD_LABELS: Record<string, string> = { function: '功能', main
 
 const activeTab = ref<TabId>('outline');
 const materials = useContinuationMaterials();
+const pendingFixCards = computed(() => buildContinuationPendingFixCards_ACU(materials.snapshot.value?.pendingFixes));
 const outlineDraft = ref('');
 const outlineError = ref('');
 const outlineDirty = ref(false);

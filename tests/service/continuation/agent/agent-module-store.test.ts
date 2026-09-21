@@ -107,6 +107,30 @@ describe('Agent 资料快照存储', () => {
     expect(validateAgentModuleSnapshot_ACU({ ...legacy, userRequirements: ['不要提前揭底牌', '用第一人称'] })!.userRequirements).toEqual(['不要提前揭底牌', '用第一人称']);
   });
 
+  it('schema v1 缺 pendingFixes 时内存归一为空数组并升到当前版本，非法队列则拒绝', () => {
+    const legacy = {
+      schemaVersion: 1, settledThroughIndex: 2, updatedAt: 1,
+      revisions: { hooks: 1, infoGap: 0, constraints: 0, storyArc: 0 },
+      hooks: [hook_ACU('H1')], infoGap: [], constraints: [],
+    };
+    const loaded = validateAgentModuleSnapshot_ACU(legacy);
+    expect(loaded!.schemaVersion).toBe(2);
+    expect(loaded!.pendingFixes).toEqual([]);
+    expect(loaded!.hooks).toHaveLength(1);
+    const current = validateAgentModuleSnapshot_ACU({ ...legacy, schemaVersion: 2, pendingFixes: [] });
+    expect(current!.pendingFixes).toEqual([]);
+    expect(validateAgentModuleSnapshot_ACU({ ...legacy, schemaVersion: 2, pendingFixes: '坏掉了' })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({
+      ...legacy,
+      schemaVersion: 2,
+      pendingFixes: [{ module: 'hooks', agentName: 'hook-cognition-maintainer', violations: [{ path: 'hooks', message: 'title 不能为空' }], attempts: 1, firstFailedAtIndex: 2, lastError: 'title 不能为空' }],
+    })!.pendingFixes).toHaveLength(1);
+    const chat: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: legacy }];
+    expect(readAgentModuleSnapshot_ACU(chat).pendingFixes).toEqual([]);
+    expect(readAgentModuleSnapshot_ACU(chat).schemaVersion).toBe(2);
+    expect(chat[0][AGENT_MODULE_FIELD_ACU].schemaVersion).toBe(1);
+  });
+
   it('旧快照缺 chronology 与其 revision 时兼容读成空账本，不误报数据丢失', () => {
     const legacy = validateAgentModuleSnapshot_ACU({
       schemaVersion: 1, settledThroughIndex: 2, updatedAt: 1,

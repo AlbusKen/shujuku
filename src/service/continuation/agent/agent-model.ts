@@ -19,7 +19,15 @@ import type {
 /** 楼层锚定快照挂在消息对象上的独立字段名，与首楼 `_qrf_continuation` 并列、互不干扰。 */
 export const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
 
-export const AGENT_MODULE_SCHEMA_VERSION_ACU = 1 as const;
+/** v1 楼层快照没有 pendingFixes。读取时归一为空数组，成功写入才升到当前版本。 */
+export const AGENT_MODULE_SCHEMA_VERSION_V1_ACU = 1 as const;
+
+export const AGENT_MODULE_SCHEMA_VERSION_ACU = 2 as const;
+
+/** 同一模块自动修复连续失败达到该次数后，不再派修复，升级主会话。 */
+export const AGENT_AUTO_FIX_MAX_ATTEMPTS_ACU = 3 as const;
+
+export const AGENT_PENDING_FIX_CAP_ACU = 128 as const;
 
 /** 主 Agent 自身会话记录挂在消息对象上的字段名。与资料快照同楼不同字段，互不干扰。 */
 export const AGENT_CONVERSATION_FIELD_ACU = '_qrf_continuation_agent_chat';
@@ -331,6 +339,21 @@ export interface AgentWebRefEntry_ACU {
   retiredReason: string;
 }
 
+export interface AgentPendingFixViolation_ACU {
+  path: string;
+  message: string;
+}
+
+/** 一次模块入库失败。attempts 从 1 起算，同一模块再次失败加一，成功写入后整条删除。 */
+export interface AgentPendingFix_ACU {
+  module: AgentWritableModule_ACU;
+  agentName: string;
+  violations: AgentPendingFixViolation_ACU[];
+  attempts: number;
+  firstFailedAtIndex: number;
+  lastError: string;
+}
+
 /** 楼层锚定的全量快照。读取=从尾向前找最近的合法快照，删楼即自动回退。 */
 export interface AgentModuleSnapshot_ACU {
   schemaVersion: typeof AGENT_MODULE_SCHEMA_VERSION_ACU;
@@ -345,18 +368,21 @@ export interface AgentModuleSnapshot_ACU {
   webRefs: AgentWebRefEntry_ACU[];
   /** 用户在 Agent 会话里提过的要求，由 requirements-maintainer 全量替换维护。 */
   userRequirements: string[];
+  /** 最近一次容错提交没能入库的模块。旧快照缺该字段时读取为空数组。 */
+  pendingFixes: AgentPendingFix_ACU[];
 }
 
 export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'] as const;
 export type AgentWritableModule_ACU = typeof AGENT_WRITABLE_MODULES_ACU[number];
 
-export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'requirements-maintainer'] as const;
+export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'requirements-maintainer', 'instruction-composer'] as const;
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
 export const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';
 export const AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU = 'requirements-maintainer';
+export const AGENT_INSTRUCTION_COMPOSER_NAME_ACU = 'instruction-composer';
 
-export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review' | 'research';
+export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review' | 'research' | 'compose';
 
 /** 最终审查是 finalize 前由运行时受控触发的内部代理，不进入主 Agent 可委派名称集合。 */
 export const AGENT_FINAL_REVIEWER_NAME_ACU = 'final-reviewer';
@@ -470,6 +496,16 @@ export interface AgentBlockAction_ACU {
   unresolved: string[];
 }
 
+/** 每轮一次的开局决策。固定工作流据此自治执行，主 Agent 不再逐个派管线角色。 */
+export interface AgentOpenRoundAction_ACU {
+  kind: 'open_round';
+  thought: string;
+  focus: string;
+  summary: string;
+  dispatchArcArchitect: boolean;
+  dispatchWebResearcher: boolean;
+}
+
 /**
  * 大纲句级编辑操作。运行时替模型收尾结构一致性（重算 suggestedTurns/totalTurns），
  * 模型只表达意图；已完成轮次与当前轮的保护由校验层强制。
@@ -499,7 +535,14 @@ export type AgentOutlineEditOp_ACU =
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU;
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU | AgentOpenRoundAction_ACU;
+
+/** instruction-composer 的产出。instruction 非空；constraints 走容错登记。 */
+export interface AgentComposerOutput_ACU {
+  summary: string;
+  instruction: string;
+  constraints: { add: string[]; retire: string[] } | null;
+}
 
 /** 运行时硬边界。预留最后一轮让主 Agent 有机会正常交付而不是被突然掐断。 */
 export interface AgentRunBudget_ACU {

@@ -84,10 +84,32 @@
         <div class="acu-v2-continuation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
           <AcuCheckbox v-model="settingsDraft.finalReview.enabled" label="启用发送前世界书终审" />
+          <AcuCheckbox v-model="settingsDraft.workflow.autoFixEnabled" :label="continuationCopy.workflow.autoFix" />
           <AcuCheckbox v-model="settingsDraft.webResearch.enabled" label="启用开场百科检索（同人推荐）" />
         </div>
 
         <div class="acu-v2-continuation-page__groups">
+          <AcuDisclosureGroup
+            class="acu-v2-continuation-page__group"
+            :label="continuationCopy.workflow.title"
+            :meta="workflowGroupMeta"
+            :expanded="isGroupExpanded('workflow')"
+            body-id="acu-continuation-group-workflow"
+            @toggle="toggleGroup('workflow')"
+          >
+            <p class="acu-v2-continuation-page__meta">{{ continuationCopy.workflow.description }}</p>
+            <div class="acu-v2-continuation-page__settings-grid">
+              <AcuFormRow label="自动修复次数上限" hint="同一模块连续失败达到该次数后停止修复，交给主会话。范围 1–10。">
+                <AcuInput v-model="settingsDraft.workflow.autoFixMaxAttempts" type="number" :min="1" :max="10" />
+              </AcuFormRow>
+              <AcuFormRow label="终审打回上限" hint="instruction-composer 按反馈清单增量修订的次数。范围 1–10。">
+                <AcuInput v-model="settingsDraft.workflow.reviseLimit" type="number" :min="1" :max="10" />
+              </AcuFormRow>
+              <AcuFormRow label="修复额外读取轮数" hint="自动修复派工自己的 read/search 轮数，不占主会话同角色派工上限。范围 0–10。">
+                <AcuInput v-model="settingsDraft.workflow.repairMaxExtraReads" type="number" :min="0" :max="10" />
+              </AcuFormRow>
+            </div>
+          </AcuDisclosureGroup>
           <AcuDisclosureGroup
             class="acu-v2-continuation-page__group"
             label="运行与重试"
@@ -354,6 +376,7 @@ import { useChatChangedTick, useChatMutationTick } from '../composables/useChatC
 import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU, useContinuationRuntime } from '../composables/useContinuationRuntime';
 import { useContinuationSession } from '../composables/useContinuationSession';
 import { useDialogStore } from '../stores/dialog-store';
+import { continuationCopy } from '../copy/continuation-copy';
 
 const runtime = useContinuationRuntime();
 const dialog = useDialogStore();
@@ -429,6 +452,7 @@ const agentChannelRoles = [
   { role: 'finalReviewer', label: '发送前终审' },
   { role: 'webResearcher', label: '网页检索' },
   { role: 'requirementsMaintainer', label: '用户要求维护' },
+  { role: 'instructionComposer', label: '写作指令编排' },
 ] as const;
 
 const webSearchProviderOptions = [
@@ -471,6 +495,12 @@ const budgetGroupMeta = computed(() => {
 });
 
 const finalReviewGroupMeta = computed(() => (settingsDraft.value?.finalReview.enabled ? '已开启' : '已关闭'));
+
+const workflowGroupMeta = computed(() => {
+  const workflow = settingsDraft.value?.workflow;
+  if (!workflow) return '';
+  return `${workflow.autoFixEnabled ? '自动修复开' : '自动修复关'} · 修复 ${workflow.autoFixMaxAttempts} 次 · 打回 ${workflow.reviseLimit} 次`;
+});
 
 const webResearchGroupMeta = computed(() => {
   const web = settingsDraft.value?.webResearch;
@@ -533,6 +563,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
     agentRunBudget: { ...settings.agentRunBudget },
     finalReview: { ...settings.finalReview },
+    workflow: { autoFixEnabled: true, autoFixMaxAttempts: 3, reviseLimit: 3, repairMaxExtraReads: 2, ...settings.workflow },
     webResearch: { ...settings.webResearch, sources: { ...settings.webResearch.sources } },
     agentApiPresets: {
       main: { ...settings.agentApiPresets.main },
@@ -545,6 +576,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       finalReviewer: { ...settings.agentApiPresets.finalReviewer },
       webResearcher: { ...settings.agentApiPresets.webResearcher },
       requirementsMaintainer: { ...settings.agentApiPresets.requirementsMaintainer },
+      instructionComposer: { ...(settings.agentApiPresets.instructionComposer ?? { mode: 'inherit', presetName: '' }) },
     },
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
     agentPrompts: {
@@ -557,6 +589,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
       webResearcher: settings.agentPrompts.webResearcher.map(segment => ({ ...segment })),
       requirementsMaintainer: settings.agentPrompts.requirementsMaintainer.map(segment => ({ ...segment })),
+      instructionComposer: (settings.agentPrompts.instructionComposer ?? []).map(segment => ({ ...segment })),
     },
   };
 }
@@ -691,6 +724,12 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
       readTokenBudget: normalizedReadBudget(source.finalReview.readTokenBudget),
       maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
     },
+    workflow: {
+      autoFixEnabled: source.workflow.autoFixEnabled,
+      autoFixMaxAttempts: requiredRangeInteger(source.workflow.autoFixMaxAttempts, '自动修复次数上限', 1, 10),
+      reviseLimit: requiredRangeInteger(source.workflow.reviseLimit, '终审打回上限', 1, 10),
+      repairMaxExtraReads: requiredRangeInteger(source.workflow.repairMaxExtraReads, '修复额外读取轮数', 0, 10),
+    },
     webResearch: {
       enabled: source.webResearch.enabled,
       sources: { ...source.webResearch.sources },
@@ -776,7 +815,7 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer' | 'webResearcher' | 'requirementsMaintainer';
+type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer' | 'webResearcher' | 'requirementsMaintainer' | 'instructionComposer';
 
 interface PromptGroupDef {
   key: PromptKey;
@@ -795,7 +834,8 @@ const promptGroups: PromptGroupDef[] = [
   { key: 'mainlinePlanner', kind: 'agent_mainline', title: '主线推进策划子代理提示词', restoreLabel: '恢复主线策划默认值' },
   { key: 'beatPlanner', kind: 'agent_beat', title: '伏笔与节拍策划子代理提示词', restoreLabel: '恢复节拍策划默认值' },
   { key: 'reviewer', kind: 'agent_reviewer', title: '连续性审查子代理提示词', restoreLabel: '恢复审查子代理默认值' },
-  { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时才会被调用。' },
+  { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时，固定工作流会在 instruction-composer 之后调用它。' },
+  { key: 'instructionComposer', kind: 'agent_instruction_composer', title: continuationCopy.composer.title, restoreLabel: '恢复写作指令编排默认值', note: continuationCopy.composer.note },
   { key: 'webResearcher', kind: 'agent_web_researcher', title: '网页检索子代理（web-researcher）提示词', restoreLabel: '恢复网页检索默认值', note: '仅在「启用开场百科检索」开启时才会被调用。专属占位符：$WEB_TOOL_CATALOG（出网工具说明与本次配额）、$WEB_REFS（百科资料库预览）。' },
   { key: 'requirementsMaintainer', kind: 'agent_requirements_maintainer', title: '用户要求维护子代理（requirements-maintainer）提示词', restoreLabel: '恢复用户要求维护默认值', note: '由会话压缩后的系统派工触发，不进入主 Agent 可派工目录。契约 JSON 为 {requirements, summary} 全量替换。' },
 ];

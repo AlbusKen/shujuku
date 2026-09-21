@@ -120,14 +120,15 @@ export interface ContinuationAgentPrompts_ACU {
   finalReviewer: ContinuationPromptSegment_ACU[];
   webResearcher: ContinuationPromptSegment_ACU[];
   requirementsMaintainer: ContinuationPromptSegment_ACU[];
+  instructionComposer: ContinuationPromptSegment_ACU[];
 }
 
-export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer'] as const;
+export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer', 'instructionComposer'] as const;
 
 export type ContinuationAgentPromptKey_ACU = typeof CONTINUATION_AGENT_PROMPT_KEYS_ACU[number];
 
 /** 可独立配置 AI 渠道的角色：主 Agent、大纲子代理、派工子代理、最终审查与用户要求维护。 */
-export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer'] as const;
+export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer', 'instructionComposer'] as const;
 
 export type ContinuationAgentApiPresetRole_ACU = typeof CONTINUATION_AGENT_API_PRESET_ROLES_ACU[number];
 
@@ -138,6 +139,14 @@ export interface ContinuationAgentApiPresetChoice_ACU {
 }
 
 export type ContinuationAgentApiPresets_ACU = Record<ContinuationAgentApiPresetRole_ACU, ContinuationAgentApiPresetChoice_ACU>;
+
+/** 固定工作流的配置级参数。提示词正文不在这里改。 */
+export interface ContinuationWorkflowSettings_ACU {
+  autoFixEnabled: boolean;
+  autoFixMaxAttempts: number;
+  reviseLimit: number;
+  repairMaxExtraReads: number;
+}
 
 /** 发送前最终审查的独立资源与开关，不占用主 Agent 或普通子代理的读取额度。 */
 export interface ContinuationFinalReviewSettings_ACU {
@@ -323,6 +332,8 @@ export interface ContinuationSettings_ACU {
   agentReadFallbackTokens: number;
   /** 发送前人物情绪与合理性终审的独立设置。 */
   finalReview: ContinuationFinalReviewSettings_ACU;
+  /** 固定工作流：自动修复、打回上限与修复读取预算。 */
+  workflow: ContinuationWorkflowSettings_ACU;
   /** 开场百科/网页检索子代理的设置。 */
   webResearch: ContinuationWebResearchSettings_ACU;
   contextExtractRules: ContinuationRulePair_ACU[];

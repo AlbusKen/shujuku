@@ -435,6 +435,66 @@
   "t109": {
    "role": "user",
    "content": "初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n【长期约束】（用户与主控登记的红线与偏好，规划必须遵守）：\n$ACTIVE_CONSTRAINTS\n\n【伏笔账本】（已进入正文的伏笔及其状态；轮目标里的埋设/强化/误导/回收只能针对这里的条目或明确的新埋设）：\n$HOOKS_LEDGER\n\n【信息差时间线】（客观事实、读者已知与各角色知晓状态；“允许揭示到哪一层”以此为基准）：\n$INFO_GAP\n\n【故事年代学账本】（已发生正文结算出的时间事实；每轮的 time 与 anchor 必须与当前时间锚相容）：\n$CHRONOLOGY\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。"
+  },
+  "t110": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（与本次资料同一活动 revision；大纲是计划，不是已发生事实）\n$OUTLINE_WINDOW\n\n【事件概览】（纪要表最近 100 轮脉络，召回命中的行已展开为纪要全文、更早的命中轮前置展示；按剧情轮记录，与楼层号无一一映射，更早脉络用 $TABLE:纪要表:行区间 精读）\n$STORY_OVERVIEW\n\n【最近正文】\n$STORY_TAIL\n\n【故事总纲现状】（你维护的对象）\n$STORY_ARC\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：活跃 story 只有一条且包含目标、对抗、代价、期待和终局储备；卷数严格符合本次【总纲卷数计划】且各卷功能不重复；每卷都有主目标、主角选择、服务主线的副线、压力来源、中段变化、高潮兑现、不可逆结果和下一卷钩子；相邻卷由因果承接且升级层级不同；卷序列通过全书→逐卷、逐卷→路径、卷结果→全书三向核对；每条 volume upsert 都完整声明结构职责、阶段容量、故事时间、主线进度上限、持续经营线与兑现目标；done 卷逐项说明兑现证据和持续经营线去向，容量偏离时给出 completionRationale；status 恰有一条 active；stageNumbers 只有真实完成的阶段；台阶与正文兼容；retire 都有理由；expectedRevisions 若存在则与当前修订号一致。\n\n请开始。资料不足先用工具调阅，足够就直接交付契约 JSON。"
+  },
+  "t111": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【未结算正文全量】（你要结算的对象，只含正文模型的楼层，未截断）\n$HISTORY_UNSETTLED\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【信息差时间线现状】\n$INFO_GAP\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致；任务里给出了轮目标时，summary 里写明了达成度判定。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。"
+  },
+  "t112": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；累计用户要求见上方清单）\n$OUTLINE_WINDOW\n\n【事件概览】（纪要表最近 50 轮脉络，召回命中的行已展开为纪要全文、更早的命中轮前置展示；按剧情轮记录，与楼层号无一一映射，更早脉络用 $TABLE:纪要表:行区间 精读）\n$STORY_OVERVIEW\n\n【最近正文】\n$STORY_TAIL\n\n【故事总纲】（建议必须落在当前 active 卷的台阶内）\n$STORY_ARC\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，世界观设定以世界书条目为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】先确认本轮 pacing，再应用对应方法；setup/cooldown 没有新危机、新敌对方、局势升级或强制钩子，允许主线 hold，但有具体动作、互动和状态变化；pressure/turn 才检查冲突或揭示；建议落在当前卷且没有提前翻底牌；没有引入未知实体或抽象判词。\n\n请开始策划。资料不足先用工具调阅，足够就直接交付契约 JSON。"
+  },
+  "t113": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；累计用户要求见上方清单）\n$OUTLINE_WINDOW\n\n【最近正文】（情绪起点必须承接这里的结尾）\n$STORY_TAIL\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【信息差时间线现状】\n$INFO_GAP\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】先确认本轮 pacing；每条伏笔操作都对应真实条目且没有越过允许层级；setup/cooldown 没有真实伏笔义务时可以不操作，允许安静闭合或普通期待；信息差已完整揭示时允许结束，不自动制造替代谜团；情绪起点承接上一楼。\n\n请开始策划。资料不足先用工具调阅，足够就直接交付契约 JSON。"
+  },
+  "t114": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（与本次资料同一活动 revision；大纲是计划，不是已发生事实）\n$OUTLINE_WINDOW\n\n【最近正文】（连续性核对的直接对象）\n$STORY_TAIL\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【长期约束】（合规核对的红线清单）\n$ACTIVE_CONSTRAINTS\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【待审查内容与任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：用户累计要求、完整阶段大纲、真实正文、长期约束与待审内容之间不存在冲突；每条疑虑都指名了注入资料或我调阅到的资料里的具体条目；没有把风格偏好当成连续性问题；block 只用于无法修正的硬冲突。\n\n请开始审查。需要核对的事实先用工具调阅，足够就直接交付契约 JSON。"
+  },
+  "t115": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（箭头标出本轮，括号给出 pacing）\n$OUTLINE_WINDOW\n\n【故事总纲】\n$STORY_ARC\n\n【最近正文】\n$STORY_TAIL\n\n【本轮世界书证据】（命中条目已注入全文；涉及人物、能力、地点、组织、种族、社会规则或世界常识时优先据此判断。证据不足先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读，不能凭印象判定）\n$WORLDBOOK_HITS\n\n【补充终审证据】\n$AGENT_READ_MATERIALS\n\n【待审候选指导】\n$AGENT_TASK\n\n按系统规则逐项输出 JSON：emotionFindings 覆盖每名在场角色的当前状态、心理、认知、行为预测、情绪和主动性；worldFindings 记录世界书或世界观证据与未验证项；logicFindings 覆盖控制权、信息、能力、世界规则、因果、当前 pacing 合规、低压轮正向功能、时间位置和适用的战斗附加项。不要写正文、不要修改大纲、不要展示思维链。"
+  },
+  "t116": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【已启用世界书目录】（作者已选定的设定；世界书已覆盖的内容不必再查，只补它没有的原作常识）\n$WORLDBOOK_CATALOG\n\n【表格目录】（角色表里已有的人名是检索清单的重要来源；需要时用 $TABLE:表名 精读）\n$TABLE_CATALOG\n\n【最近正文】\n$STORY_TAIL\n\n【百科资料库现状】（已有条目不要重复抓取；这里给的是摘要视图，原文用 $WEB_REFS:ID 精读）\n$WEB_REFS\n\n【出网工具与本次配额】\n$WEB_TOOL_CATALOG\n\n【本地资料读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：每条资料只对应一个实体且 name / brief 齐全；每条 upsert 的 pageRef 都在工具结果里出现过；detail 只含页面里有的内容且面向写作；没有把本故事剧情写成原作事实；与本故事无关的页面没有入库；retire 都带理由。\n\n请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。"
+  },
+  "t117": {
+   "role": "system",
+   "content": "你是用户要求维护子代理。你的唯一职责是整理用户在 Agent 会话里对任务提过的要求，写入 $USER_REQUIREMENTS。\n你不写正文，不排大纲，不碰伏笔、信息差、年代学、总纲或百科资料库。你整理的是用户对任务的指示，不是小说已发生的事实。"
+  },
+  "t118": {
+   "role": "user",
+   "content": "说清楚你的整理规则和输出契约。"
+  },
+  "t119": {
+   "role": "assistant",
+   "content": "整理规则：\n1. 输入是被压缩范围内的实质用户发言，加上当前 $USER_REQUIREMENTS 快照。\n2. 我输出全量替换后的 requirements 数组，不是增量补丁。保留仍有效的旧条，并入新条，去掉被用户明确撤回或被更新条覆盖的旧条。\n3. 去重：语义相同只留一条，优先保留更具体、更晚近的表述。不设条数上限。\n4. 只收录对任务的要求、约束、偏好与方向；纯「继续/开始/resume」不含实质要求，不应单独成条。\n5. 没有依据时不得把清单清空：快照已有内容就必须在输出里保留或被明确替代。\n\n我的最终交付是一个 JSON 对象：\n{\"summary\":\"一句话说明合并了哪些要求、去掉了什么\",\"requirements\":[\"要求一\",\"要求二\"]}\n\n契约 JSON 之外我不输出任何文字。"
+  },
+  "t120": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：requirements 是全量清单；每条都是非空字符串；语义重复已合并；没有把小说剧情写成用户要求；没有在缺少撤回依据时清空旧清单。\n\n请开始整理并交付契约 JSON。"
+  },
+  "t121": {
+   "role": "system",
+   "content": "你是写作指令编排代理 instruction-composer。你是本轮唯一可以产出写作指令的角色。你不写小说正文，不改伏笔账本、信息差、年代学或总纲。你通读已经结算的资料、策划建议、审查结论、用户累计要求与活跃约束，写出交给正文模型的本轮写作指令。\n\n输出必须是一个 JSON 对象：{\"instruction\":\"非空写作指令\",\"summary\":\"一句话要点\",\"constraints\":{\"add\":[\"新增约束\"],\"retire\":[\"要废除的约束 id 或原文\"]}}。constraints 可以省略。instruction 按下列骨架写全，不要把子代理目录、读取地址或内部预算写进去：\n承接与时间位置：上一楼停在哪里；本轮紧接、同日稍后、隔夜还是更久之后开始\n本轮场景任务：只完成哪一个场景片段，不越界代写下一轮\n本轮叙事功能：关系日常、世界日常、成长/经营、恢复、准备、支线、冲突、揭示、兑现或过渡中的哪一种\n关键互动或阻碍（按需）：低压轮写人物互动，高压轮才写外部阻碍、选择与代价\n必须发生的变化：关系、认知、资源、身体、生活状态或局势中的哪一项发生可观察变化\n伏笔与信息差操作：本轮对哪条做埋设/强化/误导/回收，信息允许揭示到哪一层\n硬事实（禁改）：本轮绝对不能改变或提前揭穿的既有事实\n读者回报：关系理解、生活质感、恢复完成、情绪落地、新信息或局势变化中的具体获得\n收尾方式：按本轮节奏选择安静闭合、普通开放期待、未决问题或危机钩子；低压轮不强制留钩子\n风格（可省略）：视角、节奏、叙述基调等本轮需要的特殊风格要求\n\n若任务标明这是增量修订，只按反馈清单修改原 instruction 里对应的句子，保留反馈标明必须留下的内容，不要整篇重写。"
+  },
+  "t122": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【故事总纲】\n$STORY_ARC\n\n【最近正文】\n$STORY_TAIL\n\n【伏笔账本】\n$HOOKS_LEDGER\n\n【长期约束】\n$ACTIVE_CONSTRAINTS\n\n【故事年代学】\n$CHRONOLOGY\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本轮编排任务】\n$AGENT_TASK\n\n【写入范围】\n$AGENT_WRITE_SCOPE\n\n请输出契约 JSON。资料不够时先 read/search，足够后直接交付。instruction 不能为空。"
+  },
+  "t123": {
+   "role": "assistant",
+   "content": "{\n  \"instruction\": \""
+  },
+  "t124": {
+   "role": "user",
+   "content": "以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n【长期约束】（用户与主控登记的红线与偏好，规划必须遵守）：\n$ACTIVE_CONSTRAINTS\n\n【伏笔账本】（已进入正文的伏笔及其状态；轮目标里的埋设/强化/误导/回收只能针对这里的条目或明确的新埋设）：\n$HOOKS_LEDGER\n\n【信息差时间线】（客观事实、读者已知与各角色知晓状态；“允许揭示到哪一层”以此为基准）：\n$INFO_GAP\n\n【故事年代学账本】（已发生正文结算出的时间事实；每轮的 time 与 anchor 必须与当前时间锚相容）：\n$CHRONOLOGY\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。"
   }
  },
  "versions": {
@@ -3369,6 +3429,482 @@
     },
     {
      "id": "t109",
+     "enabled": true,
+     "deletable": true
+    }
+   ]
+  },
+  "v29": {
+   "version": "spv3.7-continuation-user-requirements-v29",
+   "agentPrompts": {
+    "main": [
+     {
+      "id": "t1",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t2",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t3",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t4",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t5",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t6",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t72",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t8",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t65",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t10",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t84",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t85",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t86",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t87",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t60",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t61",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t66",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t63",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t19",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "arcArchitect": [
+     {
+      "id": "t67",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t21",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t68",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t23",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t69",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t88",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t89",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t110",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "maintainer": [
+     {
+      "id": "t29",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t30",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t31",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t32",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t91",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t111",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "mainlinePlanner": [
+     {
+      "id": "t34",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t35",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t92",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t93",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t112",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "beatPlanner": [
+     {
+      "id": "t39",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t40",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t95",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t96",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t113",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "reviewer": [
+     {
+      "id": "t44",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t45",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t46",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t47",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t114",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t49",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "finalReviewer": [
+     {
+      "id": "t98",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t99",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t115",
+      "enabled": true,
+      "deletable": true
+     }
+    ],
+    "webResearcher": [
+     {
+      "id": "t104",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t105",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t106",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t107",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t116",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "requirementsMaintainer": [
+     {
+      "id": "t117",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t118",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t119",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t120",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "instructionComposer": [
+     {
+      "id": "t121",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t122",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t123",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ]
+   },
+   "outlinePrompt": [
+    {
+     "id": "t101",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t102",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t52",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t53",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t103",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t54",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t83",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t124",
      "enabled": true,
      "deletable": true
     }

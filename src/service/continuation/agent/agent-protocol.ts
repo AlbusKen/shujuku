@@ -22,6 +22,7 @@ import {
   AGENT_VOLUME_NARRATIVE_ROLES_ACU,
   AGENT_WEB_TOOL_ACTIONS_ACU,
   type AgentChronologyDeltaItem_ACU,
+  type AgentComposerOutput_ACU,
   type AgentDelegation_ACU,
   type AgentFinalReviewerOutput_ACU,
   type AgentHookDeltaItem_ACU,
@@ -502,6 +503,18 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     if (!allowDelegate) failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
     return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
   }
+  if (action === 'open_round') {
+    const focus = readText_ACU(payload.focus).trim();
+    if (!focus) failProtocol_ACU('open_round 动作必须提供非空 focus');
+    return {
+      kind: 'open_round',
+      thought,
+      focus,
+      summary: readText_ACU(payload.summary),
+      dispatchArcArchitect: payload.dispatchArcArchitect === true,
+      dispatchWebResearcher: payload.dispatchWebResearcher === true,
+    };
+  }
   if (action === 'finalize') {
     const instruction = readText_ACU(payload.instruction);
     if (!instruction) failProtocol_ACU('finalize 动作必须提供非空 instruction');
@@ -523,7 +536,20 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'read' || action === 'search') {
     return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
   }
-  failProtocol_ACU(`action 必须是 read / search / delegate / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+}
+
+export function parseAgentComposerOutput_ACU(payload: Record<string, unknown>): AgentComposerOutput_ACU {
+  const instruction = readText_ACU(payload.instruction).trim();
+  if (!instruction) failProtocol_ACU('instruction-composer 必须提供非空 instruction');
+  const rawConstraints = payload.constraints;
+  let constraints: { add: string[]; retire: string[] } | null = null;
+  if (isRecord_ACU(rawConstraints)) {
+    const add = readTextList_ACU(rawConstraints.add);
+    const retire = readTextList_ACU(rawConstraints.retire);
+    if (add.length || retire.length) constraints = { add, retire };
+  }
+  return { instruction, summary: readText_ACU(payload.summary), constraints };
 }
 
 function parseCharacterKnowledge_ACU(value: unknown): AgentInfoGapDeltaItem_ACU['characterKnowledge'] {

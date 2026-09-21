@@ -29,6 +29,7 @@ import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
 import {
   compactAgentProtocolError_ACU,
   mergeAgentMaintainerOutputs_ACU,
+  parseAgentComposerOutput_ACU,
   parseAgentFinalReviewerOutput_ACU,
   parseAgentJsonPayload_ACU,
   parseAgentJsonPayloadDraft_ACU,
@@ -72,6 +73,7 @@ import {
 } from './agent-read-gate';
 import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU } from './agent-model';
 import type {
+  AgentComposerOutput_ACU,
   AgentDelegation_ACU,
   AgentFinalReviewerOutput_ACU,
   AgentMaintainerOutput_ACU,
@@ -119,6 +121,8 @@ export interface AgentSubagentRunResult_ACU {
   researcher: AgentResearcherOutput_ACU | null;
   /** 用户要求维护子代理的全量替换清单；其它角色为 null。 */
   requirements: string[] | null;
+  /** instruction-composer 的写作指令；其它角色省略。 */
+  composer?: AgentComposerOutput_ACU | null;
   /** 有效轮次数：1（首轮）+ 实际用掉的工具轮次。 */
   iterations: number;
   attempts: number;
@@ -199,6 +203,7 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
   reviewer: AGENT_PREFILLS_ACU.reviewer,
   webResearcher: AGENT_PREFILLS_ACU.researcher,
   requirementsMaintainer: AGENT_PREFILLS_ACU.requirements,
+  instructionComposer: AGENT_PREFILLS_ACU.composer,
 };
 
 /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
@@ -208,6 +213,7 @@ const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = 
   plan: ['recommendation', 'summary'],
   review: ['verdict'],
   research: ['delta', 'summary'],
+  compose: ['instruction', 'summary'],
 };
 
 /** 一次派工内已抓取页面的句柄缓存：网页正文只在本次派工用于归纳，契约仅回填来源元数据。 */
@@ -231,6 +237,7 @@ const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritabl
   plan: [],
   review: [],
   research: ['webRefs'],
+  compose: [],
 };
 
 function rejectDelegation_ACU(message: string, details?: Record<string, unknown>): never {
@@ -642,6 +649,7 @@ export class AgentSubagentRuntime_ACU {
           reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
           researcher: null,
           requirements: null,
+          composer: definition.kind === 'compose' ? parseAgentComposerOutput_ACU(payload) : null,
           iterations: 1 + toolRoundsUsed,
           attempts: attempt,
           expandedReads: [...expandedReads],
