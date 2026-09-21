@@ -151,7 +151,7 @@ const RULES: HintRule[] = [
   },
   {
     id: 'http-429',
-    test: /\b429\b|rate[ _-]?limit|too many requests|quota|insufficient (balance|funds)|exceeded your current|resource[ _-]?exhausted|请求过于频繁|限流|额度不足|余额不足|欠费|配额/,
+    test: /\b429\b|rate[ _-]?limit|too many requests|\bquota\b|insufficient (balance|funds)|exceeded your current|resource[ _-]?exhausted|请求过于频繁|限流|额度不足|余额不足|欠费|配额/,
     summary: '请求过于频繁被限流，或账户额度 / 余额已用完（429）。',
     steps: [
       '先等 1–2 分钟再重试；短时间内连续重试只会让限流更久。',
@@ -424,7 +424,7 @@ const RULES: HintRule[] = [
   // ─── 向量 / 存储 / 检查点 ───
   {
     id: 'vector',
-    test: /embedding|rerank|向量|vector/,
+    test: /\bembedding\b|\brerank\b|向量|\bvector\b/,
     summary: '交火模式（向量索引）相关操作失败。',
     steps: [
       '到「交火模式」页检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',

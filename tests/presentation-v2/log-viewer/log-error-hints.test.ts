@@ -132,4 +132,12 @@ describe('resolveLogErrorHint', () => {
   it('规则 ID 唯一', () => {
     expect(new Set(LOG_ERROR_HINT_RULE_IDS).size).toBe(LOG_ERROR_HINT_RULE_IDS.length);
   });
+
+  it('不把堆栈函数名里的 Vector 或中转站 quota_error:false 当成交火/额度故障', () => {
+    expect(hintIdFor('手动重填被回放根准入阻断：collectManualRefillSummaryVectorCleanup_ACU')).toBe('checkpoint-replay');
+    expect(hintIdFor('API请求失败: 400 {"error":{"type":"invalid_request_error","quota_error":false,"message":"bad request"}}')).toBe('http-400');
+    expect(hintIdFor('Embedding request failed: model not found')).toBe('http-404');
+    expect(hintIdFor('vector index rebuild failed: boom')).toBe('vector');
+    expect(hintIdFor('API请求失败: 429 quota exceeded')).toBe('http-429');
+  });
 });
