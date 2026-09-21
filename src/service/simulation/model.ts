@@ -1,7 +1,9 @@
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
-export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 3 as const;
+export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 4 as const;
 export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
 export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;
+export const WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU = 3 as const;
+export const WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU = 80 as const;
 
 export type WorldSimulationTaskStatus_ACU = 'drafting' | 'paused' | 'running' | 'stopping_after_inflight' | 'completed' | 'abandoned' | 'failed';
 export type WorldSimulationStageStatus_ACU = 'planning' | 'running' | 'completed' | 'abandoned' | 'failed';
@@ -38,7 +40,8 @@ export interface WorldSimulationWebResearchSettings_ACU {
   blockedDomains: string;
 }
 export interface WorldSimulationDynamicsSettings_ACU { rumorTTLDays: number; maxClockAdvanceDays: number; collisionEnforcement: 'strict' | 'relaxed'; missedSweepEnabled: boolean; }
-export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; dynamics: WorldSimulationDynamicsSettings_ACU; promptForceDefaultVersion?: string; }
+export interface WorldSimulationWorkflowSettings_ACU { autoFixEnabled: boolean; chroniclerHotThreshold: number; }
+export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; dynamics: WorldSimulationDynamicsSettings_ACU; workflow: WorldSimulationWorkflowSettings_ACU; promptForceDefaultVersion?: string; }
 
 export interface WorldEvidenceRef_ACU { ref: string; source: string; summary: string; }
 export function normalizeWorldRegionName_ACU(value: string): string { return value.trim().replace(/\s+/g, ' ').toLowerCase(); }
@@ -67,10 +70,20 @@ export interface WorldActor_ACU { id: string; name: string; interests: string[];
 export interface WorldChronicleEntry_ACU { id: string; at: string; summary: string; relatedIds: string[]; evidenceRefs: string[]; }
 export interface WorldChronicleOverviewRow_ACU { fingerprint: string; day: number; oneLine: string; archiveRef: string; }
 export interface WorldGuidance_ACU { signals: WorldGuidanceSignal_ACU[]; excludedFacts: string[]; evidenceRefs: string[]; }
-export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU; revision: number; clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[]; chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU; chronicleOverview: WorldChronicleOverviewRow_ACU[]; }
 
 export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
+export interface WorldSimulationPendingFixViolation_ACU { path: string; message: string; }
+export interface WorldSimulationPendingFix_ACU {
+  module: WorldSimulationLedgerModule_ACU;
+  candidateId: string;
+  agentName: string;
+  violations: WorldSimulationPendingFixViolation_ACU[];
+  attempts: number;
+  firstFailedAtDay: number;
+  lastError: string;
+}
+export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU; revision: number; clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[]; chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU; chronicleOverview: WorldChronicleOverviewRow_ACU[]; pendingFixes: WorldSimulationPendingFix_ACU[]; }
 
 export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
   clock: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'],

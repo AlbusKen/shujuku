@@ -67,6 +67,7 @@
         </div>
         <div class="acu-v2-world-simulation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.autoTriggerEnabled" label="正文生成完成后自动推演（与自动填表同一时机）" />
+          <AcuCheckbox v-model="settingsDraft.workflow.autoFixEnabled" label="自动修复违规模块（连续失败 3 次后交给主 Agent）" />
           <AcuCheckbox v-model="settingsDraft.webResearch.enabled" label="启用设定研究（外部百科检索）" />
         </div>
 
@@ -153,6 +154,22 @@
             </div>
             <div class="acu-v2-world-simulation-page__toggles">
               <AcuCheckbox v-model="settingsDraft.dynamics.missedSweepEnabled" label="启用过期清扫（关闭后过期暗流不会自动记为错过）" />
+            </div>
+          </AcuDisclosureGroup>
+
+          <AcuDisclosureGroup
+            class="acu-v2-world-simulation-page__group"
+            label="工作流"
+            :meta="workflowGroupMeta"
+            :expanded="isGroupExpanded('workflow')"
+            body-id="acu-world-simulation-group-workflow"
+            @toggle="toggleGroup('workflow')"
+          >
+            <p class="acu-v2-world-simulation-page__meta">固定工作流按时间、暗流、人物的顺序自治执行。这里只改配置：自动修复和编年热层阈值。提示词仍在下方各角色分组里改。</p>
+            <div class="acu-v2-world-simulation-page__settings-grid">
+              <AcuFormRow label="编年热层阈值" hint="热层编年达到这个条数时，本轮会派出编年。范围 1–512。">
+                <AcuInput v-model="settingsDraft.workflow.chroniclerHotThreshold" type="number" :min="1" :max="512" />
+              </AcuFormRow>
             </div>
           </AcuDisclosureGroup>
 
@@ -371,6 +388,12 @@ const dynamicsGroupMeta = computed(() => {
   return `TTL ${dynamics.rumorTTLDays} · 推进 ${dynamics.maxClockAdvanceDays} · ${dynamics.collisionEnforcement === 'strict' ? '严格' : '宽松'}${dynamics.missedSweepEnabled ? ' · 清扫开' : ' · 清扫关'}`;
 });
 
+const workflowGroupMeta = computed(() => {
+  const workflow = settingsDraft.value?.workflow;
+  if (!workflow) return '';
+  return `${workflow.autoFixEnabled ? '自动修复开' : '自动修复关'} · 编年热层 ${workflow.chroniclerHotThreshold}`;
+});
+
 function cloneSettings(settings: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU {
   return JSON.parse(JSON.stringify(settings)) as WorldSimulationSettings_ACU;
 }
@@ -464,6 +487,10 @@ function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
       maxClockAdvanceDays: requiredRangeInteger(source.dynamics.maxClockAdvanceDays, '单次时钟推进上限', 0, 3650),
       collisionEnforcement: source.dynamics.collisionEnforcement === 'relaxed' ? 'relaxed' : source.dynamics.collisionEnforcement === 'strict' ? 'strict' : (() => { throw new Error('碰撞兑现策略必须是严格或宽松'); })(),
       missedSweepEnabled: typeof source.dynamics.missedSweepEnabled === 'boolean' ? source.dynamics.missedSweepEnabled : (() => { throw new Error('过期清扫开关无效'); })(),
+    },
+    workflow: {
+      autoFixEnabled: typeof source.workflow?.autoFixEnabled === 'boolean' ? source.workflow.autoFixEnabled : true,
+      chroniclerHotThreshold: requiredRangeInteger(source.workflow?.chroniclerHotThreshold, '编年热层阈值', 1, 512),
     },
   };
   if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {

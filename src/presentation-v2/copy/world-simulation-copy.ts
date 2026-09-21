@@ -16,6 +16,7 @@ export const WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU: Record<string, string> =
   'dramatis-keeper': '人物档案',
   'chronicler': '编年',
   'causality-reviewer': '因果审核',
+  'guidance-composer': '投影决定',
   'lore-researcher': '设定研究',
   'requirements-maintainer': '用户要求维护',
   'world-analyst': '世界推演',

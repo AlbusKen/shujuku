@@ -60,13 +60,31 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     '$WORLD_USER_REQUIREMENTS': () => serialize_ACU(context.userRequirements ?? context.userGuidance),
     '$WORLD_STATE': () => {
       if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
-        const catalog = buildInUseWorldCatalog_ACU(context.worldState);
+        const ledger = context.worldState;
+        const catalog = buildInUseWorldCatalog_ACU(ledger);
+        const composerView = context.writableModules?.length === 1 && context.writableModules[0] === 'guidance';
+        if (composerView) {
+          return serialize_ACU({
+            clock: ledger.clock,
+            player: ledger.player,
+            dimensions: ledger.dimensions,
+            seeds: ledger.seeds,
+            actors: ledger.actors,
+            rumors: ledger.rumors,
+            chronicle: ledger.chronicle,
+            chronicleOverview: ledger.chronicleOverview,
+            guidance: ledger.guidance,
+            pendingFixes: ledger.pendingFixes,
+            readHint: catalog.readHint,
+          });
+        }
         if (context.writableModules?.length) {
           const hints = Array.isArray(context.worldCandidates)
-            ? catalogArchiveHints_ACU(context.worldCandidates as Array<{ patch: Record<string, unknown> }>, context.worldState.chronicleOverview)
+            ? catalogArchiveHints_ACU(context.worldCandidates as Array<{ patch: Record<string, unknown> }>, ledger.chronicleOverview)
             : [];
           return serialize_ACU({
-            ...sliceModuleCatalog_ACU(catalog, context.worldState.chronicleOverview, context.writableModules),
+            ...sliceModuleCatalog_ACU(catalog, ledger.chronicleOverview, context.writableModules),
+            pendingFixes: ledger.pendingFixes.filter(item => context.writableModules!.includes(item.module)),
             archiveHints: hints,
           });
         }

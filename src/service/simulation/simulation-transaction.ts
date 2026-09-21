@@ -2,7 +2,7 @@ import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
 import type { WorldChronicleArchiveDetail_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
-import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, WORLD_CHRONICLE_OVERVIEW_CAP_ACU, type WorldChronicleOverviewRow_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
+import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, WORLD_CHRONICLE_OVERVIEW_CAP_ACU, type WorldChronicleOverviewRow_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerModule_ACU, type WorldSimulationPendingFix_ACU, type WorldSimulationSettings_ACU } from './model';
 import {
   coerceWorldSimulationContact_ACU,
   coerceWorldSimulationGuidanceVoice_ACU,
@@ -16,6 +16,7 @@ import {
 } from './simulation-patch-normalize';
 import { eventFingerprint_ACU } from './event-similarity';
 import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
+import { validateWorldSimulationGuidanceComposerSignals_ACU } from './agent/agent-protocol';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 type Module_ACU = typeof MODULES_ACU[number];
@@ -150,21 +151,20 @@ function guidanceSignals_ACU(value: unknown, path: string): WorldGuidanceSignal_
     if (typeof item.text !== 'string' || !item.text.trim()) fail_ACU(`${path}[${index}].text 必须是非空字符串`);
     const voice = coerceWorldSimulationGuidanceVoice_ACU(item.voice);
     if (!voice.ok) fail_ACU(`${path}[${index}].voice 非法`, { actual: item.voice });
-    const signal: WorldGuidanceSignal_ACU = { text: item.text, voice: voice.value };
-    if (item.sourceId !== undefined) {
-      if (typeof item.sourceId !== 'string' || !item.sourceId.trim()) fail_ACU(`${path}[${index}].sourceId 必须是非空字符串`);
-      signal.sourceId = item.sourceId;
-    }
+    if (typeof item.sourceId !== 'string' || !item.sourceId.trim()) fail_ACU(`${path}[${index}].sourceId 必须是非空字符串`);
+    const signal: WorldGuidanceSignal_ACU = { text: item.text, voice: voice.value, sourceId: item.sourceId.trim() };
     return signal;
   });
 }
 
-function applyGuidance_ACU(current: WorldSimulationLedger_ACU['guidance'], raw: unknown): WorldSimulationLedger_ACU['guidance'] {
+function applyGuidance_ACU(current: WorldSimulationLedger_ACU['guidance'], raw: unknown, ledger: WorldSimulationLedger_ACU, anchorMessage = ''): WorldSimulationLedger_ACU['guidance'] {
   if (!isRecord_ACU(raw)) fail_ACU('patch.guidance 必须是对象');
   exactKeys_ACU(raw, ['signals', 'excludedFacts', 'evidenceRefs'], 'patch.guidance');
   if (!Object.keys(raw).length) fail_ACU('patch.guidance 不能为空');
+  const signals = raw.signals === undefined ? [...current.signals] : guidanceSignals_ACU(raw.signals, 'patch.guidance.signals');
+  if (raw.signals !== undefined) validateWorldSimulationGuidanceComposerSignals_ACU(signals, ledger, anchorMessage);
   return {
-    signals: raw.signals === undefined ? [...current.signals] : guidanceSignals_ACU(raw.signals, 'patch.guidance.signals'),
+    signals,
     excludedFacts: raw.excludedFacts === undefined ? [...current.excludedFacts] : refs_ACU(raw.excludedFacts, 'patch.guidance.excludedFacts'),
     evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.guidance.evidenceRefs'),
   };
@@ -388,13 +388,106 @@ function canWritePatchModule_ACU(module: string, writable: ReadonlySet<string>):
 
 function orderedPatchEntries_ACU(patch: Record<string, unknown>): Array<[string, unknown]> {
   const entries = Object.entries(patch);
-  entries.sort((left, right) => (left[0] === 'clock' ? -1 : right[0] === 'clock' ? 1 : 0));
+  const rank = (key: string): number => ({
+    clock: 0, rumors: 1, dimensions: 2, seeds: 3, actors: 4, player: 5, chronicle: 6, chronicleArchive: 7, guidance: 8,
+  }[key] ?? 99);
+  entries.sort((left, right) => rank(left[0]) - rank(right[0]));
   return entries;
+}
+
+function pendingModuleOf_ACU(module: string): WorldSimulationLedgerModule_ACU {
+  return module === 'chronicleArchive' ? 'chronicle' : module as WorldSimulationLedgerModule_ACU;
+}
+
+function recordPendingFix_ACU(
+  pending: WorldSimulationPendingFix_ACU[],
+  module: WorldSimulationLedgerModule_ACU,
+  candidateId: string,
+  agentName: string,
+  violations: Array<{ path: string; message: string }>,
+  day: number,
+): void {
+  const lastError = violations.map(item => item.message).join('；') || '模块入库失败';
+  const index = pending.findIndex(item => item.module === module);
+  if (index >= 0) {
+    const previous = pending[index];
+    pending[index] = {
+      module,
+      candidateId: candidateId || previous.candidateId,
+      agentName: agentName || previous.agentName,
+      violations: violations.length ? violations : previous.violations,
+      attempts: previous.attempts + 1,
+      firstFailedAtDay: previous.firstFailedAtDay,
+      lastError,
+    };
+    return;
+  }
+  pending.push({
+    module,
+    candidateId,
+    agentName,
+    violations,
+    attempts: 1,
+    firstFailedAtDay: day,
+    lastError,
+  });
+}
+
+function violationModule_ACU(message: string): WorldSimulationLedgerModule_ACU | null {
+  if (message.includes('缺少伴随 rumor') || message.includes('ledger.actors')) return 'actors';
+  if (message.includes('ledger.rumors') || message.includes('earliestRevealDay')) return 'rumors';
+  if (message.includes('ledger.seeds')) return 'seeds';
+  if (message.includes('ledger.dimensions')) return 'dimensions';
+  if (message.includes('ledger.player')) return 'player';
+  if (message.includes('ledger.clock')) return 'clock';
+  if (message.includes('ledger.guidance')) return 'guidance';
+  if (message.includes('ledger.chronicle')) return 'chronicle';
+  return null;
+}
+
+function restoreLedgerModule_ACU(next: WorldSimulationLedger_ACU, base: WorldSimulationLedger_ACU, module: WorldSimulationLedgerModule_ACU): void {
+  switch (module) {
+    case 'clock': next.clock = clone_ACU(base.clock); break;
+    case 'dimensions': next.dimensions = clone_ACU(base.dimensions); break;
+    case 'seeds': next.seeds = clone_ACU(base.seeds); break;
+    case 'actors': next.actors = clone_ACU(base.actors); break;
+    case 'chronicle':
+      next.chronicle = clone_ACU(base.chronicle);
+      next.chronicleOverview = clone_ACU(base.chronicleOverview);
+      break;
+    case 'guidance': next.guidance = clone_ACU(base.guidance); break;
+    case 'rumors': next.rumors = clone_ACU(base.rumors); break;
+    case 'player': next.player = clone_ACU(base.player); break;
+    default: break;
+  }
+}
+
+function crossFieldProblems_ACU(next: WorldSimulationLedger_ACU): Array<{ module: WorldSimulationLedgerModule_ACU; message: string }> {
+  const problems: Array<{ module: WorldSimulationLedgerModule_ACU; message: string }> = [];
+  const push = (message: string): void => {
+    const module = violationModule_ACU(message);
+    if (module) problems.push({ module, message });
+  };
+  checkCrossField_ACU(next, push);
+  for (const message of collectWorldSimulationLedgerViolations_ACU(next)) push(message);
+  return problems;
+}
+
+function clearPendingModule_ACU(pending: WorldSimulationPendingFix_ACU[], module: WorldSimulationLedgerModule_ACU): void {
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    if (pending[index].module === module) pending.splice(index, 1);
+  }
 }
 
 export interface WorldSimulationApplyResult_ACU {
   ledger: WorldSimulationLedger_ACU;
   chronicleArchiveWrites: WorldChronicleArchiveDetail_ACU[];
+  pendingFixes: WorldSimulationPendingFix_ACU[];
+  appliedModules: WorldSimulationLedgerModule_ACU[];
+}
+
+export interface WorldSimulationApplyContext_ACU {
+  anchorMessage?: string;
 }
 
 export function applyWorldSimulationCandidatesDetailed_ACU(
@@ -402,13 +495,12 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorizedEvidenceRefs: ReadonlySet<string>,
   settings?: WorldSimulationSettings_ACU,
+  context?: WorldSimulationApplyContext_ACU,
 ): WorldSimulationApplyResult_ACU {
   const dynamics = resolveDynamics_ACU(settings);
   const validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
   if (!candidates.length) fail_ACU('commit 必须包含至少一个候选');
   const candidateIds = new Set<string>();
-  let next = clone_ACU(validatedBase);
-  const chronicleArchiveWrites: WorldChronicleArchiveDetail_ACU[] = [];
   for (const candidate of candidates) {
     if (!candidate.candidateId || candidateIds.has(candidate.candidateId)) fail_ACU('commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
     candidateIds.add(candidate.candidateId);
@@ -423,29 +515,114 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
     const writable = new Set<string>(definition.writableModules);
     const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
     if (forgedPermissions.length) fail_ACU('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
-    for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
+    for (const [module] of orderedPatchEntries_ACU(candidate.patch)) {
       if (!canWritePatchModule_ACU(module, writable)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
-      switch (module) {
-        case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
-        case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day); break;
-        case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day); break;
-        case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day); break;
-        case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
-        case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
-        case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day); break;
-        case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
-        case 'chronicleArchive': {
-          const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
-          next.chronicleOverview = archived.overview;
-          chronicleArchiveWrites.push(...archived.writes);
-          break;
+    }
+  }
+
+  let next = clone_ACU(validatedBase);
+  const chronicleArchiveWrites: WorldChronicleArchiveDetail_ACU[] = [];
+  const pendingFixes = clone_ACU(validatedBase.pendingFixes);
+  const appliedModules = new Set<WorldSimulationLedgerModule_ACU>();
+  const moduleWriters = new Map<WorldSimulationLedgerModule_ACU, { candidateId: string; agentName: string }>();
+
+  for (const candidate of candidates) {
+    for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
+      const ledgerModule = pendingModuleOf_ACU(module);
+      const snapshot = clone_ACU(next);
+      const blocking: Array<{ path: string; message: string }> = [];
+      const collect = (message: string, details?: Record_ACU): void => {
+        const severity = details?.severity === 'autoFixed' ? 'autoFixed' : 'blocking';
+        if (severity === 'blocking') {
+          blocking.push({ path: typeof details?.path === 'string' ? details.path : `$.patch.${module}`, message });
         }
+      };
+      try {
+        switch (module) {
+          case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
+          case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collect); break;
+          case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collect); break;
+          case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collect); break;
+          case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
+          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch, next, context?.anchorMessage ?? ''); break;
+          case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collect); break;
+          case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
+          case 'chronicleArchive': {
+            const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
+            next.chronicleOverview = archived.overview;
+            chronicleArchiveWrites.push(...archived.writes);
+            break;
+          }
+        }
+        if (blocking.length) {
+          const changed = JSON.stringify(next[ledgerModule === 'chronicle' && module === 'chronicleArchive' ? 'chronicleOverview' : ledgerModule])
+            !== JSON.stringify(snapshot[ledgerModule === 'chronicle' && module === 'chronicleArchive' ? 'chronicleOverview' : ledgerModule]);
+          if (!changed) {
+            next = snapshot;
+            if (module === 'chronicleArchive') {
+              const snapshotRefs = new Set(snapshot.chronicleOverview.map(row => row.archiveRef));
+              for (let index = chronicleArchiveWrites.length - 1; index >= 0; index -= 1) {
+                if (!snapshotRefs.has(chronicleArchiveWrites[index].archiveRef)) chronicleArchiveWrites.splice(index, 1);
+              }
+            }
+          }
+          recordPendingFix_ACU(pendingFixes, ledgerModule, candidate.candidateId, candidate.agentName, blocking, next.clock.day);
+          continue;
+        }
+        clearPendingModule_ACU(pendingFixes, ledgerModule);
+        appliedModules.add(ledgerModule);
+        moduleWriters.set(ledgerModule, { candidateId: candidate.candidateId, agentName: candidate.agentName });
+      } catch (error) {
+        next = snapshot;
+        recordPendingFix_ACU(
+          pendingFixes,
+          ledgerModule,
+          candidate.candidateId,
+          candidate.agentName,
+          [{ path: `$.patch.${module}`, message: error instanceof Error ? error.message : String(error) }],
+          snapshot.clock.day,
+        );
       }
     }
   }
-  checkCrossField_ACU(next);
+
+  const problems = crossFieldProblems_ACU(next);
+  const grouped = new Map<WorldSimulationLedgerModule_ACU, string[]>();
+  for (const problem of problems) {
+    const messages = grouped.get(problem.module) ?? [];
+    messages.push(problem.message);
+    grouped.set(problem.module, messages);
+  }
+  for (const [module, messages] of grouped) {
+    const writer = moduleWriters.get(module);
+    const owner = writer ?? {
+      candidateId: candidates.find(item => Object.prototype.hasOwnProperty.call(item.patch, module))?.candidateId || candidates[0]?.candidateId || 'commit',
+      agentName: candidates.find(item => Object.prototype.hasOwnProperty.call(item.patch, module))?.agentName || candidates[0]?.agentName || 'world-director',
+    };
+    restoreLedgerModule_ACU(next, validatedBase, module);
+    appliedModules.delete(module);
+    moduleWriters.delete(module);
+    if (module === 'chronicle') {
+      const refs = new Set(next.chronicleOverview.map(row => row.archiveRef));
+      for (let index = chronicleArchiveWrites.length - 1; index >= 0; index -= 1) {
+        if (!refs.has(chronicleArchiveWrites[index].archiveRef)) chronicleArchiveWrites.splice(index, 1);
+      }
+    }
+    recordPendingFix_ACU(
+      pendingFixes,
+      module,
+      owner.candidateId,
+      owner.agentName,
+      messages.map(message => ({ path: `$.${module}`, message })),
+      next.clock.day,
+    );
+  }
+  const remaining = crossFieldProblems_ACU(next);
+  if (remaining.length) fail_ACU(remaining.map(item => item.message).join('；'));
+  next.pendingFixes = pendingFixes;
   next.revision = validatedBase.revision + 1;
-  return { ledger: validateWorldSimulationLedger_ACU(next, 'agent_persist'), chronicleArchiveWrites };
+  const ledger = validateWorldSimulationLedger_ACU(next, 'agent_persist');
+  return { ledger, chronicleArchiveWrites, pendingFixes: ledger.pendingFixes, appliedModules: [...appliedModules] };
 }
 
 export function applyWorldSimulationCandidates_ACU(
@@ -453,8 +630,9 @@ export function applyWorldSimulationCandidates_ACU(
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorizedEvidenceRefs: ReadonlySet<string>,
   settings?: WorldSimulationSettings_ACU,
+  context?: WorldSimulationApplyContext_ACU,
 ): WorldSimulationLedger_ACU {
-  return applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings).ledger;
+  return applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings, context).ledger;
 }
 
 export interface WorldSimulationCandidateViolation_ACU {
@@ -541,7 +719,7 @@ export function preflightWorldSimulationCandidates_ACU(
           case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collectUpsert); break;
           case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collectUpsert); break;
           case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
-          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
+          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch, next); break;
           case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert); break;
           case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
           case 'chronicleArchive': next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day).overview; break;

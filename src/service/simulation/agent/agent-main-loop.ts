@@ -1,6 +1,6 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldCollisionReport_ACU, type WorldSimulationLedger_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
-import { applyWorldSimulationCandidates_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
+import { applyWorldSimulationCandidatesDetailed_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
@@ -20,6 +20,7 @@ import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, l
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
+import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
 
 export interface WorldSimulationMainLoopDependencies_ACU {
@@ -38,6 +39,8 @@ export interface WorldSimulationMainLoopInput_ACU {
   anchor?: WorldSimulationAnchorIdentity_ACU;
   chat?: any[];
   resetRunBudget?: boolean;
+  /** 当前锚点正文已经有结算快照时为 true；pendingFixes 非空时工作流仍会进入自动修复。 */
+  anchorMaterialsCommitted?: boolean;
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -232,6 +235,7 @@ export class WorldSimulationMainLoop_ACU {
     // failures remain capped by the repair state's per-fingerprint guard.
     const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
     let pendingReview: { fingerprint: string; promise: Promise<WorldSimulationReviewerResult_ACU> } | null = null;
+    let workflowEscalation: { summary: string; pendingFixes: WorldSimulationLedger_ACU['pendingFixes'] } | null = null;
     const candidateReviewFingerprint_ACU = (items: readonly WorldSimulationCandidate_ACU[]): string =>
       sha256HexSync_ACU(JSON.stringify(uniqueCandidates_ACU(items).map(item => item.candidateId)));
     const startPendingReview_ACU = (): void => {
@@ -349,6 +353,12 @@ export class WorldSimulationMainLoop_ACU {
       }
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const requestContext = resultContext_ACU(input.promptContext, input.registry, uniqueCandidates_ACU(candidates), outcomes);
+      if (workflowEscalation) {
+        const runtimeContext = requestContext.runtimeContext && typeof requestContext.runtimeContext === 'object'
+          ? requestContext.runtimeContext as Record<string, unknown>
+          : {};
+        requestContext.runtimeContext = { ...runtimeContext, pendingFixes: workflowEscalation.pendingFixes, escalation: workflowEscalation.summary };
+      }
       const mainEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
         kind: 'main_action',
         title: `主 Agent 第 ${iteration} 轮正在工作`,
@@ -455,6 +465,68 @@ export class WorldSimulationMainLoop_ACU {
         continue;
       }
 
+      if (action.kind === 'open_round') {
+        const workflowEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+          kind: 'delegation',
+          title: '固定工作流正在执行',
+          detail: action.focus,
+          agentName: director,
+          status: 'running',
+        });
+        let workflow: Awaited<ReturnType<typeof runWorldSimulationWorkflow_ACU>>;
+        try {
+          workflow = await runWorldSimulationWorkflow_ACU({
+            identity: input.identity,
+            settings: input.settings,
+            promptContext: requestContext,
+            registry: input.registry,
+            tools: input.tools,
+            opening: {
+              summary: action.summary,
+              focus: action.focus,
+              dispatchChronicler: action.dispatchChronicler,
+              skipModules: action.skipModules,
+            },
+            anchorMaterialsCommitted: input.anchorMaterialsCommitted === true,
+            subagents: this.dependencies.subagents,
+          });
+        } catch (error) {
+          updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, { title: '固定工作流失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+          await persistEntry(workflowEntryId, `workflow-${iteration}-failed`);
+          throw error;
+        }
+        for (const outcome of workflow.outcomes) upsertLatestOutcome_ACU(outcomes, outcome);
+        updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, {
+          title: `固定工作流：${workflow.outcome}`,
+          detail: workflow.summary,
+          ok: workflow.outcome !== 'escalate',
+          status: workflow.outcome === 'escalate' ? 'failed' : 'done',
+        });
+        await persistEntry(workflowEntryId, `workflow-${iteration}`);
+        transcript.push(
+          { role: 'assistant', content: raw || '(empty)' },
+          { role: 'user', content: JSON.stringify({ outcome: workflow.outcome, summary: workflow.summary, pendingFixes: workflow.pendingFixes, agents: workflow.outcomes.map(item => ({ agentName: item.agentName, status: item.status })) }) },
+        );
+        if (workflow.outcome === 'escalate') {
+          workflowEscalation = { summary: workflow.summary, pendingFixes: workflow.pendingFixes };
+          persist(iteration + 1, workflow.summary);
+          transcript.push({ role: 'user', content: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。` });
+          continue;
+        }
+        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+          kind: 'run_completed',
+          title: workflow.outcome === 'no_change' ? '世界推演无变化' : `固定工作流提交（${workflow.commitCandidate?.acceptedCandidates.length ?? 0}）`,
+          detail: workflow.summary,
+          agentName: director,
+        });
+        await persistEntry(completedId, workflow.outcome === 'no_change' ? 'run-completed-no-change' : 'run-completed-commit');
+        if (workflow.outcome === 'no_change' || !workflow.commitCandidate) {
+          return { outcome: 'no_change', summary: workflow.summary, outcomes };
+        }
+        return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes };
+      }
+
       if (action.kind === 'delegate') {
         const accepted = [] as typeof action.delegations;
         const rejected = [] as Array<{ agentName: string; reason: string }>;
@@ -517,16 +589,12 @@ export class WorldSimulationMainLoop_ACU {
           }
         }));
         for (let index = 0; index < settled.length; index += 1) {
-          let outcome = settled[index];
+          const outcome = settled[index];
           if (outcome.candidate) {
+            upsertCandidateRevision_ACU(candidates, outcome.candidate);
             const authorized = new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
             const report = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState as WorldSimulationLedger_ACU, [outcome.candidate], authorized, input.settings);
-            if (report.blocking.length) {
-              const detail = report.blocking.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
-              outcome = { agentName: outcome.agentName, status: 'failed', summary: `\u5019\u9009\u9884\u68c0\u5931\u8d25\uff1a${detail}`, evidenceRefs: outcome.evidenceRefs, uncertainties: [], reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' };
-              settled[index] = outcome;
-            } else {
-              upsertCandidateRevision_ACU(candidates, outcome.candidate);
+            if (!report.blocking.length) {
               delegationsUsed += 1;
               perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
             }
@@ -543,10 +611,6 @@ export class WorldSimulationMainLoop_ACU {
         const transcriptPayload: Array<{ role: string; content: string }> = [{ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) }];
         if (rejected.length) {
           transcriptPayload.push({ role: 'user', content: rejectionText });
-        }
-        const preflightFailures = settled.filter(item => item.reasonCode === 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED');
-        if (preflightFailures.length) {
-          transcriptPayload.push({ role: 'user', content: `\u5019\u9009\u5165\u5e93\u9884\u68c0\u62d2\u7edd\uff1a\n${preflightFailures.map(item => `${item.agentName} ${item.summary}`).join('\n')}\n\u8bf7\u6309\u5168\u90e8\u8fdd\u89c4\u4e00\u6b21\u6027\u4fee\u6b63\u540e\u91cd\u65b0\u6d3e\u5de5\u3002\u5b8c\u6574\u5fc5\u586b\u5b57\u6bb5\u6a21\u677f\uff1a${formatWorldSimulationLedgerRequiredFields_ACU()}\u3002\u4e0d\u5f97\u628a\u672c\u6b21\u9884\u68c0\u5931\u8d25\u5f53\u4f5c\u4efb\u52a1\u7ec8\u5c40\u3002` });
         }
         transcript.push(...transcriptPayload);
         if (iteration < input.settings.agentRunBudget.maxIterations) {
@@ -617,23 +681,30 @@ export class WorldSimulationMainLoop_ACU {
         continue;
       }
       const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
-      const guidanceCandidate = reviewer.guidance ? {
-        candidateId: `candidate:guidance:${sha256HexSync_ACU(JSON.stringify([reviewer.guidance, action.summary])).slice(0, 24)}`,
-        agentName: 'causality-reviewer',
-        patch: { guidance: { signals: reviewer.guidance.signals.map(item => typeof item === 'string' ? { text: item, voice: 'ambient' as const } : item), excludedFacts: reviewer.guidance.excludedFacts, evidenceRefs: causalEvidenceRefs } },
-        summary: '审核员压缩的可感知 guidance',
-        evidenceRefs: causalEvidenceRefs,
-        uncertainties: [] as string[],
-        writableModules: ['guidance'],
-      } : null;
-      const finalCandidates = guidanceCandidate ? [...acceptedCandidates, guidanceCandidate] : acceptedCandidates;
-      try {
-        applyWorldSimulationCandidates_ACU(
-          input.promptContext.worldState as WorldSimulationLedger_ACU,
-          finalCandidates,
-          new Set(causalEvidenceRefs),
-          input.settings,
+      const anchorMessage = typeof input.promptContext.anchorMessage === 'string' ? input.promptContext.anchorMessage : '';
+      const baseLedger = input.promptContext.worldState as WorldSimulationLedger_ACU;
+      let finalCandidates = acceptedCandidates;
+      const preview = applyWorldSimulationCandidatesDetailed_ACU(baseLedger, acceptedCandidates, new Set(causalEvidenceRefs), input.settings, { anchorMessage });
+      if (!preview.appliedModules.length) {
+        const message = preview.pendingFixes.map(item => item.lastError).join('；') || '没有模块入库';
+        persist(iteration + 1, message);
+        const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: '候选事务应用失败，等待修订', detail: message, agentName: director, ok: false, status: 'failed' });
+        await persistEntry(failedId, `candidate-transaction-failed-${iteration}`);
+        transcript.push(
+          { role: 'assistant', content: raw || '(empty)' },
+          { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须一次性补齐该模块全部持久化必填字段。完整必填字段模板：${formatWorldSimulationLedgerRequiredFields_ACU()}。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` },
         );
+        continue;
+      }
+      finalCandidates = acceptedCandidates;
+      try {
+        const commitEvidenceRefs = [...new Set([...causalEvidenceRefs, ...finalCandidates.flatMap(item => item.evidenceRefs)])];
+        applyWorldSimulationCandidatesDetailed_ACU(baseLedger, finalCandidates, new Set(commitEvidenceRefs), input.settings, { anchorMessage });
+        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: commitEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions as WorldCollisionReport_ACU };
+        const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}）`, detail: action.summary, agentName: director });
+        await persistEntry(completedId, 'run-completed-commit');
+        return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
       } catch (error) {
         const message = compact_ACU(error);
         persist(iteration + 1, message);
@@ -645,11 +716,6 @@ export class WorldSimulationMainLoop_ACU {
         );
         continue;
       }
-      await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-      const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: causalEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions as WorldCollisionReport_ACU };
-      const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}${guidanceCandidate ? '+guidance' : ''}）`, detail: action.summary, agentName: director });
-      await persistEntry(completedId, 'run-completed-commit');
-      return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
     }
 
     return blockOnBudget_ACU(

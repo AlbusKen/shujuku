@@ -89303,9 +89303,11 @@ $CONTENT
     }
 
     const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1;
-    const WORLD_LEDGER_SCHEMA_VERSION_ACU = 3;
+    const WORLD_LEDGER_SCHEMA_VERSION_ACU = 4;
     const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512;
     const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32;
+    const WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU = 3;
+    const WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU = 80;
     class WorldSimulationValidationError_ACU extends Error {
         constructor(error) { super(error.message); this.name = 'WorldSimulationValidationError_ACU'; this.error = error; }
     }
@@ -89636,6 +89638,7 @@ $CONTENT
         'dramatis-keeper',
         'chronicler',
         'causality-reviewer',
+        'guidance-composer',
         'lore-researcher',
         WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU,
     ];
@@ -89648,13 +89651,14 @@ $CONTENT
         'guidance-reviewer',
     ];
     const WORLD_SIMULATION_AGENT_CATALOG_ACU = [
-        { name: 'world-director', kind: 'director', description: '每轮剧情后推算幕后世界动态：取证、派工、部分采用候选并直接收敛提交', triggers: ['每轮推演'], promptKey: 'world-director', apiRole: 'world-director', writableModules: [] },
-        { name: 'world-stage-planner', kind: 'planner', description: '为单轮幕后推演锁定焦点：本轮要推算的暗流、维度与行动者动向', triggers: ['每轮推演开始'], promptKey: 'world-stage-planner', apiRole: 'world-stage-planner', writableModules: [] },
+        { name: 'world-director', kind: 'director', description: '每轮开局决定焦点与流程参数，并作为用户沟通接口；固定工作流自治执行后中途不再回主会话派工', triggers: ['每轮推演'], promptKey: 'world-director', apiRole: 'world-director', writableModules: [] },
+        { name: 'world-stage-planner', kind: 'planner', description: '兼容展示名：单轮焦点与流程参数已由主会话开局决策吸收，不再独立派工', triggers: ['兼容展示'], promptKey: 'world-stage-planner', apiRole: 'world-stage-planner', writableModules: [] },
         { name: 'timekeeper', kind: 'specialist', description: '推演世界时钟的幕后推进，产出 clockAdvance 候选', triggers: ['正文出现时间跨度或需要校对时钟'], promptKey: 'timekeeper', apiRole: 'timekeeper', writableModules: ['clock'] },
         { name: 'undercurrent-analyst', kind: 'specialist', description: '推演维度压力与暗流种子生命周期的幕后演变', triggers: ['维度或暗流需要更新'], promptKey: 'undercurrent-analyst', apiRole: 'undercurrent-analyst', writableModules: ['dimensions', 'seeds'] },
         { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界、玩家位置接触与传闻的幕后演变', triggers: ['人物移动、生死或玩家位置变化'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player', 'rumors'] },
         { name: 'chronicler', kind: 'specialist', description: '仅在事件完结或热层编年过长时记录幕后编年并提交归档，不是每轮常规角色', triggers: ['事件完结或热层编年过长需要归档'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle'] },
-        { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，并把已接受事实压缩为台面安全 guidance', triggers: ['每轮候选形成后'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: ['guidance'] },
+        { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，不写入 guidance', triggers: ['用户路径候选终审'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: [] },
+        { name: 'guidance-composer', kind: 'specialist', description: '通读全量账本、锚点正文与玩家信息边界，决定哪些事实以何语态进入台面投影', triggers: ['投影相关字段变化后'], promptKey: 'guidance-composer', apiRole: 'guidance-composer', writableModules: ['guidance'] },
         { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
         { name: WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, kind: 'researcher', description: '整理 Agent 会话里用户提过的要求：去重合并后全量替换用户要求清单。由会话压缩后的系统派工触发，不写世界账本', triggers: ['主会话历史压缩后，被浓缩范围内仍有实质用户输入'], promptKey: WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, apiRole: WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, writableModules: [] },
     ];
@@ -89667,7 +89671,8 @@ $CONTENT
     }
 
     const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v9';
+    const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v10';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -89685,20 +89690,21 @@ $CONTENT
     }
     function worldSimulationDirectorProtocolInstruction_ACU() {
         return [
-            '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。',
-            '你是编排者而不是 ledger 写入者：writableModules=[] 是职责隔离，不是权限故障或阻断条件。需要初始化或修改账本时，必须 delegate 给有对应 writableModules 的 specialist，再审核候选；revision=0 也遵循此流程。',
-            '历史会话中的 MISSING_FIELD、REQUIRED_TEXT_LIST、INVALID_SPECIALIST_STATUS 等协议失败只用于诊断，不代表当前轮仍失败。只能依据当前 runtimeContext.outcomes、当前候选与当前证据决定是否阻断。',
-            '只有当前证据缺失且任何授权 specialist 都无法继续时才能 block；不得仅因 world-director 自身无直接写权限而 block。',
+            '仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block。',
+            '你是开局决策者而不是 ledger 写入者：writableModules=[] 是职责隔离，不是权限故障或阻断条件。常规推演在取证后输出 open_round，由固定工作流自治写入账本；revision=0 也遵循此流程。',
+            '历史会话中的 MISSING_FIELD、REQUIRED_TEXT_LIST、INVALID_SPECIALIST_STATUS 等协议失败只用于诊断，不代表当前轮仍失败。只能依据当前 runtimeContext、当前证据与 pendingFixes 决定是否阻断。',
+            '只有当前证据缺失且固定工作流也无法继续时才能 block；不得仅因 world-director 自身无直接写权限而 block。',
             'read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query、scope、maxResults、isRegex。',
             `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`,
             'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
-            'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
-            '相互独立的推演事项必须在同一次 delegate 的 delegations 数组中同批派出（上限受 maxConcurrent 约束），不要逐轮单派。clock 派 timekeeper，维度与暗流派 undercurrent-analyst，人物/玩家/传闻派 dramatis-keeper。chronicler 仅在事件完结或热层编年过长时按需派出，不要例行派编年或归档。',
-            '优先按阶段计划 plannedSpecialists 派工；计划外角色可用但必须在 instruction 里写明理由。某模块候选频繁失败时，可先放弃该模块更新、finalize 其余已通过模块，下轮再补。',
-            '派工预算耗尽即终止并输出 block 卡片，不会静默拦截或空转重试。被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
-            'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
+            'open_round 必须包含 action、summary、focus、dispatchChronicler；skipModules 可选，且只能使用账本模块名。常规自动推演必须用 open_round，工作流执行期间中途不再回主会话派工。',
+            'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；仅当用户明确要求维护某份资料时才 delegate 给对应 specialist。block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
+            'dispatchChronicler 仅在事件完结或热层编年过长时为 true。pendingFixes 非空时必须在 focus 中写明优先修复的模块。',
+            '派工预算耗尽即终止并输出 block 卡片。用户维护路径被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block。',
+            'evidenceRefs 只允许出现在 finalize 顶层；read、search、open_round、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
             '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
-            '同批派工示例：{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":["ledger:current","anchor:message"]},{"agentName":"undercurrent-analyst","instruction":"更新维度压力与暗流","reads":["ledger:current"]},{"agentName":"dramatis-keeper","instruction":"同步人物位置与传闻","reads":["player:current","rumors:current"]}]}',
+            '开局决策示例：{"action":"open_round","summary":"锁定本轮幕后焦点并启动固定工作流","focus":"时间推进与暗流压力","dispatchChronicler":false}',
+            '用户维护示例：{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":["player:current","rumors:current"]}]}',
             'finalize 顶层只能包含 action、outcome、summary、evidenceRefs；outcome 必须精确为 commit、no_change、blocked 之一。candidateId、acceptedCandidateIds、status、verdict 属于派工或审核结果，禁止抄入 finalize。',
             '提交示例：{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}',
             '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
@@ -89717,7 +89723,7 @@ $CONTENT
             lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
             lines.push('expectedRevision 可省略：新建默认 0，更新默认当前 revision。');
             lines.push('chronicle 的 id/at、chronicleArchive 的 archiveRef/fingerprint、以及 candidateId 均可省略，由系统编号；不要为这些机器字段编造格式。');
-            lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId?}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
+            lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
             if (writableModules.includes('chronicle')) {
                 lines.push('chronicle 必须使用 {"append":[...]}；append 条目可省略 id/at，必须含非空 summary。');
                 lines.push('当热层 chronicle 过长或某段事件已完结时，可提交 chronicleArchive：{"archiveEntries":[{day,summary,relatedIds,sourceChronicleIds,archiveRef?,fingerprints?}],"overviewRows":[{day,oneLine,archiveRef?,fingerprint?}],"collapseRefs"?}。oneLine 句式示例：「第3日 · 北岭矿洞塌方，三人受伤」。目录追加后超过 512 行必须自带 collapseRefs 合并旧行，否则该候选会被拒绝。');
@@ -89731,7 +89737,7 @@ $CONTENT
             if (writableModules.includes('rumors'))
                 lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
             if (writableModules.includes('guidance'))
-                lines.push('guidance 必须是非空对象。');
+                lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文原句或账本事实原句。');
         }
         else {
             lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
@@ -89744,14 +89750,11 @@ $CONTENT
     function worldSimulationReviewerProtocolInstruction_ACU() {
         return [
             '只输出一个审核 JSON 对象，不附加 Markdown、解释、思考标签或其他字段。',
-            '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时必须包含 guidance。',
+            '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。',
             'verdict 必须精确为 accept、revise、reject 之一；禁止使用 approve、approved、pass、success、done 等别名。',
             'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual，severity 必须精确为 blocking、major、minor 之一。',
             'accept 必须至少接受一个候选；reject 的 acceptedCandidateIds 必须为空；revise 可保留已通过候选并用 findings 说明待修正项。',
-            'verdict 为 accept 时必须输出 guidance 字段：{"signals":[{"text":"角色可感知信号","voice":"encounter|rumor|ambient","sourceId":"可选"}],"excludedFacts":["台面不得暴露的幕后事实"]}。无台面可感变化时仍输出 guidance，signals 为空数组，并在 summary 说明本轮没有玩家可感世界动态。',
-            'voice 三语态：encounter 当场撞上、rumor 二手传闻、ambient 环境暗流。接受 rumor 信号必须带 sourceId。',
-            '信息边界终审：rumor 信号除 sourceId 外还须语义复核玩家实际可及（region 命中且 contact=\'open\'）；程序层 commit 前硬过滤兜底。latent/dead 传闻与 missed 细节必须留在 excludedFacts。',
-            'guidance 只是把已接受候选中的幕后事实压缩为角色可感知信号，绝不新增候选中没有的事实。guidance 是幕后→台面的唯一通道，accept 时不得省略该字段。',
+            '你只审核时间、空间、因果、revision、权限与证据；投影由 guidance-composer 专责，不得在本协议中书写 signals。',
             `accept 示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer)}`,
             'revise 示例：{"verdict":"revise","summary":"候选仍需修正","findings":[{"severity":"major","reasonCode":"CAUSE_GAP","path":"$.clock","expected":"时间与因果连续","actual":"缺少因果说明"}],"acceptedCandidateIds":[]}',
             'reject 示例：{"verdict":"reject","summary":"候选不满足证据约束","findings":[{"severity":"blocking","reasonCode":"EVIDENCE_GAP","path":"$","expected":"可验证证据","actual":"缺失"}],"acceptedCandidateIds":[]}',
@@ -89785,13 +89788,13 @@ $CONTENT
         const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
         const seam = (key, body) => ({ role: seamRoles_ACU[key], content: `${worldSimulationSeamMarker_ACU(key)}\n${body}`, enabled: true, deletable: false, pinned: true });
         const roleRules = definition.kind === 'director'
-            ? `${definition.description}。你没有直接 ledger patch 权限，但拥有取证、派工、审核与收敛权限；这不是故障。账本为空或 revision=0 时仍应派有写入权限的 specialist 形成候选。不得扩大权限或杜撰证据。`
+            ? `${definition.description}。你没有直接 ledger patch 权限；这不是故障。常规推演取证后输出 open_round，固定工作流负责写入。用户要求维护资料时才 delegate。账本为空或 revision=0 同样先 open_round。不得扩大权限或杜撰证据。`
             : `${definition.description}。写入范围：${definition.writableModules.join(', ') || '无直接写入权限'}。不得扩大权限或杜撰证据。`;
         let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。';
         if (definition.kind === 'planner')
-            workflow += '本轮计划必须优先覆盖 $WORLD_COLLISIONS 中的事项；若有 seed 距过期 ≤ 2 天，计划中列入临界暗流。plannedSpecialists 按模块选择 timekeeper、undercurrent-analyst、dramatis-keeper；chronicler 仅在事件完结或热层过长时列入，不要再计划 world-analyst。';
+            workflow += '兼容展示：单轮焦点已由主会话 open_round 吸收。若仍被调用，计划必须优先覆盖 $WORLD_COLLISIONS；若有 seed 距过期 ≤ 2 天，列入临界暗流。不要再计划 world-analyst。';
         if (definition.kind === 'director')
-            workflow += '阶段计划已由系统填入 $WORLD_STAGE_PLAN，你在首轮一并锁定焦点并直接取证或同批派工，不要等待独立 planner。碰撞报告非空必须同批派相应 specialist 处理当场演化：时间派 timekeeper，暗流/维度派 undercurrent-analyst，人物与传闻派 dramatis-keeper。chronicler 仅在事件完结或热层编年过长时按需派出。优先按阶段计划 plannedSpecialists 派工；计划外角色可用但需有理由。某模块候选频繁失败时，可先放弃该模块更新、finalize 其余已通过模块。连续超过 4 轮没有新候选且既有派工结果全是 no_change 时，尽早 finalize 或 block，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入，不得期待 rumor 信号。clockAdvance.days 由正文时间跨度决定。actor 死亡必须伴生 rumor，否则 finalize 会被事务拒绝。';
+            workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。';
         if (name === 'timekeeper')
             workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
         if (name === 'undercurrent-analyst')
@@ -89801,7 +89804,9 @@ $CONTENT
         if (name === 'chronicler')
             workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
         if (definition.kind === 'reviewer')
-            workflow += 'guidance 是幕后→台面的唯一通道，缺席即本轮推演没有产生玩家可感世界动态；accept 必须带 guidance，无变化时输出空 signals 并在 summary 说明。审核清单：clockAdvance.days 与正文跨度是否匹配；碰撞当场反应是否与玩家位置一致；信息边界终审——rumor 信号须带 sourceId 且玩家 region 命中且 contact=\'open\'，程序层 commit 前硬过滤兜底。';
+            workflow += '你只审核时间、空间、因果、revision、权限与证据。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
+        if (name === 'guidance-composer')
+            workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。voice 使用 encounter、rumor、ambient。没有新的玩家可感变化时输出 no_change。';
         if (name === WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU) {
             workflow = '整理用户在 Agent 会话里对任务提过的要求。输入是被压缩范围内的实质用户发言加上当前用户要求清单。输出全量替换清单。不写账本、不派工、不产出 candidate。没有撤回依据时不得把已有清单清空。';
         }
@@ -89824,16 +89829,13 @@ $CONTENT
         return Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildDefaultWorldSimulationAgentPrompt_ACU(name)]));
     }
     const WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU = {
-        main: { action: 'delegate', delegations: [
-                { agentName: 'timekeeper', instruction: '推演本轮幕后时间推进', reads: ['ledger:current', 'anchor:message'] },
-                { agentName: 'undercurrent-analyst', instruction: '推演维度压力与暗流', reads: ['ledger:current'] },
-            ] },
+        main: { action: 'open_round', summary: '锁定本轮幕后焦点并启动固定工作流', focus: '时间推进与暗流压力', dispatchChronicler: false },
         planner: {
             action: 'plan', summary: '锁定本轮幕后推演焦点',
             plan: { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: '推演本轮幕后动态', objective: '根据最新剧情推算世界时钟、维度压力、暗流与行动者的幕后演变', impactScope: ['当前世界状态'], factsToVerify: ['时间是否推进'], plannedTools: ['read'], plannedSpecialists: ['timekeeper', 'undercurrent-analyst'], expectedLedgerChanges: ['clock'], convergenceConditions: ['证据与候选闭合'], blockingConditions: ['缺少锚点'], completedSteps: [], nextStep: '读取当前账本' },
         },
         specialist: { status: 'candidate', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '次日' } }, summary: '幕后时间推进候选', evidenceRefs: ['evidence:clock:1'], uncertainties: [] },
-        reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'], guidance: { signals: [{ text: '城中开始流传税银劫案的只言片语', voice: 'rumor', sourceId: 'rumor-tax' }], excludedFacts: ['三十万两税银由深水重船转移'] } },
+        reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'] },
     };
     function worldSimulationPlannerProtocolInstruction_ACU() {
         return [
@@ -89895,6 +89897,17 @@ $CONTENT
         'causality-reviewer': '3793:cb5b73d3',
         'lore-researcher': '2268:18029e6a',
     };
+    const WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU = {
+        'world-director': '4777:cd4e92ac',
+        'world-stage-planner': '2861:b5c724e3',
+        timekeeper: '3263:2a622abd',
+        'undercurrent-analyst': '3253:593a8dac',
+        'dramatis-keeper': '3587:e1022121',
+        chronicler: '3664:bb54d5ac',
+        'causality-reviewer': '3803:5ee73728',
+        'lore-researcher': '2278:bc497f63',
+        'requirements-maintainer': '2092:987773c2',
+    };
     const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
             ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] }] : []),
@@ -89902,6 +89915,7 @@ $CONTENT
             ...(WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v6', fingerprint: WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v7', fingerprint: WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V8_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] }] : []),
+            ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults) {
@@ -89937,6 +89951,7 @@ $CONTENT
             agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(),
             promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
             dynamics: { rumorTTLDays: 30, maxClockAdvanceDays: 14, collisionEnforcement: 'strict', missedSweepEnabled: true },
+            workflow: { autoFixEnabled: true, chroniclerHotThreshold: WORLD_CHRONICLE_HOT_WINDOW_ACU },
         };
     }
     function buildEmptyWorldSimulationLedger_ACU() {
@@ -89952,6 +89967,7 @@ $CONTENT
             rumors: [],
             player: { location: null, locationUpdatedAtDay: 1, regionVisits: [], contact: 'open', evidenceRefs: [] },
             chronicleOverview: [],
+            pendingFixes: [],
         };
     }
     function buildDefaultWorldSimulationEnvelope_ACU() {
@@ -90085,7 +90101,7 @@ $CONTENT
     const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'];
     const REVISION_REASONS_ACU = ['initial', 'automatic_replan', 'manual_replan', 'resume_repair'];
     const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed', 'swept', 'progressed'];
-    const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview'];
+    const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview', 'pendingFixes'];
     // 计划确认流程退役后的旧数据归一化：读取历史存量聊天时不再 fail-closed。
     const LEGACY_TASK_STATUSES_ACU = { awaiting_plan_review: 'paused' };
     const LEGACY_STAGE_STATUSES_ACU = { awaiting_review: 'planning' };
@@ -90219,8 +90235,15 @@ $CONTENT
     function migrateV2Ledger_ACU(raw) {
         return {
             ...raw,
-            schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+            schemaVersion: 3,
             chronicleOverview: Array.isArray(raw.chronicleOverview) ? raw.chronicleOverview : [],
+        };
+    }
+    function migrateV3Ledger_ACU(raw) {
+        return {
+            ...raw,
+            schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+            pendingFixes: Array.isArray(raw.pendingFixes) ? raw.pendingFixes : [],
         };
     }
     function migrateLedgerToCurrent_ACU(raw) {
@@ -90229,6 +90252,8 @@ $CONTENT
             current = migrateV1Ledger_ACU(current);
         if (current.schemaVersion === 2)
             current = migrateV2Ledger_ACU(current);
+        if (current.schemaVersion === 3)
+            current = migrateV3Ledger_ACU(current);
         return current;
     }
     function validateChronicleOverview_ACU(raw, phase) {
@@ -90252,6 +90277,39 @@ $CONTENT
             seenRefs.add(row.archiveRef);
         }
         return rows;
+    }
+    function validatePendingFixes_ACU(raw, phase) {
+        if (!Array.isArray(raw))
+            fail_ACU$5('ledger.pendingFixes 必须是数组', phase, { path: 'ledger.pendingFixes' });
+        if (raw.length > 128)
+            fail_ACU$5('ledger.pendingFixes 容量非法', phase);
+        return raw.map((item, index) => {
+            const path = `ledger.pendingFixes[${index}]`;
+            if (!isRecord_ACU$f(item))
+                fail_ACU$5(`${path} 必须是对象`, phase);
+            exactKeys_ACU$2(item, ['module', 'candidateId', 'agentName', 'violations', 'attempts', 'firstFailedAtDay', 'lastError'], [], path, phase);
+            if (!Array.isArray(item.violations))
+                fail_ACU$5(`${path}.violations 必须是数组`, phase);
+            const violations = item.violations.map((violation, violationIndex) => {
+                const violationPath = `${path}.violations[${violationIndex}]`;
+                if (!isRecord_ACU$f(violation))
+                    fail_ACU$5(`${violationPath} 必须是对象`, phase);
+                exactKeys_ACU$2(violation, ['path', 'message'], [], violationPath, phase);
+                return {
+                    path: string_ACU(violation.path, `${violationPath}.path`, phase),
+                    message: string_ACU(violation.message, `${violationPath}.message`, phase),
+                };
+            });
+            return {
+                module: enum_ACU$1(item.module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.module`, phase),
+                candidateId: string_ACU(item.candidateId, `${path}.candidateId`, phase, true),
+                agentName: string_ACU(item.agentName, `${path}.agentName`, phase),
+                violations,
+                attempts: integer_ACU(item.attempts, `${path}.attempts`, phase, 0, 100),
+                firstFailedAtDay: integer_ACU(item.firstFailedAtDay, `${path}.firstFailedAtDay`, phase, 1),
+                lastError: string_ACU(item.lastError, `${path}.lastError`, phase, true),
+            };
+        });
     }
     function validatePlayer_ACU(raw, phase) {
         if (!isRecord_ACU$f(raw))
@@ -90321,7 +90379,7 @@ $CONTENT
     function validateSettings_ACU(raw, phase) {
         if (!isRecord_ACU$f(raw))
             fail_ACU$5('settings 必须是对象', phase, { path: 'settings' });
-        exactKeys_ACU$2(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics'], 'settings', phase);
+        exactKeys_ACU$2(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow'], 'settings', phase);
         if (!isRecord_ACU$f(raw.agentRunBudget))
             fail_ACU$5('settings.agentRunBudget 必须是对象', phase);
         exactKeys_ACU$2(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
@@ -90384,6 +90442,22 @@ $CONTENT
                 dynamics = { rumorTTLDays, maxClockAdvanceDays, collisionEnforcement, missedSweepEnabled };
             }
         }
+        const defaultWorkflow = buildDefaultWorldSimulationSettings_ACU().workflow;
+        let workflow = defaultWorkflow;
+        if (raw.workflow !== undefined) {
+            if (!isRecord_ACU$f(raw.workflow)) {
+                workflow = defaultWorkflow;
+            }
+            else {
+                const autoFixEnabled = typeof raw.workflow.autoFixEnabled === 'boolean' ? raw.workflow.autoFixEnabled : defaultWorkflow.autoFixEnabled;
+                const chroniclerHotThreshold = Number.isInteger(raw.workflow.chroniclerHotThreshold)
+                    && raw.workflow.chroniclerHotThreshold >= 1
+                    && raw.workflow.chroniclerHotThreshold <= WORLD_CHRONICLE_OVERVIEW_CAP_ACU
+                    ? raw.workflow.chroniclerHotThreshold
+                    : defaultWorkflow.chroniclerHotThreshold;
+                workflow = { autoFixEnabled, chroniclerHotThreshold };
+            }
+        }
         return {
             autoTriggerEnabled: boolean_ACU(raw.autoTriggerEnabled, 'settings.autoTriggerEnabled', phase),
             agentHistoryTokenBudget: integer_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', phase, 0, 1000000),
@@ -90397,6 +90471,7 @@ $CONTENT
             agentPrompts,
             ...(Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion') ? { promptForceDefaultVersion: string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) } : {}),
             dynamics,
+            workflow,
         };
     }
     function validateLedger_ACU(raw, phase) {
@@ -90486,7 +90561,8 @@ $CONTENT
             fail_ACU$5('ledger.guidance 必须是对象', phase);
         exactKeys_ACU$2(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
         const chronicleOverview = validateChronicleOverview_ACU(normalized.chronicleOverview, phase);
-        return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview };
+        const pendingFixes = validatePendingFixes_ACU(normalized.pendingFixes, phase);
+        return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview, pendingFixes };
     }
     function validatePlan_ACU(raw, path, phase) {
         if (!isRecord_ACU$f(raw))
@@ -90952,6 +91028,7 @@ $CONTENT
             stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
         });
         probe(() => { validateChronicleOverview_ACU(normalized.chronicleOverview, phase); });
+        probe(() => { validatePendingFixes_ACU(normalized.pendingFixes, phase); });
         return violations;
     }
     function buildEmptyWorldChronicleArchiveSnapshot_ACU() {
@@ -156407,9 +156484,878 @@ Expected function or array of functions, received type ${typeof value}.`
         return intersection / (left.size + right.size - intersection);
     }
 
+    const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
+    const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
+    const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
+    const END_ACU = '<!-- qrf-world-simulation-projection:v2:end -->';
+    const escape_ACU = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*(?:${escape_ACU(START_V1_ACU)}[\\s\\S]*?${escape_ACU(END_V1_ACU)}|${escape_ACU(START_ACU)}[\\s\\S]*?${escape_ACU(END_ACU)})(?:\\r?\\n)*`, 'g');
+    const SECTION_ORDER_ACU = ['encounter', 'rumor', 'ambient'];
+    const SECTION_LABELS_ACU = {
+        encounter: '【此地此刻】',
+        rumor: '【风闻轶事】',
+        ambient: '【世界暗流】',
+    };
+    function buildWorldSimulationProjection_ACU(ledger) {
+        const grouped = { encounter: [], rumor: [], ambient: [] };
+        for (const signal of ledger.guidance.signals) {
+            const text = signal.text.trim();
+            if (text)
+                grouped[signal.voice].push(text);
+        }
+        const sections = SECTION_ORDER_ACU.flatMap(voice => {
+            const items = grouped[voice];
+            return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
+        });
+        if (!sections.length)
+            return null;
+        return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
+    }
+    function applyWorldSimulationProjection_ACU(content, projection) {
+        const base = String(content ?? '').replace(OWNED_BLOCK_ACU, '').trimEnd();
+        return projection ? `${base}${base ? '\n\n' : ''}${projection}` : base;
+    }
+    function readWorldSimulationMessageContent_ACU(message) {
+        return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
+    }
+    function writeWorldSimulationActiveSwipeContent_ACU(message, content) {
+        if (typeof message.mes === 'string' || typeof message.message !== 'string')
+            message.mes = content;
+        else
+            message.message = content;
+        const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
+        if (Array.isArray(message.swipes)) {
+            if (swipeId >= message.swipes.length)
+                throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
+            message.swipes[swipeId] = content;
+        }
+    }
+    const WORLD_SIMULATION_PROJECTION_MARKERS_ACU = { start: START_ACU, end: END_ACU };
+
+    const SCAN_LIMIT_ACU = 6;
+    const TERMINALS_ACU = ['commit', 'no_change', 'blocked'];
+    const isRecord_ACU$5 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const text_ACU$2 = (value) => typeof value === 'string' ? value.trim() : '';
+    const texts_ACU = (value) => Array.isArray(value) ? value.map(text_ACU$2).filter(Boolean) : [];
+    function fail_ACU$2(reasonCode, path, expected, actual) {
+        const issue = { reasonCode, path, expected, actual };
+        throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', `${reasonCode}: ${path} 应为 ${expected}`, true, { ...issue }));
+    }
+    function stripNoise_ACU(raw) {
+        return raw
+            .replace(/<(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '')
+            .replace(/<\/?(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>/gi, '')
+            .replace(/<\/?WORLD_SIMULATION_ENGINE_SEAM:[^>]*>/gi, '')
+            .replace(/```[a-zA-Z]*\n?/g, '').trim();
+    }
+    function balanced_ACU(text, start) {
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let index = start; index < text.length; index += 1) {
+            const char = text[index];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if (char === '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString)
+                continue;
+            if (char === '{')
+                depth += 1;
+            else if (char === '}' && --depth === 0)
+                return { json: text.slice(start, index + 1), end: index + 1 };
+        }
+        return null;
+    }
+    function extractFirstWorldSimulationJsonObject_ACU(text) {
+        const start = String(text ?? '').indexOf('{');
+        return start < 0 ? null : balanced_ACU(text, start)?.json ?? null;
+    }
+    function extractWorldSimulationJsonObjects_ACU(text) {
+        const result = [];
+        let cursor = 0;
+        while (result.length < SCAN_LIMIT_ACU) {
+            const start = text.indexOf('{', cursor);
+            if (start < 0)
+                break;
+            const found = balanced_ACU(text, start);
+            if (!found) {
+                cursor = start + 1;
+                continue;
+            }
+            result.push(found.json);
+            cursor = found.end;
+        }
+        return result;
+    }
+    function parseLoose_ACU(text) {
+        try {
+            return JSON.parse(text);
+        }
+        catch { /* limited formatting repair */ }
+        const repaired = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1').replace(/([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)/g, '$1"$2"$3').replace(/,\s*([}\]])/g, '$1');
+        try {
+            return JSON.parse(repaired);
+        }
+        catch {
+            return undefined;
+        }
+    }
+    function objects_ACU(candidate) {
+        return extractWorldSimulationJsonObjects_ACU(candidate).map(parseLoose_ACU).filter(isRecord_ACU$5);
+    }
+    function parseWorldSimulationJsonPayload_ACU(raw, prefill = '', requiredKeys = []) {
+        const text = stripNoise_ACU(String(raw ?? ''));
+        if (!text)
+            fail_ACU$2('EMPTY_RESPONSE', '$', 'non-empty JSON output', raw);
+        const complete = text.startsWith('{');
+        const candidates = complete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        let first = null;
+        for (const candidate of candidates)
+            for (const parsed of objects_ACU(candidate)) {
+                if (!first)
+                    first = parsed;
+                if (!requiredKeys.length || requiredKeys.some(key => key in parsed))
+                    return parsed;
+            }
+        if (first)
+            return first;
+        fail_ACU$2('JSON_NOT_FOUND', '$', 'balanced JSON object', text.slice(0, 300));
+    }
+    function salvageDraft_ACU(text) {
+        const start = text.indexOf('{');
+        if (start < 0)
+            return null;
+        const stack = [];
+        let inString = false;
+        let escaped = false;
+        let safe = -1;
+        let safeStack = [];
+        for (let index = start; index < text.length; index += 1) {
+            const char = text[index];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if (char === '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString)
+                continue;
+            if (char === '{' || char === '[')
+                stack.push(char === '{' ? '}' : ']');
+            else if (char === '}' || char === ']') {
+                if (!stack.length || stack[stack.length - 1] !== char)
+                    return null;
+                stack.pop();
+                if (!stack.length)
+                    return null;
+                safe = index + 1;
+                safeStack = [...stack];
+            }
+        }
+        if (safe < 0 || !stack.length)
+            return null;
+        return `${text.slice(start, safe).replace(/,\s*$/, '')}${safeStack.reverse().join('')}`;
+    }
+    function parseWorldSimulationJsonDraft_ACU(raw, prefill = '', requiredKeys = []) {
+        const text = stripNoise_ACU(String(raw ?? ''));
+        if (!text)
+            fail_ACU$2('EMPTY_RESPONSE', '$', 'non-empty JSON output', raw);
+        const candidates = text.startsWith('{') || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        let first = null;
+        for (const candidate of candidates) {
+            const start = candidate.indexOf('{');
+            if (start < 0)
+                continue;
+            if (balanced_ACU(candidate, start)) {
+                for (const parsed of objects_ACU(candidate)) {
+                    if (!first)
+                        first = parsed;
+                    if (!requiredKeys.length || requiredKeys.some(key => key in parsed))
+                        return { payload: parsed, truncated: false };
+                }
+                continue;
+            }
+            const salvaged = salvageDraft_ACU(candidate);
+            const parsed = salvaged ? parseLoose_ACU(salvaged) : undefined;
+            if (isRecord_ACU$5(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed)))
+                return { payload: parsed, truncated: true };
+        }
+        if (first)
+            return { payload: first, truncated: false };
+        fail_ACU$2('JSON_NOT_FOUND', '$', 'balanced or salvageable JSON object', text.slice(0, 300));
+    }
+    function requiredText_ACU(value, path) {
+        const result = text_ACU$2(value);
+        if (!result)
+            fail_ACU$2('REQUIRED_TEXT', path, 'non-empty string', value);
+        return result;
+    }
+    function optionalList_ACU(value, path) {
+        if (value === undefined)
+            return [];
+        const result = texts_ACU(value);
+        if (!Array.isArray(value) || result.length !== value.length)
+            fail_ACU$2('TEXT_LIST', path, 'string array', value);
+        return result;
+    }
+    function requiredList_ACU(value, path) {
+        const result = texts_ACU(value);
+        if (!Array.isArray(value) || !result.length || result.length !== value.length)
+            fail_ACU$2('REQUIRED_TEXT_LIST', path, 'non-empty string array', value);
+        return result;
+    }
+    function authorizedEvidenceRefs_ACU(value, path, required, snapshot) {
+        const refs = required ? requiredList_ACU(value, path) : optionalList_ACU(value, path);
+        const unauthorized = findUnauthorizedWorldSimulationEvidenceRefs_ACU(refs, snapshot);
+        if (unauthorized.length)
+            fail_ACU$2(snapshot ? 'EVIDENCE_REF_UNAUTHORIZED' : 'EVIDENCE_REGISTRY_REQUIRED', path, 'refs registered in current run', unauthorized);
+        return refs;
+    }
+    const SAFE_TOOL_REQUEST_METADATA_ACU = new Set(['evidenceRef', 'purpose']);
+    function normalizeToolRequestMetadata_ACU(value, action) {
+        if (action !== 'read' && action !== 'search')
+            return value;
+        const normalized = { ...value };
+        for (const key of SAFE_TOOL_REQUEST_METADATA_ACU)
+            delete normalized[key];
+        return normalized;
+    }
+    function isAuthorizedToolAddress_ACU(address) {
+        return WORLD_SIMULATION_TOOL_ADDRESSES_ACU.some(allowed => allowed.endsWith(':')
+            ? address.startsWith(allowed) && address.length > allowed.length
+            : address === allowed);
+    }
+    const LEGACY_TOOL_ADDRESS_ALIASES_ACU = {
+        '$WORLD_LEDGER': 'ledger:current',
+        '$CLOCK': 'ledger:current',
+        '$WORLD_SUMMARY': 'summary:current',
+    };
+    function normalizeToolAddress_ACU(value) {
+        const address = text_ACU$2(value);
+        return LEGACY_TOOL_ADDRESS_ALIASES_ACU[address] ?? address;
+    }
+    function normalizeLegacyToolAction_ACU(value) {
+        if (text_ACU$2(value.action))
+            return value;
+        const keys = Object.keys(value);
+        const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
+        if (keys.some(key => !allowed.has(key)))
+            return value;
+        const address = normalizeToolAddress_ACU(value.address);
+        if (address && isAuthorizedToolAddress_ACU(address))
+            return { action: 'read', reads: [address] };
+        if (Array.isArray(value.reads)) {
+            const reads = value.reads.map(normalizeToolAddress_ACU).filter(Boolean);
+            if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU))
+                return { action: 'read', reads };
+        }
+        return value;
+    }
+    function normalizeReadAction_ACU(value) {
+        if (text_ACU$2(value.action) !== 'read')
+            return value;
+        const normalized = normalizeToolRequestMetadata_ACU(value, 'read');
+        if (normalized.reads === undefined && normalized.address !== undefined) {
+            const { address: _address, ...rest } = normalized;
+            return { ...rest, reads: [normalizeToolAddress_ACU(normalized.address)] };
+        }
+        if (typeof normalized.reads === 'string')
+            return { ...normalized, reads: [normalizeToolAddress_ACU(normalized.reads)] };
+        if (Array.isArray(normalized.reads))
+            return { ...normalized, reads: normalized.reads.map(normalizeToolAddress_ACU) };
+        return normalized;
+    }
+    function parseWorldSimulationMainAction_ACU(value, allowDelegate = true, evidenceRegistry) {
+        if (!isRecord_ACU$5(value))
+            fail_ACU$2('OBJECT_REQUIRED', '$', 'object', value);
+        const normalizedValue = normalizeLegacyToolAction_ACU(value);
+        const action = text_ACU$2(normalizedValue.action);
+        if (action === 'read') {
+            const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
+            const reads = requiredList_ACU(raw.reads, '$.reads');
+            const invalid = reads.find(address => !isAuthorizedToolAddress_ACU(address));
+            if (invalid)
+                fail_ACU$2('INVALID_TOOL_ADDRESS', '$.reads', WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | '), invalid);
+            return { kind: 'read', reads };
+        }
+        if (action === 'search') {
+            const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
+            let maxResults = 10;
+            if (raw.maxResults !== undefined) {
+                if (!Number.isInteger(raw.maxResults) || Number(raw.maxResults) < 1 || Number(raw.maxResults) > 50)
+                    fail_ACU$2('INVALID_MAX_RESULTS', '$.maxResults', 'integer from 1 to 50', raw.maxResults);
+                maxResults = Number(raw.maxResults);
+            }
+            if (raw.isRegex !== undefined && typeof raw.isRegex !== 'boolean')
+                fail_ACU$2('BOOLEAN_REQUIRED', '$.isRegex', 'boolean', raw.isRegex);
+            return { kind: 'search', query: requiredText_ACU(raw.query, '$.query'), scope: optionalList_ACU(raw.scope, '$.scope'), maxResults, isRegex: raw.isRegex === true };
+        }
+        if (action === 'delegate') {
+            if (!allowDelegate)
+                fail_ACU$2('DELEGATION_BUDGET_EXHAUSTED', '$.action', 'non-delegate action', action);
+            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'delegations']);
+            if (!Array.isArray(raw.delegations) || !raw.delegations.length)
+                fail_ACU$2('DELEGATIONS_REQUIRED', '$.delegations', 'non-empty array', raw.delegations);
+            return { kind: 'delegate', delegations: raw.delegations.map((item, index) => {
+                    const delegation = closedObject_ACU(item, `$.delegations[${index}]`, ['agentName', 'instruction'], ['reads']);
+                    return { agentName: requiredText_ACU(delegation.agentName, `$.delegations[${index}].agentName`), instruction: requiredText_ACU(delegation.instruction, `$.delegations[${index}].instruction`), reads: optionalList_ACU(delegation.reads, `$.delegations[${index}].reads`) };
+                }) };
+        }
+        if (action === 'open_round') {
+            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'summary', 'focus', 'dispatchChronicler'], ['skipModules']);
+            if (typeof raw.dispatchChronicler !== 'boolean')
+                fail_ACU$2('BOOLEAN_REQUIRED', '$.dispatchChronicler', 'boolean', raw.dispatchChronicler);
+            const skipModules = [...new Set(optionalList_ACU(raw.skipModules, '$.skipModules'))];
+            for (const module of skipModules) {
+                if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(module)) {
+                    fail_ACU$2('INVALID_LEDGER_MODULE', '$.skipModules', WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), module);
+                }
+            }
+            return {
+                kind: 'open_round',
+                summary: requiredText_ACU(raw.summary, '$.summary'),
+                focus: requiredText_ACU(raw.focus, '$.focus'),
+                dispatchChronicler: raw.dispatchChronicler,
+                skipModules,
+            };
+        }
+        if (action === 'finalize') {
+            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
+            const outcome = text_ACU$2(raw.outcome);
+            if (!TERMINALS_ACU.includes(outcome))
+                fail_ACU$2('INVALID_OUTCOME', '$.outcome', TERMINALS_ACU.join(' | '), raw.outcome);
+            return { kind: 'finalize', outcome: outcome, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
+        }
+        if (action === 'block') {
+            const reason = text_ACU$2(normalizedValue.reason);
+            const blockValue = !Object.prototype.hasOwnProperty.call(normalizedValue, 'unresolved') && reason
+                ? { ...normalizedValue, unresolved: [reason] }
+                : normalizedValue;
+            const raw = closedObject_ACU(blockValue, '$', ['action', 'reason', 'unresolved']);
+            return { kind: 'block', reason: requiredText_ACU(raw.reason, '$.reason'), unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
+        }
+        fail_ACU$2('INVALID_ACTION', '$.action', 'read | search | delegate | open_round | finalize | block', normalizedValue.action);
+    }
+    function closedObject_ACU(value, path, required, optional = []) {
+        if (!isRecord_ACU$5(value))
+            fail_ACU$2('OBJECT_REQUIRED', path, 'object', value);
+        for (const key of required)
+            if (!Object.prototype.hasOwnProperty.call(value, key))
+                fail_ACU$2('MISSING_FIELD', `${path}.${key}`, 'required field', undefined);
+        const allowed = new Set([...required, ...optional]);
+        for (const key of Object.keys(value))
+            if (!allowed.has(key))
+                fail_ACU$2('UNKNOWN_FIELD', `${path}.${key}`, 'no additional fields', value[key]);
+        return value;
+    }
+    function stagePlan_ACU(value, path = '$.plan') {
+        const raw = closedObject_ACU(value, path, ['schemaVersion', 'title', 'objective', 'impactScope', 'factsToVerify', 'plannedTools', 'plannedSpecialists', 'expectedLedgerChanges', 'convergenceConditions', 'blockingConditions', 'completedSteps', 'nextStep']);
+        if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
+            fail_ACU$2('INVALID_SCHEMA_VERSION', `${path}.schemaVersion`, String(WORLD_SIMULATION_SCHEMA_VERSION_ACU), raw.schemaVersion);
+        const expectedLedgerChanges = requiredList_ACU(raw.expectedLedgerChanges, `${path}.expectedLedgerChanges`);
+        for (const item of expectedLedgerChanges)
+            if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(item))
+                fail_ACU$2('INVALID_LEDGER_MODULE', `${path}.expectedLedgerChanges`, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), item);
+        return {
+            schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
+            title: requiredText_ACU(raw.title, `${path}.title`),
+            objective: requiredText_ACU(raw.objective, `${path}.objective`),
+            impactScope: requiredList_ACU(raw.impactScope, `${path}.impactScope`),
+            factsToVerify: texts_ACU(raw.factsToVerify),
+            plannedTools: texts_ACU(raw.plannedTools),
+            plannedSpecialists: texts_ACU(raw.plannedSpecialists),
+            expectedLedgerChanges: expectedLedgerChanges,
+            convergenceConditions: requiredList_ACU(raw.convergenceConditions, `${path}.convergenceConditions`),
+            blockingConditions: texts_ACU(raw.blockingConditions),
+            completedSteps: texts_ACU(raw.completedSteps),
+            nextStep: requiredText_ACU(raw.nextStep, `${path}.nextStep`),
+        };
+    }
+    function parseWorldSimulationPlannerOutput_ACU(value) {
+        const raw = closedObject_ACU(value, '$', ['action', 'summary', 'plan']);
+        const action = text_ACU$2(raw.action);
+        if (action !== 'plan')
+            fail_ACU$2('INVALID_PLANNER_ACTION', '$.action', 'plan', raw.action);
+        return { action, summary: requiredText_ACU(raw.summary, '$.summary'), plan: stagePlan_ACU(raw.plan) };
+    }
+    function normalizeSpecialistStatus_ACU(value) {
+        const status = text_ACU$2(value.status);
+        const hasNonEmptyPatch = isRecord_ACU$5(value.patch) && Object.keys(value.patch).length > 0;
+        if (['success', 'completed', 'complete', 'done', 'ok'].includes(status) && hasNonEmptyPatch)
+            return { ...value, status: 'candidate' };
+        if (status === 'unchanged' && !Object.prototype.hasOwnProperty.call(value, 'patch'))
+            return { ...value, status: 'no_change' };
+        if (status === 'error' || status === 'failure')
+            return { ...value, status: 'failed' };
+        if (status === 'block' && Object.prototype.hasOwnProperty.call(value, 'unresolved'))
+            return { ...value, status: 'blocked' };
+        return value;
+    }
+    function invalidSpecialistPatch_ACU(path, expected, actual) {
+        fail_ACU$2('INVALID_SPECIALIST_PATCH', path, expected, actual);
+    }
+    function specialistStringList_ACU(value, path) {
+        if (!coerceWorldSimulationStringArray_ACU(value).ok) {
+            invalidSpecialistPatch_ACU(path, 'string array with non-empty items', value);
+        }
+    }
+    function specialistGuidanceSignals_ACU(value, path) {
+        if (!Array.isArray(value))
+            invalidSpecialistPatch_ACU(path, 'array of {text, voice, sourceId}', value);
+        value.forEach((item, index) => {
+            if (!isRecord_ACU$5(item))
+                invalidSpecialistPatch_ACU(`${path}[${index}]`, 'object', item);
+            specialistPatchRecord_ACU(item, `${path}[${index}]`, ['text', 'voice', 'sourceId']);
+            if (!text_ACU$2(item.text))
+                invalidSpecialistPatch_ACU(`${path}[${index}].text`, 'non-empty string', item.text);
+            if (!coerceWorldSimulationEnum_ACU(item.voice, WORLD_GUIDANCE_SIGNAL_VOICES_ACU).ok) {
+                invalidSpecialistPatch_ACU(`${path}[${index}].voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), item.voice);
+            }
+            if (!text_ACU$2(item.sourceId))
+                invalidSpecialistPatch_ACU(`${path}[${index}].sourceId`, 'non-empty ledger source id, clock, or player', item.sourceId);
+        });
+    }
+    function specialistPatchRecord_ACU(value, path, allowed) {
+        if (!isRecord_ACU$5(value))
+            invalidSpecialistPatch_ACU(path, 'object', value);
+        for (const key of Object.keys(value)) {
+            if (!allowed.includes(key))
+                invalidSpecialistPatch_ACU(`${path}.${key}`, 'no additional fields', value[key]);
+        }
+        return value;
+    }
+    function validateWorldSimulationSpecialistPatch_ACU(value) {
+        if (!isRecord_ACU$5(value) || !Object.keys(value).length)
+            invalidSpecialistPatch_ACU('$.patch', 'non-empty ledger patch object', value);
+        for (const [module, patch] of Object.entries(value)) {
+            const path = `$.patch.${module}`;
+            if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(module) && module !== 'chronicleArchive') {
+                invalidSpecialistPatch_ACU(path, [...WORLD_SIMULATION_LEDGER_MODULES_ACU, 'chronicleArchive'].join(' | '), patch);
+            }
+            if (module === 'chronicleArchive') {
+                if (!isRecord_ACU$5(patch))
+                    invalidSpecialistPatch_ACU(path, 'object', patch);
+                const raw = specialistPatchRecord_ACU(patch, path, ['archiveEntries', 'overviewRows', 'collapseRefs']);
+                if (!Array.isArray(raw.archiveEntries) || !raw.archiveEntries.length)
+                    invalidSpecialistPatch_ACU(`${path}.archiveEntries`, 'non-empty array', raw.archiveEntries);
+                if (!Array.isArray(raw.overviewRows) || !raw.overviewRows.length)
+                    invalidSpecialistPatch_ACU(`${path}.overviewRows`, 'non-empty array', raw.overviewRows);
+                continue;
+            }
+            if (module === 'dimensions' || module === 'seeds' || module === 'actors' || module === 'rumors') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
+                if (!Array.isArray(raw.upsert) || !raw.upsert.length)
+                    invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
+                raw.upsert.forEach((item, index) => {
+                    if (!isRecord_ACU$5(item))
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
+                    if (item.id !== undefined && !text_ACU$2(item.id))
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
+                    const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
+                    if (item[labelField] !== undefined && !text_ACU$2(item[labelField])) {
+                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
+                    }
+                    if (item.expectedRevision !== undefined) {
+                        const revision = coerceWorldSimulationInteger_ACU(item.expectedRevision);
+                        if (!revision.ok || revision.value < 0) {
+                            invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
+                        }
+                    }
+                });
+                continue;
+            }
+            if (module === 'chronicle') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['append']);
+                if (!Array.isArray(raw.append) || !raw.append.length)
+                    invalidSpecialistPatch_ACU(`${path}.append`, 'non-empty array', raw.append);
+                continue;
+            }
+            if (module === 'clock') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs']);
+                if (!Object.keys(raw).length)
+                    invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+                if (raw.days !== undefined) {
+                    const days = coerceWorldSimulationInteger_ACU(raw.days);
+                    if (!days.ok || days.value < 0)
+                        invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
+                }
+                if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string')
+                    invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
+                if (raw.slot !== undefined && typeof raw.slot !== 'string')
+                    invalidSpecialistPatch_ACU(`${path}.slot`, 'string', raw.slot);
+                if (raw.evidenceRefs !== undefined)
+                    specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
+                continue;
+            }
+            if (module === 'player') {
+                const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs']);
+                if (!Object.keys(raw).length)
+                    invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+                if (raw.contact !== undefined && !coerceWorldSimulationEnum_ACU(raw.contact, WORLD_PLAYER_CONTACTS_ACU).ok) {
+                    invalidSpecialistPatch_ACU(`${path}.contact`, WORLD_PLAYER_CONTACTS_ACU.join(' | '), raw.contact);
+                }
+                if (raw.evidenceRefs !== undefined)
+                    specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
+                if (raw.location !== undefined && raw.location !== null) {
+                    if (!isRecord_ACU$5(raw.location))
+                        invalidSpecialistPatch_ACU(`${path}.location`, 'object or null', raw.location);
+                    specialistPatchRecord_ACU(raw.location, `${path}.location`, ['region', 'place']);
+                    if (!text_ACU$2(raw.location.region))
+                        invalidSpecialistPatch_ACU(`${path}.location.region`, 'non-empty string', raw.location.region);
+                    if (raw.location.place !== undefined && typeof raw.location.place !== 'string')
+                        invalidSpecialistPatch_ACU(`${path}.location.place`, 'string', raw.location.place);
+                }
+                continue;
+            }
+            if (module !== 'guidance')
+                invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
+            const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs']);
+            if (!Object.keys(raw).length)
+                invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
+            if (raw.signals !== undefined)
+                specialistGuidanceSignals_ACU(raw.signals, `${path}.signals`);
+            if (raw.excludedFacts !== undefined)
+                specialistStringList_ACU(raw.excludedFacts, `${path}.excludedFacts`);
+            if (raw.evidenceRefs !== undefined)
+                specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
+        }
+        return value;
+    }
+    function parseWorldSimulationSpecialistResult_ACU(value, evidenceRegistry) {
+        if (!isRecord_ACU$5(value))
+            fail_ACU$2('OBJECT_REQUIRED', '$', 'specialist result object', value);
+        const normalized = normalizeSpecialistStatus_ACU(value);
+        const status = text_ACU$2(normalized.status);
+        const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
+        if (status === 'candidate') {
+            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
+            const patch = validateWorldSimulationSpecialistPatch_ACU(raw.patch);
+            return { status, agentName, patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
+        }
+        if (status === 'no_change') {
+            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'summary', 'evidenceRefs', 'uncertainties']);
+            return { status, agentName, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
+        }
+        if (status === 'failed') {
+            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'reasonCode', 'message']);
+            return { status, agentName, reasonCode: requiredText_ACU(raw.reasonCode, '$.reasonCode'), message: requiredText_ACU(raw.message, '$.message') };
+        }
+        if (status === 'blocked') {
+            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'unresolved']);
+            return { status, agentName, unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
+        }
+        fail_ACU$2('INVALID_SPECIALIST_STATUS', '$.status', 'candidate | no_change | failed | blocked', value.status);
+    }
+    function parseWorldSimulationReviewerResult_ACU(value) {
+        const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds']);
+        const verdict = text_ACU$2(raw.verdict);
+        if (!['accept', 'revise', 'reject'].includes(verdict))
+            fail_ACU$2('INVALID_REVIEW_VERDICT', '$.verdict', 'accept | revise | reject', raw.verdict);
+        if (!Array.isArray(raw.findings))
+            fail_ACU$2('FINDINGS_REQUIRED', '$.findings', 'array', raw.findings);
+        const findings = raw.findings.map((item, index) => {
+            const finding = closedObject_ACU(item, `$.findings[${index}]`, ['severity', 'reasonCode', 'path', 'expected', 'actual']);
+            const severity = text_ACU$2(finding.severity);
+            if (!['blocking', 'major', 'minor'].includes(severity))
+                fail_ACU$2('INVALID_FINDING_SEVERITY', `$.findings[${index}].severity`, 'blocking | major | minor', finding.severity);
+            return { severity: severity, reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
+        });
+        return {
+            verdict: verdict,
+            summary: requiredText_ACU(raw.summary, '$.summary'),
+            findings,
+            acceptedCandidateIds: texts_ACU(raw.acceptedCandidateIds),
+        };
+    }
+    function pushGuidanceAnchorSentence_ACU(target, value) {
+        const trimmed = String(value ?? '').trim();
+        if (trimmed.length >= 6)
+            target.push(trimmed);
+    }
+    function collectWorldSimulationGuidanceAnchorSentences_ACU(ledger, anchorMessage = '') {
+        const sentences = [];
+        const stripped = applyWorldSimulationProjection_ACU(String(anchorMessage ?? ''), null);
+        for (const chunk of stripped.split(/[。！？!?\n]+/))
+            pushGuidanceAnchorSentence_ACU(sentences, chunk);
+        for (const rumor of ledger.rumors)
+            pushGuidanceAnchorSentence_ACU(sentences, rumor.fact);
+        for (const actor of ledger.actors) {
+            for (const goal of actor.goals)
+                pushGuidanceAnchorSentence_ACU(sentences, goal);
+            for (const fact of actor.knownFacts)
+                pushGuidanceAnchorSentence_ACU(sentences, fact);
+            pushGuidanceAnchorSentence_ACU(sentences, actor.deathSummary);
+        }
+        for (const seed of ledger.seeds) {
+            pushGuidanceAnchorSentence_ACU(sentences, seed.title);
+            pushGuidanceAnchorSentence_ACU(sentences, seed.catalyst);
+            pushGuidanceAnchorSentence_ACU(sentences, seed.missedOutcome);
+        }
+        for (const dimension of ledger.dimensions)
+            pushGuidanceAnchorSentence_ACU(sentences, dimension.rationale);
+        for (const entry of ledger.chronicle)
+            pushGuidanceAnchorSentence_ACU(sentences, entry.summary);
+        return sentences;
+    }
+    function validateWorldSimulationGuidanceComposerSignals_ACU(signals, ledger, anchorMessage = '') {
+        const knownIds = new Set([
+            'clock',
+            'player',
+            ...ledger.actors.map(item => item.id),
+            ...ledger.seeds.map(item => item.id),
+            ...ledger.rumors.map(item => item.id),
+            ...ledger.dimensions.map(item => item.id),
+            ...ledger.chronicle.map(item => item.id),
+        ]);
+        const anchors = collectWorldSimulationGuidanceAnchorSentences_ACU(ledger, anchorMessage);
+        return signals.map((signal, index) => {
+            const sourceId = String(signal.sourceId ?? '').trim();
+            const text = String(signal.text ?? '').trim();
+            if (!sourceId || !knownIds.has(sourceId)) {
+                fail_ACU$2('UNKNOWN_GUIDANCE_SOURCE', `signals[${index}].sourceId`, 'ledger source id, clock, or player', sourceId);
+            }
+            if (text.length > WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU) {
+                fail_ACU$2('GUIDANCE_SIGNAL_TOO_LONG', `signals[${index}].text`, `text with at most ${WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU} characters`, text);
+            }
+            for (const anchor of anchors) {
+                if (text.includes(anchor) || anchor.includes(text)) {
+                    fail_ACU$2('GUIDANCE_RESTATES_ANCHOR', `signals[${index}].text`, 'non-quoted world fact', text);
+                }
+            }
+            return { text, voice: signal.voice, sourceId };
+        });
+    }
+    function collectActionObjects_ACU(raw, prefill) {
+        const text = stripNoise_ACU(String(raw ?? ''));
+        if (!text)
+            fail_ACU$2('EMPTY_RESPONSE', '$', 'non-empty JSON output', raw);
+        const candidates = text.startsWith('{') || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        for (const candidate of candidates) {
+            const records = objects_ACU(candidate);
+            if (records.length)
+                return records;
+        }
+        fail_ACU$2('JSON_NOT_FOUND', '$', 'balanced JSON object', text.slice(0, 300));
+    }
+    function parseWorldSimulationMainOutput_ACU(raw, prefill = '', allowDelegate = true, evidenceRegistry) {
+        const records = collectActionObjects_ACU(raw, prefill).map(normalizeLegacyToolAction_ACU);
+        const tools = records.filter(record => record.action === 'read' || record.action === 'search');
+        if (tools.length) {
+            return { kind: 'tools', calls: tools.map(record => parseWorldSimulationMainAction_ACU(record, allowDelegate, evidenceRegistry)) };
+        }
+        const action = records.find(record => Object.prototype.hasOwnProperty.call(record, 'action')) ?? records[0];
+        return parseWorldSimulationMainAction_ACU(action, allowDelegate, evidenceRegistry);
+    }
+    /**
+     * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 合法动作样例。
+     * 与智能续写 renderMainProtocolRejection_ACU 同语义：快速/推理模型对
+     * 「照这个样子写」远比对「请修正」服从；同时显式禁止模仿系统提示词里的
+     * WORLD_SIMULATION_ENGINE_SEAM 标记——推理模型会把这些标记当输出格式照抄。
+     */
+    function renderWorldSimulationDirectorProtocolRejection_ACU(issue, allowDelegate) {
+        const lines = [
+            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+            'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+            'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
+            'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
+            '动作格式必须是下面之一：',
+            '{"action":"read","reads":["ledger:current","summary:current"]}',
+            '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
+        ];
+        if (allowDelegate)
+            lines.push('{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":[]}]}');
+        lines.push('{"action":"open_round","summary":"锁定本轮幕后焦点并启动固定工作流","focus":"时间推进与暗流压力","dispatchChronicler":false}');
+        lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
+        lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
+        lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
+        lines.push('{"action":"finalize","outcome":"no_change","summary":"证据表明无需变更","evidenceRefs":["evidence:已颁发引用"]}');
+        lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
+        return lines.join('\n');
+    }
+    function renderWorldSimulationSpecialistProtocolRejection_ACU(issue, agentName, writableModules) {
+        const lines = [
+            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或额外字段。',
+            'status 必须精确为 candidate、no_change、failed、blocked 之一。',
+            `agentName 必须精确为 ${agentName}。`,
+        ];
+        if (writableModules.length) {
+            lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
+            lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId} 对象数组，sourceId 必填。');
+            const firstModule = writableModules[0];
+            const patchExample = firstModule === 'dimensions'
+                ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
+                : firstModule === 'seeds'
+                    ? { upsert: [{ id: '条目ID', title: '种子标题', expectedRevision: 0 }] }
+                    : firstModule === 'actors'
+                        ? { upsert: [{ id: '条目ID', name: '角色名称', expectedRevision: 0 }] }
+                        : firstModule === 'chronicle'
+                            ? { append: [{}] }
+                            : firstModule === 'guidance'
+                                ? { signals: [{ text: '角色可感知信号', voice: 'ambient', sourceId: 'clock' }] }
+                                : firstModule === 'player'
+                                    ? { contact: 'open' }
+                                    : firstModule === 'rumors'
+                                        ? { upsert: [{ id: '条目ID', fact: '传闻事实', expectedRevision: 0 }] }
+                                        : { days: 1 };
+            lines.push(JSON.stringify({
+                status: 'candidate',
+                agentName,
+                patch: { [firstModule]: patchExample },
+                summary: '基于已颁发证据形成候选',
+                evidenceRefs: ['evidence:已颁发引用'],
+                uncertainties: [],
+            }));
+        }
+        lines.push(JSON.stringify({ status: 'no_change', agentName, summary: '没有需要修改的内容', evidenceRefs: [], uncertainties: [] }));
+        lines.push(JSON.stringify({ status: 'failed', agentName, reasonCode: 'REASON_CODE', message: '失败原因' }));
+        lines.push(JSON.stringify({ status: 'blocked', agentName, unresolved: ['仍需解决的问题'] }));
+        return lines.join('\n');
+    }
+    function renderWorldSimulationReviewerProtocolRejection_ACU(issue) {
+        return [
+            `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+            '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。',
+            'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
+            'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
+            'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
+            '不得输出 guidance：投影由 guidance-composer 专责，审核只判断时间、空间、因果、权限与证据。',
+            JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
+            JSON.stringify({
+                verdict: 'revise',
+                summary: '候选仍需修正',
+                findings: [{ severity: 'major', reasonCode: 'CAUSE_GAP', path: '$.clock', expected: '时间与因果连续', actual: '缺少因果说明' }],
+                acceptedCandidateIds: [],
+            }),
+            JSON.stringify({
+                verdict: 'reject',
+                summary: '候选不满足证据约束',
+                findings: [{ severity: 'blocking', reasonCode: 'EVIDENCE_GAP', path: '$', expected: '可验证证据', actual: '缺失' }],
+                acceptedCandidateIds: [],
+            }),
+        ].join('\n');
+    }
+    function renderWorldSimulationPlannerProtocolRejection_ACU(issue) {
+        return [
+            `你上一次的阶段规划输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+            '顶层必须且只能包含 action、summary、plan；action 必须精确为 plan，summary 必须是非空字符串，plan 不得省略、设为 null 或只返回摘要。',
+            `plan 必须完整包含 schemaVersion、title、objective、impactScope、factsToVerify、plannedTools、plannedSpecialists、expectedLedgerChanges、convergenceConditions、blockingConditions、completedSteps、nextStep。expectedLedgerChanges 只能使用：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。`,
+            JSON.stringify({
+                action: 'plan',
+                summary: '锁定本轮幕后推演焦点',
+                plan: {
+                    schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
+                    title: '推演本轮幕后动态',
+                    objective: '根据最新剧情推算幕后世界演变',
+                    impactScope: ['当前世界状态'],
+                    factsToVerify: ['时间是否推进'],
+                    plannedTools: ['read'],
+                    plannedSpecialists: ['timekeeper', 'undercurrent-analyst'],
+                    expectedLedgerChanges: ['clock'],
+                    convergenceConditions: ['证据与候选闭合'],
+                    blockingConditions: ['缺少锚点'],
+                    completedSteps: [],
+                    nextStep: '读取当前账本',
+                },
+            }),
+        ].join('\n');
+    }
+    function mergeDraftValue_ACU(base, continuation, path, depth) {
+        if (depth > 16)
+            fail_ACU$2('DRAFT_MERGE_DEPTH', path, 'nesting depth at most 16', depth);
+        if (base === undefined)
+            return continuation;
+        if (continuation === undefined)
+            return base;
+        if (Array.isArray(base) && Array.isArray(continuation))
+            return [...base, ...continuation];
+        if (isRecord_ACU$5(base) && isRecord_ACU$5(continuation)) {
+            const result = { ...base };
+            for (const [key, value] of Object.entries(continuation))
+                result[key] = mergeDraftValue_ACU(result[key], value, `${path}.${key}`, depth + 1);
+            return result;
+        }
+        if (Object.is(base, continuation))
+            return base;
+        fail_ACU$2('DRAFT_MERGE_CONFLICT', path, 'matching scalar values or mergeable arrays/objects', { base, continuation });
+    }
+    function mergeWorldSimulationJsonDrafts_ACU(base, continuation) {
+        return mergeDraftValue_ACU(base, continuation, '$', 0);
+    }
+    function compactWorldSimulationProtocolError_ACU(error) {
+        if (error instanceof WorldSimulationValidationError_ACU && error.error.code === 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID') {
+            const details = error.error.details ?? {};
+            return { reasonCode: text_ACU$2(details.reasonCode) || 'PROTOCOL_INVALID', path: text_ACU$2(details.path) || '$', expected: text_ACU$2(details.expected) || 'valid protocol value', actual: details.actual };
+        }
+        return { reasonCode: 'PROTOCOL_UNKNOWN_ERROR', path: '$', expected: 'valid protocol output', actual: error instanceof Error ? error.message : String(error) };
+    }
+    function createWorldSimulationProtocolRepairState_ACU(maxAttempts = 2) {
+        return { attempts: 0, maxAttempts: Math.max(0, Math.floor(maxAttempts)), fingerprints: {} };
+    }
+    function recordWorldSimulationProtocolFailure_ACU(state, error) {
+        const issue = compactWorldSimulationProtocolError_ACU(error);
+        const fingerprint = `${issue.reasonCode}|${issue.path}|${issue.expected}`;
+        state.attempts += 1;
+        state.fingerprints[fingerprint] = (state.fingerprints[fingerprint] ?? 0) + 1;
+        return { retry: state.attempts <= state.maxAttempts && state.fingerprints[fingerprint] < 2, fingerprint, issue };
+    }
+    function parseWorldSimulationRequirementsMaintainerOutput_ACU(payload) {
+        const keys = Object.keys(payload);
+        if (keys.some(key => !['summary', 'requirements'].includes(key)))
+            fail_ACU$2('UNEXPECTED_FIELD', '$', 'only summary and requirements', keys.join(','));
+        const summary = text_ACU$2(payload.summary);
+        if (!summary)
+            fail_ACU$2('MISSING_FIELD', '$.summary', 'non-empty string', payload.summary);
+        if (!Array.isArray(payload.requirements))
+            fail_ACU$2('INVALID_TYPE', '$.requirements', 'string[]', payload.requirements);
+        const requirements = [];
+        const seen = new Set();
+        for (const [index, item] of payload.requirements.entries()) {
+            if (typeof item !== 'string')
+                fail_ACU$2('INVALID_TYPE', `$.requirements[${index}]`, 'non-empty string', item);
+            const text = item.trim();
+            if (!text)
+                fail_ACU$2('EMPTY_TEXT', `$.requirements[${index}]`, 'non-empty string', item);
+            if (seen.has(text))
+                continue;
+            seen.add(text);
+            requirements.push(text);
+        }
+        return { summary, requirements };
+    }
+    function renderWorldSimulationRequirementsMaintainerProtocolRejection_ACU(issue) {
+        return [
+            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
+            '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或其他字段。',
+            '顶层必须且只能包含 summary 与 requirements。',
+            'summary 必须是非空字符串。',
+            'requirements 必须是字符串数组（允许空数组），每条必须是非空字符串。',
+            '这是全量替换清单，不是增量补丁。没有撤回依据时不得把已有清单清空。',
+            '示例：{"summary":"合并了用户补充的节奏要求","requirements":["不要提前揭底牌","用第一人称"]}',
+        ].join('\n');
+    }
+
     const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'];
-    function isRecord_ACU$5(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-    function fail_ACU$2(message, details) {
+    function isRecord_ACU$4(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+    function fail_ACU$1(message, details) {
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_persist', message, false, details));
     }
     function revisionFail_ACU(message, details) {
@@ -156418,13 +157364,13 @@ Expected function or array of functions, received type ${typeof value}.`
     function exactKeys_ACU$1(raw, allowed, path) {
         for (const key of Object.keys(raw))
             if (!allowed.includes(key))
-                fail_ACU$2(`${path} 存在未知字段`, { path: `${path}.${key}` });
+                fail_ACU$1(`${path} 存在未知字段`, { path: `${path}.${key}` });
     }
     function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
     function refs_ACU(value, path) {
         const coerced = coerceWorldSimulationStringArray_ACU(value);
         if (!coerced.ok)
-            fail_ACU$2(`${path} 必须是字符串数组且元素不能为空`);
+            fail_ACU$1(`${path} 必须是字符串数组且元素不能为空`);
         return coerced.value;
     }
     function resolveDynamics_ACU(settings) {
@@ -156438,9 +157384,9 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             if (details?.revisionConflict)
                 revisionFail_ACU(message, details);
-            fail_ACU$2(message, details);
+            fail_ACU$1(message, details);
         };
-        if (!isRecord_ACU$5(raw)) {
+        if (!isRecord_ACU$4(raw)) {
             reject(`${path} 必须是对象`);
             return current.map(item => clone_ACU$6(item));
         }
@@ -156460,7 +157406,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const seen = new Set();
         for (const [index, item] of raw.upsert.entries()) {
             const itemPath = `${path}.upsert[${index}]`;
-            const existingIndex = isRecord_ACU$5(item) && typeof item.id === 'string' && item.id.trim() ? result.findIndex(entry => entry.id === item.id) : -1;
+            const existingIndex = isRecord_ACU$4(item) && typeof item.id === 'string' && item.id.trim() ? result.findIndex(entry => entry.id === item.id) : -1;
             const existing = existingIndex < 0 ? null : result[existingIndex];
             const allocateNewId = existing ? undefined : () => {
                 const taken = [...result.map(entry => entry.id), ...seen];
@@ -156500,7 +157446,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 collectEvidenceRefs_ACU(item, output);
             return output;
         }
-        if (!isRecord_ACU$5(value))
+        if (!isRecord_ACU$4(value))
             return output;
         for (const [key, item] of Object.entries(value)) {
             if (key === 'evidenceRefs')
@@ -156511,88 +157457,88 @@ Expected function or array of functions, received type ${typeof value}.`
         return output;
     }
     function applyClock_ACU(current, raw, dynamics) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2('patch.clock 必须是对象');
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1('patch.clock 必须是对象');
         exactKeys_ACU$1(raw, ['days', 'storyTime', 'slot', 'evidenceRefs'], 'patch.clock');
         if (!Object.keys(raw).length)
-            fail_ACU$2('patch.clock 不能为空');
+            fail_ACU$1('patch.clock 不能为空');
         let days = 0;
         if (raw.days !== undefined) {
             const coerced = coerceWorldSimulationInteger_ACU(raw.days);
             if (!coerced.ok || coerced.value < 0)
-                fail_ACU$2('patch.clock.days 必须是非负整数（clockAdvance 只允许单调向前推进，禁止直接写 day）');
+                fail_ACU$1('patch.clock.days 必须是非负整数（clockAdvance 只允许单调向前推进，禁止直接写 day）');
             days = coerced.value;
         }
         if (days > dynamics.maxClockAdvanceDays) {
             const advanceRefs = raw.evidenceRefs;
             if (!Array.isArray(advanceRefs) || !advanceRefs.length || advanceRefs.some(item => typeof item !== 'string' || !item.trim())) {
-                fail_ACU$2(`patch.clock.days 超过 maxClockAdvanceDays=${dynamics.maxClockAdvanceDays}，必须提供非空 evidenceRefs`);
+                fail_ACU$1(`patch.clock.days 超过 maxClockAdvanceDays=${dynamics.maxClockAdvanceDays}，必须提供非空 evidenceRefs`);
             }
         }
         return {
             day: current.day + days,
             slot: raw.slot === undefined ? current.slot
-                : typeof raw.slot === 'string' ? raw.slot : fail_ACU$2('patch.clock.slot 必须是字符串'),
+                : typeof raw.slot === 'string' ? raw.slot : fail_ACU$1('patch.clock.slot 必须是字符串'),
             storyTime: raw.storyTime === undefined ? current.storyTime
-                : typeof raw.storyTime === 'string' ? raw.storyTime : fail_ACU$2('patch.clock.storyTime 必须是字符串'),
+                : typeof raw.storyTime === 'string' ? raw.storyTime : fail_ACU$1('patch.clock.storyTime 必须是字符串'),
             precision: current.precision,
             evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.clock.evidenceRefs'),
         };
     }
     function guidanceSignals_ACU(value, path) {
         if (!Array.isArray(value))
-            fail_ACU$2(`${path} 必须是数组`);
+            fail_ACU$1(`${path} 必须是数组`);
         return value.map((item, index) => {
-            if (!isRecord_ACU$5(item))
-                fail_ACU$2(`${path}[${index}] 必须是对象`);
+            if (!isRecord_ACU$4(item))
+                fail_ACU$1(`${path}[${index}] 必须是对象`);
             exactKeys_ACU$1(item, ['text', 'voice', 'sourceId'], `${path}[${index}]`);
             if (typeof item.text !== 'string' || !item.text.trim())
-                fail_ACU$2(`${path}[${index}].text 必须是非空字符串`);
+                fail_ACU$1(`${path}[${index}].text 必须是非空字符串`);
             const voice = coerceWorldSimulationGuidanceVoice_ACU(item.voice);
             if (!voice.ok)
-                fail_ACU$2(`${path}[${index}].voice 非法`, { actual: item.voice });
-            const signal = { text: item.text, voice: voice.value };
-            if (item.sourceId !== undefined) {
-                if (typeof item.sourceId !== 'string' || !item.sourceId.trim())
-                    fail_ACU$2(`${path}[${index}].sourceId 必须是非空字符串`);
-                signal.sourceId = item.sourceId;
-            }
+                fail_ACU$1(`${path}[${index}].voice 非法`, { actual: item.voice });
+            if (typeof item.sourceId !== 'string' || !item.sourceId.trim())
+                fail_ACU$1(`${path}[${index}].sourceId 必须是非空字符串`);
+            const signal = { text: item.text, voice: voice.value, sourceId: item.sourceId.trim() };
             return signal;
         });
     }
-    function applyGuidance_ACU(current, raw) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2('patch.guidance 必须是对象');
+    function applyGuidance_ACU(current, raw, ledger, anchorMessage = '') {
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1('patch.guidance 必须是对象');
         exactKeys_ACU$1(raw, ['signals', 'excludedFacts', 'evidenceRefs'], 'patch.guidance');
         if (!Object.keys(raw).length)
-            fail_ACU$2('patch.guidance 不能为空');
+            fail_ACU$1('patch.guidance 不能为空');
+        const signals = raw.signals === undefined ? [...current.signals] : guidanceSignals_ACU(raw.signals, 'patch.guidance.signals');
+        if (raw.signals !== undefined)
+            validateWorldSimulationGuidanceComposerSignals_ACU(signals, ledger, anchorMessage);
         return {
-            signals: raw.signals === undefined ? [...current.signals] : guidanceSignals_ACU(raw.signals, 'patch.guidance.signals'),
+            signals,
             excludedFacts: raw.excludedFacts === undefined ? [...current.excludedFacts] : refs_ACU(raw.excludedFacts, 'patch.guidance.excludedFacts'),
             evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.guidance.evidenceRefs'),
         };
     }
     function applyPlayer_ACU(current, raw) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2('patch.player 必须是对象');
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1('patch.player 必须是对象');
         exactKeys_ACU$1(raw, ['location', 'contact', 'evidenceRefs'], 'patch.player');
         if (!Object.keys(raw).length)
-            fail_ACU$2('patch.player 不能为空');
+            fail_ACU$1('patch.player 不能为空');
         let location = current.location ? { ...current.location } : null;
         if (raw.location !== undefined) {
             if (raw.location === null) {
                 location = null;
             }
             else {
-                if (!isRecord_ACU$5(raw.location))
-                    fail_ACU$2('patch.player.location 必须是对象或 null');
+                if (!isRecord_ACU$4(raw.location))
+                    fail_ACU$1('patch.player.location 必须是对象或 null');
                 exactKeys_ACU$1(raw.location, ['region', 'place'], 'patch.player.location');
                 if (typeof raw.location.region !== 'string' || !raw.location.region.trim())
-                    fail_ACU$2('patch.player.location.region 必须是非空字符串');
+                    fail_ACU$1('patch.player.location.region 必须是非空字符串');
                 const nextLocation = { region: raw.location.region };
                 if (raw.location.place !== undefined) {
                     if (typeof raw.location.place !== 'string')
-                        fail_ACU$2('patch.player.location.place 必须是字符串');
+                        fail_ACU$1('patch.player.location.place 必须是字符串');
                     nextLocation.place = raw.location.place;
                 }
                 location = nextLocation;
@@ -156605,7 +157551,7 @@ Expected function or array of functions, received type ${typeof value}.`
             contact: raw.contact === undefined ? current.contact
                 : (() => {
                     const contact = coerceWorldSimulationContact_ACU(raw.contact);
-                    return contact.ok ? contact.value : fail_ACU$2('patch.player.contact 非法');
+                    return contact.ok ? contact.value : fail_ACU$1('patch.player.contact 非法');
                 })(),
             evidenceRefs: raw.evidenceRefs === undefined ? [...current.evidenceRefs] : refs_ACU(raw.evidenceRefs, 'patch.player.evidenceRefs'),
         };
@@ -156615,7 +157561,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (onViolation)
                 onViolation(message, details);
             else
-                fail_ACU$2(message, details);
+                fail_ACU$1(message, details);
         };
         for (const rumor of next.rumors) {
             if (rumor.earliestRevealDay < rumor.originDay)
@@ -156632,35 +157578,35 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
     function applyChronicle_ACU(current, raw, clock) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2('patch.chronicle 必须是对象');
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1('patch.chronicle 必须是对象');
         exactKeys_ACU$1(raw, ['append'], 'patch.chronicle');
         if (!Array.isArray(raw.append) || raw.append.length === 0)
-            fail_ACU$2('patch.chronicle.append 必须是非空数组');
+            fail_ACU$1('patch.chronicle.append 必须是非空数组');
         const taken = new Set(current.map(item => item.id));
         const appended = raw.append.map((item, index) => {
             const path = `patch.chronicle.append[${index}]`;
-            if (!isRecord_ACU$5(item))
-                fail_ACU$2(`${path} 必须是对象`);
+            if (!isRecord_ACU$4(item))
+                fail_ACU$1(`${path} 必须是对象`);
             const summary = typeof item.summary === 'string' ? item.summary.trim() : '';
             if (!summary)
-                fail_ACU$2(`${path}.summary 必须是非空字符串`);
+                fail_ACU$1(`${path}.summary 必须是非空字符串`);
             let id = typeof item.id === 'string' ? item.id.trim() : '';
             if (!id) {
                 id = allocateWorldSimulationPrefixedId_ACU(`chr-${clock.day}`, taken);
             }
             if (taken.has(id))
-                fail_ACU$2(`${path}.id 与现有或本批编年冲突`, { id });
+                fail_ACU$1(`${path}.id 与现有或本批编年冲突`, { id });
             taken.add(id);
             const at = typeof item.at === 'string' && item.at.trim()
                 ? item.at.trim()
                 : (clock.storyTime.trim() || `第${clock.day}日`);
             const related = coerceWorldSimulationStringArray_ACU(item.relatedIds === undefined ? [] : item.relatedIds);
             if (!related.ok)
-                fail_ACU$2(`${path}.relatedIds 必须是字符串数组`);
+                fail_ACU$1(`${path}.relatedIds 必须是字符串数组`);
             const evidence = coerceWorldSimulationStringArray_ACU(item.evidenceRefs === undefined ? [] : item.evidenceRefs);
             if (!evidence.ok)
-                fail_ACU$2(`${path}.evidenceRefs 必须是字符串数组`);
+                fail_ACU$1(`${path}.evidenceRefs 必须是字符串数组`);
             return { id, at, summary, relatedIds: related.value, evidenceRefs: evidence.value };
         });
         return [...clone_ACU$6(current), ...appended];
@@ -156668,36 +157614,36 @@ Expected function or array of functions, received type ${typeof value}.`
     const ARCHIVE_REF_RE_ACU = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
     function archiveRef_ACU(value, path) {
         if (typeof value !== 'string' || !ARCHIVE_REF_RE_ACU.test(value))
-            fail_ACU$2(`${path} 不是合法 archiveRef`);
+            fail_ACU$1(`${path} 不是合法 archiveRef`);
         return value;
     }
     function overviewRow_ACU(raw, path) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2(`${path} 必须是对象`);
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1(`${path} 必须是对象`);
         exactKeys_ACU$1(raw, ['fingerprint', 'day', 'oneLine', 'archiveRef'], path);
         if (typeof raw.fingerprint !== 'string' || !raw.fingerprint.trim())
-            fail_ACU$2(`${path}.fingerprint 必须是非空字符串`);
+            fail_ACU$1(`${path}.fingerprint 必须是非空字符串`);
         if (typeof raw.oneLine !== 'string' || !raw.oneLine.trim())
-            fail_ACU$2(`${path}.oneLine 必须是非空字符串`);
+            fail_ACU$1(`${path}.oneLine 必须是非空字符串`);
         const day = typeof raw.day === 'number' && Number.isInteger(raw.day) ? raw.day : NaN;
         if (!Number.isInteger(day) || day < 1)
-            fail_ACU$2(`${path}.day 必须是 >= 1 的整数`);
+            fail_ACU$1(`${path}.day 必须是 >= 1 的整数`);
         return { fingerprint: raw.fingerprint, day, oneLine: raw.oneLine, archiveRef: archiveRef_ACU(raw.archiveRef, `${path}.archiveRef`) };
     }
     function archiveDetail_ACU(raw, path) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2(`${path} 必须是对象`);
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1(`${path} 必须是对象`);
         exactKeys_ACU$1(raw, ['archiveRef', 'day', 'summary', 'fingerprints', 'relatedIds', 'sourceChronicleIds'], path);
         const stringList = (value, field) => {
             if (!Array.isArray(value) || value.some(item => typeof item !== 'string'))
-                fail_ACU$2(`${path}.${field} 必须是字符串数组`);
+                fail_ACU$1(`${path}.${field} 必须是字符串数组`);
             return value;
         };
         const day = typeof raw.day === 'number' && Number.isInteger(raw.day) ? raw.day : NaN;
         if (!Number.isInteger(day) || day < 1)
-            fail_ACU$2(`${path}.day 必须是 >= 1 的整数`);
+            fail_ACU$1(`${path}.day 必须是 >= 1 的整数`);
         if (typeof raw.summary !== 'string' || !raw.summary.trim())
-            fail_ACU$2(`${path}.summary 必须是非空字符串`);
+            fail_ACU$1(`${path}.summary 必须是非空字符串`);
         return {
             archiveRef: archiveRef_ACU(raw.archiveRef, `${path}.archiveRef`),
             day,
@@ -156708,23 +157654,23 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
     function applyChronicleArchive_ACU(current, raw, clockDay) {
-        if (!isRecord_ACU$5(raw))
-            fail_ACU$2('patch.chronicleArchive 必须是对象');
+        if (!isRecord_ACU$4(raw))
+            fail_ACU$1('patch.chronicleArchive 必须是对象');
         exactKeys_ACU$1(raw, ['archiveEntries', 'overviewRows', 'collapseRefs'], 'patch.chronicleArchive');
         if (!Array.isArray(raw.archiveEntries) || raw.archiveEntries.length === 0)
-            fail_ACU$2('patch.chronicleArchive.archiveEntries 必须是非空数组');
+            fail_ACU$1('patch.chronicleArchive.archiveEntries 必须是非空数组');
         if (!Array.isArray(raw.overviewRows) || raw.overviewRows.length === 0)
-            fail_ACU$2('patch.chronicleArchive.overviewRows 必须是非空数组');
+            fail_ACU$1('patch.chronicleArchive.overviewRows 必须是非空数组');
         const collapseRefs = raw.collapseRefs === undefined
             ? []
             : Array.isArray(raw.collapseRefs) && raw.collapseRefs.every(item => typeof item === 'string')
                 ? raw.collapseRefs
-                : fail_ACU$2('patch.chronicleArchive.collapseRefs 必须是字符串数组');
+                : fail_ACU$1('patch.chronicleArchive.collapseRefs 必须是字符串数组');
         const takenRefs = new Set(current.map(row => row.archiveRef));
         const filledEntries = raw.archiveEntries.map((item, index) => {
             const path = `patch.chronicleArchive.archiveEntries[${index}]`;
-            if (!isRecord_ACU$5(item))
-                fail_ACU$2(`${path} 必须是对象`);
+            if (!isRecord_ACU$4(item))
+                fail_ACU$1(`${path} 必须是对象`);
             const next = { ...item };
             const suppliedRef = typeof next.archiveRef === 'string' ? next.archiveRef.trim() : '';
             if (!suppliedRef) {
@@ -156757,8 +157703,8 @@ Expected function or array of functions, received type ${typeof value}.`
         const writes = filledEntries.map((item, index) => archiveDetail_ACU(item, `patch.chronicleArchive.archiveEntries[${index}]`));
         const filledRows = raw.overviewRows.map((item, index) => {
             const path = `patch.chronicleArchive.overviewRows[${index}]`;
-            if (!isRecord_ACU$5(item))
-                fail_ACU$2(`${path} 必须是对象`);
+            if (!isRecord_ACU$4(item))
+                fail_ACU$1(`${path} 必须是对象`);
             const next = { ...item };
             const paired = writes[index];
             const suppliedRef = typeof next.archiveRef === 'string' ? next.archiveRef.trim() : '';
@@ -156779,25 +157725,25 @@ Expected function or array of functions, received type ${typeof value}.`
         const overviewRows = filledRows.map((item, index) => overviewRow_ACU(item, `patch.chronicleArchive.overviewRows[${index}]`));
         const writeRefs = new Set(writes.map(item => item.archiveRef));
         if (writeRefs.size !== writes.length)
-            fail_ACU$2('patch.chronicleArchive.archiveEntries archiveRef 必须唯一');
+            fail_ACU$1('patch.chronicleArchive.archiveEntries archiveRef 必须唯一');
         const overviewRefs = new Set(overviewRows.map(item => item.archiveRef));
         if (overviewRefs.size !== overviewRows.length)
-            fail_ACU$2('patch.chronicleArchive.overviewRows archiveRef 必须唯一');
+            fail_ACU$1('patch.chronicleArchive.overviewRows archiveRef 必须唯一');
         for (const row of overviewRows) {
             if (!writeRefs.has(row.archiveRef))
-                fail_ACU$2('overviewRows.archiveRef 必须对应 archiveEntries', { archiveRef: row.archiveRef });
+                fail_ACU$1('overviewRows.archiveRef 必须对应 archiveEntries', { archiveRef: row.archiveRef });
         }
         const collapse = new Set(collapseRefs);
         const retained = current.filter(row => !collapse.has(row.archiveRef));
         const remainingRefs = new Set(retained.map(row => row.archiveRef));
         for (const row of overviewRows) {
             if (remainingRefs.has(row.archiveRef))
-                fail_ACU$2('archiveRef 与现有概览目录冲突', { archiveRef: row.archiveRef });
+                fail_ACU$1('archiveRef 与现有概览目录冲突', { archiveRef: row.archiveRef });
             remainingRefs.add(row.archiveRef);
         }
         const overview = [...retained, ...overviewRows];
         if (overview.length > WORLD_CHRONICLE_OVERVIEW_CAP_ACU) {
-            fail_ACU$2(`chronicleOverview 追加后超过 ${WORLD_CHRONICLE_OVERVIEW_CAP_ACU} 行，必须自带 collapseRefs 合并旧行`, {
+            fail_ACU$1(`chronicleOverview 追加后超过 ${WORLD_CHRONICLE_OVERVIEW_CAP_ACU} 行，必须自带 collapseRefs 合并旧行`, {
                 nextCount: overview.length,
                 cap: WORLD_CHRONICLE_OVERVIEW_CAP_ACU,
             });
@@ -156811,81 +157757,250 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function orderedPatchEntries_ACU(patch) {
         const entries = Object.entries(patch);
-        entries.sort((left, right) => (left[0] === 'clock' ? -1 : right[0] === 'clock' ? 1 : 0));
+        const rank = (key) => ({
+            clock: 0, rumors: 1, dimensions: 2, seeds: 3, actors: 4, player: 5, chronicle: 6, chronicleArchive: 7, guidance: 8,
+        }[key] ?? 99);
+        entries.sort((left, right) => rank(left[0]) - rank(right[0]));
         return entries;
     }
-    function applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings) {
+    function pendingModuleOf_ACU(module) {
+        return module === 'chronicleArchive' ? 'chronicle' : module;
+    }
+    function recordPendingFix_ACU(pending, module, candidateId, agentName, violations, day) {
+        const lastError = violations.map(item => item.message).join('；') || '模块入库失败';
+        const index = pending.findIndex(item => item.module === module);
+        if (index >= 0) {
+            const previous = pending[index];
+            pending[index] = {
+                module,
+                candidateId: candidateId || previous.candidateId,
+                agentName: agentName || previous.agentName,
+                violations: violations.length ? violations : previous.violations,
+                attempts: previous.attempts + 1,
+                firstFailedAtDay: previous.firstFailedAtDay,
+                lastError,
+            };
+            return;
+        }
+        pending.push({
+            module,
+            candidateId,
+            agentName,
+            violations,
+            attempts: 1,
+            firstFailedAtDay: day,
+            lastError,
+        });
+    }
+    function violationModule_ACU(message) {
+        if (message.includes('缺少伴随 rumor') || message.includes('ledger.actors'))
+            return 'actors';
+        if (message.includes('ledger.rumors') || message.includes('earliestRevealDay'))
+            return 'rumors';
+        if (message.includes('ledger.seeds'))
+            return 'seeds';
+        if (message.includes('ledger.dimensions'))
+            return 'dimensions';
+        if (message.includes('ledger.player'))
+            return 'player';
+        if (message.includes('ledger.clock'))
+            return 'clock';
+        if (message.includes('ledger.guidance'))
+            return 'guidance';
+        if (message.includes('ledger.chronicle'))
+            return 'chronicle';
+        return null;
+    }
+    function restoreLedgerModule_ACU(next, base, module) {
+        switch (module) {
+            case 'clock':
+                next.clock = clone_ACU$6(base.clock);
+                break;
+            case 'dimensions':
+                next.dimensions = clone_ACU$6(base.dimensions);
+                break;
+            case 'seeds':
+                next.seeds = clone_ACU$6(base.seeds);
+                break;
+            case 'actors':
+                next.actors = clone_ACU$6(base.actors);
+                break;
+            case 'chronicle':
+                next.chronicle = clone_ACU$6(base.chronicle);
+                next.chronicleOverview = clone_ACU$6(base.chronicleOverview);
+                break;
+            case 'guidance':
+                next.guidance = clone_ACU$6(base.guidance);
+                break;
+            case 'rumors':
+                next.rumors = clone_ACU$6(base.rumors);
+                break;
+            case 'player':
+                next.player = clone_ACU$6(base.player);
+                break;
+            default: break;
+        }
+    }
+    function crossFieldProblems_ACU(next) {
+        const problems = [];
+        const push = (message) => {
+            const module = violationModule_ACU(message);
+            if (module)
+                problems.push({ module, message });
+        };
+        checkCrossField_ACU(next, push);
+        for (const message of collectWorldSimulationLedgerViolations_ACU(next))
+            push(message);
+        return problems;
+    }
+    function clearPendingModule_ACU(pending, module) {
+        for (let index = pending.length - 1; index >= 0; index -= 1) {
+            if (pending[index].module === module)
+                pending.splice(index, 1);
+        }
+    }
+    function applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings, context) {
         const dynamics = resolveDynamics_ACU(settings);
         const validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
         if (!candidates.length)
-            fail_ACU$2('commit 必须包含至少一个候选');
+            fail_ACU$1('commit 必须包含至少一个候选');
         const candidateIds = new Set();
-        let next = clone_ACU$6(validatedBase);
-        const chronicleArchiveWrites = [];
         for (const candidate of candidates) {
             if (!candidate.candidateId || candidateIds.has(candidate.candidateId))
-                fail_ACU$2('commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
+                fail_ACU$1('commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
             candidateIds.add(candidate.candidateId);
-            if (!isRecord_ACU$5(candidate.patch) || !Object.keys(candidate.patch).length)
-                fail_ACU$2('candidate.patch 必须是非空对象', { candidateId: candidate.candidateId });
+            if (!isRecord_ACU$4(candidate.patch) || !Object.keys(candidate.patch).length)
+                fail_ACU$1('candidate.patch 必须是非空对象', { candidateId: candidate.candidateId });
             const declared = new Set(candidate.evidenceRefs);
             for (const ref of declared)
                 if (!authorizedEvidenceRefs.has(ref))
-                    fail_ACU$2('候选声明了未授权 evidenceRef', { candidateId: candidate.candidateId, evidenceRef: ref });
+                    fail_ACU$1('候选声明了未授权 evidenceRef', { candidateId: candidate.candidateId, evidenceRef: ref });
             for (const ref of collectEvidenceRefs_ACU(candidate.patch)) {
                 if (!declared.has(ref) || !authorizedEvidenceRefs.has(ref))
-                    fail_ACU$2('patch 使用了未由候选声明并授权的 evidenceRef', { candidateId: candidate.candidateId, evidenceRef: ref });
+                    fail_ACU$1('patch 使用了未由候选声明并授权的 evidenceRef', { candidateId: candidate.candidateId, evidenceRef: ref });
             }
             const definition = findWorldSimulationAgentDefinition_ACU(candidate.agentName);
             if (!definition)
-                fail_ACU$2('候选 Agent 不在世界推演角色目录中', { candidateId: candidate.candidateId, agentName: candidate.agentName });
+                fail_ACU$1('候选 Agent 不在世界推演角色目录中', { candidateId: candidate.candidateId, agentName: candidate.agentName });
             const writable = new Set(definition.writableModules);
             const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
             if (forgedPermissions.length)
-                fail_ACU$2('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
-            for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
+                fail_ACU$1('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
+            for (const [module] of orderedPatchEntries_ACU(candidate.patch)) {
                 if (!canWritePatchModule_ACU(module, writable))
-                    fail_ACU$2('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
-                switch (module) {
-                    case 'clock':
-                        next.clock = applyClock_ACU(next.clock, patch, dynamics);
-                        break;
-                    case 'dimensions':
-                        next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day);
-                        break;
-                    case 'seeds':
-                        next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day);
-                        break;
-                    case 'actors':
-                        next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day);
-                        break;
-                    case 'chronicle':
-                        next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock);
-                        break;
-                    case 'guidance':
-                        next.guidance = applyGuidance_ACU(next.guidance, patch);
-                        break;
-                    case 'rumors':
-                        next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day);
-                        break;
-                    case 'player':
-                        next.player = applyPlayer_ACU(next.player, patch);
-                        break;
-                    case 'chronicleArchive': {
-                        const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
-                        next.chronicleOverview = archived.overview;
-                        chronicleArchiveWrites.push(...archived.writes);
-                        break;
+                    fail_ACU$1('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
+            }
+        }
+        let next = clone_ACU$6(validatedBase);
+        const chronicleArchiveWrites = [];
+        const pendingFixes = clone_ACU$6(validatedBase.pendingFixes);
+        const appliedModules = new Set();
+        const moduleWriters = new Map();
+        for (const candidate of candidates) {
+            for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
+                const ledgerModule = pendingModuleOf_ACU(module);
+                const snapshot = clone_ACU$6(next);
+                const blocking = [];
+                const collect = (message, details) => {
+                    const severity = details?.severity === 'autoFixed' ? 'autoFixed' : 'blocking';
+                    if (severity === 'blocking') {
+                        blocking.push({ path: typeof details?.path === 'string' ? details.path : `$.patch.${module}`, message });
                     }
+                };
+                try {
+                    switch (module) {
+                        case 'clock':
+                            next.clock = applyClock_ACU(next.clock, patch, dynamics);
+                            break;
+                        case 'dimensions':
+                            next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collect);
+                            break;
+                        case 'seeds':
+                            next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collect);
+                            break;
+                        case 'actors':
+                            next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collect);
+                            break;
+                        case 'chronicle':
+                            next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock);
+                            break;
+                        case 'guidance':
+                            next.guidance = applyGuidance_ACU(next.guidance, patch, next, context?.anchorMessage ?? '');
+                            break;
+                        case 'rumors':
+                            next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collect);
+                            break;
+                        case 'player':
+                            next.player = applyPlayer_ACU(next.player, patch);
+                            break;
+                        case 'chronicleArchive': {
+                            const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
+                            next.chronicleOverview = archived.overview;
+                            chronicleArchiveWrites.push(...archived.writes);
+                            break;
+                        }
+                    }
+                    if (blocking.length) {
+                        const changed = JSON.stringify(next[ledgerModule === 'chronicle' && module === 'chronicleArchive' ? 'chronicleOverview' : ledgerModule])
+                            !== JSON.stringify(snapshot[ledgerModule === 'chronicle' && module === 'chronicleArchive' ? 'chronicleOverview' : ledgerModule]);
+                        if (!changed) {
+                            next = snapshot;
+                            if (module === 'chronicleArchive') {
+                                const snapshotRefs = new Set(snapshot.chronicleOverview.map(row => row.archiveRef));
+                                for (let index = chronicleArchiveWrites.length - 1; index >= 0; index -= 1) {
+                                    if (!snapshotRefs.has(chronicleArchiveWrites[index].archiveRef))
+                                        chronicleArchiveWrites.splice(index, 1);
+                                }
+                            }
+                        }
+                        recordPendingFix_ACU(pendingFixes, ledgerModule, candidate.candidateId, candidate.agentName, blocking, next.clock.day);
+                        continue;
+                    }
+                    clearPendingModule_ACU(pendingFixes, ledgerModule);
+                    appliedModules.add(ledgerModule);
+                    moduleWriters.set(ledgerModule, { candidateId: candidate.candidateId, agentName: candidate.agentName });
+                }
+                catch (error) {
+                    next = snapshot;
+                    recordPendingFix_ACU(pendingFixes, ledgerModule, candidate.candidateId, candidate.agentName, [{ path: `$.patch.${module}`, message: error instanceof Error ? error.message : String(error) }], snapshot.clock.day);
                 }
             }
         }
-        checkCrossField_ACU(next);
+        const problems = crossFieldProblems_ACU(next);
+        const grouped = new Map();
+        for (const problem of problems) {
+            const messages = grouped.get(problem.module) ?? [];
+            messages.push(problem.message);
+            grouped.set(problem.module, messages);
+        }
+        for (const [module, messages] of grouped) {
+            const writer = moduleWriters.get(module);
+            const owner = writer ?? {
+                candidateId: candidates.find(item => Object.prototype.hasOwnProperty.call(item.patch, module))?.candidateId || candidates[0]?.candidateId || 'commit',
+                agentName: candidates.find(item => Object.prototype.hasOwnProperty.call(item.patch, module))?.agentName || candidates[0]?.agentName || 'world-director',
+            };
+            restoreLedgerModule_ACU(next, validatedBase, module);
+            appliedModules.delete(module);
+            moduleWriters.delete(module);
+            if (module === 'chronicle') {
+                const refs = new Set(next.chronicleOverview.map(row => row.archiveRef));
+                for (let index = chronicleArchiveWrites.length - 1; index >= 0; index -= 1) {
+                    if (!refs.has(chronicleArchiveWrites[index].archiveRef))
+                        chronicleArchiveWrites.splice(index, 1);
+                }
+            }
+            recordPendingFix_ACU(pendingFixes, module, owner.candidateId, owner.agentName, messages.map(message => ({ path: `$.${module}`, message })), next.clock.day);
+        }
+        const remaining = crossFieldProblems_ACU(next);
+        if (remaining.length)
+            fail_ACU$1(remaining.map(item => item.message).join('；'));
+        next.pendingFixes = pendingFixes;
         next.revision = validatedBase.revision + 1;
-        return { ledger: validateWorldSimulationLedger_ACU(next, 'agent_persist'), chronicleArchiveWrites };
+        const ledger = validateWorldSimulationLedger_ACU(next, 'agent_persist');
+        return { ledger, chronicleArchiveWrites, pendingFixes: ledger.pendingFixes, appliedModules: [...appliedModules] };
     }
-    function applyWorldSimulationCandidates_ACU(base, candidates, authorizedEvidenceRefs, settings) {
-        return applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings).ledger;
+    function applyWorldSimulationCandidates_ACU(base, candidates, authorizedEvidenceRefs, settings, context) {
+        return applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings, context).ledger;
     }
     function preflightWorldSimulationCandidates_ACU(base, candidates, authorizedEvidenceRefs, settings) {
         const dynamics = resolveDynamics_ACU(settings);
@@ -156916,7 +158031,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 continue;
             }
             candidateIds.add(candidate.candidateId);
-            if (!isRecord_ACU$5(candidate.patch) || !Object.keys(candidate.patch).length) {
+            if (!isRecord_ACU$4(candidate.patch) || !Object.keys(candidate.patch).length) {
                 push('', '$.patch', 'candidate.patch 必须是非空对象');
                 continue;
             }
@@ -156968,7 +158083,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock);
                             break;
                         case 'guidance':
-                            next.guidance = applyGuidance_ACU(next.guidance, patch);
+                            next.guidance = applyGuidance_ACU(next.guidance, patch, next);
                             break;
                         case 'rumors':
                             next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert);
@@ -156995,21 +158110,21 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     const defaults_ACU$1 = { resolvePreset: resolveApiConfigByPreset_ACU };
-    function fail_ACU$1(phase, code, reason) {
+    function fail_ACU(phase, code, reason) {
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(code, phase, reason, false, { reason }));
     }
     function resolveWorldSimulationApiPreset_ACU(settings, phase, dependencies = defaults_ACU$1) {
         if (settings.apiPresetMode === 'fixed') {
             const presetName = settings.fixedApiPresetName.trim();
             if (!presetName)
-                fail_ACU$1(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '固定世界推演 API 预设不能为空');
+                fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '固定世界推演 API 预设不能为空');
             const resolved = dependencies.resolvePreset(presetName);
             if (!resolved.resolved)
-                fail_ACU$1(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '世界推演 API 预设不存在或已失效');
+                fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '世界推演 API 预设不存在或已失效');
             return { ...resolved, presetName, source: 'fixed', reason: 'fixed_preset' };
         }
         if (settings.apiPresetMode !== 'current')
-            fail_ACU$1(phase, 'WORLD_SIMULATION_CONFIG_INVALID', '世界推演 API 预设模式非法');
+            fail_ACU(phase, 'WORLD_SIMULATION_CONFIG_INVALID', '世界推演 API 预设模式非法');
         const resolved = dependencies.resolvePreset('');
         return { ...resolved, presetName: '', source: 'current', reason: 'current_configuration' };
     }
@@ -157242,13 +158357,31 @@ Expected function or array of functions, received type ${typeof value}.`
             '$WORLD_USER_REQUIREMENTS': () => serialize_ACU(context.userRequirements ?? context.userGuidance),
             '$WORLD_STATE': () => {
                 if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
-                    const catalog = buildInUseWorldCatalog_ACU(context.worldState);
+                    const ledger = context.worldState;
+                    const catalog = buildInUseWorldCatalog_ACU(ledger);
+                    const composerView = context.writableModules?.length === 1 && context.writableModules[0] === 'guidance';
+                    if (composerView) {
+                        return serialize_ACU({
+                            clock: ledger.clock,
+                            player: ledger.player,
+                            dimensions: ledger.dimensions,
+                            seeds: ledger.seeds,
+                            actors: ledger.actors,
+                            rumors: ledger.rumors,
+                            chronicle: ledger.chronicle,
+                            chronicleOverview: ledger.chronicleOverview,
+                            guidance: ledger.guidance,
+                            pendingFixes: ledger.pendingFixes,
+                            readHint: catalog.readHint,
+                        });
+                    }
                     if (context.writableModules?.length) {
                         const hints = Array.isArray(context.worldCandidates)
-                            ? catalogArchiveHints_ACU(context.worldCandidates, context.worldState.chronicleOverview)
+                            ? catalogArchiveHints_ACU(context.worldCandidates, ledger.chronicleOverview)
                             : [];
                         return serialize_ACU({
-                            ...sliceModuleCatalog_ACU(catalog, context.worldState.chronicleOverview, context.writableModules),
+                            ...sliceModuleCatalog_ACU(catalog, ledger.chronicleOverview, context.writableModules),
+                            pendingFixes: ledger.pendingFixes.filter(item => context.writableModules.includes(item.module)),
                             archiveHints: hints,
                         });
                     }
@@ -157279,785 +158412,6 @@ Expected function or array of functions, received type ${typeof value}.`
             '$CURRENT_EVIDENCE_REGISTRY': () => serialize_ACU(context.evidenceRegistry),
             '$PROJECTION_PREVIEW': () => serialize_ACU(context.projectionPreview),
         };
-    }
-
-    const SCAN_LIMIT_ACU = 6;
-    const TERMINALS_ACU = ['commit', 'no_change', 'blocked'];
-    const isRecord_ACU$4 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-    const text_ACU$2 = (value) => typeof value === 'string' ? value.trim() : '';
-    const texts_ACU = (value) => Array.isArray(value) ? value.map(text_ACU$2).filter(Boolean) : [];
-    function fail_ACU(reasonCode, path, expected, actual) {
-        const issue = { reasonCode, path, expected, actual };
-        throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', `${reasonCode}: ${path} 应为 ${expected}`, true, { ...issue }));
-    }
-    function stripNoise_ACU(raw) {
-        return raw
-            .replace(/<(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, '')
-            .replace(/<\/?(think|thinking|reasoning|thought|analysis)(?:\s[^>]*)?>/gi, '')
-            .replace(/<\/?WORLD_SIMULATION_ENGINE_SEAM:[^>]*>/gi, '')
-            .replace(/```[a-zA-Z]*\n?/g, '').trim();
-    }
-    function balanced_ACU(text, start) {
-        let depth = 0;
-        let inString = false;
-        let escaped = false;
-        for (let index = start; index < text.length; index += 1) {
-            const char = text[index];
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-            if (char === '\\' && inString) {
-                escaped = true;
-                continue;
-            }
-            if (char === '"') {
-                inString = !inString;
-                continue;
-            }
-            if (inString)
-                continue;
-            if (char === '{')
-                depth += 1;
-            else if (char === '}' && --depth === 0)
-                return { json: text.slice(start, index + 1), end: index + 1 };
-        }
-        return null;
-    }
-    function extractFirstWorldSimulationJsonObject_ACU(text) {
-        const start = String(text ?? '').indexOf('{');
-        return start < 0 ? null : balanced_ACU(text, start)?.json ?? null;
-    }
-    function extractWorldSimulationJsonObjects_ACU(text) {
-        const result = [];
-        let cursor = 0;
-        while (result.length < SCAN_LIMIT_ACU) {
-            const start = text.indexOf('{', cursor);
-            if (start < 0)
-                break;
-            const found = balanced_ACU(text, start);
-            if (!found) {
-                cursor = start + 1;
-                continue;
-            }
-            result.push(found.json);
-            cursor = found.end;
-        }
-        return result;
-    }
-    function parseLoose_ACU(text) {
-        try {
-            return JSON.parse(text);
-        }
-        catch { /* limited formatting repair */ }
-        const repaired = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1').replace(/([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)/g, '$1"$2"$3').replace(/,\s*([}\]])/g, '$1');
-        try {
-            return JSON.parse(repaired);
-        }
-        catch {
-            return undefined;
-        }
-    }
-    function objects_ACU(candidate) {
-        return extractWorldSimulationJsonObjects_ACU(candidate).map(parseLoose_ACU).filter(isRecord_ACU$4);
-    }
-    function parseWorldSimulationJsonPayload_ACU(raw, prefill = '', requiredKeys = []) {
-        const text = stripNoise_ACU(String(raw ?? ''));
-        if (!text)
-            fail_ACU('EMPTY_RESPONSE', '$', 'non-empty JSON output', raw);
-        const complete = text.startsWith('{');
-        const candidates = complete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
-        let first = null;
-        for (const candidate of candidates)
-            for (const parsed of objects_ACU(candidate)) {
-                if (!first)
-                    first = parsed;
-                if (!requiredKeys.length || requiredKeys.some(key => key in parsed))
-                    return parsed;
-            }
-        if (first)
-            return first;
-        fail_ACU('JSON_NOT_FOUND', '$', 'balanced JSON object', text.slice(0, 300));
-    }
-    function salvageDraft_ACU(text) {
-        const start = text.indexOf('{');
-        if (start < 0)
-            return null;
-        const stack = [];
-        let inString = false;
-        let escaped = false;
-        let safe = -1;
-        let safeStack = [];
-        for (let index = start; index < text.length; index += 1) {
-            const char = text[index];
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-            if (char === '\\' && inString) {
-                escaped = true;
-                continue;
-            }
-            if (char === '"') {
-                inString = !inString;
-                continue;
-            }
-            if (inString)
-                continue;
-            if (char === '{' || char === '[')
-                stack.push(char === '{' ? '}' : ']');
-            else if (char === '}' || char === ']') {
-                if (!stack.length || stack[stack.length - 1] !== char)
-                    return null;
-                stack.pop();
-                if (!stack.length)
-                    return null;
-                safe = index + 1;
-                safeStack = [...stack];
-            }
-        }
-        if (safe < 0 || !stack.length)
-            return null;
-        return `${text.slice(start, safe).replace(/,\s*$/, '')}${safeStack.reverse().join('')}`;
-    }
-    function parseWorldSimulationJsonDraft_ACU(raw, prefill = '', requiredKeys = []) {
-        const text = stripNoise_ACU(String(raw ?? ''));
-        if (!text)
-            fail_ACU('EMPTY_RESPONSE', '$', 'non-empty JSON output', raw);
-        const candidates = text.startsWith('{') || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
-        let first = null;
-        for (const candidate of candidates) {
-            const start = candidate.indexOf('{');
-            if (start < 0)
-                continue;
-            if (balanced_ACU(candidate, start)) {
-                for (const parsed of objects_ACU(candidate)) {
-                    if (!first)
-                        first = parsed;
-                    if (!requiredKeys.length || requiredKeys.some(key => key in parsed))
-                        return { payload: parsed, truncated: false };
-                }
-                continue;
-            }
-            const salvaged = salvageDraft_ACU(candidate);
-            const parsed = salvaged ? parseLoose_ACU(salvaged) : undefined;
-            if (isRecord_ACU$4(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed)))
-                return { payload: parsed, truncated: true };
-        }
-        if (first)
-            return { payload: first, truncated: false };
-        fail_ACU('JSON_NOT_FOUND', '$', 'balanced or salvageable JSON object', text.slice(0, 300));
-    }
-    function requiredText_ACU(value, path) {
-        const result = text_ACU$2(value);
-        if (!result)
-            fail_ACU('REQUIRED_TEXT', path, 'non-empty string', value);
-        return result;
-    }
-    function optionalList_ACU(value, path) {
-        if (value === undefined)
-            return [];
-        const result = texts_ACU(value);
-        if (!Array.isArray(value) || result.length !== value.length)
-            fail_ACU('TEXT_LIST', path, 'string array', value);
-        return result;
-    }
-    function requiredList_ACU(value, path) {
-        const result = texts_ACU(value);
-        if (!Array.isArray(value) || !result.length || result.length !== value.length)
-            fail_ACU('REQUIRED_TEXT_LIST', path, 'non-empty string array', value);
-        return result;
-    }
-    function authorizedEvidenceRefs_ACU(value, path, required, snapshot) {
-        const refs = required ? requiredList_ACU(value, path) : optionalList_ACU(value, path);
-        const unauthorized = findUnauthorizedWorldSimulationEvidenceRefs_ACU(refs, snapshot);
-        if (unauthorized.length)
-            fail_ACU(snapshot ? 'EVIDENCE_REF_UNAUTHORIZED' : 'EVIDENCE_REGISTRY_REQUIRED', path, 'refs registered in current run', unauthorized);
-        return refs;
-    }
-    const SAFE_TOOL_REQUEST_METADATA_ACU = new Set(['evidenceRef', 'purpose']);
-    function normalizeToolRequestMetadata_ACU(value, action) {
-        if (action !== 'read' && action !== 'search')
-            return value;
-        const normalized = { ...value };
-        for (const key of SAFE_TOOL_REQUEST_METADATA_ACU)
-            delete normalized[key];
-        return normalized;
-    }
-    function isAuthorizedToolAddress_ACU(address) {
-        return WORLD_SIMULATION_TOOL_ADDRESSES_ACU.some(allowed => allowed.endsWith(':')
-            ? address.startsWith(allowed) && address.length > allowed.length
-            : address === allowed);
-    }
-    const LEGACY_TOOL_ADDRESS_ALIASES_ACU = {
-        '$WORLD_LEDGER': 'ledger:current',
-        '$CLOCK': 'ledger:current',
-        '$WORLD_SUMMARY': 'summary:current',
-    };
-    function normalizeToolAddress_ACU(value) {
-        const address = text_ACU$2(value);
-        return LEGACY_TOOL_ADDRESS_ALIASES_ACU[address] ?? address;
-    }
-    function normalizeLegacyToolAction_ACU(value) {
-        if (text_ACU$2(value.action))
-            return value;
-        const keys = Object.keys(value);
-        const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
-        if (keys.some(key => !allowed.has(key)))
-            return value;
-        const address = normalizeToolAddress_ACU(value.address);
-        if (address && isAuthorizedToolAddress_ACU(address))
-            return { action: 'read', reads: [address] };
-        if (Array.isArray(value.reads)) {
-            const reads = value.reads.map(normalizeToolAddress_ACU).filter(Boolean);
-            if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU))
-                return { action: 'read', reads };
-        }
-        return value;
-    }
-    function normalizeReadAction_ACU(value) {
-        if (text_ACU$2(value.action) !== 'read')
-            return value;
-        const normalized = normalizeToolRequestMetadata_ACU(value, 'read');
-        if (normalized.reads === undefined && normalized.address !== undefined) {
-            const { address: _address, ...rest } = normalized;
-            return { ...rest, reads: [normalizeToolAddress_ACU(normalized.address)] };
-        }
-        if (typeof normalized.reads === 'string')
-            return { ...normalized, reads: [normalizeToolAddress_ACU(normalized.reads)] };
-        if (Array.isArray(normalized.reads))
-            return { ...normalized, reads: normalized.reads.map(normalizeToolAddress_ACU) };
-        return normalized;
-    }
-    function parseWorldSimulationMainAction_ACU(value, allowDelegate = true, evidenceRegistry) {
-        if (!isRecord_ACU$4(value))
-            fail_ACU('OBJECT_REQUIRED', '$', 'object', value);
-        const normalizedValue = normalizeLegacyToolAction_ACU(value);
-        const action = text_ACU$2(normalizedValue.action);
-        if (action === 'read') {
-            const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
-            const reads = requiredList_ACU(raw.reads, '$.reads');
-            const invalid = reads.find(address => !isAuthorizedToolAddress_ACU(address));
-            if (invalid)
-                fail_ACU('INVALID_TOOL_ADDRESS', '$.reads', WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | '), invalid);
-            return { kind: 'read', reads };
-        }
-        if (action === 'search') {
-            const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
-            let maxResults = 10;
-            if (raw.maxResults !== undefined) {
-                if (!Number.isInteger(raw.maxResults) || Number(raw.maxResults) < 1 || Number(raw.maxResults) > 50)
-                    fail_ACU('INVALID_MAX_RESULTS', '$.maxResults', 'integer from 1 to 50', raw.maxResults);
-                maxResults = Number(raw.maxResults);
-            }
-            if (raw.isRegex !== undefined && typeof raw.isRegex !== 'boolean')
-                fail_ACU('BOOLEAN_REQUIRED', '$.isRegex', 'boolean', raw.isRegex);
-            return { kind: 'search', query: requiredText_ACU(raw.query, '$.query'), scope: optionalList_ACU(raw.scope, '$.scope'), maxResults, isRegex: raw.isRegex === true };
-        }
-        if (action === 'delegate') {
-            if (!allowDelegate)
-                fail_ACU('DELEGATION_BUDGET_EXHAUSTED', '$.action', 'non-delegate action', action);
-            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'delegations']);
-            if (!Array.isArray(raw.delegations) || !raw.delegations.length)
-                fail_ACU('DELEGATIONS_REQUIRED', '$.delegations', 'non-empty array', raw.delegations);
-            return { kind: 'delegate', delegations: raw.delegations.map((item, index) => {
-                    const delegation = closedObject_ACU(item, `$.delegations[${index}]`, ['agentName', 'instruction'], ['reads']);
-                    return { agentName: requiredText_ACU(delegation.agentName, `$.delegations[${index}].agentName`), instruction: requiredText_ACU(delegation.instruction, `$.delegations[${index}].instruction`), reads: optionalList_ACU(delegation.reads, `$.delegations[${index}].reads`) };
-                }) };
-        }
-        if (action === 'finalize') {
-            const raw = closedObject_ACU(normalizedValue, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
-            const outcome = text_ACU$2(raw.outcome);
-            if (!TERMINALS_ACU.includes(outcome))
-                fail_ACU('INVALID_OUTCOME', '$.outcome', TERMINALS_ACU.join(' | '), raw.outcome);
-            return { kind: 'finalize', outcome: outcome, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
-        }
-        if (action === 'block') {
-            const reason = text_ACU$2(normalizedValue.reason);
-            const blockValue = !Object.prototype.hasOwnProperty.call(normalizedValue, 'unresolved') && reason
-                ? { ...normalizedValue, unresolved: [reason] }
-                : normalizedValue;
-            const raw = closedObject_ACU(blockValue, '$', ['action', 'reason', 'unresolved']);
-            return { kind: 'block', reason: requiredText_ACU(raw.reason, '$.reason'), unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
-        }
-        fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', normalizedValue.action);
-    }
-    function closedObject_ACU(value, path, required, optional = []) {
-        if (!isRecord_ACU$4(value))
-            fail_ACU('OBJECT_REQUIRED', path, 'object', value);
-        for (const key of required)
-            if (!Object.prototype.hasOwnProperty.call(value, key))
-                fail_ACU('MISSING_FIELD', `${path}.${key}`, 'required field', undefined);
-        const allowed = new Set([...required, ...optional]);
-        for (const key of Object.keys(value))
-            if (!allowed.has(key))
-                fail_ACU('UNKNOWN_FIELD', `${path}.${key}`, 'no additional fields', value[key]);
-        return value;
-    }
-    function stagePlan_ACU(value, path = '$.plan') {
-        const raw = closedObject_ACU(value, path, ['schemaVersion', 'title', 'objective', 'impactScope', 'factsToVerify', 'plannedTools', 'plannedSpecialists', 'expectedLedgerChanges', 'convergenceConditions', 'blockingConditions', 'completedSteps', 'nextStep']);
-        if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
-            fail_ACU('INVALID_SCHEMA_VERSION', `${path}.schemaVersion`, String(WORLD_SIMULATION_SCHEMA_VERSION_ACU), raw.schemaVersion);
-        const expectedLedgerChanges = requiredList_ACU(raw.expectedLedgerChanges, `${path}.expectedLedgerChanges`);
-        for (const item of expectedLedgerChanges)
-            if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(item))
-                fail_ACU('INVALID_LEDGER_MODULE', `${path}.expectedLedgerChanges`, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), item);
-        return {
-            schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
-            title: requiredText_ACU(raw.title, `${path}.title`),
-            objective: requiredText_ACU(raw.objective, `${path}.objective`),
-            impactScope: requiredList_ACU(raw.impactScope, `${path}.impactScope`),
-            factsToVerify: texts_ACU(raw.factsToVerify),
-            plannedTools: texts_ACU(raw.plannedTools),
-            plannedSpecialists: texts_ACU(raw.plannedSpecialists),
-            expectedLedgerChanges: expectedLedgerChanges,
-            convergenceConditions: requiredList_ACU(raw.convergenceConditions, `${path}.convergenceConditions`),
-            blockingConditions: texts_ACU(raw.blockingConditions),
-            completedSteps: texts_ACU(raw.completedSteps),
-            nextStep: requiredText_ACU(raw.nextStep, `${path}.nextStep`),
-        };
-    }
-    function parseWorldSimulationPlannerOutput_ACU(value) {
-        const raw = closedObject_ACU(value, '$', ['action', 'summary', 'plan']);
-        const action = text_ACU$2(raw.action);
-        if (action !== 'plan')
-            fail_ACU('INVALID_PLANNER_ACTION', '$.action', 'plan', raw.action);
-        return { action, summary: requiredText_ACU(raw.summary, '$.summary'), plan: stagePlan_ACU(raw.plan) };
-    }
-    function normalizeSpecialistStatus_ACU(value) {
-        const status = text_ACU$2(value.status);
-        const hasNonEmptyPatch = isRecord_ACU$4(value.patch) && Object.keys(value.patch).length > 0;
-        if (['success', 'completed', 'complete', 'done', 'ok'].includes(status) && hasNonEmptyPatch)
-            return { ...value, status: 'candidate' };
-        if (status === 'unchanged' && !Object.prototype.hasOwnProperty.call(value, 'patch'))
-            return { ...value, status: 'no_change' };
-        if (status === 'error' || status === 'failure')
-            return { ...value, status: 'failed' };
-        if (status === 'block' && Object.prototype.hasOwnProperty.call(value, 'unresolved'))
-            return { ...value, status: 'blocked' };
-        return value;
-    }
-    function invalidSpecialistPatch_ACU(path, expected, actual) {
-        fail_ACU('INVALID_SPECIALIST_PATCH', path, expected, actual);
-    }
-    function specialistStringList_ACU(value, path) {
-        if (!coerceWorldSimulationStringArray_ACU(value).ok) {
-            invalidSpecialistPatch_ACU(path, 'string array with non-empty items', value);
-        }
-    }
-    function specialistGuidanceSignals_ACU(value, path) {
-        if (!Array.isArray(value))
-            invalidSpecialistPatch_ACU(path, 'array of {text, voice, sourceId?}', value);
-        value.forEach((item, index) => {
-            if (!isRecord_ACU$4(item))
-                invalidSpecialistPatch_ACU(`${path}[${index}]`, 'object', item);
-            specialistPatchRecord_ACU(item, `${path}[${index}]`, ['text', 'voice', 'sourceId']);
-            if (!text_ACU$2(item.text))
-                invalidSpecialistPatch_ACU(`${path}[${index}].text`, 'non-empty string', item.text);
-            if (!coerceWorldSimulationEnum_ACU(item.voice, WORLD_GUIDANCE_SIGNAL_VOICES_ACU).ok) {
-                invalidSpecialistPatch_ACU(`${path}[${index}].voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), item.voice);
-            }
-            if (item.sourceId !== undefined && !text_ACU$2(item.sourceId))
-                invalidSpecialistPatch_ACU(`${path}[${index}].sourceId`, 'non-empty string', item.sourceId);
-        });
-    }
-    function parseReviewerGuidanceSignals_ACU(value, path) {
-        if (!Array.isArray(value))
-            fail_ACU('GUIDANCE_SIGNALS_REQUIRED', path, 'array of {text, voice, sourceId?}', value);
-        return value.map((item, index) => {
-            const itemPath = `${path}[${index}]`;
-            if (typeof item === 'string') {
-                const text = text_ACU$2(item);
-                if (!text)
-                    fail_ACU('TEXT_LIST', itemPath, 'non-empty string or signal object', item);
-                return { text, voice: 'ambient' };
-            }
-            const raw = closedObject_ACU(item, itemPath, ['text', 'voice'], ['sourceId']);
-            const voice = text_ACU$2(raw.voice);
-            if (!WORLD_GUIDANCE_SIGNAL_VOICES_ACU.includes(voice))
-                fail_ACU('INVALID_GUIDANCE_VOICE', `${itemPath}.voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), raw.voice);
-            const signal = { text: requiredText_ACU(raw.text, `${itemPath}.text`), voice: voice };
-            if (raw.sourceId !== undefined)
-                signal.sourceId = requiredText_ACU(raw.sourceId, `${itemPath}.sourceId`);
-            return signal;
-        });
-    }
-    function specialistPatchRecord_ACU(value, path, allowed) {
-        if (!isRecord_ACU$4(value))
-            invalidSpecialistPatch_ACU(path, 'object', value);
-        for (const key of Object.keys(value)) {
-            if (!allowed.includes(key))
-                invalidSpecialistPatch_ACU(`${path}.${key}`, 'no additional fields', value[key]);
-        }
-        return value;
-    }
-    function validateWorldSimulationSpecialistPatch_ACU(value) {
-        if (!isRecord_ACU$4(value) || !Object.keys(value).length)
-            invalidSpecialistPatch_ACU('$.patch', 'non-empty ledger patch object', value);
-        for (const [module, patch] of Object.entries(value)) {
-            const path = `$.patch.${module}`;
-            if (!WORLD_SIMULATION_LEDGER_MODULES_ACU.includes(module) && module !== 'chronicleArchive') {
-                invalidSpecialistPatch_ACU(path, [...WORLD_SIMULATION_LEDGER_MODULES_ACU, 'chronicleArchive'].join(' | '), patch);
-            }
-            if (module === 'chronicleArchive') {
-                if (!isRecord_ACU$4(patch))
-                    invalidSpecialistPatch_ACU(path, 'object', patch);
-                const raw = specialistPatchRecord_ACU(patch, path, ['archiveEntries', 'overviewRows', 'collapseRefs']);
-                if (!Array.isArray(raw.archiveEntries) || !raw.archiveEntries.length)
-                    invalidSpecialistPatch_ACU(`${path}.archiveEntries`, 'non-empty array', raw.archiveEntries);
-                if (!Array.isArray(raw.overviewRows) || !raw.overviewRows.length)
-                    invalidSpecialistPatch_ACU(`${path}.overviewRows`, 'non-empty array', raw.overviewRows);
-                continue;
-            }
-            if (module === 'dimensions' || module === 'seeds' || module === 'actors' || module === 'rumors') {
-                const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
-                if (!Array.isArray(raw.upsert) || !raw.upsert.length)
-                    invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
-                raw.upsert.forEach((item, index) => {
-                    if (!isRecord_ACU$4(item))
-                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
-                    if (item.id !== undefined && !text_ACU$2(item.id))
-                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
-                    const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
-                    if (item[labelField] !== undefined && !text_ACU$2(item[labelField])) {
-                        invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
-                    }
-                    if (item.expectedRevision !== undefined) {
-                        const revision = coerceWorldSimulationInteger_ACU(item.expectedRevision);
-                        if (!revision.ok || revision.value < 0) {
-                            invalidSpecialistPatch_ACU(`${path}.upsert[${index}].expectedRevision`, 'non-negative integer', item.expectedRevision);
-                        }
-                    }
-                });
-                continue;
-            }
-            if (module === 'chronicle') {
-                const raw = specialistPatchRecord_ACU(patch, path, ['append']);
-                if (!Array.isArray(raw.append) || !raw.append.length)
-                    invalidSpecialistPatch_ACU(`${path}.append`, 'non-empty array', raw.append);
-                continue;
-            }
-            if (module === 'clock') {
-                const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs']);
-                if (!Object.keys(raw).length)
-                    invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-                if (raw.days !== undefined) {
-                    const days = coerceWorldSimulationInteger_ACU(raw.days);
-                    if (!days.ok || days.value < 0)
-                        invalidSpecialistPatch_ACU(`${path}.days`, 'non-negative integer', raw.days);
-                }
-                if (raw.storyTime !== undefined && typeof raw.storyTime !== 'string')
-                    invalidSpecialistPatch_ACU(`${path}.storyTime`, 'string', raw.storyTime);
-                if (raw.slot !== undefined && typeof raw.slot !== 'string')
-                    invalidSpecialistPatch_ACU(`${path}.slot`, 'string', raw.slot);
-                if (raw.evidenceRefs !== undefined)
-                    specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
-                continue;
-            }
-            if (module === 'player') {
-                const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs']);
-                if (!Object.keys(raw).length)
-                    invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-                if (raw.contact !== undefined && !coerceWorldSimulationEnum_ACU(raw.contact, WORLD_PLAYER_CONTACTS_ACU).ok) {
-                    invalidSpecialistPatch_ACU(`${path}.contact`, WORLD_PLAYER_CONTACTS_ACU.join(' | '), raw.contact);
-                }
-                if (raw.evidenceRefs !== undefined)
-                    specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
-                if (raw.location !== undefined && raw.location !== null) {
-                    if (!isRecord_ACU$4(raw.location))
-                        invalidSpecialistPatch_ACU(`${path}.location`, 'object or null', raw.location);
-                    specialistPatchRecord_ACU(raw.location, `${path}.location`, ['region', 'place']);
-                    if (!text_ACU$2(raw.location.region))
-                        invalidSpecialistPatch_ACU(`${path}.location.region`, 'non-empty string', raw.location.region);
-                    if (raw.location.place !== undefined && typeof raw.location.place !== 'string')
-                        invalidSpecialistPatch_ACU(`${path}.location.place`, 'string', raw.location.place);
-                }
-                continue;
-            }
-            if (module !== 'guidance')
-                invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
-            const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs']);
-            if (!Object.keys(raw).length)
-                invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
-            if (raw.signals !== undefined)
-                specialistGuidanceSignals_ACU(raw.signals, `${path}.signals`);
-            if (raw.excludedFacts !== undefined)
-                specialistStringList_ACU(raw.excludedFacts, `${path}.excludedFacts`);
-            if (raw.evidenceRefs !== undefined)
-                specialistStringList_ACU(raw.evidenceRefs, `${path}.evidenceRefs`);
-        }
-        return value;
-    }
-    function parseWorldSimulationSpecialistResult_ACU(value, evidenceRegistry) {
-        if (!isRecord_ACU$4(value))
-            fail_ACU('OBJECT_REQUIRED', '$', 'specialist result object', value);
-        const normalized = normalizeSpecialistStatus_ACU(value);
-        const status = text_ACU$2(normalized.status);
-        const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
-        if (status === 'candidate') {
-            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'patch', 'summary', 'evidenceRefs', 'uncertainties']);
-            const patch = validateWorldSimulationSpecialistPatch_ACU(raw.patch);
-            return { status, agentName, patch, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', true, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
-        }
-        if (status === 'no_change') {
-            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'summary', 'evidenceRefs', 'uncertainties']);
-            return { status, agentName, summary: requiredText_ACU(raw.summary, '$.summary'), evidenceRefs: authorizedEvidenceRefs_ACU(raw.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry), uncertainties: texts_ACU(raw.uncertainties) };
-        }
-        if (status === 'failed') {
-            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'reasonCode', 'message']);
-            return { status, agentName, reasonCode: requiredText_ACU(raw.reasonCode, '$.reasonCode'), message: requiredText_ACU(raw.message, '$.message') };
-        }
-        if (status === 'blocked') {
-            const raw = closedObject_ACU(normalized, '$', ['status', 'agentName', 'unresolved']);
-            return { status, agentName, unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
-        }
-        fail_ACU('INVALID_SPECIALIST_STATUS', '$.status', 'candidate | no_change | failed | blocked', value.status);
-    }
-    function parseWorldSimulationReviewerResult_ACU(value) {
-        const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds'], ['guidance']);
-        const verdict = text_ACU$2(raw.verdict);
-        if (!['accept', 'revise', 'reject'].includes(verdict))
-            fail_ACU('INVALID_REVIEW_VERDICT', '$.verdict', 'accept | revise | reject', raw.verdict);
-        if (!Array.isArray(raw.findings))
-            fail_ACU('FINDINGS_REQUIRED', '$.findings', 'array', raw.findings);
-        const findings = raw.findings.map((item, index) => {
-            const finding = closedObject_ACU(item, `$.findings[${index}]`, ['severity', 'reasonCode', 'path', 'expected', 'actual']);
-            const severity = text_ACU$2(finding.severity);
-            if (!['blocking', 'major', 'minor'].includes(severity))
-                fail_ACU('INVALID_FINDING_SEVERITY', `$.findings[${index}].severity`, 'blocking | major | minor', finding.severity);
-            return { severity: severity, reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
-        });
-        let guidance;
-        if (verdict === 'accept' && raw.guidance === undefined)
-            fail_ACU('REVIEW_GUIDANCE_REQUIRED', '$.guidance', 'guidance object required when verdict is accept', raw.guidance);
-        if (raw.guidance !== undefined) {
-            if (verdict !== 'accept')
-                fail_ACU('REVIEW_GUIDANCE_REQUIRES_ACCEPT', '$.guidance', 'guidance only when verdict is accept', raw.guidance);
-            const parsed = closedObject_ACU(raw.guidance, '$.guidance', ['signals', 'excludedFacts']);
-            const signals = parseReviewerGuidanceSignals_ACU(parsed.signals, '$.guidance.signals');
-            const excludedFacts = texts_ACU(parsed.excludedFacts);
-            if (!Array.isArray(parsed.excludedFacts) || excludedFacts.length !== parsed.excludedFacts.length)
-                fail_ACU('TEXT_LIST', '$.guidance.excludedFacts', 'string array', parsed.excludedFacts);
-            guidance = { signals, excludedFacts };
-        }
-        return {
-            verdict: verdict,
-            summary: requiredText_ACU(raw.summary, '$.summary'),
-            findings,
-            acceptedCandidateIds: texts_ACU(raw.acceptedCandidateIds),
-            ...(guidance ? { guidance } : {}),
-        };
-    }
-    function collectActionObjects_ACU(raw, prefill) {
-        const text = stripNoise_ACU(String(raw ?? ''));
-        if (!text)
-            fail_ACU('EMPTY_RESPONSE', '$', 'non-empty JSON output', raw);
-        const candidates = text.startsWith('{') || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
-        for (const candidate of candidates) {
-            const records = objects_ACU(candidate);
-            if (records.length)
-                return records;
-        }
-        fail_ACU('JSON_NOT_FOUND', '$', 'balanced JSON object', text.slice(0, 300));
-    }
-    function parseWorldSimulationMainOutput_ACU(raw, prefill = '', allowDelegate = true, evidenceRegistry) {
-        const records = collectActionObjects_ACU(raw, prefill).map(normalizeLegacyToolAction_ACU);
-        const tools = records.filter(record => record.action === 'read' || record.action === 'search');
-        if (tools.length) {
-            return { kind: 'tools', calls: tools.map(record => parseWorldSimulationMainAction_ACU(record, allowDelegate, evidenceRegistry)) };
-        }
-        const action = records.find(record => Object.prototype.hasOwnProperty.call(record, 'action')) ?? records[0];
-        return parseWorldSimulationMainAction_ACU(action, allowDelegate, evidenceRegistry);
-    }
-    /**
-     * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 合法动作样例。
-     * 与智能续写 renderMainProtocolRejection_ACU 同语义：快速/推理模型对
-     * 「照这个样子写」远比对「请修正」服从；同时显式禁止模仿系统提示词里的
-     * WORLD_SIMULATION_ENGINE_SEAM 标记——推理模型会把这些标记当输出格式照抄。
-     */
-    function renderWorldSimulationDirectorProtocolRejection_ACU(issue, allowDelegate) {
-        const lines = [
-            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
-            'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
-            'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
-            'delegate 只能包含 action、delegations；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
-            '动作格式必须是下面之一：',
-            '{"action":"read","reads":["ledger:current","summary:current"]}',
-            '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
-        ];
-        if (allowDelegate)
-            lines.push('{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":[]},{"agentName":"undercurrent-analyst","instruction":"更新维度与暗流","reads":[]}]}');
-        lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
-        lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
-        lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
-        lines.push('{"action":"finalize","outcome":"no_change","summary":"证据表明无需变更","evidenceRefs":["evidence:已颁发引用"]}');
-        lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
-        return lines.join('\n');
-    }
-    function renderWorldSimulationSpecialistProtocolRejection_ACU(issue, agentName, writableModules) {
-        const lines = [
-            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或额外字段。',
-            'status 必须精确为 candidate、no_change、failed、blocked 之一。',
-            `agentName 必须精确为 ${agentName}。`,
-        ];
-        if (writableModules.length) {
-            lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
-            lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
-            const firstModule = writableModules[0];
-            const patchExample = firstModule === 'dimensions'
-                ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
-                : firstModule === 'seeds'
-                    ? { upsert: [{ id: '条目ID', title: '种子标题', expectedRevision: 0 }] }
-                    : firstModule === 'actors'
-                        ? { upsert: [{ id: '条目ID', name: '角色名称', expectedRevision: 0 }] }
-                        : firstModule === 'chronicle'
-                            ? { append: [{}] }
-                            : firstModule === 'guidance'
-                                ? { signals: [{ text: '角色可感知信号', voice: 'ambient' }] }
-                                : firstModule === 'player'
-                                    ? { contact: 'open' }
-                                    : firstModule === 'rumors'
-                                        ? { upsert: [{ id: '条目ID', fact: '传闻事实', expectedRevision: 0 }] }
-                                        : { days: 1 };
-            lines.push(JSON.stringify({
-                status: 'candidate',
-                agentName,
-                patch: { [firstModule]: patchExample },
-                summary: '基于已颁发证据形成候选',
-                evidenceRefs: ['evidence:已颁发引用'],
-                uncertainties: [],
-            }));
-        }
-        lines.push(JSON.stringify({ status: 'no_change', agentName, summary: '没有需要修改的内容', evidenceRefs: [], uncertainties: [] }));
-        lines.push(JSON.stringify({ status: 'failed', agentName, reasonCode: 'REASON_CODE', message: '失败原因' }));
-        lines.push(JSON.stringify({ status: 'blocked', agentName, unresolved: ['仍需解决的问题'] }));
-        return lines.join('\n');
-    }
-    function renderWorldSimulationReviewerProtocolRejection_ACU(issue) {
-        return [
-            `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
-            '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时必须包含 guidance。',
-            'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
-            'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
-            'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
-            'accept 时必须包含 guidance：{"signals":[{"text":"...","voice":"ambient"}],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；无台面可感变化时 signals 为空数组并在 summary 说明。',
-            JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
-            JSON.stringify({
-                verdict: 'revise',
-                summary: '候选仍需修正',
-                findings: [{ severity: 'major', reasonCode: 'CAUSE_GAP', path: '$.clock', expected: '时间与因果连续', actual: '缺少因果说明' }],
-                acceptedCandidateIds: [],
-            }),
-            JSON.stringify({
-                verdict: 'reject',
-                summary: '候选不满足证据约束',
-                findings: [{ severity: 'blocking', reasonCode: 'EVIDENCE_GAP', path: '$', expected: '可验证证据', actual: '缺失' }],
-                acceptedCandidateIds: [],
-            }),
-        ].join('\n');
-    }
-    function renderWorldSimulationPlannerProtocolRejection_ACU(issue) {
-        return [
-            `你上一次的阶段规划输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
-            '顶层必须且只能包含 action、summary、plan；action 必须精确为 plan，summary 必须是非空字符串，plan 不得省略、设为 null 或只返回摘要。',
-            `plan 必须完整包含 schemaVersion、title、objective、impactScope、factsToVerify、plannedTools、plannedSpecialists、expectedLedgerChanges、convergenceConditions、blockingConditions、completedSteps、nextStep。expectedLedgerChanges 只能使用：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。`,
-            JSON.stringify({
-                action: 'plan',
-                summary: '锁定本轮幕后推演焦点',
-                plan: {
-                    schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
-                    title: '推演本轮幕后动态',
-                    objective: '根据最新剧情推算幕后世界演变',
-                    impactScope: ['当前世界状态'],
-                    factsToVerify: ['时间是否推进'],
-                    plannedTools: ['read'],
-                    plannedSpecialists: ['timekeeper', 'undercurrent-analyst'],
-                    expectedLedgerChanges: ['clock'],
-                    convergenceConditions: ['证据与候选闭合'],
-                    blockingConditions: ['缺少锚点'],
-                    completedSteps: [],
-                    nextStep: '读取当前账本',
-                },
-            }),
-        ].join('\n');
-    }
-    function mergeDraftValue_ACU(base, continuation, path, depth) {
-        if (depth > 16)
-            fail_ACU('DRAFT_MERGE_DEPTH', path, 'nesting depth at most 16', depth);
-        if (base === undefined)
-            return continuation;
-        if (continuation === undefined)
-            return base;
-        if (Array.isArray(base) && Array.isArray(continuation))
-            return [...base, ...continuation];
-        if (isRecord_ACU$4(base) && isRecord_ACU$4(continuation)) {
-            const result = { ...base };
-            for (const [key, value] of Object.entries(continuation))
-                result[key] = mergeDraftValue_ACU(result[key], value, `${path}.${key}`, depth + 1);
-            return result;
-        }
-        if (Object.is(base, continuation))
-            return base;
-        fail_ACU('DRAFT_MERGE_CONFLICT', path, 'matching scalar values or mergeable arrays/objects', { base, continuation });
-    }
-    function mergeWorldSimulationJsonDrafts_ACU(base, continuation) {
-        return mergeDraftValue_ACU(base, continuation, '$', 0);
-    }
-    function compactWorldSimulationProtocolError_ACU(error) {
-        if (error instanceof WorldSimulationValidationError_ACU && error.error.code === 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID') {
-            const details = error.error.details ?? {};
-            return { reasonCode: text_ACU$2(details.reasonCode) || 'PROTOCOL_INVALID', path: text_ACU$2(details.path) || '$', expected: text_ACU$2(details.expected) || 'valid protocol value', actual: details.actual };
-        }
-        return { reasonCode: 'PROTOCOL_UNKNOWN_ERROR', path: '$', expected: 'valid protocol output', actual: error instanceof Error ? error.message : String(error) };
-    }
-    function createWorldSimulationProtocolRepairState_ACU(maxAttempts = 2) {
-        return { attempts: 0, maxAttempts: Math.max(0, Math.floor(maxAttempts)), fingerprints: {} };
-    }
-    function recordWorldSimulationProtocolFailure_ACU(state, error) {
-        const issue = compactWorldSimulationProtocolError_ACU(error);
-        const fingerprint = `${issue.reasonCode}|${issue.path}|${issue.expected}`;
-        state.attempts += 1;
-        state.fingerprints[fingerprint] = (state.fingerprints[fingerprint] ?? 0) + 1;
-        return { retry: state.attempts <= state.maxAttempts && state.fingerprints[fingerprint] < 2, fingerprint, issue };
-    }
-    function parseWorldSimulationRequirementsMaintainerOutput_ACU(payload) {
-        const keys = Object.keys(payload);
-        if (keys.some(key => !['summary', 'requirements'].includes(key)))
-            fail_ACU('UNEXPECTED_FIELD', '$', 'only summary and requirements', keys.join(','));
-        const summary = text_ACU$2(payload.summary);
-        if (!summary)
-            fail_ACU('MISSING_FIELD', '$.summary', 'non-empty string', payload.summary);
-        if (!Array.isArray(payload.requirements))
-            fail_ACU('INVALID_TYPE', '$.requirements', 'string[]', payload.requirements);
-        const requirements = [];
-        const seen = new Set();
-        for (const [index, item] of payload.requirements.entries()) {
-            if (typeof item !== 'string')
-                fail_ACU('INVALID_TYPE', `$.requirements[${index}]`, 'non-empty string', item);
-            const text = item.trim();
-            if (!text)
-                fail_ACU('EMPTY_TEXT', `$.requirements[${index}]`, 'non-empty string', item);
-            if (seen.has(text))
-                continue;
-            seen.add(text);
-            requirements.push(text);
-        }
-        return { summary, requirements };
-    }
-    function renderWorldSimulationRequirementsMaintainerProtocolRejection_ACU(issue) {
-        return [
-            `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或其他字段。',
-            '顶层必须且只能包含 summary 与 requirements。',
-            'summary 必须是非空字符串。',
-            'requirements 必须是字符串数组（允许空数组），每条必须是非空字符串。',
-            '这是全量替换清单，不是增量补丁。没有撤回依据时不得把已有清单清空。',
-            '示例：{"summary":"合并了用户补充的节奏要求","requirements":["不要提前揭底牌","用第一人称"]}',
-        ].join('\n');
     }
 
     const RUN_STATE_FIELD_ACU = WORLD_SIMULATION_RUN_STATE_FIELD_ACU;
@@ -158330,6 +158684,293 @@ Expected function or array of functions, received type ${typeof value}.`
         return { status: 'sent', response: await input.invoke(messages), messages, totalTokens, compressed };
     }
 
+    const WORKFLOW_AGENTS_ACU = ['timekeeper', 'undercurrent-analyst', 'dramatis-keeper'];
+    const PROJECTION_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player'];
+    function cloneLedger_ACU(ledger) {
+        return JSON.parse(JSON.stringify(ledger));
+    }
+    function requireLedger_ACU(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.pendingFixes)) {
+            throw new Error('WORLD_SIMULATION_WORKFLOW_LEDGER_REQUIRED');
+        }
+        return value;
+    }
+    function anchorText_ACU$1(context) {
+        return typeof context.anchorMessage === 'string' ? context.anchorMessage : '';
+    }
+    function collisionReport_ACU(context) {
+        const value = context.worldCollisions;
+        if (!value || typeof value !== 'object' || Array.isArray(value) || !('playerContact' in value))
+            return undefined;
+        return value;
+    }
+    function worldSimulationProjectionFingerprint_ACU(ledger) {
+        return sha256HexSync_ACU(JSON.stringify({
+            clock: ledger.clock,
+            dimensions: ledger.dimensions,
+            seeds: ledger.seeds,
+            actors: ledger.actors,
+            rumors: ledger.rumors,
+            player: ledger.player,
+        }));
+    }
+    function authorizedRefs_ACU(registry) {
+        return new Set(snapshotWorldSimulationEvidenceRegistry_ACU(registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
+    }
+    function agentSkipped_ACU(agentName, skipModules) {
+        const modules = findWorldSimulationAgentDefinition_ACU(agentName)?.writableModules ?? [];
+        return modules.length > 0 && modules.every(module => skipModules.has(module));
+    }
+    function fixesForAgent_ACU(ledger, agentName) {
+        const modules = new Set(findWorldSimulationAgentDefinition_ACU(agentName)?.writableModules ?? []);
+        return ledger.pendingFixes.filter(item => modules.has(item.module));
+    }
+    function formatFixes_ACU(fixes) {
+        if (!fixes.length)
+            return '无';
+        return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => `${violation.path}: ${violation.message}`).join('；') || item.lastError}`).join(' | ');
+    }
+    function instructionFor_ACU(agentName, focus, ledger, repair) {
+        const modules = findWorldSimulationAgentDefinition_ACU(agentName)?.writableModules ?? [];
+        const fixes = repair
+            ? fixesForAgent_ACU(ledger, agentName).filter(item => item.attempts < WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU)
+            : fixesForAgent_ACU(ledger, agentName);
+        const lines = [
+            repair ? '这是独立预算的自动修复派工。只提交违规模块的增量 patch，不要重写无关模块。' : `本轮焦点：${focus}`,
+            `只维护这些模块：${modules.join(', ') || '无'}。正文里已经发生或已经变化的事实，直接 upsert 到自己的模块。`,
+            `本模块待修复：${formatFixes_ACU(fixes)}`,
+            formatWorldSimulationLedgerRequiredFields_ACU(),
+        ];
+        return lines.join('\n');
+    }
+    function failedOutcome_ACU(agentName, error) {
+        return {
+            agentName,
+            status: 'failed',
+            summary: error instanceof Error ? error.message : String(error),
+            evidenceRefs: [],
+            uncertainties: [],
+            reasonCode: 'WORLD_SIMULATION_SUBAGENT_FAILED',
+        };
+    }
+    function needsEscalation_ACU(ledger, autoFixEnabled) {
+        if (!ledger.pendingFixes.length)
+            return false;
+        if (!autoFixEnabled)
+            return true;
+        return ledger.pendingFixes.some(item => item.attempts >= WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU);
+    }
+    function seedsClosedThisRound_ACU(before, after) {
+        const previous = new Map(before.seeds.map(seed => [seed.id, seed.status]));
+        return after.seeds.some(seed => (seed.status === 'resolved' || seed.status === 'retired') && previous.get(seed.id) !== seed.status);
+    }
+    function applySafely_ACU(ledger, candidates, authorized, settings, anchorMessage) {
+        if (!candidates.length)
+            return { ledger, accepted: [], rejected: [] };
+        const rejected = [];
+        const tryApply = (base, batch) => {
+            try {
+                return { ledger: applyWorldSimulationCandidatesDetailed_ACU(base, batch, authorized, settings, { anchorMessage }).ledger };
+            }
+            catch (error) {
+                return { error };
+            }
+        };
+        const whole = tryApply(ledger, candidates);
+        if ('ledger' in whole)
+            return { ledger: whole.ledger, accepted: [...candidates], rejected };
+        if (candidates.length === 1) {
+            rejected.push(failedOutcome_ACU(candidates[0].agentName, whole.error));
+            return { ledger, accepted: [], rejected };
+        }
+        const accepted = [];
+        for (const candidate of candidates) {
+            const single = tryApply(ledger, [candidate]);
+            if ('ledger' in single)
+                accepted.push(candidate);
+            else
+                rejected.push(failedOutcome_ACU(candidate.agentName, single.error));
+        }
+        if (!accepted.length)
+            return { ledger, accepted, rejected };
+        const combined = tryApply(ledger, accepted);
+        if ('ledger' in combined)
+            return { ledger: combined.ledger, accepted, rejected };
+        let rolling = ledger;
+        const kept = [];
+        for (const candidate of accepted) {
+            const single = tryApply(rolling, [candidate]);
+            if ('ledger' in single) {
+                rolling = single.ledger;
+                kept.push(candidate);
+            }
+            else {
+                rejected.push(failedOutcome_ACU(candidate.agentName, single.error));
+            }
+        }
+        return { ledger: rolling, accepted: kept, rejected };
+    }
+    async function runWorldSimulationGuidanceComposer_ACU(input) {
+        const agentName = 'guidance-composer';
+        try {
+            return await input.subagents.run({
+                delegation: {
+                    agentName,
+                    instruction: instructionFor_ACU(agentName, input.focus, input.ledger, false),
+                    reads: ['ledger:current', 'anchor:message', 'player:current'],
+                },
+                settings: input.settings,
+                promptContext: { ...input.promptContext, worldState: input.ledger },
+                registry: input.registry,
+                tools: input.tools,
+                runId: input.identity.runId,
+                candidateSeq: input.candidateSeq,
+            });
+        }
+        catch (error) {
+            return failedOutcome_ACU(agentName, error);
+        }
+    }
+    async function runWorldSimulationWorkflow_ACU(input) {
+        const base = cloneLedger_ACU(requireLedger_ACU(input.promptContext.worldState));
+        const skipModules = new Set(input.opening.skipModules);
+        const outcomes = [];
+        const seq = new Map();
+        const anchorMessage = anchorText_ACU$1(input.promptContext);
+        const authorized = authorizedRefs_ACU(input.registry);
+        const nextSeq = (agentName) => {
+            const value = (seq.get(agentName) ?? 0) + 1;
+            seq.set(agentName, value);
+            return value;
+        };
+        const runAgent = async (agentName, repair, ledger) => {
+            try {
+                return await input.subagents.run({
+                    delegation: {
+                        agentName,
+                        instruction: instructionFor_ACU(agentName, input.opening.focus, ledger, repair),
+                        reads: ['ledger:current', 'anchor:message'],
+                    },
+                    settings: input.settings,
+                    promptContext: { ...input.promptContext, worldState: ledger },
+                    registry: input.registry,
+                    tools: input.tools,
+                    runId: input.identity.runId,
+                    candidateSeq: nextSeq(agentName),
+                });
+            }
+            catch (error) {
+                return failedOutcome_ACU(agentName, error);
+            }
+        };
+        if (input.anchorMaterialsCommitted && base.pendingFixes.length === 0) {
+            return {
+                outcome: 'no_change',
+                summary: '正文指纹未变且没有待修复项，整轮跳过',
+                outcomes,
+                pendingFixes: [],
+                escalated: false,
+                ledger: base,
+            };
+        }
+        const projectionBefore = worldSimulationProjectionFingerprint_ACU(base);
+        if (!agentSkipped_ACU('timekeeper', skipModules))
+            outcomes.push(await runAgent('timekeeper', false, base));
+        const parallel = ['undercurrent-analyst', 'dramatis-keeper'].filter(name => !agentSkipped_ACU(name, skipModules));
+        outcomes.push(...await Promise.all(parallel.map(name => runAgent(name, false, base))));
+        let ledger = base;
+        let accepted = [];
+        const primaryCandidates = outcomes.flatMap(item => item.candidate ? [item.candidate] : []);
+        const primary = applySafely_ACU(ledger, primaryCandidates, authorized, input.settings, anchorMessage);
+        ledger = primary.ledger;
+        accepted = primary.accepted;
+        outcomes.push(...primary.rejected);
+        const repairableAgents = [...new Set(ledger.pendingFixes
+                .filter(item => item.attempts < WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU)
+                .map(item => item.agentName))]
+            .filter((name) => !!findWorldSimulationAgentDefinition_ACU(name));
+        if (input.settings.workflow.autoFixEnabled && repairableAgents.length) {
+            const repairs = await Promise.all(repairableAgents.map(name => runAgent(name, true, ledger)));
+            outcomes.push(...repairs);
+            const repaired = applySafely_ACU(ledger, repairs.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
+            ledger = repaired.ledger;
+            accepted = [...accepted, ...repaired.accepted];
+            outcomes.push(...repaired.rejected);
+        }
+        const shouldChronicle = !agentSkipped_ACU('chronicler', skipModules) && (input.opening.dispatchChronicler
+            || ledger.chronicle.length >= input.settings.workflow.chroniclerHotThreshold
+            || seedsClosedThisRound_ACU(base, ledger));
+        if (shouldChronicle) {
+            const chronicler = await runAgent('chronicler', false, ledger);
+            outcomes.push(chronicler);
+            if (chronicler.candidate) {
+                const archived = applySafely_ACU(ledger, [chronicler.candidate], authorized, input.settings, anchorMessage);
+                ledger = archived.ledger;
+                accepted = [...accepted, ...archived.accepted];
+                outcomes.push(...archived.rejected);
+            }
+        }
+        const projectionChanged = worldSimulationProjectionFingerprint_ACU(ledger) !== projectionBefore;
+        const substantive = accepted.some(item => Object.keys(item.patch).some(key => PROJECTION_MODULES_ACU.includes(key)));
+        if (substantive && projectionChanged && !agentSkipped_ACU('guidance-composer', skipModules)) {
+            const composer = await runWorldSimulationGuidanceComposer_ACU({
+                identity: input.identity,
+                settings: input.settings,
+                promptContext: input.promptContext,
+                registry: input.registry,
+                tools: input.tools,
+                subagents: input.subagents,
+                ledger,
+                focus: input.opening.focus,
+                candidateSeq: nextSeq('guidance-composer'),
+            });
+            outcomes.push(composer);
+            if (composer.candidate) {
+                const projected = applySafely_ACU(ledger, [composer.candidate], authorized, input.settings, anchorMessage);
+                ledger = projected.ledger;
+                accepted = [...accepted, ...projected.accepted];
+                outcomes.push(...projected.rejected);
+            }
+        }
+        const escalated = needsEscalation_ACU(ledger, input.settings.workflow.autoFixEnabled);
+        const summary = escalated
+            ? `工作流完成，仍有待修复模块需要主会话处理：${ledger.pendingFixes.map(item => `${item.module}(${item.attempts})`).join('、')}`
+            : accepted.length
+                ? `固定工作流已处理 ${accepted.length} 个候选`
+                : '固定工作流没有产生账本变更';
+        if (!accepted.length) {
+            return {
+                outcome: escalated ? 'escalate' : 'no_change',
+                summary,
+                outcomes,
+                pendingFixes: ledger.pendingFixes,
+                escalated,
+                ledger,
+            };
+        }
+        const evidenceRefs = [...new Set(accepted.flatMap(item => item.evidenceRefs))];
+        return {
+            outcome: 'commit',
+            summary,
+            outcomes,
+            pendingFixes: ledger.pendingFixes,
+            escalated,
+            ledger,
+            commitCandidate: {
+                runId: input.identity.runId,
+                taskId: input.identity.taskId,
+                stageId: input.identity.stageId,
+                stageRevision: input.identity.stageRevision,
+                baseLedgerRevision: input.identity.baseLedgerRevision,
+                summary: input.opening.summary || summary,
+                acceptedCandidates: accepted,
+                evidenceRefs,
+                collisionReport: collisionReport_ACU(input.promptContext),
+            },
+        };
+    }
+    const WORLD_SIMULATION_WORKFLOW_AGENT_ORDER_ACU = WORKFLOW_AGENTS_ACU;
+
     const compact_ACU = (error) => error instanceof Error ? error.message : String(error);
     const LEGACY_BUDGET_FEEDBACK_ACU = new Set(['iteration budget exhausted', 'delegation gate exhausted']);
     const cursorKey_ACU = (identity) => `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`;
@@ -158513,6 +159154,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // failures remain capped by the repair state's per-fingerprint guard.
             const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
             let pendingReview = null;
+            let workflowEscalation = null;
             const candidateReviewFingerprint_ACU = (items) => sha256HexSync_ACU(JSON.stringify(uniqueCandidates_ACU(items).map(item => item.candidateId)));
             const startPendingReview_ACU = () => {
                 const available = uniqueCandidates_ACU(candidates);
@@ -158617,6 +159259,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                 const requestContext = resultContext_ACU(input.promptContext, input.registry, uniqueCandidates_ACU(candidates), outcomes);
+                if (workflowEscalation) {
+                    const runtimeContext = requestContext.runtimeContext && typeof requestContext.runtimeContext === 'object'
+                        ? requestContext.runtimeContext
+                        : {};
+                    requestContext.runtimeContext = { ...runtimeContext, pendingFixes: workflowEscalation.pendingFixes, escalation: workflowEscalation.summary };
+                }
                 const mainEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
                     kind: 'main_action',
                     title: `主 Agent 第 ${iteration} 轮正在工作`,
@@ -158714,6 +159362,66 @@ Expected function or array of functions, received type ${typeof value}.`
                     persist(iteration + 1);
                     continue;
                 }
+                if (action.kind === 'open_round') {
+                    const workflowEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+                        kind: 'delegation',
+                        title: '固定工作流正在执行',
+                        detail: action.focus,
+                        agentName: director,
+                        status: 'running',
+                    });
+                    let workflow;
+                    try {
+                        workflow = await runWorldSimulationWorkflow_ACU({
+                            identity: input.identity,
+                            settings: input.settings,
+                            promptContext: requestContext,
+                            registry: input.registry,
+                            tools: input.tools,
+                            opening: {
+                                summary: action.summary,
+                                focus: action.focus,
+                                dispatchChronicler: action.dispatchChronicler,
+                                skipModules: action.skipModules,
+                            },
+                            anchorMaterialsCommitted: input.anchorMaterialsCommitted === true,
+                            subagents: this.dependencies.subagents,
+                        });
+                    }
+                    catch (error) {
+                        updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, { title: '固定工作流失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+                        await persistEntry(workflowEntryId, `workflow-${iteration}-failed`);
+                        throw error;
+                    }
+                    for (const outcome of workflow.outcomes)
+                        upsertLatestOutcome_ACU(outcomes, outcome);
+                    updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, {
+                        title: `固定工作流：${workflow.outcome}`,
+                        detail: workflow.summary,
+                        ok: workflow.outcome !== 'escalate',
+                        status: workflow.outcome === 'escalate' ? 'failed' : 'done',
+                    });
+                    await persistEntry(workflowEntryId, `workflow-${iteration}`);
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify({ outcome: workflow.outcome, summary: workflow.summary, pendingFixes: workflow.pendingFixes, agents: workflow.outcomes.map(item => ({ agentName: item.agentName, status: item.status })) }) });
+                    if (workflow.outcome === 'escalate') {
+                        workflowEscalation = { summary: workflow.summary, pendingFixes: workflow.pendingFixes };
+                        persist(iteration + 1, workflow.summary);
+                        transcript.push({ role: 'user', content: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。` });
+                        continue;
+                    }
+                    await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+                    const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+                        kind: 'run_completed',
+                        title: workflow.outcome === 'no_change' ? '世界推演无变化' : `固定工作流提交（${workflow.commitCandidate?.acceptedCandidates.length ?? 0}）`,
+                        detail: workflow.summary,
+                        agentName: director,
+                    });
+                    await persistEntry(completedId, workflow.outcome === 'no_change' ? 'run-completed-no-change' : 'run-completed-commit');
+                    if (workflow.outcome === 'no_change' || !workflow.commitCandidate) {
+                        return { outcome: 'no_change', summary: workflow.summary, outcomes };
+                    }
+                    return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes };
+                }
                 if (action.kind === 'delegate') {
                     const accepted = [];
                     const rejected = [];
@@ -158770,17 +159478,12 @@ Expected function or array of functions, received type ${typeof value}.`
                         }
                     }));
                     for (let index = 0; index < settled.length; index += 1) {
-                        let outcome = settled[index];
+                        const outcome = settled[index];
                         if (outcome.candidate) {
+                            upsertCandidateRevision_ACU(candidates, outcome.candidate);
                             const authorized = new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
                             const report = preflightWorldSimulationCandidates_ACU(input.promptContext.worldState, [outcome.candidate], authorized, input.settings);
-                            if (report.blocking.length) {
-                                const detail = report.blocking.map(item => `${item.path || '$'}: ${item.message}`).join('\uff1b');
-                                outcome = { agentName: outcome.agentName, status: 'failed', summary: `\u5019\u9009\u9884\u68c0\u5931\u8d25\uff1a${detail}`, evidenceRefs: outcome.evidenceRefs, uncertainties: [], reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' };
-                                settled[index] = outcome;
-                            }
-                            else {
-                                upsertCandidateRevision_ACU(candidates, outcome.candidate);
+                            if (!report.blocking.length) {
                                 delegationsUsed += 1;
                                 perAgent.set(outcome.agentName, (perAgent.get(outcome.agentName) ?? 0) + 1);
                             }
@@ -158798,10 +159501,6 @@ Expected function or array of functions, received type ${typeof value}.`
                     const transcriptPayload = [{ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify(settled.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, candidateId: item.candidate?.candidateId }))) }];
                     if (rejected.length) {
                         transcriptPayload.push({ role: 'user', content: rejectionText });
-                    }
-                    const preflightFailures = settled.filter(item => item.reasonCode === 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED');
-                    if (preflightFailures.length) {
-                        transcriptPayload.push({ role: 'user', content: `\u5019\u9009\u5165\u5e93\u9884\u68c0\u62d2\u7edd\uff1a\n${preflightFailures.map(item => `${item.agentName} ${item.summary}`).join('\n')}\n\u8bf7\u6309\u5168\u90e8\u8fdd\u89c4\u4e00\u6b21\u6027\u4fee\u6b63\u540e\u91cd\u65b0\u6d3e\u5de5\u3002\u5b8c\u6574\u5fc5\u586b\u5b57\u6bb5\u6a21\u677f\uff1a${formatWorldSimulationLedgerRequiredFields_ACU()}\u3002\u4e0d\u5f97\u628a\u672c\u6b21\u9884\u68c0\u5931\u8d25\u5f53\u4f5c\u4efb\u52a1\u7ec8\u5c40\u3002` });
                     }
                     transcript.push(...transcriptPayload);
                     if (iteration < input.settings.agentRunBudget.maxIterations) {
@@ -158866,18 +159565,27 @@ Expected function or array of functions, received type ${typeof value}.`
                     continue;
                 }
                 const causalEvidenceRefs = [...new Set([...action.evidenceRefs, ...acceptedCandidates.flatMap(item => item.evidenceRefs)])];
-                const guidanceCandidate = reviewer.guidance ? {
-                    candidateId: `candidate:guidance:${sha256HexSync_ACU(JSON.stringify([reviewer.guidance, action.summary])).slice(0, 24)}`,
-                    agentName: 'causality-reviewer',
-                    patch: { guidance: { signals: reviewer.guidance.signals.map(item => typeof item === 'string' ? { text: item, voice: 'ambient' } : item), excludedFacts: reviewer.guidance.excludedFacts, evidenceRefs: causalEvidenceRefs } },
-                    summary: '审核员压缩的可感知 guidance',
-                    evidenceRefs: causalEvidenceRefs,
-                    uncertainties: [],
-                    writableModules: ['guidance'],
-                } : null;
-                const finalCandidates = guidanceCandidate ? [...acceptedCandidates, guidanceCandidate] : acceptedCandidates;
+                const anchorMessage = typeof input.promptContext.anchorMessage === 'string' ? input.promptContext.anchorMessage : '';
+                const baseLedger = input.promptContext.worldState;
+                let finalCandidates = acceptedCandidates;
+                const preview = applyWorldSimulationCandidatesDetailed_ACU(baseLedger, acceptedCandidates, new Set(causalEvidenceRefs), input.settings, { anchorMessage });
+                if (!preview.appliedModules.length) {
+                    const message = preview.pendingFixes.map(item => item.lastError).join('；') || '没有模块入库';
+                    persist(iteration + 1, message);
+                    const failedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'main_action', title: '候选事务应用失败，等待修订', detail: message, agentName: director, ok: false, status: 'failed' });
+                    await persistEntry(failedId, `candidate-transaction-failed-${iteration}`);
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须一次性补齐该模块全部持久化必填字段。完整必填字段模板：${formatWorldSimulationLedgerRequiredFields_ACU()}。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` });
+                    continue;
+                }
+                finalCandidates = acceptedCandidates;
                 try {
-                    applyWorldSimulationCandidates_ACU(input.promptContext.worldState, finalCandidates, new Set(causalEvidenceRefs), input.settings);
+                    const commitEvidenceRefs = [...new Set([...causalEvidenceRefs, ...finalCandidates.flatMap(item => item.evidenceRefs)])];
+                    applyWorldSimulationCandidatesDetailed_ACU(baseLedger, finalCandidates, new Set(commitEvidenceRefs), input.settings, { anchorMessage });
+                    await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+                    const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: commitEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions };
+                    const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}）`, detail: action.summary, agentName: director });
+                    await persistEntry(completedId, 'run-completed-commit');
+                    return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
                 }
                 catch (error) {
                     const message = compact_ACU(error);
@@ -158887,11 +159595,6 @@ Expected function or array of functions, received type ${typeof value}.`
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `已接受候选在账本事务应用阶段失败：${message}\n请把该错误作为修订约束重新派工。若为 revision 冲突，必须基于当前账本 revision 重建受影响条目；若为字段缺失，必须一次性补齐该模块全部持久化必填字段。完整必填字段模板：${formatWorldSimulationLedgerRequiredFields_ACU()}。不得把本次事务失败当作任务终局，只有确实无法修正时才输出 blocked。` });
                     continue;
                 }
-                await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-                const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: causalEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions };
-                const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}${guidanceCandidate ? '+guidance' : ''}）`, detail: action.summary, agentName: director });
-                await persistEntry(completedId, 'run-completed-commit');
-                return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
             }
             return blockOnBudget_ACU(input.settings.agentRunBudget.maxIterations, 'iteration budget exhausted', '世界推演主循环迭代预算耗尽', `maxIterations=${input.settings.agentRunBudget.maxIterations}`, ['iteration budget exhausted'], 'block-iteration-budget');
         }
@@ -159012,7 +159715,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 throw new Error('WORLD_SIMULATION_REVIEW_CANDIDATES_REQUIRED');
             const agentName = 'causality-reviewer';
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
-            const context = withTask_ACU(input.promptContext, { objective: '审核候选的时间、因果、权限、revision 与证据完整性' }, input.candidates, ['guidance']);
+            const context = withTask_ACU(input.promptContext, { objective: '审核候选的时间、因果、权限、revision 与证据完整性' }, input.candidates, []);
             const transcript = [];
             const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
             const readGateState = createWorldSimulationReadGateState_ACU();
@@ -159399,54 +160102,6 @@ Expected function or array of functions, received type ${typeof value}.`
         });
     }
 
-    const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
-    const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
-    const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
-    const END_ACU = '<!-- qrf-world-simulation-projection:v2:end -->';
-    const escape_ACU = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*(?:${escape_ACU(START_V1_ACU)}[\\s\\S]*?${escape_ACU(END_V1_ACU)}|${escape_ACU(START_ACU)}[\\s\\S]*?${escape_ACU(END_ACU)})(?:\\r?\\n)*`, 'g');
-    const SECTION_ORDER_ACU = ['encounter', 'rumor', 'ambient'];
-    const SECTION_LABELS_ACU = {
-        encounter: '【此地此刻】',
-        rumor: '【风闻轶事】',
-        ambient: '【世界暗流】',
-    };
-    function buildWorldSimulationProjection_ACU(ledger) {
-        const grouped = { encounter: [], rumor: [], ambient: [] };
-        for (const signal of ledger.guidance.signals) {
-            const text = signal.text.trim();
-            if (text)
-                grouped[signal.voice].push(text);
-        }
-        const sections = SECTION_ORDER_ACU.flatMap(voice => {
-            const items = grouped[voice];
-            return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
-        });
-        if (!sections.length)
-            return null;
-        return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
-    }
-    function applyWorldSimulationProjection_ACU(content, projection) {
-        const base = String(content ?? '').replace(OWNED_BLOCK_ACU, '').trimEnd();
-        return projection ? `${base}${base ? '\n\n' : ''}${projection}` : base;
-    }
-    function readWorldSimulationMessageContent_ACU(message) {
-        return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
-    }
-    function writeWorldSimulationActiveSwipeContent_ACU(message, content) {
-        if (typeof message.mes === 'string' || typeof message.message !== 'string')
-            message.mes = content;
-        else
-            message.message = content;
-        const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
-        if (Array.isArray(message.swipes)) {
-            if (swipeId >= message.swipes.length)
-                throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
-            message.swipes[swipeId] = content;
-        }
-    }
-    const WORLD_SIMULATION_PROJECTION_MARKERS_ACU = { start: START_ACU, end: END_ACU };
-
     const tailsByChat_ACU = new Map();
     const isRecord_ACU$3 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
     const clone_ACU$3 = (value) => JSON.parse(JSON.stringify(value));
@@ -159634,12 +160289,12 @@ Expected function or array of functions, received type ${typeof value}.`
         const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
         const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
         assertRun_ACU(envelope, input);
-        const applied = applyWorldSimulationCandidatesDetailed_ACU(envelope.ledger, input.commitCandidate.acceptedCandidates, new Set(input.commitCandidate.evidenceRefs), envelope.settings);
+        const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
+        const applied = applyWorldSimulationCandidatesDetailed_ACU(envelope.ledger, input.commitCandidate.acceptedCandidates, new Set(input.commitCandidate.evidenceRefs), envelope.settings, { anchorMessage: storyText });
         let ledger = applied.ledger;
         ledger = maintainWorldPlayer_ACU(ledger, envelope.ledger.player);
         const extraTimeline = [];
         const daysAdvanced = Math.max(0, ledger.clock.day - envelope.ledger.clock.day);
-        const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
         const relevance = relevanceGate_ACU(ledger, storyText);
         const directives = progressionPlan_ACU({
             ledger,
@@ -160851,6 +161506,7 @@ Expected function or array of functions, received type ${typeof value}.`
                                 anchor: currentAnchor,
                                 chat: getChatArray_ACU(),
                                 resetRunBudget,
+                                anchorMaterialsCommitted: readWorldSimulationLedgerAtAnchor_ACU(currentAnchor, getChatArray_ACU()) !== null,
                             }),
                         });
                         return engine.run({ identity: runIdentity });
@@ -187130,7 +187786,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_19$9 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_20$8 = { class: "acu-v2-continuation-materials__outline-nodes" };
     const _hoisted_21$8 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_22$6 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_22$7 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_23$5 = { class: "acu-v2-continuation-materials__card-body" };
     const _hoisted_24$5 = { class: "acu-v2-continuation-materials__turns" };
     const _hoisted_25$5 = { class: "acu-v2-continuation-materials__badge" };
@@ -187200,18 +187856,18 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_52 = {
+    const _hoisted_52$1 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_53 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_54 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_55 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_56 = {
+    const _hoisted_53$1 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_54$1 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_55$1 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_56$1 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_57 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_57$1 = { class: "acu-v2-continuation-materials__card-body" };
     const _hoisted_58 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_59 = { class: "acu-v2-continuation-materials__json" };
     const _hoisted_60 = {
@@ -187567,7 +188223,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									/* TEXT */
 								), createBaseVNode(
 									"span",
-									_hoisted_22$6,
+									_hoisted_22$7,
 									toDisplayString(node.turns.length) + " 轮",
 									1
 									/* TEXT */
@@ -187963,7 +188619,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						1
 						/* TEXT */
 					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_50$1, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_51$1, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_52, [(openBlock(true), createElementBlock(
+					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_51$1, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_52$1, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.hooks, (hook) => {
@@ -187974,7 +188630,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": hook.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_53, [
+									createBaseVNode("p", _hoisted_53$1, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -187984,21 +188640,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_54,
+											_hoisted_54$1,
 											toDisplayString($setup.HOOK_STATUS_LABELS[hook.status] ?? hook.status),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_55,
+											_hoisted_55$1,
 											toDisplayString($setup.HOOK_IMPORTANCE_LABELS[hook.importance] ?? hook.importance),
 											1
 											/* TEXT */
 										),
 										hook.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_56,
+											_hoisted_56$1,
 											"已退休" + toDisplayString(hook.retiredReason ? `：${hook.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -188006,7 +188662,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_57,
+										_hoisted_57$1,
 										toDisplayString(hook.summary),
 										1
 										/* TEXT */
@@ -190039,7 +190695,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_22$5 = {
+    const _hoisted_22$6 = {
 	key: 2,
 	class: "acu-v2-continuation-page__error"
     };
@@ -190993,7 +191649,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["expanded"])]),
 				$setup.settingsError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_22$5,
+					_hoisted_22$6,
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
@@ -191020,6 +191676,7 @@ Expected function or array of functions, received type ${typeof value}.`
         'dramatis-keeper': '人物档案',
         'chronicler': '编年',
         'causality-reviewer': '因果审核',
+        'guidance-composer': '投影决定',
         'lore-researcher': '设定研究',
         'requirements-maintainer': '用户要求维护',
         'world-analyst': '世界推演',
@@ -191152,7 +191809,7 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_20$6 = { class: "acu-v2-session-feed__badge" };
     const _hoisted_21$6 = { class: "acu-v2-session-feed__title" };
-    const _hoisted_22$4 = { class: "acu-v2-session-feed__time" };
+    const _hoisted_22$5 = { class: "acu-v2-session-feed__time" };
     const _hoisted_23$4 = ["onClick"];
     const _hoisted_24$4 = {
 	key: 1,
@@ -191316,7 +191973,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_22$4,
+											_hoisted_22$5,
 											toDisplayString($setup.formatTime(entry.at)),
 											1
 											/* TEXT */
@@ -191676,7 +192333,6 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    /** 账本来源是首楼信封里的权威账本（提交后即更新），结算快照只用于说明"写在哪一楼"。 */
     var _sfc_main$n = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationMaterialsPanel',
         props: {
@@ -191803,6 +192459,16 @@ Expected function or array of functions, received type ${typeof value}.`
                     },
                 ];
             });
+            const MODULE_LABELS = {
+                clock: '时钟', dimensions: '世界维度', seeds: '暗流种子', actors: '行动者', chronicle: '世界编年', guidance: '投影', rumors: '传闻', player: '玩家',
+            };
+            const pendingFixCards = computed(() => (props.ledger?.pendingFixes ?? []).map(item => ({
+                module: item.module,
+                title: MODULE_LABELS[item.module] ?? item.module,
+                attempts: item.attempts,
+                detail: item.violations.map(violation => violation.message).join('；') || item.lastError,
+                meta: `${item.agentName} · 第 ${item.firstFailedAtDay} 天起 · ${item.lastError}`,
+            })));
             const CONTACT_LABELS = { open: '开放', secluded: '隔绝' };
             const RUMOR_STATUS_LABELS = { latent: '潜伏', ripe: '待命', revealed: '已得知', dead: '已失效' };
             const HIT_STATE_LABELS = { 'open-hit': '开放可命中', 'secluded-delay': '隔绝延迟中', waiting: '等待到访' };
@@ -191845,14 +192511,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     return `${channels} · 得知日 第 ${item.revealedAtDay} 天`;
                 return channels;
             }
-            const __returned__ = { props, emit, TABS, activeTab, clearPending, requirementsDraft, requirementsDirty, requirementsError, snapshotRequirementsJson, updateRequirementsDraft, discardRequirementsDraft, saveRequirementsDraft, confirmClear, anchorText, diagnostics, candidateEntries, agentLabel, SEED_STATUS_LABELS, VISIBILITY_LABELS, TREND_LABELS, DIMENSION_KIND_LABELS, ledgerGroups, CONTACT_LABELS, RUMOR_STATUS_LABELS, HIT_STATE_LABELS, chronicleRows, missedItems, rumorQueue, rumorQueueGroups, chronicleMeta, missedMeta, rumorMeta, AcuButton, AcuTextarea };
+            const __returned__ = { props, emit, TABS, activeTab, clearPending, requirementsDraft, requirementsDirty, requirementsError, snapshotRequirementsJson, updateRequirementsDraft, discardRequirementsDraft, saveRequirementsDraft, confirmClear, anchorText, diagnostics, candidateEntries, agentLabel, SEED_STATUS_LABELS, VISIBILITY_LABELS, TREND_LABELS, DIMENSION_KIND_LABELS, ledgerGroups, MODULE_LABELS, pendingFixCards, CONTACT_LABELS, RUMOR_STATUS_LABELS, HIT_STATE_LABELS, chronicleRows, missedItems, rumorQueue, rumorQueueGroups, chronicleMeta, missedMeta, rumorMeta, AcuButton, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-a4204170] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-a4204170] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-a4204170] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-a4204170] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-a4204170] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__confirm[data-v-a4204170] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-a4204170] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-a4204170] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-a4204170] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-a4204170] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-a4204170] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-a4204170] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-a4204170] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-a4204170] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-a4204170] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-a4204170] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-a4204170] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-a4204170] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-a4204170] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-a4204170] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-a4204170] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-a4204170] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-a4204170] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-a4204170] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-a4204170] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-a4204170] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-a4204170] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-a4204170] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__projection[data-v-a4204170] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-a4204170] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-a4204170] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-a4204170] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-a4204170] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-a4204170");
-    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_a4204170_lang = null;
+    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-f416abe4] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-f416abe4] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-f416abe4] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-f416abe4] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-f416abe4] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__confirm[data-v-f416abe4] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-f416abe4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-f416abe4] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-f416abe4] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-f416abe4] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-f416abe4] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-f416abe4] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-f416abe4] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-f416abe4] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-f416abe4] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-f416abe4] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-f416abe4] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-f416abe4] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-f416abe4] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-f416abe4] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-f416abe4] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-f416abe4] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-f416abe4] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-f416abe4] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-f416abe4] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-f416abe4] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-f416abe4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-f416abe4] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__projection[data-v-f416abe4] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-f416abe4] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-f416abe4] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-f416abe4] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-f416abe4] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-f416abe4");
+    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_f416abe4_lang = null;
 
     const _hoisted_1$n = { class: "acu-v2-ws-materials" };
     const _hoisted_2$l = { class: "acu-v2-ws-materials__tabs" };
@@ -191874,25 +192540,17 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_10$9 = {
 	key: 2,
-	class: "acu-v2-ws-materials__empty"
+	class: "acu-v2-ws-materials__block",
+	open: ""
     };
-    const _hoisted_11$9 = {
-	key: 0,
-	class: "acu-v2-ws-materials__empty"
-    };
-    const _hoisted_12$9 = {
-	key: 1,
-	class: "acu-v2-ws-materials__cards"
-    };
-    const _hoisted_13$7 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_14$7 = {
-	key: 0,
-	class: "acu-v2-ws-materials__badge"
-    };
-    const _hoisted_15$7 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_11$9 = { class: "acu-v2-ws-materials__cards" };
+    const _hoisted_12$9 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_13$7 = { class: "acu-v2-ws-materials__badge" };
+    const _hoisted_14$7 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_15$7 = { class: "acu-v2-ws-materials__card-meta" };
     const _hoisted_16$7 = {
-	key: 0,
-	class: "acu-v2-ws-materials__card-meta"
+	key: 3,
+	class: "acu-v2-ws-materials__empty"
     };
     const _hoisted_17$6 = {
 	key: 0,
@@ -191903,89 +192561,107 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-ws-materials__cards"
     };
     const _hoisted_19$6 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_20$5 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_21$5 = {
+    const _hoisted_20$5 = {
+	key: 0,
+	class: "acu-v2-ws-materials__badge"
+    };
+    const _hoisted_21$5 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_22$4 = {
+	key: 0,
+	class: "acu-v2-ws-materials__card-meta"
+    };
+    const _hoisted_23$3 = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_24$3 = {
+	key: 1,
+	class: "acu-v2-ws-materials__cards"
+    };
+    const _hoisted_25$3 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_26$3 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_27$3 = {
 	class: "acu-v2-ws-materials__block",
 	open: ""
     };
-    const _hoisted_22$3 = {
+    const _hoisted_28$2 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_23$3 = {
+    const _hoisted_29$2 = {
 	key: 1,
 	class: "acu-v2-ws-materials__list"
     };
-    const _hoisted_24$3 = { class: "acu-v2-ws-materials__projection" };
-    const _hoisted_25$3 = {
-	key: 0,
-	class: "acu-v2-ws-materials__empty"
-    };
-    const _hoisted_26$3 = {
-	key: 1,
-	class: "acu-v2-ws-materials__cards"
-    };
-    const _hoisted_27$3 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_28$2 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_29$2 = { class: "acu-v2-ws-materials__card-meta" };
-    const _hoisted_30$2 = {
-	key: 0,
-	class: "acu-v2-ws-materials__empty"
-    };
+    const _hoisted_30$2 = { class: "acu-v2-ws-materials__projection" };
     const _hoisted_31$2 = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_32$2 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_32$2 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_33$2 = { class: "acu-v2-ws-materials__badge" };
+    const _hoisted_33$2 = { class: "acu-v2-ws-materials__card-head" };
     const _hoisted_34$1 = { class: "acu-v2-ws-materials__card-body" };
     const _hoisted_35$1 = { class: "acu-v2-ws-materials__card-meta" };
     const _hoisted_36$1 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_37$1 = { class: "acu-v2-ws-materials__meta" };
-    const _hoisted_38$1 = {
-	key: 0,
-	class: "acu-v2-ws-materials__empty"
-    };
-    const _hoisted_39$1 = {
+    const _hoisted_37$1 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_40$1 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_41 = { class: "acu-v2-ws-materials__badge" };
-    const _hoisted_42 = { class: "acu-v2-ws-materials__card-meta" };
-    const _hoisted_43 = {
+    const _hoisted_38$1 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_39$1 = { class: "acu-v2-ws-materials__badge" };
+    const _hoisted_40$1 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_41 = { class: "acu-v2-ws-materials__card-meta" };
+    const _hoisted_42 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
+    const _hoisted_43 = { class: "acu-v2-ws-materials__meta" };
     const _hoisted_44 = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_45 = {
+	key: 1,
+	class: "acu-v2-ws-materials__cards"
+    };
+    const _hoisted_46 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_47 = { class: "acu-v2-ws-materials__badge" };
+    const _hoisted_48 = { class: "acu-v2-ws-materials__card-meta" };
+    const _hoisted_49 = {
+	key: 0,
+	class: "acu-v2-ws-materials__empty"
+    };
+    const _hoisted_50 = {
 	key: 1,
 	class: "acu-v2-ws-materials__diagnostics"
     };
-    const _hoisted_45 = {
+    const _hoisted_51 = {
 	key: 0,
 	class: "acu-v2-ws-materials__meta"
     };
-    const _hoisted_46 = {
+    const _hoisted_52 = {
 	key: 1,
 	class: "acu-v2-ws-materials__error"
     };
-    const _hoisted_47 = {
+    const _hoisted_53 = {
 	key: 2,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_48 = {
+    const _hoisted_54 = {
 	key: 3,
 	class: "acu-v2-ws-materials__list"
     };
-    const _hoisted_49 = { class: "acu-v2-ws-materials__json" };
-    const _hoisted_50 = {
+    const _hoisted_55 = { class: "acu-v2-ws-materials__json" };
+    const _hoisted_56 = {
 	key: 0,
 	class: "acu-v2-ws-materials__error"
     };
-    const _hoisted_51 = { class: "acu-v2-ws-materials__actions" };
+    const _hoisted_57 = { class: "acu-v2-ws-materials__actions" };
     function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$n, [
 		createBaseVNode("div", _hoisted_2$l, [(openBlock(), createElementBlock(
@@ -192121,7 +192797,53 @@ Expected function or array of functions, received type ${typeof value}.`
 					1
 					/* TEXT */
 				)) : (openBlock(), createElementBlock("p", _hoisted_9$9, "当前分支还没有任何楼层带有已结算的世界账本快照；首次提交后会写到冻结的 assistant 楼层。")),
-				!$props.ledger || !$setup.ledgerGroups.some((group) => group.items.length) ? (openBlock(), createElementBlock("p", _hoisted_10$9, "世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。")) : createCommentVNode("v-if", true),
+				$setup.pendingFixCards.length ? (openBlock(), createElementBlock("details", _hoisted_10$9, [createBaseVNode(
+					"summary",
+					null,
+					"待修复 · " + toDisplayString($setup.pendingFixCards.length) + " 项",
+					1
+					/* TEXT */
+				), createBaseVNode("div", _hoisted_11$9, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.pendingFixCards, (item) => {
+						return openBlock(), createElementBlock("article", {
+							key: item.module,
+							class: "acu-v2-ws-materials__card acu-v2-ws-materials__card--failed"
+						}, [
+							createBaseVNode("p", _hoisted_12$9, [createBaseVNode(
+								"strong",
+								null,
+								toDisplayString(item.title),
+								1
+								/* TEXT */
+							), createBaseVNode(
+								"span",
+								_hoisted_13$7,
+								"第 " + toDisplayString(item.attempts) + " 次",
+								1
+								/* TEXT */
+							)]),
+							createBaseVNode(
+								"p",
+								_hoisted_14$7,
+								toDisplayString(item.detail),
+								1
+								/* TEXT */
+							),
+							createBaseVNode(
+								"p",
+								_hoisted_15$7,
+								toDisplayString(item.meta),
+								1
+								/* TEXT */
+							)
+						]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])])) : createCommentVNode("v-if", true),
+				!$props.ledger || !$setup.ledgerGroups.some((group) => group.items.length) ? (openBlock(), createElementBlock("p", _hoisted_16$7, "世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。")) : createCommentVNode("v-if", true),
 				(openBlock(true), createElementBlock(
 					Fragment,
 					null,
@@ -192136,7 +192858,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							toDisplayString(group.label) + " · " + toDisplayString(group.items.length) + " 条",
 							1
 							/* TEXT */
-						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_11$9, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_12$9, [(openBlock(true), createElementBlock(
+						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_17$6, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_18$6, [(openBlock(true), createElementBlock(
 							Fragment,
 							null,
 							renderList(group.items, (item) => {
@@ -192144,7 +192866,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									key: item.id,
 									class: "acu-v2-ws-materials__card"
 								}, [
-									createBaseVNode("p", _hoisted_13$7, [createBaseVNode(
+									createBaseVNode("p", _hoisted_19$6, [createBaseVNode(
 										"strong",
 										null,
 										toDisplayString(item.title),
@@ -192152,21 +192874,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										/* TEXT */
 									), item.badge ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_14$7,
+										_hoisted_20$5,
 										toDisplayString(item.badge),
 										1
 										/* TEXT */
 									)) : createCommentVNode("v-if", true)]),
 									createBaseVNode(
 										"p",
-										_hoisted_15$7,
+										_hoisted_21$5,
 										toDisplayString(item.detail),
 										1
 										/* TEXT */
 									),
 									item.meta ? (openBlock(), createElementBlock(
 										"p",
-										_hoisted_16$7,
+										_hoisted_22$4,
 										toDisplayString(item.meta),
 										1
 										/* TEXT */
@@ -192186,7 +192908,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "candidates" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 2 },
-			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_17$6, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_18$6, [(openBlock(true), createElementBlock(
+			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_23$3, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_24$3, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.candidateEntries, (item) => {
@@ -192196,7 +192918,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							key: item.id,
 							class: normalizeClass(["acu-v2-ws-materials__card", { "acu-v2-ws-materials__card--failed": item.status === "failed" }])
 						},
-						[createBaseVNode("p", _hoisted_19$6, [createBaseVNode(
+						[createBaseVNode("p", _hoisted_25$3, [createBaseVNode(
 							"strong",
 							null,
 							toDisplayString(item.title),
@@ -192210,7 +192932,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						)]), createBaseVNode(
 							"p",
-							_hoisted_20$5,
+							_hoisted_26$3,
 							toDisplayString(item.detail),
 							1
 							/* TEXT */
@@ -192236,13 +192958,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					-1
 					/* CACHED */
 				)),
-				createBaseVNode("details", _hoisted_21$5, [createBaseVNode(
+				createBaseVNode("details", _hoisted_27$3, [createBaseVNode(
 					"summary",
 					null,
 					"可感知信号 · " + toDisplayString($props.ledger?.guidance.signals.length ?? 0) + " 条",
 					1
 					/* TEXT */
-				), !$props.ledger?.guidance.signals.length ? (openBlock(), createElementBlock("p", _hoisted_22$3, "当前没有可投影信号。")) : (openBlock(), createElementBlock("ul", _hoisted_23$3, [(openBlock(true), createElementBlock(
+				), !$props.ledger?.guidance.signals.length ? (openBlock(), createElementBlock("p", _hoisted_28$2, "当前没有可投影信号。")) : (openBlock(), createElementBlock("ul", _hoisted_29$2, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($props.ledger.guidance.signals, (signal, index) => {
@@ -192259,7 +192981,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				))]))]),
 				createBaseVNode(
 					"pre",
-					_hoisted_24$3,
+					_hoisted_30$2,
 					toDisplayString($props.projectionPreview || "当前没有系统投影。"),
 					1
 					/* TEXT */
@@ -192270,7 +192992,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "chronicle" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 4 },
-			[!$setup.chronicleRows.length ? (openBlock(), createElementBlock("p", _hoisted_25$3, "编年还是空的。提交后会按发生日与玩家得知日对照。")) : (openBlock(), createElementBlock("div", _hoisted_26$3, [(openBlock(true), createElementBlock(
+			[!$setup.chronicleRows.length ? (openBlock(), createElementBlock("p", _hoisted_31$2, "编年还是空的。提交后会按发生日与玩家得知日对照。")) : (openBlock(), createElementBlock("div", _hoisted_32$2, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.chronicleRows, (row) => {
@@ -192278,7 +193000,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: row.id,
 						class: "acu-v2-ws-materials__card"
 					}, [
-						createBaseVNode("p", _hoisted_27$3, [createBaseVNode(
+						createBaseVNode("p", _hoisted_33$2, [createBaseVNode(
 							"strong",
 							null,
 							toDisplayString(row.summary),
@@ -192287,14 +193009,14 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						createBaseVNode(
 							"p",
-							_hoisted_28$2,
+							_hoisted_34$1,
 							toDisplayString(row.at),
 							1
 							/* TEXT */
 						),
 						createBaseVNode(
 							"p",
-							_hoisted_29$2,
+							_hoisted_35$1,
 							toDisplayString($setup.chronicleMeta(row)),
 							1
 							/* TEXT */
@@ -192309,7 +193031,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "missed" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 5 },
-			[!$setup.missedItems.length ? (openBlock(), createElementBlock("p", _hoisted_30$2, "当前没有错过的暗流或过期清扫记录。")) : (openBlock(), createElementBlock("div", _hoisted_31$2, [(openBlock(true), createElementBlock(
+			[!$setup.missedItems.length ? (openBlock(), createElementBlock("p", _hoisted_36$1, "当前没有错过的暗流或过期清扫记录。")) : (openBlock(), createElementBlock("div", _hoisted_37$1, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.missedItems, (item) => {
@@ -192317,7 +193039,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: `${item.source}:${item.id}`,
 						class: "acu-v2-ws-materials__card"
 					}, [
-						createBaseVNode("p", _hoisted_32$2, [createBaseVNode(
+						createBaseVNode("p", _hoisted_38$1, [createBaseVNode(
 							"strong",
 							null,
 							toDisplayString(item.title),
@@ -192325,21 +193047,21 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						), createBaseVNode(
 							"span",
-							_hoisted_33$2,
+							_hoisted_39$1,
 							toDisplayString(item.source === "timeline" ? "清扫" : "错过"),
 							1
 							/* TEXT */
 						)]),
 						createBaseVNode(
 							"p",
-							_hoisted_34$1,
+							_hoisted_40$1,
 							toDisplayString(item.detail || "暂无摘要"),
 							1
 							/* TEXT */
 						),
 						createBaseVNode(
 							"p",
-							_hoisted_35$1,
+							_hoisted_41,
 							toDisplayString($setup.missedMeta(item)),
 							1
 							/* TEXT */
@@ -192354,12 +193076,12 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "rumors" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 6 },
-			[!$setup.rumorQueue ? (openBlock(), createElementBlock("p", _hoisted_36$1, "当前没有可展示的传闻队列。")) : (openBlock(), createElementBlock(
+			[!$setup.rumorQueue ? (openBlock(), createElementBlock("p", _hoisted_42, "当前没有可展示的传闻队列。")) : (openBlock(), createElementBlock(
 				Fragment,
 				{ key: 1 },
 				[createBaseVNode(
 					"p",
-					_hoisted_37$1,
+					_hoisted_43,
 					"接触状态：" + toDisplayString($setup.CONTACT_LABELS[$setup.rumorQueue.contact] ?? $setup.rumorQueue.contact) + " · 当前位置：" + toDisplayString($setup.rumorQueue.playerRegion || "未知"),
 					1
 					/* TEXT */
@@ -192377,14 +193099,14 @@ Expected function or array of functions, received type ${typeof value}.`
 							toDisplayString(group.label) + " · " + toDisplayString(group.items.length) + " 条",
 							1
 							/* TEXT */
-						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_38$1, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_39$1, [(openBlock(true), createElementBlock(
+						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_44, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_45, [(openBlock(true), createElementBlock(
 							Fragment,
 							null,
 							renderList(group.items, (item) => {
 								return openBlock(), createElementBlock("article", {
 									key: item.id,
 									class: "acu-v2-ws-materials__card"
-								}, [createBaseVNode("p", _hoisted_40$1, [createBaseVNode(
+								}, [createBaseVNode("p", _hoisted_46, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(item.fact),
@@ -192392,13 +193114,13 @@ Expected function or array of functions, received type ${typeof value}.`
 									/* TEXT */
 								), createBaseVNode(
 									"span",
-									_hoisted_41,
+									_hoisted_47,
 									toDisplayString($setup.RUMOR_STATUS_LABELS[item.status] ?? item.status),
 									1
 									/* TEXT */
 								)]), createBaseVNode(
 									"p",
-									_hoisted_42,
+									_hoisted_48,
 									toDisplayString($setup.rumorMeta(item)),
 									1
 									/* TEXT */
@@ -192419,7 +193141,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "diagnostics" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 7 },
-			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_43, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_44, [(openBlock(true), createElementBlock(
+			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_49, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_50, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.diagnostics, (item) => {
@@ -192449,19 +193171,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$props.userRequirements.snapshot ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_45,
+					_hoisted_51,
 					" 条目 " + toDisplayString($props.userRequirements.snapshot.requirements.length) + " 条 ",
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$props.userRequirements.diagnostics.length ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_46,
+					_hoisted_52,
 					toDisplayString($props.userRequirements.diagnostics.join("；")),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$props.userRequirements.snapshot?.requirements.length ? (openBlock(), createElementBlock("p", _hoisted_47, " 还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。 ")) : (openBlock(), createElementBlock("ol", _hoisted_48, [(openBlock(true), createElementBlock(
+				!$props.userRequirements.snapshot?.requirements.length ? (openBlock(), createElementBlock("p", _hoisted_53, " 还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。 ")) : (openBlock(), createElementBlock("ol", _hoisted_54, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($props.userRequirements.snapshot.requirements, (line, index) => {
@@ -192476,7 +193198,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_49, [
+				createBaseVNode("details", _hoisted_55, [
 					_cache[14] || (_cache[14] = createBaseVNode(
 						"summary",
 						null,
@@ -192498,12 +193220,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.requirementsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_50,
+						_hoisted_56,
 						toDisplayString($setup.requirementsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_51, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_57, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.requirementsDirty,
 						onClick: $setup.discardRequirementsDraft
 					}, {
@@ -192533,7 +193255,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-a4204170"]]);
+    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-f416abe4"]]);
 
     const TASK_STATUS_LABELS_ACU = {
         drafting: '运行中',
@@ -193020,6 +193742,12 @@ Expected function or array of functions, received type ${typeof value}.`
                     return '';
                 return `TTL ${dynamics.rumorTTLDays} · 推进 ${dynamics.maxClockAdvanceDays} · ${dynamics.collisionEnforcement === 'strict' ? '严格' : '宽松'}${dynamics.missedSweepEnabled ? ' · 清扫开' : ' · 清扫关'}`;
             });
+            const workflowGroupMeta = computed(() => {
+                const workflow = settingsDraft.value?.workflow;
+                if (!workflow)
+                    return '';
+                return `${workflow.autoFixEnabled ? '自动修复开' : '自动修复关'} · 编年热层 ${workflow.chroniclerHotThreshold}`;
+            });
             function cloneSettings(settings) {
                 return JSON.parse(JSON.stringify(settings));
             }
@@ -193115,6 +193843,10 @@ Expected function or array of functions, received type ${typeof value}.`
                         maxClockAdvanceDays: requiredRangeInteger(source.dynamics.maxClockAdvanceDays, '单次时钟推进上限', 0, 3650),
                         collisionEnforcement: source.dynamics.collisionEnforcement === 'relaxed' ? 'relaxed' : source.dynamics.collisionEnforcement === 'strict' ? 'strict' : (() => { throw new Error('碰撞兑现策略必须是严格或宽松'); })(),
                         missedSweepEnabled: typeof source.dynamics.missedSweepEnabled === 'boolean' ? source.dynamics.missedSweepEnabled : (() => { throw new Error('过期清扫开关无效'); })(),
+                    },
+                    workflow: {
+                        autoFixEnabled: typeof source.workflow?.autoFixEnabled === 'boolean' ? source.workflow.autoFixEnabled : true,
+                        chroniclerHotThreshold: requiredRangeInteger(source.workflow?.chroniclerHotThreshold, '编年热层阈值', 1, 512),
                     },
                 };
                 if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {
@@ -193319,14 +194051,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 scheduleSettingsSave();
             }, { deep: true });
-            const __returned__ = { runtime, dialog, apiStore, followActiveApiLabel, apiPresetOptions, settingsDraft, messageDraft, messageSending, settingsError, settingsNotice, agentNames, agentLabel, roleOptions, webSearchProviderOptions, collisionEnforcementOptions, INHERIT_CHANNEL_VALUE, apiPresetValue, applyApiPreset, agentChannelOptions, agentChannelValue, applyAgentChannel, expandedGroups, isGroupExpanded, toggleGroup, budgetGroupMeta, webResearchGroupMeta, channelGroupMeta, dynamicsGroupMeta, cloneSettings, confirmFirstSendRpmWarning, sendMessage, clearData, saveUserRequirements, requiredRangeInteger, normalizedReadBudget, presetExists, normalizeSettingsDraft, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsImmediately, saveSettingsNow, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuSelect, AcuTextarea, WorldSimulationChat, WorldSimulationMaterialsPanel };
+            const __returned__ = { runtime, dialog, apiStore, followActiveApiLabel, apiPresetOptions, settingsDraft, messageDraft, messageSending, settingsError, settingsNotice, agentNames, agentLabel, roleOptions, webSearchProviderOptions, collisionEnforcementOptions, INHERIT_CHANNEL_VALUE, apiPresetValue, applyApiPreset, agentChannelOptions, agentChannelValue, applyAgentChannel, expandedGroups, isGroupExpanded, toggleGroup, budgetGroupMeta, webResearchGroupMeta, channelGroupMeta, dynamicsGroupMeta, workflowGroupMeta, cloneSettings, confirmFirstSendRpmWarning, sendMessage, clearData, saveUserRequirements, requiredRangeInteger, normalizedReadBudget, presetExists, normalizeSettingsDraft, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsImmediately, saveSettingsNow, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuSelect, AcuTextarea, WorldSimulationChat, WorldSimulationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-a50447e0] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-a50447e0] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-a50447e0] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-a50447e0] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-a50447e0] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-a50447e0] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-a50447e0] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-a50447e0] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-a50447e0] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-a50447e0] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-a50447e0] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-a50447e0] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-a50447e0] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-a50447e0] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-a50447e0] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-a50447e0] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-a50447e0] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-a50447e0]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-a50447e0] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-a50447e0] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-a50447e0] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-a50447e0] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-a50447e0] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-a50447e0");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_a50447e0_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-83780261] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-83780261] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-83780261] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-83780261] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-83780261] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-83780261] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-83780261] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-83780261] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-83780261] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-83780261] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-83780261] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-83780261] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-83780261]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-83780261] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-83780261] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-83780261] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-83780261] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-83780261");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_83780261_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$k = {
@@ -193350,26 +194082,27 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_11$8 = { class: "acu-v2-world-simulation-page__settings-grid" };
     const _hoisted_12$8 = { class: "acu-v2-world-simulation-page__toggles" };
     const _hoisted_13$6 = { class: "acu-v2-world-simulation-page__settings-grid" };
-    const _hoisted_14$6 = {
-	key: 0,
-	class: "acu-v2-world-simulation-page__error"
-    };
+    const _hoisted_14$6 = { class: "acu-v2-world-simulation-page__settings-grid" };
     const _hoisted_15$6 = {
-	key: 1,
-	class: "acu-v2-world-simulation-page__meta"
-    };
-    const _hoisted_16$6 = { class: "acu-v2-world-simulation-page__actions acu-v2-world-simulation-page__actions--start" };
-    const _hoisted_17$5 = {
 	key: 0,
 	class: "acu-v2-world-simulation-page__error"
     };
-    const _hoisted_18$5 = {
+    const _hoisted_16$6 = {
 	key: 1,
 	class: "acu-v2-world-simulation-page__meta"
     };
-    const _hoisted_19$5 = { class: "acu-v2-world-simulation-page__groups" };
-    const _hoisted_20$4 = { class: "acu-v2-world-simulation-page__actions" };
-    const _hoisted_21$4 = {
+    const _hoisted_17$5 = { class: "acu-v2-world-simulation-page__actions acu-v2-world-simulation-page__actions--start" };
+    const _hoisted_18$5 = {
+	key: 0,
+	class: "acu-v2-world-simulation-page__error"
+    };
+    const _hoisted_19$5 = {
+	key: 1,
+	class: "acu-v2-world-simulation-page__meta"
+    };
+    const _hoisted_20$4 = { class: "acu-v2-world-simulation-page__groups" };
+    const _hoisted_21$4 = { class: "acu-v2-world-simulation-page__actions" };
+    const _hoisted_22$3 = {
 	key: 2,
 	class: "acu-v2-world-simulation-page__error"
     };
@@ -193387,7 +194120,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				size: "sm",
 				onClick: $setup.refreshAll
 			}, {
-				default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
+				default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
 					"重新读取",
 					-1
 					/* CACHED */
@@ -193516,15 +194249,23 @@ Expected function or array of functions, received type ${typeof value}.`
 							_: 1
 						})
 					]),
-					createBaseVNode("div", _hoisted_6$b, [createVNode($setup["AcuCheckbox"], {
-						modelValue: $setup.settingsDraft.autoTriggerEnabled,
-						"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.settingsDraft.autoTriggerEnabled = $event),
-						label: "正文生成完成后自动推演（与自动填表同一时机）"
-					}, null, 8, ["modelValue"]), createVNode($setup["AcuCheckbox"], {
-						modelValue: $setup.settingsDraft.webResearch.enabled,
-						"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.webResearch.enabled = $event),
-						label: "启用设定研究（外部百科检索）"
-					}, null, 8, ["modelValue"])]),
+					createBaseVNode("div", _hoisted_6$b, [
+						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.autoTriggerEnabled,
+							"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.settingsDraft.autoTriggerEnabled = $event),
+							label: "正文生成完成后自动推演（与自动填表同一时机）"
+						}, null, 8, ["modelValue"]),
+						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.workflow.autoFixEnabled,
+							"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.workflow.autoFixEnabled = $event),
+							label: "自动修复违规模块（连续失败 3 次后交给主 Agent）"
+						}, null, 8, ["modelValue"]),
+						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.webResearch.enabled,
+							"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.webResearch.enabled = $event),
+							label: "启用设定研究（外部百科检索）"
+						}, null, 8, ["modelValue"])
+					]),
 					createBaseVNode("div", _hoisted_7$9, [
 						createVNode($setup["AcuDisclosureGroup"], {
 							class: "acu-v2-world-simulation-page__group",
@@ -193532,7 +194273,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.budgetGroupMeta,
 							expanded: $setup.isGroupExpanded("budget"),
 							"body-id": "acu-world-simulation-group-budget",
-							onToggle: _cache[12] || (_cache[12] = ($event) => $setup.toggleGroup("budget"))
+							onToggle: _cache[13] || (_cache[13] = ($event) => $setup.toggleGroup("budget"))
 						}, {
 							default: withCtx(() => [createBaseVNode("div", _hoisted_8$9, [
 								createVNode($setup["AcuFormRow"], {
@@ -193541,7 +194282,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxIterations,
-										"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
+										"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
 										type: "number",
 										min: 1,
 										max: 100
@@ -193554,7 +194295,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxDelegations,
-										"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
+										"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
 										type: "number",
 										min: 0,
 										max: 100
@@ -193567,7 +194308,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxSameAgent,
-										"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
+										"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
 										type: "number",
 										min: 0,
 										max: 20
@@ -193580,7 +194321,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxConcurrent,
-										"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
+										"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
 										type: "number",
 										min: 1,
 										max: 20
@@ -193593,7 +194334,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxReads,
-										"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
+										"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
 										type: "number",
 										min: 0,
 										max: 200
@@ -193606,7 +194347,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxExtraReads,
-										"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
+										"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
 										type: "number",
 										min: 0,
 										max: 20
@@ -193622,10 +194363,10 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.webResearchGroupMeta,
 							expanded: $setup.isGroupExpanded("webResearch"),
 							"body-id": "acu-world-simulation-group-web-research",
-							onToggle: _cache[20] || (_cache[20] = ($event) => $setup.toggleGroup("webResearch"))
+							onToggle: _cache[21] || (_cache[21] = ($event) => $setup.toggleGroup("webResearch"))
 						}, {
 							default: withCtx(() => [
-								_cache[30] || (_cache[30] = createBaseVNode(
+								_cache[33] || (_cache[33] = createBaseVNode(
 									"p",
 									{ class: "acu-v2-world-simulation-page__meta" },
 									"开启后，主 Agent 在本地证据不足时可派工 lore-researcher 从勾选的百科补充公开设定资料；研究结果只作证据，不直接写入世界账本。",
@@ -193635,17 +194376,17 @@ Expected function or array of functions, received type ${typeof value}.`
 								createBaseVNode("div", _hoisted_9$8, [
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.moegirl,
-										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.webResearch.sources.moegirl = $event),
+										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.webResearch.sources.moegirl = $event),
 										label: "萌娘百科"
 									}, null, 8, ["modelValue"]),
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.wikipediaZh,
-										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaZh = $event),
+										"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaZh = $event),
 										label: "中文维基百科"
 									}, null, 8, ["modelValue"]),
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.wikipediaEn,
-										"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaEn = $event),
+										"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaEn = $event),
 										label: "英文维基百科"
 									}, null, 8, ["modelValue"])
 								]),
@@ -193656,7 +194397,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuSelect"], {
 											modelValue: $setup.settingsDraft.webResearch.searchProvider,
-											"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.webResearch.searchProvider = $event),
+											"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.webResearch.searchProvider = $event),
 											options: $setup.webSearchProviderOptions
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -193668,7 +194409,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.webResearch.searxngBaseUrl,
-											"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.webResearch.searxngBaseUrl = $event),
+											"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.webResearch.searxngBaseUrl = $event),
 											type: "text"
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -193679,7 +194420,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.webResearch.pageCharLimit,
-											"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.webResearch.pageCharLimit = $event),
+											"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.webResearch.pageCharLimit = $event),
 											type: "number",
 											min: 500,
 											max: 2e4
@@ -193692,7 +194433,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuTextarea"], {
 											modelValue: $setup.settingsDraft.webResearch.blockedDomains,
-											"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.webResearch.blockedDomains = $event),
+											"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.webResearch.blockedDomains = $event),
 											rows: 3
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -193707,10 +194448,10 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.dynamicsGroupMeta,
 							expanded: $setup.isGroupExpanded("dynamics"),
 							"body-id": "acu-world-simulation-group-dynamics",
-							onToggle: _cache[25] || (_cache[25] = ($event) => $setup.toggleGroup("dynamics"))
+							onToggle: _cache[26] || (_cache[26] = ($event) => $setup.toggleGroup("dynamics"))
 						}, {
 							default: withCtx(() => [
-								_cache[31] || (_cache[31] = createBaseVNode(
+								_cache[34] || (_cache[34] = createBaseVNode(
 									"p",
 									{ class: "acu-v2-world-simulation-page__meta" },
 									"控制传闻时效、时钟推进上限、碰撞兑现与过期清扫；改动在下一轮推演生效。",
@@ -193724,7 +194465,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.dynamics.rumorTTLDays,
-											"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.dynamics.rumorTTLDays = $event),
+											"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.dynamics.rumorTTLDays = $event),
 											type: "number",
 											min: 1,
 											max: 3650
@@ -193737,7 +194478,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.dynamics.maxClockAdvanceDays,
-											"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.dynamics.maxClockAdvanceDays = $event),
+											"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.dynamics.maxClockAdvanceDays = $event),
 											type: "number",
 											min: 0,
 											max: 3650
@@ -193750,7 +194491,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuSelect"], {
 											modelValue: $setup.settingsDraft.dynamics.collisionEnforcement,
-											"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.dynamics.collisionEnforcement = $event),
+											"onUpdate:modelValue": _cache[24] || (_cache[24] = ($event) => $setup.settingsDraft.dynamics.collisionEnforcement = $event),
 											options: $setup.collisionEnforcementOptions
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -193758,10 +194499,39 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuCheckbox"], {
 									modelValue: $setup.settingsDraft.dynamics.missedSweepEnabled,
-									"onUpdate:modelValue": _cache[24] || (_cache[24] = ($event) => $setup.settingsDraft.dynamics.missedSweepEnabled = $event),
+									"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.settingsDraft.dynamics.missedSweepEnabled = $event),
 									label: "启用过期清扫（关闭后过期暗流不会自动记为错过）"
 								}, null, 8, ["modelValue"])])
 							]),
+							_: 1
+						}, 8, ["meta", "expanded"]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-world-simulation-page__group",
+							label: "工作流",
+							meta: $setup.workflowGroupMeta,
+							expanded: $setup.isGroupExpanded("workflow"),
+							"body-id": "acu-world-simulation-group-workflow",
+							onToggle: _cache[28] || (_cache[28] = ($event) => $setup.toggleGroup("workflow"))
+						}, {
+							default: withCtx(() => [_cache[35] || (_cache[35] = createBaseVNode(
+								"p",
+								{ class: "acu-v2-world-simulation-page__meta" },
+								"固定工作流按时间、暗流、人物的顺序自治执行。这里只改配置：自动修复和编年热层阈值。提示词仍在下方各角色分组里改。",
+								-1
+								/* CACHED */
+							)), createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuFormRow"], {
+								label: "编年热层阈值",
+								hint: "热层编年达到这个条数时，本轮会派出编年。范围 1–512。"
+							}, {
+								default: withCtx(() => [createVNode($setup["AcuInput"], {
+									modelValue: $setup.settingsDraft.workflow.chroniclerHotThreshold,
+									"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.workflow.chroniclerHotThreshold = $event),
+									type: "number",
+									min: 1,
+									max: 512
+								}, null, 8, ["modelValue"])]),
+								_: 1
+							})])]),
 							_: 1
 						}, 8, ["meta", "expanded"]),
 						createVNode($setup["AcuDisclosureGroup"], {
@@ -193770,15 +194540,15 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.channelGroupMeta,
 							expanded: $setup.isGroupExpanded("channels"),
 							"body-id": "acu-world-simulation-group-channels",
-							onToggle: _cache[26] || (_cache[26] = ($event) => $setup.toggleGroup("channels"))
+							onToggle: _cache[29] || (_cache[29] = ($event) => $setup.toggleGroup("channels"))
 						}, {
-							default: withCtx(() => [_cache[32] || (_cache[32] = createBaseVNode(
+							default: withCtx(() => [_cache[36] || (_cache[36] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-world-simulation-page__meta" },
 								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。",
 								-1
 								/* CACHED */
-							)), createBaseVNode("div", _hoisted_13$6, [(openBlock(true), createElementBlock(
+							)), createBaseVNode("div", _hoisted_14$6, [(openBlock(true), createElementBlock(
 								Fragment,
 								null,
 								renderList($setup.agentNames, (agentName) => {
@@ -193806,14 +194576,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					]),
 					$setup.settingsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_14$6,
+						_hoisted_15$6,
 						toDisplayString($setup.settingsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
 					$setup.settingsNotice ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_15$6,
+						_hoisted_16$6,
 						toDisplayString($setup.settingsNotice),
 						1
 						/* TEXT */
@@ -193829,17 +194599,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。引擎 seam 段固定顺序与角色、不可删除，其余段可自由增删改。修改后自动保存。"
 		}, {
 			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_16$6, [
+				createBaseVNode("div", _hoisted_17$5, [
 					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
-						default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
+						default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
 							"导出提示词 JSON",
 							-1
 							/* CACHED */
 						)])]),
 						_: 1
 					}),
-					createVNode($setup["AcuButton"], { onClick: _cache[27] || (_cache[27] = ($event) => $setup.promptImportInput?.click()) }, {
-						default: withCtx(() => [..._cache[34] || (_cache[34] = [createTextVNode(
+					createVNode($setup["AcuButton"], { onClick: _cache[30] || (_cache[30] = ($event) => $setup.promptImportInput?.click()) }, {
+						default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
 							"导入提示词 JSON",
 							-1
 							/* CACHED */
@@ -193862,19 +194632,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				$setup.promptIoError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_17$5,
+					_hoisted_18$5,
 					toDisplayString($setup.promptIoError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.promptIoNotice ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_18$5,
+					_hoisted_19$5,
 					toDisplayString($setup.promptIoNotice),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_19$5, [(openBlock(true), createElementBlock(
+				createBaseVNode("div", _hoisted_20$4, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.agentNames, (agentName) => {
@@ -193903,7 +194673,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								"onDelete",
 								"onMove",
 								"onUpdate"
-							]), createBaseVNode("div", _hoisted_20$4, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(agentName) }, {
+							]), createBaseVNode("div", _hoisted_21$4, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(agentName) }, {
 								default: withCtx(() => [createTextVNode(
 									"恢复" + toDisplayString($setup.agentLabel(agentName)) + "默认值",
 									1
@@ -193928,9 +194698,9 @@ Expected function or array of functions, received type ${typeof value}.`
 					meta: "参考",
 					expanded: $setup.isGroupExpanded("prompt:reference"),
 					"body-id": "acu-world-simulation-prompt-reference",
-					onToggle: _cache[28] || (_cache[28] = ($event) => $setup.toggleGroup("prompt:reference"))
+					onToggle: _cache[31] || (_cache[31] = ($event) => $setup.toggleGroup("prompt:reference"))
 				}, {
-					default: withCtx(() => [..._cache[35] || (_cache[35] = [
+					default: withCtx(() => [..._cache[39] || (_cache[39] = [
 						createBaseVNode(
 							"h4",
 							{ class: "acu-v2-world-simulation-page__subheading" },
@@ -193964,7 +194734,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["expanded"])]),
 				$setup.settingsError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_21$4,
+					_hoisted_22$3,
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
@@ -193974,7 +194744,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-a50447e0"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-83780261"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

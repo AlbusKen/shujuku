@@ -29,7 +29,7 @@ function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
   chat[0]._qrf_world_simulation = envelope;
   const acceptedCandidates: any[] = [
     { candidateId: 'candidate:clock', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '1h', evidenceRefs: ['e1'] } }, summary: '时间推进', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock'] },
-    { candidateId: 'candidate:guidance', agentName: 'causality-reviewer', patch: { guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }], evidenceRefs: ['e1'] } }, summary: '安全投影', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['guidance'] },
+    { candidateId: 'candidate:guidance', agentName: 'guidance-composer', patch: { guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' }], evidenceRefs: ['e1'] } }, summary: '安全投影', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['guidance'] },
   ];
   const commitCandidate: any = {
     runId: identity.runId,
@@ -285,7 +285,7 @@ describe('world simulation commit adapter', () => {
     }];
     commitInput.commitCandidate.acceptedCandidates[1].patch.guidance.signals = [
       { text: '客栈传闻', voice: 'rumor', sourceId: 'rumor-1' },
-      { text: '远处钟声响起', voice: 'ambient' },
+      { text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' },
     ];
 
     await commitWorldSimulationProjection_ACU(commitInput);
@@ -293,7 +293,7 @@ describe('world simulation commit adapter', () => {
     expect(saveChat).toHaveBeenCalledTimes(1);
     const ledger = readWorldSimulationLedgerAtAnchor_ACU(resolveWorldSimulationAnchor_ACU(1, chat), chat);
     expect(ledger.rumors[0]).toMatchObject({ status: 'ripe', revealedAtDay: null });
-    expect(ledger.guidance.signals).toEqual([{ text: '远处钟声响起', voice: 'ambient' }]);
+    expect(ledger.guidance.signals).toEqual([{ text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' }]);
     expect(ledger.player.regionVisits).toEqual([]);
     expect(chat[1].mes).not.toContain('客栈传闻');
     expect(chat[1].mes).toContain('远处钟声响起');
@@ -310,7 +310,7 @@ describe('world simulation commit adapter', () => {
     }];
     commitInput.commitCandidate.acceptedCandidates[1].patch.guidance.signals = [
       { text: '客栈传闻', voice: 'rumor', sourceId: 'rumor-1' },
-      { text: '远处钟声响起', voice: 'ambient' },
+      { text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' },
     ];
 
     await commitWorldSimulationProjection_ACU(commitInput);
@@ -319,7 +319,7 @@ describe('world simulation commit adapter', () => {
     expect(ledger.rumors[0]).toMatchObject({ status: 'revealed', revealedAtDay: 2 });
     expect(ledger.guidance.signals).toEqual([
       { text: '客栈传闻', voice: 'rumor', sourceId: 'rumor-1' },
-      { text: '远处钟声响起', voice: 'ambient' },
+      { text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' },
     ]);
     expect(ledger.player.regionVisits).toEqual([{ region: '青阳城', day: 2 }]);
   });

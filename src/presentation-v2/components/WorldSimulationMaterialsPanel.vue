@@ -36,6 +36,16 @@
         资料快照跟着楼层走：该楼被删除、重新生成或 swipe 时，账本会回退到更早楼层的快照。
       </p>
       <p v-else class="acu-v2-ws-materials__meta">当前分支还没有任何楼层带有已结算的世界账本快照；首次提交后会写到冻结的 assistant 楼层。</p>
+      <details v-if="pendingFixCards.length" class="acu-v2-ws-materials__block" open>
+        <summary>待修复 · {{ pendingFixCards.length }} 项</summary>
+        <div class="acu-v2-ws-materials__cards">
+          <article v-for="item in pendingFixCards" :key="item.module" class="acu-v2-ws-materials__card acu-v2-ws-materials__card--failed">
+            <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span class="acu-v2-ws-materials__badge">第 {{ item.attempts }} 次</span></p>
+            <p class="acu-v2-ws-materials__card-body">{{ item.detail }}</p>
+            <p class="acu-v2-ws-materials__card-meta">{{ item.meta }}</p>
+          </article>
+        </div>
+      </details>
       <p v-if="!ledger || !ledgerGroups.some(group => group.items.length)" class="acu-v2-ws-materials__empty">世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。</p>
       <details v-for="group in ledgerGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
         <summary>{{ group.label }} · {{ group.items.length }} 条</summary>
@@ -253,7 +263,6 @@ const DIMENSION_KIND_LABELS: Record<string, string> = { pressure: '压力', grow
 
 interface LedgerCard { id: string; title: string; detail: string; badge?: string; meta?: string }
 
-/** 账本来源是首楼信封里的权威账本（提交后即更新），结算快照只用于说明"写在哪一楼"。 */
 const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerCard[] }>>(() => {
   const ledger = props.ledger;
   if (!ledger) return [];
@@ -294,6 +303,18 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
     },
   ];
 });
+
+const MODULE_LABELS: Record<string, string> = {
+  clock: '时钟', dimensions: '世界维度', seeds: '暗流种子', actors: '行动者', chronicle: '世界编年', guidance: '投影', rumors: '传闻', player: '玩家',
+};
+
+const pendingFixCards = computed(() => (props.ledger?.pendingFixes ?? []).map(item => ({
+  module: item.module,
+  title: MODULE_LABELS[item.module] ?? item.module,
+  attempts: item.attempts,
+  detail: item.violations.map(violation => violation.message).join('；') || item.lastError,
+  meta: `${item.agentName} · 第 ${item.firstFailedAtDay} 天起 · ${item.lastError}`,
+})));
 
 const CONTACT_LABELS: Record<string, string> = { open: '开放', secluded: '隔绝' };
 const RUMOR_STATUS_LABELS: Record<string, string> = { latent: '潜伏', ripe: '待命', revealed: '已得知', dead: '已失效' };

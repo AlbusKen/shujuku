@@ -150,7 +150,7 @@ export class WorldSimulationSubagentRuntime_ACU {
     if (!input.candidates.length) throw new Error('WORLD_SIMULATION_REVIEW_CANDIDATES_REQUIRED');
     const agentName = 'causality-reviewer' as const;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
-    const context = withTask_ACU(input.promptContext, { objective: '审核候选的时间、因果、权限、revision 与证据完整性' }, input.candidates, ['guidance']);
+    const context = withTask_ACU(input.promptContext, { objective: '审核候选的时间、因果、权限、revision 与证据完整性' }, input.candidates, []);
     const transcript: Array<{ role: string; content: string }> = [];
     const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
     const readGateState = createWorldSimulationReadGateState_ACU();

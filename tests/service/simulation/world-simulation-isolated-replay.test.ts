@@ -98,29 +98,17 @@ function buildReplay(options: ReplayOptions) {
       clock: { days: 1, storyTime: '1h', evidenceRefs: [initialEvidence] },
     };
     const clockSummary = '钟楼事件使世界时间推进一小时';
-    const clockCandidateId = `${input.identity.runId}:timekeeper:1`;
     const scripts = new Map<WorldSimulationAgentName_ACU, string[]>([
       ['world-director', [
         JSON.stringify({ action: 'read', reads: ['anchor:message'] }),
         ...(options.mode === 'blocked'
           ? [JSON.stringify({ action: 'block', reason: '证据不足，拒绝提交', unresolved: ['missing causal evidence'] })]
-          : [
-              JSON.stringify({
-                action: 'delegate',
-                delegations: options.mode === 'commit_partial'
-                  ? [
-                      { agentName: 'timekeeper', instruction: '分析时间推进', reads: [] },
-                      { agentName: 'lore-researcher', instruction: '分析暗流变化', reads: [] },
-                    ]
-                  : [{ agentName: 'timekeeper', instruction: '核验是否变化', reads: [] }],
-              }),
-              JSON.stringify({
-                action: 'finalize',
-                outcome: options.mode === 'no_change' ? 'no_change' : 'commit',
-                summary: options.mode === 'no_change' ? '证据显示世界状态无变化' : '提交部分成功候选',
-                evidenceRefs: [initialEvidence],
-              }),
-            ]),
+          : [JSON.stringify({
+              action: 'open_round',
+              summary: options.mode === 'no_change' ? '核验后没有幕后变化' : '锁定钟楼时间推进',
+              focus: '世界时钟',
+              dispatchChronicler: false,
+            })]),
       ]],
       ['timekeeper', [options.mode === 'no_change'
         ? JSON.stringify({
@@ -138,18 +126,19 @@ function buildReplay(options: ReplayOptions) {
             evidenceRefs: [initialEvidence],
             uncertainties: [],
           })]],
-      ['lore-researcher', [JSON.stringify({
-        status: 'failed',
-        agentName: 'lore-researcher',
-        reasonCode: 'SEED_EVIDENCE_MISSING',
-        message: '暗流证据不足',
+      ['undercurrent-analyst', [JSON.stringify({
+        status: 'no_change', agentName: 'undercurrent-analyst', summary: '暗流没有变化', evidenceRefs: [initialEvidence], uncertainties: [],
       })]],
-      ['causality-reviewer', [JSON.stringify({
-        verdict: 'accept',
-        summary: '仅采用证据完整的时间候选',
-        findings: [],
-        acceptedCandidateIds: [clockCandidateId],
-        guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }], excludedFacts: [] },
+      ['dramatis-keeper', [JSON.stringify({
+        status: 'no_change', agentName: 'dramatis-keeper', summary: '人物没有变化', evidenceRefs: [initialEvidence], uncertainties: [],
+      })]],
+      ['guidance-composer', [JSON.stringify({
+        status: 'candidate',
+        agentName: 'guidance-composer',
+        patch: { guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' }] } },
+        summary: '远处钟声可以进入投影',
+        evidenceRefs: [initialEvidence],
+        uncertainties: [],
       })]],
     ]);
     const invoke = vi.fn(async (role: WorldSimulationAgentName_ACU) => {
@@ -287,9 +276,11 @@ describe('T9 世界推演隔离 API replay', () => {
     if (!result || result.status !== 'completed' || result.result.outcome !== 'commit') throw new Error('expected committed replay');
     expect(result.result.outcomes.map(item => [item.agentName, item.status, item.reasonCode])).toEqual([
       ['timekeeper', 'candidate', undefined],
-      ['lore-researcher', 'failed', 'SEED_EVIDENCE_MISSING'],
+      ['undercurrent-analyst', 'no_change', undefined],
+      ['dramatis-keeper', 'no_change', undefined],
+      ['guidance-composer', 'candidate', undefined],
     ]);
-    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'causality-reviewer']);
+    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'guidance-composer']);
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } }, task: { status: 'completed', activeRun: null } });
     expect(replay.commitProjection).toHaveBeenCalledOnce();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
@@ -344,12 +335,12 @@ describe('T9 世界推演隔离 API replay', () => {
 
     const result = await replay.run();
 
-    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', outcomes: [{ status: 'no_change' }] } });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', outcomes: [{ status: 'no_change' }, { status: 'no_change' }, { status: 'no_change' }] } });
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 0 }, task: { status: 'completed', activeRun: null }, stages: [{ status: 'completed' }] });
     expect(replay.commitProjection).not.toHaveBeenCalled();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
     expect(readWorldSimulationSessionLog_ACU('chat-replay')).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'main_action', title: '主 Agent 动作：finalize', ok: true }),
+      expect.objectContaining({ kind: 'main_action', title: '主 Agent 动作：open_round', ok: true }),
       expect.objectContaining({ kind: 'run_completed', title: '世界推演无变化', ok: true }),
     ]));
   });

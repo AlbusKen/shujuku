@@ -8,6 +8,7 @@ import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU } from './agent/a
 import { validateWorldSimulationAgentPrompts_ACU } from './agent/prompt-template';
 import {
   WORLD_CHRONICLE_OVERVIEW_CAP_ACU,
+  WORLD_CHRONICLE_HOT_WINDOW_ACU,
   WORLD_LEDGER_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_LEDGER_MODULES_ACU,
@@ -25,6 +26,7 @@ import {
   type WorldSimulationEnvelope_ACU,
   type WorldSimulationErrorPhase_ACU,
   type WorldSimulationLedger_ACU,
+  type WorldSimulationPendingFix_ACU,
   type WorldSimulationWriteGuard_ACU,
   type WorldChronicleOverviewRow_ACU,
   type WorldGuidanceSignal_ACU,
@@ -40,7 +42,7 @@ const TASK_STATUSES_ACU = ['drafting', 'paused', 'running', 'stopping_after_infl
 const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'] as const;
 const REVISION_REASONS_ACU = ['initial', 'automatic_replan', 'manual_replan', 'resume_repair'] as const;
 const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed', 'swept', 'progressed'] as const;
-const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview'] as const;
+const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview', 'pendingFixes'] as const;
 // 计划确认流程退役后的旧数据归一化：读取历史存量聊天时不再 fail-closed。
 const LEGACY_TASK_STATUSES_ACU: Record<string, NonNullable<WorldSimulationEnvelope_ACU['task']>['status']> = { awaiting_plan_review: 'paused' };
 const LEGACY_STAGE_STATUSES_ACU: Record<string, WorldSimulationEnvelope_ACU['stages'][number]['status']> = { awaiting_review: 'planning' };
@@ -167,8 +169,16 @@ function migrateV1Ledger_ACU(raw: Record<string, unknown>): Record<string, unkno
 function migrateV2Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
   return {
     ...raw,
-    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    schemaVersion: 3,
     chronicleOverview: Array.isArray(raw.chronicleOverview) ? raw.chronicleOverview : [],
+  };
+}
+
+function migrateV3Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...raw,
+    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    pendingFixes: Array.isArray(raw.pendingFixes) ? raw.pendingFixes : [],
   };
 }
 
@@ -176,6 +186,7 @@ function migrateLedgerToCurrent_ACU(raw: Record<string, unknown>): Record<string
   let current = raw;
   if (current.schemaVersion === 1) current = migrateV1Ledger_ACU(current);
   if (current.schemaVersion === 2) current = migrateV2Ledger_ACU(current);
+  if (current.schemaVersion === 3) current = migrateV3Ledger_ACU(current);
   return current;
 }
 
@@ -197,6 +208,35 @@ function validateChronicleOverview_ACU(raw: unknown, phase: WorldSimulationError
     seenRefs.add(row.archiveRef);
   }
   return rows;
+}
+
+function validatePendingFixes_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationPendingFix_ACU[] {
+  if (!Array.isArray(raw)) fail_ACU('ledger.pendingFixes 必须是数组', phase, { path: 'ledger.pendingFixes' });
+  if (raw.length > 128) fail_ACU('ledger.pendingFixes 容量非法', phase);
+  return raw.map((item, index) => {
+    const path = `ledger.pendingFixes[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`, phase);
+    exactKeys_ACU(item, ['module', 'candidateId', 'agentName', 'violations', 'attempts', 'firstFailedAtDay', 'lastError'], [], path, phase);
+    if (!Array.isArray(item.violations)) fail_ACU(`${path}.violations 必须是数组`, phase);
+    const violations = item.violations.map((violation, violationIndex) => {
+      const violationPath = `${path}.violations[${violationIndex}]`;
+      if (!isRecord_ACU(violation)) fail_ACU(`${violationPath} 必须是对象`, phase);
+      exactKeys_ACU(violation, ['path', 'message'], [], violationPath, phase);
+      return {
+        path: string_ACU(violation.path, `${violationPath}.path`, phase),
+        message: string_ACU(violation.message, `${violationPath}.message`, phase),
+      };
+    });
+    return {
+      module: enum_ACU(item.module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.module`, phase),
+      candidateId: string_ACU(item.candidateId, `${path}.candidateId`, phase, true),
+      agentName: string_ACU(item.agentName, `${path}.agentName`, phase),
+      violations,
+      attempts: integer_ACU(item.attempts, `${path}.attempts`, phase, 0, 100),
+      firstFailedAtDay: integer_ACU(item.firstFailedAtDay, `${path}.firstFailedAtDay`, phase, 1),
+      lastError: string_ACU(item.lastError, `${path}.lastError`, phase, true),
+    };
+  });
 }
 
 function validatePlayer_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldPlayer_ACU {
@@ -256,7 +296,7 @@ function validateRumors_ACU(raw: unknown, actorIds: ReadonlySet<string>, phase: 
 
 function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['settings'] {
   if (!isRecord_ACU(raw)) fail_ACU('settings 必须是对象', phase, { path: 'settings' });
-  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics'], 'settings', phase);
+  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow'], 'settings', phase);
   if (!isRecord_ACU(raw.agentRunBudget)) fail_ACU('settings.agentRunBudget 必须是对象', phase);
   exactKeys_ACU(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
   const budget = {
@@ -314,6 +354,21 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
       dynamics = { rumorTTLDays, maxClockAdvanceDays, collisionEnforcement, missedSweepEnabled };
     }
   }
+  const defaultWorkflow = buildDefaultWorldSimulationSettings_ACU().workflow;
+  let workflow = defaultWorkflow;
+  if (raw.workflow !== undefined) {
+    if (!isRecord_ACU(raw.workflow)) {
+      workflow = defaultWorkflow;
+    } else {
+      const autoFixEnabled = typeof raw.workflow.autoFixEnabled === 'boolean' ? raw.workflow.autoFixEnabled : defaultWorkflow.autoFixEnabled;
+      const chroniclerHotThreshold = Number.isInteger(raw.workflow.chroniclerHotThreshold)
+        && (raw.workflow.chroniclerHotThreshold as number) >= 1
+        && (raw.workflow.chroniclerHotThreshold as number) <= WORLD_CHRONICLE_OVERVIEW_CAP_ACU
+        ? raw.workflow.chroniclerHotThreshold as number
+        : defaultWorkflow.chroniclerHotThreshold;
+      workflow = { autoFixEnabled, chroniclerHotThreshold };
+    }
+  }
   return {
     autoTriggerEnabled: boolean_ACU(raw.autoTriggerEnabled, 'settings.autoTriggerEnabled', phase),
     agentHistoryTokenBudget: integer_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', phase, 0, 1000000),
@@ -327,6 +382,7 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     agentPrompts,
     ...(Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion') ? { promptForceDefaultVersion: string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) } : {}),
     dynamics,
+    workflow,
   };
 }
 
@@ -395,7 +451,8 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
   if (!isRecord_ACU(normalized.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
   exactKeys_ACU(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
   const chronicleOverview = validateChronicleOverview_ACU(normalized.chronicleOverview, phase);
-  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview };
+  const pendingFixes = validatePendingFixes_ACU(normalized.pendingFixes, phase);
+  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview, pendingFixes };
 }
 
 function validatePlan_ACU(raw: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['stages'][number]['revisions'][number]['plan'] {
@@ -822,6 +879,7 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
     stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
   });
   probe(() => { validateChronicleOverview_ACU(normalized.chronicleOverview, phase); });
+  probe(() => { validatePendingFixes_ACU(normalized.pendingFixes, phase); });
   return violations;
 }
 

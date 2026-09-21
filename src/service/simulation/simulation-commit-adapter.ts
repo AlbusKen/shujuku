@@ -240,17 +240,18 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
   const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
   assertRun_ACU(envelope, input);
+  const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
   const applied = applyWorldSimulationCandidatesDetailed_ACU(
     envelope.ledger,
     input.commitCandidate.acceptedCandidates,
     new Set(input.commitCandidate.evidenceRefs),
     envelope.settings,
+    { anchorMessage: storyText },
   );
   let ledger = applied.ledger;
   ledger = maintainWorldPlayer_ACU(ledger, envelope.ledger.player);
   const extraTimeline: WorldSimulationTimelineEntry_ACU[] = [];
   const daysAdvanced = Math.max(0, ledger.clock.day - envelope.ledger.clock.day);
-  const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
   const relevance = relevanceGate_ACU(ledger, storyText);
   const directives = progressionPlan_ACU({
     ledger,

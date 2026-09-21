@@ -102,6 +102,7 @@ export type WorldSimulationMainAction_ACU =
   | WorldSimulationToolCall_ACU
   | { kind: 'tools'; calls: WorldSimulationToolCall_ACU[] }
   | { kind: 'delegate'; delegations: WorldSimulationDelegation_ACU[] }
+  | { kind: 'open_round'; summary: string; focus: string; dispatchChronicler: boolean; skipModules: string[] }
   | { kind: 'finalize'; outcome: WorldSimulationTerminalOutcome_ACU; summary: string; evidenceRefs: string[] }
   | { kind: 'block'; reason: string; unresolved: string[] };
 export interface WorldSimulationPlannerOutput_ACU { action: 'plan' | 'replan'; summary: string; plan: import('../model').WorldSimulationStagePlan_ACU; }
@@ -125,8 +126,6 @@ export interface WorldSimulationReviewerResult_ACU {
   summary: string;
   findings: WorldSimulationReviewerFinding_ACU[];
   acceptedCandidateIds: string[];
-  /** verdict 为 accept 时必填：把已接受幕后事实压缩为角色可感知信号，不新增事实。无变化时 signals 为空数组。 */
-  guidance?: { signals: import('../model').WorldGuidanceSignal_ACU[]; excludedFacts: string[] };
 }
 export interface WorldSimulationSubagentOutcome_ACU {
   agentName: string;
@@ -147,7 +146,7 @@ export interface WorldSimulationCommitCandidate_ACU {
   summary: string;
   acceptedCandidates: WorldSimulationCandidate_ACU[];
   evidenceRefs: string[];
-  reviewer: WorldSimulationReviewerResult_ACU;
+  reviewer?: WorldSimulationReviewerResult_ACU;
   collisionReport?: WorldCollisionReport_ACU;
 }
 export type WorldSimulationMainLoopResult_ACU =

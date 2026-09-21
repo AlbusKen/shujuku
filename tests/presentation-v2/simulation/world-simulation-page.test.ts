@@ -287,7 +287,7 @@ describe('WorldSimulationPage', () => {
     const { host } = await mountPage();
     const groups = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'));
     const labels = groups.map(group => group.querySelector('.acu-disclosure-group__label')?.textContent?.trim());
-    expect(labels).toEqual(expect.arrayContaining(['Agent 运行预算', '设定研究（网页检索）', '世界动态', '各 Agent 渠道', '主 Agent（world-director）提示词', '因果审核（causality-reviewer）提示词', '占位符速查']));
+    expect(labels).toEqual(expect.arrayContaining(['Agent 运行预算', '设定研究（网页检索）', '世界动态', '工作流', '各 Agent 渠道', '主 Agent（world-director）提示词', '因果审核（causality-reviewer）提示词', '占位符速查']));
     for (const group of groups) {
       expect(group.querySelector('.acu-disclosure-group__header')?.getAttribute('aria-expanded')).toBe('false');
     }
@@ -296,6 +296,7 @@ describe('WorldSimulationPage', () => {
     await nextTick();
     expect(channelGroup.textContent).toContain('时计');
     expect(channelGroup.textContent).toContain('暗流分析');
+    expect(channelGroup.textContent).toContain('投影决定');
     expect(channelGroup.textContent).toContain('设定研究');
     const topLevelLabels = Array.from(host.querySelectorAll<HTMLElement>('.acu-form-row__label'))
       .filter(label => !label.closest('.acu-v2-world-simulation-page__group'))
@@ -308,6 +309,7 @@ describe('WorldSimulationPage', () => {
     snapshot.value = baseSnapshot({ projectionPreview: '<!-- projection-test -->北境压力上升' });
     const { host } = await mountPage();
     expect(host.textContent).toContain('世界状态');
+    expect(host.textContent).not.toContain('待修复');
     button(host, '投影预览')!.click();
     await nextTick();
     expect(host.textContent).toContain('Projection preview');
@@ -338,10 +340,17 @@ describe('WorldSimulationPage', () => {
         exposePolicy: 'on_collision', evidenceRefs: [], retiredReason: 'missed', revision: 1,
       }],
       player: { location: { region: '客栈' }, locationUpdatedAtDay: 47, regionVisits: [{ region: '客栈', day: 22 }], contact: 'open', evidenceRefs: [] },
+      pendingFixes: [{
+        module: 'actors', candidateId: 'candidate:actors', agentName: 'dramatis-keeper',
+        violations: [{ path: '$.patch.actors', message: 'locationRef 必须是对象或 null' }],
+        attempts: 2, firstFailedAtDay: 47, lastError: 'locationRef 必须是对象或 null',
+      }],
     };
     next.envelope.timeline = [{ id: 'run:swept', at: 't1', kind: 'swept', taskId: 'task', message: 'seed-miss' }];
     snapshot.value = next;
     const { host } = await mountPage();
+    expect(host.textContent).toContain('待修复');
+    expect(host.textContent).toContain('locationRef 必须是对象或 null');
     expect(host.textContent).toContain('编年对照');
     expect(host.textContent).toContain('错过清单');
     expect(host.textContent).toContain('传闻队列');

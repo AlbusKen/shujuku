@@ -4,7 +4,7 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
-import { readLatestWorldSimulationMaterials_ACU } from './agent/agent-module-store';
+import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from './agent/agent-module-store';
 import { compactWorldSimulationConversationAndDispatchRequirements_ACU } from './agent/agent-requirements-dispatch';
 import { clearWorldSimulationRunState_ACU } from './agent/agent-run-cache';
 import { clearWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
@@ -239,6 +239,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               anchor: currentAnchor,
               chat: getChatArray_ACU(),
               resetRunBudget,
+              anchorMaterialsCommitted: readWorldSimulationLedgerAtAnchor_ACU(currentAnchor, getChatArray_ACU()) !== null,
             }),
           });
           return engine.run({ identity: runIdentity });

@@ -11,7 +11,7 @@ function agentForPatch_ACU(patch: Record<string, unknown>): string {
   if (keys.some(key => key === 'dimensions' || key === 'seeds')) return 'undercurrent-analyst';
   if (keys.some(key => key === 'actors' || key === 'player' || key === 'rumors')) return 'dramatis-keeper';
   if (keys.some(key => key === 'chronicle' || key === 'chronicleArchive')) return 'chronicler';
-  if (keys.some(key => key === 'guidance')) return 'causality-reviewer';
+  if (keys.some(key => key === 'guidance')) return 'guidance-composer';
   throw new Error(`TEST_PATCH_HAS_NO_WRITER:${keys.join(',')}`);
 }
 
@@ -51,7 +51,13 @@ describe('world simulation transaction', () => {
     )).toThrow(/未授权/);
     const base = buildEmptyWorldSimulationLedger_ACU();
     base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '', evidenceRefs: [], revision: 1 });
-    expect(() => applyWorldSimulationCandidates_ACU(base, [candidate({ dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: [] }] } })], new Set(['e1']))).toThrow(/revision 冲突/);
+    const conflicted = applyWorldSimulationCandidates_ACU(base, [candidate({ dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: [] }] } })], new Set(['e1']));
+    expect(conflicted.dimensions[0]).toMatchObject({ value: 1, revision: 1 });
+    expect(conflicted.pendingFixes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ module: 'dimensions', agentName: 'undercurrent-analyst' }),
+    ]));
+    expect(conflicted.pendingFixes[0].lastError).toMatch(/revision 冲突/);
+    expect(conflicted.revision).toBe(1);
   });
 
   it('dimensions upsert 缺 kind/value/trend 时按缺省补齐并可入库', () => {
@@ -119,11 +125,13 @@ describe('world simulation transaction', () => {
       new Set(['e1']),
     );
     expect(next.actors[0]).toMatchObject({ id: 'actor-1', interests: ['刀', '盾'], visibility: 'hidden', life: 'alive' });
-    expect(() => applyWorldSimulationCandidates_ACU(
+    const missingActor = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ seeds: { upsert: [{ id: 'seed-x', title: '暗流', actorIds: ['actor-missing'] }] } })],
       new Set(['e1']),
-    )).toThrow(/引用了不存在的 actor/);
+    );
+    expect(missingActor.seeds).toEqual([]);
+    expect(missingActor.pendingFixes.some(item => item.module === 'seeds' && item.lastError.includes('引用了不存在的 actor'))).toBe(true);
     expect(() => applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [{ ...candidate({ clock: { days: 1, evidenceRefs: ['e1'] } }), patch: { guidance: { signals: [{ text: '泄露', voice: 'ambient' }] } } }],
@@ -138,24 +146,30 @@ describe('world simulation transaction', () => {
       new Set(['e1']),
     );
     expect(next.clock).toMatchObject({ day: 3, slot: '黄昏', storyTime: '第三日', evidenceRefs: ['e1'] });
-    expect(() => applyWorldSimulationCandidates_ACU(
+    const unknownDay = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ clock: { day: 9, evidenceRefs: ['e1'] } })],
       new Set(['e1']),
-    )).toThrow(/未知字段|禁止直接写 day/);
-    expect(() => applyWorldSimulationCandidates_ACU(
+    );
+    expect(unknownDay.clock.day).toBe(1);
+    expect(unknownDay.pendingFixes[0].lastError).toMatch(/未知字段|禁止直接写 day/);
+    const negative = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ clock: { days: -1, evidenceRefs: ['e1'] } })],
       new Set(['e1']),
-    )).toThrow(/非负整数/);
+    );
+    expect(negative.clock.day).toBe(1);
+    expect(negative.pendingFixes[0].lastError).toMatch(/非负整数/);
   });
 
   it('超过 maxClockAdvanceDays 时必须提供非空 evidenceRefs', () => {
-    expect(() => applyWorldSimulationCandidates_ACU(
+    const blocked = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ clock: { days: 15 } })],
       new Set(['e1']),
-    )).toThrow(/maxClockAdvanceDays/);
+    );
+    expect(blocked.clock.day).toBe(1);
+    expect(blocked.pendingFixes[0].lastError).toMatch(/maxClockAdvanceDays/);
     const next = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ clock: { days: 15, evidenceRefs: ['e1'] } })],
@@ -171,29 +185,60 @@ describe('world simulation transaction', () => {
       new Set(['e1']),
     );
     expect(next.player).toMatchObject({ location: { region: '临川' }, contact: 'secluded', locationUpdatedAtDay: 1, regionVisits: [] });
-    expect(() => applyWorldSimulationCandidates_ACU(
+    const forbiddenUpdatedAt = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ player: { locationUpdatedAtDay: 9 } })],
       new Set(['e1']),
-    )).toThrow(/未知字段/);
-    expect(() => applyWorldSimulationCandidates_ACU(
+    );
+    expect(forbiddenUpdatedAt.player.locationUpdatedAtDay).toBe(1);
+    expect(forbiddenUpdatedAt.pendingFixes[0].lastError).toMatch(/未知字段/);
+    const forbiddenVisits = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ player: { regionVisits: [{ region: '临川', day: 1 }] } })],
       new Set(['e1']),
-    )).toThrow(/未知字段/);
+    );
+    expect(forbiddenVisits.player.regionVisits).toEqual([]);
+    expect(forbiddenVisits.pendingFixes[0].lastError).toMatch(/未知字段/);
   });
 
   it('死亡行动者必须伴随 rumor，guidance 信号必须结构化', () => {
     const dead = { id: 'actor-dead', name: '死者', interests: [], location: '', locationRef: null, life: 'dead', diedAtDay: 1, deathSummary: '战死', resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', expectedRevision: 0 };
     const rumor = { id: 'rumor-death', fact: '有人战死', originDay: 1, earliestRevealDay: 1, channels: ['north'], relatedActorIds: ['actor-dead'], status: 'latent', revealedAtDay: null, expectedRevision: 0 };
-    expect(() => applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ actors: { upsert: [dead] } })], new Set(['e1']))).toThrow(/伴随 rumor/);
+    const deadOnly = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ actors: { upsert: [dead] } })], new Set(['e1']));
+    expect(deadOnly.actors).toEqual([]);
+    expect(deadOnly.pendingFixes[0].lastError).toMatch(/伴随 rumor/);
     const next = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ actors: { upsert: [dead] }, rumors: { upsert: [rumor] } })], new Set(['e1']));
     expect(next.actors[0].life).toBe('dead');
     expect(next.rumors[0].id).toBe('rumor-death');
-    expect(() => applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ rumors: { upsert: [{ ...rumor, id: 'rumor-bad', relatedActorIds: [], earliestRevealDay: 1, originDay: 2 }] } })], new Set(['e1']))).toThrow(/earliestRevealDay/);
-    expect(() => applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [{ ...candidate({ guidance: { signals: ['钟声'] } }), agentName: 'causality-reviewer', writableModules: ['guidance'] }], new Set(['e1']))).toThrow(/必须是对象/);
-    const guided = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [{ ...candidate({ guidance: { signals: [{ text: '钟声', voice: 'ambient' }] } }), agentName: 'causality-reviewer', writableModules: ['guidance'] }], new Set(['e1']));
-    expect(guided.guidance.signals).toEqual([{ text: '钟声', voice: 'ambient' }]);
+    const badRumor = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ rumors: { upsert: [{ ...rumor, id: 'rumor-bad', relatedActorIds: [], earliestRevealDay: 1, originDay: 2 }] } })], new Set(['e1']));
+    expect(badRumor.rumors).toEqual([]);
+    expect(badRumor.pendingFixes[0].lastError).toMatch(/earliestRevealDay/);
+    const unstructured = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ guidance: { signals: ['钟声'] } })], new Set(['e1']));
+    expect(unstructured.guidance.signals).toEqual([]);
+    expect(unstructured.pendingFixes[0].lastError).toMatch(/必须是对象/);
+    const guided = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ guidance: { signals: [{ text: '钟声', voice: 'ambient', sourceId: 'clock' }] } })], new Set(['e1']));
+    expect(guided.guidance.signals).toEqual([{ text: '钟声', voice: 'ambient', sourceId: 'clock' }]);
+    const missingSource = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ guidance: { signals: [{ text: '钟声', voice: 'ambient' }] } })], new Set(['e1']));
+    expect(missingSource.guidance.signals).toEqual([]);
+    expect(missingSource.pendingFixes[0].lastError).toMatch(/sourceId/);
+  });
+
+  it('部分模块违规时其余模块入库并记录 pendingFixes', () => {
+    const detailed = applyWorldSimulationCandidatesDetailed_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [
+        candidate({ clock: { days: 1, storyTime: '次日', evidenceRefs: ['e1'] } }, ['e1'], 'candidate:clock'),
+        candidate({ actors: { upsert: [{ id: 'actor-dead', name: '死者', life: 'dead', diedAtDay: 1, deathSummary: '战死', expectedRevision: 0 }] } }, ['e1'], 'candidate:actors'),
+      ],
+      new Set(['e1']),
+    );
+    expect(detailed.ledger.clock).toMatchObject({ day: 2, storyTime: '次日' });
+    expect(detailed.ledger.actors).toEqual([]);
+    expect(detailed.appliedModules).toEqual(['clock']);
+    expect(detailed.pendingFixes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ module: 'actors', candidateId: 'candidate:actors', attempts: 1 }),
+    ]));
+    expect(detailed.ledger.revision).toBe(1);
   });
 
   it('chronicleArchive 合法落账，超容无合并行拒绝，相似事件不拦截', () => {
@@ -227,7 +272,9 @@ describe('world simulation transaction', () => {
       oneLine: `事件${index}`,
       archiveRef: `arc-${index}`,
     }));
-    expect(() => applyWorldSimulationCandidates_ACU(filled, [candidate(archivePatch)], new Set(['e1']))).toThrow(/超过/);
+    const overflow = applyWorldSimulationCandidates_ACU(filled, [candidate(archivePatch)], new Set(['e1']));
+    expect(overflow.chronicleOverview).toHaveLength(WORLD_CHRONICLE_OVERVIEW_CAP_ACU);
+    expect(overflow.pendingFixes[0].lastError).toMatch(/超过/);
 
     const similar = applyWorldSimulationCandidates_ACU(
       detailed.ledger,
@@ -253,11 +300,13 @@ describe('world simulation transaction', () => {
       new Set(['e1']),
     );
     expect(sequential.dimensions.map(item => item.id)).toEqual(['dim-1', 'dim-2']);
-    expect(() => applyWorldSimulationCandidates_ACU(
+    const missingName = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
       [candidate({ dimensions: { upsert: [{ rationale: '', evidenceRefs: ['e1'] }] } })],
       new Set(['e1']),
-    )).toThrow(/name 必须是非空字符串/);
+    );
+    expect(missingName.dimensions).toEqual([]);
+    expect(missingName.pendingFixes[0].lastError).toMatch(/name 必须是非空字符串/);
   });
 
   it('chronicle append 省略 id/at 时按当前 clock 编号；先推进时钟再用推进后的 day', () => {

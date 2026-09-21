@@ -3,7 +3,8 @@ import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-t
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v9';
+export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v10';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -31,20 +32,21 @@ export function worldSimulationSeamMarker_ACU(seam: WorldSimulationEngineSeam_AC
 
 export function worldSimulationDirectorProtocolInstruction_ACU(): string {
   return [
-    '仅输出一个主动作 JSON：read、search、delegate、finalize 或 block。',
-    '你是编排者而不是 ledger 写入者：writableModules=[] 是职责隔离，不是权限故障或阻断条件。需要初始化或修改账本时，必须 delegate 给有对应 writableModules 的 specialist，再审核候选；revision=0 也遵循此流程。',
-    '历史会话中的 MISSING_FIELD、REQUIRED_TEXT_LIST、INVALID_SPECIALIST_STATUS 等协议失败只用于诊断，不代表当前轮仍失败。只能依据当前 runtimeContext.outcomes、当前候选与当前证据决定是否阻断。',
-    '只有当前证据缺失且任何授权 specialist 都无法继续时才能 block；不得仅因 world-director 自身无直接写权限而 block。',
+    '仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block。',
+    '你是开局决策者而不是 ledger 写入者：writableModules=[] 是职责隔离，不是权限故障或阻断条件。常规推演在取证后输出 open_round，由固定工作流自治写入账本；revision=0 也遵循此流程。',
+    '历史会话中的 MISSING_FIELD、REQUIRED_TEXT_LIST、INVALID_SPECIALIST_STATUS 等协议失败只用于诊断，不代表当前轮仍失败。只能依据当前 runtimeContext、当前证据与 pendingFixes 决定是否阻断。',
+    '只有当前证据缺失且固定工作流也无法继续时才能 block；不得仅因 world-director 自身无直接写权限而 block。',
     'read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query、scope、maxResults、isRegex。',
     `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`,
     'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
-    'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
-    '相互独立的推演事项必须在同一次 delegate 的 delegations 数组中同批派出（上限受 maxConcurrent 约束），不要逐轮单派。clock 派 timekeeper，维度与暗流派 undercurrent-analyst，人物/玩家/传闻派 dramatis-keeper。chronicler 仅在事件完结或热层编年过长时按需派出，不要例行派编年或归档。',
-    '优先按阶段计划 plannedSpecialists 派工；计划外角色可用但必须在 instruction 里写明理由。某模块候选频繁失败时，可先放弃该模块更新、finalize 其余已通过模块，下轮再补。',
-    '派工预算耗尽即终止并输出 block 卡片，不会静默拦截或空转重试。被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
-    'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
+    'open_round 必须包含 action、summary、focus、dispatchChronicler；skipModules 可选，且只能使用账本模块名。常规自动推演必须用 open_round，工作流执行期间中途不再回主会话派工。',
+    'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；仅当用户明确要求维护某份资料时才 delegate 给对应 specialist。block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
+    'dispatchChronicler 仅在事件完结或热层编年过长时为 true。pendingFixes 非空时必须在 focus 中写明优先修复的模块。',
+    '派工预算耗尽即终止并输出 block 卡片。用户维护路径被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block。',
+    'evidenceRefs 只允许出现在 finalize 顶层；read、search、open_round、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
     '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
-    '同批派工示例：{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":["ledger:current","anchor:message"]},{"agentName":"undercurrent-analyst","instruction":"更新维度压力与暗流","reads":["ledger:current"]},{"agentName":"dramatis-keeper","instruction":"同步人物位置与传闻","reads":["player:current","rumors:current"]}]}',
+    '开局决策示例：{"action":"open_round","summary":"锁定本轮幕后焦点并启动固定工作流","focus":"时间推进与暗流压力","dispatchChronicler":false}',
+    '用户维护示例：{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":["player:current","rumors:current"]}]}',
     'finalize 顶层只能包含 action、outcome、summary、evidenceRefs；outcome 必须精确为 commit、no_change、blocked 之一。candidateId、acceptedCandidateIds、status、verdict 属于派工或审核结果，禁止抄入 finalize。',
     '提交示例：{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}',
     '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
@@ -67,7 +69,7 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
     lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
     lines.push('expectedRevision 可省略：新建默认 0，更新默认当前 revision。');
     lines.push('chronicle 的 id/at、chronicleArchive 的 archiveRef/fingerprint、以及 candidateId 均可省略，由系统编号；不要为这些机器字段编造格式。');
-    lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId?}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
+    lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
     if (writableModules.includes('chronicle')) {
       lines.push('chronicle 必须使用 {"append":[...]}；append 条目可省略 id/at，必须含非空 summary。');
       lines.push('当热层 chronicle 过长或某段事件已完结时，可提交 chronicleArchive：{"archiveEntries":[{day,summary,relatedIds,sourceChronicleIds,archiveRef?,fingerprints?}],"overviewRows":[{day,oneLine,archiveRef?,fingerprint?}],"collapseRefs"?}。oneLine 句式示例：「第3日 · 北岭矿洞塌方，三人受伤」。目录追加后超过 512 行必须自带 collapseRefs 合并旧行，否则该候选会被拒绝。');
@@ -78,7 +80,7 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
       lines.push('contact 维护纪律：正文出现闭关/昏迷/囚禁/荒野独行等无社交渠道信号置 secluded，城镇/客栈/人群置 open，无明确信号保守维持原值。');
     }
     if (writableModules.includes('rumors')) lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
-    if (writableModules.includes('guidance')) lines.push('guidance 必须是非空对象。');
+    if (writableModules.includes('guidance')) lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文原句或账本事实原句。');
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
   }
@@ -91,14 +93,11 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
 export function worldSimulationReviewerProtocolInstruction_ACU(): string {
   return [
     '只输出一个审核 JSON 对象，不附加 Markdown、解释、思考标签或其他字段。',
-    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时必须包含 guidance。',
+    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。',
     'verdict 必须精确为 accept、revise、reject 之一；禁止使用 approve、approved、pass、success、done 等别名。',
     'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual，severity 必须精确为 blocking、major、minor 之一。',
     'accept 必须至少接受一个候选；reject 的 acceptedCandidateIds 必须为空；revise 可保留已通过候选并用 findings 说明待修正项。',
-    'verdict 为 accept 时必须输出 guidance 字段：{"signals":[{"text":"角色可感知信号","voice":"encounter|rumor|ambient","sourceId":"可选"}],"excludedFacts":["台面不得暴露的幕后事实"]}。无台面可感变化时仍输出 guidance，signals 为空数组，并在 summary 说明本轮没有玩家可感世界动态。',
-    'voice 三语态：encounter 当场撞上、rumor 二手传闻、ambient 环境暗流。接受 rumor 信号必须带 sourceId。',
-    '信息边界终审：rumor 信号除 sourceId 外还须语义复核玩家实际可及（region 命中且 contact=\'open\'）；程序层 commit 前硬过滤兜底。latent/dead 传闻与 missed 细节必须留在 excludedFacts。',
-    'guidance 只是把已接受候选中的幕后事实压缩为角色可感知信号，绝不新增候选中没有的事实。guidance 是幕后→台面的唯一通道，accept 时不得省略该字段。',
+    '你只审核时间、空间、因果、revision、权限与证据；投影由 guidance-composer 专责，不得在本协议中书写 signals。',
     `accept 示例：${JSON.stringify(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer)}`,
     'revise 示例：{"verdict":"revise","summary":"候选仍需修正","findings":[{"severity":"major","reasonCode":"CAUSE_GAP","path":"$.clock","expected":"时间与因果连续","actual":"缺少因果说明"}],"acceptedCandidateIds":[]}',
     'reject 示例：{"verdict":"reject","summary":"候选不满足证据约束","findings":[{"severity":"blocking","reasonCode":"EVIDENCE_GAP","path":"$","expected":"可验证证据","actual":"缺失"}],"acceptedCandidateIds":[]}',
@@ -131,16 +130,17 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
   const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
   const seam = (key: WorldSimulationEngineSeam_ACU, body: string): WorldSimulationPromptSegment_ACU => ({ role: seamRoles_ACU[key], content: `${worldSimulationSeamMarker_ACU(key)}\n${body}`, enabled: true, deletable: false, pinned: true });
   const roleRules = definition.kind === 'director'
-    ? `${definition.description}。你没有直接 ledger patch 权限，但拥有取证、派工、审核与收敛权限；这不是故障。账本为空或 revision=0 时仍应派有写入权限的 specialist 形成候选。不得扩大权限或杜撰证据。`
+    ? `${definition.description}。你没有直接 ledger patch 权限；这不是故障。常规推演取证后输出 open_round，固定工作流负责写入。用户要求维护资料时才 delegate。账本为空或 revision=0 同样先 open_round。不得扩大权限或杜撰证据。`
     : `${definition.description}。写入范围：${definition.writableModules.join(', ') || '无直接写入权限'}。不得扩大权限或杜撰证据。`;
   let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。';
-  if (definition.kind === 'planner') workflow += '本轮计划必须优先覆盖 $WORLD_COLLISIONS 中的事项；若有 seed 距过期 ≤ 2 天，计划中列入临界暗流。plannedSpecialists 按模块选择 timekeeper、undercurrent-analyst、dramatis-keeper；chronicler 仅在事件完结或热层过长时列入，不要再计划 world-analyst。';
-  if (definition.kind === 'director') workflow += '阶段计划已由系统填入 $WORLD_STAGE_PLAN，你在首轮一并锁定焦点并直接取证或同批派工，不要等待独立 planner。碰撞报告非空必须同批派相应 specialist 处理当场演化：时间派 timekeeper，暗流/维度派 undercurrent-analyst，人物与传闻派 dramatis-keeper。chronicler 仅在事件完结或热层编年过长时按需派出。优先按阶段计划 plannedSpecialists 派工；计划外角色可用但需有理由。某模块候选频繁失败时，可先放弃该模块更新、finalize 其余已通过模块。连续超过 4 轮没有新候选且既有派工结果全是 no_change 时，尽早 finalize 或 block，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入，不得期待 rumor 信号。clockAdvance.days 由正文时间跨度决定。actor 死亡必须伴生 rumor，否则 finalize 会被事务拒绝。';
+  if (definition.kind === 'planner') workflow += '兼容展示：单轮焦点已由主会话 open_round 吸收。若仍被调用，计划必须优先覆盖 $WORLD_COLLISIONS；若有 seed 距过期 ≤ 2 天，列入临界暗流。不要再计划 world-analyst。';
+  if (definition.kind === 'director') workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。';
   if (name === 'timekeeper') workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
   if (name === 'undercurrent-analyst') workflow += '只写入 dimensions 与 seeds。空间纪律：新建事件类 seed 必须给 location.region。时效纪律：有时限事件必须给 expiresAtDay 与 missedOutcome。不得写入 clock、actors、chronicle。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
   if (name === 'dramatis-keeper') workflow += '只写入 actors、player、rumors。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
   if (name === 'chronicler') workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
-  if (definition.kind === 'reviewer') workflow += 'guidance 是幕后→台面的唯一通道，缺席即本轮推演没有产生玩家可感世界动态；accept 必须带 guidance，无变化时输出空 signals 并在 summary 说明。审核清单：clockAdvance.days 与正文跨度是否匹配；碰撞当场反应是否与玩家位置一致；信息边界终审——rumor 信号须带 sourceId 且玩家 region 命中且 contact=\'open\'，程序层 commit 前硬过滤兜底。';
+  if (definition.kind === 'reviewer') workflow += '你只审核时间、空间、因果、revision、权限与证据。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
+  if (name === 'guidance-composer') workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。voice 使用 encounter、rumor、ambient。没有新的玩家可感变化时输出 no_change。';
   if (name === WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU) {
     workflow = '整理用户在 Agent 会话里对任务提过的要求。输入是被压缩范围内的实质用户发言加上当前用户要求清单。输出全量替换清单。不写账本、不派工、不产出 candidate。没有撤回依据时不得把已有清单清空。';
   }
@@ -166,16 +166,13 @@ export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAg
 }
 
 export const WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU = {
-  main: { action: 'delegate', delegations: [
-    { agentName: 'timekeeper', instruction: '推演本轮幕后时间推进', reads: ['ledger:current', 'anchor:message'] },
-    { agentName: 'undercurrent-analyst', instruction: '推演维度压力与暗流', reads: ['ledger:current'] },
-  ] },
+  main: { action: 'open_round', summary: '锁定本轮幕后焦点并启动固定工作流', focus: '时间推进与暗流压力', dispatchChronicler: false },
   planner: {
     action: 'plan', summary: '锁定本轮幕后推演焦点',
     plan: { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: '推演本轮幕后动态', objective: '根据最新剧情推算世界时钟、维度压力、暗流与行动者的幕后演变', impactScope: ['当前世界状态'], factsToVerify: ['时间是否推进'], plannedTools: ['read'], plannedSpecialists: ['timekeeper', 'undercurrent-analyst'], expectedLedgerChanges: ['clock'], convergenceConditions: ['证据与候选闭合'], blockingConditions: ['缺少锚点'], completedSteps: [], nextStep: '读取当前账本' },
   },
   specialist: { status: 'candidate', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '次日' } }, summary: '幕后时间推进候选', evidenceRefs: ['evidence:clock:1'], uncertainties: [] },
-  reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'], guidance: { signals: [{ text: '城中开始流传税银劫案的只言片语', voice: 'rumor', sourceId: 'rumor-tax' }], excludedFacts: ['三十万两税银由深水重船转移'] } },
+  reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'] },
 } as const;
 
 export function worldSimulationPlannerProtocolInstruction_ACU(): string {
@@ -245,6 +242,18 @@ const WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU: Partial<Record<WorldSimulatio
   'lore-researcher': '2268:18029e6a',
 };
 
+const WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
+  'world-director': '4777:cd4e92ac',
+  'world-stage-planner': '2861:b5c724e3',
+  timekeeper: '3263:2a622abd',
+  'undercurrent-analyst': '3253:593a8dac',
+  'dramatis-keeper': '3587:e1022121',
+  chronicler: '3664:bb54d5ac',
+  'causality-reviewer': '3803:5ee73728',
+  'lore-researcher': '2278:bc497f63',
+  'requirements-maintainer': '2092:987773c2',
+};
+
 export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
   WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
     ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
@@ -253,6 +262,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v6', fingerprint: WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v7', fingerprint: WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V8_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] }] : []),
+    ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;

@@ -1,4 +1,5 @@
-import { WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationStagePlan_ACU } from '../model';
+import { WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationStagePlan_ACU } from '../model';
+import { applyWorldSimulationProjection_ACU } from '../simulation-projection';
 import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerceWorldSimulationStringArray_ACU } from '../simulation-patch-normalize';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
@@ -224,6 +225,23 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
       return { agentName: requiredText_ACU(delegation.agentName, `$.delegations[${index}].agentName`), instruction: requiredText_ACU(delegation.instruction, `$.delegations[${index}].instruction`), reads: optionalList_ACU(delegation.reads, `$.delegations[${index}].reads`) };
     }) };
   }
+  if (action === 'open_round') {
+    const raw = closedObject_ACU(normalizedValue, '$', ['action', 'summary', 'focus', 'dispatchChronicler'], ['skipModules']);
+    if (typeof raw.dispatchChronicler !== 'boolean') fail_ACU('BOOLEAN_REQUIRED', '$.dispatchChronicler', 'boolean', raw.dispatchChronicler);
+    const skipModules = [...new Set(optionalList_ACU(raw.skipModules, '$.skipModules'))];
+    for (const module of skipModules) {
+      if (!(WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]).includes(module)) {
+        fail_ACU('INVALID_LEDGER_MODULE', '$.skipModules', WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), module);
+      }
+    }
+    return {
+      kind: 'open_round',
+      summary: requiredText_ACU(raw.summary, '$.summary'),
+      focus: requiredText_ACU(raw.focus, '$.focus'),
+      dispatchChronicler: raw.dispatchChronicler,
+      skipModules,
+    };
+  }
   if (action === 'finalize') {
     const raw = closedObject_ACU(normalizedValue, '$', ['action', 'outcome', 'summary'], ['evidenceRefs']);
     const outcome = text_ACU(raw.outcome);
@@ -238,7 +256,7 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
     const raw = closedObject_ACU(blockValue, '$', ['action', 'reason', 'unresolved']);
     return { kind: 'block', reason: requiredText_ACU(raw.reason, '$.reason'), unresolved: requiredList_ACU(raw.unresolved, '$.unresolved') };
   }
-  fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | finalize | block', normalizedValue.action);
+  fail_ACU('INVALID_ACTION', '$.action', 'read | search | delegate | open_round | finalize | block', normalizedValue.action);
 }
 
 
@@ -299,7 +317,7 @@ function specialistStringList_ACU(value: unknown, path: string): void {
 }
 
 function specialistGuidanceSignals_ACU(value: unknown, path: string): void {
-  if (!Array.isArray(value)) invalidSpecialistPatch_ACU(path, 'array of {text, voice, sourceId?}', value);
+  if (!Array.isArray(value)) invalidSpecialistPatch_ACU(path, 'array of {text, voice, sourceId}', value);
   value.forEach((item, index) => {
     if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}[${index}]`, 'object', item);
     specialistPatchRecord_ACU(item, `${path}[${index}]`, ['text', 'voice', 'sourceId']);
@@ -307,25 +325,7 @@ function specialistGuidanceSignals_ACU(value: unknown, path: string): void {
     if (!coerceWorldSimulationEnum_ACU(item.voice, WORLD_GUIDANCE_SIGNAL_VOICES_ACU).ok) {
       invalidSpecialistPatch_ACU(`${path}[${index}].voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), item.voice);
     }
-    if (item.sourceId !== undefined && !text_ACU(item.sourceId)) invalidSpecialistPatch_ACU(`${path}[${index}].sourceId`, 'non-empty string', item.sourceId);
-  });
-}
-
-function parseReviewerGuidanceSignals_ACU(value: unknown, path: string): WorldGuidanceSignal_ACU[] {
-  if (!Array.isArray(value)) fail_ACU('GUIDANCE_SIGNALS_REQUIRED', path, 'array of {text, voice, sourceId?}', value);
-  return value.map((item, index) => {
-    const itemPath = `${path}[${index}]`;
-    if (typeof item === 'string') {
-      const text = text_ACU(item);
-      if (!text) fail_ACU('TEXT_LIST', itemPath, 'non-empty string or signal object', item);
-      return { text, voice: 'ambient' as const };
-    }
-    const raw = closedObject_ACU(item, itemPath, ['text', 'voice'], ['sourceId']);
-    const voice = text_ACU(raw.voice);
-    if (!(WORLD_GUIDANCE_SIGNAL_VOICES_ACU as readonly string[]).includes(voice)) fail_ACU('INVALID_GUIDANCE_VOICE', `${itemPath}.voice`, WORLD_GUIDANCE_SIGNAL_VOICES_ACU.join(' | '), raw.voice);
-    const signal: WorldGuidanceSignal_ACU = { text: requiredText_ACU(raw.text, `${itemPath}.text`), voice: voice as WorldGuidanceSignal_ACU['voice'] };
-    if (raw.sourceId !== undefined) signal.sourceId = requiredText_ACU(raw.sourceId, `${itemPath}.sourceId`);
-    return signal;
+    if (!text_ACU(item.sourceId)) invalidSpecialistPatch_ACU(`${path}[${index}].sourceId`, 'non-empty ledger source id, clock, or player', item.sourceId);
   });
 }
 
@@ -438,7 +438,7 @@ export function parseWorldSimulationSpecialistResult_ACU(value: unknown, evidenc
 }
 
 export function parseWorldSimulationReviewerResult_ACU(value: unknown): WorldSimulationReviewerResult_ACU {
-  const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds'], ['guidance']);
+  const raw = closedObject_ACU(value, '$', ['verdict', 'summary', 'findings', 'acceptedCandidateIds']);
   const verdict = text_ACU(raw.verdict);
   if (!['accept', 'revise', 'reject'].includes(verdict)) fail_ACU('INVALID_REVIEW_VERDICT', '$.verdict', 'accept | revise | reject', raw.verdict);
   if (!Array.isArray(raw.findings)) fail_ACU('FINDINGS_REQUIRED', '$.findings', 'array', raw.findings);
@@ -448,23 +448,70 @@ export function parseWorldSimulationReviewerResult_ACU(value: unknown): WorldSim
     if (!['blocking', 'major', 'minor'].includes(severity)) fail_ACU('INVALID_FINDING_SEVERITY', `$.findings[${index}].severity`, 'blocking | major | minor', finding.severity);
     return { severity: severity as 'blocking' | 'major' | 'minor', reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
   });
-  let guidance: WorldSimulationReviewerResult_ACU['guidance'] | undefined;
-  if (verdict === 'accept' && raw.guidance === undefined) fail_ACU('REVIEW_GUIDANCE_REQUIRED', '$.guidance', 'guidance object required when verdict is accept', raw.guidance);
-  if (raw.guidance !== undefined) {
-    if (verdict !== 'accept') fail_ACU('REVIEW_GUIDANCE_REQUIRES_ACCEPT', '$.guidance', 'guidance only when verdict is accept', raw.guidance);
-    const parsed = closedObject_ACU(raw.guidance, '$.guidance', ['signals', 'excludedFacts']);
-    const signals = parseReviewerGuidanceSignals_ACU(parsed.signals, '$.guidance.signals');
-    const excludedFacts = texts_ACU(parsed.excludedFacts);
-    if (!Array.isArray(parsed.excludedFacts) || excludedFacts.length !== parsed.excludedFacts.length) fail_ACU('TEXT_LIST', '$.guidance.excludedFacts', 'string array', parsed.excludedFacts);
-    guidance = { signals, excludedFacts };
-  }
   return {
     verdict: verdict as WorldSimulationReviewerResult_ACU['verdict'],
     summary: requiredText_ACU(raw.summary, '$.summary'),
     findings,
     acceptedCandidateIds: texts_ACU(raw.acceptedCandidateIds),
-    ...(guidance ? { guidance } : {}),
   };
+}
+
+function pushGuidanceAnchorSentence_ACU(target: string[], value: string | null | undefined): void {
+  const trimmed = String(value ?? '').trim();
+  if (trimmed.length >= 6) target.push(trimmed);
+}
+
+export function collectWorldSimulationGuidanceAnchorSentences_ACU(ledger: WorldSimulationLedger_ACU, anchorMessage = ''): string[] {
+  const sentences: string[] = [];
+  const stripped = applyWorldSimulationProjection_ACU(String(anchorMessage ?? ''), null);
+  for (const chunk of stripped.split(/[。！？!?\n]+/)) pushGuidanceAnchorSentence_ACU(sentences, chunk);
+  for (const rumor of ledger.rumors) pushGuidanceAnchorSentence_ACU(sentences, rumor.fact);
+  for (const actor of ledger.actors) {
+    for (const goal of actor.goals) pushGuidanceAnchorSentence_ACU(sentences, goal);
+    for (const fact of actor.knownFacts) pushGuidanceAnchorSentence_ACU(sentences, fact);
+    pushGuidanceAnchorSentence_ACU(sentences, actor.deathSummary);
+  }
+  for (const seed of ledger.seeds) {
+    pushGuidanceAnchorSentence_ACU(sentences, seed.title);
+    pushGuidanceAnchorSentence_ACU(sentences, seed.catalyst);
+    pushGuidanceAnchorSentence_ACU(sentences, seed.missedOutcome);
+  }
+  for (const dimension of ledger.dimensions) pushGuidanceAnchorSentence_ACU(sentences, dimension.rationale);
+  for (const entry of ledger.chronicle) pushGuidanceAnchorSentence_ACU(sentences, entry.summary);
+  return sentences;
+}
+
+export function validateWorldSimulationGuidanceComposerSignals_ACU(
+  signals: readonly WorldGuidanceSignal_ACU[],
+  ledger: WorldSimulationLedger_ACU,
+  anchorMessage = '',
+): WorldGuidanceSignal_ACU[] {
+  const knownIds = new Set<string>([
+    'clock',
+    'player',
+    ...ledger.actors.map(item => item.id),
+    ...ledger.seeds.map(item => item.id),
+    ...ledger.rumors.map(item => item.id),
+    ...ledger.dimensions.map(item => item.id),
+    ...ledger.chronicle.map(item => item.id),
+  ]);
+  const anchors = collectWorldSimulationGuidanceAnchorSentences_ACU(ledger, anchorMessage);
+  return signals.map((signal, index) => {
+    const sourceId = String(signal.sourceId ?? '').trim();
+    const text = String(signal.text ?? '').trim();
+    if (!sourceId || !knownIds.has(sourceId)) {
+      fail_ACU('UNKNOWN_GUIDANCE_SOURCE', `signals[${index}].sourceId`, 'ledger source id, clock, or player', sourceId);
+    }
+    if (text.length > WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU) {
+      fail_ACU('GUIDANCE_SIGNAL_TOO_LONG', `signals[${index}].text`, `text with at most ${WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU} characters`, text);
+    }
+    for (const anchor of anchors) {
+      if (text.includes(anchor) || anchor.includes(text)) {
+        fail_ACU('GUIDANCE_RESTATES_ANCHOR', `signals[${index}].text`, 'non-quoted world fact', text);
+      }
+    }
+    return { text, voice: signal.voice, sourceId };
+  });
 }
 
 function collectActionObjects_ACU(raw: string | null | undefined, prefill: string): Record<string, unknown>[] {
@@ -500,12 +547,13 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
     '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
     'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
     'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
-    'delegate 只能包含 action、delegations；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
+    'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
     '动作格式必须是下面之一：',
     '{"action":"read","reads":["ledger:current","summary:current"]}',
     '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
   ];
-  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":[]},{"agentName":"undercurrent-analyst","instruction":"更新维度与暗流","reads":[]}]}');
+  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":[]}]}');
+  lines.push('{"action":"open_round","summary":"锁定本轮幕后焦点并启动固定工作流","focus":"时间推进与暗流压力","dispatchChronicler":false}');
   lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
   lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
   lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
@@ -527,7 +575,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
-    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
+    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId} 对象数组，sourceId 必填。');
     const firstModule = writableModules[0];
     const patchExample = firstModule === 'dimensions'
       ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
@@ -538,7 +586,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
       : firstModule === 'chronicle'
         ? { append: [{}] }
         : firstModule === 'guidance'
-          ? { signals: [{ text: '角色可感知信号', voice: 'ambient' }] }
+          ? { signals: [{ text: '角色可感知信号', voice: 'ambient', sourceId: 'clock' }] }
           : firstModule === 'player'
             ? { contact: 'open' }
             : firstModule === 'rumors'
@@ -563,11 +611,11 @@ export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldS
   return [
     `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
     '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
-    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时必须包含 guidance。',
+    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。',
     'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
     'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
     'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
-    'accept 时必须包含 guidance：{"signals":[{"text":"...","voice":"ambient"}],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；无台面可感变化时 signals 为空数组并在 summary 说明。',
+    '不得输出 guidance：投影由 guidance-composer 专责，审核只判断时间、空间、因果、权限与证据。',
     JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
     JSON.stringify({
       verdict: 'revise',

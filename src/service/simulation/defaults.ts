@@ -1,5 +1,5 @@
 import { WORLD_SIMULATION_PROMPT_VERSION_ACU, buildDefaultWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
-import { WORLD_LEDGER_SCHEMA_VERSION_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
+import { WORLD_CHRONICLE_HOT_WINDOW_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
 
 export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettings_ACU {
   return {
@@ -15,6 +15,7 @@ export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettin
     agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(),
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
     dynamics: { rumorTTLDays: 30, maxClockAdvanceDays: 14, collisionEnforcement: 'strict', missedSweepEnabled: true },
+    workflow: { autoFixEnabled: true, chroniclerHotThreshold: WORLD_CHRONICLE_HOT_WINDOW_ACU },
   };
 }
 
@@ -31,6 +32,7 @@ export function buildEmptyWorldSimulationLedger_ACU(): WorldSimulationLedger_ACU
     rumors: [],
     player: { location: null, locationUpdatedAtDay: 1, regionVisits: [], contact: 'open', evidenceRefs: [] },
     chronicleOverview: [],
+    pendingFixes: [],
   };
 }
 

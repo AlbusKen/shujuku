@@ -95,7 +95,7 @@ describe('世界推演 Agent runtime', () => {
     };
     const responses = [
       JSON.stringify({ verdict: 'approved', summary: '错误别名', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
-      JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: [candidate.candidateId], guidance: { signals: [], excludedFacts: [] } }),
+      JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
     ];
     const invoke = vi.fn(async () => responses.shift()!);
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
@@ -765,7 +765,7 @@ describe('世界推演 Agent runtime', () => {
     _set_SillyTavern_API_ACU(undefined);
   });
 
-  it('候选入库预检失败时不入库并回灌全部违规', async () => {
+  it('内容违规候选留给容错提交，预检不再把整个 specialist 判失败', async () => {
     const { registry, evidence, promptContext } = fixture('preflight-reject');
     const badCandidate = {
       candidateId: 'candidate:preflight-bad', agentName: 'undercurrent-analyst',
@@ -787,45 +787,44 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'blocked', summary: '等待修正' });
     expect(result.outcomes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ agentName: 'undercurrent-analyst', status: 'failed', reasonCode: 'WORLD_SIMULATION_CANDIDATE_PREFLIGHT_FAILED' }),
+      expect.objectContaining({ agentName: 'undercurrent-analyst', status: 'candidate', candidate: badCandidate }),
     ]));
-    expect(subagents.runReviewer).not.toHaveBeenCalled();
-    expect(JSON.stringify(invoke.mock.calls)).toContain('候选入库预检拒绝');
-    expect(JSON.stringify(invoke.mock.calls)).toContain('引用了不存在的 actor');
+    expect(subagents.runReviewer).toHaveBeenCalled();
+    expect(JSON.stringify(invoke.mock.calls)).not.toContain('候选入库预检拒绝');
   });
 
-  it('causality-reviewer accept 时可把 guidance 合入最终候选', async () => {
+  it('open_round 后投影只由 guidance-composer 产出，审核员不夹带 guidance', async () => {
     const { registry, evidence, promptContext } = fixture('reviewer-guidance');
     const candidate = {
-      candidateId: 'candidate:guidance-source', agentName: 'timekeeper',
+      candidateId: 'run-guidance:timekeeper:1', agentName: 'timekeeper',
       patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence],
       uncertainties: [], writableModules: ['clock'],
     };
-    const subagents = {
-      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
-      runReviewer: vi.fn(async () => ({
-        verdict: 'accept' as const, summary: '审核通过并压缩感知', findings: [],
-        acceptedCandidateIds: [candidate.candidateId],
-        guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }], excludedFacts: ['幕后真相'] },
-      })),
+    const guidanceCandidate = {
+      candidateId: 'run-guidance:guidance-composer:1', agentName: 'guidance-composer',
+      patch: { guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' }] } },
+      summary: '投影决定', evidenceRefs: [evidence], uncertainties: [], writableModules: ['guidance'],
     };
-    const responses = [
-      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
-      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交含 guidance', evidenceRefs: [evidence] }),
-    ];
-    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => responses.shift()!), subagents, apiPreset, countTokens: async () => 1 });
+    const subagents = {
+      run: vi.fn(async ({ delegation }: { delegation: { agentName: string } }) => {
+        if (delegation.agentName === 'guidance-composer') {
+          return { agentName: 'guidance-composer', status: 'candidate' as const, summary: guidanceCandidate.summary, candidate: guidanceCandidate, evidenceRefs: [evidence], uncertainties: [] };
+        }
+        if (delegation.agentName === 'timekeeper') {
+          return { agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] };
+        }
+        return { agentName: delegation.agentName, status: 'no_change' as const, summary: '无变化', evidenceRefs: [evidence], uncertainties: [] };
+      }),
+      runReviewer: vi.fn(),
+    };
+    const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action: 'open_round', summary: '锁定时钟', focus: '时间推进', dispatchChronicler: false })), subagents, apiPreset, countTokens: async () => 1 });
     const identity = { runId: 'run-guidance', chatIdentity: 'chat-guidance', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-guidance', stageId: 'stage-guidance', stageRevision: 1 };
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result.outcome).toBe('commit');
     if (result.outcome !== 'commit') throw new Error('expected commit');
-    expect(result.commitCandidate.acceptedCandidates).toEqual([
-      candidate,
-      expect.objectContaining({
-        agentName: 'causality-reviewer',
-        writableModules: ['guidance'],
-        patch: { guidance: expect.objectContaining({ signals: [{ text: '远处钟声响起', voice: 'ambient' }], excludedFacts: ['幕后真相'] }) },
-      }),
-    ]);
+    expect(result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'guidance-composer']);
+    expect(result.commitCandidate.reviewer).toBeUndefined();
+    expect(subagents.runReviewer).not.toHaveBeenCalled();
   });
 
   it('整轮派工被预算门禁拦截时当轮显式 block 并写入预算终局', async () => {
@@ -988,7 +987,7 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'commit', summary: '预检后提交' });
     expect(subagents.run).toHaveBeenCalledTimes(3);
-    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(3);
   });
 
   it('allowDelegate=false 时 delegate 当轮显式 block，不走协议重试', async () => {
@@ -1093,7 +1092,6 @@ describe('世界推演 Agent runtime', () => {
           summary: '投机审核通过',
           findings: [],
           acceptedCandidateIds: [candidate.candidateId],
-          guidance: { signals: [], excludedFacts: [] },
         };
       }),
     };
@@ -1143,7 +1141,6 @@ describe('世界推演 Agent runtime', () => {
           summary: '取证后串行通过',
           findings: [],
           acceptedCandidateIds: [candidate.candidateId],
-          guidance: { signals: [], excludedFacts: [] },
         }),
     };
     const responses = [

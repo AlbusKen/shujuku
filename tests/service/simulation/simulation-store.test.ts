@@ -71,7 +71,7 @@ describe('world simulation envelope store', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
-  it('读取 v1 账本时内存归一化为 v3，且不写回原对象', () => {
+  it('读取 v1 账本时内存归一化为 v4，且不写回原对象', () => {
     const raw: any = {
       schemaVersion: 1,
       revision: 0,
@@ -84,28 +84,55 @@ describe('world simulation envelope store', () => {
     };
     const snapshot = JSON.parse(JSON.stringify(raw));
     const next = validateWorldSimulationLedger_ACU(raw);
-    expect(next.schemaVersion).toBe(3);
+    expect(next.schemaVersion).toBe(4);
     expect(next.clock.day).toBe(3);
     expect(next.clock.slot).toBe('');
     expect(next.rumors).toEqual([]);
     expect(next.player).toMatchObject({ location: null, contact: 'open', locationUpdatedAtDay: 3, regionVisits: [] });
     expect(next.guidance.signals).toEqual([{ text: '风声', voice: 'ambient' }]);
     expect(next.chronicleOverview).toEqual([]);
+    expect(next.pendingFixes).toEqual([]);
     expect(raw).toEqual(snapshot);
   });
 
-  it('读取 v2 账本时补 chronicleOverview 空数组归一化为 v3，且不写回原对象', () => {
+  it('读取 v2 账本时补 chronicleOverview 空数组归一化为 v4，且不写回原对象', () => {
     const raw: any = {
       ...buildEmptyWorldSimulationLedger_ACU(),
       schemaVersion: 2,
     };
     delete raw.chronicleOverview;
+    delete raw.pendingFixes;
     const snapshot = JSON.parse(JSON.stringify(raw));
     const next = validateWorldSimulationLedger_ACU(raw);
-    expect(next.schemaVersion).toBe(3);
+    expect(next.schemaVersion).toBe(4);
     expect(next.chronicleOverview).toEqual([]);
+    expect(next.pendingFixes).toEqual([]);
     expect(raw).toEqual(snapshot);
     expect(raw).not.toHaveProperty('chronicleOverview');
+    expect(raw).not.toHaveProperty('pendingFixes');
+  });
+
+  it('读取 v3 账本时补 pendingFixes 空数组归一化为 v4，且不写回原对象', () => {
+    const raw: any = {
+      ...buildEmptyWorldSimulationLedger_ACU(),
+      schemaVersion: 3,
+    };
+    delete raw.pendingFixes;
+    const snapshot = JSON.parse(JSON.stringify(raw));
+    const next = validateWorldSimulationLedger_ACU(raw);
+    expect(next.schemaVersion).toBe(4);
+    expect(next.pendingFixes).toEqual([]);
+    expect(raw).toEqual(snapshot);
+    expect(raw).not.toHaveProperty('pendingFixes');
+  });
+
+  it('pendingFixes 非数组或条目缺键 fail-closed', () => {
+    const notArray: any = buildEmptyWorldSimulationLedger_ACU();
+    notArray.pendingFixes = { module: 'clock' };
+    expect(() => validateWorldSimulationLedger_ACU(notArray)).toThrow(/pendingFixes 必须是数组/);
+    const missing: any = buildEmptyWorldSimulationLedger_ACU();
+    missing.pendingFixes = [{ module: 'clock', candidateId: 'c1', agentName: 'timekeeper' }];
+    expect(() => validateWorldSimulationLedger_ACU(missing)).toThrow(/缺少必填字段/);
   });
 
   it('chronicleOverview 超过 512 行 fail-closed', () => {
@@ -151,6 +178,21 @@ describe('world simulation envelope store', () => {
       maxClockAdvanceDays: 7,
       collisionEnforcement: 'strict',
       missedSweepEnabled: true,
+    });
+  });
+
+  it('缺 workflow 时补默认自动修复配置，非法阈值回退', () => {
+    const missing: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
+    delete missing.settings.workflow;
+    expect(validateWorldSimulationEnvelope_ACU(missing).settings.workflow).toEqual({
+      autoFixEnabled: true,
+      chroniclerHotThreshold: 32,
+    });
+    const invalid: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
+    invalid.settings.workflow = { autoFixEnabled: 'yes', chroniclerHotThreshold: 0 };
+    expect(validateWorldSimulationEnvelope_ACU(invalid).settings.workflow).toEqual({
+      autoFixEnabled: true,
+      chroniclerHotThreshold: 32,
     });
   });
 });
