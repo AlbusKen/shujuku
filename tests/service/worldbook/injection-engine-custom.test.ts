@@ -22,6 +22,7 @@ const {
   mockGetLatestSummaryVectorIndexSnapshotState,
   mockGetEffectiveSummaryVectorIndexConfig,
   mockGetCurrentFlightModeState,
+  mockDidLastRecallSucceed,
 } = vi.hoisted(() => ({
   mockSettings: {
     dataIsolationEnabled: false,
@@ -78,6 +79,7 @@ const {
     summaryIndexKeywordMinRows: 3,
   })),
   mockGetCurrentFlightModeState: vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' })),
+  mockDidLastRecallSucceed: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/service/settings/settings-readers', () => ({
@@ -146,6 +148,10 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
   getEffectiveSummaryVectorIndexConfig_ACU: mockGetEffectiveSummaryVectorIndexConfig,
 }));
 
+vi.mock('../../../src/service/vector/summary-vector-index-recall-status', () => ({
+  didLastSummaryVectorRecallSucceed_ACU: (...args: any[]) => mockDidLastRecallSucceed(...args),
+}));
+
 vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
   getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
 }));
@@ -167,6 +173,7 @@ beforeEach(() => {
   mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: false });
   mockGetSortedSheetKeys.mockReturnValue([]);
   mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
+  mockDidLastRecallSucceed.mockReturnValue(false);
 });
 
 describe('updateCustomTableExports_ACU', () => {
@@ -758,8 +765,78 @@ describe('updateCustomTableExports_ACU', () => {
         const hasMainEntry = createArgs[1].some((e: any) => e.comment && !e.comment.includes('索引'));
         // 索引条目应该存在
         const hasIndexEntry = createArgs[1].some((e: any) => e.comment && e.comment.includes('索引'));
-        expect(hasIndexEntry).toBe(true);
-      }
+      expect(hasIndexEntry).toBe(true);
+        }
+    });
+  });
+
+  describe('交火纪要索引内容保护', () => {
+    function setupChronicleIndexExport() {
+      mockGetCurrentWorldbookConfig.mockReturnValue({
+        zeroTkOccupyMode: false,
+        summaryVectorIndexModeEnabled: true,
+      } as any);
+      mockGetEffectiveSummaryVectorIndexConfig.mockReturnValue({ summaryIndexKeywordMinRows: 1 });
+      mockGetLatestSummaryVectorIndexSnapshotState.mockReturnValue({
+        summaryVectorIndexState: {
+          rows: [{ rowKey: 'r1', status: 'active' }, { rowKey: 'r2', status: 'active' }],
+          manifest: { snapshot: { activeRowKeys: ['r1', 'r2'] } },
+        },
+      });
+      mockGetLorebookEntries.mockResolvedValue([
+        { uid: 9, comment: 'TavernDB-ACU-CustomExport-纪要索引', content: '召回残留内容' },
+      ]);
+      mockGetSortedSheetKeys.mockReturnValue(['sheet_chronicle']);
+      mockEnsureExportConfigDefaults.mockReturnValue({
+        enabled: true,
+        splitByRow: false,
+        entryName: '纪要表',
+        entryType: 'constant',
+        keywords: '',
+        preventRecursion: true,
+        injectionTemplate: '',
+        extraIndexEnabled: true,
+        extraIndexEntryName: '纪要索引',
+        extraIndexColumns: ['事件'],
+        extraIndexColumnModes: {},
+        extraIndexInjectionTemplate: '',
+        entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 },
+        extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 },
+      });
+      return {
+        sheet_chronicle: {
+          name: '纪要表',
+          content: [['row_id', '事件'], ['1', '表内全量概览']],
+          exportConfig: {
+            enabled: true,
+            extraIndexEnabled: true,
+            extraIndexEntryName: '纪要索引',
+            extraIndexColumns: ['事件'],
+          },
+        },
+      };
+    }
+
+    function collectedIndexContent(): string {
+      const created = mockCreateLorebookEntries.mock.calls.flatMap((call) => call[1] || []);
+      const updated = mockSetLorebookEntries.mock.calls.flatMap((call) => call[1] || []);
+      const entries = [...created, ...updated];
+      const indexEntry = entries.find((entry: any) => String(entry?.comment || '').includes('纪要索引'));
+      return String(indexEntry?.content || '');
+    }
+
+    it('上一轮召回成功时保留现有召回内容', async () => {
+      mockDidLastRecallSucceed.mockReturnValue(true);
+      await updateCustomTableExports_ACU(setupChronicleIndexExport());
+      expect(collectedIndexContent()).toContain('召回残留内容');
+      expect(collectedIndexContent()).not.toContain('表内全量概览');
+    });
+
+    it('上一轮召回失败时用全量概览覆盖纪要索引', async () => {
+      mockDidLastRecallSucceed.mockReturnValue(false);
+      await updateCustomTableExports_ACU(setupChronicleIndexExport());
+      expect(collectedIndexContent()).toContain('表内全量概览');
+      expect(collectedIndexContent()).not.toContain('召回残留内容');
     });
   });
 });

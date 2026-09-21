@@ -30,6 +30,7 @@ export function buildEmptyWorldSimulationLedger_ACU(): WorldSimulationLedger_ACU
     guidance: { signals: [], excludedFacts: [], evidenceRefs: [] },
     rumors: [],
     player: { location: null, locationUpdatedAtDay: 1, regionVisits: [], contact: 'open', evidenceRefs: [] },
+    chronicleOverview: [],
   };
 }
 

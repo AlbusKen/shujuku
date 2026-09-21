@@ -341,8 +341,15 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
   if (!isRecord_ACU(value) || !Object.keys(value).length) invalidSpecialistPatch_ACU('$.patch', 'non-empty ledger patch object', value);
   for (const [module, patch] of Object.entries(value)) {
     const path = `$.patch.${module}`;
-    if (!(WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]).includes(module)) {
-      invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
+    if (!(WORLD_SIMULATION_LEDGER_MODULES_ACU as readonly string[]).includes(module) && module !== 'chronicleArchive') {
+      invalidSpecialistPatch_ACU(path, [...WORLD_SIMULATION_LEDGER_MODULES_ACU, 'chronicleArchive'].join(' | '), patch);
+    }
+    if (module === 'chronicleArchive') {
+      if (!isRecord_ACU(patch)) invalidSpecialistPatch_ACU(path, 'object', patch);
+      const raw = specialistPatchRecord_ACU(patch, path, ['archiveEntries', 'overviewRows', 'collapseRefs']);
+      if (!Array.isArray(raw.archiveEntries) || !raw.archiveEntries.length) invalidSpecialistPatch_ACU(`${path}.archiveEntries`, 'non-empty array', raw.archiveEntries);
+      if (!Array.isArray(raw.overviewRows) || !raw.overviewRows.length) invalidSpecialistPatch_ACU(`${path}.overviewRows`, 'non-empty array', raw.overviewRows);
+      continue;
     }
     if (module === 'dimensions' || module === 'seeds' || module === 'actors' || module === 'rumors') {
       const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
@@ -518,7 +525,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
     `agentName 必须精确为 ${agentName}。`,
   ];
   if (writableModules.length) {
-    lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}。`);
+    lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
     lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
     const firstModule = writableModules[0];
     const patchExample = firstModule === 'dimensions'

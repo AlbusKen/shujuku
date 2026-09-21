@@ -1,3 +1,6 @@
+import type { WorldSimulationLedger_ACU } from '../model';
+import { relevanceGate_ACU } from '../relevance-gate';
+import { buildInUseWorldCatalog_ACU, catalogArchiveHints_ACU, sliceModuleCatalog_ACU, summarizeCandidatePatches_ACU } from '../world-catalog';
 import type { WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import type { WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
@@ -18,10 +21,24 @@ export interface WorldSimulationPlaceholderContext_ACU {
   worldCollisions: unknown;
   evidenceRegistry: WorldSimulationEvidenceRegistrySnapshot_ACU;
   projectionPreview: unknown;
+  candidateView?: 'full' | 'summary';
+  writableModules?: readonly string[];
 }
 
 function serialize_ACU(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value ?? null);
+}
+
+export function isWorldSimulationLedgerContext_ACU(value: unknown): value is WorldSimulationLedger_ACU {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Array.isArray((value as WorldSimulationLedger_ACU).seeds)
+    && Array.isArray((value as WorldSimulationLedger_ACU).chronicle)
+    && Array.isArray((value as WorldSimulationLedger_ACU).chronicleOverview)
+    && !!(value as WorldSimulationLedger_ACU).clock;
+}
+
+function storyText_ACU(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }
 
 export function createWorldSimulationPlaceholderResolvers_ACU(
@@ -32,16 +49,47 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     '$WORLD_HISTORY': () => serialize_ACU(context.history),
     '$WORLD_RUNTIME_CONTEXT': () => serialize_ACU(context.runtimeContext),
     '$WORLD_AGENT_CATALOG': () => serialize_ACU(context.agentCatalog),
-    '$WORLD_TOOL_CATALOG': () => serialize_ACU(context.toolCatalog),
+    '$WORLD_TOOL_CATALOG': () => serialize_ACU({
+      addresses: context.toolCatalog,
+      hint: '目录中任一条目可通过 read 工具按地址调阅详细信息。',
+    }),
     '$WORLD_EVIDENCE': () => serialize_ACU(context.evidence),
     '$WORLD_USER_GUIDANCE': () => serialize_ACU(context.userGuidance),
-    '$WORLD_STATE': () => serialize_ACU(context.worldState),
+    '$WORLD_STATE': () => {
+      if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
+        const catalog = buildInUseWorldCatalog_ACU(context.worldState);
+        if (context.writableModules?.length) {
+          const hints = Array.isArray(context.worldCandidates)
+            ? catalogArchiveHints_ACU(context.worldCandidates as Array<{ patch: Record<string, unknown> }>, context.worldState.chronicleOverview)
+            : [];
+          return serialize_ACU({
+            ...sliceModuleCatalog_ACU(catalog, context.worldState.chronicleOverview, context.writableModules),
+            archiveHints: hints,
+          });
+        }
+        return serialize_ACU(catalog);
+      }
+      return serialize_ACU(context.worldState);
+    },
     '$ANCHOR_MESSAGE': () => serialize_ACU(context.anchorMessage),
     '$ANCHOR_IDENTITY': () => serialize_ACU(context.anchorIdentity),
     '$WORLD_STAGE_PLAN': () => serialize_ACU(context.worldStagePlan),
-    '$WORLD_CHRONICLE': () => serialize_ACU(context.worldChronicle),
-    '$WORLD_CANDIDATES': () => serialize_ACU(context.worldCandidates),
-    '$WORLD_COLLISIONS': () => serialize_ACU(context.worldCollisions),
+    '$WORLD_CHRONICLE': () => {
+      if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
+        return serialize_ACU(buildInUseWorldCatalog_ACU(context.worldState).chronicleHot);
+      }
+      return serialize_ACU(context.worldChronicle);
+    },
+    '$WORLD_CANDIDATES': () => {
+      if (context.candidateView === 'full' || !Array.isArray(context.worldCandidates)) return serialize_ACU(context.worldCandidates);
+      return serialize_ACU(summarizeCandidatePatches_ACU(context.worldCandidates as Array<{ candidateId: string; agentName: string; patch: Record<string, unknown>; summary: string }>));
+    },
+    '$WORLD_COLLISIONS': () => {
+      if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
+        return serialize_ACU(relevanceGate_ACU(context.worldState, storyText_ACU(context.anchorMessage)));
+      }
+      return serialize_ACU(context.worldCollisions);
+    },
     '$CURRENT_EVIDENCE_REGISTRY': () => serialize_ACU(context.evidenceRegistry),
     '$PROJECTION_PREVIEW': () => serialize_ACU(context.projectionPreview),
   };

@@ -101,6 +101,39 @@ import { getCurrentFlightModeState_ACU, stageFlightModeHiddenRowIds_ACU } from '
 interface ManualRefillSummaryVectorCleanup_ACU {
     sourceTableKey: string;
     removedRowIds: string[];
+    replaceAll?: boolean;
+}
+
+function collectSheetContentRowIds_ACU(sheet: any): string[] {
+    const content = Array.isArray(sheet?.content) ? sheet.content : [];
+    if (content.length < 2) return [];
+    const header = Array.isArray(content[0]) ? content[0] : [];
+    let rowIdIndex = header.findIndex((cell: any) => String(cell || '').trim().toLowerCase() === 'row_id');
+    if (rowIdIndex < 0) rowIdIndex = 0;
+    const ids: string[] = [];
+    for (let i = 1; i < content.length; i += 1) {
+        const row = content[i];
+        const rowId = String(Array.isArray(row) ? row[rowIdIndex] : '').trim();
+        if (rowId) ids.push(rowId);
+    }
+    return ids;
+}
+
+function collectCurrentIndexedSummaryRowIds_ACU(sourceTableKey: string): string[] {
+    const ids = new Set<string>(collectSheetContentRowIds_ACU((currentJsonTableData_ACU as any)?.[sourceTableKey]));
+    const currentIndex = getAggregatedSummaryVectorIndexSnapshot_ACU()?.summaryVectorIndexState || null;
+    if (
+        currentIndex
+        && (!currentIndex.sourceTableKey || currentIndex.sourceTableKey === sourceTableKey)
+        && Array.isArray(currentIndex.rows)
+    ) {
+        for (const row of currentIndex.rows) {
+            if (row?.status === 'removed') continue;
+            const rowId = String((row as any).rowId || row.rowKey || '').trim();
+            if (rowId) ids.add(rowId);
+        }
+    }
+    return Array.from(ids);
 }
 
 function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: number[], targetSheetKeys: string[]): ManualRefillSummaryVectorCleanup_ACU[] {
@@ -113,6 +146,7 @@ function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: numbe
 
     const sourceTableKeySet = new Set(summarySourceTableKeys);
     const removedRowIdsBySourceTable = new Map(summarySourceTableKeys.map((sheetKey) => [sheetKey, new Set<string>()]));
+    const replaceAllBySourceTable = new Set<string>();
     const chat = getChatArray_ACU();
     for (const messageIndex of targetMessageIndices) {
         const message = chat?.[messageIndex];
@@ -141,6 +175,14 @@ function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: numbe
                     extracted.rowIds.forEach((rowId) => removedRowIdsBySourceTable.get(sheetKey)!.add(rowId));
                     continue;
                 }
+                if (kind === 'sheet_replace') {
+                    if (!sourceTableKeySet.has(sheetKey)) continue;
+                    replaceAllBySourceTable.add(sheetKey);
+                    collectCurrentIndexedSummaryRowIds_ACU(sheetKey).forEach((rowId) => {
+                        removedRowIdsBySourceTable.get(sheetKey)!.add(rowId);
+                    });
+                    continue;
+                }
                 if (kind === 'data_replace' || kind === 'sql_batch' || kind === 'table_edit_dsl') {
                     throw new Error(`手动重填清理前无法精确识别操作 ${kind} 影响的纪要表历史 row_id。`);
                 }
@@ -157,14 +199,20 @@ function collectManualRefillSummaryVectorCleanup_ACU(targetMessageIndices: numbe
 
     const currentIndex = getAggregatedSummaryVectorIndexSnapshot_ACU()?.summaryVectorIndexState || null;
     return summarySourceTableKeys.flatMap((sourceTableKey) => {
+        const replaceAll = replaceAllBySourceTable.has(sourceTableKey);
+        if (replaceAll) {
+            collectCurrentIndexedSummaryRowIds_ACU(sourceTableKey).forEach((rowId) => {
+                removedRowIdsBySourceTable.get(sourceTableKey)!.add(rowId);
+            });
+        }
         const removedRowIds = Array.from(removedRowIdsBySourceTable.get(sourceTableKey) || []).sort();
         const hasCurrentIndex = currentIndex?.sourceTableKey === sourceTableKey
             && Array.isArray(currentIndex.rows)
             && currentIndex.rows.some((row) => row.status !== 'removed');
-        if (hasCurrentIndex && removedRowIds.length === 0) {
+        if (hasCurrentIndex && removedRowIds.length === 0 && !replaceAll) {
             throw new Error(`手动重填清理前无法从目标范围识别纪要表 ${sourceTableKey} 的历史 row_id。`);
         }
-        return [{ sourceTableKey, removedRowIds }];
+        return [{ sourceTableKey, removedRowIds, replaceAll }];
     });
 }
 
@@ -176,13 +224,15 @@ async function snapshotManualRefillSummaryVectors_ACU(
     cleanups: ManualRefillSummaryVectorCleanup_ACU[],
 ): Promise<SummaryVectorMirrorRowRemovalSnapshot_ACU | null> {
     const excludedRowIds = collectManualRefillExcludedSummaryRowIds_ACU(cleanups);
-    if (excludedRowIds.length === 0) return null;
+    const replaceAll = cleanups.some((cleanup) => cleanup.replaceAll === true);
+    if (excludedRowIds.length === 0 && !replaceAll) return null;
     const worldbook = getCurrentWorldbookConfig_ACU();
     if (worldbook.summaryVectorIndexModeEnabled !== true) return null;
     if (worldbook.summaryVectorMirrorEnabled === false) return null;
     return snapshotSummaryVectorMirrorExcludingRowsNow_ACU({
         excludedRowIds,
         sourceTableKey: cleanups[0]?.sourceTableKey,
+        ...(replaceAll ? { excludeAllCurrentRows: true } : {}),
     });
 }
 

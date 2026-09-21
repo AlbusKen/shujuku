@@ -170,6 +170,7 @@ import {
   processSummaryVectorIndexBeforeGeneration_ACU,
   resetSummaryVectorIndexRuntimeDedupeState_ACU,
 } from '../../../src/service/vector/summary-vector-index-runtime';
+import { __resetLastSummaryVectorRecallSucceededForTests_ACU } from '../../../src/service/vector/summary-vector-index-recall-status';
 
 
 function row_ACU(key: string, order: number, summary: string): any {
@@ -243,6 +244,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
   beforeEach(() => {
     vi.clearAllMocks();
     resetSummaryVectorIndexRuntimeDedupeState_ACU();
+    __resetLastSummaryVectorRecallSucceededForTests_ACU();
     h.chat = [{ is_user: true, mes: 'latest user' } as any];
     h.entries = [];
     h.callAI.mockResolvedValue('<keywords>secret relic</keywords>');
@@ -620,42 +622,43 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
   });
 
 
-  it('T5：createEmbeddings 抛异常但有最近固定行时，降级为仅注入固定行，不中断生成', async () => {
+  it('T5：createEmbeddings 抛异常时返回 embedding_failed，不注入固定行', async () => {
     h.config.summaryIndexRecentFixedInjectCount = 1;
     h.createEmbeddings.mockRejectedValueOnce(new Error('Embedding 请求失败 403: insufficient balance'));
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 't5-degrade' });
 
-    expect(result.success).toBe(true);
-    expect(result.reason).toBe('query_embedding_failed_recent_fixed_only');
-    expect(result.injectedCount).toBe(1);
-    expect(result.keywordCount).toBe(0);
-    // 固定行（rowOrder 3 = recent fixed summary）被注入，向量候选为 0。
+    expect(result.success).toBe(false);
+    expect(result.skipped).not.toBe(true);
+    expect(result.reason).toBe('embedding_failed');
+    expect(result.error).toContain('insufficient balance');
     const content = createdContent_ACU();
+    expect(content).toContain('old sparse summary');
+    expect(content).toContain('dense summary');
     expect(content).toContain('recent fixed summary');
-    expect(content).not.toContain('old sparse summary');
-    expect(content).not.toContain('dense summary');
   });
 
-  it('T5：createEmbeddings 抛异常且无最近固定行时，异常穿透（由上层 init.ts try/catch 兜底）', async () => {
+  it('T5：createEmbeddings 抛异常且无最近固定行时同样返回结构化失败，不穿透异常', async () => {
     h.config.summaryIndexRecentFixedInjectCount = 0;
     h.createEmbeddings.mockRejectedValueOnce(new Error('Embedding 请求失败 500: boom'));
 
-    await expect(processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 't5-rethrow' }))
-      .rejects.toThrow('Embedding 请求失败 500: boom');
-    expect(h.createEntries).not.toHaveBeenCalled();
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 't5-rethrow' });
+    expect(result).toMatchObject({ success: false, reason: 'embedding_failed' });
+    expect(result.error).toContain('Embedding 请求失败 500: boom');
+    expect(createdContent_ACU()).toContain('old sparse summary');
   });
 
-  it('T5：createEmbeddings 返回空向量但有最近固定行时，同样降级注入固定行', async () => {
+  it('T5：createEmbeddings 返回空向量时返回 empty_query_embedding，不注入固定行', async () => {
     h.config.summaryIndexRecentFixedInjectCount = 1;
     h.createEmbeddings.mockResolvedValueOnce([{ index: 0, embedding: [] }]);
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 't5-empty-vector' });
 
-    expect(result.success).toBe(true);
-    expect(result.reason).toBe('query_embedding_failed_recent_fixed_only');
-    const content = createdContent_ACU();
-    expect(content).toContain('recent fixed summary');
+    expect(result.success).toBe(false);
+    expect(result.skipped).not.toBe(true);
+    expect(result.reason).toBe('empty_query_embedding');
+    expect(createdContent_ACU()).toContain('recent fixed summary');
+    expect(createdContent_ACU()).toContain('old sparse summary');
   });
 
 });

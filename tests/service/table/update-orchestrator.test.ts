@@ -2897,9 +2897,13 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
   });
 
-  it('手动重填范围含无法精确归属的纪要表操作时，在清理前拒绝删除向量', async () => {
-    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
-    const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
+  it('手动重填范围含纪要表 sheet_replace 时按整表替换清理向量', async () => {
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSummaryOrOutlineTable_ACU, parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '纪要表', updateConfig: { groupId: 0 }, content: [['row_id', '事件']] },
+    });
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true, mes: '用户0' },
       {
@@ -2936,17 +2940,66 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockCurrentJsonTableData = {
       sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '事件'], ['3', '旧值']] },
     };
+    vi.mocked(commitManualRefillSheetSnapshotInRangeAtomic_ACU).mockResolvedValueOnce({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 1 });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
+
+    expect(result.success, result.error).toBe(true);
+    expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([1], ['sheet_0']);
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow).toHaveBeenCalledWith({
+      excludedRowIds: ['3'],
+      sourceTableKey: 'sheet_0',
+      excludeAllCurrentRows: true,
+    });
+    expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow.mock.invocationCallOrder[0])
+      .toBeLessThan(mockClearManualRefillSheetDataInRange.mock.invocationCallOrder[0]);
+    expect(mockRebuildCurrentSummaryVectorIndexNow).toHaveBeenCalledWith({ reason: 'rebuild_repair' });
+  });
+
+  it('手动重填范围含缺 row_id 的纪要表 row_upsert 时仍 fail-closed', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSummaryOrOutlineTable_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户0' },
+      {
+        is_user: false,
+        mes: 'AI回复1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: undefined,
+              logEntries: [{
+                seq: 1, entryId: 'missing-row-id', createdAt: 1, source: 'manual_crud', targetMessageIndex: 1, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', cells: ['', '缺 id'] }],
+              }],
+            },
+          },
+        },
+      },
+    ]);
+    mockSettings.manualUpdateContextDepth = 1;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockSettings = { ...mockSettings, summaryVectorIndexModeEnabled: true };
+    mockClearManualRefillSheetDataInRange.mockClear();
+    mockSnapshotSummaryVectorMirrorExcludingRowsNow.mockClear();
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '事件'], ['3', '旧值']] },
+    };
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
     vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('无法精确识别纪要表 sheet_0 的 sheet_replace 操作历史 row_id');
+    expect(result.error).toContain('无法确认纪要表 sheet_0 的历史 row_id');
     expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
-    expect(mockArchiveSummaryVectorIndexNow).not.toHaveBeenCalled();
-    expect(mockRebuildCurrentSummaryVectorIndexNow).not.toHaveBeenCalled();
     expect(mockSnapshotSummaryVectorMirrorExcludingRowsNow).not.toHaveBeenCalled();
-    expect(mockPublishSummaryVectorMirrorRowRemovalSnapshotNow).not.toHaveBeenCalled();
   });
 
   it('手动重填范围含 sql_sheet_batch 纪要表 INSERT 时，按语句里的 row_id 清理向量', async () => {

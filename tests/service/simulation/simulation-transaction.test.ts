@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
-import { applyWorldSimulationCandidates_ACU, preflightWorldSimulationCandidates_ACU } from '../../../src/service/simulation/simulation-transaction';
+import { applyWorldSimulationCandidates_ACU, applyWorldSimulationCandidatesDetailed_ACU, preflightWorldSimulationCandidates_ACU } from '../../../src/service/simulation/simulation-transaction';
+import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU } from '../../../src/service/simulation/model';
 
 const candidate = (patch: Record<string, unknown>, evidenceRefs = ['e1']) => ({
   candidateId: 'candidate:one', agentName: 'world-analyst', patch,
@@ -174,5 +175,49 @@ describe('world simulation transaction', () => {
     expect(() => applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [{ ...candidate({ guidance: { signals: ['钟声'] } }), agentName: 'causality-reviewer', writableModules: ['guidance'] }], new Set(['e1']))).toThrow(/必须是对象/);
     const guided = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [{ ...candidate({ guidance: { signals: [{ text: '钟声', voice: 'ambient' }] } }), agentName: 'causality-reviewer', writableModules: ['guidance'] }], new Set(['e1']));
     expect(guided.guidance.signals).toEqual([{ text: '钟声', voice: 'ambient' }]);
+  });
+
+  it('chronicleArchive 合法落账，超容无合并行拒绝，相似事件不拦截', () => {
+    const archivePatch = {
+      chronicleArchive: {
+        archiveEntries: [{
+          archiveRef: 'arc-mine',
+          day: 3,
+          summary: '北岭矿洞塌方，三人受伤，暗流收束。',
+          fingerprints: ['fp-mine'],
+          relatedIds: ['seed-1'],
+          sourceChronicleIds: ['ch-1'],
+        }],
+        overviewRows: [{ fingerprint: 'fp-mine', day: 3, oneLine: '第3日 · 北岭矿洞塌方，三人受伤', archiveRef: 'arc-mine' }],
+      },
+    };
+    const detailed = applyWorldSimulationCandidatesDetailed_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate(archivePatch)],
+      new Set(['e1']),
+    );
+    expect(detailed.ledger.chronicleOverview).toEqual([{
+      fingerprint: 'fp-mine', day: 3, oneLine: '第3日 · 北岭矿洞塌方，三人受伤', archiveRef: 'arc-mine',
+    }]);
+    expect(detailed.chronicleArchiveWrites).toEqual([expect.objectContaining({ archiveRef: 'arc-mine', day: 3 })]);
+
+    const filled = buildEmptyWorldSimulationLedger_ACU();
+    filled.chronicleOverview = Array.from({ length: WORLD_CHRONICLE_OVERVIEW_CAP_ACU }, (_, index) => ({
+      fingerprint: `fp${index}`,
+      day: 1,
+      oneLine: `事件${index}`,
+      archiveRef: `arc-${index}`,
+    }));
+    expect(() => applyWorldSimulationCandidates_ACU(filled, [candidate(archivePatch)], new Set(['e1']))).toThrow(/超过/);
+
+    const similar = applyWorldSimulationCandidates_ACU(
+      detailed.ledger,
+      [candidate({
+        chronicle: { append: [{ id: 'ch-2', at: '第四日', summary: '北岭矿洞今夜塌方压伤了三人', relatedIds: [], evidenceRefs: ['e1'] }] },
+      })],
+      new Set(['e1']),
+    );
+    expect(similar.chronicle.some(item => item.id === 'ch-2')).toBe(true);
+    expect(similar.chronicleOverview).toHaveLength(1);
   });
 });

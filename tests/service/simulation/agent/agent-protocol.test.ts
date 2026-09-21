@@ -239,4 +239,26 @@ describe('世界推演 Agent 协议', () => {
       actual: 'ledger',
     });
   });
+
+  it('允许 chronicle 写权限提交 chronicleArchive，并拒绝空 overview', () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('archive-protocol');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
+    const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    const parsed = parseWorldSimulationSpecialistResult_ACU({
+      status: 'candidate', agentName: 'world-analyst',
+      patch: {
+        chronicleArchive: {
+          archiveEntries: [{ archiveRef: 'arc-1', day: 3, summary: '归档', fingerprints: [], relatedIds: [], sourceChronicleIds: [] }],
+          overviewRows: [{ fingerprint: 'fp', day: 3, oneLine: '第3日 · 归档', archiveRef: 'arc-1' }],
+        },
+      },
+      summary: '归档完结事件', evidenceRefs: [ref], uncertainties: [],
+    }, snapshot);
+    expect(parsed).toMatchObject({ status: 'candidate' });
+    expect(() => parseWorldSimulationSpecialistResult_ACU({
+      status: 'candidate', agentName: 'world-analyst',
+      patch: { chronicleArchive: { archiveEntries: [{ archiveRef: 'arc-1' }], overviewRows: [] } },
+      summary: '空目录', evidenceRefs: [ref], uncertainties: [],
+    }, snapshot)).toThrowError(/INVALID_SPECIALIST_PATCH/);
+  });
 });

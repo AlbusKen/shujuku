@@ -79,4 +79,32 @@ describe('世界推演工具与 EvidenceRegistry', () => {
     expect(results[0].content).toContain('qingyang');
     expect(results[1].content).toContain('rumor-1');
   });
+
+  it('条目级地址与 chronicle-archive 可调阅详情，未知 id 返回 empty', async () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('item-tools');
+    const dependencies = createWorldSimulationToolDependencies_ACU({
+      anchorMessage: '', summary: '',
+      ledger: {
+        seeds: [{ id: 'seed-1', title: '矿难' }],
+        actors: [{ id: 'actor-1', name: '铁匠' }],
+        rumors: [{ id: 'rumor-1', fact: '铁匠死在北岭' }],
+        chronicle: [{ id: 'ch-1', summary: '北岭塌方' }],
+        dimensions: [{ id: 'dim-1', name: '秩序' }],
+      },
+      stagePlan: {}, candidates: [], chronicle: [], projectionPreview: {},
+      chronicleArchive: {
+        schemaVersion: 1,
+        records: {
+          'arc-mine': { archiveRef: 'arc-mine', day: 3, summary: '北岭矿洞塌方已归档', fingerprints: ['fp'], relatedIds: ['seed-1'], sourceChronicleIds: ['ch-1'] },
+        },
+      },
+    });
+    const results = await runWorldSimulationToolBatch_ACU({
+      registry, dependencies,
+      calls: [{ kind: 'read', reads: ['seeds:seed-1', 'actors:actor-1', 'rumors:rumor-1', 'chronicle:ch-1', 'dimensions:dim-1', 'chronicle-archive:arc-mine', 'seeds:missing', 'chronicle-archive:missing'] }],
+    });
+    expect(results.map(item => item.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'empty', 'empty']);
+    expect(results[0].content).toContain('矿难');
+    expect(results[5].content).toContain('北岭矿洞塌方已归档');
+  });
 });

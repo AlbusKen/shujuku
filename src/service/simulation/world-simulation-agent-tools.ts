@@ -7,6 +7,7 @@ export const WORLD_SIMULATION_TOOL_ADDRESSES_ACU = [
   'anchor:message', 'summary:current', 'worldbook:entry:', 'encyclopedia:entry:', 'web:url:',
   'ledger:current', 'stage-plan:current', 'candidates:current', 'chronicle:current', 'projection:preview',
   'player:current', 'rumors:current',
+  'seeds:', 'actors:', 'rumors:', 'chronicle:', 'dimensions:', 'chronicle-archive:',
 ] as const;
 export interface WorldSimulationToolReadResult_ACU { status: WorldSimulationEvidenceStatus_ACU; content?: string; summary?: string; exact?: boolean; truncated?: boolean; directory?: boolean; }
 export interface WorldSimulationToolSearchHit_ACU { address: string; summary: string; }
@@ -28,16 +29,34 @@ export interface WorldSimulationToolBatchGate_ACU {
 export interface WorldSimulationToolContext_ACU {
   anchorMessage: unknown; summary: unknown; ledger: unknown; stagePlan: unknown;
   candidates: unknown; chronicle: unknown; projectionPreview: unknown;
+  chronicleArchive?: unknown;
   externalRead?: (address: string) => Promise<WorldSimulationToolReadResult_ACU>;
   externalSearch?: (query: string, scope: readonly string[], maxResults: number, isRegex: boolean) => Promise<WorldSimulationToolSearchResult_ACU>;
 }
 
 function summary_ACU(value: unknown): string { return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 300); }
 function content_ACU(value: unknown): string { return typeof value === 'string' ? value : JSON.stringify(value ?? null); }
-function ledgerSlice_ACU(ledger: unknown, key: 'player' | 'rumors'): unknown {
+function ledgerSlice_ACU(ledger: unknown, key: string): unknown {
   return ledger !== null && typeof ledger === 'object' && !Array.isArray(ledger) && Object.prototype.hasOwnProperty.call(ledger, key)
     ? (ledger as Record<string, unknown>)[key]
     : null;
+}
+
+function ledgerItem_ACU(ledger: unknown, collection: string, id: string): unknown {
+  const list = ledgerSlice_ACU(ledger, collection);
+  if (!Array.isArray(list) || !id) return undefined;
+  return list.find(item => item !== null && typeof item === 'object' && (item as { id?: unknown }).id === id);
+}
+
+function archiveItem_ACU(archive: unknown, archiveRef: string): unknown {
+  if (!archiveRef) return undefined;
+  if (archive !== null && typeof archive === 'object' && !Array.isArray(archive) && 'records' in archive) {
+    const records = (archive as { records?: unknown }).records;
+    if (records !== null && typeof records === 'object' && !Array.isArray(records)) {
+      return (records as Record<string, unknown>)[archiveRef];
+    }
+  }
+  return undefined;
 }
 
 export function createWorldSimulationToolDependencies_ACU(context: WorldSimulationToolContext_ACU): WorldSimulationToolDependencies_ACU {
@@ -48,10 +67,25 @@ export function createWorldSimulationToolDependencies_ACU(context: WorldSimulati
     ['player:current', ledgerSlice_ACU(context.ledger, 'player')],
     ['rumors:current', ledgerSlice_ACU(context.ledger, 'rumors')],
   ]);
+  const resolveLocal_ACU = (address: string): { found: boolean; value?: unknown } => {
+    if (local.has(address)) return { found: true, value: local.get(address) };
+    const prefixed = address.match(/^(seeds|actors|rumors|chronicle|dimensions):(.+)$/);
+    if (prefixed) {
+      const item = ledgerItem_ACU(context.ledger, prefixed[1], prefixed[2]);
+      return item === undefined ? { found: true, value: undefined } : { found: true, value: item };
+    }
+    if (address.startsWith('chronicle-archive:')) {
+      const item = archiveItem_ACU(context.chronicleArchive, address.slice('chronicle-archive:'.length));
+      return { found: true, value: item };
+    }
+    return { found: false };
+  };
   return {
     async read(address) {
-      if (local.has(address)) {
-        const value = content_ACU(local.get(address));
+      const localHit = resolveLocal_ACU(address);
+      if (localHit.found) {
+        if (localHit.value === undefined || localHit.value === null) return { status: 'empty', summary: 'empty local value', exact: true };
+        const value = content_ACU(localHit.value);
         return value ? { status: 'ok', content: value, summary: summary_ACU(value), exact: true } : { status: 'empty', summary: 'empty local value', exact: true };
       }
       return context.externalRead ? context.externalRead(address) : { status: 'dependency_unavailable', summary: 'external read dependency unavailable' };

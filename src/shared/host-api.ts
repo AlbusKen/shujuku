@@ -69,6 +69,8 @@ export interface ChatMessageACUExtensions {
     _qrf_world_simulation_agent_chat?: Record<string, unknown>;
     /** 世界推演材料快照；与 continuation 资料字段严格隔离。 */
     _qrf_world_simulation_agent_materials?: Record<string, unknown>;
+    /** 世界推演编年总结详情归档桶；独立持久化字段，随冻结 assistant 楼层 swipe 分桶回退。 */
+    _qrf_world_simulation_chronicle_archive?: Record<string, unknown>;
     /** 世界推演聊天级任务 envelope，仅使用于首楼。 */
     _qrf_world_simulation?: Record<string, unknown>;
     /** QRF 剧情推进任务级结果映射（key=taskId, value=该任务的推进内容） */

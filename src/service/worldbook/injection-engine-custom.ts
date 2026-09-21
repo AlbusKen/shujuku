@@ -15,6 +15,7 @@ import { buildUsedOrderSet_ACU, allocOrder_ACU, allocConsecutiveOrderBlock_ACU }
 import { getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU } from './injection-engine-state';
 import { splitKeywordsByComma_ACU } from './injection-engine-entries';
 import { getLatestSummaryVectorIndexSnapshotState_ACU } from '../vector/summary-vector-index-state-service';
+import { didLastSummaryVectorRecallSucceed_ACU } from '../vector/summary-vector-index-recall-status';
 import { getEffectiveSummaryVectorIndexConfig_ACU } from '../vector/vector-memory-config';
 import { isSqliteMode } from '../table/storage-mode';
 import { buildExternalCustomTableExportComment_ACU, type ExternalCustomTableExportMarker_ACU } from './worldbook-placeholder-classification';
@@ -280,12 +281,14 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
                   false,
                   fallbackTemplate
               );
-              if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && crossfireThresholdMet) {
+              if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && crossfireThresholdMet && didLastSummaryVectorRecallSucceed_ACU()) {
                   const existingEntry = allEntries.find(e => e.comment === mainComment);
                   if (existingEntry?.content) {
                       mainContent = existingEntry.content;
-                      logDebug_ACU('[CustomExport] 交火模式已启用且已达门槛，保留现有纪要索引召回内容，避免覆盖发送前召回结果。');
+                      logDebug_ACU('[CustomExport] 交火模式已启用、已达门槛且上一轮召回成功，保留现有纪要索引召回内容，避免覆盖发送前召回结果。');
                   }
+              } else if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && !didLastSummaryVectorRecallSucceed_ACU()) {
+                  logDebug_ACU('[CustomExport] 交火模式已启用但上一轮召回未成功，纪要索引条目使用普通填表概览覆盖写入。');
               } else if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && !crossfireThresholdMet) {
                   logDebug_ACU('[CustomExport] 交火模式已启用但未达门槛，纪要索引条目使用普通填表数据，不保护现有内容。');
               }

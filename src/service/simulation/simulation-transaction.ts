@@ -1,7 +1,8 @@
 import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
+import type { WorldChronicleArchiveDetail_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
-import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
+import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, WORLD_CHRONICLE_OVERVIEW_CAP_ACU, type WorldChronicleOverviewRow_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationSettings_ACU } from './model';
 import {
   coerceWorldSimulationContact_ACU,
   coerceWorldSimulationGuidanceVoice_ACU,
@@ -218,17 +219,109 @@ function applyChronicle_ACU(current: WorldSimulationLedger_ACU['chronicle'], raw
   return [...clone_ACU(current), ...clone_ACU(raw.append as WorldSimulationLedger_ACU['chronicle'])];
 }
 
-export function applyWorldSimulationCandidates_ACU(
+const ARCHIVE_REF_RE_ACU = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function archiveRef_ACU(value: unknown, path: string): string {
+  if (typeof value !== 'string' || !ARCHIVE_REF_RE_ACU.test(value)) fail_ACU(`${path} 不是合法 archiveRef`);
+  return value;
+}
+
+function overviewRow_ACU(raw: unknown, path: string): WorldChronicleOverviewRow_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU(`${path} 必须是对象`);
+  exactKeys_ACU(raw, ['fingerprint', 'day', 'oneLine', 'archiveRef'], path);
+  if (typeof raw.fingerprint !== 'string' || !raw.fingerprint.trim()) fail_ACU(`${path}.fingerprint 必须是非空字符串`);
+  if (typeof raw.oneLine !== 'string' || !raw.oneLine.trim()) fail_ACU(`${path}.oneLine 必须是非空字符串`);
+  const day = typeof raw.day === 'number' && Number.isInteger(raw.day) ? raw.day : NaN;
+  if (!Number.isInteger(day) || day < 1) fail_ACU(`${path}.day 必须是 >= 1 的整数`);
+  return { fingerprint: raw.fingerprint, day, oneLine: raw.oneLine, archiveRef: archiveRef_ACU(raw.archiveRef, `${path}.archiveRef`) };
+}
+
+function archiveDetail_ACU(raw: unknown, path: string): WorldChronicleArchiveDetail_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU(`${path} 必须是对象`);
+  exactKeys_ACU(raw, ['archiveRef', 'day', 'summary', 'fingerprints', 'relatedIds', 'sourceChronicleIds'], path);
+  const stringList = (value: unknown, field: string): string[] => {
+    if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) fail_ACU(`${path}.${field} 必须是字符串数组`);
+    return value as string[];
+  };
+  const day = typeof raw.day === 'number' && Number.isInteger(raw.day) ? raw.day : NaN;
+  if (!Number.isInteger(day) || day < 1) fail_ACU(`${path}.day 必须是 >= 1 的整数`);
+  if (typeof raw.summary !== 'string' || !raw.summary.trim()) fail_ACU(`${path}.summary 必须是非空字符串`);
+  return {
+    archiveRef: archiveRef_ACU(raw.archiveRef, `${path}.archiveRef`),
+    day,
+    summary: raw.summary,
+    fingerprints: stringList(raw.fingerprints, 'fingerprints'),
+    relatedIds: stringList(raw.relatedIds, 'relatedIds'),
+    sourceChronicleIds: stringList(raw.sourceChronicleIds, 'sourceChronicleIds'),
+  };
+}
+
+export interface WorldSimulationChronicleArchiveApply_ACU {
+  overview: WorldChronicleOverviewRow_ACU[];
+  writes: WorldChronicleArchiveDetail_ACU[];
+}
+
+export function applyChronicleArchive_ACU(
+  current: readonly WorldChronicleOverviewRow_ACU[],
+  raw: unknown,
+): WorldSimulationChronicleArchiveApply_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU('patch.chronicleArchive 必须是对象');
+  exactKeys_ACU(raw, ['archiveEntries', 'overviewRows', 'collapseRefs'], 'patch.chronicleArchive');
+  if (!Array.isArray(raw.archiveEntries) || raw.archiveEntries.length === 0) fail_ACU('patch.chronicleArchive.archiveEntries 必须是非空数组');
+  if (!Array.isArray(raw.overviewRows) || raw.overviewRows.length === 0) fail_ACU('patch.chronicleArchive.overviewRows 必须是非空数组');
+  const collapseRefs = raw.collapseRefs === undefined
+    ? []
+    : Array.isArray(raw.collapseRefs) && raw.collapseRefs.every(item => typeof item === 'string')
+      ? raw.collapseRefs as string[]
+      : fail_ACU('patch.chronicleArchive.collapseRefs 必须是字符串数组');
+  const writes = raw.archiveEntries.map((item, index) => archiveDetail_ACU(item, `patch.chronicleArchive.archiveEntries[${index}]`));
+  const overviewRows = raw.overviewRows.map((item, index) => overviewRow_ACU(item, `patch.chronicleArchive.overviewRows[${index}]`));
+  const writeRefs = new Set(writes.map(item => item.archiveRef));
+  if (writeRefs.size !== writes.length) fail_ACU('patch.chronicleArchive.archiveEntries archiveRef 必须唯一');
+  const overviewRefs = new Set(overviewRows.map(item => item.archiveRef));
+  if (overviewRefs.size !== overviewRows.length) fail_ACU('patch.chronicleArchive.overviewRows archiveRef 必须唯一');
+  for (const row of overviewRows) {
+    if (!writeRefs.has(row.archiveRef)) fail_ACU('overviewRows.archiveRef 必须对应 archiveEntries', { archiveRef: row.archiveRef });
+  }
+  const collapse = new Set(collapseRefs);
+  const retained = current.filter(row => !collapse.has(row.archiveRef));
+  const remainingRefs = new Set(retained.map(row => row.archiveRef));
+  for (const row of overviewRows) {
+    if (remainingRefs.has(row.archiveRef)) fail_ACU('archiveRef 与现有概览目录冲突', { archiveRef: row.archiveRef });
+    remainingRefs.add(row.archiveRef);
+  }
+  const overview = [...retained, ...overviewRows];
+  if (overview.length > WORLD_CHRONICLE_OVERVIEW_CAP_ACU) {
+    fail_ACU(`chronicleOverview 追加后超过 ${WORLD_CHRONICLE_OVERVIEW_CAP_ACU} 行，必须自带 collapseRefs 合并旧行`, {
+      nextCount: overview.length,
+      cap: WORLD_CHRONICLE_OVERVIEW_CAP_ACU,
+    });
+  }
+  return { overview, writes };
+}
+
+function canWritePatchModule_ACU(module: string, writable: ReadonlySet<string>): boolean {
+  if (module === 'chronicleArchive') return writable.has('chronicle');
+  return (MODULES_ACU as readonly string[]).includes(module) && writable.has(module);
+}
+
+export interface WorldSimulationApplyResult_ACU {
+  ledger: WorldSimulationLedger_ACU;
+  chronicleArchiveWrites: WorldChronicleArchiveDetail_ACU[];
+}
+
+export function applyWorldSimulationCandidatesDetailed_ACU(
   base: WorldSimulationLedger_ACU,
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorizedEvidenceRefs: ReadonlySet<string>,
   settings?: WorldSimulationSettings_ACU,
-): WorldSimulationLedger_ACU {
+): WorldSimulationApplyResult_ACU {
   const dynamics = resolveDynamics_ACU(settings);
   const validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
   if (!candidates.length) fail_ACU('commit 必须包含至少一个候选');
   const candidateIds = new Set<string>();
   let next = clone_ACU(validatedBase);
+  const chronicleArchiveWrites: WorldChronicleArchiveDetail_ACU[] = [];
   for (const candidate of candidates) {
     if (!candidate.candidateId || candidateIds.has(candidate.candidateId)) fail_ACU('commit candidateId 缺失或重复', { candidateId: candidate.candidateId });
     candidateIds.add(candidate.candidateId);
@@ -244,8 +337,8 @@ export function applyWorldSimulationCandidates_ACU(
     const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
     if (forgedPermissions.length) fail_ACU('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
     for (const [module, patch] of Object.entries(candidate.patch)) {
-      if (!(MODULES_ACU as readonly string[]).includes(module) || !writable.has(module)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
-      switch (module as Module_ACU) {
+      if (!canWritePatchModule_ACU(module, writable)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
+      switch (module) {
         case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
         case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day); break;
         case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day); break;
@@ -254,12 +347,27 @@ export function applyWorldSimulationCandidates_ACU(
         case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
         case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day); break;
         case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
+        case 'chronicleArchive': {
+          const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch);
+          next.chronicleOverview = archived.overview;
+          chronicleArchiveWrites.push(...archived.writes);
+          break;
+        }
       }
     }
   }
   checkCrossField_ACU(next);
   next.revision = validatedBase.revision + 1;
-  return validateWorldSimulationLedger_ACU(next, 'agent_persist');
+  return { ledger: validateWorldSimulationLedger_ACU(next, 'agent_persist'), chronicleArchiveWrites };
+}
+
+export function applyWorldSimulationCandidates_ACU(
+  base: WorldSimulationLedger_ACU,
+  candidates: readonly WorldSimulationCandidate_ACU[],
+  authorizedEvidenceRefs: ReadonlySet<string>,
+  settings?: WorldSimulationSettings_ACU,
+): WorldSimulationLedger_ACU {
+  return applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings).ledger;
 }
 
 export interface WorldSimulationCandidateViolation_ACU {
@@ -332,7 +440,7 @@ export function preflightWorldSimulationCandidates_ACU(
     const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
     if (forgedPermissions.length) push('', '$.writableModules', `候选声明了角色目录未授权的写入模块: ${forgedPermissions.join(',')}`, { forgedPermissions });
     for (const [module, patch] of Object.entries(candidate.patch)) {
-      if (!(MODULES_ACU as readonly string[]).includes(module) || !writable.has(module)) {
+      if (!canWritePatchModule_ACU(module, writable)) {
         push(module, `$.patch.${module}`, '候选越权写入 ledger 模块');
         continue;
       }
@@ -340,7 +448,7 @@ export function preflightWorldSimulationCandidates_ACU(
         push(module, typeof details?.path === 'string' ? details.path : `$.patch.${module}`, message, details);
       };
       try {
-        switch (module as Module_ACU) {
+        switch (module) {
           case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
           case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collectUpsert); break;
           case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collectUpsert); break;
@@ -349,6 +457,7 @@ export function preflightWorldSimulationCandidates_ACU(
           case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
           case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert); break;
           case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
+          case 'chronicleArchive': next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch).overview; break;
         }
       } catch (error) {
         push(module, `$.patch.${module}`, error instanceof Error ? error.message : String(error));

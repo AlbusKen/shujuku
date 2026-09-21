@@ -21,15 +21,27 @@ export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimu
 
 function candidate_ACU(result: Extract<WorldSimulationSpecialistResult_ACU, { status: 'candidate' }>, writableModules: readonly string[]): WorldSimulationCandidate_ACU {
   const keys = Object.keys(result.patch);
-  const denied = keys.filter(key => !writableModules.includes(key));
+  const denied = keys.filter(key => key === 'chronicleArchive' ? !writableModules.includes('chronicle') : !writableModules.includes(key));
   if (denied.length) throw new Error(`WORLD_SIMULATION_PATCH_SCOPE_DENIED:${denied.join(',')}`);
   const candidateId = `candidate:${sha256HexSync_ACU(JSON.stringify([result.agentName, result.patch, result.evidenceRefs, result.summary])).slice(0, 24)}`;
   return { candidateId, agentName: result.agentName, patch: result.patch, summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties, writableModules: [...writableModules] };
 }
 
 
-function withTask_ACU(context: WorldSimulationPlaceholderContext_ACU, task: unknown, candidates?: readonly WorldSimulationCandidate_ACU[]): WorldSimulationPlaceholderContext_ACU {
-  return { ...context, task, worldCandidates: candidates ?? context.worldCandidates, evidenceRegistry: context.evidenceRegistry };
+function withTask_ACU(
+  context: WorldSimulationPlaceholderContext_ACU,
+  task: unknown,
+  candidates?: readonly WorldSimulationCandidate_ACU[],
+  writableModules?: readonly string[],
+): WorldSimulationPlaceholderContext_ACU {
+  return {
+    ...context,
+    task,
+    worldCandidates: candidates ?? context.worldCandidates,
+    evidenceRegistry: context.evidenceRegistry,
+    candidateView: candidates ? 'full' : context.candidateView,
+    writableModules: writableModules ?? context.writableModules,
+  };
 }
 
 function bindSpecialistIdentity_ACU(payload: Record<string, unknown>, agentName: WorldSimulationAgentName_ACU): Record<string, unknown> {
@@ -58,7 +70,7 @@ export class WorldSimulationSubagentRuntime_ACU {
     if (!definition || !['specialist', 'researcher'].includes(definition.kind)) throw new Error('WORLD_SIMULATION_DELEGATION_AGENT_INVALID');
     const agentName = definition.name;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
-    const context = withTask_ACU(input.promptContext, { instruction: input.delegation.instruction, reads: input.delegation.reads });
+    const context = withTask_ACU(input.promptContext, { instruction: input.delegation.instruction, reads: input.delegation.reads }, undefined, definition.writableModules);
     const transcript: Array<{ role: string; content: string }> = [];
     const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
     const readGateState = createWorldSimulationReadGateState_ACU();
@@ -123,7 +135,7 @@ export class WorldSimulationSubagentRuntime_ACU {
     if (!input.candidates.length) throw new Error('WORLD_SIMULATION_REVIEW_CANDIDATES_REQUIRED');
     const agentName = 'causality-reviewer' as const;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
-    const context = withTask_ACU(input.promptContext, { objective: '审核候选的时间、因果、权限、revision 与证据完整性' }, input.candidates);
+    const context = withTask_ACU(input.promptContext, { objective: '审核候选的时间、因果、权限、revision 与证据完整性' }, input.candidates, ['guidance']);
     const transcript: Array<{ role: string; content: string }> = [];
     const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
     const readGateState = createWorldSimulationReadGateState_ACU();

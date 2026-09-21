@@ -10,6 +10,7 @@ import { clearWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from './world-simulation-agent-tools';
 import { WorldSimulationMainLoop_ACU } from './agent/agent-main-loop';
 import {
+  WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   WORLD_SIMULATION_RUN_STATE_FIELD_ACU,
@@ -29,7 +30,7 @@ import {
 } from './simulation-orchestrator';
 import { WorldSimulationStagePlanner_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
-import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
+import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, buildEmptyWorldChronicleArchiveSnapshot_ACU, readWorldSimulationBucketEntry_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationChronicleArchiveSnapshot_ACU } from './simulation-store';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import { detectWorldCollisions_ACU } from './world-dynamics';
@@ -175,6 +176,12 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         candidates: [],
         chronicle: envelope.ledger.chronicle,
         projectionPreview: promptContext.projectionPreview,
+        chronicleArchive: readWorldSimulationBucketEntry_ACU(
+          WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
+          currentAnchor,
+          validateWorldSimulationChronicleArchiveSnapshot_ACU,
+          chat,
+        ) ?? buildEmptyWorldChronicleArchiveSnapshot_ACU(),
         webResearch: envelope.settings.webResearch,
       });
       const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1]) =>
@@ -236,6 +243,7 @@ const WORLD_SIMULATION_FLOOR_FIELDS_ACU = [
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_RUN_STATE_FIELD_ACU,
+  WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
 ] as const;
 
 const RESUME_KEYWORD_ACU = /^(继续|恢复(?:任务)?|resume|continue)$/i;

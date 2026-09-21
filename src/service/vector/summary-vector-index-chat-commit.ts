@@ -93,7 +93,8 @@ export async function commitVectorMetadataPatch_ACU(
  * - 成功时只调用一次宿主严格保存；保存成功后才可继续外置文件清理。
  *
  * @param entries 待提交的消息列表（含 isolationKey 与 patch）
- * @param options.additionalMutate 可选每层额外 mutation，在 patch 后执行，随事务回滚
+ * @param options.additionalMutate 可选每层额外 mutation，在 patch 后执行，随事务回滚。
+ * 返回 true 表示该 mutation 本身构成一次需要 strict save 的变更（例如只清 V2 镜像帧）。
  * @returns 是否发生任何变化（false 表示全部 no-op 或空列表）
  */
 export async function commitVectorMetadataPatchesBatch_ACU(
@@ -104,7 +105,7 @@ export async function commitVectorMetadataPatchesBatch_ACU(
         expectedIndexId?: string;
     }>,
     options?: {
-        additionalMutate?: (message: any) => void;
+        additionalMutate?: (message: any) => void | boolean;
     },
 ): Promise<boolean> {
     if (!Array.isArray(entries) || entries.length === 0) return false;
@@ -135,9 +136,12 @@ export async function commitVectorMetadataPatchesBatch_ACU(
                 expectedIndexId: entry.expectedIndexId,
             });
             if (result.changed) changed = true;
-            options?.additionalMutate?.(entry.message);
+            if (options?.additionalMutate?.(entry.message) === true) changed = true;
         }
-        if (!changed) return false;
+        if (!changed) {
+            rollbackAll();
+            return false;
+        }
         await saveChatToHostStrict_ACU();
         return true;
     } catch (error) {

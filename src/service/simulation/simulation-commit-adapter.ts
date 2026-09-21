@@ -14,10 +14,12 @@ import {
   validateWorldSimulationConversationFloorRecord_ACU,
 } from './agent/agent-conversation-store';
 import {
+  WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_STATE_FIELD_ACU,
+  type WorldChronicleArchiveSnapshot_ACU,
   type WorldSimulationAnchorIdentity_ACU,
   type WorldSimulationBucket_ACU,
   type WorldSimulationCommitCandidate_ACU,
@@ -25,9 +27,12 @@ import {
   type WorldSimulationMaterialsSnapshot_ACU,
 } from './agent/agent-model';
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationTimelineEntry_ACU } from './model';
+import { sweepWorldLifecycle_ACU } from './lifecycle-sweeper';
+import { progressionPlan_ACU } from './progression-plan';
+import { relevanceGate_ACU } from './relevance-gate';
 import { applyWorldSimulationProjection_ACU, buildWorldSimulationProjection_ACU, readWorldSimulationMessageContent_ACU, writeWorldSimulationActiveSwipeContent_ACU } from './simulation-projection';
-import { applyWorldSimulationCandidates_ACU } from './simulation-transaction';
-import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
+import { applyWorldSimulationCandidatesDetailed_ACU } from './simulation-transaction';
+import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildEmptyWorldChronicleArchiveSnapshot_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationChronicleArchiveSnapshot_ACU, validateWorldSimulationEnvelope_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 
 interface CommitInput_ACU {
   identity: WorldSimulationRunIdentity_ACU;
@@ -44,6 +49,34 @@ const clone_ACU = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 function reject_ACU(code: 'WORLD_SIMULATION_REVISION_CONFLICT' | 'WORLD_SIMULATION_PERSIST_FAILED' | 'WORLD_SIMULATION_SNAPSHOT_INVALID', message: string, details?: Record_ACU): never {
   throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(code, 'persist', message, false, details));
+}
+
+function lastCatalyzedAtDayBySeed_ACU(timeline: readonly WorldSimulationTimelineEntry_ACU[]): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const entry of timeline) {
+    if (entry.kind !== 'progressed' || !entry.message) continue;
+    try {
+      const parsed = JSON.parse(entry.message) as { seedId?: unknown; advance?: unknown; day?: unknown };
+      if (typeof parsed.seedId !== 'string' || parsed.advance !== 'catalyze' || typeof parsed.day !== 'number' || !Number.isInteger(parsed.day)) continue;
+      map[parsed.seedId] = parsed.day;
+    } catch {
+      continue;
+    }
+  }
+  return map;
+}
+
+function readArchiveSnapshot_ACU(raw: unknown, anchor: WorldSimulationAnchorIdentity_ACU): WorldChronicleArchiveSnapshot_ACU {
+  if (raw === undefined) return buildEmptyWorldChronicleArchiveSnapshot_ACU();
+  if (!isRecord_ACU(raw) || raw.schemaVersion !== 1 || !isRecord_ACU(raw.entries)) {
+    reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU} 分桶结构损坏`);
+  }
+  const entry = (raw.entries as Record<string, unknown>)[buildWorldSimulationBucketKey_ACU(anchor)];
+  if (entry === undefined) return buildEmptyWorldChronicleArchiveSnapshot_ACU();
+  if (!isRecord_ACU(entry) || !Object.prototype.hasOwnProperty.call(entry, 'value')) {
+    reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU} 当前 swipe 条目损坏`);
+  }
+  return validateWorldSimulationChronicleArchiveSnapshot_ACU(entry.value, 'persist');
 }
 
 function assertRun_ACU(envelope: WorldSimulationEnvelope_ACU, input: CommitInput_ACU): void {
@@ -207,21 +240,64 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
   const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
   assertRun_ACU(envelope, input);
-  let ledger = applyWorldSimulationCandidates_ACU(
+  const applied = applyWorldSimulationCandidatesDetailed_ACU(
     envelope.ledger,
     input.commitCandidate.acceptedCandidates,
     new Set(input.commitCandidate.evidenceRefs),
     envelope.settings,
   );
+  let ledger = applied.ledger;
   ledger = maintainWorldPlayer_ACU(ledger, envelope.ledger.player);
+  const extraTimeline: WorldSimulationTimelineEntry_ACU[] = [];
+  const daysAdvanced = Math.max(0, ledger.clock.day - envelope.ledger.clock.day);
+  const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
+  const relevance = relevanceGate_ACU(ledger, storyText);
+  const directives = progressionPlan_ACU({
+    ledger,
+    daysAdvanced,
+    relevance,
+    lastCatalyzedAtDayBySeed: lastCatalyzedAtDayBySeed_ACU(envelope.timeline),
+  });
+  for (const directive of directives) {
+    extraTimeline.push({
+      id: `${input.timelineId}:progressed:${directive.seedId}`,
+      at: input.completedAt,
+      kind: 'progressed',
+      taskId: input.identity.taskId,
+      stageId: input.identity.stageId,
+      revision: input.identity.stageRevision,
+      runId: input.identity.runId,
+      message: JSON.stringify({ seedId: directive.seedId, advance: directive.advance, reason: directive.reason, day: ledger.clock.day, circle: directive.circle }),
+    });
+  }
   const sweep = sweepWorldLedger_ACU(ledger, envelope.settings);
   ledger = sweep.ledger;
-  const extraTimeline: WorldSimulationTimelineEntry_ACU[] = [];
   if (sweep.sweptSeedIds.length) extraTimeline.push({
     id: `${input.timelineId}:swept`, at: input.completedAt, kind: 'swept',
     taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,
     message: sweep.sweptSeedIds.join(','),
   });
+  const life = sweepWorldLifecycle_ACU(ledger, envelope.settings);
+  ledger = life.ledger;
+  if (life.droppedRumorIds.length || life.droppedSeedIds.length || life.droppedActorIds.length || life.compressedRegionVisits) {
+    extraTimeline.push({
+      id: `${input.timelineId}:lifecycle`, at: input.completedAt, kind: 'swept',
+      taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,
+      message: JSON.stringify({
+        droppedRumorIds: life.droppedRumorIds,
+        droppedSeedIds: life.droppedSeedIds,
+        droppedActorIds: life.droppedActorIds,
+        compressedRegionVisits: life.compressedRegionVisits,
+      }),
+    });
+  }
+  if (life.skipped.length) {
+    extraTimeline.push({
+      id: `${input.timelineId}:lifecycle-skip`, at: input.completedAt, kind: 'swept',
+      taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,
+      message: JSON.stringify({ skipped: life.skipped }),
+    });
+  }
   const filtered = filterUnreachableRumorSignals_ACU(ledger.guidance, ledger);
   ledger = { ...ledger, guidance: filtered.guidance };
   ledger = refreshWorldRumors_ACU(ledger, ledger.guidance.signals.flatMap(signal => signal.voice === 'rumor' && signal.sourceId ? [signal.sourceId] : []), envelope.settings);
@@ -260,6 +336,12 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU], persistedAnchor, materials, input.completedAt,
     WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   );
+  const archiveSnapshot = readArchiveSnapshot_ACU(anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU], currentAnchor);
+  for (const write of applied.chronicleArchiveWrites) archiveSnapshot.records[write.archiveRef] = write;
+  const nextArchiveBucket = bucketWithEntry_ACU(
+    anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU], persistedAnchor, archiveSnapshot, input.completedAt,
+    WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
+  );
   const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(
     anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU],
     anchorMessage,
@@ -273,6 +355,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     { target: anchorMessage, key: WORLD_SIMULATION_STATE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_STATE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_STATE_FIELD_ACU] },
     { target: anchorMessage, key: WORLD_SIMULATION_MATERIALS_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_MATERIALS_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU] },
     { target: anchorMessage, key: WORLD_SIMULATION_CONVERSATION_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_CONVERSATION_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] },
+    { target: anchorMessage, key: WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU] },
     { target: anchorMessage, key: 'mes', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'mes'), value: anchorMessage.mes },
     { target: anchorMessage, key: 'message', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'message'), value: anchorMessage.message },
     { target: anchorMessage, key: 'swipes', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'swipes'), value: Array.isArray(anchorMessage.swipes) ? [...anchorMessage.swipes] : anchorMessage.swipes },
@@ -283,6 +366,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     anchorMessage[WORLD_SIMULATION_STATE_FIELD_ACU] = nextStateBucket;
     anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU] = nextMaterialsBucket;
     if (nextConversationBucket) anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = nextConversationBucket;
+    anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU] = nextArchiveBucket;
     writeWorldSimulationActiveSwipeContent_ACU(anchorMessage, newContent);
     if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
       reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交前聊天上下文已变化');

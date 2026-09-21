@@ -8,6 +8,7 @@ import { toastr_API_ACU } from '../../shared/host-api';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { logDebug_ACU } from '../../shared/utils';
 import { processSummaryVectorIndexBeforeGeneration_ACU, type SummaryVectorIndexRuntimeResult_ACU } from '../../service/vector/summary-vector-index-runtime';
+import { useToastStore } from '../../presentation-v2/stores/toast-store';
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import { isSummaryVectorIndexSourceTextOutdated_ACU, type SummaryVectorIndexArchiveResult_ACU } from '../../service/vector/summary-vector-index-archive-service';
 import { getLatestSummaryVectorIndexSnapshotState_ACU } from '../../service/vector/summary-vector-index-state-service';
@@ -30,6 +31,24 @@ function clearToastElement_ACU($toast: JQuery<HTMLElement> | null) {
 function shouldShowSummaryVectorResultToast_ACU(result: SummaryVectorIndexRuntimeResult_ACU): boolean {
   if (!result || result.skipped) return false;
   return result.success === true && Number(result.injectedCount || 0) > 0;
+}
+
+function shouldNotifySummaryVectorRecallFailure_ACU(result: SummaryVectorIndexRuntimeResult_ACU): boolean {
+  return !!result && result.success === false && result.skipped !== true;
+}
+
+function notifySummaryVectorRecallFailure_ACU(result: SummaryVectorIndexRuntimeResult_ACU): void {
+  const reason = String(result?.reason || 'unknown');
+  const detail = String(result?.error || '').trim();
+  const text = detail
+    ? `交火记忆召回失败（${reason}）：${detail}。已恢复纪要索引全量概览。请检查 Embedding / Rerank 接口、额度与模型配置。`
+    : `交火记忆召回失败（${reason}）。已恢复纪要索引全量概览。请检查 Embedding / Rerank 接口、额度与模型配置。`;
+  try {
+    useToastStore().error(text, { muteable: false });
+    return;
+  } catch {
+    showToastr_ACU('error', text);
+  }
 }
 
 export function shouldRebuildSummaryVectorIndexWithUI_ACU(reason: string | undefined): boolean {
@@ -148,6 +167,8 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
         '交火召回完成',
         { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK },
       );
+    } else if (shouldNotifySummaryVectorRecallFailure_ACU(result)) {
+      notifySummaryVectorRecallFailure_ACU(result);
     } else {
       logDebug_ACU(`[交火模式纪要索引] UI 包装完成：success=${result?.success === true}, skipped=${result?.skipped === true}, reason=${result?.reason || 'none'}`);
     }
@@ -179,6 +200,8 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
             '交火召回完成',
             { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK },
           );
+        } else if (shouldNotifySummaryVectorRecallFailure_ACU(retried)) {
+          notifySummaryVectorRecallFailure_ACU(retried);
         }
         return retried;
       } catch (error) {

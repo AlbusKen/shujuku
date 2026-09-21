@@ -18,6 +18,7 @@ import {
     setLorebookEntries_ACU,
 } from '../worldbook/worldbook-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU, validateSummaryVectorIndexConfig_ACU } from './vector-memory-config';
+import { setLastSummaryVectorRecallSucceeded_ACU } from './summary-vector-index-recall-status';
 import { enqueueSummaryVectorIndexFlush_ACU } from './summary-vector-index-flush-queue';
 import {
     chatHasLegacySummaryVectorFields_ACU,
@@ -81,6 +82,8 @@ export interface SummaryVectorIndexRuntimeResult_ACU {
     rerankDocumentCount?: number;
     /** 关键词 AI 是否参与了本轮 query 构造。 */
     keywordGenerationEnabled?: boolean;
+    /** API/异常类失败的可读原因，供 UI toast 展示。 */
+    error?: string;
 }
 
 interface RankedSummaryCandidate_ACU extends SummaryHybridCandidate_ACU {
@@ -349,6 +352,43 @@ function buildSummaryIndexOverwriteContent_ACU(candidates: SummaryIndexSelectedC
     }
 
     return lines.join('\n');
+}
+
+const SUMMARY_VECTOR_OVERVIEW_RESTORE_REASONS_ACU = new Set([
+    'embedding_failed',
+    'empty_query_embedding',
+    'no_candidates',
+    'no_chunks',
+    'no_selected_rows',
+    'below_min_rows',
+    'rerank_failed',
+]);
+
+async function restoreSummaryIndexOverview_ACU(rows: ChatSummaryVectorIndexRow_ACU[]): Promise<void> {
+    const selected = (Array.isArray(rows) ? rows : [])
+        .filter((row): row is ChatSummaryVectorIndexRow_ACU => !!row)
+        .sort((left, right) => (Number(left.rowOrder) || 0) - (Number(right.rowOrder) || 0))
+        .map((row): SummaryIndexSelectedCandidate_ACU => ({ kind: 'recent_fixed', row }));
+    await upsertOriginalSummaryIndexEntry_ACU(buildSummaryIndexOverwriteContent_ACU(selected));
+}
+
+async function finalizeSummaryVectorRecallResult_ACU(
+    result: SummaryVectorIndexRuntimeResult_ACU,
+    overviewRows?: ChatSummaryVectorIndexRow_ACU[],
+): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    if (result.reason === 'deduped') return result;
+    setLastSummaryVectorRecallSucceeded_ACU(result.success === true && result.skipped !== true);
+    if (
+        !(result.success === true && result.skipped !== true)
+        && SUMMARY_VECTOR_OVERVIEW_RESTORE_REASONS_ACU.has(String(result.reason || ''))
+    ) {
+        try {
+            await restoreSummaryIndexOverview_ACU(overviewRows || []);
+        } catch (error: any) {
+            logWarn_ACU('[交火模式纪要索引] 召回失败后恢复纪要索引概览失败:', error?.message || error);
+        }
+    }
+    return result;
 }
 
 async function upsertOriginalSummaryIndexEntry_ACU(content: string): Promise<void> {
@@ -716,27 +756,6 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     return alignedState;
 }
 
-// T5：query embedding 失败时的降级路径 —— 仅注入最近固定行，不依赖向量检索。
-// 仅在 recentFixedRows 非空时调用；调用方负责确认 recentFixedRows.length > 0。
-async function injectRecentFixedRowsOnly_ACU(recentFixedRows: ChatSummaryVectorIndexRow_ACU[]): Promise<SummaryVectorIndexRuntimeResult_ACU> {
-    const selected = recentFixedRows
-        .map((row): SummaryIndexSelectedCandidate_ACU => ({ kind: 'recent_fixed', row }))
-        .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
-    const content = buildSummaryIndexOverwriteContent_ACU(selected);
-    await upsertOriginalSummaryIndexEntry_ACU(content);
-    return {
-        success: true,
-        reason: 'query_embedding_failed_recent_fixed_only',
-        keywordCount: 0,
-        candidateCount: 0,
-        injectedCount: selected.length,
-        denseCandidateCount: 0,
-        sparseCandidateCount: 0,
-        fusionCandidateCount: 0,
-    };
-}
-
-
 export async function processSummaryVectorIndexBeforeGeneration_ACU(
     options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
@@ -842,10 +861,16 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         });
     }
     if (rows.length < config.summaryIndexKeywordMinRows) {
-        return { success: false, skipped: true, reason: 'below_min_rows' };
+        return await finalizeSummaryVectorRecallResult_ACU(
+            { success: false, skipped: true, reason: 'below_min_rows' },
+            rows,
+        );
     }
     if (chunks.length === 0) {
-        return { success: false, skipped: true, reason: 'no_chunks' };
+        return await finalizeSummaryVectorRecallResult_ACU(
+            { success: false, skipped: true, reason: 'no_chunks' },
+            rows,
+        );
     }
 
     const rowByKey = new Map(rows.map((row) => [row.rowKey, row]));
@@ -863,9 +888,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     // 较早的行（不参与排序的候选池）
     const olderRows = rows.filter((row) => !recentFixedRowKeys.has(row.rowKey));
 
-    // T5：query embedding 失败不中断宿主生成。generateKeywords/createEmbeddings 抛异常或返回空向量时，
-    // 若存在最近固定行（recentFixedRows），降级为仅注入固定行（不依赖向量），继续原始生成；
-    // 否则保持原行为（空向量返回 empty_query_embedding；异常穿透给上层 init.ts 的 try/catch 兜底）。
+    // T5：query embedding 失败不得伪装成功，也不再降级注入最近固定行。
     let keywords: string[] = [];
     let queryText = '';
     let queryVector: number[] | Float32Array = [];
@@ -880,18 +903,23 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         });
         queryVector = embeddings[0]?.embedding || [];
         if (queryVector.length === 0) {
-            if (recentFixedRows.length > 0) {
-                logWarn_ACU('[交火模式纪要索引] query embedding 返回空向量，降级为仅注入最近固定行:', userInput);
-                return await injectRecentFixedRowsOnly_ACU(recentFixedRows);
-            }
-            return { success: false, skipped: true, reason: 'empty_query_embedding' };
+            logWarn_ACU('[交火模式纪要索引] query embedding 返回空向量，已中止召回并恢复纪要索引概览:', userInput);
+            return await finalizeSummaryVectorRecallResult_ACU({
+                success: false,
+                reason: 'empty_query_embedding',
+                error: 'query embedding 返回空向量',
+                keywordCount: keywords.length,
+            }, rows);
         }
-    } catch (error) {
-        if (recentFixedRows.length > 0) {
-            logWarn_ACU('[交火模式纪要索引] query embedding 失败，降级为仅注入最近固定行，继续原始生成:', error);
-            return await injectRecentFixedRowsOnly_ACU(recentFixedRows);
-        }
-        throw error;
+    } catch (error: any) {
+        const message = error?.message || String(error || 'embedding 调用失败');
+        logWarn_ACU('[交火模式纪要索引] query embedding 失败，已中止召回并恢复纪要索引概览:', message);
+        return await finalizeSummaryVectorRecallResult_ACU({
+            success: false,
+            reason: 'embedding_failed',
+            error: message,
+            keywordCount: keywords.length,
+        }, rows);
     }
 
     // 只对较早行的 chunks 做向量匹配
@@ -940,7 +968,15 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     );
 
     if (candidates.length === 0 && recentFixedRows.length === 0) {
-        return { success: false, skipped: true, reason: 'no_candidates', keywordCount: keywords.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length };
+        return await finalizeSummaryVectorRecallResult_ACU({
+            success: false,
+            skipped: true,
+            reason: 'no_candidates',
+            keywordCount: keywords.length,
+            denseCandidateCount: denseCandidates.length,
+            sparseCandidateCount: sparseCandidates.length,
+            fusionCandidateCount: candidates.length,
+        }, rows);
     }
 
     // Rerank 只处理较早行的候选；document 取实时纪要正文，候选行不多于 topK 时跳过。
@@ -961,7 +997,36 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
     const keywordGenerationEnabled = config.keywordGenerationEnabled !== false;
     if (selected.length === 0) {
-        return { success: false, skipped: true, reason: 'no_selected_rows', keywordCount: keywords.length, candidateCount: candidates.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error, rerankDocumentCount: rerank.documentCount, keywordGenerationEnabled };
+        if (rerank.status === 'failed') {
+            return await finalizeSummaryVectorRecallResult_ACU({
+                success: false,
+                reason: 'rerank_failed',
+                error: rerank.error || 'rerank 失败且没有可注入的可信结果',
+                keywordCount: keywords.length,
+                candidateCount: candidates.length,
+                denseCandidateCount: denseCandidates.length,
+                sparseCandidateCount: sparseCandidates.length,
+                fusionCandidateCount: candidates.length,
+                rerankStatus: rerank.status,
+                rerankError: rerank.error,
+                rerankDocumentCount: rerank.documentCount,
+                keywordGenerationEnabled,
+            }, rows);
+        }
+        return await finalizeSummaryVectorRecallResult_ACU({
+            success: false,
+            skipped: true,
+            reason: 'no_selected_rows',
+            keywordCount: keywords.length,
+            candidateCount: candidates.length,
+            denseCandidateCount: denseCandidates.length,
+            sparseCandidateCount: sparseCandidates.length,
+            fusionCandidateCount: candidates.length,
+            rerankStatus: rerank.status,
+            rerankError: rerank.error,
+            rerankDocumentCount: rerank.documentCount,
+            keywordGenerationEnabled,
+        }, rows);
     }
 
     const content = buildSummaryIndexOverwriteContent_ACU(selected);
@@ -969,5 +1034,17 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     logDebug_ACU(
         `[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个（关键词 AI ${keywordGenerationEnabled ? '开' : '关'}），rerank=${rerank.status}${rerank.documentCount ? `（${rerank.documentCount} 条 documents）` : ''}，输出顺序按纪要表原 rowOrder。`,
     );
-    return { success: true, keywordCount: keywords.length, candidateCount: candidates.length, injectedCount: selected.length, denseCandidateCount: denseCandidates.length, sparseCandidateCount: sparseCandidates.length, fusionCandidateCount: candidates.length, rerankStatus: rerank.status, rerankError: rerank.error, rerankDocumentCount: rerank.documentCount, keywordGenerationEnabled };
+    return await finalizeSummaryVectorRecallResult_ACU({
+        success: true,
+        keywordCount: keywords.length,
+        candidateCount: candidates.length,
+        injectedCount: selected.length,
+        denseCandidateCount: denseCandidates.length,
+        sparseCandidateCount: sparseCandidates.length,
+        fusionCandidateCount: candidates.length,
+        rerankStatus: rerank.status,
+        rerankError: rerank.error,
+        rerankDocumentCount: rerank.documentCount,
+        keywordGenerationEnabled,
+    }, rows);
 }

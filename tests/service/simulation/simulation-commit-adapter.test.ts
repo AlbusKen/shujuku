@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
-import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
+import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from '../../../src/service/simulation/agent/agent-module-store';
 import { commitWorldSimulationProjection_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
@@ -265,10 +265,11 @@ describe('world simulation commit adapter', () => {
 
     expect(saveChat).toHaveBeenCalledTimes(1);
     const ledger = readWorldSimulationLedgerAtAnchor_ACU(resolveWorldSimulationAnchor_ACU(1, chat), chat);
-    expect(ledger.seeds[0]).toMatchObject({ status: 'retired', retiredReason: 'missed' });
+    expect(ledger.seeds).toEqual([]);
     expect(ledger.chronicle.map((item: { summary: string }) => item.summary)).toContain('[错过] 矿洞塌了');
     expect(chat[0]._qrf_world_simulation.timeline).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'swept', message: 'seed-1' }),
+      expect.objectContaining({ kind: 'swept', message: expect.stringContaining('seed-1') }),
       expect.objectContaining({ kind: 'committed', id: 'timeline-1' }),
     ]));
   });
@@ -367,6 +368,43 @@ describe('world simulation commit adapter', () => {
       expect.objectContaining({ kind: 'failed', message: '碰撞种子 seed-1 缺少 encounter 信号' }),
       expect.objectContaining({ kind: 'committed', id: 'timeline-1' }),
     ]));
+  });
+
+  it('归档候选写入独立楼层桶，推进指令写入 progressed timeline', async () => {
+    const { chat, commitInput, acceptedCandidates } = fixture();
+    chat[0]._qrf_world_simulation.ledger.seeds = [{
+      id: 'seed-edge', title: '远方暗流', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: [],
+      location: { region: '临川' }, expiresAtDay: 40, missedOutcome: null, exposePolicy: 'on_collision',
+      evidenceRefs: [], retiredReason: null, revision: 0,
+    }];
+    acceptedCandidates.push({
+      candidateId: 'candidate:archive',
+      agentName: 'world-analyst',
+      patch: {
+        chronicleArchive: {
+          archiveEntries: [{
+            archiveRef: 'arc-mine', day: 3, summary: '北岭塌方已归档',
+            fingerprints: ['fp'], relatedIds: ['seed-edge'], sourceChronicleIds: [],
+          }],
+          overviewRows: [{ fingerprint: 'fp', day: 3, oneLine: '第3日 · 北岭塌方', archiveRef: 'arc-mine' }],
+        },
+      },
+      summary: '归档完结事件',
+      evidenceRefs: ['e1'],
+      uncertainties: [],
+      writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'],
+    });
+
+    await commitWorldSimulationProjection_ACU(commitInput);
+
+    expect(chat[0]._qrf_world_simulation.ledger.chronicleOverview).toEqual([
+      expect.objectContaining({ archiveRef: 'arc-mine', oneLine: '第3日 · 北岭塌方' }),
+    ]);
+    expect(JSON.stringify(chat[1][WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU])).toContain('北岭塌方已归档');
+    const progressed = chat[0]._qrf_world_simulation.timeline.filter((item: { kind: string }) => item.kind === 'progressed');
+    expect(progressed).toHaveLength(1);
+    expect(JSON.parse(progressed[0].message)).toMatchObject({ seedId: 'seed-edge', advance: 'catalyze' });
+    expect(chat[0]._qrf_world_simulation.timeline.at(-1)).toMatchObject({ kind: 'committed', id: 'timeline-1' });
   });
 
 });

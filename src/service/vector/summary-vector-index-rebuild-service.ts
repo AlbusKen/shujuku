@@ -55,6 +55,7 @@ export async function rebuildCurrentSummaryVectorIndexNow_ACU(
 export async function snapshotSummaryVectorMirrorExcludingRowsNow_ACU(options: {
     excludedRowIds: string[];
     sourceTableKey?: string;
+    excludeAllCurrentRows?: boolean;
 }): Promise<SummaryVectorMirrorRowRemovalSnapshot_ACU> {
     return snapshotSummaryVectorMirrorExcludingRows_ACU(options);
 }

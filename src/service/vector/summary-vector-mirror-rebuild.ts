@@ -164,6 +164,7 @@ export function selectRetainedVectorMirrorRows_ACU(
 export async function snapshotSummaryVectorMirrorExcludingRows_ACU(options: {
     excludedRowIds: string[];
     sourceTableKey?: string;
+    excludeAllCurrentRows?: boolean;
 }): Promise<SummaryVectorMirrorRowRemovalSnapshot_ACU> {
     const chat = getChatArray_ACU();
     const sourceTableKey = String(options.sourceTableKey || findSummaryTable_ACU()?.summaryKey || '').trim();
@@ -179,7 +180,10 @@ export async function snapshotSummaryVectorMirrorExcludingRows_ACU(options: {
         return { kind: 'none' };
     }
 
-    const rows = selectRetainedVectorMirrorRows_ACU(head.head, options.excludedRowIds);
+    const excludedRowIds = options.excludeAllCurrentRows === true
+        ? [...head.head.keys()]
+        : options.excludedRowIds;
+    const rows = selectRetainedVectorMirrorRows_ACU(head.head, excludedRowIds);
     const usedPackHashes = new Set(rows.flatMap((row) => row.chunks.map((chunk) => chunk.packHash)));
     return {
         kind: 'ready',

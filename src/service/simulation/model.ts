@@ -1,5 +1,7 @@
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
-export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 2 as const;
+export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 3 as const;
+export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
+export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;
 
 export type WorldSimulationTaskStatus_ACU = 'drafting' | 'paused' | 'running' | 'stopping_after_inflight' | 'completed' | 'abandoned' | 'failed';
 export type WorldSimulationStageStatus_ACU = 'planning' | 'running' | 'completed' | 'abandoned' | 'failed';
@@ -63,8 +65,9 @@ export interface WorldDimension_ACU { id: string; name: string; kind: 'pressure'
 export interface WorldSeed_ACU { id: string; title: string; status: 'established' | 'incubating' | 'active' | 'converging' | 'resolved' | 'retired'; level: number; catalyst: string; visibility: 'hidden' | 'limited' | 'public'; actorIds: string[]; location: WorldLocationRef_ACU | null; expiresAtDay: number | null; missedOutcome: string | null; exposePolicy: WorldSeedExposePolicy_ACU; evidenceRefs: string[]; retiredReason: string | null; revision: number; }
 export interface WorldActor_ACU { id: string; name: string; interests: string[]; location: string; locationRef: WorldLocationRef_ACU | null; life: WorldActorLife_ACU; diedAtDay: number | null; deathSummary: string | null; resources: string[]; goals: string[]; constraints: string[]; informationSources: string[]; knownFacts: string[]; visibility: 'hidden' | 'limited' | 'public'; revision: number; }
 export interface WorldChronicleEntry_ACU { id: string; at: string; summary: string; relatedIds: string[]; evidenceRefs: string[]; }
+export interface WorldChronicleOverviewRow_ACU { fingerprint: string; day: number; oneLine: string; archiveRef: string; }
 export interface WorldGuidance_ACU { signals: WorldGuidanceSignal_ACU[]; excludedFacts: string[]; evidenceRefs: string[]; }
-export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU; revision: number; clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[]; chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU; }
+export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU; revision: number; clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[]; chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU; chronicleOverview: WorldChronicleOverviewRow_ACU[]; }
 
 export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
@@ -84,7 +87,7 @@ export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
 }
 
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';
-export type WorldSimulationTimelineKind_ACU = 'task_created' | 'plan_ready' | 'stage_started' | 'stage_completed' | 'paused' | 'resumed' | 'stopped' | 'committed' | 'no_change' | 'blocked' | 'failed' | 'swept';
+export type WorldSimulationTimelineKind_ACU = 'task_created' | 'plan_ready' | 'stage_started' | 'stage_completed' | 'paused' | 'resumed' | 'stopped' | 'committed' | 'no_change' | 'blocked' | 'failed' | 'swept' | 'progressed';
 
 export interface WorldSimulationStagePlan_ACU {
   schemaVersion: typeof WORLD_SIMULATION_SCHEMA_VERSION_ACU;

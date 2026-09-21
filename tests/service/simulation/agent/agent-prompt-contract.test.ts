@@ -84,9 +84,15 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v5 含碰撞占位符与各角色动态世界硬约束', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v5');
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual(['world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5']);
+  it('提示词 v6 含碰撞占位符、归档职责与各角色动态世界硬约束', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v6');
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6',
+    ]);
+    const v5 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v5');
+    const v6 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v6');
+    expect(v5?.fingerprint).toBe('3749:5e40f616');
+    expect(v6?.fingerprint).not.toBe(v5?.fingerprint);
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
     const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');
@@ -119,7 +125,12 @@ describe('世界推演提示词装配契约', () => {
     expect(specialist).toContain('rumors');
     expect(specialist).toContain('earliestRevealDay');
     expect(specialist).toContain('sourceId');
+    expect(specialist).toContain('chronicleArchive');
+    expect(specialist).toContain('目录中任一条目都可通过 read 工具按地址调阅详细信息');
     expect(analystPrompt).toContain(specialist);
+    expect(analystPrompt).toContain('归档职责');
+    expect(director).toContain('chronicle-archive:');
+    expect(director).toContain('seeds:{id}');
 
     const reviewer = worldSimulationReviewerProtocolInstruction_ACU();
     expect(reviewer).toContain('encounter');

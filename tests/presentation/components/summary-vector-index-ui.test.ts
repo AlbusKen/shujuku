@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   process: vi.fn(),
   rebuild: vi.fn(),
   toast: vi.fn(),
+  toastError: vi.fn(),
   clear: vi.fn(),
   remove: vi.fn(),
   snapshot: null as any,
@@ -37,6 +38,9 @@ vi.mock('../../../src/data/repositories/profile-repo', () => ({
   get globalMeta_ACU() { return h.globalMeta; },
 }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: h.toast }));
+vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
+  useToastStore: () => ({ error: h.toastError }),
+}));
 
 import {
   processSummaryVectorIndexBeforeGenerationWithUI_ACU,
@@ -111,6 +115,24 @@ describe('summary vector index UI recovery', () => {
 
     await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
 
+    expect(h.rebuild).not.toHaveBeenCalled();
+    expect(h.toastError).not.toHaveBeenCalled();
+  });
+
+  it('embedding 失败弹出不可静默错误 toast', async () => {
+    h.process.mockResolvedValue({
+      success: false,
+      reason: 'embedding_failed',
+      error: 'Embedding 请求失败 403: insufficient balance',
+    });
+
+    await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
+
+    expect(h.toastError).toHaveBeenCalledWith(
+      expect.stringContaining('embedding_failed'),
+      { muteable: false },
+    );
+    expect(h.toastError.mock.calls[0][0]).toContain('insufficient balance');
     expect(h.rebuild).not.toHaveBeenCalled();
   });
 

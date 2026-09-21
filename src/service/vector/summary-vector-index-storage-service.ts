@@ -18,6 +18,7 @@ import {
     loadVectorIndexRegistry_ACU,
     readVectorIndexJsonFile_ACU,
     registerVectorIndexFiles_ACU,
+    resolveVectorIndexRegistryFileScope_ACU,
     sha256Text_ACU,
     unregisterVectorIndexFiles_ACU,
     uploadVectorIndexJsonFile_ACU,
@@ -3287,6 +3288,33 @@ export async function inspectSummaryVectorIndexHealth_ACU(): Promise<SummaryVect
     };
 }
 
+async function sumRegistryExternalBytesForScope_ACU(scope: {
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+}): Promise<number> {
+    try {
+        const registry = await loadVectorIndexRegistry_ACU();
+        const files = Array.isArray(registry?.files) ? registry.files : [];
+        let total = 0;
+        for (const file of files) {
+            const fileScope = resolveVectorIndexRegistryFileScope_ACU(file);
+            if (!fileScope) continue;
+            if (
+                fileScope.chatKey !== scope.chatKey
+                || fileScope.isolationKey !== scope.isolationKey
+                || fileScope.sourceTableKey !== scope.sourceTableKey
+            ) continue;
+            const bytes = Number(file.byteSize);
+            if (Number.isFinite(bytes) && bytes > 0) total += bytes;
+        }
+        return total;
+    } catch (error: any) {
+        logWarn_ACU('[交火向量索引] 读取 V2 registry 体积失败，外置体积按 0 展示:', error?.message || error);
+        return 0;
+    }
+}
+
 async function tryReadV2MirrorDisplayStats_ACU(): Promise<{
     status: 'ready';
     indexId: string;
@@ -3295,6 +3323,7 @@ async function tryReadV2MirrorDisplayStats_ACU(): Promise<{
     chunkCount: number;
     baseShardCount: number;
     deltaShardCount: number;
+    externalTotalBytes: number;
     updatedAt: string;
 } | null> {
     const chat = getChatArray_ACU();
@@ -3307,6 +3336,11 @@ async function tryReadV2MirrorDisplayStats_ACU(): Promise<{
         || '',
     ).trim();
     if (!sourceTableKey) return null;
+    const scope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: currentChatFileIdentifier_ACU,
+        isolationKey,
+        sourceTableKey,
+    });
     try {
         const head = await resolveSummaryVectorMirrorHead_ACU({
             chat,
@@ -3316,6 +3350,7 @@ async function tryReadV2MirrorDisplayStats_ACU(): Promise<{
         });
         if (head.status !== 'ok' || !head.checkpoint) return null;
         const chunkCount = [...head.head.values()].reduce((sum, refs) => sum + refs.length, 0);
+        const externalTotalBytes = await sumRegistryExternalBytesForScope_ACU(scope);
         return {
             status: 'ready',
             indexId: head.checkpoint.manifestRef?.manifestHash || head.vectorRevision || '',
@@ -3324,6 +3359,7 @@ async function tryReadV2MirrorDisplayStats_ACU(): Promise<{
             chunkCount,
             baseShardCount: head.packRefs.length,
             deltaShardCount: head.appliedDeltaEntryIds.length,
+            externalTotalBytes,
             updatedAt: head.checkpoint.createdAt ? new Date(head.checkpoint.createdAt).toISOString() : '',
         };
     } catch (error: any) {
@@ -3357,7 +3393,7 @@ export async function getSummaryVectorIndexStats_ACU(manifest: ChatSummaryVector
                 ...v2,
                 tombstoneRowCount: 0,
                 tombstoneChunkCount: 0,
-                externalTotalBytes: 0,
+                externalTotalBytes: v2.externalTotalBytes,
                 cacheTotalBytes,
                 tempCacheBytes: tempCache.bytes,
                 tempCacheCount: tempCache.count,

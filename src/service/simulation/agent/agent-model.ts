@@ -3,9 +3,11 @@ import type { WorldCollisionReport_ACU, WorldSimulationLedger_ACU } from '../mod
 export const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
 export const WORLD_SIMULATION_CONVERSATION_FIELD_ACU = '_qrf_world_simulation_agent_chat';
 export const WORLD_SIMULATION_MATERIALS_FIELD_ACU = '_qrf_world_simulation_agent_materials';
+export const WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU = '_qrf_world_simulation_chronicle_archive';
 export const WORLD_SIMULATION_BUCKET_SCHEMA_VERSION_ACU = 1 as const;
 export const WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU = 1 as const;
 export const WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU = 1 as const;
+export const WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU = 1 as const;
 
 export interface WorldSimulationAnchorIdentity_ACU { chatIdentity: string; messageIndex: number; messageId: string | number; messageKey: string; swipeId: string; contentDigest: string; }
 export interface WorldSimulationBucketEntry_ACU<T> { anchor: WorldSimulationAnchorIdentity_ACU; value: T; updatedAt: number; }
@@ -62,6 +64,18 @@ export interface WorldSimulationConversationAppend_ACU extends WorldSimulationCo
 }
 
 export interface WorldSimulationMaterialsSnapshot_ACU { schemaVersion: typeof WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU; ledgerRevision: number; ledger: WorldSimulationLedger_ACU; evidenceRefs: string[]; updatedAt: number; }
+export interface WorldChronicleArchiveDetail_ACU {
+  archiveRef: string;
+  day: number;
+  summary: string;
+  fingerprints: string[];
+  relatedIds: string[];
+  sourceChronicleIds: string[];
+}
+export interface WorldChronicleArchiveSnapshot_ACU {
+  schemaVersion: typeof WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU;
+  records: Record<string, WorldChronicleArchiveDetail_ACU>;
+}
 export interface WorldSimulationConversationView_ACU { nextId: number; messages: WorldSimulationConversationMessage_ACU[]; compaction: WorldSimulationConversationCompaction_ACU | null; diagnostics: string[]; }
 export interface WorldSimulationMaterialsReadResult_ACU { snapshot: WorldSimulationMaterialsSnapshot_ACU | null; diagnostics: string[]; adoptedIndex: number | null; }
 

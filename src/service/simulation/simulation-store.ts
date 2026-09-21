@@ -3,9 +3,11 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import { buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
-import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationBucket_ACU } from './agent/agent-model';
+import type { WorldChronicleArchiveDetail_ACU, WorldChronicleArchiveSnapshot_ACU, WorldSimulationAnchorIdentity_ACU, WorldSimulationBucket_ACU } from './agent/agent-model';
+import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU } from './agent/agent-model';
 import { validateWorldSimulationAgentPrompts_ACU } from './agent/prompt-template';
 import {
+  WORLD_CHRONICLE_OVERVIEW_CAP_ACU,
   WORLD_LEDGER_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_LEDGER_MODULES_ACU,
@@ -24,6 +26,7 @@ import {
   type WorldSimulationErrorPhase_ACU,
   type WorldSimulationLedger_ACU,
   type WorldSimulationWriteGuard_ACU,
+  type WorldChronicleOverviewRow_ACU,
   type WorldGuidanceSignal_ACU,
   type WorldLocationRef_ACU,
   type WorldPlayer_ACU,
@@ -36,7 +39,8 @@ export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
 const TASK_STATUSES_ACU = ['drafting', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'] as const;
 const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'] as const;
 const REVISION_REASONS_ACU = ['initial', 'automatic_replan', 'manual_replan', 'resume_repair'] as const;
-const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed', 'swept'] as const;
+const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed', 'swept', 'progressed'] as const;
+const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview'] as const;
 // 计划确认流程退役后的旧数据归一化：读取历史存量聊天时不再 fail-closed。
 const LEGACY_TASK_STATUSES_ACU: Record<string, NonNullable<WorldSimulationEnvelope_ACU['task']>['status']> = { awaiting_plan_review: 'paused' };
 const LEGACY_STAGE_STATUSES_ACU: Record<string, WorldSimulationEnvelope_ACU['stages'][number]['status']> = { awaiting_review: 'planning' };
@@ -144,7 +148,7 @@ function migrateV1Ledger_ACU(raw: Record<string, unknown>): Record<string, unkno
     : guidanceRaw.signals;
   return {
     ...raw,
-    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    schemaVersion: 2,
     clock: {
       day,
       slot: typeof clockRaw.slot === 'string' ? clockRaw.slot : '',
@@ -158,6 +162,41 @@ function migrateV1Ledger_ACU(raw: Record<string, unknown>): Record<string, unkno
     player: isRecord_ACU(raw.player) ? raw.player : { location: null, locationUpdatedAtDay: day, regionVisits: [], contact: 'open', evidenceRefs: [] },
     guidance: { ...guidanceRaw, signals },
   };
+}
+
+function migrateV2Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...raw,
+    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    chronicleOverview: Array.isArray(raw.chronicleOverview) ? raw.chronicleOverview : [],
+  };
+}
+
+function migrateLedgerToCurrent_ACU(raw: Record<string, unknown>): Record<string, unknown> {
+  let current = raw;
+  if (current.schemaVersion === 1) current = migrateV1Ledger_ACU(current);
+  if (current.schemaVersion === 2) current = migrateV2Ledger_ACU(current);
+  return current;
+}
+
+function validateChronicleOverview_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldChronicleOverviewRow_ACU[] {
+  if (!Array.isArray(raw) || raw.length > WORLD_CHRONICLE_OVERVIEW_CAP_ACU) fail_ACU('ledger.chronicleOverview 容量非法', phase);
+  const rows = raw.map((item, index) => {
+    if (!isRecord_ACU(item)) fail_ACU(`ledger.chronicleOverview[${index}] 必须是对象`, phase);
+    exactKeys_ACU(item, ['fingerprint', 'day', 'oneLine', 'archiveRef'], [], `ledger.chronicleOverview[${index}]`, phase);
+    return {
+      fingerprint: string_ACU(item.fingerprint, `ledger.chronicleOverview[${index}].fingerprint`, phase),
+      day: integer_ACU(item.day, `ledger.chronicleOverview[${index}].day`, phase, 1),
+      oneLine: string_ACU(item.oneLine, `ledger.chronicleOverview[${index}].oneLine`, phase),
+      archiveRef: stableId_ACU(item.archiveRef, `ledger.chronicleOverview[${index}].archiveRef`, phase),
+    };
+  });
+  const seenRefs = new Set<string>();
+  for (const row of rows) {
+    if (seenRefs.has(row.archiveRef)) fail_ACU('ledger.chronicleOverview 存在重复 archiveRef', phase, { archiveRef: row.archiveRef });
+    seenRefs.add(row.archiveRef);
+  }
+  return rows;
 }
 
 function validatePlayer_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldPlayer_ACU {
@@ -293,8 +332,8 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
 
 function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationLedger_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('ledger 必须是对象', phase);
-  const normalized = raw.schemaVersion === 1 ? migrateV1Ledger_ACU(raw) : raw;
-  exactKeys_ACU(normalized, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance'], [], 'ledger', phase);
+  const normalized = migrateLedgerToCurrent_ACU(raw);
+  exactKeys_ACU(normalized, LEDGER_EXACT_KEYS_ACU, [], 'ledger', phase);
   if (normalized.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU) fail_ACU(`ledger.schemaVersion 必须为 ${WORLD_LEDGER_SCHEMA_VERSION_ACU}`, phase);
   if (!isRecord_ACU(normalized.clock)) fail_ACU('ledger.clock 必须是对象', phase);
   exactKeys_ACU(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
@@ -355,7 +394,8 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
   const player = validatePlayer_ACU(normalized.player, phase);
   if (!isRecord_ACU(normalized.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
   exactKeys_ACU(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
-  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) } };
+  const chronicleOverview = validateChronicleOverview_ACU(normalized.chronicleOverview, phase);
+  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview };
 }
 
 function validatePlan_ACU(raw: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['stages'][number]['revisions'][number]['plan'] {
@@ -656,10 +696,10 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
   };
   const phase: WorldSimulationErrorPhase_ACU = 'agent_persist';
   if (!isRecord_ACU(raw)) return ['ledger 必须是对象'];
-  const normalized = raw.schemaVersion === 1 ? migrateV1Ledger_ACU(raw) : raw;
+  const normalized = migrateLedgerToCurrent_ACU(raw);
   if (!isRecord_ACU(normalized)) return ['ledger 必须是对象'];
   probe(() => {
-    exactKeys_ACU(normalized, ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance'], [], 'ledger', phase);
+    exactKeys_ACU(normalized, LEDGER_EXACT_KEYS_ACU, [], 'ledger', phase);
     if (normalized.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU) fail_ACU(`ledger.schemaVersion 必须为 ${WORLD_LEDGER_SCHEMA_VERSION_ACU}`, phase);
     integer_ACU(normalized.revision, 'ledger.revision', phase);
   });
@@ -781,5 +821,34 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
     stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase);
     stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
   });
+  probe(() => { validateChronicleOverview_ACU(normalized.chronicleOverview, phase); });
   return violations;
+}
+
+export function buildEmptyWorldChronicleArchiveSnapshot_ACU(): WorldChronicleArchiveSnapshot_ACU {
+  return { schemaVersion: WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU, records: {} };
+}
+
+export function validateWorldSimulationChronicleArchiveSnapshot_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU = 'load'): WorldChronicleArchiveSnapshot_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU('chronicle archive 必须是对象', phase);
+  exactKeys_ACU(raw, ['schemaVersion', 'records'], [], 'chronicleArchive', phase);
+  if (raw.schemaVersion !== WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU) fail_ACU('chronicleArchive.schemaVersion 必须为 1', phase);
+  if (!isRecord_ACU(raw.records)) fail_ACU('chronicleArchive.records 必须是对象', phase);
+  const records: Record<string, WorldChronicleArchiveDetail_ACU> = {};
+  for (const [archiveRef, item] of Object.entries(raw.records)) {
+    const path = `chronicleArchive.records.${archiveRef}`;
+    if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`, phase);
+    exactKeys_ACU(item, ['archiveRef', 'day', 'summary', 'fingerprints', 'relatedIds', 'sourceChronicleIds'], [], path, phase);
+    const validatedRef = stableId_ACU(item.archiveRef, `${path}.archiveRef`, phase);
+    if (validatedRef !== archiveRef) fail_ACU(`${path}.archiveRef 必须与键一致`, phase);
+    records[archiveRef] = {
+      archiveRef: validatedRef,
+      day: integer_ACU(item.day, `${path}.day`, phase, 1),
+      summary: string_ACU(item.summary, `${path}.summary`, phase),
+      fingerprints: stringArray_ACU(item.fingerprints, `${path}.fingerprints`, phase),
+      relatedIds: stringArray_ACU(item.relatedIds, `${path}.relatedIds`, phase),
+      sourceChronicleIds: stringArray_ACU(item.sourceChronicleIds, `${path}.sourceChronicleIds`, phase),
+    };
+  }
+  return { schemaVersion: WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU, records };
 }

@@ -57,6 +57,64 @@ function latestOutcomes_ACU(items: readonly WorldSimulationSubagentOutcome_ACU[]
 }
 
 
+function rounds_ACU(transcript: readonly { role: string; content: string }[]): Array<Array<{ role: string; content: string }>> {
+  const rounds: Array<Array<{ role: string; content: string }>> = [];
+  let current: Array<{ role: string; content: string }> = [];
+  for (const message of transcript) {
+    if (message.role === 'assistant' && current.length) {
+      rounds.push(current);
+      current = [message];
+    } else {
+      current.push(message);
+    }
+  }
+  if (current.length) rounds.push(current);
+  return rounds;
+}
+
+export const WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU = 4;
+export const WORLD_SIMULATION_TRANSCRIPT_COMPACTION_RATIO_ACU = 0.8;
+
+export async function compactWorldSimulationTranscriptIfNeeded_ACU(input: {
+  transcript: Array<{ role: string; content: string }>;
+  unsettledCandidates: number;
+  historyTokenBudget: number;
+  countTokens: WorldSimulationTokenCounter_ACU;
+}): Promise<{ compacted: boolean; transcript: Array<{ role: string; content: string }> }> {
+  if (input.unsettledCandidates > 0 || input.historyTokenBudget <= 0 || input.transcript.length === 0) {
+    return { compacted: false, transcript: input.transcript };
+  }
+  const trigger = Math.floor(input.historyTokenBudget * WORLD_SIMULATION_TRANSCRIPT_COMPACTION_RATIO_ACU);
+  let tokens = 0;
+  for (const message of input.transcript) tokens += await input.countTokens(message.content);
+  if (tokens <= trigger) return { compacted: false, transcript: input.transcript };
+  const grouped = rounds_ACU(input.transcript);
+  if (grouped.length <= WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU) {
+    return { compacted: false, transcript: input.transcript };
+  }
+  const dropped = grouped.slice(0, grouped.length - WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU).flat();
+  const kept = grouped.slice(-WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU).flat();
+  const messages: WorldSimulationConversationMessage_ACU[] = dropped.map((item, index) => ({
+    id: index + 1,
+    kind: item.role === 'assistant' ? 'agent' : 'user',
+    text: item.content,
+    digest: item.content.slice(0, 240),
+    turnKey: `compact-${index + 1}`,
+    at: 0,
+  }));
+  try {
+    const summary = await summarizeWorldSimulationHandoff_ACU({
+      previous: null,
+      messages,
+      maxTokens: 2000,
+      countTokens: input.countTokens,
+    });
+    return { compacted: true, transcript: [{ role: 'user', content: summary.report }, ...kept] };
+  } catch {
+    return { compacted: false, transcript: input.transcript };
+  }
+}
+
 function resultContext_ACU(
   base: WorldSimulationPlaceholderContext_ACU,
   registry: WorldSimulationEvidenceRegistry_ACU,
@@ -256,6 +314,15 @@ export class WorldSimulationMainLoop_ACU {
     };
 
     for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
+      const compacted = await compactWorldSimulationTranscriptIfNeeded_ACU({
+        transcript,
+        unsettledCandidates: uniqueCandidates_ACU(candidates).length,
+        historyTokenBudget: input.settings.agentHistoryTokenBudget,
+        countTokens: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+      });
+      if (compacted.compacted) {
+        transcript.splice(0, transcript.length, ...compacted.transcript);
+      }
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const requestContext = resultContext_ACU(input.promptContext, input.registry, uniqueCandidates_ACU(candidates), outcomes);
       const mainEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
