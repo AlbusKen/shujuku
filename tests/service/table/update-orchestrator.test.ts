@@ -379,6 +379,15 @@ vi.mock('../../../src/service/settings/settings-service', () => ({
   applyTemplateScopeForCurrentChat_ACU: vi.fn(),
 }));
 
+const mockSaveChatToHostStrict = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../../src/data/gateways/chat-gateway', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/data/gateways/chat-gateway')>();
+  return {
+    ...actual,
+    saveChatToHostStrict_ACU: (...args: any[]) => mockSaveChatToHostStrict(...args),
+  };
+});
+
 import {
   resolveUpdateMode_ACU,
   loadBatchBaseData_ACU,
@@ -403,6 +412,7 @@ beforeEach(() => {
   mockGetChatArray_ACU.mockImplementation(() => mockChatArrayForSeedStage);
   mockClearManualRefillIncrementalDataInRange.mockResolvedValue(0);
   mockClearManualRefillSheetDataInRange.mockResolvedValue(0);
+  mockSaveChatToHostStrict.mockReset().mockResolvedValue(undefined);
   mockCommitManualRefillSheetSnapshot.mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 });
   mockEstablishManualRefillTemplateRoot.mockResolvedValue({ success: true, changed: true, targetMessageIndex: 0 });
   mockEnsureManualCatchUpAnchor.mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 });
@@ -3217,7 +3227,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(1);
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
-  it('跨根 staging 的 pre 段失败时不继续 post 段写入，不回滚保留已清理状态', async () => {
+  it('跨根 staging 的 pre 段失败时不继续 post 段写入，并恢复清理前 IsolatedData', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
@@ -3255,10 +3265,55 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('AI 调用失败');
-    // pre 段失败：post 段（[4]）不得写入聊天帧；清理已发生且不可逆，不回滚。
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     expect(mockRefreshData).toHaveBeenCalled();
     expect(mockCommitManualRefillSheetSnapshot).not.toHaveBeenCalled();
+    expect(chat[4].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content[1][1]).toBe('目标层基底');
+    expect(mockSaveChatToHostStrict).toHaveBeenCalled();
+  });
+
+  it('手动重填在首批落盘前失败时恢复清理前 IsolatedData', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+    });
+    const preservedFrame = {
+      version: 2,
+      logEntries: [],
+      checkpoint: {
+        kind: 'full',
+        reason: 'init',
+        createdAt: 1,
+        data: { mate: { type: 'acu' }, sheet_0: { name: '测试表A', content: [['row_id', '值A'], ['keep', '清理前数据']] } },
+      },
+    };
+    const chat: any[] = [
+      {
+        is_user: false,
+        mes: 'AI回复1',
+        TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: preservedFrame } },
+      },
+      { is_user: true, mes: '用户2' },
+      { is_user: false, mes: 'AI回复3' },
+    ];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['keep', '清理前数据']] } };
+    mockCallCustomOpenAI.mockRejectedValue(new Error('404 model not found'));
+    mockClearManualRefillSheetDataInRange.mockImplementation(async (indices: number[]) => {
+      for (const index of indices) {
+        if (chat[index]) delete chat[index].TavernDB_ACU_IsolatedData;
+      }
+      return 0;
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('404');
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content[1][1]).toBe('清理前数据');
+    expect(mockSaveChatToHostStrict).toHaveBeenCalled();
   });
 
   // Issue #13 Bug 3 回归：原 full 落在重填范围内且只含部分表时，破坏性清理会改写该楼层 frame

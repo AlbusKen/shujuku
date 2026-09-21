@@ -835,8 +835,8 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(dialogText).toContain('会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志');
     expect(dialogText).toContain('此前楼层的表格数据将无法恢复');
     expect(dialogText).toContain('范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除');
-    // orchestrator 的失败语义是不回滚：文案不得再承诺回滚，且要显示世界书注入目标。
-    expect(dialogText).toContain('执行失败或中途终止时不会回滚');
+    expect(dialogText).toContain('若在首批结果落盘前失败或中止，会自动恢复清理前的表格数据');
+    expect(dialogText).toContain('一旦已有批次成功提交，失败不会回滚清理');
     expect(dialogText).not.toContain('会回滚到本次操作前的状态');
     expect(dialogText).toContain('世界书注入目标：角色卡绑定世界书 · CharBookFF');
     expect(dialogText).not.toContain('第二次破坏性确认');

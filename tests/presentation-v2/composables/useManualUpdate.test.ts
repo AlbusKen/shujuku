@@ -183,9 +183,10 @@ describe('useManualUpdate destructive refill confirmation', () => {
     expect(dialog.active?.message).toContain('范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除');
     // 二次确认链路已移除，首次文案不得再承诺它。
     expect(dialog.active?.message).not.toContain('第二次破坏性确认');
-    // Issue #13：orchestrator 的失败语义是「不回滚、已清理不恢复、已提交批次保留」，文案不得承诺回滚。
-    expect(dialog.active?.message).toContain('执行失败或中途终止时不会回滚');
-    expect(dialog.active?.message).toContain('已成功提交的批次会保留');
+    // Issue #18-4：首批落盘前失败会恢复清理前数据；已提交批次仍保留。
+    expect(dialog.active?.message).toContain('若在首批结果落盘前失败或中止，会自动恢复清理前的表格数据');
+    expect(dialog.active?.message).toContain('一旦已有批次成功提交，失败不会回滚清理');
+    expect(dialog.active?.message).toContain('已提交批次会保留');
     expect(dialog.active?.message).not.toContain('会回滚到本次操作前的状态');
     // 默认注入目标是角色卡绑定的主世界书：大规模回填前必须让用户看到条目将写去哪里。
     expect(dialog.active?.message).toContain('世界书注入目标：角色卡绑定世界书 · 主世界书');

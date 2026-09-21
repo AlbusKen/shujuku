@@ -13,6 +13,7 @@ import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU }
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
+import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import {
     enqueueSummaryVectorIndexFlush_ACU,
@@ -4674,6 +4675,48 @@ async function ensureManualRefillAnchorHealth_ACU(
     return { blockedError: null, healed: true };
 }
 
+type ManualRefillIsolatedDataBackup_ACU = {
+    index: number;
+    present: boolean;
+    isolatedData: unknown;
+};
+
+function cloneJsonValue_ACU<T>(value: T): T {
+    return value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+
+function snapshotMessageIsolatedData_ACU(
+    chat: any[],
+    messageIndices: number[],
+): ManualRefillIsolatedDataBackup_ACU[] {
+    return messageIndices.map((index) => {
+        const message = Array.isArray(chat) ? chat[index] : null;
+        const present = Boolean(message && typeof message === 'object'
+            && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'));
+        return {
+            index,
+            present,
+            isolatedData: present ? cloneJsonValue_ACU(message.TavernDB_ACU_IsolatedData) : undefined,
+        };
+    });
+}
+
+function restoreMessageIsolatedData_ACU(
+    chat: any[],
+    backup: ManualRefillIsolatedDataBackup_ACU[],
+): void {
+    if (!Array.isArray(chat) || backup.length === 0) return;
+    for (const item of backup) {
+        const message = chat[item.index];
+        if (!message || typeof message !== 'object') continue;
+        if (!item.present) {
+            delete message.TavernDB_ACU_IsolatedData;
+            continue;
+        }
+        message.TavernDB_ACU_IsolatedData = cloneJsonValue_ACU(item.isolatedData);
+    }
+}
+
 /**
  * 手动更新编排（纯业务逻辑）
  * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
@@ -4709,18 +4752,26 @@ export async function orchestrateManualUpdate_ACU(
     let stagingRun: TableFillStagingRunContext_ACU | null = null;
     let stagingSession: TableFillStagingSession_ACU | null = null;
     let boundaryCommitted = false;
-    // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
-    // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
+    // 破坏性清理是否已开始。零提交失败会恢复清理前 IsolatedData；一旦已有 bucket
+    // 落盘，就不再回滚清理，只按已提交事实对齐运行时（#18 问题四）。
     let refillCleanupStarted = false;
+    let refillCleanupBackup: ManualRefillIsolatedDataBackup_ACU[] | null = null;
     let manualRefillSummarySourceTableKeys: string[] = [];
-    // 手动重填失败语义（计划 §5.5 / §5.6，已删除旧 snapshot/rollback 机制）：
-    // 破坏性清理不可逆，失败绝不回滚、绝不恢复已删数据；已提交的 bucket 成果保留，
-    // 仅按聊天记录里的已提交事实重新对齐运行时快照，避免界面显示与持久化不一致。
-    // 手动追平/自动填表路径的 staging 汇合失败会自行返回 integrity_failed，不在此回滚。
     const failManualRefillSession = async (failureError: string): Promise<ManualUpdateResult> => {
-        // 清理失败或 bucket 失败后：运行时快照可能停在中间态，必须按聊天记录里的
-        // 已提交事实重新同步，否则界面会显示与持久化结果不一致的数据。
-        // 不回滚、不恢复已删数据；已提交成果保留。
+        if (committedBucketCount === 0 && refillCleanupBackup) {
+            try {
+                restoreMessageIsolatedData_ACU(getChatArray_ACU(), refillCleanupBackup);
+                await saveChatToHostStrict_ACU();
+            } catch (restoreError) {
+                logError_ACU('[Manual Refill] 零提交失败后恢复清理前数据失败:', restoreError);
+                try {
+                    await refreshData();
+                } catch (refreshError) {
+                    logWarn_ACU('[Manual Refill] 恢复失败后刷新运行时数据失败:', refreshError);
+                }
+                return { success: false, error: failureError };
+            }
+        }
         try {
             await loadAllChatMessages_ACU();
             await refreshData();
@@ -4975,14 +5026,13 @@ export async function orchestrateManualUpdate_ACU(
                 manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
                 // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
                 summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
-                // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
+                refillCleanupBackup = snapshotMessageIsolatedData_ACU(getChatArray_ACU(), contextScopeIndices);
                 refillCleanupStarted = true;
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
                 const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
-                // 清理已部分发生且不可逆：不回滚、不恢复已删数据，直接失败返回。
-                return { success: false, error: failureError };
+                return await failManualRefillSession(failureError);
             }
             logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
 
@@ -5017,7 +5067,7 @@ export async function orchestrateManualUpdate_ACU(
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                 const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                return { success: false, error: failureError };
+                return await failManualRefillSession(failureError);
             }
 
             // 按清表前拍下的 head 发布剩余行。禁止按 reload 后的空模板表重建，
@@ -5400,7 +5450,6 @@ export async function orchestrateManualUpdate_ACU(
         }
         const failureError = error?.message || String(error || '手动更新执行异常。');
         logError_ACU('[Manual Update] 执行过程中发生未处理异常:', error);
-        // 清理已开始：不可逆，不回滚、不恢复已删数据；失败按已提交事实对齐运行时。
         return await failManualRefillSession(failureError);
     } finally {
         _set_manualExtraHint_ACU('');
