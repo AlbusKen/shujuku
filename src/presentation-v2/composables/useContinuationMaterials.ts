@@ -9,8 +9,8 @@ import { ContinuationValidationError_ACU } from '../../service/continuation/mode
 import type { AgentModuleSnapshot_ACU } from '../../service/continuation/agent/agent-model';
 import { useToastStore } from '../stores/toast-store';
 
-/** 用户可分模块编辑的六项资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
-export const CONTINUATION_MATERIAL_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs'] as const;
+/** 用户可分模块编辑的资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
+export const CONTINUATION_MATERIAL_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'] as const;
 export type ContinuationMaterialModule_ACU = typeof CONTINUATION_MATERIAL_MODULES_ACU[number];
 
 export const CONTINUATION_MATERIAL_MODULE_LABELS_ACU: Record<ContinuationMaterialModule_ACU, string> = {
@@ -20,6 +20,7 @@ export const CONTINUATION_MATERIAL_MODULE_LABELS_ACU: Record<ContinuationMateria
   storyArc: '故事总纲',
   chronology: '故事年代学账本',
   webRefs: '百科资料库',
+  userRequirements: '用户要求',
 };
 
 interface ModuleDraftState_ACU {
@@ -65,6 +66,7 @@ export function useContinuationMaterials() {
     storyArc: emptyModuleState_ACU(),
     chronology: emptyModuleState_ACU(),
     webRefs: emptyModuleState_ACU(),
+    userRequirements: emptyModuleState_ACU(),
   });
 
   function resetModule(module: ContinuationMaterialModule_ACU, current: AgentModuleSnapshot_ACU): void {

@@ -300,6 +300,7 @@ export interface AgentModuleRevisions_ACU {
   storyArc: number;
   chronology: number;
   webRefs: number;
+  userRequirements: number;
 }
 
 /** 百科资料库条目的来源渠道。baidu 走酒馆服务器同源转发，其余为浏览器直连 MediaWiki API。 */
@@ -342,15 +343,18 @@ export interface AgentModuleSnapshot_ACU {
   storyArc: AgentStoryArcEntry_ACU[];
   chronology: AgentChronologyEntry_ACU[];
   webRefs: AgentWebRefEntry_ACU[];
+  /** 用户在 Agent 会话里提过的要求，由 requirements-maintainer 全量替换维护。 */
+  userRequirements: string[];
 }
 
-export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs'] as const;
+export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'] as const;
 export type AgentWritableModule_ACU = typeof AGENT_WRITABLE_MODULES_ACU[number];
 
-export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher'] as const;
+export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'requirements-maintainer'] as const;
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
 export const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';
+export const AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU = 'requirements-maintainer';
 
 export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review' | 'research';
 

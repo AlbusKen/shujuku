@@ -2,9 +2,10 @@ import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
+import { worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU } from './agent/agent-module-store';
+import { compactWorldSimulationConversationAndDispatchRequirements_ACU } from './agent/agent-requirements-dispatch';
 import { clearWorldSimulationRunState_ACU } from './agent/agent-run-cache';
 import { clearWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from './world-simulation-agent-tools';
@@ -15,10 +16,17 @@ import {
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   WORLD_SIMULATION_RUN_STATE_FIELD_ACU,
   WORLD_SIMULATION_STATE_FIELD_ACU,
+  WORLD_SIMULATION_USER_REQUIREMENTS_FIELD_ACU,
   type WorldSimulationAnchorIdentity_ACU,
 } from './agent/agent-model';
 import type { WorldSimulationPlaceholderContext_ACU } from './agent/agent-placeholder-resolver';
 import { WorldSimulationSubagentRuntime_ACU } from './agent/agent-subagent-runtime';
+import {
+  readLatestWorldSimulationUserRequirements_ACU,
+  renderWorldSimulationUserRequirements_ACU,
+  replaceWorldSimulationUserRequirementsByUser_ACU,
+  seedWorldSimulationUserRequirementsIfEmpty_ACU,
+} from './agent/agent-user-requirements';
 import { createWorldSimulationError_ACU, WorldSimulationValidationError_ACU, type WorldCollisionReport_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from './model';
 import { commitWorldSimulationProjection_ACU } from './simulation-commit-adapter';
 import {
@@ -89,10 +97,15 @@ function buildPromptContext_ACU(input: {
       instruction: input.instruction,
       baseLedgerRevision: input.identity.baseLedgerRevision,
     },
-    agentCatalog: WORLD_SIMULATION_AGENT_CATALOG_ACU,
+    agentCatalog: worldSimulationDirectorVisibleCatalog_ACU(),
     toolCatalog: WORLD_SIMULATION_TOOL_ADDRESSES_ACU,
     evidence: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries,
     userGuidance: input.instruction,
+    userRequirements: renderWorldSimulationUserRequirements_ACU(
+      readLatestWorldSimulationUserRequirements_ACU(input.chat).snapshot,
+      input.envelope.task?.originInstruction ?? input.instruction,
+    ),
+    originInstruction: input.envelope.task?.originInstruction ?? input.instruction,
     worldState: input.envelope.ledger,
     anchorMessage: anchorText_ACU(input.anchor, input.chat),
     anchorIdentity: input.anchor,
@@ -187,6 +200,25 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal);
       const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
       const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents });
+      if (identity.triggerKind === 'agent_chat_message') {
+        await seedWorldSimulationUserRequirementsIfEmpty_ACU(envelope.task?.originInstruction ?? instruction, currentAnchor, chat);
+        promptContext.userRequirements = renderWorldSimulationUserRequirements_ACU(
+          readLatestWorldSimulationUserRequirements_ACU(getChatArray_ACU()).snapshot,
+          envelope.task?.originInstruction ?? instruction,
+        );
+      }
+      await compactWorldSimulationConversationAndDispatchRequirements_ACU({
+        identity,
+        anchor: currentAnchor,
+        settings: envelope.settings,
+        originInstruction: envelope.task?.originInstruction ?? instruction,
+        promptContext,
+        subagents,
+        registry,
+        tools,
+        persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event),
+        chat: getChatArray_ACU(),
+      });
       return {
         revision: plannedRevision,
         execute: async runIdentity => {
@@ -220,6 +252,7 @@ export interface WorldSimulationUiSnapshot_ACU {
   envelope: WorldSimulationEnvelope_ACU | null;
   conversation: ReturnType<typeof readWorldSimulationConversation_ACU>;
   materials: ReturnType<typeof readLatestWorldSimulationMaterials_ACU>;
+  userRequirements: ReturnType<typeof readLatestWorldSimulationUserRequirements_ACU>;
   session: {
     chatIdentity: string | null;
     entries: ReturnType<typeof readWorldSimulationSessionLog_ACU>;
@@ -241,12 +274,13 @@ export const WORLD_SIMULATION_STOP_REASON_LABELS_ACU: Record<string, string> = {
 const WORLD_SIMULATION_FLOOR_FIELDS_ACU = [
   WORLD_SIMULATION_STATE_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
+  WORLD_SIMULATION_USER_REQUIREMENTS_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_RUN_STATE_FIELD_ACU,
   WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
 ] as const;
 
-const RESUME_KEYWORD_ACU = /^(继续|恢复(?:任务)?|resume|continue)$/i;
+const RESUME_KEYWORD_ACU = /^(继续|开始|恢复(?:任务)?|resume|continue)$/i;
 
 export class WorldSimulationRuntime_ACU {
   constructor(
@@ -283,6 +317,7 @@ export class WorldSimulationRuntime_ACU {
       envelope,
       conversation: readWorldSimulationConversation_ACU(chat),
       materials: readLatestWorldSimulationMaterials_ACU(chat),
+      userRequirements: readLatestWorldSimulationUserRequirements_ACU(chat),
       session: {
         chatIdentity,
         entries: chatIdentity ? readWorldSimulationSessionLog_ACU(chatIdentity) : [],
@@ -366,6 +401,10 @@ export class WorldSimulationRuntime_ACU {
       settings,
       updatedAt: Date.now(),
     }), { chatIdentity });
+  }
+
+  async saveUserRequirements(requirements: unknown): Promise<void> {
+    await replaceWorldSimulationUserRequirementsByUser_ACU(requirements, this.getChat());
   }
 
   /**

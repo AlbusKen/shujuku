@@ -14,6 +14,7 @@ import {
   type AgentContextRules_ACU,
 } from './agent/agent-placeholder-resolver';
 import { readAgentModuleSnapshot_ACU, renderAgentChronology_ACU, renderAgentConstraints_ACU, renderAgentHooksByIds_ACU, renderAgentInfoGapByIds_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
+import { renderAgentUserRequirements_ACU } from './agent/agent-user-requirements';
 import { ContinuationWorldbookContext_ACU } from './worldbook-context';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
 import { registerContinuationHostGenerationBridge_ACU } from './host-generation-bridge-registry';
@@ -112,6 +113,7 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
   const background = () => worldbook.readRelevantBackground(`${task.originInstruction}\n${storyTail()}`);
   return {
     $ORIGIN_INSTRUCTION: () => task.originInstruction,
+    $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU()), task.originInstruction),
     $1: background,
     $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(getChatArray_ACU()) }),
     $STORY_TAIL: storyTail,

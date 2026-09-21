@@ -28,6 +28,11 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU, AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
+import {
+  applyAgentUserRequirementsReplace_ACU,
+  collectSubstantialUserTexts_ACU,
+  renderAgentUserRequirements_ACU,
+} from './agent-user-requirements';
 import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
 import { AGENT_FINAL_REVIEW_STATUSES_ACU, clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU, type AgentFinalReviewResumeState_ACU } from './agent-run-cache';
 import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
@@ -84,6 +89,7 @@ import { trackAgentPromptDrift_ACU } from './agent-prompt-drift';
 import {
   AGENT_HISTORY_EMERGENCY_FACTOR_ACU,
   AGENT_OUTLINE_AGENT_NAME_ACU,
+  AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
   AGENT_WEB_RESEARCHER_NAME_ACU,
   DEFAULT_AGENT_RUN_BUDGET_ACU,
   type AgentConversationAppend_ACU,
@@ -562,7 +568,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       };
       return this.dependencies.callInternalAi(messages, preset, identity, request.signal, { promptCacheEnabled: false, cacheScope: 'handoff-summary' });
     });
-    const session = await this.openConversation_ACU(chat, request, conversationTurnKeyOf(), counter, measureOverhead, handoffSemanticAdapter);
+    const session = await this.openConversation_ACU(chat, request, context, conversationTurnKeyOf(), counter, measureOverhead, handoffSemanticAdapter, apiDependencies);
+    snapshot = context.moduleSnapshot;
     if (request.settings.finalReview.enabled) {
       finalReview = resumedState?.finalReview ?? readFinalReviewStateFromConversation_ACU(session.snapshot(), identitySeed.taskId, session.turnKey) ?? finalReview;
       postReviewDecisionAvailable = finalReview.status === 'feedback_ready';
@@ -653,6 +660,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         const lifecycle = { outlineMaintenanceReserveAvailable, convergenceOnly: maintenanceConvergenceAvailable };
         await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
         const round = await this.callMainAgent(request, preset, session, counter, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle);
+        snapshot = context.moduleSnapshot;
         totalAttempts += round.attempts;
         const action = round.action;
         logAgentSession_ACU({
@@ -844,10 +852,12 @@ export class ContinuationAgentTurnPlanner_ACU {
   private async openConversation_ACU(
     chat: any[],
     request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
     turnKey: string,
     counter: TokenCounter_ACU,
     measureOverhead: () => Promise<number>,
     semanticAdapter: AgentHandoffSemanticSummaryAdapter_ACU,
+    apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<AgentConversationHandle_ACU> {
     let snapshot = this.dependencies.readConversation(chat);
     // 分段存储下落盘只追加新消息。打开时拼出来的所有消息都已持久，
@@ -869,7 +879,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (budgetTokens <= 0 || !snapshot.messages.length) return false;
       // 压缩成功后会话视图以持久层回读为准，未落盘的消息必须先写进去，否则会在回读时丢失。
       await flush();
-      const next = await this.compactConversation_ACU(chat, snapshot, budgetTokens, await measureOverhead(), counter, semanticAdapter, emergency);
+      const next = await this.compactConversation_ACU(chat, snapshot, budgetTokens, await measureOverhead(), counter, semanticAdapter, emergency, request, context, apiDependencies);
       if (!next) return false;
       snapshot = next;
       return true;
@@ -921,7 +931,11 @@ export class ContinuationAgentTurnPlanner_ACU {
     counter: TokenCounter_ACU,
     semanticAdapter: AgentHandoffSemanticSummaryAdapter_ACU,
     emergency: boolean,
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
+    apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<AgentConversationSnapshot_ACU | null> {
+    const previousThroughId = this.dependencies.readCompactionMark(chat)?.compactedThroughId ?? 0;
     const compaction = await planAgentHistoryCompaction_ACU({
       snapshot,
       activeMark: this.dependencies.readCompactionMark(chat),
@@ -963,7 +977,81 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
     // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
     logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: candidate.report });
+    await this.dispatchRequirementsMaintainerAfterCompaction_ACU(
+      chat,
+      snapshot,
+      previousThroughId,
+      candidate.compactedThroughId,
+      request,
+      context,
+      apiDependencies,
+    );
     return reread;
+  }
+
+  /**
+   * 压缩提交后的系统派工：被浓缩范围内仍有实质用户发言时，让 requirements-maintainer
+   * 全量替换 $USER_REQUIREMENTS。不计入主 Agent 派工预算；失败只记日志，不阻断压缩。
+   */
+  private async dispatchRequirementsMaintainerAfterCompaction_ACU(
+    chat: any[],
+    preCompactSnapshot: AgentConversationSnapshot_ACU,
+    previousThroughId: number,
+    compactedThroughId: number,
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
+    apiDependencies?: ContinuationApiPresetDependencies_ACU,
+  ): Promise<void> {
+    const userTexts = collectSubstantialUserTexts_ACU(preCompactSnapshot.messages, previousThroughId, compactedThroughId);
+    if (!userTexts.length) return;
+    const entryId = logAgentSession_ACU({
+      kind: 'delegation',
+      agentName: AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
+      title: '用户要求维护执行中',
+      detail: `压缩范围内 ${userTexts.length} 条实质用户发言`,
+      status: 'running',
+    });
+    try {
+      const prompt = [
+        '会话历史刚被压缩。请根据被浓缩范围内的实质用户发言，全量替换整理 $USER_REQUIREMENTS。',
+        '被浓缩范围内的实质用户发言：',
+        ...userTexts.map((text, index) => `${index + 1}. ${text}`),
+      ].join('\n');
+      const preset = this.dependencies.resolveApiPreset(request.settings, 'requirementsMaintainer', 'agent_delegate', apiDependencies);
+      const result = await this.dependencies.subagentRuntime.run({
+        delegation: {
+          agentName: AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
+          prompt,
+          reads: ['$USER_REQUIREMENTS'],
+        },
+        settings: request.settings,
+        resolveContext: context,
+        budget: request.settings.agentRunBudget ?? DEFAULT_AGENT_RUN_BUDGET_ACU,
+        preset,
+        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+        isCurrent: identity => request.isInternalRequestCurrent(identity),
+        signal: request.signal,
+      });
+      if (!result.requirements) {
+        updateAgentSession_ACU(entryId, { title: '用户要求维护未采用', detail: '子代理没有返回可用的 requirements 清单，已保留旧快照。', ok: false });
+        return;
+      }
+      const applied = applyAgentUserRequirementsReplace_ACU(context.moduleSnapshot, result.requirements);
+      await this.persistSnapshot_ACU(chat, applied);
+      context.moduleSnapshot = applied;
+      updateAgentSession_ACU(entryId, {
+        title: '用户要求维护完成',
+        detail: [result.requirements.length ? `现有 ${result.requirements.length} 条用户要求` : '清单为空', result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : ''].filter(Boolean).join('\n'),
+        ok: true,
+      });
+    } catch (error) {
+      if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
+      updateAgentSession_ACU(entryId, {
+        title: '用户要求维护失败',
+        detail: `${compactAgentProtocolError_ACU(error)}\n已保留旧快照，压缩交接不受影响。`,
+        ok: false,
+      });
+    }
   }
 
   private async callMainAgent(
@@ -1099,6 +1187,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false), buildAgentWorldbookScanText_ACU(context)),
       $HISTORY_UNSETTLED: () => renderAgentUnsettledHistory_ACU(context),
       $USER_INTENT: () => context.originInstruction || '（用户未提供初始要求）',
+      $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction),
       $CURRENT_TURN_GOAL: () => context.execution.turn?.goal || '（尚无可执行的大纲轮次，需先创建或继续大纲）',
       $UNSETTLED_RANGE: () => this.renderUnsettledRange_ACU(context),
       $STORY_ARC_STATE: () => this.renderStoryArcState_ACU(context),
@@ -1483,6 +1572,10 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     const accepted: AgentDelegation_ACU[] = [];
     for (const delegation of normalDelegations) {
+      if (delegation.agentName === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU) {
+        rejectImmediately(delegation.agentName, 'requirements-maintainer 只能由会话压缩后的系统派工触发，主 Agent 不能直接派它。本次未消耗派工额度。');
+        continue;
+      }
       if (outlineMaintenanceReserveAvailable) {
         rejectImmediately(delegation.agentName, '末轮保留容量只允许 outline-architect 恢复可执行大纲；普通子代理本次未执行。');
         continue;
@@ -1646,6 +1739,10 @@ export class ContinuationAgentTurnPlanner_ACU {
         const settled = this.settleResearcherResult_ACU(result, nextSnapshot);
         if (settled.snapshot !== nextSnapshot) { nextSnapshot = settled.snapshot; snapshotChanged = true; }
         settleOutcome(item.delegation, settled.outcome, result.usage);
+        continue;
+      }
+      if (result.requirements) {
+        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: 'requirements-maintainer 只能由会话压缩后的系统派工触发' }, result.usage);
         continue;
       }
       settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' }, result.usage);

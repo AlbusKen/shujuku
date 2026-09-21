@@ -520,6 +520,7 @@ export function applyAgentModuleDelta_ACU(
       storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
       chronology: snapshot.revisions.chronology + (chronologyTouched ? 1 : 0),
       webRefs: snapshot.revisions.webRefs,
+      userRequirements: snapshot.revisions.userRequirements,
     },
   };
 }

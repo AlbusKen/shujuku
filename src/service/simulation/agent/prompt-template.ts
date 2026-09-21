@@ -28,8 +28,8 @@ export function validateWorldSimulationPromptSegments_ACU(value: unknown, agentN
     if (segment.role !== SEAM_ROLES_ACU[seam] || !segment.enabled || segment.deletable || !segment.pinned) fail_ACU('engine seam 属性非法', { agentName, seam }, phase);
     cursor = matches[0];
   }
-  const guidance = result.filter(segment => segment.content.includes('$WORLD_USER_GUIDANCE'));
-  if (guidance.length !== 1 || !guidance[0].enabled || !guidance[0].deletable || guidance[0].pinned) fail_ACU('guidance 段必须唯一、启用且可编辑', { agentName }, phase);
+  const guidance = result.filter(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));
+  if (guidance.length !== 1 || !guidance[0].enabled || !guidance[0].deletable || guidance[0].pinned) fail_ACU('用户要求/guidance 段必须唯一、启用且可编辑', { agentName }, phase);
   for (const segment of result) for (const token of segment.content.match(PLACEHOLDER_PATTERN_ACU) ?? []) if (!(WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU as readonly string[]).includes(token)) fail_ACU('提示词包含未知占位符', { agentName, token }, phase);
   return result;
 }
@@ -39,11 +39,9 @@ export function validateWorldSimulationAgentPrompts_ACU(value: unknown, phase: W
   const raw = value as Record<string, unknown>;
   const retired = new Set<string>(WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU);
   if (Object.keys(raw).some(key => !(WORLD_SIMULATION_AGENT_NAMES_ACU as readonly string[]).includes(key) && !retired.has(key))) fail_ACU('agentPrompts 包含未知角色', undefined, phase);
-  const hasRetired = Object.keys(raw).some(key => retired.has(key));
   const result = {} as WorldSimulationAgentPrompts_ACU;
   for (const name of WORLD_SIMULATION_AGENT_NAMES_ACU) {
     if (raw[name] === undefined) {
-      if (!hasRetired) fail_ACU('提示词必须是非空数组', { agentName: name }, phase);
       result[name] = buildDefaultWorldSimulationAgentPrompt_ACU(name);
       continue;
     }

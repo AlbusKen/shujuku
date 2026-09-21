@@ -88,14 +88,14 @@ describe('continuation prompt templates', () => {
     // V26 在 system 与任务段之间插入了故事时间一致性规则段，任务段按内容定位而不是按下标。
     const finalReviewer = buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer;
     const system = finalReviewer[0];
-    const user = finalReviewer.find(segment => segment.content.includes('$USER_INTENT'))!;
+    const user = finalReviewer.find(segment => segment.content.includes('$USER_REQUIREMENTS'))!;
     expect(system.content).toContain('角色人设参考来源优先级：角色卡（卡片简述和背景设定）> 前文剧情 > 已发生事件概览。');
     expect(system.content).toContain('公平但不冷漠：DM在规则上公平对待<user>和角色，但不用刻意制造障碍，只是不给<user>开绿灯。');
     expect(system.content).toContain('关系阶段变化需要主角和角色的双向互动+标志性事件');
     expect(system.content).toContain('角色控制权（用户只能控制自己的角色）、信息边界（角色只使用已知信息）、能力边界（行为在角色能力范围内）、世界规则（符合世界观的物理或魔法规则）、因果逻辑（行为与结果符合因果）。');
     expect(system.content).toContain('分析所有登场角色，不能遗漏；保留所有板块：基础信息+状态+心理+认知+行为预测+情绪优化+主动性。');
     expect(system.content).toContain('字段为 verdict、summary、emotionFindings、worldFindings、logicFindings、requiredFixes、preserve。');
-    expect(user.content).toContain('$USER_INTENT');
+    expect(user.content).toContain('$USER_REQUIREMENTS');
     expect(user.content).toContain('$OUTLINE_WINDOW');
     expect(user.content).toContain('不要写正文、不要修改大纲、不要展示思维链。');
   });
@@ -104,16 +104,18 @@ describe('continuation prompt templates', () => {
     const prompts = buildDefaultContinuationSettings_ACU().agentPrompts;
     const text = (segments: typeof prompts.main) => segments.map(segment => segment.content).join('\n');
 
-    expect(text(prompts.arcArchitect)).toContain('$USER_INTENT');
+    expect(text(prompts.arcArchitect)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.arcArchitect)).toContain('$OUTLINE_WINDOW');
-    expect(text(prompts.reviewer)).toContain('$USER_INTENT');
+    expect(text(prompts.reviewer)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.reviewer)).toContain('$OUTLINE_WINDOW');
     expect(text(prompts.mainlinePlanner)).toContain('$OUTLINE_WINDOW');
     expect(text(prompts.beatPlanner)).toContain('$OUTLINE_WINDOW');
-    expect(text(prompts.mainlinePlanner)).not.toContain('$USER_INTENT');
-    expect(text(prompts.beatPlanner)).not.toContain('$USER_INTENT');
-    expect(text(prompts.maintainer)).not.toContain('$USER_INTENT');
+    expect(text(prompts.mainlinePlanner)).toContain('$USER_REQUIREMENTS');
+    expect(text(prompts.beatPlanner)).toContain('$USER_REQUIREMENTS');
+    expect(text(prompts.maintainer)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.maintainer)).not.toContain('$OUTLINE_WINDOW');
+    expect(text(prompts.requirementsMaintainer)).toContain('$USER_REQUIREMENTS');
+    expect(text(prompts.requirementsMaintainer)).not.toContain('$OUTLINE_WINDOW');
   });
 
   it('restores only the selected prompt default', () => {
@@ -137,6 +139,11 @@ describe('continuation prompt templates', () => {
     const restoredFinalReviewer = restoreContinuationPromptDefault_ACU(restoredMain, 'agent_final_reviewer');
     expect(restoredFinalReviewer.agentPrompts.finalReviewer[0].content).toContain('发送前最终审查代理');
     expect(restoredFinalReviewer.agentPrompts.reviewer[0].content).toBe('custom reviewer');
+
+    settings.agentPrompts.requirementsMaintainer = [{ role: 'user', content: 'custom requirements', deletable: true }];
+    const restoredRequirements = restoreContinuationPromptDefault_ACU(settings, 'agent_requirements_maintainer');
+    expect(restoredRequirements.agentPrompts.requirementsMaintainer.map(item => item.content).join('\n')).toContain('$USER_REQUIREMENTS');
+    expect(restoredRequirements.agentPrompts.reviewer[0].content).toBe('custom reviewer');
   });
 });
 

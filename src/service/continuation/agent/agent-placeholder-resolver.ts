@@ -31,6 +31,7 @@ import {
 } from './agent-worldbook-read';
 import { normalizeAmCode_ACU } from '../worldbook-context';
 import { applyContextTagFilters_ACU } from '../../runtime/helpers-context-tags';
+import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
 
 export const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
 export const AGENT_STORY_RANGE_TOKEN_PREFIX_ACU = '$STORY_RANGE:';
@@ -47,6 +48,7 @@ const READ_TOKEN_TITLES_ACU: Record<string, string> = {
   $CURRENT_TURN_GOAL: '本轮目标',
   $CURRENT_TURN_PACING: '本轮节奏',
   $USER_INTENT: '用户的初始要求',
+  $USER_REQUIREMENTS: '用户对任务曾经提过的要求',
   $STORY_ARC: '故事总纲',
   $HOOKS_LEDGER: '伏笔账本',
   $INFO_GAP: '认知与信息差时间线',
@@ -635,6 +637,7 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
     case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
     case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnGuidance_ACU(context.execution.turn ?? null) };
     case '$USER_INTENT': return { title, text: context.originInstruction || '（用户未提供初始要求）' };
+    case '$USER_REQUIREMENTS': return { title, text: renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction) };
     case '$TABLE_GLOBAL': return { title, text: renderAgentTableByAliases_ACU('global', context.tableData) };
     case '$TABLE_CHARACTERS': return { title, text: renderAgentTableByAliases_ACU('characters', context.tableData) };
     case '$TABLE_CHRONICLES': return { title, text: renderAgentTableByAliases_ACU('chronicles', context.tableData) };

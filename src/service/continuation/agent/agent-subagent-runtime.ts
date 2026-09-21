@@ -23,8 +23,9 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
-import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { hasActiveStoryArc_ACU } from './agent-module-store';
+import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
+import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
 import {
   compactAgentProtocolError_ACU,
   mergeAgentMaintainerOutputs_ACU,
@@ -37,6 +38,7 @@ import {
   parseAgentResearcherToolCalls_ACU,
   parseAgentResearcherWorkingNotes_ACU,
   parseAgentReviewerOutput_ACU,
+  parseAgentRequirementsMaintainerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
   renderAgentContractContinuationRequest_ACU,
   type AgentContractRejection_ACU,
@@ -68,7 +70,7 @@ import {
   type AgentReadGateConfig_ACU,
   type AgentReadGateState_ACU,
 } from './agent-read-gate';
-import { AGENT_FINAL_REVIEWER_NAME_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU } from './agent-model';
 import type {
   AgentDelegation_ACU,
   AgentFinalReviewerOutput_ACU,
@@ -115,6 +117,8 @@ export interface AgentSubagentRunResult_ACU {
   reviewer: AgentReviewerOutput_ACU | null;
   /** web-researcher 的输出：pageRef 已回填成完整条目，主循环用 applyAgentWebRefsDelta_ACU 落库。 */
   researcher: AgentResearcherOutput_ACU | null;
+  /** 用户要求维护子代理的全量替换清单；其它角色为 null。 */
+  requirements: string[] | null;
   /** 有效轮次数：1（首轮）+ 实际用掉的工具轮次。 */
   iterations: number;
   attempts: number;
@@ -194,6 +198,7 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
   beatPlanner: AGENT_PREFILLS_ACU.planner,
   reviewer: AGENT_PREFILLS_ACU.reviewer,
   webResearcher: AGENT_PREFILLS_ACU.researcher,
+  requirementsMaintainer: AGENT_PREFILLS_ACU.requirements,
 };
 
 /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
@@ -252,7 +257,7 @@ export function renderStoryArcVolumePlanInstruction_ACU(settings: ContinuationSe
 
 function describeWriteScope_ACU(writes: readonly AgentWritableModule_ACU[]): string {
   if (!writes.length) return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
-  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本', webRefs: '$WEB_REFS 百科资料库' };
+  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本', webRefs: '$WEB_REFS 百科资料库', userRequirements: '$USER_REQUIREMENTS 用户要求' };
   return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
 }
 
@@ -341,7 +346,8 @@ export class AgentSubagentRuntime_ACU {
     if (!definition) {
       rejectDelegation_ACU(`目录里没有名为 ${input.delegation.agentName} 的子代理`, { agentName: input.delegation.agentName });
     }
-    const writes = [...KIND_FIXED_WRITES_ACU[definition.kind]];
+    const isRequirementsMaintainer = definition.name === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU;
+    const writes = isRequirementsMaintainer ? (['userRequirements'] as AgentWritableModule_ACU[]) : [...KIND_FIXED_WRITES_ACU[definition.kind]];
     const gate: SubagentGate_ACU = {
       state: createAgentReadGateState_ACU(),
       config: {
@@ -383,6 +389,7 @@ export class AgentSubagentRuntime_ACU {
       $AGENT_TASK: () => input.delegation.prompt,
       $AGENT_WRITE_SCOPE: () => describeWriteScope_ACU(writes),
       $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
+      $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(input.resolveContext.moduleSnapshot, input.resolveContext.originInstruction),
       $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
       // 资料目录与固定注入：默认提示词按角色矩阵引用；未引用的占位符不产生开销（惰性渲染）。
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
@@ -456,7 +463,7 @@ export class AgentSubagentRuntime_ACU {
       },
     };
     // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮 + 契约续写/修补轮。到界仍未交付即失败。
-    const contractKind = definition.kind === 'arc' || definition.kind === 'maintain';
+    const contractKind = !isRequirementsMaintainer && (definition.kind === 'arc' || definition.kind === 'maintain');
     const maxContinuations = contractKind ? AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU : 0;
     const maxCalls = 1 + maxToolRounds + retries + 1 + maxContinuations;
     // 契约草稿累积：截断或单条非法时不整份重来，先收下合法条目，再只向模型索要剩余/修正条目。
@@ -479,6 +486,7 @@ export class AgentSubagentRuntime_ACU {
       planner: null,
       reviewer: null,
       researcher: null,
+      requirements: null,
       iterations: 1 + toolRoundsUsed,
       attempts: attempt,
       expandedReads: [...expandedReads],
@@ -551,6 +559,26 @@ export class AgentSubagentRuntime_ACU {
       }
 
       try {
+        if (isRequirementsMaintainer) {
+          const payload = parseAgentJsonPayload_ACU(raw, prefill, ['requirements', 'summary']);
+          const parsed = parseAgentRequirementsMaintainerOutput_ACU(payload);
+          return {
+            agentName: definition.name,
+            kind: definition.kind,
+            writes,
+            arc: null,
+            maintainer: null,
+            planner: null,
+            reviewer: null,
+            researcher: null,
+            requirements: parsed.requirements,
+            iterations: 1 + toolRoundsUsed,
+            attempts: attempt,
+            expandedReads: [...expandedReads],
+            readRevisions,
+            usage: usageTotal,
+          };
+        }
         if (isResearch) {
           const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU.research);
           const draft = parseAgentResearcherOutput_ACU(payload);
@@ -564,6 +592,7 @@ export class AgentSubagentRuntime_ACU {
             planner: null,
             reviewer: null,
             researcher,
+            requirements: null,
             iterations: 1 + toolRoundsUsed,
             attempts: attempt,
             expandedReads: [...expandedReads],
@@ -612,6 +641,7 @@ export class AgentSubagentRuntime_ACU {
           planner: definition.kind === 'plan' ? parseAgentPlannerOutput_ACU(payload) : null,
           reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
           researcher: null,
+          requirements: null,
           iterations: 1 + toolRoundsUsed,
           attempts: attempt,
           expandedReads: [...expandedReads],
@@ -661,6 +691,7 @@ export class AgentSubagentRuntime_ACU {
 
     const rendered = await renderContinuationPrompt_ACU(input.settings.agentPrompts.finalReviewer, {
       $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
+      $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(input.resolveContext.moduleSnapshot, input.resolveContext.originInstruction),
       $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
       $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
       $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,

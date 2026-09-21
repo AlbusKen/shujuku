@@ -16,7 +16,7 @@
     </div>
 
     <p v-if="clearPending" class="acu-v2-continuation-materials__confirm">
-      清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲、年代学、百科资料库）。
+      清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲、年代学、百科资料库、用户要求）。
       小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。
       <span class="acu-v2-continuation-materials__confirm-actions">
         <AcuButton variant="danger" :loading="busy" @click="confirmClear">确认清空</AcuButton>
@@ -318,8 +318,36 @@
       </details>
     </template>
 
+    <!-- 用户要求：Agent 会话里用户累计提出的任务要求 -->
+    <template v-else-if="activeTab === 'userRequirements'">
+      <p class="acu-v2-continuation-materials__meta">
+        用户要求由 requirements-maintainer 在会话历史压缩后整理，创建任务时会把初始要求机械写成首条。
+        也可以在这里手动修正；保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
+      </p>
+      <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
+        条目 {{ materials.snapshot.value.userRequirements.length }} 条 · 修订号 {{ materials.snapshot.value.revisions.userRequirements }}
+      </p>
+      <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
+      <p v-if="!materials.snapshot.value?.userRequirements.length" class="acu-v2-continuation-materials__empty">
+        还没有用户要求条目。创建任务后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。
+      </p>
+      <ol v-else class="acu-v2-continuation-materials__list">
+        <li v-for="(line, index) in materials.snapshot.value.userRequirements" :key="`${index}-${line}`">{{ line }}</li>
+      </ol>
+      <details class="acu-v2-continuation-materials__json">
+        <summary>编辑原始 JSON</summary>
+        <p class="acu-v2-continuation-materials__card-meta">必须是字符串数组，例如 ["不要提前揭底牌","继续用第一人称"]。空数组表示清空；空串条目会被拒绝。</p>
+        <AcuTextarea :model-value="materials.modules.userRequirements.draft" :rows="10" @update:model-value="value => materials.updateDraft('userRequirements', value)" />
+        <p v-if="materials.modules.userRequirements.error" class="acu-v2-continuation-materials__error">{{ materials.modules.userRequirements.error }}</p>
+        <div class="acu-v2-continuation-materials__actions">
+          <AcuButton :disabled="!materials.modules.userRequirements.dirty" @click="materials.discard('userRequirements')">放弃修改</AcuButton>
+          <AcuButton variant="primary" :loading="materials.modules.userRequirements.saving" :disabled="!materials.modules.userRequirements.dirty" @click="materials.save('userRequirements')">保存用户要求</AcuButton>
+        </div>
+      </details>
+    </template>
+
     <!-- 故事总纲：结构化展示 + JSON 编辑 -->
-    <template v-else>
+    <template v-else-if="activeTab === 'storyArc'">
       <p class="acu-v2-continuation-materials__meta">
         故事总纲由 arc-architect 子代理维护：全书方向一条 + 若干卷台阶。也可以在这里手动修正，保存走同一套结构校验并推进修订号。
       </p>
@@ -389,6 +417,7 @@ const TABS = [
   { id: 'modules', label: '本地资料' },
   { id: 'storyArc', label: '故事总纲' },
   { id: 'webRefs', label: '百科资料' },
+  { id: 'userRequirements', label: '用户要求' },
 ] as const;
 
 type TabId = typeof TABS[number]['id'];

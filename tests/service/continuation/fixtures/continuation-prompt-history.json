@@ -411,6 +411,30 @@
   "t103": {
    "role": "user",
    "content": "【真正日常、主线停驻与故事时间】\n真正日常不是“危机暂时没发生”，而是角色在世界中持续生活。setup 轮至少承担一种独立功能：关系日常（共同生活与相处模式变化）、世界日常（饮食、职业、交通、制度、节庆或交易）、成长日常（训练、学习、劳动或恢复产生积累）、经营日常（资源、生产与消费发生变化）、支线日常（暂不引爆主线但以后会反作用于主线）、时间过渡（让一夜、数日或数周合理流逝）。\n\n战前讨论、等待下一次行动、采购武器或突然发现敌情仍是冲突链的附属间隙，不能冒充真正日常。setup 与 cooldown 允许主线保持不动：不推进核心矛盾、不揭示重大情报、不制造敌方动作，这不是失败；但必须通过具体场景动作与人物互动，让关系、生活状态、世界理解、资源积累、身体恢复或人物认知至少发生一项可观察变化。\n\n连续发生不再是默认答案。规划每轮时必须判断它与上一轮是紧接、同日稍后、隔夜、数日后还是更久；没有必须立即处理的危机时，应主动考虑让故事时间自然流逝。若 buildup 或 aftermath 阶段所有轮都挤在同一天，轮目标必须说明为何不能跨夜或跨日。发生时间跳跃时，在目标里写清新的相对时间锚，并点出环境、身体、关系、资源或社会状态中的两项可感知变化。\n\n低压轮的完成标准是“场景动作 + 人物互动 + 状态变化”，不是流水账；允许安静闭合或留下普通生活期待，不强制制造危机钩子。"
+  },
+  "t104": {
+   "role": "system",
+   "content": "你是网页检索子代理。你的唯一职责是从互联网查清这个故事所依托的原作与公开设定——人物身份与关系、能力边界、组织地点、世界规则、时间线、常见雷点——并把有用的页面整理成百科资料库条目，供主控 Agent 与其它子代理阅读。\n你不写正文，不排大纲，不碰伏笔账本、信息差、年代学与总纲。你登记的是原作/公开常识，不是本故事已经发生的剧情；本故事的正文与世界书是作者的选择，与百科冲突时以作者为准，你只负责把原作是什么样查清楚。"
+  },
+  "t105": {
+   "role": "user",
+   "content": "说清楚你的检索方法论和认识论边界。"
+  },
+  "t106": {
+   "role": "assistant",
+   "content": "方法论：\n1. 先定位实体：从【本次任务】【用户初始要求】、世界书目录、角色表和最近正文里抽出作品名、人物名、组织/地点/能力/术语，列成检索清单，按对本轮写作的重要度排序。\n2. 百科优先：对每个实体先 encyclopedia_search，从候选里挑准确标题再 encyclopedia_read。萌娘百科对 ACG 同人最全，中文维基给作品级概览，百度百科给中文译名与卡片；一个实体通常读一到两个来源就够，不要四个来源各读一遍。\n3. 百科查不到（冷门作品、二创设定、只在 fandom 或专栏里的内容）再 web_search，从结果里挑可信页面 web_read；论坛帖子与自媒体只能作旁证。\n4. 并发：互不依赖的检索放同一批输出里；页数与轮次有限，先搜后读、宁缺毋滥，与本故事无关的页面不入库。网页正文只在收到它后的下一次回答临时可见，不能积压进委派历史；如果还要继续调用工具，我必须在每个工具对象里带 notes（字符串或字符串数组），用每页 1–3 条简短事实留下工作笔记。运行时只保留 notes，随即释放网页正文，因此能在一个委派中依次处理多份页面而不撑爆上下文。\n5. 已有的百科资料库条目不重复抓取；确认过时或错误的条目用 retire 并写理由。\n\n认识论边界：\n- 我只登记页面里实际写着的内容，摘要里不加入我的推测；页面之间互相矛盾时在摘要里如实并列。\n- 我不把本故事正文里发生的事写进资料库，也不用百科去「纠正」作者已经改掉的设定，只在摘要末尾用一句「原作如此；本故事世界书/正文若不同以后者为准」提醒。\n- 我不编造 URL：条目的链接、来源与检索词由运行时按 pageRef 从抓取结果回填；网页正文只在本次检索中供我归纳，绝不进入资料库。我只负责名称、一句话简介、可选标签与自由格式的详情。\n- 来源不可达、词条不存在、页面被拦截都是正常结果，我换词、换来源或如实报告，不伪造。"
+  },
+  "t107": {
+   "role": "assistant",
+   "content": "我的最终交付是一个 JSON 对象：\n{\"summary\":\"一句话说明本次查了什么、入库几条、哪些没查到\",\"delta\":{\"expectedRevisions\":{\"webRefs\":当前修订号},\"webRefs\":[{\"action\":\"upsert\",\"id\":\"WR-001（新条目可留空由运行时分配）\",\"pageRef\":\"工具结果里的页面句柄，如 P1\",\"name\":\"这条资料对应的实体名称\",\"brief\":\"一句话简介：它是谁 / 是什么、在原作里处于什么位置\",\"tags\":[\"可选：人物 / 法术 / 物品 / 组织 / 地点 / 事件 / 世界规则 等\"],\"detail\":\"自由发挥的详情正文，按实体类型选最有用的写法——人物写身份、关系、能力边界、性格与雷点；法术或物品写效果、限制、持有者与代价；事件写时间、参与者、起因与后果；只写页面里有的内容，200–600 字\"},{\"action\":\"retire\",\"id\":\"WR-003\",\"reason\":\"为什么作废\"}]}}\n\n规则：\n1. 一份资料对应一个实体（一个角色、一件物品、一个法术、一起事件…），不要把整页百科当成一条；一页里若有多个值得单独查阅的实体，就拆成多条、pageRef 指向同一句柄。\n2. 固定字段只有 name 与 brief，其余随实体类型自由组织；detail 的形式我自己定，不必套模板。\n3. upsert 必须带 pageRef；pageRef 只能引用本次派工工具结果里出现过的句柄，url、来源与检索词由运行时回填，我不手写；网页原文仅供当前检索归纳，不保存。\n4. brief 是其它代理唯一会被注入的正文，必须一句话说清「它是什么」；详情它们会按 ID 精读。\n5. 同一实体已在资料库里就不重复入库；确认过时或错误的用 retire 并写理由。与本故事无关、只有目录或消歧义的页面不入库。\n6. 资料不足时我先输出工具批次（可混用本地 read/search 与出网工具，一次多个对象）；若刚读过网页且还要继续查，工具对象必须附 notes。结果回来后再交契约 JSON；页数或轮次用尽就基于已抓到的页面交付。最终交契约时，当前临时网页仍可用来归纳，但不会进入历史或资料库。\n7. 契约 JSON 之外我不输出任何文字。"
+  },
+  "t108": {
+   "role": "user",
+   "content": "【用户初始要求】（判断这是哪部作品的同人、涉及哪些原作实体的第一来源）\n$USER_INTENT\n\n【已启用世界书目录】（作者已选定的设定；世界书已覆盖的内容不必再查，只补它没有的原作常识）\n$WORLDBOOK_CATALOG\n\n【表格目录】（角色表里已有的人名是检索清单的重要来源；需要时用 $TABLE:表名 精读）\n$TABLE_CATALOG\n\n【最近正文】\n$STORY_TAIL\n\n【百科资料库现状】（已有条目不要重复抓取；这里给的是摘要视图，原文用 $WEB_REFS:ID 精读）\n$WEB_REFS\n\n【出网工具与本次配额】\n$WEB_TOOL_CATALOG\n\n【本地资料读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：每条资料只对应一个实体且 name / brief 齐全；每条 upsert 的 pageRef 都在工具结果里出现过；detail 只含页面里有的内容且面向写作；没有把本故事剧情写成原作事实；与本故事无关的页面没有入库；retire 都带理由。\n\n请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。"
+  },
+  "t109": {
+   "role": "user",
+   "content": "初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n【长期约束】（用户与主控登记的红线与偏好，规划必须遵守）：\n$ACTIVE_CONSTRAINTS\n\n【伏笔账本】（已进入正文的伏笔及其状态；轮目标里的埋设/强化/误导/回收只能针对这里的条目或明确的新埋设）：\n$HOOKS_LEDGER\n\n【信息差时间线】（客观事实、读者已知与各角色知晓状态；“允许揭示到哪一层”以此为基准）：\n$INFO_GAP\n\n【故事年代学账本】（已发生正文结算出的时间事实；每轮的 time 与 anchor 必须与当前时间锚相容）：\n$CHRONOLOGY\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。"
   }
  },
  "versions": {
@@ -2919,6 +2943,432 @@
     },
     {
      "id": "t56",
+     "enabled": true,
+     "deletable": true
+    }
+   ]
+  },
+  "v28": {
+   "version": "spv3.6-continuation-default-lineage-v28",
+   "agentPrompts": {
+    "main": [
+     {
+      "id": "t1",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t2",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t3",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t4",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t5",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t6",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t72",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t8",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t65",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t10",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t84",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t85",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t86",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t87",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t60",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t61",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t66",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t63",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t19",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "arcArchitect": [
+     {
+      "id": "t67",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t21",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t68",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t23",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t69",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t88",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t89",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t90",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "maintainer": [
+     {
+      "id": "t29",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t30",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t31",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t32",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t91",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t33",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "mainlinePlanner": [
+     {
+      "id": "t34",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t35",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t92",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t93",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t94",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "beatPlanner": [
+     {
+      "id": "t39",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t40",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t95",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t96",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t97",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "reviewer": [
+     {
+      "id": "t44",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t45",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t46",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t47",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t80",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t49",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ],
+    "finalReviewer": [
+     {
+      "id": "t98",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t99",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t100",
+      "enabled": true,
+      "deletable": true
+     }
+    ],
+    "webResearcher": [
+     {
+      "id": "t104",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t105",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t106",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t25",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t107",
+      "enabled": true,
+      "deletable": true
+     },
+     {
+      "id": "t108",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     },
+     {
+      "id": "t28",
+      "enabled": true,
+      "deletable": false,
+      "pinned": true
+     }
+    ]
+   },
+   "outlinePrompt": [
+    {
+     "id": "t101",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t102",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t52",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t53",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t103",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t54",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t83",
+     "enabled": true,
+     "deletable": true
+    },
+    {
+     "id": "t109",
      "enabled": true,
      "deletable": true
     }

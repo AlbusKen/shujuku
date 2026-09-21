@@ -26,11 +26,12 @@
 
     <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
     <AcuPanelGrid class="acu-v2-world-simulation-page__layout">
-      <AcuPanel title="已有资料" description="当前分支的世界账本、编年对照、错过清单、传闻队列、候选轨迹、投影预览与读取诊断；账本只由 Agent 经审核后写入，这里只读。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
+      <AcuPanel title="已有资料" description="当前分支的用户要求、世界账本、编年对照、错过清单、传闻队列、候选轨迹、投影预览与读取诊断；用户要求可在资料区手动修正，账本只由 Agent 经审核后写入。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
         <WorldSimulationMaterialsPanel
           v-if="runtime.ready.value && runtime.snapshot.value"
           :conversation="runtime.snapshot.value.conversation"
           :materials="runtime.snapshot.value.materials"
+          :user-requirements="runtime.snapshot.value.userRequirements"
           :session="runtime.entries.value"
           :ledger="runtime.envelope.value?.ledger ?? null"
           :anchor="runtime.anchor.value"
@@ -39,6 +40,7 @@
           :timeline="runtime.envelope.value?.timeline ?? []"
           @refresh="refreshAll"
           @clear="clearData"
+          @save-user-requirements="saveUserRequirements"
         />
         <p v-else class="acu-v2-world-simulation-page__meta">当前没有可显示的世界推演资料。</p>
       </AcuPanel>
@@ -223,9 +225,9 @@
           @toggle="toggleGroup('prompt:reference')"
         >
           <h4 class="acu-v2-world-simulation-page__subheading">引擎 seam 段</h4>
-          <p class="acu-v2-world-simulation-page__meta">每个角色的提示词由固定顺序的 ROOT、ROLE_RULES、PROTOCOL、WORKFLOW、HISTORY、RUNTIME_CONTEXT、ACKNOWLEDGEMENT、EXECUTION_BOUNDARY 八段引擎 seam 与一段可编辑的 guidance 段组成。seam 段的角色与顺序由引擎锁定，只能改内容不能删除或移动；guidance 段必须唯一且包含 $WORLD_USER_GUIDANCE。</p>
+          <p class="acu-v2-world-simulation-page__meta">每个角色的提示词由固定顺序的 ROOT、ROLE_RULES、PROTOCOL、WORKFLOW、HISTORY、RUNTIME_CONTEXT、ACKNOWLEDGEMENT、EXECUTION_BOUNDARY 八段引擎 seam 与一段可编辑的用户要求段组成。seam 段的角色与顺序由引擎锁定，只能改内容不能删除或移动；可编辑段必须唯一且包含 $WORLD_USER_REQUIREMENTS 或 $WORLD_USER_GUIDANCE。requirements-maintainer 由会话压缩后的系统派工触发，不进入主 Agent 可派工目录。</p>
           <h4 class="acu-v2-world-simulation-page__subheading">世界推演占位符</h4>
-          <p class="acu-v2-world-simulation-page__meta">运行装配占位符：$WORLD_TASK（当前任务）、$WORLD_HISTORY（楼层锚定的 Agent 会话历史）、$WORLD_RUNTIME_CONTEXT（触发种类、指令与基准账本 revision）、$WORLD_AGENT_CATALOG（可派工角色与职责）、$WORLD_TOOL_CATALOG（read/search 地址词汇表）、$WORLD_EVIDENCE（已授权证据条目）、$WORLD_USER_GUIDANCE（用户本轮指令）。世界领域占位符：$WORLD_STATE（当前世界账本）、$ANCHOR_MESSAGE（冻结 assistant 楼层正文）、$ANCHOR_IDENTITY（楼层 / swipe / 正文摘要身份）、$WORLD_STAGE_PLAN（本轮阶段计划）、$WORLD_CHRONICLE（宏观编年）、$WORLD_CANDIDATES（本轮候选摘要）、$CURRENT_EVIDENCE_REGISTRY（证据注册表快照）、$PROJECTION_PREVIEW（〈与此同时〉投影预览）。所有动态内容都以转义后的 UNTRUSTED_* 区块注入，只有提示词里实际出现的占位符才会被解析；未知占位符会在保存时被拒绝。</p>
+          <p class="acu-v2-world-simulation-page__meta">运行装配占位符：$WORLD_TASK（当前任务）、$WORLD_HISTORY（楼层锚定的 Agent 会话历史）、$WORLD_RUNTIME_CONTEXT（触发种类、指令与基准账本 revision）、$WORLD_AGENT_CATALOG（可派工角色与职责）、$WORLD_TOOL_CATALOG（read/search 地址词汇表）、$WORLD_EVIDENCE（已授权证据条目）、$WORLD_USER_REQUIREMENTS（用户累计要求，默认注入）、$WORLD_USER_GUIDANCE（用户本轮指令，自定义段仍可用）。世界领域占位符：$WORLD_STATE（当前世界账本）、$ANCHOR_MESSAGE（冻结 assistant 楼层正文）、$ANCHOR_IDENTITY（楼层 / swipe / 正文摘要身份）、$WORLD_STAGE_PLAN（本轮阶段计划）、$WORLD_CHRONICLE（宏观编年）、$WORLD_CANDIDATES（本轮候选摘要）、$CURRENT_EVIDENCE_REGISTRY（证据注册表快照）、$PROJECTION_PREVIEW（〈与此同时〉投影预览）。所有动态内容都以转义后的 UNTRUSTED_* 区块注入，只有提示词里实际出现的占位符才会被解析；未知占位符会在保存时被拒绝。</p>
         </AcuDisclosureGroup>
       </div>
       <p v-if="settingsError" class="acu-v2-world-simulation-page__error">{{ settingsError }}</p>
@@ -402,6 +404,10 @@ async function sendMessage(text: string): Promise<void> {
 
 async function clearData(): Promise<void> {
   await runtime.clearData();
+}
+
+async function saveUserRequirements(requirements: unknown): Promise<void> {
+  await runtime.saveUserRequirements(requirements);
 }
 
 function requiredRangeInteger(value: unknown, label: string, minimum: number, maximum: number): number {

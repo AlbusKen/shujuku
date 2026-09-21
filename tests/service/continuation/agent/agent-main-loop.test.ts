@@ -445,6 +445,53 @@ describe('主 Agent 会话记录', () => {
     expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
     expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史压缩未提交'))).toBe(true);
   });
+
+  it('压缩范围内有实质用户发言时系统派工 requirements-maintainer，不占主 Agent 派工额度', async () => {
+    const filler = '守门人'.repeat(400);
+    const conversation = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+      { kind: 'turn', text: '开始新的一轮规划：第 1 阶段 · 第 1/6 轮', digest: '第 1 阶段 · 第 1/6 轮', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'user', text: '不要提前揭底牌', digest: '用户要求', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'user', text: '继续', digest: '机械继续', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'agent', text: filler, digest: '交付写作指导', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'turn', text: '开始新的一轮规划：第 2 阶段 · 第 2/6 轮', digest: '第 2 阶段 · 第 2/6 轮', turnKey: 'stage-1#0#turn-2' },
+    ]);
+    const h = harness_ACU({
+      conversation,
+      historyTokenBudget: 200,
+      countTokens: fillerTokens_ACU,
+      mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
+      subReplies: [JSON.stringify({ summary: '合并了压缩范围内的用户要求', requirements: ['不要提前揭底牌', '推进主角进入禁区'] })],
+      context: nextTurnContext_ACU,
+    });
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
+    expect(h.conversation().messages[0].kind).toBe('handoff');
+    expect(h.presetRoles).toContain('requirementsMaintainer');
+    expect(h.written.some(item => item.snapshot.userRequirements.includes('不要提前揭底牌'))).toBe(true);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('用户要求维护完成'))).toBe(true);
+    expect(h.mainCalls).toHaveLength(1);
+  });
+
+  it('压缩后维护子代理失败时保留旧快照且不阻断交接', async () => {
+    const filler = '守门人'.repeat(400);
+    const conversation = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+      { kind: 'turn', text: '开始新的一轮规划：第 1 阶段 · 第 1/6 轮', digest: '第 1 阶段 · 第 1/6 轮', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'user', text: '保持慢热', digest: '用户要求', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'agent', text: filler, digest: '交付写作指导', turnKey: 'stage-1#0#turn-1' },
+      { kind: 'turn', text: '开始新的一轮规划：第 2 阶段 · 第 2/6 轮', digest: '第 2 阶段 · 第 2/6 轮', turnKey: 'stage-1#0#turn-2' },
+    ]);
+    const h = harness_ACU({
+      conversation,
+      historyTokenBudget: 200,
+      countTokens: fillerTokens_ACU,
+      mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
+      subReplies: ['不是 JSON'],
+      context: nextTurnContext_ACU,
+    });
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
+    expect(h.conversation().messages[0].kind).toBe('handoff');
+    expect(h.written.every(item => item.snapshot.userRequirements.length === 0)).toBe(true);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('用户要求维护失败'))).toBe(true);
+  });
 });
 
 describe('主 Agent read/search 工具批次', () => {
@@ -1186,6 +1233,21 @@ describe('大纲子代理派工', () => {
 });
 
 describe('派工与写集落盘', () => {
+  it('主 Agent 派工 requirements-maintainer 立即拒绝，不占派工额度也不发起子代理调用', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"requirements-maintainer","prompt":"整理要求","reads":["$USER_REQUIREMENTS"]}]}',
+        '{"action":"finalize","instruction":"指导"}',
+      ],
+    });
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '指导' });
+    expect(h.subCalls).toHaveLength(0);
+    const feedback = h.mainCalls[1].map(message => message.content).join('\n');
+    expect(feedback).toContain('requirements-maintainer｜失败');
+    expect(feedback).toContain('只能由会话压缩后的系统派工触发');
+    expect(feedback).toContain('未消耗派工额度');
+  });
+
   it('维护类子代理的 delta 串行落盘，结果与约束提议回灌给主 Agent', async () => {
     const h = harness_ACU({
       mainReplies: [
@@ -1567,5 +1629,18 @@ describe('子代理运行时', () => {
     const isCurrent = vi.fn().mockReturnValue(false);
     await expect(runtime.run(input_ACU({ isCurrent } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_INTERNAL_REQUEST_STALE' } });
     expect(calls).toHaveLength(0);
+  });
+
+  it('requirements-maintainer 只写 userRequirements，契约是 summary+requirements 全量清单', async () => {
+    replies = [JSON.stringify({ summary: '合并用户要求', requirements: ['不要提前揭底牌', '用第一人称'] })];
+    const result = await runtime.run(input_ACU({
+      delegation: { agentName: 'requirements-maintainer', prompt: '整理压缩范围内的用户发言', reads: ['$USER_REQUIREMENTS'] },
+    } as any));
+    expect(result.writes).toEqual(['userRequirements']);
+    expect(result.requirements).toEqual(['不要提前揭底牌', '用第一人称']);
+    expect(result.maintainer).toBeNull();
+    const text = calls[0].map(message => message.content).join('\n');
+    expect(text).toContain('$USER_REQUIREMENTS 用户要求');
+    expect(text).toContain('整理压缩范围内的用户发言');
   });
 });

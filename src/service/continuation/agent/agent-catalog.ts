@@ -7,14 +7,14 @@
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher';
+  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher' | 'requirementsMaintainer';
 }
 
 /** 目录渲染的可选开关：网页检索关闭时，web-researcher 及其资料模块不进主 Agent 视野。 */
@@ -82,6 +82,13 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     triggers: ['任务启用了开场检索且资料库为空时由运行时自动派工，无需你派', '正文或大纲新登场了原作人物、组织、地点、能力、术语，而百科资料库与世界书都没有对应条目', '需要核对某个原作设定（关系、能力边界、时间线、禁忌）而现有资料无法回答'],
     promptKey: 'webResearcher',
   },
+  {
+    name: AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
+    kind: 'maintain',
+    description: '整理 Agent 会话里用户提过的要求：去重合并后全量替换 $USER_REQUIREMENTS。由会话压缩后的系统派工触发，不写伏笔或正文事实',
+    triggers: ['主会话历史压缩后，被浓缩范围内仍有实质用户输入'],
+    promptKey: 'requirementsMaintainer',
+  },
 ];
 
 export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] = [
@@ -121,6 +128,12 @@ export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] 
     triggers: ['同人写作需要核对原作人物关系、能力边界、组织与地点设定', '大纲或策划涉及原作术语而世界书没有覆盖', '审查候选指导是否违背原作常识'],
     writableBy: [AGENT_WEB_RESEARCHER_NAME_ACU],
   },
+  {
+    token: '$USER_REQUIREMENTS',
+    description: '用户要求资料区：用户在 Agent 会话里对任务提过的要求，逐条分行。由 requirements-maintainer 在历史压缩后整理；创建任务时机械写入 originInstruction 作为首条',
+    triggers: ['规划、审查或写作需要遵守用户累计提出的任务要求', '用户中途补充、修正或覆盖了此前的要求'],
+    writableBy: [AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU],
+  },
 ];
 
 /** 子代理目录里的类型中文名。 */
@@ -142,6 +155,7 @@ const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
 };
 
 function isDefinitionVisible_ACU(name: AgentSubagentName_ACU, options?: AgentCatalogOptions_ACU): boolean {
+  if (name === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU) return false;
   if (name === AGENT_WEB_RESEARCHER_NAME_ACU) return options?.webResearchEnabled === true;
   return true;
 }
@@ -215,6 +229,7 @@ export function renderAgentReadCatalog_ACU(): string {
     '- $ACTIVE_CONSTRAINTS / $ACTIVE_CONSTRAINTS:ID,ID：长期约束全部条目，或按 ID 精读。',
     '- $CHRONOLOGY / $CHRONOLOGY:ID,ID：故事年代学账本（已发生正文结算出的时间锚、累计经过时间与转换证据），或按 ID 精读（含已作废条目）。',
     '- $WEB_REFS / $WEB_REFS:ID,ID：百科资料库——全量只给每条「名称 + 一句话简介」预览；按 ID 精读才有自由格式详情与来源链接，不保存网页原文。它是原作/公开设定的外部参考，不是本故事事实。',
+    '- $USER_REQUIREMENTS：用户在 Agent 会话里累计提过的任务要求，逐条分行；由系统在历史压缩后维护，不是正文事实。',
     '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
     '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
     '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',

@@ -1,5 +1,7 @@
 import type { WorldSimulationLedgerModule_ACU } from '../model';
 
+export const WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU = 'requirements-maintainer';
+
 export const WORLD_SIMULATION_AGENT_NAMES_ACU = [
   'world-director',
   'world-stage-planner',
@@ -9,6 +11,7 @@ export const WORLD_SIMULATION_AGENT_NAMES_ACU = [
   'chronicler',
   'causality-reviewer',
   'lore-researcher',
+  WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU,
 ] as const;
 
 export type WorldSimulationAgentName_ACU = typeof WORLD_SIMULATION_AGENT_NAMES_ACU[number];
@@ -43,8 +46,14 @@ export const WORLD_SIMULATION_AGENT_CATALOG_ACU: readonly WorldSimulationAgentDe
   { name: 'chronicler', kind: 'specialist', description: '仅在事件完结或热层编年过长时记录幕后编年并提交归档，不是每轮常规角色', triggers: ['事件完结或热层编年过长需要归档'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle'] },
   { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，并把已接受事实压缩为台面安全 guidance', triggers: ['每轮候选形成后'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: ['guidance'] },
   { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
+  { name: WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, kind: 'researcher', description: '整理 Agent 会话里用户提过的要求：去重合并后全量替换用户要求清单。由会话压缩后的系统派工触发，不写世界账本', triggers: ['主会话历史压缩后，被浓缩范围内仍有实质用户输入'], promptKey: WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, apiRole: WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, writableModules: [] },
 ];
 
 export function findWorldSimulationAgentDefinition_ACU(name: string): WorldSimulationAgentDefinition_ACU | null {
   return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? null;
+}
+
+/** 主 Agent 可见目录：隐藏系统派工的 requirements-maintainer。 */
+export function worldSimulationDirectorVisibleCatalog_ACU(): readonly WorldSimulationAgentDefinition_ACU[] {
+  return WORLD_SIMULATION_AGENT_CATALOG_ACU.filter(item => item.name !== WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU);
 }

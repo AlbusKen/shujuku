@@ -197,6 +197,7 @@ function setSettings(): void {
       reviewer: { mode: 'inherit', presetName: '' },
       finalReviewer: { mode: 'inherit', presetName: '' },
       webResearcher: { mode: 'inherit', presetName: '' },
+      requirementsMaintainer: { mode: 'inherit', presetName: '' },
     },
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
     agentPrompts: {
@@ -208,6 +209,7 @@ function setSettings(): void {
       reviewer: [{ role: 'system', content: '审查', enabled: true, deletable: true }],
       finalReviewer: [{ role: 'system', content: '终审', enabled: true, deletable: true }],
       webResearcher: [{ role: 'system', content: '检索', enabled: true, deletable: true }],
+      requirementsMaintainer: [{ role: 'system', content: '用户要求', enabled: true, deletable: true }],
     },
   };
 }
@@ -611,8 +613,8 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('关闭时不装配终审证据');
       expect(el.textContent).toContain('不会发起终审调用');
       expect(el.textContent).toContain('发送前终审子代理提示词');
-      expect(el.textContent).toContain('固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查与终审固定获得 $OUTLINE_WINDOW');
-      expect(el.textContent).toContain('伏笔与认知维护代理不接收用户目标或阶段大纲');
+      expect(el.textContent).toContain('固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查、终审与用户要求维护固定获得 $OUTLINE_WINDOW 或任务段中的 $USER_REQUIREMENTS');
+      expect(el.textContent).toContain('伏笔与认知维护代理不再注入初始要求原文，只接收累计用户要求清单');
       expect(el.textContent).toContain('故事总纲子代理（arc-architect）提示词');
       expect(el.textContent).not.toContain('缓存优化');
       expect(el.textContent).not.toContain('prompt_cache_key');

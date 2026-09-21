@@ -6,6 +6,7 @@ import type { ContinuationOrchestratorResult_ACU } from '../../service/continuat
 import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/continuation/stage-execution-engine';
 import { restoreContinuationPromptDefault_ACU, validateContinuationPromptSegments_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
 import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU } from '../../service/continuation/defaults';
+import { buildDefaultContinuationAgentPrompts_ACU } from '../../service/continuation/agent/agent-defaults';
 import { useToastStore } from '../stores/toast-store';
 
 /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
@@ -342,9 +343,10 @@ export function useContinuationRuntime() {
     try {
       const outlinePrompt = validateContinuationPromptSegments_ACU(record.outlinePrompt, 'load');
       const agentRecord = agentRaw as Record<string, unknown>;
+      const defaults = buildDefaultContinuationAgentPrompts_ACU();
       const agentPrompts = {} as ContinuationSettings_ACU['agentPrompts'];
       for (const key of CONTINUATION_AGENT_PROMPT_KEYS_ACU) {
-        agentPrompts[key] = validateContinuationPromptSegments_ACU(agentRecord[key], 'load');
+        agentPrompts[key] = validateContinuationPromptSegments_ACU(agentRecord[key] ?? defaults[key], 'load');
       }
       return { outlinePrompt, agentPrompts };
     } catch (error) {

@@ -63,6 +63,7 @@ describe('Agent 目录渲染', () => {
     expect(catalog).toContain('continuity-reviewer');
     expect(catalog).toContain('无（只返回建议）');
     expect(catalog).not.toContain('你只输出一个 JSON 对象');
+    expect(catalog).not.toContain('requirements-maintainer');
   });
 
   it('大纲子代理排在目录首位，说明三种触发时机与串行执行方式', () => {
@@ -94,6 +95,15 @@ describe('Agent 目录渲染', () => {
   it('未知代理名查不到定义', () => {
     expect(findAgentSubagentDefinition_ACU('hook-cognition-maintainer')?.kind).toBe('maintain');
     expect(findAgentSubagentDefinition_ACU('不存在的代理')).toBeNull();
+  });
+
+  it('用户要求模块进资料目录与读集词汇表，维护子代理可按名查到但不进主 Agent 目录', () => {
+    const moduleCatalog = renderAgentModuleCatalog_ACU();
+    expect(moduleCatalog).toContain('$USER_REQUIREMENTS');
+    expect(moduleCatalog).toContain('requirements-maintainer');
+    expect(renderAgentReadCatalog_ACU()).toContain('$USER_REQUIREMENTS');
+    expect(findAgentSubagentDefinition_ACU('requirements-maintainer')).toMatchObject({ kind: 'maintain', promptKey: 'requirementsMaintainer' });
+    expect(renderAgentSubagentCatalog_ACU()).not.toContain('name: requirements-maintainer');
   });
 });
 

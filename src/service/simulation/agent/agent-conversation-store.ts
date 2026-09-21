@@ -570,3 +570,63 @@ export async function appendWorldSimulationSessionEvent_ACU(
     }],
   }, chat);
 }
+
+/**
+ * 把压缩标记写到当前锚点楼层的最后一段。不能新建空 messages 段（校验拒绝），
+ * 因此当前楼层还没有任何 segment 时返回 false，由调用方跳过本次派工。
+ */
+export async function writeWorldSimulationConversationCompaction_ACU(
+  input: {
+    anchor: WorldSimulationAnchorIdentity_ACU;
+    compaction: WorldSimulationConversationCompaction_ACU;
+  },
+  chat?: any[],
+): Promise<boolean> {
+  return serializeConversationWrite_ACU(input.anchor.chatIdentity, async () => {
+    const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+    const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, messages);
+    const hostMessage = messages[currentAnchor.messageIndex] as Record<string, unknown>;
+    const previous = hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
+    const migrated = previous === undefined ? null : migrateLegacyWorldSimulationConversationBucket_ACU(
+      previous, hostMessage, currentAnchor.chatIdentity, currentAnchor.messageIndex,
+    );
+    let currentBucket: WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>;
+    if (previous === undefined) return false;
+    if (migrated) currentBucket = migrated;
+    else if (isRecord_ACU(previous) && previous.schemaVersion === 1 && isRecord_ACU(previous.entries)) {
+      currentBucket = previous as unknown as WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>;
+    } else reject_ACU(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
+    const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
+    const existing = currentBucket.entries[key]
+      ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
+      : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
+    if (!existing.segments.length) return false;
+    const at = Date.now();
+    const last = existing.segments[existing.segments.length - 1];
+    const updated: WorldSimulationConversationSegment_ACU = {
+      ...last,
+      compaction: validateCompaction_ACU(input.compaction, 'compaction'),
+      updatedAt: at,
+    };
+    const candidate: WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU> = {
+      schemaVersion: 1,
+      entries: {
+        ...currentBucket.entries,
+        [key]: {
+          anchor: { ...currentAnchor },
+          value: { ...existing, segments: [...existing.segments.slice(0, -1), updated], updatedAt: at },
+          updatedAt: at,
+        },
+      },
+    };
+    try {
+      hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = candidate;
+      await saveChatToHostStrict_ACU();
+      resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, messages);
+    } catch (error) {
+      hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = previous;
+      throw error;
+    }
+    return true;
+  });
+}

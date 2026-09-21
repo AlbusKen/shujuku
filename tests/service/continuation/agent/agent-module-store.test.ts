@@ -87,6 +87,24 @@ describe('Agent 资料快照存储', () => {
     const empty = buildEmptyAgentModuleSnapshot_ACU();
     expect(empty.chronology).toEqual([]);
     expect(empty.revisions.chronology).toBe(0);
+    expect(empty.userRequirements).toEqual([]);
+    expect(empty.revisions.userRequirements).toBe(0);
+  });
+
+  it('旧快照缺 userRequirements 时兼容为空清单；字段一旦出现就必须整体合法', () => {
+    const legacy = {
+      schemaVersion: 1, settledThroughIndex: 2, updatedAt: 1,
+      revisions: { hooks: 1, infoGap: 0, constraints: 0, storyArc: 0 },
+      hooks: [hook_ACU('H1')], infoGap: [], constraints: [],
+    };
+    const loaded = validateAgentModuleSnapshot_ACU(legacy);
+    expect(loaded!.userRequirements).toEqual([]);
+    expect(loaded!.revisions.userRequirements).toBe(0);
+    expect(loaded!.hooks).toHaveLength(1);
+    expect(validateAgentModuleSnapshot_ACU({ ...legacy, userRequirements: [''] })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...legacy, userRequirements: [1] })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...legacy, userRequirements: '不是数组' })).toBeNull();
+    expect(validateAgentModuleSnapshot_ACU({ ...legacy, userRequirements: ['不要提前揭底牌', '用第一人称'] })!.userRequirements).toEqual(['不要提前揭底牌', '用第一人称']);
   });
 
   it('旧快照缺 chronology 与其 revision 时兼容读成空账本，不误报数据丢失', () => {

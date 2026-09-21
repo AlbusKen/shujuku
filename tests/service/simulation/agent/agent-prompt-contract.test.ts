@@ -1,21 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU, worldSimulationDirectorVisibleCatalog_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
 import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU } from '../../../../src/service/simulation/model';
 import { createWorldSimulationPlaceholderResolvers_ACU } from '../../../../src/service/simulation/agent/agent-placeholder-resolver';
 import { parseWorldSimulationMainAction_ACU, parseWorldSimulationPlannerOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU } from '../../../../src/service/simulation/agent/agent-protocol';
-import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, renderWorldSimulationPrompt_ACU, validateWorldSimulationAgentPrompts_ACU } from '../../../../src/service/simulation/agent/prompt-template';
+import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, renderWorldSimulationPrompt_ACU, validateWorldSimulationAgentPrompts_ACU, validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
 describe('世界推演提示词装配契约', () => {
-  it('装配八角色及唯一有序固定 seam', () => {
+  it('装配九角色、主 Agent 可见八角色，以及唯一有序固定 seam', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
-    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(8);
+    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(9);
+    expect(worldSimulationDirectorVisibleCatalog_ACU()).toHaveLength(8);
     expect(WORLD_SIMULATION_AGENT_NAMES_ACU).toEqual([
       'world-director', 'world-stage-planner', 'timekeeper', 'undercurrent-analyst',
-      'dramatis-keeper', 'chronicler', 'causality-reviewer', 'lore-researcher',
+      'dramatis-keeper', 'chronicler', 'causality-reviewer', 'lore-researcher', 'requirements-maintainer',
     ]);
     for (const segments of Object.values(prompts)) {
       const positions = WORLD_SIMULATION_ENGINE_SEAMS_ACU.map(seam => segments.findIndex(segment => segment.content.includes(worldSimulationSeamMarker_ACU(seam))));
@@ -88,23 +89,26 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v8 含幕后重定位、按需编年、guidance 必出、速度压缩默认值与各角色动态世界硬约束', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v8');
+  it('提示词 v9 含累计用户要求、幕后重定位、按需编年、guidance 必出、速度压缩默认值与各角色动态世界硬约束', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v9');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9']);
     const v5 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v5');
     const v6 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v6');
     const v7 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v7');
-    const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
+    const v9 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(v5?.fingerprint).toBe('3749:5e40f616');
     expect(v6?.fingerprint).toBe('3910:629ead1');
     expect(v7?.fingerprint).toBe('4534:cb080224');
+    expect(v8?.fingerprint).toBe('4767:87f876e3');
     expect(v6?.fingerprint).not.toBe(v5?.fingerprint);
     expect(v7?.fingerprint).not.toBe(v6?.fingerprint);
     expect(v8?.fingerprint).not.toBe(v7?.fingerprint);
+    expect(v9?.fingerprint).not.toBe(v8?.fingerprint);
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
     const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');
@@ -112,6 +116,7 @@ describe('世界推演提示词装配契约', () => {
     const undercurrentPrompt = prompts['undercurrent-analyst'].map(item => item.content).join('\n');
     const chroniclerPrompt = prompts.chronicler.map(item => item.content).join('\n');
     const reviewerPrompt = prompts['causality-reviewer'].map(item => item.content).join('\n');
+    expect(directorPrompt).toContain('$WORLD_USER_REQUIREMENTS');
     expect(directorPrompt).toContain('$WORLD_COLLISIONS');
     expect(plannerPrompt).toContain('$WORLD_COLLISIONS');
     expect(plannerPrompt).toContain('临界暗流');
@@ -191,9 +196,32 @@ describe('世界推演提示词装配契约', () => {
     const previous = structuredClone(defaults);
     const stock = structuredClone(previous);
     const custom = structuredClone(previous);
-    custom['world-director'][2].content = '用户 guidance：自定义动态世界';
+    custom['world-director'][2].content = '以下是用户对任务曾经提过的要求：\n$WORLD_USER_REQUIREMENTS\n用户附加：自定义动态世界';
     expect(migrateWorldSimulationAgentPrompts_ACU(custom, previous)['world-director'][2].content).toContain('自定义动态世界');
     expect(migrateWorldSimulationAgentPrompts_ACU(stock, previous)).toEqual(defaults);
+    const restoredV8Guidance = structuredClone(defaults);
+    restoredV8Guidance['world-director'][2] = { role: 'system', content: '用户 guidance：$WORLD_USER_GUIDANCE', enabled: true, deletable: true, pinned: false };
+    expect(migrateWorldSimulationAgentPrompts_ACU(restoredV8Guidance, {})['world-director'][2].content).toContain('$WORLD_USER_REQUIREMENTS');
+    const customGuidance = structuredClone(defaults);
+    customGuidance['world-director'][2] = { role: 'system', content: '用户 guidance：$WORLD_USER_GUIDANCE\n用户附加：自定义 guidance', enabled: true, deletable: true, pinned: false };
+    expect(migrateWorldSimulationAgentPrompts_ACU(customGuidance, {})['world-director'][2].content).toContain('$WORLD_USER_GUIDANCE');
+    expect(migrateWorldSimulationAgentPrompts_ACU(customGuidance, {})['world-director'][2].content).toContain('自定义 guidance');
+  });
+
+  it('自定义唯一可编辑段仍可用 $WORLD_USER_GUIDANCE 通过校验', () => {
+    const segments = structuredClone(buildDefaultWorldSimulationAgentPrompts_ACU()['world-director']);
+    const index = segments.findIndex(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS'));
+    expect(index).toBeGreaterThanOrEqual(0);
+    segments[index].content = '用户 guidance：$WORLD_USER_GUIDANCE';
+    expect(() => validateWorldSimulationPromptSegments_ACU(segments, 'world-director')).not.toThrow();
+  });
+
+  it('缺 requirements-maintainer 提示词时补当前默认，不因缺键判整包非法', () => {
+    const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const rest = { ...defaults };
+    delete (rest as Record<string, unknown>)['requirements-maintainer'];
+    const validated = validateWorldSimulationAgentPrompts_ACU(rest);
+    expect(validated['requirements-maintainer']).toEqual(defaults['requirements-maintainer']);
   });
 
 });

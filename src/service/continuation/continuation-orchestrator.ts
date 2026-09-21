@@ -10,6 +10,7 @@ import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU,
 import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
 import { appendAgentConversationToChat_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
 import { clearAgentModuleField_ACU } from './agent/agent-module-store';
+import { seedAgentUserRequirementsIfEmpty_ACU } from './agent/agent-user-requirements';
 import { clearAgentRunState_ACU } from './agent/agent-run-cache';
 import { clearAgentSessionLog_ACU, logAgentSession_ACU } from './agent/agent-session-log';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
@@ -268,6 +269,7 @@ export class ContinuationOrchestrator_ACU {
         },
       };
       await this.dependencies.store.replaceAtomically(candidate, guardForTask_ACU(chatIdentity, existing));
+      await seedAgentUserRequirementsIfEmpty_ACU(originInstruction);
       return taskResult_ACU(candidate);
     });
   }

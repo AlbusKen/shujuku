@@ -13,6 +13,7 @@ import {
   parseWorldSimulationPlannerOutput_ACU,
   parseWorldSimulationReviewerResult_ACU,
   parseWorldSimulationSpecialistResult_ACU,
+  parseWorldSimulationRequirementsMaintainerOutput_ACU,
   recordWorldSimulationProtocolFailure_ACU,
   renderWorldSimulationDirectorProtocolRejection_ACU,
   renderWorldSimulationPlannerProtocolRejection_ACU,
@@ -268,5 +269,28 @@ describe('世界推演 Agent 协议', () => {
       patch: { chronicleArchive: { archiveEntries: [{ archiveRef: 'arc-1' }], overviewRows: [] } },
       summary: '空目录', evidenceRefs: [ref], uncertainties: [],
     }, snapshot)).toThrowError(/INVALID_SPECIALIST_PATCH/);
+  });
+});
+
+describe('用户要求维护子代理契约', () => {
+  it('只接受 summary+requirements，允许空数组，拒绝未知字段与空串', () => {
+    expect(parseWorldSimulationRequirementsMaintainerOutput_ACU({
+      summary: '合并了用户补充的节奏要求',
+      requirements: ['  不要提前揭底牌  ', '不要提前揭底牌', '用第一人称'],
+    })).toEqual({
+      summary: '合并了用户补充的节奏要求',
+      requirements: ['不要提前揭底牌', '用第一人称'],
+    });
+    expect(parseWorldSimulationRequirementsMaintainerOutput_ACU({ summary: '暂无新要求', requirements: [] })).toEqual({
+      summary: '暂无新要求',
+      requirements: [],
+    });
+    expect(() => parseWorldSimulationRequirementsMaintainerOutput_ACU({
+      summary: '多余字段',
+      requirements: ['a'],
+      patch: {},
+    })).toThrowError(/UNEXPECTED_FIELD/);
+    expect(() => parseWorldSimulationRequirementsMaintainerOutput_ACU({ summary: '', requirements: [] })).toThrowError(/MISSING_FIELD/);
+    expect(() => parseWorldSimulationRequirementsMaintainerOutput_ACU({ summary: '空串', requirements: ['ok', ''] })).toThrowError(/EMPTY_TEXT/);
   });
 });

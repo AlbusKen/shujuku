@@ -43,7 +43,7 @@ export const V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU = `【以下是你自己�
 export const V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU = '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。';
 
 /** 主循环渲染并追加到会话的运行时快照模板。占位符由 renderMainPrompt 同一套 resolvers 解析。 */
-export const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。\n\n【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【百科资料库目录】\n$WEB_REFS_CATALOG\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
+export const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。\n\n以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【百科资料库目录】\n$WEB_REFS_CATALOG\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
 
 /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
 export const AGENT_PREFILLS_ACU = {
@@ -53,6 +53,7 @@ export const AGENT_PREFILLS_ACU = {
   planner: '{\n  "summary": "',
   reviewer: '{\n  "verdict": "',
   researcher: '{\n  "summary": "',
+  requirements: '{\n  "summary": "',
 } as const;
 
 /** 最终指导骨架，写进主 Agent 的协议规范段，约束 finalize 的 instruction 形态。 */
@@ -272,7 +273,7 @@ const ARC_ARCHITECT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【用户初始要求】（全书方向的最高目标来源；真实正文是既成事实来源，两者有张力时调整后续卷台阶，不能否认事实或静默丢弃用户目标）\n$USER_INTENT\n\n【完整当前阶段大纲】（与本次资料同一活动 revision；大纲是计划，不是已发生事实）\n$OUTLINE_WINDOW\n\n【事件概览】（纪要表最近 100 轮脉络，召回命中的行已展开为纪要全文、更早的命中轮前置展示；按剧情轮记录，与楼层号无一一映射，更早脉络用 $TABLE:纪要表:行区间 精读）\n$STORY_OVERVIEW\n\n【最近正文】\n$STORY_TAIL\n\n【故事总纲现状】（你维护的对象）\n$STORY_ARC\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：活跃 story 只有一条且包含目标、对抗、代价、期待和终局储备；卷数严格符合本次【总纲卷数计划】且各卷功能不重复；每卷都有主目标、主角选择、服务主线的副线、压力来源、中段变化、高潮兑现、不可逆结果和下一卷钩子；相邻卷由因果承接且升级层级不同；卷序列通过全书→逐卷、逐卷→路径、卷结果→全书三向核对；每条 volume upsert 都完整声明结构职责、阶段容量、故事时间、主线进度上限、持续经营线与兑现目标；done 卷逐项说明兑现证据和持续经营线去向，容量偏离时给出 completionRationale；status 恰有一条 active；stageNumbers 只有真实完成的阶段；台阶与正文兼容；retire 都有理由；expectedRevisions 若存在则与当前修订号一致。\n\n请开始。资料不足先用工具调阅，足够就直接交付契约 JSON。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（与本次资料同一活动 revision；大纲是计划，不是已发生事实）\n$OUTLINE_WINDOW\n\n【事件概览】（纪要表最近 100 轮脉络，召回命中的行已展开为纪要全文、更早的命中轮前置展示；按剧情轮记录，与楼层号无一一映射，更早脉络用 $TABLE:纪要表:行区间 精读）\n$STORY_OVERVIEW\n\n【最近正文】\n$STORY_TAIL\n\n【故事总纲现状】（你维护的对象）\n$STORY_ARC\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：活跃 story 只有一条且包含目标、对抗、代价、期待和终局储备；卷数严格符合本次【总纲卷数计划】且各卷功能不重复；每卷都有主目标、主角选择、服务主线的副线、压力来源、中段变化、高潮兑现、不可逆结果和下一卷钩子；相邻卷由因果承接且升级层级不同；卷序列通过全书→逐卷、逐卷→路径、卷结果→全书三向核对；每条 volume upsert 都完整声明结构职责、阶段容量、故事时间、主线进度上限、持续经营线与兑现目标；done 卷逐项说明兑现证据和持续经营线去向，容量偏离时给出 completionRationale；status 恰有一条 active；stageNumbers 只有真实完成的阶段；台阶与正文兼容；retire 都有理由；expectedRevisions 若存在则与当前修订号一致。\n\n请开始。资料不足先用工具调阅，足够就直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -326,7 +327,7 @@ const MAINTAINER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【未结算正文全量】（你要结算的对象，只含正文模型的楼层，未截断）\n$HISTORY_UNSETTLED\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【信息差时间线现状】\n$INFO_GAP\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致；任务里给出了轮目标时，summary 里写明了达成度判定。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【未结算正文全量】（你要结算的对象，只含正文模型的楼层，未截断）\n$HISTORY_UNSETTLED\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【信息差时间线现状】\n$INFO_GAP\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致；任务里给出了轮目标时，summary 里写明了达成度判定。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -374,7 +375,7 @@ const MAINLINE_PLANNER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；首条用户要求仅由【本次任务】裁剪传达）\n$OUTLINE_WINDOW\n\n【事件概览】（纪要表最近 50 轮脉络，召回命中的行已展开为纪要全文、更早的命中轮前置展示；按剧情轮记录，与楼层号无一一映射，更早脉络用 $TABLE:纪要表:行区间 精读）\n$STORY_OVERVIEW\n\n【最近正文】\n$STORY_TAIL\n\n【故事总纲】（建议必须落在当前 active 卷的台阶内）\n$STORY_ARC\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，世界观设定以世界书条目为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】先确认本轮 pacing，再应用对应方法；setup/cooldown 没有新危机、新敌对方、局势升级或强制钩子，允许主线 hold，但有具体动作、互动和状态变化；pressure/turn 才检查冲突或揭示；建议落在当前卷且没有提前翻底牌；没有引入未知实体或抽象判词。\n\n请开始策划。资料不足先用工具调阅，足够就直接交付契约 JSON。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；累计用户要求见上方清单）\n$OUTLINE_WINDOW\n\n【事件概览】（纪要表最近 50 轮脉络，召回命中的行已展开为纪要全文、更早的命中轮前置展示；按剧情轮记录，与楼层号无一一映射，更早脉络用 $TABLE:纪要表:行区间 精读）\n$STORY_OVERVIEW\n\n【最近正文】\n$STORY_TAIL\n\n【故事总纲】（建议必须落在当前 active 卷的台阶内）\n$STORY_ARC\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，世界观设定以世界书条目为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】先确认本轮 pacing，再应用对应方法；setup/cooldown 没有新危机、新敌对方、局势升级或强制钩子，允许主线 hold，但有具体动作、互动和状态变化；pressure/turn 才检查冲突或揭示；建议落在当前卷且没有提前翻底牌；没有引入未知实体或抽象判词。\n\n请开始策划。资料不足先用工具调阅，足够就直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -422,7 +423,7 @@ const BEAT_PLANNER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；首条用户要求仅由【本次任务】裁剪传达）\n$OUTLINE_WINDOW\n\n【最近正文】（情绪起点必须承接这里的结尾）\n$STORY_TAIL\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【信息差时间线现状】\n$INFO_GAP\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】先确认本轮 pacing；每条伏笔操作都对应真实条目且没有越过允许层级；setup/cooldown 没有真实伏笔义务时可以不操作，允许安静闭合或普通期待；信息差已完整揭示时允许结束，不自动制造替代谜团；情绪起点承接上一楼。\n\n请开始策划。资料不足先用工具调阅，足够就直接交付契约 JSON。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（固定注入，与本次资料同一活动 revision；箭头标出本轮，括号给出 pacing；累计用户要求见上方清单）\n$OUTLINE_WINDOW\n\n【最近正文】（情绪起点必须承接这里的结尾）\n$STORY_TAIL\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【信息差时间线现状】\n$INFO_GAP\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】先确认本轮 pacing；每条伏笔操作都对应真实条目且没有越过允许层级；setup/cooldown 没有真实伏笔义务时可以不操作，允许安静闭合或普通期待；信息差已完整揭示时允许结束，不自动制造替代谜团；情绪起点承接上一楼。\n\n请开始策划。资料不足先用工具调阅，足够就直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -470,7 +471,7 @@ const WEB_RESEARCHER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【用户初始要求】（判断这是哪部作品的同人、涉及哪些原作实体的第一来源）\n$USER_INTENT\n\n【已启用世界书目录】（作者已选定的设定；世界书已覆盖的内容不必再查，只补它没有的原作常识）\n$WORLDBOOK_CATALOG\n\n【表格目录】（角色表里已有的人名是检索清单的重要来源；需要时用 $TABLE:表名 精读）\n$TABLE_CATALOG\n\n【最近正文】\n$STORY_TAIL\n\n【百科资料库现状】（已有条目不要重复抓取；这里给的是摘要视图，原文用 $WEB_REFS:ID 精读）\n$WEB_REFS\n\n【出网工具与本次配额】\n$WEB_TOOL_CATALOG\n\n【本地资料读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：每条资料只对应一个实体且 name / brief 齐全；每条 upsert 的 pageRef 都在工具结果里出现过；detail 只含页面里有的内容且面向写作；没有把本故事剧情写成原作事实；与本故事无关的页面没有入库；retire 都带理由。\n\n请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【已启用世界书目录】（作者已选定的设定；世界书已覆盖的内容不必再查，只补它没有的原作常识）\n$WORLDBOOK_CATALOG\n\n【表格目录】（角色表里已有的人名是检索清单的重要来源；需要时用 $TABLE:表名 精读）\n$TABLE_CATALOG\n\n【最近正文】\n$STORY_TAIL\n\n【百科资料库现状】（已有条目不要重复抓取；这里给的是摘要视图，原文用 $WEB_REFS:ID 精读）\n$WEB_REFS\n\n【出网工具与本次配额】\n$WEB_TOOL_CATALOG\n\n【本地资料读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：每条资料只对应一个实体且 name / brief 齐全；每条 upsert 的 pageRef 都在工具结果里出现过；detail 只含页面里有的内容且面向写作；没有把本故事剧情写成原作事实；与本故事无关的页面没有入库；retire 都带理由。\n\n请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -478,6 +479,42 @@ const WEB_RESEARCHER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   {
     role: 'assistant',
     content: AGENT_PREFILLS_ACU.researcher,
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+];
+
+const REQUIREMENTS_MAINTAINER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
+  {
+    role: 'system',
+    content: '你是用户要求维护子代理。你的唯一职责是整理用户在 Agent 会话里对任务提过的要求，写入 $USER_REQUIREMENTS。\n你不写正文，不排大纲，不碰伏笔、信息差、年代学、总纲或百科资料库。你整理的是用户对任务的指示，不是小说已发生的事实。',
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+  {
+    role: 'user',
+    content: '说清楚你的整理规则和输出契约。',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'assistant',
+    content: '整理规则：\n1. 输入是被压缩范围内的实质用户发言，加上当前 $USER_REQUIREMENTS 快照。\n2. 我输出全量替换后的 requirements 数组，不是增量补丁。保留仍有效的旧条，并入新条，去掉被用户明确撤回或被更新条覆盖的旧条。\n3. 去重：语义相同只留一条，优先保留更具体、更晚近的表述。不设条数上限。\n4. 只收录对任务的要求、约束、偏好与方向；纯「继续/开始/resume」不含实质要求，不应单独成条。\n5. 没有依据时不得把清单清空：快照已有内容就必须在输出里保留或被明确替代。\n\n我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明合并了哪些要求、去掉了什么","requirements":["要求一","要求二"]}\n\n契约 JSON 之外我不输出任何文字。',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'user',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：requirements 是全量清单；每条都是非空字符串；语义重复已合并；没有把小说剧情写成用户要求；没有在缺少撤回依据时清空旧清单。\n\n请开始整理并交付契约 JSON。',
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+  {
+    role: 'assistant',
+    content: AGENT_PREFILLS_ACU.requirements,
     enabled: true,
     deletable: false,
     pinned: true,
@@ -511,7 +548,7 @@ const FINAL_REVIEWER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】（箭头标出本轮，括号给出 pacing）\n$OUTLINE_WINDOW\n\n【故事总纲】\n$STORY_ARC\n\n【最近正文】\n$STORY_TAIL\n\n【本轮世界书证据】（命中条目已注入全文；涉及人物、能力、地点、组织、种族、社会规则或世界常识时优先据此判断。证据不足先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读，不能凭印象判定）\n$WORLDBOOK_HITS\n\n【补充终审证据】\n$AGENT_READ_MATERIALS\n\n【待审候选指导】\n$AGENT_TASK\n\n按系统规则逐项输出 JSON：emotionFindings 覆盖每名在场角色的当前状态、心理、认知、行为预测、情绪和主动性；worldFindings 记录世界书或世界观证据与未验证项；logicFindings 覆盖控制权、信息、能力、世界规则、因果、当前 pacing 合规、低压轮正向功能、时间位置和适用的战斗附加项。不要写正文、不要修改大纲、不要展示思维链。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（箭头标出本轮，括号给出 pacing）\n$OUTLINE_WINDOW\n\n【故事总纲】\n$STORY_ARC\n\n【最近正文】\n$STORY_TAIL\n\n【本轮世界书证据】（命中条目已注入全文；涉及人物、能力、地点、组织、种族、社会规则或世界常识时优先据此判断。证据不足先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读，不能凭印象判定）\n$WORLDBOOK_HITS\n\n【补充终审证据】\n$AGENT_READ_MATERIALS\n\n【待审候选指导】\n$AGENT_TASK\n\n按系统规则逐项输出 JSON：emotionFindings 覆盖每名在场角色的当前状态、心理、认知、行为预测、情绪和主动性；worldFindings 记录世界书或世界观证据与未验证项；logicFindings 覆盖控制权、信息、能力、世界规则、因果、当前 pacing 合规、低压轮正向功能、时间位置和适用的战斗附加项。不要写正文、不要修改大纲、不要展示思维链。',
     enabled: true,
     deletable: true,
   },
@@ -551,7 +588,7 @@ const REVIEWER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【用户初始要求】\n$USER_INTENT\n\n【完整当前阶段大纲】（与本次资料同一活动 revision；大纲是计划，不是已发生事实）\n$OUTLINE_WINDOW\n\n【最近正文】（连续性核对的直接对象）\n$STORY_TAIL\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【长期约束】（合规核对的红线清单）\n$ACTIVE_CONSTRAINTS\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【待审查内容与任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：用户初始要求、完整阶段大纲、真实正文、长期约束与待审内容之间不存在冲突；每条疑虑都指名了注入资料或我调阅到的资料里的具体条目；没有把风格偏好当成连续性问题；block 只用于无法修正的硬冲突。\n\n请开始审查。需要核对的事实先用工具调阅，足够就直接交付契约 JSON。',
+    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】（与本次资料同一活动 revision；大纲是计划，不是已发生事实）\n$OUTLINE_WINDOW\n\n【最近正文】（连续性核对的直接对象）\n$STORY_TAIL\n\n【伏笔账本现状】\n$HOOKS_LEDGER\n\n【长期约束】（合规核对的红线清单）\n$ACTIVE_CONSTRAINTS\n\n【楼层索引】\n$STORY_CATALOG\n\n【已启用世界书目录】（每条已标注 token 开销，设定以世界书为准）\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【待审查内容与任务】\n$AGENT_TASK\n\n【写入权限】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：用户累计要求、完整阶段大纲、真实正文、长期约束与待审内容之间不存在冲突；每条疑虑都指名了注入资料或我调阅到的资料里的具体条目；没有把风格偏好当成连续性问题；block 只用于无法修正的硬冲突。\n\n请开始审查。需要核对的事实先用工具调阅，足够就直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -700,19 +737,33 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
     { hash: '23b29f8b', length: 1866, slot: 'outputContract', note: 'V22/V23 总纲输出契约（无 direction/escalation 微型弧要求）' },
     { hash: 'fcf65a8c', length: 688, slot: 'task', note: 'V22 总纲任务段（无用户初始要求与完整阶段大纲注入）' },
     { hash: 'bddf4a96', length: 828, slot: 'task', note: 'V23 总纲任务段（自检清单未含卷级容量项）' },
+    { hash: '87e7fe96', length: 934, slot: 'task', note: 'V28 总纲任务段（【用户初始要求】/$USER_INTENT）' },
   ],
-  maintainer: [],
+  maintainer: [
+    { hash: '1a711ac0', length: 516, slot: 'task', note: 'V28 结算任务段（尚未固定注入累计用户要求）' },
+  ],
   mainlinePlanner: [
     { hash: '11188ac7', length: 559, slot: 'task', note: 'V17–V22 主线策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
+    { hash: 'abacb6be', length: 631, slot: 'task', note: 'V23 主线策划任务段（首条用户要求仅由本次任务裁剪，无 $USER_REQUIREMENTS）' },
+    { hash: 'c21f99d9', length: 680, slot: 'task', note: 'V28 主线策划任务段（首条用户要求仅由本次任务裁剪）' },
   ],
   beatPlanner: [
     { hash: '4fd1fd54', length: 452, slot: 'task', note: 'V17–V22 节拍策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
+    { hash: '0aa00887', length: 524, slot: 'task', note: 'V23 节拍策划任务段（首条用户要求仅由本次任务裁剪，无 $USER_REQUIREMENTS）' },
+    { hash: 'abb5e7d2', length: 566, slot: 'task', note: 'V28 节拍策划任务段（首条用户要求仅由本次任务裁剪）' },
   ],
   reviewer: [
     { hash: '338b41a7', length: 452, slot: 'task', note: 'V17–V22 连续性审查任务段（无用户初始要求与完整阶段大纲注入）' },
+    { hash: '8f14e197', length: 573, slot: 'task', note: 'V28 连续性审查任务段（【用户初始要求】/$USER_INTENT）' },
   ],
-  finalReviewer: [],
-  webResearcher: [],
+  finalReviewer: [
+    { hash: '101fe8e2', length: 441, slot: 'task', note: 'V23 终审任务段（【用户初始要求】/$USER_INTENT，无 pacing 合规项）' },
+    { hash: '77d8980a', length: 487, slot: 'task', note: 'V28 终审任务段（【用户初始要求】/$USER_INTENT）' },
+  ],
+  webResearcher: [
+    { hash: '2d46cb2a', length: 606, slot: 'task', note: 'V28 网页检索任务段（【用户初始要求】/$USER_INTENT）' },
+  ],
+  requirementsMaintainer: [],
 };
 
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {
@@ -747,9 +798,13 @@ export function buildDefaultAgentWebResearcherPrompt_ACU(): ContinuationPromptSe
   return cloneAgentPromptSegments_ACU(WEB_RESEARCHER_PROMPT_ACU);
 }
 
+export function buildDefaultAgentRequirementsMaintainerPrompt_ACU(): ContinuationPromptSegment_ACU[] {
+  return cloneAgentPromptSegments_ACU(REQUIREMENTS_MAINTAINER_PROMPT_ACU);
+}
+
 /**
- * 构造全部八组 Agent 默认提示词。
- * @returns 八组提示词的深拷贝，可安全写入 settings
+ * 构造全部 Agent 默认提示词。
+ * @returns 各组提示词的深拷贝，可安全写入 settings
  */
 export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   return {
@@ -761,5 +816,6 @@ export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPro
     reviewer: buildDefaultAgentReviewerPrompt_ACU(),
     finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
     webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
+    requirementsMaintainer: buildDefaultAgentRequirementsMaintainerPrompt_ACU(),
   };
 }

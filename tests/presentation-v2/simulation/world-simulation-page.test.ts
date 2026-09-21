@@ -26,6 +26,7 @@ const send = vi.fn(async () => true);
 const stop = vi.fn(async () => undefined);
 const resume = vi.fn(async () => true);
 const saveSettings = vi.fn(async () => 'saved' as const);
+const saveUserRequirements = vi.fn(async () => true);
 const clearData = vi.fn(async () => true);
 const restorePromptDefault = vi.fn((draft: any) => draft);
 const parsePromptBundle = vi.fn();
@@ -42,7 +43,7 @@ const running = computed(() => snapshot.value?.session.running ?? false);
 vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
   useWorldSimulationRuntime: () => ({
     snapshot, ready, busy, error, envelope, task, settings, activeStage, activeRevision, anchor, anchorText, entries, running,
-    statusText, stageText, revisionText, refresh, send, stop, resume, saveSettings, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
+    statusText, stageText, revisionText, refresh, send, stop, resume, saveSettings, saveUserRequirements, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
   }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
@@ -62,6 +63,7 @@ function baseSnapshot(overrides: Record<string, unknown> = {}) {
     envelope: { ...buildDefaultWorldSimulationEnvelope_ACU(), settings: settings.value },
     conversation: { messages: [], nextId: 1, compaction: null, diagnostics: [] },
     materials: { snapshot: null, diagnostics: [], adoptedIndex: null },
+    userRequirements: { snapshot: null, diagnostics: [], adoptedIndex: null },
     session: { chatIdentity: 'chat-a', entries: [], running: false },
     anchor: { chatIdentity: 'chat-a', messageIndex: 0, messageId: 7, messageKey: 'number:7', swipeId: '0', contentDigest: 'd' },
     projectionPreview: null,

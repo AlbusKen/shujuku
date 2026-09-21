@@ -3,11 +3,11 @@ import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPreset
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
-import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
+import { findWorldSimulationAgentDefinition_ACU, WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationRequirementsMaintainerProtocolInstruction_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationDelegation_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationRequirementsMaintainerOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationRequirementsMaintainerProtocolRejection_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -25,6 +25,7 @@ export interface WorldSimulationSubagentRunInput_ACU {
   candidateSeq?: number;
 }
 export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; }
+export interface WorldSimulationRequirementsMaintainerResult_ACU { summary: string; requirements: string[]; }
 
 function candidate_ACU(
   result: Extract<WorldSimulationSpecialistResult_ACU, { status: 'candidate' }>,
@@ -79,7 +80,9 @@ export class WorldSimulationSubagentRuntime_ACU {
 
   async run(input: WorldSimulationSubagentRunInput_ACU): Promise<WorldSimulationSubagentOutcome_ACU> {
     const definition = findWorldSimulationAgentDefinition_ACU(input.delegation.agentName);
-    if (!definition || !['specialist', 'researcher'].includes(definition.kind)) throw new Error('WORLD_SIMULATION_DELEGATION_AGENT_INVALID');
+    if (!definition || !['specialist', 'researcher'].includes(definition.kind) || definition.name === WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU) {
+      throw new Error('WORLD_SIMULATION_DELEGATION_AGENT_INVALID');
+    }
     const agentName = definition.name;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
     const context = withTask_ACU(input.promptContext, { instruction: input.delegation.instruction, reads: input.delegation.reads }, undefined, definition.writableModules);
@@ -200,6 +203,70 @@ export class WorldSimulationSubagentRuntime_ACU {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
         if (!failure.retry) throw error;
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationReviewerProtocolRejection_ACU(failure.issue) });
+      }
+    }
+  }
+
+  async runRequirementsMaintainer(input: {
+    instruction: string;
+    settings: WorldSimulationSettings_ACU;
+    promptContext: WorldSimulationPlaceholderContext_ACU;
+    registry: WorldSimulationEvidenceRegistry_ACU;
+    tools: WorldSimulationToolDependencies_ACU;
+    runId: string;
+  }): Promise<WorldSimulationRequirementsMaintainerResult_ACU> {
+    const agentName = WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU;
+    const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
+    const context = withTask_ACU(input.promptContext, { instruction: input.instruction, reads: [] }, undefined, []);
+    const transcript: Array<{ role: string; content: string }> = [];
+    const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
+    const readGateState = createWorldSimulationReadGateState_ACU();
+    const toolUsage = { readsUsed: 0 };
+    let toolRounds = 0;
+    for (;;) {
+      const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
+      const requestContext = { ...context, evidenceRegistry: requestSnapshot };
+      const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+      const protocolGuard = { role: 'system', content: worldSimulationRequirementsMaintainerProtocolInstruction_ACU() };
+      const sent = await executeWorldSimulationFinalRequest_ACU({
+        messages: [...rendered.messages, protocolGuard, ...transcript],
+        historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+        count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+        invoke: value => this.dependencies.invoke(agentName, value, preset),
+      });
+      if (sent.status === 'rejected') throw new Error(sent.reason);
+      const raw = String(sent.response ?? '');
+      const calls = toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
+      if (calls) {
+        transcript.push({ role: 'assistant', content: raw || '(empty)' });
+        if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
+          transcript.push({ role: 'user', content: 'read/search 轮次已用尽，请依据现有证据输出最终 JSON。' });
+          continue;
+        }
+        toolRounds += 1;
+        const results = await runWorldSimulationToolBatch_ACU({
+          calls, registry: input.registry, dependencies: input.tools,
+          gate: {
+            state: readGateState,
+            config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+            usage: toolUsage,
+            maxReads: input.settings.agentRunBudget.maxReads,
+            count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+          },
+        });
+        transcript.push({ role: 'user', content: toolText_ACU(results) });
+        continue;
+      }
+      try {
+        const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['summary', 'requirements']);
+        return parseWorldSimulationRequirementsMaintainerOutput_ACU(payload);
+      } catch (error) {
+        const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+        if (!failure.retry) throw error;
+        transcript.push(
+          { role: 'assistant', content: raw || '(empty)' },
+          { role: 'user', content: renderWorldSimulationRequirementsMaintainerProtocolRejection_ACU(failure.issue) },
+        );
       }
     }
   }

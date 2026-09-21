@@ -112,17 +112,45 @@
     </template>
 
     <!-- 读取诊断 -->
-    <template v-else>
+    <template v-else-if="activeTab === 'diagnostics'">
       <p v-if="!diagnostics.length" class="acu-v2-ws-materials__empty">当前没有读取诊断。</p>
       <ul v-else class="acu-v2-ws-materials__diagnostics"><li v-for="item in diagnostics" :key="item">{{ item }}</li></ul>
+    </template>
+
+    <template v-else-if="activeTab === 'userRequirements'">
+      <p class="acu-v2-ws-materials__meta">
+        用户要求由 requirements-maintainer 在会话历史压缩后整理，创建任务时会把初始要求机械写成首条。
+        也可以在这里手动修正；保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
+      </p>
+      <p v-if="userRequirements.snapshot" class="acu-v2-ws-materials__meta">
+        条目 {{ userRequirements.snapshot.requirements.length }} 条
+      </p>
+      <p v-if="userRequirements.diagnostics.length" class="acu-v2-ws-materials__error">{{ userRequirements.diagnostics.join('；') }}</p>
+      <p v-if="!userRequirements.snapshot?.requirements.length" class="acu-v2-ws-materials__empty">
+        还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。
+      </p>
+      <ol v-else class="acu-v2-ws-materials__list">
+        <li v-for="(line, index) in userRequirements.snapshot.requirements" :key="`${index}-${line}`">{{ line }}</li>
+      </ol>
+      <details class="acu-v2-ws-materials__json">
+        <summary>编辑原始 JSON</summary>
+        <p class="acu-v2-ws-materials__card-meta">必须是字符串数组，例如 ["不要提前揭底牌","继续用第一人称"]。空数组表示清空；空串条目会被拒绝。</p>
+        <AcuTextarea :model-value="requirementsDraft" :rows="10" @update:model-value="updateRequirementsDraft" />
+        <p v-if="requirementsError" class="acu-v2-ws-materials__error">{{ requirementsError }}</p>
+        <div class="acu-v2-ws-materials__actions">
+          <AcuButton :disabled="!requirementsDirty" @click="discardRequirementsDraft">放弃修改</AcuButton>
+          <AcuButton variant="primary" :loading="busy" :disabled="!requirementsDirty" @click="saveRequirementsDraft">保存用户要求</AcuButton>
+        </div>
+      </details>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
-import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import AcuTextarea from './_lib/AcuTextarea.vue';
+import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationLedger_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
@@ -131,6 +159,7 @@ import { buildWorldChronicleContrast_ACU, buildWorldMissedList_ACU, buildWorldRu
 const props = withDefaults(defineProps<{
   conversation: WorldSimulationConversationView_ACU;
   materials: WorldSimulationMaterialsReadResult_ACU;
+  userRequirements: WorldSimulationUserRequirementsReadResult_ACU;
   session: WorldSimulationSessionEntry_ACU[];
   ledger: WorldSimulationLedger_ACU | null;
   anchor: WorldSimulationAnchorIdentity_ACU | null;
@@ -138,10 +167,14 @@ const props = withDefaults(defineProps<{
   busy?: boolean;
   timeline?: WorldSimulationTimelineEntry_ACU[];
 }>(), { busy: false, timeline: () => [] });
-const emit = defineEmits<{ (event: 'refresh' | 'clear'): void }>();
+const emit = defineEmits<{
+  (event: 'refresh' | 'clear'): void;
+  (event: 'saveUserRequirements', requirements: unknown): void;
+}>();
 
 const TABS = [
   { id: 'state', label: '世界状态' },
+  { id: 'userRequirements', label: '用户要求' },
   { id: 'candidates', label: '候选轨迹' },
   { id: 'chronicle', label: '编年对照' },
   { id: 'missed', label: '错过清单' },
@@ -153,6 +186,46 @@ const TABS = [
 type TabId = typeof TABS[number]['id'];
 const activeTab = ref<TabId>('state');
 const clearPending = ref(false);
+const requirementsDraft = ref('[]');
+const requirementsDirty = ref(false);
+const requirementsError = ref('');
+
+function snapshotRequirementsJson(): string {
+  return JSON.stringify(props.userRequirements.snapshot?.requirements ?? [], null, 2);
+}
+
+watch(() => props.userRequirements.snapshot, () => {
+  if (requirementsDirty.value) return;
+  requirementsDraft.value = snapshotRequirementsJson();
+  requirementsError.value = '';
+}, { immediate: true });
+
+function updateRequirementsDraft(value: string): void {
+  requirementsDraft.value = value;
+  requirementsDirty.value = value !== snapshotRequirementsJson();
+  requirementsError.value = '';
+}
+
+function discardRequirementsDraft(): void {
+  requirementsDraft.value = snapshotRequirementsJson();
+  requirementsDirty.value = false;
+  requirementsError.value = '';
+}
+
+function saveRequirementsDraft(): void {
+  try {
+    const parsed: unknown = JSON.parse(requirementsDraft.value);
+    if (!Array.isArray(parsed) || parsed.some(item => typeof item !== 'string')) {
+      requirementsError.value = '必须是字符串数组';
+      return;
+    }
+    emit('saveUserRequirements', parsed);
+    requirementsDirty.value = false;
+    requirementsError.value = '';
+  } catch {
+    requirementsError.value = 'JSON 无法解析';
+  }
+}
 
 function confirmClear(): void {
   clearPending.value = false;
@@ -290,6 +363,10 @@ function rumorMeta(item: WorldRumorQueueItem_ACU): string {
 .acu-v2-ws-materials__card-meta { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word; }
 .acu-v2-ws-materials__meta { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
 .acu-v2-ws-materials__empty { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-ws-materials__error { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-ws-materials__json { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; }
+.acu-v2-ws-materials__json > summary { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-ws-materials__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .acu-v2-ws-materials__list { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-ws-materials__projection { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word; }
 .acu-v2-ws-materials__diagnostics { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }

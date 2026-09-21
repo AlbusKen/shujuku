@@ -265,6 +265,23 @@ export function useWorldSimulationRuntime() {
     }
   }
 
+  async function saveUserRequirements(requirements: unknown): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    try {
+      await runtime.saveUserRequirements(requirements);
+      refresh();
+      toast.success('已保存用户要求。');
+      return true;
+    } catch (cause) {
+      toast.error(errorMessage_ACU(cause), { muteable: false });
+      refresh();
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
   /**
    * 一键清空：丢弃任务、账本、会话记录与各楼层资料快照，正文与已写入正文的 <与此同时> 段不动。
    * @returns 是否清空成功
@@ -356,6 +373,7 @@ export function useWorldSimulationRuntime() {
     stop,
     resume,
     saveSettings,
+    saveUserRequirements,
     clearData,
     restorePromptDefault,
     parsePromptBundle,

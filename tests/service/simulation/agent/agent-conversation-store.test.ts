@@ -6,6 +6,7 @@ import {
   appendWorldSimulationUserInstruction_ACU,
   nextWorldSimulationUserInstructionSegmentId_ACU,
   readWorldSimulationConversation_ACU,
+  writeWorldSimulationConversationCompaction_ACU,
 } from '../../../../src/service/simulation/agent/agent-conversation-store';
 import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simulation/simulation-store';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
@@ -301,6 +302,18 @@ describe('world simulation conversation segments', () => {
     });
     expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(previous);
     expect(readWorldSimulationConversation_ACU(chat).messages).toHaveLength(1);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('楼层没有会话段时压缩标记拒绝落盘，不造空消息段', async () => {
+    const chat: any[] = [{ message_id: 1, mes: 'one', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    await expect(writeWorldSimulationConversationCompaction_ACU({
+      anchor,
+      compaction: { compactedThroughId: 1, report: '早期会话交接报告', at: 1 },
+    }, chat)).resolves.toBe(false);
+    expect(chat[0][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeUndefined();
     expect(saveChat).not.toHaveBeenCalled();
   });
 

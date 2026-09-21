@@ -12,6 +12,8 @@ export interface WorldSimulationPlaceholderContext_ACU {
   toolCatalog: unknown;
   evidence: unknown;
   userGuidance: unknown;
+  userRequirements?: unknown;
+  originInstruction?: string;
   worldState: unknown;
   anchorMessage: unknown;
   anchorIdentity: unknown;
@@ -55,6 +57,7 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     }),
     '$WORLD_EVIDENCE': () => serialize_ACU(context.evidence),
     '$WORLD_USER_GUIDANCE': () => serialize_ACU(context.userGuidance),
+    '$WORLD_USER_REQUIREMENTS': () => serialize_ACU(context.userRequirements ?? context.userGuidance),
     '$WORLD_STATE': () => {
       if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
         const catalog = buildInUseWorldCatalog_ACU(context.worldState);

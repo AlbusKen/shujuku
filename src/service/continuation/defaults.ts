@@ -39,6 +39,12 @@ export const V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU = '初始要求：\n$ORIGIN
  */
 export const V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU = '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n【长期约束】（用户与主控登记的红线与偏好，规划必须遵守）：\n$ACTIVE_CONSTRAINTS\n\n【伏笔账本】（已进入正文的伏笔及其状态；轮目标里的埋设/强化/误导/回收只能针对这里的条目或明确的新埋设）：\n$HOOKS_LEDGER\n\n【信息差时间线】（客观事实、读者已知与各角色知晓状态；“允许揭示到哪一层”以此为基准）：\n$INFO_GAP\n\n【故事年代学账本】（已发生正文结算出的时间事实；每轮的 time 与 anchor 必须与当前时间锚相容）：\n$CHRONOLOGY\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。';
 
+/** V29 大纲上下文段：开头两行改为累计用户要求，其余与 V27 相同。 */
+export const V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU = V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU.replace(
+  '初始要求：\n$ORIGIN_INSTRUCTION',
+  '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS',
+);
+
 /** V24 长篇日常契约：给低压轮独立的正向义务，并显式要求规划故事时间。 */
 export const V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU = '【真正日常、主线停驻与故事时间】\n真正日常不是“危机暂时没发生”，而是角色在世界中持续生活。setup 轮至少承担一种独立功能：关系日常（共同生活与相处模式变化）、世界日常（饮食、职业、交通、制度、节庆或交易）、成长日常（训练、学习、劳动或恢复产生积累）、经营日常（资源、生产与消费发生变化）、支线日常（暂不引爆主线但以后会反作用于主线）、时间过渡（让一夜、数日或数周合理流逝）。\n\n战前讨论、等待下一次行动、采购武器或突然发现敌情仍是冲突链的附属间隙，不能冒充真正日常。setup 与 cooldown 允许主线保持不动：不推进核心矛盾、不揭示重大情报、不制造敌方动作，这不是失败；但必须通过具体场景动作与人物互动，让关系、生活状态、世界理解、资源积累、身体恢复或人物认知至少发生一项可观察变化。\n\n连续发生不再是默认答案。规划每轮时必须判断它与上一轮是紧接、同日稍后、隔夜、数日后还是更久；没有必须立即处理的危机时，应主动考虑让故事时间自然流逝。若 buildup 或 aftermath 阶段所有轮都挤在同一天，轮目标必须说明为何不能跨夜或跨日。发生时间跳跃时，在目标里写清新的相对时间锚，并点出环境、身体、关系、资源或社会状态中的两项可感知变化。\n\n低压轮的完成标准是“场景动作 + 人物互动 + 状态变化”，不是流水账；允许安静闭合或留下普通生活期待，不强制制造危机钩子。';
 
@@ -87,7 +93,7 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU,
+    content: V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU,
     enabled: true,
     deletable: true,
   },
@@ -194,6 +200,11 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU = 'spv3.5-continu
  * V28 maps every known historical default segment to its current slot and restores missing task segments.
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU = 'spv3.6-continuation-default-lineage-v28';
+/**
+ * V29 把默认注入从「初始要求 / $USER_INTENT / $ORIGIN_INSTRUCTION」换成累计用户要求
+ * `$USER_REQUIREMENTS`。未改写的默认段按谱系哈希替换；用户定制段保留。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU = 'spv3.7-continuation-user-requirements-v29';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -281,7 +292,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU,
   };
 }
 

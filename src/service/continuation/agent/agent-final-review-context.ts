@@ -58,9 +58,10 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
     supplementalMaterials,
     worldbookEvidence,
     worldbookSeeds,
-    fixedReadKeys: unique_ACU(['$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY']),
+    fixedReadKeys: unique_ACU(['$USER_INTENT', '$USER_REQUIREMENTS', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY']),
     gateItems: [
       { label: '用户初始要求', text: context.originInstruction || '（用户未提供初始要求）' },
+      { label: '用户累计要求', text: resolveAgentReadToken_ACU('$USER_REQUIREMENTS', context).text },
       { label: '本轮用户输入', text: input.currentUserInput || '（本轮没有额外用户输入）' },
       { label: '候选写作指导', text: input.candidateInstruction },
       { label: '完整当前阶段大纲', text: outline },

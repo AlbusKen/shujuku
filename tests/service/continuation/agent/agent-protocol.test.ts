@@ -10,6 +10,7 @@ import {
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
+  parseAgentRequirementsMaintainerOutput_ACU,
 } from '../../../../src/service/continuation/agent/agent-protocol';
 import { AGENT_PREFILLS_ACU } from '../../../../src/service/continuation/agent/agent-defaults';
 
@@ -256,6 +257,25 @@ describe('子代理输出解析', () => {
     expect(parseAgentReviewerOutput_ACU({ verdict: 'revise', reason: '与 H1 冲突', fixes: ['改为部分回收'] }))
       .toMatchObject({ verdict: 'revise', fixes: ['改为部分回收'] });
     expect(() => parseAgentReviewerOutput_ACU({ verdict: '说不清' })).toThrowError(/verdict 必须是/);
+  });
+});
+
+describe('用户要求维护子代理契约', () => {
+  it('接受空数组与去重后的全量清单，拒绝空串和非字符串', () => {
+    expect(parseAgentRequirementsMaintainerOutput_ACU({
+      summary: '合并了用户补充的节奏要求',
+      requirements: ['  不要提前揭底牌  ', '不要提前揭底牌', '用第一人称'],
+    })).toEqual({
+      summary: '合并了用户补充的节奏要求',
+      requirements: ['不要提前揭底牌', '用第一人称'],
+    });
+    expect(parseAgentRequirementsMaintainerOutput_ACU({ summary: '暂无新要求', requirements: [] })).toEqual({
+      summary: '暂无新要求',
+      requirements: [],
+    });
+    expect(() => parseAgentRequirementsMaintainerOutput_ACU({ summary: '', requirements: [] })).toThrowError(/非空 summary/);
+    expect(() => parseAgentRequirementsMaintainerOutput_ACU({ summary: '坏条目', requirements: ['合法', ''] })).toThrowError(/requirements/);
+    expect(() => parseAgentRequirementsMaintainerOutput_ACU({ summary: '坏类型', requirements: '不是数组' })).toThrowError(/requirements/);
   });
 });
 
