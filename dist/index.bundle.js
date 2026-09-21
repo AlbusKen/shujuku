@@ -4276,6 +4276,23 @@ $CONTENT
         const store = getConfigStorage_ACU();
         store.setItem(getProfileTemplateKey_ACU(code), String(templateStr || ''));
     }
+    /**
+     * 删除非默认隔离标签对应的设置与表格模板。
+     *
+     * 空标识代表默认 Profile，必须保留；调用方只应传入待退役的旧隔离码。
+     */
+    function deleteProfileFromStorage_ACU(code) {
+        const normalizedCode = normalizeIsolationCode_ACU(code);
+        if (!normalizedCode) {
+            throw new Error('不能删除默认 Profile。');
+        }
+        const store = getConfigStorage_ACU();
+        if (!store || typeof store.removeItem !== 'function') {
+            throw new Error('当前配置存储不支持删除 Profile。');
+        }
+        store.removeItem(getProfileSettingsKey_ACU(normalizedCode));
+        store.removeItem(getProfileTemplateKey_ACU(normalizedCode));
+    }
     function saveCurrentProfileTemplate_ACU(templateStr, settings) {
         const tpl = templateStr !== undefined ? templateStr : TABLE_TEMPLATE_ACU;
         const code = normalizeIsolationCode_ACU(settings?.dataIsolationCode || '');
@@ -51258,6 +51275,10 @@ $CONTENT
      */
     const SUMMARY_VECTOR_SOURCE_TEXT_MAX_CHARS_ACU = 1600;
     const SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU = ['纪要', '纪要内容', '纪要正文', '事件纪要', '详细纪要', '正文'];
+    const SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU = ['时间跨度', '时间', '阶段', '时段'];
+    const SUMMARY_LOCATION_COLUMN_ALIASES_ACU = ['地点', '位置', '场景', '场所'];
+    const SUMMARY_SUMMARY_COLUMN_ALIASES_ACU = ['概要', '概览', '概述', '摘要'];
+    const SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU = ['编码索引'];
     /**
      * 概览在前保住高密度摘要信号，纪要正文补充实体与细节；两者都为空的行由调用方跳过。
      */
@@ -51490,10 +51511,10 @@ $CONTENT
     function buildPreparedRows_ACU(table, summaryKey) {
         const content = Array.isArray(table?.content) ? table.content : [];
         const headerRow = Array.isArray(content[0]) ? content[0] : [];
-        const timeSpanColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['时间跨度', '时间', '阶段', '时段'], 0);
-        const locationColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['地点', '位置', '场景', '场所'], 1);
-        const summaryColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['概要', '概览', '概述', '摘要']);
-        const indexColIdx = resolveColumnIndexByAliases_ACU(headerRow, ['编码索引']);
+        const timeSpanColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU, 0);
+        const locationColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_LOCATION_COLUMN_ALIASES_ACU, 1);
+        const summaryColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_SUMMARY_COLUMN_ALIASES_ACU);
+        const indexColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU);
         const chronicleColIdx = resolveColumnIndexByAliases_ACU(headerRow, SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU);
         if (summaryColIdx < 0) {
             return { rows: [], skippedRowCount: 0, error: '纪要表缺少概要列，无法构建纪要向量索引。' };
@@ -57482,6 +57503,26 @@ $CONTENT
         }
         return headRevision;
     }
+    function resolveMutationParentRevision_ACU(frame, parentChainChat, isolationKey, explicit) {
+        if (explicit !== undefined)
+            return explicit;
+        if (typeof frame.headRevision === 'string' && frame.headRevision.length > 0) {
+            return frame.headRevision;
+        }
+        // 必须用写前候选历史：replacement 会先 purge 范围内增量，原始 chat 仍残留
+        // 即将删除的 headRevision。若在这里回退到原始 chat，新 entry 会把已裁掉的
+        // commitRevision 当成 parent（#18 问题二的反向：dangling parent）。
+        const latestHead = getLatestTableStorageHeadRevisionV2_ACU(parentChainChat, isolationKey);
+        return latestHead && latestHead.length > 0 ? latestHead : null;
+    }
+    function isImportDataReplaceBootstrap_ACU(source, operations) {
+        if (source !== 'import' || operations.length === 0)
+            return false;
+        return operations.every(operation => (operation?.kind === 'data_replace'
+            && operation.data
+            && typeof operation.data === 'object'
+            && !Array.isArray(operation.data)));
+    }
     /**
      * 按楼层正序收集同一隔离键下全部 full checkpoint 的 message index。
      *
@@ -58831,12 +58872,14 @@ $CONTENT
         //
         // 这条对所有 source 一致：导入只可能带来「现有没有的表」，
         // 同一张表的差异只是列，新增列按空处理，不需要另立基线。
+        const importDataReplaceBootstrap = isImportDataReplaceBootstrap_ACU(options.source, operations);
         const shouldCheckpoint = !hasCheckpointAnywhere
             && !isManualRefillProgressOnly
             && (temporaryBaselineUpgrade
                 || initialCheckpointReason === 'init'
-                || initialCheckpointReason === 'migration');
-        if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade) {
+                || initialCheckpointReason === 'migration'
+                || initialCheckpointReason === 'import');
+        if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade && !importDataReplaceBootstrap) {
             return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
         }
         const targetExistingTagData = cloneIsolatedData_ACU(target.message)?.[isolationKey];
@@ -58915,9 +58958,11 @@ $CONTENT
         if (shouldCheckpoint) {
             const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
             const checkpointEvent = {
-                filledSheetKeys,
+                // import bootstrap 是灾备快照，不是填表完成事件。filledSheetKeys/groupKeys
+                // 会让 table-history 把恢复所在楼层当成已追平前沿（#18 问题五）。
+                filledSheetKeys: importDataReplaceBootstrap ? [] : filledSheetKeys,
                 changedSheetKeys: effectiveChangedSheetKeys,
-                groupKeys: options.groupKeys || [],
+                groupKeys: importDataReplaceBootstrap ? [] : (options.groupKeys || []),
                 requestId: options.requestId,
                 batchId: options.batchId,
                 error: options.error,
@@ -58951,6 +58996,27 @@ $CONTENT
                 }
             }
             logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
+            if (importDataReplaceBootstrap) {
+                const parentRevision = resolveMutationParentRevision_ACU(frame, preWriteChat, isolationKey);
+                entry = appendMutationLogEntry_ACU(frame, {
+                    seq: 1,
+                    createdAt: now,
+                    source: options.source,
+                    targetMessageIndex: target.index,
+                    aiFloor,
+                    filledSheetKeys: [],
+                    changedSheetKeys: effectiveChangedSheetKeys,
+                    groupKeys: [],
+                    requestId: options.requestId,
+                    batchId: options.batchId,
+                    error: options.error,
+                    operations,
+                    baseRevision: requestedBaseRevision ?? parentRevision,
+                    parentRevision,
+                    writeSet: currentWriteSet,
+                });
+                logDebug_ACU(`[V2 Persist] 初始 import checkpoint 追加 data_replace log: messageIndex=${target.index}, seq=${entry.seq}, revision=${entry.commitRevision}`);
+            }
         }
         else if (shouldAppendLogEntry) {
             // 目标表必须在追加 operation 前的 active replay state 中真实存在。仅仅曾在历史
@@ -59046,7 +59112,7 @@ $CONTENT
                 }
             }
             const nextSeq = Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)) + 1;
-            const parentRevision = options.parentRevision !== undefined ? options.parentRevision : (frame.headRevision ?? null);
+            const parentRevision = resolveMutationParentRevision_ACU(frame, preWriteChat, isolationKey, options.parentRevision);
             entry = appendMutationLogEntry_ACU(frame, {
                 seq: nextSeq,
                 createdAt: now,
@@ -59362,7 +59428,7 @@ $CONTENT
             }
             const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
             const entryId = generateEntryId_ACU();
-            const parentRevision = frame.headRevision ?? null;
+            const parentRevision = resolveMutationParentRevision_ACU(frame, candidateChat, isolationKey);
             const entry = {
                 seq: nextSeq,
                 entryId,
@@ -62565,11 +62631,16 @@ $CONTENT
             catch (e) {
                 logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
             }
-            const persistedOperations = strategy.mode === 'empty' ? [] : operations;
+            const persistSource = source || (metadataOnlyUpdateGroupKeys.length > 0 ? 'group_fill' : 'system');
+            // empty 只表示聊天里还没有 V2 帧。首次真实填表才剥 operations、写 init 快照。
+            // Checkpoint 恢复/导入同样会在 clear 之后走到 empty，但必须保留 data_replace，
+            // 否则落盘只剩 reason=init、logEntries=[]，F5 一旦剥空 checkpoint.data 就无法回放。
+            const treatAsEmptyBootstrap = strategy.mode === 'empty' && persistSource !== 'import';
+            const persistedOperations = treatAsEmptyBootstrap ? [] : operations;
             const persistV2InTransaction = async (transactionContext) => {
                 const result = await persistTableMutationLogV2_ACU({
                     targetMessageIndex,
-                    source: source || (metadataOnlyUpdateGroupKeys.length > 0 ? 'group_fill' : 'system'),
+                    source: persistSource,
                     afterData: effectiveTableData,
                     operations: persistedOperations,
                     filledSheetKeys,
@@ -62577,8 +62648,8 @@ $CONTENT
                     groupKeys: metadataOnlyUpdateGroupKeys,
                     requestId,
                     batchId,
-                    forceCheckpoint: forceCheckpoint === true || strategy.mode === 'empty',
-                    checkpointReason: checkpointReason || (strategy.mode === 'empty' ? 'init' : undefined),
+                    forceCheckpoint: forceCheckpoint === true || treatAsEmptyBootstrap,
+                    checkpointReason: checkpointReason || (treatAsEmptyBootstrap ? 'init' : undefined),
                     manualRefillProgress,
                     replaceExistingIncremental,
                     isolationKey: currentIsolationKey,
@@ -70984,8 +71055,9 @@ $CONTENT
             return;
         }
         logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
+        let nextProvider = null;
         try {
-            const nextProvider = createProvider(mode);
+            nextProvider = createProvider(mode);
             const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
             logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
             if (mode === 'sqlite') {
@@ -70993,18 +71065,30 @@ $CONTENT
                 if (failure) {
                     logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${failure}`);
                     nextProvider.dispose();
+                    nextProvider = null;
                     replaceActiveProvider_ACU(createProvider('native'));
+                    setRuntimeHealth_ACU({
+                        status: 'degraded', expectedMode: mode, activeMode: 'native', source: result.source,
+                        failureCode: 'provider_fallback', error: failure,
+                    });
                     throw new Error(`SQLite 模式切换失败: ${failure}。已自动回退到原生模式。`);
                 }
             }
             replaceActiveProvider_ACU(nextProvider);
+            nextProvider = null;
+            setRuntimeHealth_ACU({ status: 'ready', expectedMode: mode, activeMode: mode, source: result.source });
         }
         catch (e) {
             if (e.message?.includes('已自动回退'))
                 throw e;
             logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
+            nextProvider?.dispose();
             if (mode === 'sqlite') {
                 replaceActiveProvider_ACU(createProvider('native'));
+                setRuntimeHealth_ACU({
+                    status: 'degraded', expectedMode: mode, activeMode: 'native',
+                    failureCode: 'provider_fallback', error: e?.message || String(e),
+                });
             }
             throw e;
         }
@@ -112548,16 +112632,19 @@ $CONTENT
                         performanceParentSpanId: options.performanceParentSpanId,
                     });
                     if (applyResult.success) {
-                        const nextCommittedBucketCount = committedBucketCount + 1;
-                        options.onBucketCommitted?.({
-                            saveTargetIndex: bucket.saveTargetIndex,
-                            messageIndices: replacementMessageIndices,
-                            sheetKeys: replacementSheetKeys,
-                            committedBucketCount: nextCommittedBucketCount,
-                        });
                         emitBucketProgress(bucketIndex, { phase: 'complete' });
                         bucketSucceeded = true;
-                        committedBucketCount = nextCommittedBucketCount;
+                        // progress-only / 空操作成功不能算「已提交 bucket」：toast 的已保留数必须对应实质改表。
+                        if (applyResult.modifiedKeys.length > 0) {
+                            const nextCommittedBucketCount = committedBucketCount + 1;
+                            options.onBucketCommitted?.({
+                                saveTargetIndex: bucket.saveTargetIndex,
+                                messageIndices: replacementMessageIndices,
+                                sheetKeys: replacementSheetKeys,
+                                committedBucketCount: nextCommittedBucketCount,
+                            });
+                            committedBucketCount = nextCommittedBucketCount;
+                        }
                         break;
                     }
                     const safeApplyError = sanitizeRetryFeedback_ACU(applyResult.error || '统一提交失败。', MAX_WARN_ERROR_LENGTH_ACU);
@@ -114313,6 +114400,35 @@ $CONTENT
             return { blockedError: `手动重填被锚点预检阻断（自动收敛后仍未通过）：${postViolation}`, healed: false };
         return { blockedError: null, healed: true };
     }
+    function cloneJsonValue_ACU(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function snapshotMessageIsolatedData_ACU(chat, messageIndices) {
+        return messageIndices.map((index) => {
+            const message = Array.isArray(chat) ? chat[index] : null;
+            const present = Boolean(message && typeof message === 'object'
+                && Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'));
+            return {
+                index,
+                present,
+                isolatedData: present ? cloneJsonValue_ACU(message.TavernDB_ACU_IsolatedData) : undefined,
+            };
+        });
+    }
+    function restoreMessageIsolatedData_ACU(chat, backup) {
+        if (!Array.isArray(chat) || backup.length === 0)
+            return;
+        for (const item of backup) {
+            const message = chat[item.index];
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!item.present) {
+                delete message.TavernDB_ACU_IsolatedData;
+                continue;
+            }
+            message.TavernDB_ACU_IsolatedData = cloneJsonValue_ACU(item.isolatedData);
+        }
+    }
     /**
      * 手动更新编排（纯业务逻辑）
      * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
@@ -114333,18 +114449,28 @@ $CONTENT
         let stagingRun = null;
         let stagingSession = null;
         let boundaryCommitted = false;
-        // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
-        // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
+        // 破坏性清理是否已开始。零提交失败会恢复清理前 IsolatedData；一旦已有 bucket
+        // 落盘，就不再回滚清理，只按已提交事实对齐运行时（#18 问题四）。
         let refillCleanupStarted = false;
+        let refillCleanupBackup = null;
         let manualRefillSummarySourceTableKeys = [];
-        // 手动重填失败语义（计划 §5.5 / §5.6，已删除旧 snapshot/rollback 机制）：
-        // 破坏性清理不可逆，失败绝不回滚、绝不恢复已删数据；已提交的 bucket 成果保留，
-        // 仅按聊天记录里的已提交事实重新对齐运行时快照，避免界面显示与持久化不一致。
-        // 手动追平/自动填表路径的 staging 汇合失败会自行返回 integrity_failed，不在此回滚。
         const failManualRefillSession = async (failureError) => {
-            // 清理失败或 bucket 失败后：运行时快照可能停在中间态，必须按聊天记录里的
-            // 已提交事实重新同步，否则界面会显示与持久化结果不一致的数据。
-            // 不回滚、不恢复已删数据；已提交成果保留。
+            if (committedBucketCount === 0 && refillCleanupBackup) {
+                try {
+                    restoreMessageIsolatedData_ACU(getChatArray_ACU(), refillCleanupBackup);
+                    await saveChatToHostStrict_ACU();
+                }
+                catch (restoreError) {
+                    logError_ACU('[Manual Refill] 零提交失败后恢复清理前数据失败:', restoreError);
+                    try {
+                        await refreshData();
+                    }
+                    catch (refreshError) {
+                        logWarn_ACU('[Manual Refill] 恢复失败后刷新运行时数据失败:', refreshError);
+                    }
+                    return { success: false, error: failureError };
+                }
+            }
             try {
                 await loadAllChatMessages_ACU();
                 await refreshData();
@@ -114494,17 +114620,26 @@ $CONTENT
             if (manualRefillEnabled) {
                 const currentIsolationKey = getCurrentIsolationKey_ACU();
                 const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
+                const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
+                const canStageAcrossReplayRoot = originalFullIndex >= 0
+                    && contextScopeIndices.length > 0
+                    && contextScopeIndices[0] < originalFullIndex;
                 // Task 4 破坏性清理前准入：重填会先清空范围内旧数据，若最新 full checkpoint
                 // 晚于重填范围末尾，清理后写入目标早于回放根，必然撞 persist 层 fail-fast。
                 // 必须在删除任何数据前阻止，避免用户数据先被清空才报错。
+                // 例外：范围首个目标已早于根时，后面的跨根 staging 会把边界前 bucket 改成
+                // stage_only，不写聊天帧；这时硬阻断会把「跳过最新回复后重填更早楼层」做成无解。
                 const refillAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
                     chat: liveChat,
                     isolationKey: currentIsolationKey,
                     targetMessageIndex: refillTargetIndex,
                 });
-                if (!refillAdmission.allow) {
+                if (!refillAdmission.allow && !canStageAcrossReplayRoot) {
                     logDebug_ACU(`[手动重填准入] 阻断：${refillAdmission.reason}（refillTarget=${refillTargetIndex}, isolationKey=[${currentIsolationKey || '无标签'}]）。`);
                     return { success: false, error: `手动重填被回放根准入阻断${refillAdmission.reason}` };
+                }
+                if (!refillAdmission.allow && canStageAcrossReplayRoot) {
+                    logDebug_ACU(`[手动重填准入] 写目标早于回放根，改走跨根 staging：${refillAdmission.reason}（refillTarget=${refillTargetIndex}, originalFull=${originalFullIndex}）。`);
                 }
                 // 跨根 staging 判定：重填范围首个目标早于原 full checkpoint 时，
                 // 中间 bucket 若按普通 persist 写入会撞 persist 层 fail-fast（写目标早于回放根）。
@@ -114513,8 +114648,7 @@ $CONTENT
                 // staging 的「原 full 边界」前提在清理后消失，汇合必以 full_checkpoint_root_mismatch
                 // fail-closed。此时禁用 staging，改走普通路径 + 清理后临时根前置，由末尾
                 // commitManualRefillSheetSnapshotInRangeAtomic_ACU 以既有 fallbackRequired 分支重建根。
-                const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
-                let requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+                let requiresBoundaryStaging = canStageAcrossReplayRoot;
                 if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
                     // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
                     // sheet 键集合是否被 targetKeys 全量覆盖）。空 data 的 full 同样会被
@@ -114576,15 +114710,14 @@ $CONTENT
                     manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
                     // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
                     summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
-                    // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
+                    refillCleanupBackup = snapshotMessageIsolatedData_ACU(getChatArray_ACU(), contextScopeIndices);
                     refillCleanupStarted = true;
                     await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
                 }
                 catch (error) {
                     logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
                     const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
-                    // 清理已部分发生且不可逆：不回滚、不恢复已删数据，直接失败返回。
-                    return { success: false, error: failureError };
+                    return await failManualRefillSession(failureError);
                 }
                 logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
                 // 手动重填临时根前置：全范围 + 全选表清理会删除范围内唯一整库 full checkpoint，
@@ -114618,7 +114751,7 @@ $CONTENT
                 catch (error) {
                     logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                     const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                    return { success: false, error: failureError };
+                    return await failManualRefillSession(failureError);
                 }
                 // 按清表前拍下的 head 发布剩余行。禁止按 reload 后的空模板表重建，
                 // 否则会写出 dimension=0 的非法 vector_full，后续 persist 在 #0 失败。
@@ -114990,7 +115123,6 @@ $CONTENT
             }
             const failureError = error?.message || String(error || '手动更新执行异常。');
             logError_ACU('[Manual Update] 执行过程中发生未处理异常:', error);
-            // 清理已开始：不可逆，不回滚、不恢复已删数据；失败按已提交事实对齐运行时。
             return await failManualRefillSession(failureError);
         }
         finally {
@@ -120376,11 +120508,7 @@ $CONTENT
             .replace(/\r?\n+/g, '<br>')
             .replace(/\|/g, '\\|');
     }
-    function buildSummaryIndexOverwriteContent_ACU(candidates) {
-        const selectedRows = (Array.isArray(candidates) ? candidates : [])
-            .map((candidate) => candidate.row)
-            .filter((row) => !!row)
-            .sort((left, right) => (Number(left.rowOrder) || 0) - (Number(right.rowOrder) || 0));
+    function buildFallbackSummaryIndexOverwriteContent_ACU(selectedRows) {
         const lines = [
             '# 纪要索引',
             '',
@@ -120394,6 +120522,102 @@ $CONTENT
             lines.push('|  |  | （无命中纪要） |  |');
         }
         return lines.join('\n');
+    }
+    function resolveCrossfireExtraIndexColumns_ACU() {
+        try {
+            const selected = findSummaryTable_ACU();
+            const table = selected?.table;
+            const cfg = table?.exportConfig;
+            if (!table || !cfg || cfg.extraIndexEnabled !== true)
+                return null;
+            const content = Array.isArray(table.content) ? table.content : [];
+            const headerRow = Array.isArray(content[0]) ? content[0] : [];
+            if (headerRow.length === 0)
+                return null;
+            const selectedRaw = Array.isArray(cfg.extraIndexColumns) ? cfg.extraIndexColumns : [];
+            const columns = [];
+            for (const col of selectedRaw) {
+                if (typeof col === 'string' && headerRow.includes(col) && !columns.includes(col))
+                    columns.push(col);
+            }
+            if (columns.length === 0)
+                return null;
+            const colIndexes = columns.map((col) => headerRow.indexOf(col)).filter((idx) => idx >= 0);
+            if (colIndexes.length === 0)
+                return null;
+            const template = typeof cfg.extraIndexInjectionTemplate === 'string' ? cfg.extraIndexInjectionTemplate : '';
+            return { columns, colIndexes, headerRow, table, template };
+        }
+        catch (_error) {
+            return null;
+        }
+    }
+    function getStoredRowFallbackCell_ACU(row, columnName) {
+        const name = String(columnName || '').trim();
+        if (SUMMARY_TIME_SPAN_COLUMN_ALIASES_ACU.includes(name))
+            return row?.timeSpan ?? '';
+        if (SUMMARY_LOCATION_COLUMN_ALIASES_ACU.includes(name))
+            return row?.location ?? '';
+        if (SUMMARY_SUMMARY_COLUMN_ALIASES_ACU.includes(name))
+            return row?.summary ?? '';
+        if (SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU.includes(name))
+            return row?.indexCode ?? '';
+        if (SUMMARY_CHRONICLE_COLUMN_ALIASES_ACU.includes(name))
+            return row?.vectorSourceText ?? '';
+        return '';
+    }
+    function buildSummaryIndexOverwriteContent_ACU(candidates) {
+        const selectedRows = (Array.isArray(candidates) ? candidates : [])
+            .map((candidate) => candidate.row)
+            .filter((row) => !!row)
+            .sort((left, right) => (Number(left.rowOrder) || 0) - (Number(right.rowOrder) || 0));
+        try {
+            const spec = resolveCrossfireExtraIndexColumns_ACU();
+            if (spec) {
+                const content = Array.isArray(spec.table?.content) ? spec.table.content : [];
+                const dataRows = content.slice(1).filter((row) => Array.isArray(row));
+                const indexCodeColIdx = resolveColumnIndexByAliases_ACU(spec.headerRow, SUMMARY_INDEX_CODE_COLUMN_ALIASES_ACU);
+                const byIndexCode = new Map();
+                dataRows.forEach((row) => {
+                    const indexCode = indexCodeColIdx >= 0 ? normalizeText_ACU(row?.[indexCodeColIdx]) : '';
+                    if (indexCode && !byIndexCode.has(indexCode))
+                        byIndexCode.set(indexCode, row);
+                });
+                const lines = [
+                    `| ${spec.columns.join(' | ')} |`,
+                    `|${spec.columns.map(() => '---').join('|')}|`,
+                ];
+                selectedRows.forEach((row) => {
+                    const liveRow = byIndexCode.get(normalizeText_ACU(row?.indexCode)) || null;
+                    const cells = spec.colIndexes.map((colIdx, i) => {
+                        let value = '';
+                        if (liveRow) {
+                            const v = liveRow[colIdx];
+                            value = v === null || v === undefined ? '' : String(v);
+                        }
+                        else {
+                            value = getStoredRowFallbackCell_ACU(row, spec.columns[i]);
+                        }
+                        return escapeMarkdownTableCell_ACU(value);
+                    });
+                    lines.push(`| ${cells.join(' | ')} |`);
+                });
+                if (selectedRows.length === 0) {
+                    const markerCol = spec.columns.findIndex((col) => SUMMARY_SUMMARY_COLUMN_ALIASES_ACU.includes(String(col).trim()));
+                    const markerIdx = markerCol >= 0 ? markerCol : 0;
+                    lines.push(`| ${spec.columns.map((_, i) => (i === markerIdx ? '（无命中纪要）' : '')).join(' | ')} |`);
+                }
+                const tableText = lines.join('\n');
+                if (spec.template && spec.template.includes('$1')) {
+                    return spec.template.replace('$1', tableText);
+                }
+                return `# 纪要索引\n\n${tableText}`;
+            }
+        }
+        catch (error) {
+            logWarn_ACU('[交火模式纪要索引] 自定义列拼表失败，回退固定4列:', error);
+        }
+        return buildFallbackSummaryIndexOverwriteContent_ACU(selectedRows);
     }
     const SUMMARY_VECTOR_OVERVIEW_RESTORE_REASONS_ACU = new Set([
         'embedding_failed',
@@ -142011,6 +142235,8 @@ Expected function or array of functions, received type ${typeof value}.`
      */
     /** 单条会话消息的字符上限。模型原始输出与工具结果都可能很长，超出即截断并如实标注。 */
     const AGENT_CONVERSATION_TEXT_LIMIT_ACU = 8000;
+    /** UI 回灌时间线默认只解析最近这么多条消息，避免长任务把主线程卡死。完整扫描仍可通过不传 maxMessages 获得。 */
+    const AGENT_CONVERSATION_TIMELINE_UI_WINDOW_ACU = 200;
     /** 各非 assistant 种类在发送给模型时的标题前缀，让模型能区分「谁在说话」。 */
     const KIND_PREFIXES_ACU = {
         user: '【用户】',
@@ -142278,6 +142504,21 @@ Expected function or array of functions, received type ${typeof value}.`
             messages: projected,
         };
     }
+    function readFloorTimelineContribution_ACU(message) {
+        if (!message || typeof message !== 'object')
+            return null;
+        if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU))
+            return null;
+        const raw = message[AGENT_CONVERSATION_FIELD_ACU];
+        const record = validateAgentConversationFloorRecord_ACU(raw);
+        if (record) {
+            return { segment: record.segment, compaction: record.compaction, replacesEarlier: false };
+        }
+        const legacy = validateAgentConversationSnapshot_ACU(raw);
+        if (legacy)
+            return { segment: [...legacy.messages], replacesEarlier: true };
+        return null;
+    }
     /**
      * 读取完整的会话时间线（展示通道专用）：拼接所有楼层段，不做压缩投影，
      * 而是把每一份压缩标记的交接报告合成 handoff 消息插在它的截止位置上。
@@ -142286,32 +142527,48 @@ Expected function or array of functions, received type ${typeof value}.`
      * 时间线保留全部原始消息——用户在 UI 里仍能回看交接文件之前的历史，并直观看到
      * 「AI 可见性从哪条交接文件开始」。删除承载标记的楼层后，该标记连同其 handoff 一起消失。
      * @param chat 聊天数组，缺省取当前聊天
+     * @param options.maxMessages 只从末尾收集这么多条原始消息，跳过更早楼层的解析
      * @returns 按时间顺序的完整消息数组（含合成的 handoff 条目）
      */
-    function readAgentConversationTimeline_ACU(chat) {
+    function readAgentConversationTimeline_ACU(chat, options) {
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const maxMessages = Number.isInteger(options?.maxMessages) && options?.maxMessages > 0
+            ? Math.floor(options.maxMessages)
+            : null;
         let collected = [];
         const marksById = new Map();
-        for (let index = 0; index < messages.length; index += 1) {
-            const message = messages[index];
-            if (!message || typeof message !== 'object')
-                continue;
-            if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU))
-                continue;
-            const raw = message[AGENT_CONVERSATION_FIELD_ACU];
-            const record = validateAgentConversationFloorRecord_ACU(raw);
-            if (record) {
-                collected = [...collected, ...record.segment];
-                if (record.compaction) {
-                    const existing = marksById.get(record.compaction.compactedThroughId);
-                    if (!existing || record.compaction.at > existing.at)
-                        marksById.set(record.compaction.compactedThroughId, record.compaction);
-                }
-                continue;
+        const rememberCompaction = (compaction) => {
+            if (!compaction)
+                return;
+            const existing = marksById.get(compaction.compactedThroughId);
+            if (!existing || compaction.at > existing.at)
+                marksById.set(compaction.compactedThroughId, compaction);
+        };
+        if (maxMessages == null) {
+            for (let index = 0; index < messages.length; index += 1) {
+                const contribution = readFloorTimelineContribution_ACU(messages[index]);
+                if (!contribution)
+                    continue;
+                collected = contribution.replacesEarlier ? [...contribution.segment] : [...collected, ...contribution.segment];
+                rememberCompaction(contribution.compaction);
             }
-            const legacy = validateAgentConversationSnapshot_ACU(raw);
-            if (legacy)
-                collected = [...legacy.messages];
+        }
+        else {
+            const segmentsFromEnd = [];
+            let count = 0;
+            for (let index = messages.length - 1; index >= 0; index -= 1) {
+                const contribution = readFloorTimelineContribution_ACU(messages[index]);
+                if (!contribution)
+                    continue;
+                segmentsFromEnd.push(contribution.segment);
+                rememberCompaction(contribution.compaction);
+                count += contribution.segment.length;
+                if (contribution.replacesEarlier || count >= maxMessages)
+                    break;
+            }
+            collected = segmentsFromEnd.reverse().flat();
+            if (collected.length > maxMessages)
+                collected = collected.slice(-maxMessages);
         }
         const marks = [...marksById.values()].sort((a, b) => a.compactedThroughId - b.compactedThroughId);
         if (!marks.length)
@@ -142321,15 +142578,12 @@ Expected function or array of functions, received type ${typeof value}.`
         const timeline = [];
         let markIndex = 0;
         for (const item of collected) {
-            // 消息 id 在拼接顺序上单调递增，因此「插在 id ≤ 截止值的最后一条之后」等价于
-            // 在第一条 id 超过截止值的消息之前插入。
             while (markIndex < marks.length && item.id > marks[markIndex].compactedThroughId) {
                 timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
                 markIndex += 1;
             }
             timeline.push(item);
         }
-        // 截止值不小于全部消息 id 的标记（含消息段所在楼层已被删除、只剩标记的情况）挂在末尾。
         while (markIndex < marks.length) {
             timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
             markIndex += 1;
@@ -180139,7 +180393,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const injectionTargetLabel = await describeInjectionTargetForConfirm();
                 const confirmed = await dialogStore.confirm({
                     title: '执行手动填表',
-                    message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n世界书注入目标：${injectionTargetLabel}（填表结果会写入该世界书的 TavernDB 条目）\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或中途终止时不会回滚：已清理的旧数据不会恢复，已成功提交的批次会保留，运行时会按聊天记录中的已提交结果重新对齐。`,
+                    message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n世界书注入目标：${injectionTargetLabel}（填表结果会写入该世界书的 TavernDB 条目）\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。若在首批结果落盘前失败或中止，会自动恢复清理前的表格数据。一旦已有批次成功提交，失败不会回滚清理：已提交批次会保留，运行时会按聊天记录中的已提交结果重新对齐。`,
                     dangerMessage: checkpointRiskMessage.value || undefined,
                     confirmLabel: '确认并继续',
                     cancelLabel: '取消',
@@ -185080,8 +185334,18 @@ Expected function or array of functions, received type ${typeof value}.`
             const outlineError = ref('');
             const outlineDirty = ref(false);
             const clearPending = ref(false);
+            const expandedHistoryStageIds = ref(new Set());
             const activeVolume = computed(() => materials.snapshot.value?.storyArc.find(entry => entry.scope === 'volume' && !entry.retired && entry.status === 'active') ?? null);
             const historyStages = computed(() => (props.task?.stages ?? []).filter(stage => stage.stageId !== props.activeStage?.stageId));
+            function onHistoryStageToggle(stageId, event) {
+                const open = event.target instanceof HTMLDetailsElement ? event.target.open : false;
+                const next = new Set(expandedHistoryStageIds.value);
+                if (open)
+                    next.add(stageId);
+                else
+                    next.delete(stageId);
+                expandedHistoryStageIds.value = next;
+            }
             function displayRevision(stage) {
                 return stage.revisions.find(revision => revision.revision === stage.activeRevision)
                     ?? stage.revisions.reduce((latest, revision) => !latest || revision.revision > latest.revision ? revision : latest, null);
@@ -185167,14 +185431,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     syncOutlineDraft();
             }, { immediate: true });
             __expose({ reload });
-            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, outlineDraft, outlineError, outlineDirty, clearPending, activeVolume, historyStages, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
+            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, outlineDraft, outlineError, outlineDirty, clearPending, expandedHistoryStageIds, activeVolume, historyStages, onHistoryStageToggle, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-add01772] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-add01772] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-add01772] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-add01772] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-add01772] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-add01772] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-add01772] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-add01772] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-add01772] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-add01772] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-add01772] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-add01772] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-add01772] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-add01772] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-add01772] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-add01772] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-add01772], .acu-v2-continuation-materials__outline-node[data-v-add01772] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-add01772] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-add01772] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-add01772] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-add01772] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-add01772] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-add01772] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-add01772] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-add01772] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-add01772] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--retired[data-v-add01772] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-add01772] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-add01772] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-add01772] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-add01772] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-add01772] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-add01772] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-add01772] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-add01772] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-add01772] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-add01772] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-add01772] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-add01772] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\r\n\r\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-add01772] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-add01772] { display: flex; margin: 8px 0 0;\n}\n}\r\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-add01772");
-    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_add01772_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-7e469b13] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-7e469b13] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-7e469b13] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-7e469b13] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-7e469b13] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-7e469b13] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-7e469b13] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-7e469b13] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-7e469b13] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-7e469b13] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-7e469b13] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-7e469b13] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-7e469b13] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-7e469b13] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-7e469b13] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-7e469b13] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-7e469b13], .acu-v2-continuation-materials__outline-node[data-v-7e469b13] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-7e469b13] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-7e469b13] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-7e469b13] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-7e469b13] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-7e469b13] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-7e469b13] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-7e469b13] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-7e469b13] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-7e469b13] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--retired[data-v-7e469b13] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-7e469b13] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-7e469b13] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-7e469b13] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-7e469b13] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-7e469b13] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-7e469b13] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-7e469b13] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-7e469b13] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-7e469b13] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-7e469b13] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-7e469b13] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-7e469b13] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-7e469b13] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-7e469b13] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-7e469b13");
+    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_7e469b13_lang = null;
 
     const _hoisted_1$r = { class: "acu-v2-continuation-materials" };
     const _hoisted_2$p = { class: "acu-v2-continuation-materials__tabs" };
@@ -185232,236 +185496,237 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_35$2 = {
+    const _hoisted_35$2 = ["open", "onToggle"];
+    const _hoisted_36$2 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__outline-summary"
     };
-    const _hoisted_36$2 = { class: "acu-v2-continuation-materials__outline-heading" };
-    const _hoisted_37$2 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_37$2 = { class: "acu-v2-continuation-materials__outline-heading" };
     const _hoisted_38$2 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_39$2 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_40$1 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_41$1 = { class: "acu-v2-continuation-materials__list" };
-    const _hoisted_42$1 = {
+    const _hoisted_40$2 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_41$1 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_42$1 = { class: "acu-v2-continuation-materials__list" };
+    const _hoisted_43$1 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_43$1 = {
+    const _hoisted_44$1 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__history"
     };
-    const _hoisted_44$1 = { class: "acu-v2-continuation-materials__list" };
-    const _hoisted_45 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__meta"
-    };
+    const _hoisted_45 = { class: "acu-v2-continuation-materials__list" };
     const _hoisted_46 = {
-	key: 1,
+	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
     const _hoisted_47 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__meta"
+    };
+    const _hoisted_48 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_48 = {
+    const _hoisted_49 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
-    };
-    const _hoisted_49 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_50 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__empty"
+	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_51 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_52 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_52 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_53 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_53 = { class: "acu-v2-continuation-materials__card-head" };
     const _hoisted_54 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_55 = {
+    const _hoisted_55 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_56 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_56 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_57 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_58 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_59 = {
+    const _hoisted_57 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_58 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_59 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_60 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_60 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_61 = {
+    const _hoisted_61 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_62 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
-    };
-    const _hoisted_62 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_63 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__empty"
+	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_64 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_65 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_65 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_66 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_67 = {
+    const _hoisted_66 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_67 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_68 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_68 = {
+    const _hoisted_69 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_69 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_70 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_71 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_72 = {
+    const _hoisted_70 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_71 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_72 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_73 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_73 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_74 = {
+    const _hoisted_74 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_75 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
-    };
-    const _hoisted_75 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_76 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__empty"
+	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_77 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_78 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_78 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_79 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_80 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_81 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_82 = {
+    const _hoisted_79 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_80 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_81 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_82 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_83 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_83 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_84 = {
+    const _hoisted_84 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_85 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
     };
-    const _hoisted_85 = {
+    const _hoisted_86 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge"
     };
-    const _hoisted_86 = {
+    const _hoisted_87 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_87 = {
+    const _hoisted_88 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_88 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_89 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_90 = {
+    const _hoisted_89 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_90 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_91 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_91 = { class: "acu-v2-continuation-materials__card-body" };
     const _hoisted_92 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_93 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_94 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_95 = {
+    const _hoisted_93 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_94 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_95 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_96 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_96 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_97 = {
+    const _hoisted_97 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_98 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
-    };
-    const _hoisted_98 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__error"
     };
     const _hoisted_99 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_100 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_100 = {
+    const _hoisted_101 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_101 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_102 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_103 = {
+    const _hoisted_102 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_103 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
+    const _hoisted_104 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_104 = {
+    const _hoisted_105 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_105 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_106 = {
+    const _hoisted_106 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_107 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_107 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_108 = ["href"];
-    const _hoisted_109 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_110 = {
+    const _hoisted_108 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_109 = ["href"];
+    const _hoisted_110 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_111 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_111 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_112 = {
+    const _hoisted_112 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_113 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_113 = {
+    const _hoisted_114 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_114 = {
+    const _hoisted_115 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_115 = {
+    const _hoisted_116 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_116 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_117 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_118 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_119 = {
+    const _hoisted_117 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_118 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
+    const _hoisted_119 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_120 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_120 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_121 = {
+    const _hoisted_121 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_122 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_122 = {
+    const _hoisted_123 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__card-meta"
     };
-    const _hoisted_123 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_124 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_125 = {
+    const _hoisted_124 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_125 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_126 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_126 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_127 = { class: "acu-v2-continuation-materials__actions" };
     function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$r, [
 		createBaseVNode("div", _hoisted_2$p, [(openBlock(), createElementBlock(
@@ -185765,24 +186030,26 @@ Expected function or array of functions, received type ${typeof value}.`
 						return openBlock(), createElementBlock("details", {
 							key: stage.stageId,
 							class: "acu-v2-continuation-materials__block",
-							open: ""
-						}, [
-							createBaseVNode(
-								"summary",
-								null,
-								"第 " + toDisplayString(stage.stageNumber) + " 阶段 · " + toDisplayString(stage.status) + " · " + toDisplayString(stage.completedTurns) + " / " + toDisplayString($setup.stageTotalTurns(stage)) + " 轮",
-								1
-								/* TEXT */
-							),
-							(openBlock(true), createElementBlock(
+							open: $setup.expandedHistoryStageIds.has(stage.stageId),
+							onToggle: ($event) => $setup.onHistoryStageToggle(stage.stageId, $event)
+						}, [createBaseVNode(
+							"summary",
+							null,
+							"第 " + toDisplayString(stage.stageNumber) + " 阶段 · " + toDisplayString(stage.status) + " · " + toDisplayString(stage.completedTurns) + " / " + toDisplayString($setup.stageTotalTurns(stage)) + " 轮",
+							1
+							/* TEXT */
+						), $setup.expandedHistoryStageIds.has(stage.stageId) ? (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 0 },
+							[(openBlock(true), createElementBlock(
 								Fragment,
 								null,
 								renderList([$setup.displayRevision(stage)], (revision) => {
 									return openBlock(), createElementBlock(
 										Fragment,
 										{ key: revision?.revision ?? "no-revision" },
-										[revision ? (openBlock(), createElementBlock("section", _hoisted_35$2, [
-											createBaseVNode("p", _hoisted_36$2, [
+										[revision ? (openBlock(), createElementBlock("section", _hoisted_36$2, [
+											createBaseVNode("p", _hoisted_37$2, [
 												createBaseVNode(
 													"strong",
 													null,
@@ -185792,21 +186059,21 @@ Expected function or array of functions, received type ${typeof value}.`
 												),
 												createBaseVNode(
 													"span",
-													_hoisted_37$2,
+													_hoisted_38$2,
 													"revision " + toDisplayString(revision.revision),
 													1
 													/* TEXT */
 												),
 												createBaseVNode(
 													"span",
-													_hoisted_38$2,
+													_hoisted_39$2,
 													toDisplayString(revision.frozen ? "已冻结" : "待确认"),
 													1
 													/* TEXT */
 												),
 												createBaseVNode(
 													"span",
-													_hoisted_39$2,
+													_hoisted_40$2,
 													"职责：" + toDisplayString($setup.ROLE_LABELS[revision.outline.role ?? ""] ?? revision.outline.role ?? "未标注"),
 													1
 													/* TEXT */
@@ -185814,12 +186081,12 @@ Expected function or array of functions, received type ${typeof value}.`
 											]),
 											createBaseVNode(
 												"p",
-												_hoisted_40$1,
+												_hoisted_41$1,
 												"阶段目标：" + toDisplayString(revision.outline.goal),
 												1
 												/* TEXT */
 											),
-											createBaseVNode("ol", _hoisted_41$1, [(openBlock(true), createElementBlock(
+											createBaseVNode("ol", _hoisted_42$1, [(openBlock(true), createElementBlock(
 												Fragment,
 												null,
 												renderList(revision.outline.nodes, (node) => {
@@ -185864,15 +186131,14 @@ Expected function or array of functions, received type ${typeof value}.`
 												128
 												/* KEYED_FRAGMENT */
 											))])
-										])) : (openBlock(), createElementBlock("p", _hoisted_42$1, "该阶段没有可展示的 revision。"))],
+										])) : (openBlock(), createElementBlock("p", _hoisted_43$1, "该阶段没有可展示的 revision。"))],
 										64
 										/* STABLE_FRAGMENT */
 									);
 								}),
 								128
 								/* KEYED_FRAGMENT */
-							)),
-							$setup.olderRevisions(stage).length ? (openBlock(), createElementBlock("details", _hoisted_43$1, [createBaseVNode(
+							)), $setup.olderRevisions(stage).length ? (openBlock(), createElementBlock("details", _hoisted_44$1, [createBaseVNode(
 								"summary",
 								null,
 								"旧 revision（" + toDisplayString($setup.olderRevisions(stage).length) + "）",
@@ -185891,7 +186157,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										"revision " + toDisplayString(revision.revision) + " · " + toDisplayString(revision.reason) + " · " + toDisplayString(revision.outline.title),
 										1
 										/* TEXT */
-									), createBaseVNode("ol", _hoisted_44$1, [(openBlock(true), createElementBlock(
+									), createBaseVNode("ol", _hoisted_45, [(openBlock(true), createElementBlock(
 										Fragment,
 										null,
 										renderList(revision.outline.nodes, (node) => {
@@ -185913,8 +186179,10 @@ Expected function or array of functions, received type ${typeof value}.`
 								}),
 								128
 								/* KEYED_FRAGMENT */
-							))])) : createCommentVNode("v-if", true)
-						]);
+							))])) : createCommentVNode("v-if", true)],
+							64
+							/* STABLE_FRAGMENT */
+						)) : createCommentVNode("v-if", true)], 40, _hoisted_35$2);
 					}),
 					128
 					/* KEYED_FRAGMENT */
@@ -185938,12 +186206,12 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_45,
+					_hoisted_46,
 					" 结算水位：楼层 " + toDisplayString($setup.materials.snapshot.value.settledThroughIndex) + " · 伏笔 " + toDisplayString($setup.materials.snapshot.value.hooks.length) + " 条 · 信息差 " + toDisplayString($setup.materials.snapshot.value.infoGap.length) + " 条 · 长期约束 " + toDisplayString($setup.materials.snapshot.value.constraints.length) + " 条 · 故事时间 " + toDisplayString($setup.materials.snapshot.value.chronology.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.hooks) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.infoGap) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.constraints) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.chronology),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				$setup.materials.snapshot.value ? (openBlock(), createElementBlock("p", _hoisted_46, [$setup.materials.diagnostics.value.adoptedIndex === null ? (openBlock(), createElementBlock(
+				$setup.materials.snapshot.value ? (openBlock(), createElementBlock("p", _hoisted_47, [$setup.materials.diagnostics.value.adoptedIndex === null ? (openBlock(), createElementBlock(
 					Fragment,
 					{ key: 0 },
 					[createTextVNode(" 当前聊天没有任何楼层带有资料快照。快照由子代理结算后写到当时的末楼，并跟着该楼层走：该楼被删除、重新生成或 swipe 时，资料会回退到更早楼层的快照；若此前只写过一次，就会回到空。 ")],
@@ -186001,19 +186269,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				))])) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_47,
+					_hoisted_48,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				createCommentVNode(" 伏笔账本 "),
-				createBaseVNode("details", _hoisted_48, [
+				createBaseVNode("details", _hoisted_49, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"伏笔账本 · " + toDisplayString($setup.materials.snapshot.value?.hooks.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_49, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_50, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_51, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_50, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_51, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_52, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.hooks, (hook) => {
@@ -186024,7 +186292,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": hook.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_52, [
+									createBaseVNode("p", _hoisted_53, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -186034,21 +186302,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_53,
+											_hoisted_54,
 											toDisplayString($setup.HOOK_STATUS_LABELS[hook.status] ?? hook.status),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_54,
+											_hoisted_55,
 											toDisplayString($setup.HOOK_IMPORTANCE_LABELS[hook.importance] ?? hook.importance),
 											1
 											/* TEXT */
 										),
 										hook.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_55,
+											_hoisted_56,
 											"已退休" + toDisplayString(hook.retiredReason ? `：${hook.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -186056,12 +186324,12 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_56,
+										_hoisted_57,
 										toDisplayString(hook.summary),
 										1
 										/* TEXT */
 									),
-									createBaseVNode("p", _hoisted_57, [createTextVNode(
+									createBaseVNode("p", _hoisted_58, [createTextVNode(
 										"植入楼层 " + toDisplayString(hook.plantedIndex) + " · 最近更新楼层 " + toDisplayString(hook.updatedIndex),
 										1
 										/* TEXT */
@@ -186084,7 +186352,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_58, [
+					createBaseVNode("details", _hoisted_59, [
 						_cache[32] || (_cache[32] = createBaseVNode(
 							"summary",
 							null,
@@ -186099,12 +186367,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.hooks.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_59,
+							_hoisted_60,
 							toDisplayString($setup.materials.modules.hooks.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_60, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_61, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.hooks.dirty,
 							onClick: _cache[3] || (_cache[3] = ($event) => $setup.materials.discard("hooks"))
 						}, {
@@ -186130,13 +186398,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 认知与信息差 "),
-				createBaseVNode("details", _hoisted_61, [
+				createBaseVNode("details", _hoisted_62, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"认知与信息差 · " + toDisplayString($setup.materials.snapshot.value?.infoGap.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.infoGap.dirty ? (openBlock(), createElementBlock("span", _hoisted_62, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.infoGap.length ? (openBlock(), createElementBlock("p", _hoisted_63, "还没有信息差条目。")) : (openBlock(), createElementBlock("div", _hoisted_64, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.infoGap.dirty ? (openBlock(), createElementBlock("span", _hoisted_63, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.infoGap.length ? (openBlock(), createElementBlock("p", _hoisted_64, "还没有信息差条目。")) : (openBlock(), createElementBlock("div", _hoisted_65, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.infoGap, (gap) => {
@@ -186147,7 +186415,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": gap.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_65, [
+									createBaseVNode("p", _hoisted_66, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -186164,21 +186432,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_66,
+											_hoisted_67,
 											toDisplayString($setup.REVEAL_STATUS_LABELS[gap.revealStatus] ?? gap.revealStatus),
 											1
 											/* TEXT */
 										),
 										gap.revealIndex !== null ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_67,
+											_hoisted_68,
 											"揭示楼层 " + toDisplayString(gap.revealIndex),
 											1
 											/* TEXT */
 										)) : createCommentVNode("v-if", true),
 										gap.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_68,
+											_hoisted_69,
 											"已退休" + toDisplayString(gap.retiredReason ? `：${gap.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -186186,14 +186454,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_69,
+										_hoisted_70,
 										"客观事实：" + toDisplayString(gap.objectiveFact),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_70,
+										_hoisted_71,
 										"读者已知：" + toDisplayString(gap.readerKnown || "（未记录）"),
 										1
 										/* TEXT */
@@ -186224,7 +186492,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_71, [
+					createBaseVNode("details", _hoisted_72, [
 						_cache[35] || (_cache[35] = createBaseVNode(
 							"summary",
 							null,
@@ -186239,12 +186507,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.infoGap.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_72,
+							_hoisted_73,
 							toDisplayString($setup.materials.modules.infoGap.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_73, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_74, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.infoGap.dirty,
 							onClick: _cache[6] || (_cache[6] = ($event) => $setup.materials.discard("infoGap"))
 						}, {
@@ -186270,13 +186538,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 长期约束 "),
-				createBaseVNode("details", _hoisted_74, [
+				createBaseVNode("details", _hoisted_75, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"长期约束 · " + toDisplayString($setup.materials.snapshot.value?.constraints.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.constraints.dirty ? (openBlock(), createElementBlock("span", _hoisted_75, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.constraints.length ? (openBlock(), createElementBlock("p", _hoisted_76, "还没有长期约束。")) : (openBlock(), createElementBlock("div", _hoisted_77, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.constraints.dirty ? (openBlock(), createElementBlock("span", _hoisted_76, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.constraints.length ? (openBlock(), createElementBlock("p", _hoisted_77, "还没有长期约束。")) : (openBlock(), createElementBlock("div", _hoisted_78, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.constraints, (constraint) => {
@@ -186284,7 +186552,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								key: constraint.id,
 								class: "acu-v2-continuation-materials__card"
 							}, [
-								createBaseVNode("p", _hoisted_78, [createBaseVNode(
+								createBaseVNode("p", _hoisted_79, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(constraint.id),
@@ -186293,12 +186561,12 @@ Expected function or array of functions, received type ${typeof value}.`
 								)]),
 								createBaseVNode(
 									"p",
-									_hoisted_79,
+									_hoisted_80,
 									toDisplayString(constraint.text),
 									1
 									/* TEXT */
 								),
-								createBaseVNode("p", _hoisted_80, [createTextVNode(
+								createBaseVNode("p", _hoisted_81, [createTextVNode(
 									"登记楼层 " + toDisplayString(constraint.createdIndex),
 									1
 									/* TEXT */
@@ -186318,7 +186586,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_81, [
+					createBaseVNode("details", _hoisted_82, [
 						_cache[38] || (_cache[38] = createBaseVNode(
 							"summary",
 							null,
@@ -186333,12 +186601,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.constraints.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_82,
+							_hoisted_83,
 							toDisplayString($setup.materials.modules.constraints.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_83, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_84, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.constraints.dirty,
 							onClick: _cache[9] || (_cache[9] = ($event) => $setup.materials.discard("constraints"))
 						}, {
@@ -186364,13 +186632,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 故事年代学账本 "),
-				createBaseVNode("details", _hoisted_84, [
+				createBaseVNode("details", _hoisted_85, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"故事年代学账本 · " + toDisplayString($setup.materials.snapshot.value?.chronology.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.chronology.dirty ? (openBlock(), createElementBlock("span", _hoisted_85, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.chronology.length ? (openBlock(), createElementBlock("p", _hoisted_86, "还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。")) : (openBlock(), createElementBlock("div", _hoisted_87, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.chronology.dirty ? (openBlock(), createElementBlock("span", _hoisted_86, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.chronology.length ? (openBlock(), createElementBlock("p", _hoisted_87, "还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。")) : (openBlock(), createElementBlock("div", _hoisted_88, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.chronology, (entry) => {
@@ -186381,7 +186649,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": entry.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_88, [
+									createBaseVNode("p", _hoisted_89, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -186398,14 +186666,14 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_89,
+											_hoisted_90,
 											toDisplayString($setup.CHRONOLOGY_PRECISION_LABELS[entry.precision] ?? entry.precision),
 											1
 											/* TEXT */
 										),
 										entry.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_90,
+											_hoisted_91,
 											"已作废" + toDisplayString(entry.retiredReason ? `：${entry.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -186413,21 +186681,21 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_91,
+										_hoisted_92,
 										"累计经过：" + toDisplayString(entry.elapsed),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_92,
+										_hoisted_93,
 										"时间转换：" + toDisplayString(entry.transition),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_93,
+										_hoisted_94,
 										"证据楼层 " + toDisplayString(entry.evidenceIndexes.join("、")) + " · 结算楼层 " + toDisplayString(entry.updatedIndex),
 										1
 										/* TEXT */
@@ -186440,7 +186708,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_94, [
+					createBaseVNode("details", _hoisted_95, [
 						_cache[41] || (_cache[41] = createBaseVNode(
 							"summary",
 							null,
@@ -186455,12 +186723,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.chronology.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_95,
+							_hoisted_96,
 							toDisplayString($setup.materials.modules.chronology.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_96, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_97, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.chronology.dirty,
 							onClick: _cache[12] || (_cache[12] = ($event) => $setup.materials.discard("chronology"))
 						}, {
@@ -186502,19 +186770,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_97,
+					_hoisted_98,
 					" 条目 " + toDisplayString($setup.materials.snapshot.value.webRefs.length) + " 条（活跃 " + toDisplayString($setup.materials.snapshot.value.webRefs.filter((entry) => !entry.retired).length) + "）· 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.webRefs),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_98,
+					_hoisted_99,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_99, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_100, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_100, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_101, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.webRefs, (ref) => {
@@ -186525,7 +186793,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": ref.retired }])
 							},
 							[
-								createBaseVNode("summary", _hoisted_101, [
+								createBaseVNode("summary", _hoisted_102, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -186542,7 +186810,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_102,
+										_hoisted_103,
 										toDisplayString($setup.WEB_REF_SOURCE_LABELS[ref.source] ?? ref.source),
 										1
 										/* TEXT */
@@ -186567,14 +186835,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									)),
 									ref.sourceStatus !== "ok" ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_103,
+										_hoisted_104,
 										toDisplayString($setup.WEB_REF_STATUS_LABELS[ref.sourceStatus] ?? ref.sourceStatus),
 										1
 										/* TEXT */
 									)) : createCommentVNode("v-if", true),
 									ref.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_104,
+										_hoisted_105,
 										"已退休" + toDisplayString(ref.retiredReason ? `：${ref.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -186582,24 +186850,24 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_105,
+									_hoisted_106,
 									toDisplayString(ref.brief),
 									1
 									/* TEXT */
 								),
 								ref.summary ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_106,
+									_hoisted_107,
 									toDisplayString(ref.summary),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
-								createBaseVNode("p", _hoisted_107, [
+								createBaseVNode("p", _hoisted_108, [
 									createBaseVNode("a", {
 										href: ref.url,
 										target: "_blank",
 										rel: "noopener noreferrer"
-									}, toDisplayString(ref.url), 9, _hoisted_108),
+									}, toDisplayString(ref.url), 9, _hoisted_109),
 									ref.query ? (openBlock(), createElementBlock(
 										Fragment,
 										{ key: 0 },
@@ -186631,7 +186899,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_109, [
+				createBaseVNode("details", _hoisted_110, [
 					_cache[45] || (_cache[45] = createBaseVNode(
 						"summary",
 						null,
@@ -186653,12 +186921,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.webRefs.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_110,
+						_hoisted_111,
 						toDisplayString($setup.materials.modules.webRefs.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_111, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_112, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.webRefs.dirty,
 						onClick: _cache[15] || (_cache[15] = ($event) => $setup.materials.discard("webRefs"))
 					}, {
@@ -186699,19 +186967,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_112,
+					_hoisted_113,
 					" 总纲 " + toDisplayString($setup.materials.snapshot.value.storyArc.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.storyArc),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_113,
+					_hoisted_114,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_114, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_115, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_115, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_116, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.storyArc, (arc) => {
@@ -186722,7 +186990,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": arc.retired }])
 							},
 							[
-								createBaseVNode("p", _hoisted_116, [
+								createBaseVNode("p", _hoisted_117, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -186732,14 +187000,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_117,
+										_hoisted_118,
 										toDisplayString(arc.scope === "story" ? "全书方向" : "卷台阶"),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_118,
+										_hoisted_119,
 										toDisplayString($setup.ARC_STATUS_LABELS[arc.status] ?? arc.status),
 										1
 										/* TEXT */
@@ -186753,7 +187021,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									arc.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_119,
+										_hoisted_120,
 										"已退休" + toDisplayString(arc.retiredReason ? `：${arc.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -186761,28 +187029,28 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_120,
+									_hoisted_121,
 									"方向：" + toDisplayString(arc.direction),
 									1
 									/* TEXT */
 								),
 								arc.escalation ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_121,
+									_hoisted_122,
 									"冲突高度：" + toDisplayString(arc.escalation),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								arc.withheld ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_122,
+									_hoisted_123,
 									"禁翻底牌：" + toDisplayString(arc.withheld),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								createBaseVNode(
 									"p",
-									_hoisted_123,
+									_hoisted_124,
 									" 已承载阶段：" + toDisplayString(arc.stageNumbers.length ? arc.stageNumbers.join("、") : "（尚未承载）"),
 									1
 									/* TEXT */
@@ -186795,7 +187063,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_124, [
+				createBaseVNode("details", _hoisted_125, [
 					_cache[50] || (_cache[50] = createBaseVNode(
 						"summary",
 						null,
@@ -186810,12 +187078,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.storyArc.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_125,
+						_hoisted_126,
 						toDisplayString($setup.materials.modules.storyArc.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_126, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_127, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.storyArc.dirty,
 						onClick: _cache[18] || (_cache[18] = ($event) => $setup.materials.discard("storyArc"))
 					}, {
@@ -186845,7 +187113,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		))
 	]);
     }
-    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-add01772"]]);
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-7e469b13"]]);
 
     /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -187292,7 +187560,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (hasAgentSessionEntries_ACU())
                 return;
             try {
-                const timeline = readAgentConversationTimeline_ACU();
+                const timeline = readAgentConversationTimeline_ACU(undefined, { maxMessages: AGENT_CONVERSATION_TIMELINE_UI_WINDOW_ACU });
                 if (timeline.length)
                     hydrateAgentSessionLog_ACU(timeline.map(projectMessage_ACU));
             }
@@ -189863,7 +190131,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_40 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_40$1 = { class: "acu-v2-ws-materials__card-head" };
     const _hoisted_41 = { class: "acu-v2-ws-materials__badge" };
     const _hoisted_42 = { class: "acu-v2-ws-materials__card-meta" };
     const _hoisted_43 = {
@@ -190272,7 +190540,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								return openBlock(), createElementBlock("article", {
 									key: item.id,
 									class: "acu-v2-ws-materials__card"
-								}, [createBaseVNode("p", _hoisted_40, [createBaseVNode(
+								}, [createBaseVNode("p", _hoisted_40$1, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(item.fact),
@@ -193991,6 +194259,65 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
+     * 退役隔离标签的全局 Profile 清理编排。
+     *
+     * 只清理全局隔离登记及对应 Profile（设置/表格模板），不删除聊天正文，也不改写
+     * 各聊天消息中已经持久化的历史表格数据。
+     */
+    function errorMessage$1(error) {
+        return error instanceof Error ? error.message : String(error || '未知错误');
+    }
+    /**
+     * 清理全部旧隔离标签。
+     *
+     * 先切回默认槽，再逐个删除 Profile。单个删除失败时保留该标签的历史登记，
+     * 便于用户重试；成功项则从登记中移除。
+     *
+     * saveGlobalMeta_ACU 与 saveSettings_ACU 是两次独立宿主写入，不是跨字段事务。
+     * 登记先落盘、设置后落盘：若第二步失败，调用方看到抛错后可重试保存默认设置，
+     * 不得把已删除的 Profile 假装还在。
+     */
+    async function cleanupLegacyIsolationProfiles_ACU() {
+        const activeCode = normalizeIsolationCode_ACU(settings_ACU?.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || '');
+        const switchedToDefault = !!activeCode;
+        if (switchedToDefault) {
+            await switchIsolationProfile_ACU('');
+        }
+        const codes = [...new Set([activeCode, ...getDataIsolationHistory_ACU()]
+                .map(code => normalizeIsolationCode_ACU(code))
+                .filter(Boolean))];
+        if (codes.length === 0) {
+            return { removedCodes: [], failedCodes: [], switchedToDefault };
+        }
+        const removedCodes = [];
+        const failedCodes = [];
+        for (const code of codes) {
+            try {
+                deleteProfileFromStorage_ACU(code);
+                removedCodes.push(code);
+            }
+            catch (error) {
+                const message = errorMessage$1(error);
+                failedCodes.push({ code, error: message });
+                logWarn_ACU(`[旧隔离清理] 删除 Profile 失败: ${code}`, error);
+            }
+        }
+        globalMeta_ACU.activeIsolationCode = '';
+        globalMeta_ACU.isolationCodeList = failedCodes.map(item => item.code);
+        settings_ACU.dataIsolationCode = '';
+        settings_ACU.dataIsolationEnabled = false;
+        settings_ACU.dataIsolationHistory = [];
+        if (!saveGlobalMeta_ACU()) {
+            throw new Error('旧隔离标签登记保存失败，请检查存储状态后重试。');
+        }
+        const saveResult = saveSettings_ACU();
+        if (!saveResult.saved) {
+            throw new Error(saveResult.warning || saveResult.error || '默认设置保存失败。');
+        }
+        return { removedCodes, failedCodes, switchedToDefault };
+    }
+
+    /**
      * reset-defaults-service — 恢复默认配置的业务编排。
      * UI 只负责选项、等待与结果展示；候选准备、保存顺序、补偿和部分失败分类在这里收敛。
      */
@@ -194512,7 +194839,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (!setChatSheetGuideDataForIsolationKey_ACU(isolationKey, checked.guideSnapshot.data, { reason: 'checkpoint_import', syncTemplateScope: false }))
                         throw new Error('Checkpoint 指导表恢复失败。');
                     const sheetKeys = Object.keys(checked.tableSnapshot).filter(key => key.startsWith('sheet_'));
-                    const persisted = await persistTablesToChatMessage_ACU({ targetMessageIndex, tableData: checked.tableSnapshot, targetSheetKeys: sheetKeys, trackingSheetKeys: sheetKeys, filledSheetKeys: sheetKeys, trackAsUpdate: false, source: 'import', operations: [{ kind: 'data_replace', data: checked.tableSnapshot, reason: 'checkpoint_fallback' }], strictSave: true, assumeCommitLock: true, transactionContext });
+                    const persisted = await persistTablesToChatMessage_ACU({ targetMessageIndex, tableData: checked.tableSnapshot, targetSheetKeys: sheetKeys, trackingSheetKeys: sheetKeys, trackAsUpdate: false, source: 'import', checkpointReason: 'import', operations: [{ kind: 'data_replace', data: checked.tableSnapshot, reason: 'checkpoint_fallback' }], strictSave: true, assumeCommitLock: true, transactionContext });
                     if (!persisted.saved)
                         throw new Error(persisted.error || 'Checkpoint 持久化失败。');
                     return { clearedCount: cleared.clearedCount, restoredMessageIndex: persisted.messageIndex ?? targetMessageIndex };
@@ -194836,6 +195163,13 @@ Expected function or array of functions, received type ${typeof value}.`
         });
         const isolationModeLabel = computed(() => (activeIsolationCode.value ? '已启用隔离' : '未启用隔离'));
         const isolationHistoryOptions = computed(() => isolationHistory.value.map(code => ({ value: code, label: code })));
+        const legacyIsolationCodes = computed(() => {
+            const codes = new Set(isolationHistory.value);
+            if (activeIsolationCode.value)
+                codes.add(activeIsolationCode.value);
+            return [...codes];
+        });
+        const legacyIsolationCount = computed(() => legacyIsolationCodes.value.length);
         const rangeLabel = computed(() => {
             const start = normalizeFloorValue(deleteRange.startFloor);
             const end = normalizeFloorValue(deleteRange.endFloor);
@@ -194951,6 +195285,33 @@ Expected function or array of functions, received type ${typeof value}.`
                 logError_ACU('[ACU-V2] removeHistory failed', e);
                 message.value = null;
                 toast.error('移除历史标识失败，详情见运行日志。');
+            }
+            finally {
+                busyAction.value = '';
+            }
+        }
+        async function cleanupLegacyIsolationProfiles() {
+            if (busyAction.value)
+                return;
+            busyAction.value = 'cleanup-legacy-isolation';
+            try {
+                const result = await cleanupLegacyIsolationProfiles_ACU();
+                refresh();
+                message.value = null;
+                if (result.failedCodes.length > 0) {
+                    toast.warning(`已清理 ${result.removedCodes.length} 个旧隔离标签；${result.failedCodes.length} 个删除失败，已保留登记，可重试。`);
+                }
+                else if (result.removedCodes.length === 0) {
+                    toast.info('没有发现可清理的旧隔离标签。');
+                }
+                else {
+                    toast.success(`已清理 ${result.removedCodes.length} 个旧隔离标签，并切换到默认数据。`);
+                }
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] cleanupLegacyIsolationProfiles failed', e);
+                message.value = null;
+                toast.error('清理旧隔离标签失败，详情见运行日志。');
             }
             finally {
                 busyAction.value = '';
@@ -195480,6 +195841,8 @@ Expected function or array of functions, received type ${typeof value}.`
             v2RecoverySummary,
             v2IsolationDiagnostics,
             isolationHistoryOptions,
+            legacyIsolationCodes,
+            legacyIsolationCount,
             currentIsolationLabel,
             isolationModeLabel,
             deleteRange,
@@ -195497,6 +195860,7 @@ Expected function or array of functions, received type ${typeof value}.`
             getCheckpointTargetStorageMode,
             applyIsolation,
             removeHistory,
+            cleanupLegacyIsolationProfiles,
             deleteCurrentIsolationEntries,
             importCombinedSettings,
             exportCombinedSettings,
@@ -195705,6 +196069,28 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 void flow.deleteLocalData("all");
             }
+            async function onCleanupLegacyIsolationProfiles() {
+                if (runtimeDiagnostic.busy.value)
+                    return;
+                const codes = flow.legacyIsolationCodes.value;
+                const codeText = codes.length > 0 ? `：${codes.join("、")}` : "";
+                const confirmed = await dialogStore.confirm({
+                    title: "全局旧隔离标签清理",
+                    message: `将清理全部 ${codes.length} 个旧隔离标签${codeText}。\n` +
+                        "· 如有当前激活标识，会切回默认数据；\n" +
+                        "· 删除这些标签对应的全局设置与表格模板；\n" +
+                        "· 不会删除聊天正文，也不会改写各聊天里已保存的历史表格数据；\n" +
+                        "· 若单个标签删除失败，会保留登记供重试。\n" +
+                        "此操作不可恢复。确认继续？",
+                    confirmLabel: "清理旧隔离标签",
+                    confirmVariant: "danger",
+                });
+                if (!confirmed)
+                    return;
+                if (runtimeDiagnostic.busy.value)
+                    return;
+                await flow.cleanupLegacyIsolationProfiles();
+            }
             async function onCommitMixedStorageDecision(action) {
                 if (runtimeDiagnostic.busy.value)
                     return;
@@ -195829,14 +196215,14 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             onMounted(refreshAll);
             watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { SHOW_LEGACY_DATA_MGMT_UI, resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, AcuCheckbox, get dataMgmtCopy() { return dataMgmtCopy; } };
+            const __returned__ = { SHOW_LEGACY_DATA_MGMT_UI, resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCleanupLegacyIsolationProfiles, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, AcuCheckbox, get dataMgmtCopy() { return dataMgmtCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-0f8a0cec] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-0f8a0cec] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-0f8a0cec] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-0f8a0cec] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-0f8a0cec] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-0f8a0cec] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__sheet-filter[data-v-0f8a0cec] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 10px 12px;\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md, 8px);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-data-mgmt-page__sheet-filter-head[data-v-0f8a0cec] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__sheet-filter-title[data-v-0f8a0cec] {\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-0f8a0cec] {\r\n  padding: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-accent);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  cursor: pointer;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-0f8a0cec]:disabled {\r\n  opacity: 0.5;\r\n  cursor: not-allowed;\n}\n.acu-v2-data-mgmt-page__sheet-filter-list[data-v-0f8a0cec] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));\r\n  gap: 6px 12px;\n}\n.acu-v2-data-mgmt-page__cleanup-section\r\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-0f8a0cec] {\r\n  margin-top: 4px;\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-0f8a0cec] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-0f8a0cec] {\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-0f8a0cec] .acu-disclosure-group__header {\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-0f8a0cec] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-0f8a0cec] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-0f8a0cec] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-0f8a0cec] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-align: left;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-0f8a0cec] {\r\n  flex-shrink: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-0f8a0cec] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-0f8a0cec] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-0f8a0cec],\r\n.acu-v2-data-mgmt-page__command-grid[data-v-0f8a0cec] {\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-0f8a0cec] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-0f8a0cec] {\r\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-0f8a0cec] {\r\n  margin-top: 16px;\r\n  padding-top: 16px;\r\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-0f8a0cec] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-0f8a0cec] {\r\n  min-width: 0;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-0f8a0cec] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-0f8a0cec] {\r\n  margin: 4px 0 0;\r\n  overflow-wrap: anywhere;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-0f8a0cec] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-0f8a0cec] .acu-file-button,\r\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-0f8a0cec] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-0f8a0cec] .acu-file-button,\r\n.acu-v2-data-mgmt-page__command-grid[data-v-0f8a0cec] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-0f8a0cec] {\r\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-0f8a0cec] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-0f8a0cec] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-0f8a0cec] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-0f8a0cec] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-0f8a0cec");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_0f8a0cec_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-c5f075be] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-c5f075be] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-c5f075be] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__sheet-filter[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 10px 12px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md, 8px);\n  background: var(--acu-bg-1);\n}\n.acu-v2-data-mgmt-page__sheet-filter-head[data-v-c5f075be] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__sheet-filter-title[data-v-c5f075be] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 600;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-c5f075be] {\n  padding: 0;\n  border: 0;\n  background: transparent;\n  color: var(--acu-accent);\n  font: inherit;\n  font-size: var(--acu-font-size-body, 12px);\n  cursor: pointer;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-c5f075be]:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n.acu-v2-data-mgmt-page__sheet-filter-list[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));\n  gap: 6px 12px;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-c5f075be] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-c5f075be] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-c5f075be] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-c5f075be] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-c5f075be] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-c5f075be] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-c5f075be] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-c5f075be] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-c5f075be] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-c5f075be],\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-c5f075be] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-c5f075be] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-c5f075be] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-c5f075be] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-c5f075be] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-c5f075be] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-c5f075be");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_c5f075be_lang = null;
 
     const _hoisted_1$h = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$g = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -195931,6 +196317,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_37 = { class: "acu-v2-data-mgmt-page__sheet-filter-list" };
     const _hoisted_38 = { class: "acu-v2-data-mgmt-page__meta" };
     const _hoisted_39 = { class: "acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup" };
+    const _hoisted_40 = { class: "acu-v2-data-mgmt-page__meta" };
     function _sfc_render$h(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$h, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
 		key: 0,
@@ -196678,15 +197065,36 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* CACHED */
 						)])]),
 						_: 1
+					}, 8, ["disabled", "loading"]),
+					createVNode($setup["AcuButton"], {
+						block: "",
+						variant: "danger",
+						disabled: $setup.runtimeDiagnostic.busy.value || !!$setup.flow.busyAction.value,
+						loading: $setup.flow.busyAction.value === "cleanup-legacy-isolation",
+						onClick: $setup.onCleanupLegacyIsolationProfiles
+					}, {
+						default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
+							" 全局旧隔离标签清理 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
 					}, 8, ["disabled", "loading"])
-				])
+				]),
+				createBaseVNode(
+					"p",
+					_hoisted_40,
+					" 清理全部退役隔离标签及其全局设置/表格模板，并切回默认数据；不会删除聊天正文或各聊天已保存的历史表格数据。当前发现 " + toDisplayString($setup.flow.legacyIsolationCount.value) + " 个旧隔离标签。 ",
+					1
+					/* TEXT */
+				)
 			]),
 			_: 1
 		}, 8, ["title", "description"])])]),
 		_: 1
 	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-0f8a0cec"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-c5f075be"]]);
 
     var _sfc_main$g = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
@@ -198472,7 +198880,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
         {
             id: 'http-429',
-            test: /\b429\b|rate[ _-]?limit|too many requests|quota|insufficient (balance|funds)|exceeded your current|resource[ _-]?exhausted|请求过于频繁|限流|额度不足|余额不足|欠费|配额/,
+            test: /\b429\b|rate[ _-]?limit|too many requests|\bquota\b|insufficient (balance|funds)|exceeded your current|resource[ _-]?exhausted|请求过于频繁|限流|额度不足|余额不足|欠费|配额/,
             summary: '请求过于频繁被限流，或账户额度 / 余额已用完（429）。',
             steps: [
                 '先等 1–2 分钟再重试；短时间内连续重试只会让限流更久。',
@@ -198735,7 +199143,7 @@ Expected function or array of functions, received type ${typeof value}.`
         // ─── 向量 / 存储 / 检查点 ───
         {
             id: 'vector',
-            test: /embedding|rerank|向量|vector/,
+            test: /\bembedding\b|\brerank\b|向量|\bvector\b/,
             summary: '交火模式（向量索引）相关操作失败。',
             steps: [
                 '到「交火模式」页检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',
@@ -199966,6 +200374,8 @@ Expected function or array of functions, received type ${typeof value}.`
      * - sidebar 数据驱动：`visiblePages` 按可见性过滤注册表
      * - P0-6：activePageId 持久化到 acu_v2_ui_state.router；关闭后再开保留页面
      *   抽屉 / 滚动是页面内部状态，不在路由层处理（关闭/重开不持久化）
+     * - 崩溃哨兵：即将渲染一页时写入 bootPending=true；首帧绘制完成后清掉。
+     *   下次启动若仍为 true，视为上次卡死，回退到默认可见页，避免重页死循环。
      */
     const SECTION_KEY$2 = 'router';
     const LEGACY_PAGE_ID_ALIASES = {
@@ -199996,6 +200406,10 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function readInitialActiveId(featureGates, isSqliteMode) {
         const persisted = readSection(SECTION_KEY$2);
+        if (persisted?.bootPending === true) {
+            logWarn_ACU('[ACU-V2] previous page paint did not complete; falling back to the default page.');
+            return defaultVisiblePageId();
+        }
         if (persisted && isKnownPage(persisted.activePageId)) {
             const activePageId = normalizePageId(persisted.activePageId) || persisted.activePageId;
             const page = ACU_V2_PAGE_REGISTRY.find(p => p.id === activePageId);
@@ -200003,11 +200417,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 activePageId,
                 isSqliteMode,
                 featureGates,
+                bootGeneration: 0,
             };
             if (page && isPageVisible(page, initialState))
                 return activePageId;
         }
         return defaultVisiblePageId();
+    }
+    function persistRouterArmed_ACU(activePageId) {
+        writeSection(SECTION_KEY$2, { activePageId, bootPending: true });
     }
     function isPageVisible(page, state) {
         const uiMode = useUiModeStore();
@@ -200030,10 +200448,13 @@ Expected function or array of functions, received type ${typeof value}.`
         state: () => {
             const featureGates = readInitialFeatureGates();
             const isSqliteMode = readInitialSqliteMode();
+            const activePageId = readInitialActiveId(featureGates, isSqliteMode);
+            persistRouterArmed_ACU(activePageId);
             return {
-                activePageId: readInitialActiveId(featureGates, isSqliteMode),
+                activePageId,
                 isSqliteMode,
                 featureGates,
+                bootGeneration: 1,
             };
         },
         getters: {
@@ -200071,8 +200492,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 时拒绝切换，让 sidebar 保持一致状态
                 if (!isPageVisible(target, this))
                     return;
+                if (this.activePageId === normalizedId)
+                    return;
                 this.activePageId = normalizedId;
-                this.persist();
+                this.armBootPending();
             },
             setSqliteMode(on) {
                 this.isSqliteMode = on;
@@ -200095,13 +200518,35 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (current && isPageVisible(current, this))
                     return;
                 this.activePageId = defaultVisiblePageId();
-                this.persist();
+                this.armBootPending();
             },
-            persist() {
-                writeSection(SECTION_KEY$2, { activePageId: this.activePageId });
+            /** 即将渲染当前页：武装哨兵并推进代次。 */
+            armBootPending() {
+                this.bootGeneration += 1;
+                persistRouterArmed_ACU(this.activePageId);
+                return this.bootGeneration;
+            },
+            /** 当前页已交出一次事件循环切片。代次不匹配时忽略。 */
+            markBootComplete(generation) {
+                if (generation !== this.bootGeneration)
+                    return;
+                writeSection(SECTION_KEY$2, { activePageId: this.activePageId, bootPending: false });
             },
         },
     });
+    /** 双 rAF：setup/onMounted 卡死时回调不会执行，哨兵保持 true。 */
+    function scheduleRouterBootComplete_ACU(onComplete) {
+        const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : null;
+        if (!raf) {
+            onComplete();
+            return;
+        }
+        raf(() => {
+            raf(() => {
+                onComplete();
+            });
+        });
+    }
 
     var _sfc_main$b = /*@__PURE__*/ defineComponent({
         __name: 'MainArea',
@@ -200114,18 +200559,31 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (containerRef.value)
                     containerRef.value.scrollTop = 0;
             }
-            onMounted(resetScroll);
-            // 切页时重置滚动；mount 模块在 close 时也会触发 requestScrollReset
-            watch(() => router.activePageId, resetScroll);
+            function schedulePaintComplete() {
+                const generation = router.bootGeneration;
+                scheduleRouterBootComplete_ACU(() => router.markBootComplete(generation));
+            }
+            onMounted(() => {
+                resetScroll();
+                schedulePaintComplete();
+            });
             watch(() => shell.scrollResetTick, resetScroll);
-            const __returned__ = { router, shell, containerRef, resetScroll };
+            // 重开 UI 会 remount 当前重页，必须在新 setup 之前重新武装哨兵。
+            watch(() => shell.openRefreshTick, () => {
+                router.armBootPending();
+            });
+            watch(() => `${router.activePageId}:${shell.openRefreshTick}`, () => {
+                resetScroll();
+                schedulePaintComplete();
+            }, { flush: 'post' });
+            const __returned__ = { router, shell, containerRef, resetScroll, schedulePaintComplete };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-main[data-v-c695ac77] {\r\n  flex: 1 1 auto;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  overflow: auto;\r\n  scrollbar-gutter: stable;\r\n  background: var(--acu-bg-0);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-main[data-v-c695ac77] .acu-v2-dashboard-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-advanced-tools-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-basic-config-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-form-fill-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-api-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-import-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-continuation-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-content-replace-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-data-mgmt-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-developer-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-plot-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-table-page,\r\n.acu-v2-main[data-v-c695ac77] .acu-v2-vector-index-page {\r\n  padding: var(--acu-page-padding, 20px);\r\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-main__empty[data-v-c695ac77] {\r\n  padding: var(--acu-space-6, 24px);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-3);\n}\n@media (max-width: 720px) {\n.acu-v2-main[data-v-c695ac77] .acu-v2-dashboard-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-advanced-tools-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-basic-config-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-form-fill-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-api-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-import-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-continuation-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-content-replace-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-data-mgmt-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-developer-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-plot-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-table-page,\r\n  .acu-v2-main[data-v-c695ac77] .acu-v2-vector-index-page {\r\n    padding: var(--acu-page-padding-compact, 14px);\n}\n}\r\n", "src/presentation-v2/components/MainArea.vue#style-0-c695ac77");
-    var MainArea_vue_vue_type_style_index_0_scoped_c695ac77_lang = null;
+    injectSfcStyle("\n.acu-v2-main[data-v-2955c5b3] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  overflow: auto;\n  scrollbar-gutter: stable;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-v2-main[data-v-2955c5b3] .acu-v2-dashboard-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-advanced-tools-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-basic-config-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-form-fill-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-api-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-import-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-continuation-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-content-replace-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-data-mgmt-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-developer-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-plot-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-table-page,\n.acu-v2-main[data-v-2955c5b3] .acu-v2-vector-index-page {\n  padding: var(--acu-page-padding, 20px);\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-main__empty[data-v-2955c5b3] {\n  padding: var(--acu-space-6, 24px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-3);\n}\n@media (max-width: 720px) {\n.acu-v2-main[data-v-2955c5b3] .acu-v2-dashboard-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-advanced-tools-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-basic-config-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-form-fill-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-api-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-import-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-continuation-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-content-replace-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-data-mgmt-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-developer-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-plot-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-table-page,\n  .acu-v2-main[data-v-2955c5b3] .acu-v2-vector-index-page {\n    padding: var(--acu-page-padding-compact, 14px);\n}\n}\n", "src/presentation-v2/components/MainArea.vue#style-0-2955c5b3");
+    var MainArea_vue_vue_type_style_index_0_scoped_2955c5b3_lang = null;
 
     const _hoisted_1$b = {
 	ref: "containerRef",
@@ -200145,7 +200603,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var MainArea = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-c695ac77"]]);
+    var MainArea = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-2955c5b3"]]);
 
     var _sfc_main$a = /*@__PURE__*/ defineComponent({
         __name: 'Sidebar',
