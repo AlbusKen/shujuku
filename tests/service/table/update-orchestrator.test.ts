@@ -3160,6 +3160,63 @@ describe('orchestrateManualUpdate_ACU', () => {
     }));
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
+
+  it('重填范围完全早于最后一层恢复根时改走跨根 staging，不硬阻断', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+    });
+    const chat: any[] = [
+      { is_user: false, mes: 'AI回复1' },
+      { is_user: true, mes: '用户2' },
+      { is_user: false, mes: 'AI回复3' },
+      { is_user: true, mes: '用户4' },
+      {
+        is_user: false,
+        mes: 'AI回复5',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [],
+              checkpoint: {
+                kind: 'full',
+                reason: 'import',
+                createdAt: 2,
+                data: { mate: { type: 'acu' }, sheet_0: { name: '测试表A', content: [['row_id', '值A'], ['later', '恢复快照']] } },
+                event: { filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [] },
+              },
+            },
+          },
+        },
+      },
+    ];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    mockSettings.skipUpdateFloors = 1;
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.manualUpdateContextDepth = 0;
+    mockSettings.manualUpdateBatchSize = 1;
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] } };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockResolvedValueOnce({
+      ok: true,
+      boundaryCommitSummary: { selectedSheetKeys: ['sheet_0'], originalFullCheckpointIndex: 4 },
+      verifiedHeadSnapshot: JSON.parse(JSON.stringify(mockCurrentJsonTableData)),
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.error || '').not.toContain('回放根准入阻断');
+    expect(result.success, result.error).toBe(true);
+    expect(mockCallCustomOpenAI).toHaveBeenCalled();
+    expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([0, 2], ['sheet_0']);
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(1);
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+  });
   it('跨根 staging 的 pre 段失败时不继续 post 段写入，不回滚保留已清理状态', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');

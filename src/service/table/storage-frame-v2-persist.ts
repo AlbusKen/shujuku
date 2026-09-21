@@ -849,6 +849,36 @@ export function getLatestTableStorageHeadRevisionV2_ACU(chat: any[] | null | und
   return headRevision;
 }
 
+function resolveMutationParentRevision_ACU(
+  frame: TableStorageFrameV2_ACU,
+  parentChainChat: any[],
+  isolationKey: string,
+  explicit?: string | null,
+): string | null {
+  if (explicit !== undefined) return explicit;
+  if (typeof frame.headRevision === 'string' && frame.headRevision.length > 0) {
+    return frame.headRevision;
+  }
+  // 必须用写前候选历史：replacement 会先 purge 范围内增量，原始 chat 仍残留
+  // 即将删除的 headRevision。若在这里回退到原始 chat，新 entry 会把已裁掉的
+  // commitRevision 当成 parent（#18 问题二的反向：dangling parent）。
+  const latestHead = getLatestTableStorageHeadRevisionV2_ACU(parentChainChat, isolationKey);
+  return latestHead && latestHead.length > 0 ? latestHead : null;
+}
+
+function isImportDataReplaceBootstrap_ACU(
+  source: TableMutationSourceV2_ACU | undefined,
+  operations: TableMutationOperationV2_ACU[],
+): boolean {
+  if (source !== 'import' || operations.length === 0) return false;
+  return operations.every(operation => (
+    operation?.kind === 'data_replace'
+    && operation.data
+    && typeof operation.data === 'object'
+    && !Array.isArray(operation.data)
+  ));
+}
+
 
 /**
  * 按楼层正序收集同一隔离键下全部 full checkpoint 的 message index。
@@ -2360,12 +2390,14 @@ async function persistTableMutationLogV2Core_ACU(
   //
   // 这条对所有 source 一致：导入只可能带来「现有没有的表」，
   // 同一张表的差异只是列，新增列按空处理，不需要另立基线。
+  const importDataReplaceBootstrap = isImportDataReplaceBootstrap_ACU(options.source, operations);
   const shouldCheckpoint = !hasCheckpointAnywhere
     && !isManualRefillProgressOnly
     && (temporaryBaselineUpgrade
       || initialCheckpointReason === 'init'
-      || initialCheckpointReason === 'migration');
-  if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade) {
+      || initialCheckpointReason === 'migration'
+      || initialCheckpointReason === 'import');
+  if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade && !importDataReplaceBootstrap) {
     return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
   }
 
@@ -2469,9 +2501,11 @@ async function persistTableMutationLogV2Core_ACU(
   if (shouldCheckpoint) {
     const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
     const checkpointEvent = {
-      filledSheetKeys,
+      // import bootstrap 是灾备快照，不是填表完成事件。filledSheetKeys/groupKeys
+      // 会让 table-history 把恢复所在楼层当成已追平前沿（#18 问题五）。
+      filledSheetKeys: importDataReplaceBootstrap ? [] : filledSheetKeys,
       changedSheetKeys: effectiveChangedSheetKeys,
-      groupKeys: options.groupKeys || [],
+      groupKeys: importDataReplaceBootstrap ? [] : (options.groupKeys || []),
       requestId: options.requestId,
       batchId: options.batchId,
       error: options.error,
@@ -2505,6 +2539,27 @@ async function persistTableMutationLogV2Core_ACU(
       }
     }
     logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
+    if (importDataReplaceBootstrap) {
+      const parentRevision = resolveMutationParentRevision_ACU(frame, preWriteChat, isolationKey);
+      entry = appendMutationLogEntry_ACU(frame, {
+        seq: 1,
+        createdAt: now,
+        source: options.source,
+        targetMessageIndex: target.index,
+        aiFloor,
+        filledSheetKeys: [],
+        changedSheetKeys: effectiveChangedSheetKeys,
+        groupKeys: [],
+        requestId: options.requestId,
+        batchId: options.batchId,
+        error: options.error,
+        operations,
+        baseRevision: requestedBaseRevision ?? parentRevision,
+        parentRevision,
+        writeSet: currentWriteSet,
+      });
+      logDebug_ACU(`[V2 Persist] 初始 import checkpoint 追加 data_replace log: messageIndex=${target.index}, seq=${entry.seq}, revision=${entry.commitRevision}`);
+    }
   } else if (shouldAppendLogEntry) {
     // 目标表必须在追加 operation 前的 active replay state 中真实存在。仅仅曾在历史
     // checkpoint 出现过不够：sheet_hide / data_replace 都可能已将它移出 active state；
@@ -2602,7 +2657,7 @@ async function persistTableMutationLogV2Core_ACU(
       }
     }
     const nextSeq = Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)) + 1;
-    const parentRevision = options.parentRevision !== undefined ? options.parentRevision : (frame.headRevision ?? null);
+    const parentRevision = resolveMutationParentRevision_ACU(frame, preWriteChat, isolationKey, options.parentRevision);
     entry = appendMutationLogEntry_ACU(frame, {
       seq: nextSeq,
       createdAt: now,
@@ -2958,7 +3013,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
     }
     const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
     const entryId = generateEntryId_ACU();
-    const parentRevision = frame.headRevision ?? null;
+    const parentRevision = resolveMutationParentRevision_ACU(frame, candidateChat, isolationKey);
     const entry: TableMutationLogEntryV2_ACU = {
       seq: nextSeq,
       entryId,

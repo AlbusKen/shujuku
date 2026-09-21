@@ -261,6 +261,37 @@ describe('direct persistence guards', () => {
       transactionContext,
     }));
   });
+
+  it('empty 策略的 import 恢复保留 data_replace，不伪装成 init 填表', async () => {
+    const message = { is_user: false, mes: 'AI 回复' };
+    mockGetChatArray.mockReturnValue([message]);
+    const transactionContext = makeTestTransactionContext_ACU();
+    const tableData = mockCurrentJsonTableDataRef.value;
+    const operations = [{ kind: 'data_replace', data: tableData, reason: 'checkpoint_fallback' }];
+
+    const result = await persistTablesToChatMessage_ACU({
+      assumeCommitLock: true,
+      transactionContext,
+      targetMessageIndex: 0,
+      tableData,
+      source: 'import',
+      checkpointReason: 'import',
+      trackAsUpdate: false,
+      trackingSheetKeys: ['sheet_0', 'sheet_1'],
+      operations,
+    });
+
+    expect(result).toEqual({ saved: true, messageIndex: 0, error: undefined });
+    expect(mockPersistTableMutationLogV2).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'import',
+      afterData: tableData,
+      forceCheckpoint: false,
+      checkpointReason: 'import',
+      operations,
+      filledSheetKeys: [],
+      transactionContext,
+    }));
+  });
 });
 
 describe('ensureLegacyStorageMigratedBeforeWrite_ACU', () => {

@@ -1762,6 +1762,37 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(mocks.saveChat).not.toHaveBeenCalled();
   });
 
+  it('group_fill 写到新的后续楼层时 parentRevision 继承全局 head，而不是新帧的 null', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const rootMessage = seedFrame({ logEntries: [] });
+    const laterMessage = { is_user: false } as any;
+    mocks.chat.push(laterMessage);
+    const rootHead = rootMessage.TavernDB_ACU_IsolatedData[''].storageFrame.headRevision;
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 1,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'catch-up']] }, sheet_b: sheetB } as any,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'catch-up'] }] as any,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.saved).toBe(true);
+    expect(laterMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0]).toMatchObject({
+      source: 'group_fill',
+      parentRevision: rootHead,
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'catch-up'] }],
+    });
+  });
+
 
   it('目标表在本楼未被任何 checkpoint 锚定时，先补写 per-sheet checkpoint 再追加增量', async () => {
     // 复现：先用旧模板填过表，切到新模板（新增表/列，rebase 落在最新楼层），
@@ -2272,6 +2303,44 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       logEntries: [],
     });
     expect(mocks.saveChat).toHaveBeenCalledOnce();
+
+    const restoreMessage = { is_user: false } as any;
+    mocks.chat.splice(0, mocks.chat.length, restoreMessage);
+    mocks.saveChat.mockClear();
+    mocks.saveChatStrict.mockClear();
+    const restoredData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'restored-row']] },
+      sheet_b: sheetB,
+    } as any;
+    const restoreImport = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'import',
+      checkpointReason: 'import',
+      afterData: restoredData,
+      filledSheetKeys: ['sheet_a', 'sheet_b'],
+      candidateChangedSheetKeys: ['sheet_a', 'sheet_b'],
+      operations: [{ kind: 'data_replace', data: restoredData, reason: 'checkpoint_fallback' }],
+      strictSave: true,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(restoreImport.saved).toBe(true);
+    const restoreFrame = restoreMessage.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(restoreFrame.checkpoint).toMatchObject({
+      kind: 'full',
+      reason: 'import',
+      data: restoredData,
+      event: { filledSheetKeys: [], changedSheetKeys: ['sheet_a', 'sheet_b'], groupKeys: [] },
+    });
+    expect(restoreFrame.logEntries).toHaveLength(1);
+    expect(restoreFrame.logEntries[0]).toMatchObject({
+      source: 'import',
+      filledSheetKeys: [],
+      operations: [{ kind: 'data_replace', data: restoredData, reason: 'checkpoint_fallback' }],
+    });
+    expect(String(restoreFrame.logEntries[0].parentRevision || '')).toMatch(/^checkpoint:/);
 
     const historicalImportMessage = { is_user: false } as any;
     const futureCheckpointMessage = {

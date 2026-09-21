@@ -60,6 +60,50 @@ describe('resolveTableHistoryStateFromChat_ACU', () => {
     expect(state.lastTrackedUpdateAiFloor).toBe(1);
   });
 
+  it('位于最后一层的 import 恢复帧不把空 filledSheetKeys 当成已追平前沿', () => {
+    const restoredSheet = { name: '表A', content: [['row_id', '值'], ['1', '恢复数据']] };
+    const chat = [
+      { is_user: false },
+      { is_user: true },
+      { is_user: false },
+      { is_user: true },
+      v2Message({
+        version: 2,
+        checkpoint: {
+          kind: 'full',
+          createdAt: 1,
+          reason: 'import',
+          data: { mate: {}, sheet_0: restoredSheet },
+          event: {
+            filledSheetKeys: [],
+            changedSheetKeys: ['sheet_0'],
+            groupKeys: [],
+          },
+        },
+        logEntries: [{
+          seq: 1,
+          source: 'import',
+          filledSheetKeys: [],
+          changedSheetKeys: ['sheet_0'],
+          groupKeys: [],
+          operations: [{ kind: 'data_replace', data: { mate: {}, sheet_0: restoredSheet }, reason: 'checkpoint_fallback' }],
+        }],
+      }),
+    ];
+
+    const state = resolveTableHistoryStateFromChat_ACU(chat, {
+      sheetKey: 'sheet_0',
+      isSummaryTable: false,
+      isolationKey: '',
+      settings,
+    });
+
+    expect(state.hasAnyData).toBe(true);
+    expect(state.hasTrackedUpdate).toBe(false);
+    expect(state.latestDataAiFloor).toBe(3);
+    expect(state.lastTrackedUpdateAiFloor).toBe(0);
+  });
+
   it('识别 V2 operation log 的 filledSheetKeys 作为最后填表楼层', () => {
     const chat = [
       v2Message({

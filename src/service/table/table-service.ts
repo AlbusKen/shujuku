@@ -225,11 +225,16 @@ async function persistTablesToChatMessageWithLockOption_ACU(
       logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
     }
 
-    const persistedOperations = strategy.mode === 'empty' ? [] : operations;
+    const persistSource = source || (metadataOnlyUpdateGroupKeys.length > 0 ? 'group_fill' : 'system');
+    // empty 只表示聊天里还没有 V2 帧。首次真实填表才剥 operations、写 init 快照。
+    // Checkpoint 恢复/导入同样会在 clear 之后走到 empty，但必须保留 data_replace，
+    // 否则落盘只剩 reason=init、logEntries=[]，F5 一旦剥空 checkpoint.data 就无法回放。
+    const treatAsEmptyBootstrap = strategy.mode === 'empty' && persistSource !== 'import';
+    const persistedOperations = treatAsEmptyBootstrap ? [] : operations;
     const persistV2InTransaction = async (transactionContext: TableWriteTransactionContext_ACU) => {
       const result = await persistTableMutationLogV2_ACU({
         targetMessageIndex,
-        source: source || (metadataOnlyUpdateGroupKeys.length > 0 ? 'group_fill' : 'system'),
+        source: persistSource,
         afterData: effectiveTableData,
         operations: persistedOperations,
         filledSheetKeys,
@@ -237,8 +242,8 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         groupKeys: metadataOnlyUpdateGroupKeys,
         requestId,
         batchId,
-        forceCheckpoint: forceCheckpoint === true || strategy.mode === 'empty',
-        checkpointReason: checkpointReason || (strategy.mode === 'empty' ? 'init' : undefined),
+        forceCheckpoint: forceCheckpoint === true || treatAsEmptyBootstrap,
+        checkpointReason: checkpointReason || (treatAsEmptyBootstrap ? 'init' : undefined),
         manualRefillProgress,
         replaceExistingIncremental,
         isolationKey: currentIsolationKey,

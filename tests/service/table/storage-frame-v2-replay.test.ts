@@ -2332,6 +2332,42 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(mockLogWarn).not.toHaveBeenCalled();
   });
 
+  it('full checkpoint.data 被剥空时仍能从同帧 checkpoint_fallback data_replace 重建', async () => {
+    const restored = makeCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'import',
+              data: { mate: { type: 'acu', version: 1 } },
+            },
+            logEntries: [{
+              seq: 1,
+              entryId: 'restore-replace',
+              createdAt: 2,
+              source: 'import',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: [],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: [],
+              operations: [{ kind: 'data_replace', data: restored, reason: 'checkpoint_fallback' }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    expect(result?.sheet_0.content).toEqual(restored.sheet_0.content);
+  });
+
   it('bounded replay 在 anchor 前只有 checkpoint_fallback、full 位于 anchor 后时拒绝越界恢复', async () => {
     const fallbackData = makeCheckpointData();
     fallbackData.sheet_0.content[1][1] = '降级快照';

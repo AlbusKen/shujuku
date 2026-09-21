@@ -4882,17 +4882,26 @@ export async function orchestrateManualUpdate_ACU(
 
             const currentIsolationKey = getCurrentIsolationKey_ACU();
             const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
+            const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
+            const canStageAcrossReplayRoot = originalFullIndex >= 0
+                && contextScopeIndices.length > 0
+                && contextScopeIndices[0] < originalFullIndex;
             // Task 4 破坏性清理前准入：重填会先清空范围内旧数据，若最新 full checkpoint
             // 晚于重填范围末尾，清理后写入目标早于回放根，必然撞 persist 层 fail-fast。
             // 必须在删除任何数据前阻止，避免用户数据先被清空才报错。
+            // 例外：范围首个目标已早于根时，后面的跨根 staging 会把边界前 bucket 改成
+            // stage_only，不写聊天帧；这时硬阻断会把「跳过最新回复后重填更早楼层」做成无解。
             const refillAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
                 chat: liveChat,
                 isolationKey: currentIsolationKey,
                 targetMessageIndex: refillTargetIndex,
             });
-            if (!refillAdmission.allow) {
+            if (!refillAdmission.allow && !canStageAcrossReplayRoot) {
                 logDebug_ACU(`[手动重填准入] 阻断：${refillAdmission.reason}（refillTarget=${refillTargetIndex}, isolationKey=[${currentIsolationKey || '无标签'}]）。`);
                 return { success: false, error: `手动重填被回放根准入阻断${refillAdmission.reason}` };
+            }
+            if (!refillAdmission.allow && canStageAcrossReplayRoot) {
+                logDebug_ACU(`[手动重填准入] 写目标早于回放根，改走跨根 staging：${refillAdmission.reason}（refillTarget=${refillTargetIndex}, originalFull=${originalFullIndex}）。`);
             }
 
             // 跨根 staging 判定：重填范围首个目标早于原 full checkpoint 时，
@@ -4902,8 +4911,7 @@ export async function orchestrateManualUpdate_ACU(
             // staging 的「原 full 边界」前提在清理后消失，汇合必以 full_checkpoint_root_mismatch
             // fail-closed。此时禁用 staging，改走普通路径 + 清理后临时根前置，由末尾
             // commitManualRefillSheetSnapshotInRangeAtomic_ACU 以既有 fallbackRequired 分支重建根。
-            const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
-            let requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+            let requiresBoundaryStaging = canStageAcrossReplayRoot;
             if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
                 // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
                 // sheet 键集合是否被 targetKeys 全量覆盖）。空 data 的 full 同样会被

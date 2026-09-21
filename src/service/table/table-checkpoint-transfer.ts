@@ -367,7 +367,7 @@ export async function restoreTableCheckpointToLatestAi_ACU(parsed: TableCheckpoi
         if (!templateState || !setCurrentChatTemplateScopeState_ACU(templateState, { isolationKey, reason: 'checkpoint_import' })) throw new Error('Checkpoint 模板作用域恢复失败。');
         if (!setChatSheetGuideDataForIsolationKey_ACU(isolationKey, checked.guideSnapshot.data, { reason: 'checkpoint_import', syncTemplateScope: false })) throw new Error('Checkpoint 指导表恢复失败。');
         const sheetKeys = Object.keys(checked.tableSnapshot).filter(key => key.startsWith('sheet_'));
-        const persisted = await persistTablesToChatMessage_ACU({ targetMessageIndex, tableData: checked.tableSnapshot, targetSheetKeys: sheetKeys, trackingSheetKeys: sheetKeys, filledSheetKeys: sheetKeys, trackAsUpdate: false, source: 'import', operations: [{ kind: 'data_replace', data: checked.tableSnapshot, reason: 'checkpoint_fallback' }], strictSave: true, assumeCommitLock: true, transactionContext });
+        const persisted = await persistTablesToChatMessage_ACU({ targetMessageIndex, tableData: checked.tableSnapshot, targetSheetKeys: sheetKeys, trackingSheetKeys: sheetKeys, trackAsUpdate: false, source: 'import', checkpointReason: 'import', operations: [{ kind: 'data_replace', data: checked.tableSnapshot, reason: 'checkpoint_fallback' }], strictSave: true, assumeCommitLock: true, transactionContext });
         if (!persisted.saved) throw new Error(persisted.error || 'Checkpoint 持久化失败。');
         return { clearedCount: cleared.clearedCount, restoredMessageIndex: persisted.messageIndex ?? targetMessageIndex };
       }, [{ kind: 'all' }]);
