@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../../src/service/simulation/defaults';
 import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../src/service/simulation/agent/agent-defaults';
-import { confirmWorldSimulationStageRevision_ACU, replaceWorldSimulationStagePlan_ACU, WorldSimulationStagePlanner_ACU } from '../../../src/service/simulation/simulation-stage-planner';
+import { buildDirectorOwnedStageRevision_ACU, confirmWorldSimulationStageRevision_ACU, replaceWorldSimulationStagePlan_ACU, WorldSimulationStagePlanner_ACU } from '../../../src/service/simulation/simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from '../../../src/service/simulation/simulation-stage-execution-engine';
 import { createWorldSimulationEvidenceRegistry_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../src/service/simulation/world-simulation-evidence-registry';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
@@ -15,6 +15,24 @@ const plan = { schemaVersion: 1 as const, title: '阶段', objective: '推进世
 
 describe('世界推演阶段 runtime', () => {
   afterEach(() => { resetWorldSimulationSessionLogForTests_ACU(); });
+  it('新建 run 使用确定性 director-owned 阶段计划且不含 chronicler', () => {
+    const revision = buildDirectorOwnedStageRevision_ACU({
+      instruction: '推进北岭暗流',
+      collisions: { playerRegion: '北岭', playerContact: 'open', secludedNote: null, collidedSeeds: ['seed-border'], ripeRumors: ['rumor-bell'] },
+      now: 42,
+    });
+    expect(revision).toMatchObject({ revision: 1, createdAt: 42, frozen: false, reason: 'initial' });
+    expect(revision.plan.title).toBe('本轮幕后推演');
+    expect(revision.plan.objective).toBe('推进北岭暗流');
+    expect(revision.plan.plannedSpecialists).toEqual(['timekeeper', 'undercurrent-analyst', 'dramatis-keeper']);
+    expect(revision.plan.plannedSpecialists).not.toContain('chronicler');
+    expect(revision.plan.expectedLedgerChanges).toEqual(['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player']);
+    expect(revision.plan.factsToVerify).toEqual(expect.arrayContaining([
+      '碰撞暗流：seed-border',
+      '成熟传闻：rumor-bell',
+      '正文时间跨度',
+    ]));
+  });
   it('生成、确认并冻结阶段 revision', async () => {
     const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
     const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke: async () => JSON.stringify({ action: 'plan', summary: 'ok', plan }) });

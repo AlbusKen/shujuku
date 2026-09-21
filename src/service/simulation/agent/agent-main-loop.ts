@@ -7,7 +7,7 @@ import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_A
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolInstruction_ACU } from './agent-defaults';
-import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
+import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
 import { summarizeWorldSimulationHandoff_ACU } from './agent-handoff-summarizer';
 import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
@@ -230,7 +230,29 @@ export class WorldSimulationMainLoop_ACU {
     const director = 'world-director' as const;
     // Director may correct several different mechanical fields in sequence; repeated identical
     // failures remain capped by the repair state's per-fingerprint guard.
-    const protocolRepair = createWorldSimulationProtocolRepairState_ACU(4);
+    const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
+    let pendingReview: { fingerprint: string; promise: Promise<WorldSimulationReviewerResult_ACU> } | null = null;
+    const candidateReviewFingerprint_ACU = (items: readonly WorldSimulationCandidate_ACU[]): string =>
+      sha256HexSync_ACU(JSON.stringify(uniqueCandidates_ACU(items).map(item => item.candidateId)));
+    const startPendingReview_ACU = (): void => {
+      const available = uniqueCandidates_ACU(candidates);
+      if (!available.length) {
+        pendingReview = null;
+        return;
+      }
+      const fingerprint = candidateReviewFingerprint_ACU(available);
+      if (pendingReview?.fingerprint === fingerprint) return;
+      pendingReview = {
+        fingerprint,
+        promise: this.dependencies.subagents.runReviewer({
+          candidates: available,
+          settings: input.settings,
+          promptContext: resultContext_ACU(input.promptContext, input.registry, available, outcomes),
+          registry: input.registry,
+          tools: input.tools,
+        }),
+      };
+    };
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, director, 'agent_loop', this.dependencies.apiPreset);
@@ -428,6 +450,7 @@ export class WorldSimulationMainLoop_ACU {
           throw error;
         }
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
+        pendingReview = null;
         persist(iteration + 1);
         continue;
       }
@@ -524,6 +547,9 @@ export class WorldSimulationMainLoop_ACU {
           transcriptPayload.push({ role: 'user', content: `\u5019\u9009\u5165\u5e93\u9884\u68c0\u62d2\u7edd\uff1a\n${preflightFailures.map(item => `${item.agentName} ${item.summary}`).join('\n')}\n\u8bf7\u6309\u5168\u90e8\u8fdd\u89c4\u4e00\u6b21\u6027\u4fee\u6b63\u540e\u91cd\u65b0\u6d3e\u5de5\u3002\u5b8c\u6574\u5fc5\u586b\u5b57\u6bb5\u6a21\u677f\uff1a${formatWorldSimulationLedgerRequiredFields_ACU()}\u3002\u4e0d\u5f97\u628a\u672c\u6b21\u9884\u68c0\u5931\u8d25\u5f53\u4f5c\u4efb\u52a1\u7ec8\u5c40\u3002` });
         }
         transcript.push(...transcriptPayload);
+        if (iteration < input.settings.agentRunBudget.maxIterations) {
+          startPendingReview_ACU();
+        }
         persist(iteration + 1);
         continue;
       }
@@ -556,12 +582,17 @@ export class WorldSimulationMainLoop_ACU {
         continue;
       }
       let reviewer;
+      const reviewFingerprint = candidateReviewFingerprint_ACU(available);
       const reviewerEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'delegation', title: '因果审核正在工作', detail: `正在审核 ${available.length} 个候选的时间、因果、权限与证据完整性`, agentName: 'causality-reviewer', status: 'running' });
       try {
-        reviewer = await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
+        reviewer = pendingReview?.fingerprint === reviewFingerprint
+          ? await pendingReview.promise
+          : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
+        pendingReview = null;
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
         await persistEntry(reviewerEntryId, `causality-review-${iteration}`);
       } catch (error) {
+        pendingReview = null;
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: '因果审核失败', detail: compact_ACU(error), ok: false, status: 'failed' });
         await persistEntry(reviewerEntryId, `causality-review-${iteration}-failed`);
         persist(iteration + 1, compact_ACU(error));

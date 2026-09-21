@@ -72,6 +72,7 @@ vi.mock('../../../src/service/continuation/internal-ai-events', () => ({
 vi.mock('../../../src/service/simulation/simulation-internal-ai-events', () => ({
   bindWorldSimulationInternalAiGenerationStarted_ACU: (...args: any[]) => m.bindSimulationInternalGeneration(...args),
   consumeWorldSimulationInternalAiGenerationEnded_ACU: (...args: any[]) => m.consumeSimulationInternalGeneration(...args),
+  hasWorldSimulationInternalAiInflight_ACU: () => false,
 }));
 vi.mock('../../../src/service/simulation/simulation-runtime', () => ({
   createWorldSimulationCompletionIntentForCurrentChat_ACU: (...args: any[]) => m.createSimulationIntent(...args),

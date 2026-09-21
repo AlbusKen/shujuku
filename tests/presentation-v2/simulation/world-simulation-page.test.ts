@@ -239,7 +239,7 @@ describe('WorldSimulationPage', () => {
     expect(saveSettings).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(900);
     expect(saveSettings).toHaveBeenCalledOnce();
-    expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000, agentRunBudget: { maxIterations: 12 } });
+    expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000, agentRunBudget: { maxIterations: 6 } });
 
     host.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
     await nextTick();

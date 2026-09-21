@@ -1,5 +1,6 @@
 <template>
   <div class="acu-v2-app">
+    <WorldSimulationProgressCard />
     <div v-show="rootShell.isOpen" class="acu-v2-app__shell">
       <div class="acu-v2-app__body">
         <Sidebar v-if="!visualizer.isActive" class="acu-v2-app__desktop-sidebar" />
@@ -146,6 +147,7 @@ import AcuSegmentedControl from "./components/_lib/AcuSegmentedControl.vue";
 import AcuToastViewport from "./components/_lib/AcuToastViewport.vue";
 import MainArea from "./components/MainArea.vue";
 import Sidebar from "./components/Sidebar.vue";
+import WorldSimulationProgressCard from "./components/WorldSimulationProgressCard.vue";
 import { useChatChangedListener } from "./composables/useChatChangedListener";
 import { useTemplateRuntimeChangeListener } from "./composables/useTemplateRuntimeChangeListener";
 import { useDevOptions } from "./composables/useDevOptions";

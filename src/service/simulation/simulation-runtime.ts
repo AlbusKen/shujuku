@@ -19,7 +19,7 @@ import {
 } from './agent/agent-model';
 import type { WorldSimulationPlaceholderContext_ACU } from './agent/agent-placeholder-resolver';
 import { WorldSimulationSubagentRuntime_ACU } from './agent/agent-subagent-runtime';
-import { createWorldSimulationError_ACU, WorldSimulationValidationError_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from './model';
+import { createWorldSimulationError_ACU, WorldSimulationValidationError_ACU, type WorldCollisionReport_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from './model';
 import { commitWorldSimulationProjection_ACU } from './simulation-commit-adapter';
 import {
   WORLD_SIMULATION_STOP_REASON_INTERRUPTED_ACU,
@@ -28,7 +28,7 @@ import {
   WorldSimulationOrchestrator_ACU,
   type WorldSimulationOrchestratorResult_ACU,
 } from './simulation-orchestrator';
-import { WorldSimulationStagePlanner_ACU } from './simulation-stage-planner';
+import { buildDirectorOwnedStageRevision_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
 import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, buildEmptyWorldChronicleArchiveSnapshot_ACU, readWorldSimulationBucketEntry_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationChronicleArchiveSnapshot_ACU } from './simulation-store';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
@@ -153,17 +153,16 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
           event,
         }, getChatArray_ACU());
 
-      const planner = new WorldSimulationStagePlanner_ACU({
-        invoke: (messages, preset) => invokeWorldSimulationAgent_ACU('world-stage-planner', messages, preset, identity, signal),
-        chatIdentity: identity.chatIdentity,
-        persistSessionEvent,
-      });
       const activeStage = envelope.stages.find(stage => stage.stageId === identity.stageId);
       const resumableRevision = envelope.task?.status === 'paused'
         ? activeStage?.revisions.find(revision => revision.revision === identity.stageRevision && revision.frozen)
         : undefined;
       const plannedRevision = resumableRevision
-        ?? (await planner.plan({ settings: envelope.settings, promptContext: baseContext, now: Date.now() })).revision;
+        ?? buildDirectorOwnedStageRevision_ACU({
+          instruction,
+          collisions: baseContext.worldCollisions as WorldCollisionReport_ACU,
+          now: Date.now(),
+        });
       const promptContext = buildPromptContext_ACU({
         identity, anchor: currentAnchor, instruction, envelope,
         stagePlan: plannedRevision.plan, registry, chat,

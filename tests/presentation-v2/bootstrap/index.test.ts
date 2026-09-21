@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   openVisualizer: vi.fn(async () => true),
   refreshVisualizer: vi.fn(async () => undefined),
   isVisualizerActive: vi.fn(() => true),
+  ensureMounted: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/ui-surface-registry', () => ({
@@ -23,6 +24,12 @@ vi.mock('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surfac
   requestVisualizerExternalRefresh_ACU: h.refreshVisualizer,
   isVisualizerSurfaceActive_ACU: h.isVisualizerActive,
 }));
+vi.mock('../../../src/presentation-v2/bootstrap/mount', () => ({
+  ensureAcuV2AppMounted: h.ensureMounted,
+  getAcuV2PiniaForBridge: vi.fn(() => null),
+  openAcuV2App: vi.fn(),
+  closeAcuV2App: vi.fn(),
+}));
 
 describe('bootstrapAcuV2', () => {
   beforeEach(() => {
@@ -37,10 +44,13 @@ describe('bootstrapAcuV2', () => {
     expect(h.registerUiSurface).toHaveBeenCalledTimes(1);
     expect(h.installApi).toHaveBeenCalledTimes(1);
     expect(h.registerMenu).toHaveBeenCalledTimes(1);
+    expect(h.ensureMounted).toHaveBeenCalledTimes(1);
     expect(h.registerUiSurface.mock.invocationCallOrder[0])
       .toBeLessThan(h.installApi.mock.invocationCallOrder[0]);
     expect(h.installApi.mock.invocationCallOrder[0])
       .toBeLessThan(h.registerMenu.mock.invocationCallOrder[0]);
+    expect(h.registerMenu.mock.invocationCallOrder[0])
+      .toBeLessThan(h.ensureMounted.mock.invocationCallOrder[0]);
 
     const handlers = h.registerUiSurface.mock.calls[0][0];
     await expect(handlers.openSettings()).resolves.toBe(true);

@@ -99,6 +99,11 @@ export async function openAcuV2App(): Promise<void> {
   if (wasMounted && !wasOpen) store.requestOpenRefresh();
 }
 
+/** 挂载根应用但不打开 shell。聊天页浮卡需要 Vue 根节点存在，即使设置面板仍关闭。 */
+export function ensureAcuV2AppMounted(): void {
+  ensureMounted();
+}
+
 /** Bridge 层在 Vue 组件外访问现有 Pinia；不会主动创建应用。 */
 export function getAcuV2PiniaForBridge(): Pinia | null {
   return state?.pinia ?? null;

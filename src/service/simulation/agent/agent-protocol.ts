@@ -449,6 +449,7 @@ export function parseWorldSimulationReviewerResult_ACU(value: unknown): WorldSim
     return { severity: severity as 'blocking' | 'major' | 'minor', reasonCode: requiredText_ACU(finding.reasonCode, `$.findings[${index}].reasonCode`), path: requiredText_ACU(finding.path, `$.findings[${index}].path`), expected: requiredText_ACU(finding.expected, `$.findings[${index}].expected`), actual: finding.actual };
   });
   let guidance: WorldSimulationReviewerResult_ACU['guidance'] | undefined;
+  if (verdict === 'accept' && raw.guidance === undefined) fail_ACU('REVIEW_GUIDANCE_REQUIRED', '$.guidance', 'guidance object required when verdict is accept', raw.guidance);
   if (raw.guidance !== undefined) {
     if (verdict !== 'accept') fail_ACU('REVIEW_GUIDANCE_REQUIRES_ACCEPT', '$.guidance', 'guidance only when verdict is accept', raw.guidance);
     const parsed = closedObject_ACU(raw.guidance, '$.guidance', ['signals', 'excludedFacts']);
@@ -562,11 +563,11 @@ export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldS
   return [
     `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
     '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
-    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时可额外包含 guidance。',
+    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；verdict 为 accept 时必须包含 guidance。',
     'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
     'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
     'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
-    'accept 时可额外包含 guidance：{"signals":[{"text":"...","voice":"ambient"}],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；没有可压缩内容时省略该字段。',
+    'accept 时必须包含 guidance：{"signals":[{"text":"...","voice":"ambient"}],"excludedFacts":["..."]}，只压缩已接受候选中的事实，不新增事实；无台面可感变化时 signals 为空数组并在 summary 说明。',
     JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
     JSON.stringify({
       verdict: 'revise',

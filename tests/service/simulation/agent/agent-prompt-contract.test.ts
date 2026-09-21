@@ -81,27 +81,30 @@ describe('世界推演提示词装配契约', () => {
     expect(instruction).toContain('verdict 必须精确为 accept、revise、reject');
     expect(instruction).toContain('severity 必须精确为 blocking、major、minor');
     expect(instruction).toContain('accept 必须至少接受一个候选');
-    expect(instruction).toContain('verdict 为 accept 时可额外包含 guidance');
+    expect(instruction).toContain('verdict 为 accept 时必须包含 guidance');
     expect(instruction).toContain('"verdict":"accept"');
     expect(instruction).toContain('"verdict":"revise"');
     expect(instruction).toContain('"verdict":"reject"');
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v7 含碰撞占位符、四拆分 specialist、并发派工与各角色动态世界硬约束', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v7');
-    expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget.maxConcurrent).toBe(5);
+  it('提示词 v8 含幕后重定位、按需编年、guidance 必出、速度压缩默认值与各角色动态世界硬约束', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v8');
+    expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8']);
     const v5 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v5');
     const v6 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v6');
-    const v7 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const v7 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v7');
+    const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(v5?.fingerprint).toBe('3749:5e40f616');
     expect(v6?.fingerprint).toBe('3910:629ead1');
+    expect(v7?.fingerprint).toBe('4534:cb080224');
     expect(v6?.fingerprint).not.toBe(v5?.fingerprint);
     expect(v7?.fingerprint).not.toBe(v6?.fingerprint);
+    expect(v8?.fingerprint).not.toBe(v7?.fingerprint);
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
     const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');
@@ -125,6 +128,10 @@ describe('世界推演提示词装配契约', () => {
     expect(directorPrompt).toContain('secluded');
     expect(directorPrompt).toContain('clockAdvance');
     expect(directorPrompt).toContain('伴生');
+    expect(directorPrompt).toContain('正文对话只是观察素材');
+    expect(directorPrompt).toContain('不要等待独立 planner');
+    expect(director).toContain('chronicler 仅在事件完结或热层编年过长时按需派出');
+    expect(director).not.toContain('编年与归档派 chronicler');
 
     const timekeeper = worldSimulationSpecialistProtocolInstruction_ACU(
       'timekeeper',
@@ -163,6 +170,8 @@ describe('世界推演提示词装配契约', () => {
     expect(chronicler).toContain('可省略 id/at');
     expect(chroniclerPrompt).toContain(chronicler);
     expect(chroniclerPrompt).toContain('归档职责');
+    expect(chroniclerPrompt).toContain('不是每轮常规角色');
+    expect(reviewerPrompt).toContain('guidance 是幕后→台面的唯一通道');
     expect(director).toContain('chronicle-archive:');
     expect(director).toContain('seeds:{id}');
 

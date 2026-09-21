@@ -69,7 +69,7 @@ describe('世界推演 Agent runtime', () => {
     };
     const responses = [
       JSON.stringify({ verdict: 'approved', summary: '错误别名', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
-      JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: [candidate.candidateId] }),
+      JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: [candidate.candidateId], guidance: { signals: [], excludedFacts: [] } }),
     ];
     const invoke = vi.fn(async () => responses.shift()!);
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
@@ -212,7 +212,6 @@ describe('世界推演 Agent runtime', () => {
     const responses = [
       JSON.stringify({ action: 'finalize', summary: '缺少 outcome', evidenceRefs: [] }),
       JSON.stringify({ action: 'finalize', outcome: 'no_change', candidateId: 'candidate:wrong', summary: '混入审核字段', evidenceRefs: [] }),
-      JSON.stringify({ action: 'finalize', outcome: 'done', summary: '非法别名', evidenceRefs: [] }),
       JSON.stringify({ action: 'block', reason: '协议已修正但证据不足', unresolved: ['missing evidence'] }),
     ];
     const invoke = vi.fn(async () => responses.shift()!);
@@ -223,7 +222,7 @@ describe('世界推演 Agent runtime', () => {
 
     await expect(loop.run({ identity, settings: runSettings, promptContext, registry, tools }))
       .resolves.toMatchObject({ outcome: 'blocked', summary: '协议已修正但证据不足' });
-    expect(invoke).toHaveBeenCalledTimes(4);
+    expect(invoke).toHaveBeenCalledTimes(3);
     expect(subagents.run).not.toHaveBeenCalled();
   });
 
@@ -392,7 +391,7 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
 
     expect(result).toMatchObject({ outcome: 'commit' });
-    expect(subagents.runReviewer.mock.calls[0][0].candidates).toEqual([revised]);
+    expect(subagents.runReviewer.mock.calls.at(-1)![0].candidates).toEqual([revised]);
     if (result.outcome !== 'commit') throw new Error('expected commit');
     expect(result.commitCandidate.acceptedCandidates).toEqual([revised]);
   });
@@ -440,8 +439,7 @@ describe('世界推演 Agent runtime', () => {
     expect(JSON.stringify(invoke.mock.calls)).toContain('完整必填字段模板');
     expect(JSON.stringify(invoke.mock.calls)).toContain('核心字段 dimensions:id,name');
     expect(subagents.run).toHaveBeenCalledTimes(2);
-    expect(subagents.runReviewer).toHaveBeenCalledTimes(1);
-    expect(subagents.runReviewer.mock.calls[0][0].candidates).toEqual([corrected]);
+    expect(subagents.runReviewer.mock.calls.at(-1)![0].candidates).toEqual([corrected]);
   });
 
   it('候选缺 kind/value/trend 时预检通过并直接入库', async () => {
@@ -514,7 +512,7 @@ describe('世界推演 Agent runtime', () => {
     expect(resumed.outcome).toBe('commit');
     expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries.some(entry => entry.evidenceRef === evidence)).toBe(true);
     expect(subagents.run).toHaveBeenCalledOnce();
-    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
   });
 
   it('同一 task/stage identity 恢复候选且不重复派工', async () => {
@@ -636,7 +634,7 @@ describe('世界推演 Agent runtime', () => {
 
     expect(result).toMatchObject({ outcome: 'commit', summary: '楼层恢复后提交' });
     expect(subagents.run).toHaveBeenCalledOnce();
-    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
     expect(snapshotWorldSimulationEvidenceRegistry_ACU(resumedRegistry).entries.some(entry => entry.evidenceRef === evidence)).toBe(true);
     _set_SillyTavern_API_ACU(undefined);
   });
@@ -1025,6 +1023,105 @@ describe('世界推演 Agent runtime', () => {
     const resumed = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 }).run({ identity, settings: runSettings, promptContext, registry, tools });
     expect(resumed).toMatchObject({ outcome: 'commit', summary: '自由文本后提交' });
     expect(subagents.run).toHaveBeenCalledOnce();
+  });
+
+  it('候选形成后投机审核与主 Agent 下一轮重叠，commit 复用同一 fingerprint', async () => {
+    const { registry, evidence, promptContext } = fixture('speculative-review-overlap');
+    const candidate = {
+      candidateId: 'candidate:overlap', agentName: 'timekeeper',
+      patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock'],
+    };
+    const events: string[] = [];
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn(async () => {
+        events.push('reviewer');
+        return {
+          verdict: 'accept' as const,
+          summary: '投机审核通过',
+          findings: [],
+          acceptedCandidateIds: [candidate.candidateId],
+          guidance: { signals: [], excludedFacts: [] },
+        };
+      }),
+    };
+    let directorRound = 0;
+    const invoke = vi.fn(async () => {
+      directorRound += 1;
+      events.push(`director-${directorRound}`);
+      if (directorRound === 1) {
+        return JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] });
+      }
+      expect(events).toContain('reviewer');
+      return JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交重叠审核结果', evidenceRefs: [evidence] });
+    });
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
+    const identity = {
+      runId: 'run-overlap', chatIdentity: 'chat-overlap', triggerKind: 'assistant_completed' as const,
+      triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0,
+      taskId: 'task-overlap', stageId: 'stage-overlap', stageRevision: 1,
+    };
+
+    const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '提交重叠审核结果' });
+    expect(events).toEqual(['director-1', 'reviewer', 'director-2']);
+    expect(subagents.runReviewer).toHaveBeenCalledOnce();
+  });
+
+  it('取证后作废投机审核，commit 改走串行审核且不复用 reject', async () => {
+    const { registry, evidence, promptContext } = fixture('speculative-review-invalidate');
+    const candidate = {
+      candidateId: 'candidate:invalidate', agentName: 'timekeeper',
+      patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence],
+      uncertainties: [], writableModules: ['clock'],
+    };
+    const subagents = {
+      run: vi.fn(async () => ({ agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] })),
+      runReviewer: vi.fn()
+        .mockResolvedValueOnce({
+          verdict: 'reject' as const,
+          summary: '过期审核不得复用',
+          findings: [{ severity: 'blocking' as const, reasonCode: 'STALE_EVIDENCE', path: '$', expected: '最新取证', actual: '审核早于 read' }],
+          acceptedCandidateIds: [],
+        })
+        .mockResolvedValueOnce({
+          verdict: 'accept' as const,
+          summary: '取证后串行通过',
+          findings: [],
+          acceptedCandidateIds: [candidate.candidateId],
+          guidance: { signals: [], excludedFacts: [] },
+        }),
+    };
+    const responses = [
+      JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
+      JSON.stringify({ action: 'read', reads: ['ledger:current'] }),
+      JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '取证后提交', evidenceRefs: [evidence] }),
+    ];
+    const liveTools = {
+      read: vi.fn(async () => ({ status: 'ok' as const, content: '{}', summary: '最新账本', exact: true })),
+      search: vi.fn(async () => ({ status: 'empty' as const, hits: [], summary: 'empty' })),
+    };
+    const loop = new WorldSimulationMainLoop_ACU({
+      invoke: vi.fn(async () => responses.shift()!),
+      subagents, apiPreset, countTokens: async () => 1,
+    });
+    const identity = {
+      runId: 'run-invalidate', chatIdentity: 'chat-invalidate', triggerKind: 'assistant_completed' as const,
+      triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0,
+      taskId: 'task-invalidate', stageId: 'stage-invalidate', stageRevision: 1,
+    };
+    const runSettings = settings();
+    runSettings.agentRunBudget.maxIterations = 4;
+
+    const result = await loop.run({ identity, settings: runSettings, promptContext, registry, tools: liveTools });
+
+    expect(result).toMatchObject({ outcome: 'commit', summary: '取证后提交' });
+    expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
+    expect(liveTools.read).toHaveBeenCalledWith('ledger:current');
   });
 
 });

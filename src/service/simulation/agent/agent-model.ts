@@ -113,7 +113,7 @@ export interface WorldSimulationReviewerResult_ACU {
   summary: string;
   findings: WorldSimulationReviewerFinding_ACU[];
   acceptedCandidateIds: string[];
-  /** verdict 为 accept 时可选：把已接受幕后事实压缩为角色可感知信号，不新增事实。 */
+  /** verdict 为 accept 时必填：把已接受幕后事实压缩为角色可感知信号，不新增事实。无变化时 signals 为空数组。 */
   guidance?: { signals: import('../model').WorldGuidanceSignal_ACU[]; excludedFacts: string[] };
 }
 export interface WorldSimulationSubagentOutcome_ACU {

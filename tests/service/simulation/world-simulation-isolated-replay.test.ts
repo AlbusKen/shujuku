@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
 import { WorldSimulationRuntime_ACU } from '../../../src/service/simulation/simulation-runtime';
 import { WorldSimulationOrchestrator_ACU } from '../../../src/service/simulation/simulation-orchestrator';
-import { WorldSimulationStagePlanner_ACU } from '../../../src/service/simulation/simulation-stage-planner';
+import { buildDirectorOwnedStageRevision_ACU } from '../../../src/service/simulation/simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from '../../../src/service/simulation/simulation-stage-execution-engine';
 import { WorldSimulationMainLoop_ACU } from '../../../src/service/simulation/agent/agent-main-loop';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../src/service/simulation/agent/agent-subagent-runtime';
@@ -20,21 +20,6 @@ import type { WorldSimulationRunIdentity_ACU } from '../../../src/service/simula
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
 type ReplayMode = 'commit_partial' | 'no_change' | 'blocked';
-
-const plan = {
-  schemaVersion: 1 as const,
-  title: '隔离回放阶段',
-  objective: '核验世界状态并安全收敛',
-  impactScope: ['world'],
-  factsToVerify: ['冻结锚点仍有效'],
-  plannedTools: ['anchor:message'],
-  plannedSpecialists: ['timekeeper', 'lore-researcher'],
-  expectedLedgerChanges: ['clock', 'guidance'] as const,
-  convergenceConditions: ['形成可审计终局'],
-  blockingConditions: ['证据不足'],
-  completedSteps: [],
-  nextStep: '执行隔离 API 脚本',
-};
 
 const isolatedPreset = {
   resolvePreset: vi.fn(() => ({
@@ -115,7 +100,6 @@ function buildReplay(options: ReplayOptions) {
     const clockSummary = '钟楼事件使世界时间推进一小时';
     const clockCandidateId = `${input.identity.runId}:timekeeper:1`;
     const scripts = new Map<WorldSimulationAgentName_ACU, string[]>([
-      ['world-stage-planner', [JSON.stringify({ action: 'plan', summary: '隔离阶段计划已冻结', plan })]],
       ['world-director', [
         JSON.stringify({ action: 'read', reads: ['anchor:message'] }),
         ...(options.mode === 'blocked'
@@ -176,29 +160,12 @@ function buildReplay(options: ReplayOptions) {
       return response;
     });
     const countTokens = async () => 1;
-    const planner = new WorldSimulationStagePlanner_ACU({ invoke: (messages, preset) => invoke('world-stage-planner', messages, preset), apiPreset: isolatedPreset, countTokens });
-    const planned = await planner.plan({
-      settings: input.envelope.settings,
-      promptContext: {
-        task: input.envelope.task,
-        history: readWorldSimulationConversation_ACU(chat),
-        runtimeContext: { triggerKind: input.identity.triggerKind, instruction: input.instruction },
-        agentCatalog: [],
-        toolCatalog: ['anchor:message'],
-        evidence: snapshotWorldSimulationEvidenceRegistry_ACU(registry).entries,
-        userGuidance: input.instruction,
-        worldState: input.envelope.ledger,
-        anchorMessage: assistant.mes,
-        anchorIdentity: input.anchor,
-        worldStagePlan: {},
-        worldChronicle: input.envelope.ledger.chronicle,
-        worldCandidates: [],
-        worldCollisions: { playerRegion: null, playerContact: 'open', secludedNote: null, collidedSeeds: [], ripeRumors: [] },
-        evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry),
-        projectionPreview: {},
-      },
+    const plannedRevision = buildDirectorOwnedStageRevision_ACU({
+      instruction: input.instruction,
+      collisions: { playerRegion: null, playerContact: 'open', secludedNote: null, collidedSeeds: [], ripeRumors: [] },
       now: ++clock,
     });
+    expect(plannedRevision.plan.plannedSpecialists).not.toContain('chronicler');
     const promptContext = {
       task: input.envelope.task,
       history: readWorldSimulationConversation_ACU(chat),
@@ -210,7 +177,7 @@ function buildReplay(options: ReplayOptions) {
       worldState: input.envelope.ledger,
       anchorMessage: assistant.mes,
       anchorIdentity: input.anchor,
-      worldStagePlan: planned.revision.plan,
+      worldStagePlan: plannedRevision.plan,
       worldChronicle: input.envelope.ledger.chronicle,
       worldCandidates: [],
       worldCollisions: { playerRegion: null, playerContact: 'open', secludedNote: null, collidedSeeds: [], ripeRumors: [] },
@@ -221,7 +188,7 @@ function buildReplay(options: ReplayOptions) {
     const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset: isolatedPreset, countTokens });
     const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset: isolatedPreset, countTokens });
     return {
-      revision: planned.revision,
+      revision: plannedRevision,
       execute: async (identity: WorldSimulationRunIdentity_ACU) => {
         const engine = new WorldSimulationStageExecutionEngine_ACU({
           readEnvelope: () => store.read(),
@@ -328,6 +295,8 @@ describe('T9 世界推演隔离 API replay', () => {
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
     expect(replay.toolRead).toHaveBeenCalledWith('anchor:message');
     expect(replay.toolSearch).not.toHaveBeenCalled();
+    expect(replay.invocations.map(item => item.role)).not.toContain('world-stage-planner');
+    expect(replay.invocations.map(item => item.role)).not.toContain('chronicler');
     expect(readWorldSimulationSessionLog_ACU('chat-replay').map(item => item.kind)).toEqual(expect.arrayContaining(['run_started', 'tool_read', 'delegation', 'run_completed']));
   });
 

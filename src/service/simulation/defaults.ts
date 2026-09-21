@@ -7,7 +7,7 @@ export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettin
     agentHistoryTokenBudget: 120000,
     agentReadTokenBudget: '20%',
     agentReadFallbackTokens: 6000,
-    agentRunBudget: { maxIterations: 12, maxDelegations: 12, maxSameAgent: 4, maxConcurrent: 5, maxReads: 24, maxExtraReads: 3 },
+    agentRunBudget: { maxIterations: 6, maxDelegations: 12, maxSameAgent: 4, maxConcurrent: 5, maxReads: 24, maxExtraReads: 1 },
     webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false }, searchProvider: 'duckduckgo', searxngBaseUrl: '', pageCharLimit: 4000, blockedDomains: '' },
     apiPresetMode: 'current',
     fixedApiPresetName: '',

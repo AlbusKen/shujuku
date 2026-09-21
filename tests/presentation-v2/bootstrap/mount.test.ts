@@ -100,6 +100,20 @@ describe('mount — 当前文档场景', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('ensureAcuV2AppMounted 挂载根节点但不打开 shell', async () => {
+    persistAdvancedMode();
+    const { mount } = await freshImport();
+    mount.ensureAcuV2AppMounted();
+    const root = document.getElementById(ROOT_ID);
+    expect(root).not.toBeNull();
+    expect(root!.style.display).toBe('none');
+    const pinia = mount.getAcuV2PiniaForBridge();
+    expect(pinia).not.toBeNull();
+    const { useRootShellStore } = await import('../../../src/presentation-v2/stores/root-shell-store');
+    expect(useRootShellStore(pinia!).isOpen).toBe(false);
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('主题按钮可以打开主题菜单，并在外部点击后关闭', async () => {
     const { mount } = await freshImport();
     await mount.openAcuV2App();

@@ -47,6 +47,8 @@ describe('世界推演 Agent 协议', () => {
     expect(() => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'macro', patch: { clock: { days: 1 } }, summary: '越权', evidenceRefs: ['E1'], uncertainties: [] }, snapshot)).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'finalize', outcome: 'commit', summary: '完成', evidenceRefs: [ref] })).toThrowError(/EVIDENCE_REGISTRY_REQUIRED/);
     expect(parseWorldSimulationReviewerResult_ACU({ verdict: 'revise', summary: '需修正', findings: [{ severity: 'major', reasonCode: 'TIME_GAP', path: '$.clock', expected: '连续', actual: '跳跃' }], acceptedCandidateIds: [] })).toMatchObject({ verdict: 'revise' });
+    expect(() => parseWorldSimulationReviewerResult_ACU({ verdict: 'accept', summary: '缺 guidance', findings: [], acceptedCandidateIds: ['candidate:1'] })).toThrowError(/REVIEW_GUIDANCE_REQUIRED/);
+    expect(parseWorldSimulationReviewerResult_ACU({ verdict: 'accept', summary: '无台面变化', findings: [], acceptedCandidateIds: ['candidate:1'], guidance: { signals: [], excludedFacts: [] } })).toMatchObject({ verdict: 'accept', guidance: { signals: [], excludedFacts: [] } });
   });
 
   it('在 specialist 边界拒绝非法模块 patch 并保留精确修正路径', () => {
@@ -136,6 +138,7 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('"verdict":"accept"');
     expect(message).toContain('"verdict":"revise"');
     expect(message).toContain('"verdict":"reject"');
+    expect(message).toContain('accept 时必须包含 guidance');
     expect(message).toContain('WORLD_SIMULATION_ENGINE_SEAM');
   });
 

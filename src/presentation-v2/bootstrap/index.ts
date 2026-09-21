@@ -10,7 +10,7 @@ import { registerUiSurface_ACU, type UiToastPayload_ACU } from '../../shared/ui-
 import { topLevelWindow_ACU } from '../../shared/env';
 import { logWarn_ACU } from '../../shared/utils';
 import { registerAcuV2MenuButton } from './menu-button';
-import { getAcuV2PiniaForBridge } from './mount';
+import { ensureAcuV2AppMounted, getAcuV2PiniaForBridge } from './mount';
 import { useRootShellStore } from '../stores/root-shell-store';
 import { useToastStore } from '../stores/toast-store';
 import {
@@ -21,7 +21,7 @@ import {
   isVisualizerSurfaceActive_ACU,
 } from '../surfaces/visualizer/open-visualizer-surface';
 
-export { openAcuV2App, closeAcuV2App } from './mount';
+export { openAcuV2App, closeAcuV2App, ensureAcuV2AppMounted } from './mount';
 export { openVisualizerSurface_ACU } from '../surfaces/visualizer/open-visualizer-surface';
 
 /**
@@ -74,4 +74,5 @@ export function bootstrapAcuV2(): void {
   });
   installAutoCardUpdaterV2Api_ACU();
   registerAcuV2MenuButton();
+  ensureAcuV2AppMounted();
 }
