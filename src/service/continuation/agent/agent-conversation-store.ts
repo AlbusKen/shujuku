@@ -35,6 +35,9 @@ import {
 /** 单条会话消息的字符上限。模型原始输出与工具结果都可能很长，超出即截断并如实标注。 */
 export const AGENT_CONVERSATION_TEXT_LIMIT_ACU = 8000;
 
+/** UI 回灌时间线默认只解析最近这么多条消息，避免长任务把主线程卡死。完整扫描仍可通过不传 maxMessages 获得。 */
+export const AGENT_CONVERSATION_TIMELINE_UI_WINDOW_ACU = 200;
+
 /** 各非 assistant 种类在发送给模型时的标题前缀，让模型能区分「谁在说话」。 */
 const KIND_PREFIXES_ACU: Record<AgentConversationMessageKind_ACU, string> = {
   user: '【用户】',
@@ -297,6 +300,23 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
   };
 }
 
+function readFloorTimelineContribution_ACU(message: any): {
+  segment: AgentConversationMessage_ACU[];
+  compaction?: AgentConversationCompactionMark_ACU;
+  replacesEarlier: boolean;
+} | null {
+  if (!message || typeof message !== 'object') return null;
+  if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) return null;
+  const raw = (message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU];
+  const record = validateAgentConversationFloorRecord_ACU(raw);
+  if (record) {
+    return { segment: record.segment, compaction: record.compaction, replacesEarlier: false };
+  }
+  const legacy = validateAgentConversationSnapshot_ACU(raw);
+  if (legacy) return { segment: [...legacy.messages], replacesEarlier: true };
+  return null;
+}
+
 /**
  * 读取完整的会话时间线（展示通道专用）：拼接所有楼层段，不做压缩投影，
  * 而是把每一份压缩标记的交接报告合成 handoff 消息插在它的截止位置上。
@@ -305,28 +325,44 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
  * 时间线保留全部原始消息——用户在 UI 里仍能回看交接文件之前的历史，并直观看到
  * 「AI 可见性从哪条交接文件开始」。删除承载标记的楼层后，该标记连同其 handoff 一起消失。
  * @param chat 聊天数组，缺省取当前聊天
+ * @param options.maxMessages 只从末尾收集这么多条原始消息，跳过更早楼层的解析
  * @returns 按时间顺序的完整消息数组（含合成的 handoff 条目）
  */
-export function readAgentConversationTimeline_ACU(chat?: any[]): AgentConversationMessage_ACU[] {
+export function readAgentConversationTimeline_ACU(
+  chat?: any[],
+  options?: { maxMessages?: number },
+): AgentConversationMessage_ACU[] {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  const maxMessages = Number.isInteger(options?.maxMessages) && (options?.maxMessages as number) > 0
+    ? Math.floor(options!.maxMessages as number)
+    : null;
   let collected: AgentConversationMessage_ACU[] = [];
   const marksById = new Map<number, AgentConversationCompactionMark_ACU>();
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!message || typeof message !== 'object') continue;
-    if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) continue;
-    const raw = (message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU];
-    const record = validateAgentConversationFloorRecord_ACU(raw);
-    if (record) {
-      collected = [...collected, ...record.segment];
-      if (record.compaction) {
-        const existing = marksById.get(record.compaction.compactedThroughId);
-        if (!existing || record.compaction.at > existing.at) marksById.set(record.compaction.compactedThroughId, record.compaction);
-      }
-      continue;
+  const rememberCompaction = (compaction?: AgentConversationCompactionMark_ACU): void => {
+    if (!compaction) return;
+    const existing = marksById.get(compaction.compactedThroughId);
+    if (!existing || compaction.at > existing.at) marksById.set(compaction.compactedThroughId, compaction);
+  };
+  if (maxMessages == null) {
+    for (let index = 0; index < messages.length; index += 1) {
+      const contribution = readFloorTimelineContribution_ACU(messages[index]);
+      if (!contribution) continue;
+      collected = contribution.replacesEarlier ? [...contribution.segment] : [...collected, ...contribution.segment];
+      rememberCompaction(contribution.compaction);
     }
-    const legacy = validateAgentConversationSnapshot_ACU(raw);
-    if (legacy) collected = [...legacy.messages];
+  } else {
+    const segmentsFromEnd: AgentConversationMessage_ACU[][] = [];
+    let count = 0;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const contribution = readFloorTimelineContribution_ACU(messages[index]);
+      if (!contribution) continue;
+      segmentsFromEnd.push(contribution.segment);
+      rememberCompaction(contribution.compaction);
+      count += contribution.segment.length;
+      if (contribution.replacesEarlier || count >= maxMessages) break;
+    }
+    collected = segmentsFromEnd.reverse().flat();
+    if (collected.length > maxMessages) collected = collected.slice(-maxMessages);
   }
   const marks = [...marksById.values()].sort((a, b) => a.compactedThroughId - b.compactedThroughId);
   if (!marks.length) return collected;
@@ -336,15 +372,12 @@ export function readAgentConversationTimeline_ACU(chat?: any[]): AgentConversati
   const timeline: AgentConversationMessage_ACU[] = [];
   let markIndex = 0;
   for (const item of collected) {
-    // 消息 id 在拼接顺序上单调递增，因此「插在 id ≤ 截止值的最后一条之后」等价于
-    // 在第一条 id 超过截止值的消息之前插入。
     while (markIndex < marks.length && item.id > marks[markIndex].compactedThroughId) {
       timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
       markIndex += 1;
     }
     timeline.push(item);
   }
-  // 截止值不小于全部消息 id 的标记（含消息段所在楼层已被删除、只剩标记的情况）挂在末尾。
   while (markIndex < marks.length) {
     timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
     markIndex += 1;

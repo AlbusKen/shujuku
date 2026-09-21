@@ -89,9 +89,11 @@
           v-for="stage in historyStages"
           :key="stage.stageId"
           class="acu-v2-continuation-materials__block"
-          open
+          :open="expandedHistoryStageIds.has(stage.stageId)"
+          @toggle="onHistoryStageToggle(stage.stageId, $event)"
         >
           <summary>第 {{ stage.stageNumber }} 阶段 · {{ stage.status }} · {{ stage.completedTurns }} / {{ stageTotalTurns(stage) }} 轮</summary>
+          <template v-if="expandedHistoryStageIds.has(stage.stageId)">
           <template v-for="revision in [displayRevision(stage)]" :key="revision?.revision ?? 'no-revision'">
             <section v-if="revision" class="acu-v2-continuation-materials__outline-summary">
               <p class="acu-v2-continuation-materials__outline-heading"><strong>{{ revision.outline.title }}</strong><span class="acu-v2-continuation-materials__badge">revision {{ revision.revision }}</span><span class="acu-v2-continuation-materials__badge">{{ revision.frozen ? '已冻结' : '待确认' }}</span><span class="acu-v2-continuation-materials__badge">职责：{{ ROLE_LABELS[revision.outline.role ?? ''] ?? revision.outline.role ?? '未标注' }}</span></p>
@@ -109,6 +111,7 @@
               <ol class="acu-v2-continuation-materials__list"><li v-for="node in revision.outline.nodes" :key="node.id"><strong>{{ node.title }}</strong>：{{ node.goal }}</li></ol>
             </details>
           </details>
+          </template>
         </details>
       </template>
     </template>
@@ -413,8 +416,17 @@ const outlineDraft = ref('');
 const outlineError = ref('');
 const outlineDirty = ref(false);
 const clearPending = ref(false);
+const expandedHistoryStageIds = ref(new Set<string>());
 const activeVolume = computed(() => materials.snapshot.value?.storyArc.find(entry => entry.scope === 'volume' && !entry.retired && entry.status === 'active') ?? null);
 const historyStages = computed(() => (props.task?.stages ?? []).filter(stage => stage.stageId !== props.activeStage?.stageId));
+
+function onHistoryStageToggle(stageId: string, event: Event): void {
+  const open = event.target instanceof HTMLDetailsElement ? event.target.open : false;
+  const next = new Set(expandedHistoryStageIds.value);
+  if (open) next.add(stageId);
+  else next.delete(stageId);
+  expandedHistoryStageIds.value = next;
+}
 
 function displayRevision(stage: ContinuationStage_ACU): StageRevision_ACU | null {
   return stage.revisions.find(revision => revision.revision === stage.activeRevision)

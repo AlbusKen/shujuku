@@ -10,7 +10,7 @@ import {
   type AgentSessionEntry_ACU,
   type AgentSessionEventInput_ACU,
 } from '../../service/continuation/agent/agent-session-log';
-import { readAgentConversationTimeline_ACU } from '../../service/continuation/agent/agent-conversation-store';
+import { readAgentConversationTimeline_ACU, AGENT_CONVERSATION_TIMELINE_UI_WINDOW_ACU } from '../../service/continuation/agent/agent-conversation-store';
 import type { AgentConversationMessage_ACU } from '../../service/continuation/agent/agent-model';
 
 /**
@@ -55,7 +55,7 @@ export function useContinuationSession() {
   function hydrate(): void {
     if (hasAgentSessionEntries_ACU()) return;
     try {
-      const timeline = readAgentConversationTimeline_ACU();
+      const timeline = readAgentConversationTimeline_ACU(undefined, { maxMessages: AGENT_CONVERSATION_TIMELINE_UI_WINDOW_ACU });
       if (timeline.length) hydrateAgentSessionLog_ACU(timeline.map(projectMessage_ACU));
     } catch { /* 持久会话不可读时保持空会话流，实时事件仍会显示。 */ }
     sync();

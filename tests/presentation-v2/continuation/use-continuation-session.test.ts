@@ -8,6 +8,7 @@ const harness = vi.hoisted(() => ({ readTimeline: vi.fn() }));
 
 vi.mock('../../../src/service/continuation/agent/agent-conversation-store', () => ({
   readAgentConversationTimeline_ACU: harness.readTimeline,
+  AGENT_CONVERSATION_TIMELINE_UI_WINDOW_ACU: 200,
 }));
 
 import { useContinuationSession } from '../../../src/presentation-v2/composables/useContinuationSession';
@@ -58,6 +59,7 @@ describe('useContinuationSession', () => {
     ]);
     // 回灌是历史展示，不能把自己算成"正在运行"。
     expect(session.running.value).toBe(false);
+    expect(harness.readTimeline).toHaveBeenCalledWith(undefined, { maxMessages: 200 });
   });
 
   it('会话流已有实时条目时不回灌，避免历史覆盖正在进行的运行', () => {

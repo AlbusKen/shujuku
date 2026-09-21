@@ -204,6 +204,15 @@ describe('会话时间线（展示通道）', () => {
     expect(readAgentConversationTimeline_ACU(chat).map(item => item.text)).toEqual(['第一句', '第二句']);
     expect(readAgentConversationTimeline_ACU([{ mes: 'a' }])).toEqual([]);
   });
+
+  it('maxMessages 只解析末尾窗口，不读取更早楼层', () => {
+    const chat = Array.from({ length: 6 }, (_, index) => ({
+      mes: `floor-${index}`,
+      [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(index + 1, 'agent', `消息${index + 1}`)]),
+    }));
+    expect(readAgentConversationTimeline_ACU(chat, { maxMessages: 2 }).map(item => item.text)).toEqual(['消息5', '消息6']);
+    expect(readAgentConversationTimeline_ACU(chat).map(item => item.text)).toHaveLength(6);
+  });
 });
 
 describe('会话落盘', () => {
