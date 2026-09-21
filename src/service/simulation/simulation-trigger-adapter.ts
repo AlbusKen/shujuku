@@ -1,5 +1,6 @@
 import { countAiMessages_ACU, isAiMessage_ACU, resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../runtime/message-handler';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import type { WorldSimulationRunIdentity_ACU } from './model';
 import { resolveWorldSimulationAnchor_ACU } from './simulation-store';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent/agent-model';
@@ -12,8 +13,53 @@ export interface WorldSimulationTriggerDependencies_ACU {
   delay(ms: number): Promise<void>;
   maxRetries?: number;
   retryDelayMs?: number;
+  settleRetries?: number;
+  settleDelayMs?: number;
 }
 const defaults_ACU: Pick<WorldSimulationTriggerDependencies_ACU, 'delay'> = { delay: ms => new Promise(resolve => setTimeout(resolve, ms)) };
+const SETTLE_RETRIES_DEFAULT_ACU = 4;
+const SETTLE_DELAY_MS_DEFAULT_ACU = 500;
+
+function readWorldSimulationSettleContent_ACU(message: unknown): string {
+  if (!message || typeof message !== 'object') return '';
+  const record = message as Record<string, unknown>;
+  return typeof record.mes === 'string' ? record.mes : typeof record.message === 'string' ? record.message : '';
+}
+
+function readWorldSimulationSettleSample_ACU(message: unknown): { ready: true; swipeId: string; digest: string } | { ready: false } {
+  if (!message || typeof message !== 'object') return { ready: false };
+  const record = message as Record<string, unknown>;
+  const content = readWorldSimulationSettleContent_ACU(record);
+  const swipeId = record.swipe_id;
+  if (!content || typeof swipeId !== 'number' || !Number.isInteger(swipeId) || swipeId < 0) return { ready: false };
+  return { ready: true, swipeId: String(swipeId), digest: sha256HexSync_ACU(content) };
+}
+
+async function waitForWorldSimulationAnchorSettle_ACU(
+  messageIndex: number,
+  chatIdentity: string,
+  dependencies: WorldSimulationTriggerDependencies_ACU,
+): Promise<WorldSimulationTriggerResolution_ACU> {
+  const delayFn = dependencies.delay ?? defaults_ACU.delay;
+  const settleRetries = dependencies.settleRetries ?? SETTLE_RETRIES_DEFAULT_ACU;
+  const settleDelay = dependencies.settleDelayMs ?? SETTLE_DELAY_MS_DEFAULT_ACU;
+  let previous: { swipeId: string; digest: string } | null = null;
+  for (let attempt = 0; attempt <= settleRetries; attempt += 1) {
+    const chat = dependencies.getChat();
+    if (getActiveChatStorageIdentity_ACU(chat) !== chatIdentity) return { kind: 'blocked', reason: 'chat_changed' };
+    const sample = readWorldSimulationSettleSample_ACU(chat[messageIndex]);
+    if (sample.ready) {
+      if (previous && previous.swipeId === sample.swipeId && previous.digest === sample.digest) {
+        return { kind: 'resolved', anchor: resolveWorldSimulationAnchor_ACU(messageIndex, chat) };
+      }
+      previous = { swipeId: sample.swipeId, digest: sample.digest };
+    } else {
+      previous = null;
+    }
+    if (attempt < settleRetries) await delayFn(settleDelay);
+  }
+  return { kind: 'blocked', reason: 'not_materialized' };
+}
 
 export function createWorldSimulationCompletionIntent_ACU(eventMessageId: number, chatKey: string, isolationKey: string, chat: any[], generationSeq?: number): AutoFillIntent_ACU {
   return {
@@ -36,7 +82,7 @@ export async function resolveWorldSimulationAssistantCompletion_ACU(
     const result = resolveGeneratedAiMessageIndex_ACU({ liveChat: chat, intent });
     if (result.kind === 'resolved') {
       if (!isAiMessage_ACU(chat[result.messageIndex])) return { kind: 'blocked', reason: 'invalid_intent' };
-      return { kind: 'resolved', anchor: resolveWorldSimulationAnchor_ACU(result.messageIndex, chat) };
+      return waitForWorldSimulationAnchorSettle_ACU(result.messageIndex, chatIdentity, dependencies);
     }
     if (result.kind === 'ambiguous') return { kind: 'blocked', reason: 'ambiguous' };
     if (result.kind === 'invalid_intent') return { kind: 'blocked', reason: 'invalid_intent' };

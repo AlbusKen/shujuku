@@ -7,6 +7,7 @@
       <!-- 冻结锚点：本轮推演写入的 assistant 楼层与 swipe，运行中不随新增楼层漂移。 -->
       <span v-if="anchorText" class="acu-v2-agent-chat__status-item">锚点 {{ anchorText }}</span>
     </div>
+    <p v-if="anchorStaleDiff" class="acu-v2-agent-chat__anchor-diff">{{ anchorStaleDiff }}</p>
 
     <WorldSimulationSessionFeed :entries="entries" :running="running" />
 
@@ -34,6 +35,7 @@
 import { computed } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import WorldSimulationSessionFeed from './WorldSimulationSessionFeed.vue';
+import { formatWorldSimulationAnchorStaleDiff_ACU } from '../simulation/world-simulation-anchor-diff';
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationTask_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationError_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
@@ -87,6 +89,8 @@ const notice = computed(() => {
   return '';
 });
 
+const anchorStaleDiff = computed(() => formatWorldSimulationAnchorStaleDiff_ACU(props.lastError));
+
 function onInput(event: Event): void {
   emit('update:draft', (event.target as HTMLTextAreaElement).value);
 }
@@ -112,6 +116,7 @@ function onKeydown(event: KeyboardEvent): void {
 .acu-v2-agent-chat__badge--failed { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b); }
 .acu-v2-agent-chat__status-item { color: var(--acu-text-3); }
 .acu-v2-agent-chat__notice { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
+.acu-v2-agent-chat__anchor-diff { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; }
 .acu-v2-agent-chat__composer { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2); }
 .acu-v2-agent-chat__input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px); }
 .acu-v2-agent-chat__input:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }

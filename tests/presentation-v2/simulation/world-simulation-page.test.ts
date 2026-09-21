@@ -379,6 +379,42 @@ describe('WorldSimulationPage', () => {
     expect(host.textContent).toContain('传闻等待上限 必须是 1 到 3650 之间的整数');
   });
 
+  it('锚点 stale 时在状态横幅下渲染 expected/actual 差异；非该错误不渲染', async () => {
+    setTask('paused');
+    const next = snapshot.value;
+    next.envelope.task.status = 'failed';
+    next.envelope.lastError = {
+      code: 'WORLD_SIMULATION_ANCHOR_STALE',
+      phase: 'anchor',
+      message: '世界推演冻结锚点已变化，拒绝继续写入',
+      retryable: false,
+      details: {
+        expected: { chatIdentity: 'chat-a', messageKey: 'number:7', swipeId: '0', contentDigest: 'aaaaaaaaaaaabbbb' },
+        actual: { chatIdentity: 'chat-a', messageKey: 'number:7', swipeId: '1', contentDigest: 'ccccccccccccdddd' },
+      },
+    };
+    snapshot.value = next;
+    statusText.value = '已失败 · 最近错误：世界推演冻结锚点已变化，拒绝继续写入';
+    const { host } = await mountPage();
+    const diff = host.querySelector('.acu-v2-agent-chat__anchor-diff');
+    expect(diff).not.toBeNull();
+    expect(diff?.textContent).toContain('swipeId expected=0 actual=1');
+    expect(diff?.textContent).toContain('contentDigest expected=aaaaaaaaaaaa actual=cccccccccccc');
+    expect(host.textContent).toContain('已失败 · 最近错误：世界推演冻结锚点已变化，拒绝继续写入');
+
+    next.envelope.lastError = {
+      code: 'WORLD_SIMULATION_CHAT_CHANGED',
+      phase: 'anchor',
+      message: '聊天已切换',
+      retryable: false,
+      details: { expected: { swipeId: '0' }, actual: { swipeId: '1' } },
+    };
+    snapshot.value = { ...next };
+    await nextTick();
+    expect(host.querySelector('.acu-v2-agent-chat__anchor-diff')).toBeNull();
+    expect(host.textContent).not.toContain('锚点差异');
+  });
+
   it('严格读取失败时展示结构化错误且不渲染会话输入与资料', async () => {
     ready.value = false;
     error.value = 'WORLD_SIMULATION_ENVELOPE_INVALID: envelope 损坏';
