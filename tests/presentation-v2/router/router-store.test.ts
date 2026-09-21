@@ -39,6 +39,7 @@ beforeEach(() => {
 
 afterEach(() => {
   localStorage.clear();
+  vi.unstubAllGlobals();
 });
 
 describe('router-store · pageRegistry 基线', () => {
@@ -332,6 +333,7 @@ describe('router-store · 切页 + 持久化', () => {
     expect(r.activePageId).toBe('continuation');
     const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
     expect(persisted.router.activePageId).toBe('continuation');
+    expect(persisted.router.bootPending).toBe(true);
   });
 
   it('剧情推进、智能续写、世界推演、外部导入与交火模式按功能开关控制一级页可见性', async () => {
@@ -385,6 +387,105 @@ describe('router-store · 切页 + 持久化', () => {
     expect(r.activePageId).toBe('advanced-tools');
   });
 
+});
+
+describe('router-store · 崩溃哨兵', () => {
+  it('旧存档没有 bootPending 时仍恢复上次页面，并立即武装本轮哨兵', async () => {
+    persistAdvancedMode('continuation');
+    const m = await freshImport();
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+    expect(r.activePageId).toBe('continuation');
+    expect(r.bootGeneration).toBe(1);
+    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
+    expect(persisted.router.activePageId).toBe('continuation');
+    expect(persisted.router.bootPending).toBe(true);
+  });
+
+  it('上次页面未完成绘制时高手模式回退到 dashboard，不恢复 continuation', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      uiMode: { mode: 'advanced' },
+      router: { activePageId: 'continuation', bootPending: true },
+    }));
+    const m = await freshImport();
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+    expect(r.activePageId).toBe('dashboard');
+    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
+    expect(persisted.router.activePageId).toBe('dashboard');
+    expect(persisted.router.bootPending).toBe(true);
+  });
+
+  it('上次页面未完成绘制时基础模式回退到 basic-config', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      uiMode: { mode: 'basic' },
+      router: { activePageId: 'basic-config', bootPending: true },
+    }));
+    const m = await freshImport();
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+    expect(r.activePageId).toBe('basic-config');
+  });
+
+  it('markBootComplete 仅在 generation 匹配时清除 bootPending', async () => {
+    persistAdvancedMode('plot');
+    const m = await freshImport();
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+    const generation = r.bootGeneration;
+    r.markBootComplete(generation - 1);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).router.bootPending).toBe(true);
+    r.markBootComplete(generation);
+    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!).router;
+    expect(persisted.bootPending).toBe(false);
+    expect(persisted.activePageId).toBe('plot');
+  });
+
+  it('armBootPending 递增 generation，过期 complete 不能清掉新哨兵', async () => {
+    persistAdvancedMode();
+    const m = await freshImport();
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+    const first = r.bootGeneration;
+    r.markBootComplete(first);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).router.bootPending).toBe(false);
+
+    const next = r.armBootPending();
+    expect(next).toBe(first + 1);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).router.bootPending).toBe(true);
+    r.markBootComplete(first);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).router.bootPending).toBe(true);
+    r.markBootComplete(next);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).router.bootPending).toBe(false);
+  });
+
+  it('scheduleRouterBootComplete_ACU 在双 rAF 之后才调用 complete', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const m = await freshImport();
+    const onComplete = vi.fn();
+    m.router.scheduleRouterBootComplete_ACU(onComplete);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(1);
+    frames[0](0);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(2);
+    frames[1](0);
+    expect(onComplete).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it('scheduleRouterBootComplete_ACU 在没有 rAF 时同步 complete', async () => {
+    vi.stubGlobal('requestAnimationFrame', undefined);
+    const m = await freshImport();
+    const onComplete = vi.fn();
+    m.router.scheduleRouterBootComplete_ACU(onComplete);
+    expect(onComplete).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
 });
 
 describe('root-shell-store · close 行为（P0-6）', () => {

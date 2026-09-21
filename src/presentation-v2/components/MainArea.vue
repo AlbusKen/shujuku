@@ -11,7 +11,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue';
-import { useRouterStore } from '../stores/router-store';
+import { scheduleRouterBootComplete_ACU, useRouterStore } from '../stores/router-store';
 import { useRootShellStore } from '../stores/root-shell-store';
 
 const router = useRouterStore();
@@ -22,10 +22,28 @@ function resetScroll() {
   if (containerRef.value) containerRef.value.scrollTop = 0;
 }
 
-onMounted(resetScroll);
-// 切页时重置滚动；mount 模块在 close 时也会触发 requestScrollReset
-watch(() => router.activePageId, resetScroll);
+function schedulePaintComplete(): void {
+  const generation = router.bootGeneration;
+  scheduleRouterBootComplete_ACU(() => router.markBootComplete(generation));
+}
+
+onMounted(() => {
+  resetScroll();
+  schedulePaintComplete();
+});
 watch(() => shell.scrollResetTick, resetScroll);
+// 重开 UI 会 remount 当前重页，必须在新 setup 之前重新武装哨兵。
+watch(() => shell.openRefreshTick, () => {
+  router.armBootPending();
+});
+watch(
+  () => `${router.activePageId}:${shell.openRefreshTick}`,
+  () => {
+    resetScroll();
+    schedulePaintComplete();
+  },
+  { flush: 'post' },
+);
 </script>
 
 <style scoped>

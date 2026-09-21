@@ -170,9 +170,8 @@ describe('mount — 当前文档场景', () => {
     expect(root!.getAttribute('data-acu-ui-scale')).toBe('125');
     expect(style!.textContent).toContain('--acu-ui-scale: 1.25;');
     expect(style!.textContent).toContain('--acu-font-size-body: 15px;');
-    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
-      appearance: { uiScale: '125' },
-    });
+    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
+    expect(persisted.appearance).toEqual({ uiScale: '125' });
     expect(menu!.textContent).toContain('125%');
 
     mount.__resetAcuV2MountForTests();
