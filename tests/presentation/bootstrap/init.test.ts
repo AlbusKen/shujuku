@@ -24,6 +24,8 @@ const m = vi.hoisted(() => ({
   getContinuationRuntime: vi.fn(),
   continuationRuntimeInitialize: vi.fn(async () => undefined),
   continuationBridge: null as any,
+  adoptOwners: vi.fn(),
+  installBranchSync: vi.fn(),
   recordGeneration: vi.fn((type: any, params: any, dryRun: any) => {
     const context = { seq: ++m.gate.generationSeq, type, params, dryRun };
     m.gate.activeGenerations.push(context);
@@ -63,6 +65,10 @@ vi.mock('../../../src/service/vector/summary-vector-index-realign-state', () => 
 vi.mock('../../../src/service/continuation/internal-ai-events', () => ({
   bindContinuationInternalAiGenerationStarted_ACU: (...args: any[]) => m.bindInternalGeneration(...args),
   consumeContinuationInternalAiGenerationEnded_ACU: (...args: any[]) => m.consumeInternalGeneration(...args),
+}));
+vi.mock('../../../src/service/chat/chat-branch-sync', () => ({
+  installChatBranchSync_ACU: m.installBranchSync,
+  adoptCopiedChatMetadataOwnersForCurrentChat_ACU: m.adoptOwners,
 }));
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({ getContinuationRuntime_ACU: () => m.getContinuationRuntime() }));
 vi.mock('../../../src/service/continuation/host-generation-bridge-registry', () => ({ getContinuationHostGenerationBridge_ACU: () => m.continuationBridge }));
@@ -267,6 +273,22 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(bridge.onGenerationStarted).toHaveBeenCalledTimes(3);
     m.generationEnded!(42);
     expect(bridge.claimsGenerationEnded).toHaveBeenLastCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: false, automaticTrigger: true, quietLike: false, dryRun: false });
+  });
+});
+
+describe('mainInitialize_ACU 分支同步接线', () => {
+  it('启动时安装分支存档拦截，并在 CHAT_CHANGED 刷新前认领拷贝来的 metadata owner', async () => {
+    vi.useFakeTimers();
+    m.api.chat = [{ mes: 'active' }];
+    m.resetScript.mockImplementation(async (chatKey: string) => { m.currentChatKey = chatKey; });
+    reinitialize_ACU!();
+    expect(m.installBranchSync).toHaveBeenCalled();
+
+    await m.chatChanged!('Name - Branch #1');
+    expect(m.adoptOwners).toHaveBeenCalledWith('Name - Branch #1');
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(m.adoptOwners).toHaveBeenCalledWith('Name - Branch #1');
+    vi.useRealTimers();
   });
 });
 

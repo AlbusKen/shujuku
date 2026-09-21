@@ -12,6 +12,7 @@ import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../se
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
 import { captureCheckpointVaultForCurrentChat_ACU, installCheckpointDeleteGuard_ACU } from '../../service/chat/checkpoint-delete-guard';
+import { adoptCopiedChatMetadataOwnersForCurrentChat_ACU, installChatBranchSync_ACU } from '../../service/chat/chat-branch-sync';
 import { reloadStorageProvider, disposeStorageProvider, getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from '../../service/table/table-storage-strategy';
 import { createCanonicalSnapshotEnvelope_ACU } from '../../service/table/canonical-snapshot-envelope';
 import { isSqliteMode } from '../../service/table/storage-mode';
@@ -149,6 +150,8 @@ export   function mainInitialize_ACU() {
       loadSettings_ACU();
       // S0-4：注册插件保存后的 checkpoint 保管库同步（删楼恢复的影子基线）。
       installCheckpointDeleteGuard_ACU();
+      // 酒馆「创建分支 / 检查点」另存新文件时，把截止该楼层的表数据与 metadata 归属同步过去。
+      installChatBranchSync_ACU();
       // Register the bridge before generation events are subscribed. Runtime
       // migration remains page-owned so no chat persistence is touched at startup.
       getContinuationRuntime_ACU();
@@ -223,6 +226,10 @@ export   function mainInitialize_ACU() {
             notifyRuntimeTableCleared_ACU();
             cancelPendingChatMutationRefresh_ACU();
             if (isSqliteMode()) logDebug_ACU('[SQLite] CHAT_CHANGED: 立即销毁旧数据库实例');
+          }
+
+          if (hasValidChatFileName_ACU) {
+            adoptCopiedChatMetadataOwnersForCurrentChat_ACU(chatFileName);
           }
 
           await resetScriptStateForNewChat_ACU(chatFileName, { reason: 'chat_changed' });
@@ -308,6 +315,8 @@ export   function mainInitialize_ACU() {
 
              // 先重新读取当前聊天持久化消息，再应用 chat_metadata 中的聊天模板快照。
              // 此处是“持久化 → 派生缓存”的唯一重建入口，不能依赖切换前遗留的 TABLE_TEMPLATE/currentJsonTableData。
+             // 分支/检查点会把父聊天 metadata 整份拷来，必须先把 owner 改绑到当前聊天，否则 chat_override 会被丢掉。
+             adoptCopiedChatMetadataOwnersForCurrentChat_ACU(scheduledChatIdentifier_ACU || chatFileName);
              await loadAllChatMessages_ACU();
              applyTemplateScopeForCurrentChat_ACU();
 
@@ -670,9 +679,11 @@ export   function mainInitialize_ACU() {
       // [修复] 添加轮询重试机制：如果 chatId 暂时不可用，持续轮询直到可用
       const initWithChatId = async (chatId: string) => {
           logDebug_ACU(`ACU: Initializing with current chat on load: ${chatId}`);
+          adoptCopiedChatMetadataOwnersForCurrentChat_ACU(chatId);
           await resetScriptStateForNewChat_ACU(chatId, { reason: 'startup_restore' });
           await loadPresetAndCleanCharacterData_ACU();
           // 再次强制刷新数据和UI，确保初始加载时表格显示正确
+          adoptCopiedChatMetadataOwnersForCurrentChat_ACU(chatId);
           await loadAllChatMessages_ACU();
 
           // [provisional bridge] 启动加载当前聊天后统一恢复门：
