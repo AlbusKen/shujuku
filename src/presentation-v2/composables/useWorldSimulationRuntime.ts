@@ -294,7 +294,7 @@ export function useWorldSimulationRuntime() {
   }
 
   /**
-   * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 九个角色: 段数组 } }。
+   * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 各角色: 段数组 } }。
    * 任何一组校验失败（角色缺失、seam 缺失、未知占位符）即整体拒绝，绝不产生半套导入。
    */
   function parsePromptBundle(text: string): WorldSimulationAgentPrompts_ACU {

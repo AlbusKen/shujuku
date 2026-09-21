@@ -356,7 +356,7 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
       if (!Array.isArray(raw.upsert) || !raw.upsert.length) invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
       raw.upsert.forEach((item, index) => {
         if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
-        if (!text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
+        if (item.id !== undefined && !text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
         const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
         if (item[labelField] !== undefined && !text_ACU(item[labelField])) {
           invalidSpecialistPatch_ACU(`${path}.upsert[${index}].${labelField}`, 'non-empty string', item[labelField]);
@@ -504,7 +504,7 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
     '{"action":"read","reads":["ledger:current","summary:current"]}',
     '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
   ];
-  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
+  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":[]},{"agentName":"undercurrent-analyst","instruction":"更新维度与暗流","reads":[]}]}');
   lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
   lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
   lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
@@ -526,7 +526,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
-    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
+    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
     const firstModule = writableModules[0];
     const patchExample = firstModule === 'dimensions'
       ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
@@ -599,7 +599,7 @@ export function renderWorldSimulationPlannerProtocolRejection_ACU(issue: WorldSi
         impactScope: ['当前世界状态'],
         factsToVerify: ['时间是否推进'],
         plannedTools: ['read'],
-        plannedSpecialists: ['world-analyst'],
+        plannedSpecialists: ['timekeeper', 'undercurrent-analyst'],
         expectedLedgerChanges: ['clock'],
         convergenceConditions: ['证据与候选闭合'],
         blockingConditions: ['缺少锚点'],

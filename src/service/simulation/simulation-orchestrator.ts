@@ -24,7 +24,7 @@ export interface WorldSimulationOrchestratorDependencies_ACU {
   store: WorldSimulationStorePort_ACU;
   now(): number;
   allocateId(kind: 'task' | 'stage' | 'run' | 'timeline'): string;
-  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal }): Promise<WorldSimulationPreparedRun_ACU>;
+  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean }): Promise<WorldSimulationPreparedRun_ACU>;
   assertAnchorCurrent(anchor: WorldSimulationAnchorIdentity_ACU): void | Promise<void>;
   appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string; idempotent?: boolean }): Promise<void>;
   commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string }): Promise<void>;
@@ -190,7 +190,7 @@ export class WorldSimulationOrchestrator_ACU {
     return this.runNew_ACU(input, existing, pausedRun ? existing!.task!.taskId : null);
   }
 
-  async resume(input: { anchor: WorldSimulationAnchorIdentity_ACU; instruction?: string }): Promise<WorldSimulationOrchestratorResult_ACU> {
+  async resume(input: { anchor: WorldSimulationAnchorIdentity_ACU; instruction?: string; resetRunBudget?: boolean }): Promise<WorldSimulationOrchestratorResult_ACU> {
     const envelope = this.deriveEnvelopeView(this.dependencies.store.read());
     const identity = envelope?.task?.activeRun;
     if (!envelope?.task || !identity || envelope.activeStageId !== identity.stageId) return { status: 'skipped', reason: 'duplicate' };
@@ -200,6 +200,7 @@ export class WorldSimulationOrchestrator_ACU {
     const controller = new AbortController();
     abortByChat_ACU.set(identity.chatIdentity, controller);
     const instruction = typeof input.instruction === 'string' && input.instruction.trim() ? input.instruction.trim() : '';
+    const resetRunBudget = input.resetRunBudget === true;
     const completion = (async (): Promise<WorldSimulationOrchestratorResult_ACU> => {
       try {
         await this.dependencies.assertAnchorCurrent(input.anchor);
@@ -208,7 +209,7 @@ export class WorldSimulationOrchestrator_ACU {
           await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction, idempotent: true });
         }
         if (controller.signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
-        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task!.originInstruction, envelope, signal: controller.signal });
+        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task!.originInstruction, envelope, signal: controller.signal, resetRunBudget });
         return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
       } catch (error) {
         return this.finishFailure_ACU(identity, error, controller.signal.aborted);

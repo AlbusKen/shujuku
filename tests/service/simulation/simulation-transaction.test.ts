@@ -1,12 +1,33 @@
 import { describe, expect, it } from 'vitest';
+import { findWorldSimulationAgentDefinition_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 import { buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
+import { eventFingerprint_ACU } from '../../../src/service/simulation/event-similarity';
 import { applyWorldSimulationCandidates_ACU, applyWorldSimulationCandidatesDetailed_ACU, preflightWorldSimulationCandidates_ACU } from '../../../src/service/simulation/simulation-transaction';
 import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU } from '../../../src/service/simulation/model';
 
-const candidate = (patch: Record<string, unknown>, evidenceRefs = ['e1']) => ({
-  candidateId: 'candidate:one', agentName: 'world-analyst', patch,
-  summary: '候选', evidenceRefs, uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'],
-});
+function agentForPatch_ACU(patch: Record<string, unknown>): string {
+  const keys = Object.keys(patch);
+  if (keys.some(key => key === 'clock')) return 'timekeeper';
+  if (keys.some(key => key === 'dimensions' || key === 'seeds')) return 'undercurrent-analyst';
+  if (keys.some(key => key === 'actors' || key === 'player' || key === 'rumors')) return 'dramatis-keeper';
+  if (keys.some(key => key === 'chronicle' || key === 'chronicleArchive')) return 'chronicler';
+  if (keys.some(key => key === 'guidance')) return 'causality-reviewer';
+  throw new Error(`TEST_PATCH_HAS_NO_WRITER:${keys.join(',')}`);
+}
+
+const candidate = (patch: Record<string, unknown>, evidenceRefs = ['e1'], candidateId = 'candidate:one') => {
+  const agentName = agentForPatch_ACU(patch);
+  const definition = findWorldSimulationAgentDefinition_ACU(agentName)!;
+  return {
+    candidateId,
+    agentName,
+    patch,
+    summary: '候选',
+    evidenceRefs,
+    uncertainties: [],
+    writableModules: [...definition.writableModules],
+  };
+};
 
 describe('world simulation transaction', () => {
   it('按授权模块应用候选且账本 revision 只递增一次', () => {
@@ -22,7 +43,7 @@ describe('world simulation transaction', () => {
   it('拒绝越权模块、未授权证据与条目 revision 冲突', () => {
     expect(() => applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
-      [candidate({ guidance: { signals: ['泄露'] } })], new Set(['e1']),
+      [{ ...candidate({ clock: { days: 1, evidenceRefs: ['e1'] } }), patch: { guidance: { signals: [{ text: '泄露', voice: 'ambient' }] } } }], new Set(['e1']),
     )).toThrow(/越权/);
     expect(() => applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
@@ -45,14 +66,10 @@ describe('world simulation transaction', () => {
   it('preflight 把可自动修复与必须人工修的违规分级返回', () => {
     const base = buildEmptyWorldSimulationLedger_ACU();
     base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '', evidenceRefs: [], revision: 1 });
-    const analyst = (candidateId: string, patch: Record<string, unknown>) => ({
-      candidateId, agentName: 'world-analyst', patch, summary: '候选',
-      evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'],
-    });
     const report = preflightWorldSimulationCandidates_ACU(base, [
-      analyst('candidate:clock', { clock: { days: -1, evidenceRefs: ['e1'] } }),
-      analyst('candidate:dimension-missing', { dimensions: { upsert: [{ id: 'new-dim', name: '新维度', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } }),
-      analyst('candidate:dimension-revision', { dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: ['e1'] }] } }),
+      candidate({ clock: { days: -1, evidenceRefs: ['e1'] } }, ['e1'], 'candidate:clock'),
+      candidate({ dimensions: { upsert: [{ id: 'new-dim', name: '新维度', expectedRevision: 0, rationale: '', evidenceRefs: ['e1'] }] } }, ['e1'], 'candidate:dimension-missing'),
+      candidate({ dimensions: { upsert: [{ id: 'pressure', expectedRevision: 0, name: '压力', kind: 'pressure', value: 2, trend: 'rising', rationale: '', evidenceRefs: ['e1'] }] } }, ['e1'], 'candidate:dimension-revision'),
     ], new Set(['e1']));
     const blocking = report.blocking.map(item => item.message).join('\n');
     const autoFixed = report.autoFixed.map(item => item.message).join('\n');
@@ -66,12 +83,14 @@ describe('world simulation transaction', () => {
     const report = preflightWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [
       candidate({
         actors: { upsert: [{ id: 'actor-1', name: '角色', interests: '不是数组', location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', expectedRevision: 0 }] },
+      }, ['e1'], 'candidate:actors'),
+      candidate({
         seeds: { upsert: [
           { id: 'seed-1', title: '暗流', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: [], location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision', evidenceRefs: ['e1'], retiredReason: '', expectedRevision: 0 },
           { id: 'seed-2', title: '暗流二', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: [], location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision', evidenceRefs: ['e1'], retiredReason: '不该带原因', expectedRevision: 0 },
           { id: 'seed-3', title: '暗流三', status: 'active', level: 1, catalyst: '', visibility: 'hidden', actorIds: ['actor-missing'], location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision', evidenceRefs: ['e1'], retiredReason: null, expectedRevision: 0 },
         ] },
-      }),
+      }, ['e1'], 'candidate:seeds'),
     ], new Set(['e1']));
     const autoFixed = report.autoFixed.map(item => item.message).join('\n');
     const blocking = report.blocking.map(item => item.message).join('\n');
@@ -107,7 +126,7 @@ describe('world simulation transaction', () => {
     )).toThrow(/引用了不存在的 actor/);
     expect(() => applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),
-      [candidate({ guidance: { signals: [{ text: '泄露', voice: 'ambient' }] } })],
+      [{ ...candidate({ clock: { days: 1, evidenceRefs: ['e1'] } }), patch: { guidance: { signals: [{ text: '泄露', voice: 'ambient' }] } } }],
       new Set(['e1']),
     )).toThrow(/越权/);
   });
@@ -219,5 +238,71 @@ describe('world simulation transaction', () => {
     );
     expect(similar.chronicle.some(item => item.id === 'ch-2')).toBe(true);
     expect(similar.chronicleOverview).toHaveLength(1);
+  });
+
+  it('新建 upsert 省略 id 时按模块前缀编号；缺 name 仍拒绝', () => {
+    const next = applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ dimensions: { upsert: [{ name: '压力', rationale: '', evidenceRefs: ['e1'] }] } })],
+      new Set(['e1']),
+    );
+    expect(next.dimensions[0]).toMatchObject({ id: 'dim-1', name: '压力', kind: 'pressure', value: 0, trend: 'stable', revision: 1 });
+    const sequential = applyWorldSimulationCandidates_ACU(
+      next,
+      [candidate({ dimensions: { upsert: [{ name: '增长', rationale: '', evidenceRefs: ['e1'] }] } })],
+      new Set(['e1']),
+    );
+    expect(sequential.dimensions.map(item => item.id)).toEqual(['dim-1', 'dim-2']);
+    expect(() => applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ dimensions: { upsert: [{ rationale: '', evidenceRefs: ['e1'] }] } })],
+      new Set(['e1']),
+    )).toThrow(/name 必须是非空字符串/);
+  });
+
+  it('chronicle append 省略 id/at 时按当前 clock 编号；先推进时钟再用推进后的 day', () => {
+    const omitted = applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [candidate({ chronicle: { append: [{ summary: '北境起风', relatedIds: [], evidenceRefs: ['e1'] }] } })],
+      new Set(['e1']),
+    );
+    expect(omitted.chronicle[0]).toMatchObject({ id: 'chr-1-1', at: '第1日', summary: '北境起风' });
+
+    const advanced = applyWorldSimulationCandidates_ACU(
+      buildEmptyWorldSimulationLedger_ACU(),
+      [
+        candidate({ clock: { days: 1, storyTime: '次日黎明', evidenceRefs: ['e1'] } }, ['e1'], 'candidate:clock'),
+        candidate({ chronicle: { append: [{ summary: '时钟推进后的编年', relatedIds: [], evidenceRefs: ['e1'] }] } }, ['e1'], 'candidate:chronicle'),
+      ],
+      new Set(['e1']),
+    );
+    expect(advanced.clock).toMatchObject({ day: 2, storyTime: '次日黎明' });
+    expect(advanced.chronicle[0]).toMatchObject({ id: 'chr-2-1', at: '次日黎明', summary: '时钟推进后的编年' });
+  });
+
+  it('chronicleArchive 省略 archiveRef/fingerprint 时按当日编号并与 overview 配对', () => {
+    const base = buildEmptyWorldSimulationLedger_ACU();
+    base.clock.day = 3;
+    const detailed = applyWorldSimulationCandidatesDetailed_ACU(
+      base,
+      [candidate({
+        chronicleArchive: {
+          archiveEntries: [{
+            summary: '北岭矿洞塌方，三人受伤，暗流收束。',
+            relatedIds: ['seed-1'],
+            sourceChronicleIds: ['ch-1'],
+          }],
+          overviewRows: [{ oneLine: '第3日 · 北岭矿洞塌方，三人受伤' }],
+        },
+      })],
+      new Set(['e1']),
+    );
+    const fingerprint = eventFingerprint_ACU('北岭矿洞塌方，三人受伤，暗流收束。', '3', ['seed-1']);
+    expect(detailed.ledger.chronicleOverview).toEqual([{
+      fingerprint, day: 3, oneLine: '第3日 · 北岭矿洞塌方，三人受伤', archiveRef: 'archive-3-1',
+    }]);
+    expect(detailed.chronicleArchiveWrites).toEqual([expect.objectContaining({
+      archiveRef: 'archive-3-1', day: 3, fingerprints: [fingerprint], relatedIds: ['seed-1'], sourceChronicleIds: ['ch-1'],
+    })]);
   });
 });

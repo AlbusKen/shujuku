@@ -8,10 +8,13 @@ import {
   coerceWorldSimulationGuidanceVoice_ACU,
   coerceWorldSimulationInteger_ACU,
   coerceWorldSimulationStringArray_ACU,
+  allocateWorldSimulationPrefixedId_ACU,
+  WORLD_SIMULATION_UPSERT_ID_PREFIX_ACU,
   normalizeWorldSimulationUpsertItem_ACU,
   type WorldSimulationPatchFixSeverity_ACU,
   type WorldSimulationUpsertModule_ACU,
 } from './simulation-patch-normalize';
+import { eventFingerprint_ACU } from './event-similarity';
 import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
@@ -72,9 +75,13 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(
   const seen = new Set<string>();
   for (const [index, item] of raw.upsert.entries()) {
     const itemPath = `${path}.upsert[${index}]`;
-    const existingIndex = isRecord_ACU(item) && typeof item.id === 'string' ? result.findIndex(entry => entry.id === item.id) : -1;
+    const existingIndex = isRecord_ACU(item) && typeof item.id === 'string' && item.id.trim() ? result.findIndex(entry => entry.id === item.id) : -1;
     const existing = existingIndex < 0 ? null : result[existingIndex] as unknown as Record_ACU;
-    const normalized = normalizeWorldSimulationUpsertItem_ACU({ module, item, existing, path: itemPath, clockDay });
+    const allocateNewId = existing ? undefined : () => {
+      const taken = [...result.map(entry => entry.id), ...seen];
+      return allocateWorldSimulationPrefixedId_ACU(WORLD_SIMULATION_UPSERT_ID_PREFIX_ACU[module], taken);
+    };
+    const normalized = normalizeWorldSimulationUpsertItem_ACU({ module, item, existing, path: itemPath, clockDay, allocateNewId });
     let blocked = false;
     for (const note of normalized.notes) {
       if (onViolation) {
@@ -212,11 +219,36 @@ function checkCrossField_ACU(next: WorldSimulationLedger_ACU, onViolation?: (mes
   }
 }
 
-function applyChronicle_ACU(current: WorldSimulationLedger_ACU['chronicle'], raw: unknown): WorldSimulationLedger_ACU['chronicle'] {
+function applyChronicle_ACU(
+  current: WorldSimulationLedger_ACU['chronicle'],
+  raw: unknown,
+  clock: WorldSimulationLedger_ACU['clock'],
+): WorldSimulationLedger_ACU['chronicle'] {
   if (!isRecord_ACU(raw)) fail_ACU('patch.chronicle 必须是对象');
   exactKeys_ACU(raw, ['append'], 'patch.chronicle');
   if (!Array.isArray(raw.append) || raw.append.length === 0) fail_ACU('patch.chronicle.append 必须是非空数组');
-  return [...clone_ACU(current), ...clone_ACU(raw.append as WorldSimulationLedger_ACU['chronicle'])];
+  const taken = new Set(current.map(item => item.id));
+  const appended = raw.append.map((item, index) => {
+    const path = `patch.chronicle.append[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`);
+    const summary = typeof item.summary === 'string' ? item.summary.trim() : '';
+    if (!summary) fail_ACU(`${path}.summary 必须是非空字符串`);
+    let id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) {
+      id = allocateWorldSimulationPrefixedId_ACU(`chr-${clock.day}`, taken);
+    }
+    if (taken.has(id)) fail_ACU(`${path}.id 与现有或本批编年冲突`, { id });
+    taken.add(id);
+    const at = typeof item.at === 'string' && item.at.trim()
+      ? item.at.trim()
+      : (clock.storyTime.trim() || `第${clock.day}日`);
+    const related = coerceWorldSimulationStringArray_ACU(item.relatedIds === undefined ? [] : item.relatedIds);
+    if (!related.ok) fail_ACU(`${path}.relatedIds 必须是字符串数组`);
+    const evidence = coerceWorldSimulationStringArray_ACU(item.evidenceRefs === undefined ? [] : item.evidenceRefs);
+    if (!evidence.ok) fail_ACU(`${path}.evidenceRefs 必须是字符串数组`);
+    return { id, at, summary, relatedIds: related.value, evidenceRefs: evidence.value };
+  });
+  return [...clone_ACU(current), ...appended];
 }
 
 const ARCHIVE_REF_RE_ACU = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -264,6 +296,7 @@ export interface WorldSimulationChronicleArchiveApply_ACU {
 export function applyChronicleArchive_ACU(
   current: readonly WorldChronicleOverviewRow_ACU[],
   raw: unknown,
+  clockDay: number,
 ): WorldSimulationChronicleArchiveApply_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('patch.chronicleArchive 必须是对象');
   exactKeys_ACU(raw, ['archiveEntries', 'overviewRows', 'collapseRefs'], 'patch.chronicleArchive');
@@ -274,8 +307,56 @@ export function applyChronicleArchive_ACU(
     : Array.isArray(raw.collapseRefs) && raw.collapseRefs.every(item => typeof item === 'string')
       ? raw.collapseRefs as string[]
       : fail_ACU('patch.chronicleArchive.collapseRefs 必须是字符串数组');
-  const writes = raw.archiveEntries.map((item, index) => archiveDetail_ACU(item, `patch.chronicleArchive.archiveEntries[${index}]`));
-  const overviewRows = raw.overviewRows.map((item, index) => overviewRow_ACU(item, `patch.chronicleArchive.overviewRows[${index}]`));
+  const takenRefs = new Set(current.map(row => row.archiveRef));
+  const filledEntries = raw.archiveEntries.map((item, index) => {
+    const path = `patch.chronicleArchive.archiveEntries[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`);
+    const next = { ...item };
+    const suppliedRef = typeof next.archiveRef === 'string' ? next.archiveRef.trim() : '';
+    if (!suppliedRef) {
+      const allocated = allocateWorldSimulationPrefixedId_ACU(`archive-${clockDay}`, takenRefs);
+      next.archiveRef = allocated;
+    }
+    takenRefs.add(String(next.archiveRef));
+    const relatedIds = Array.isArray(next.relatedIds) && next.relatedIds.every(value => typeof value === 'string')
+      ? next.relatedIds as string[]
+      : [];
+    const fingerprints = Array.isArray(next.fingerprints) && next.fingerprints.every(value => typeof value === 'string')
+      ? (next.fingerprints as string[]).map(value => value.trim()).filter(Boolean)
+      : [];
+    const day = typeof next.day === 'number' && Number.isInteger(next.day) ? next.day : clockDay;
+    const summary = typeof next.summary === 'string' ? next.summary : '';
+    if (!fingerprints.length) {
+      next.fingerprints = [eventFingerprint_ACU(summary, String(day), relatedIds)];
+    } else {
+      next.fingerprints = fingerprints;
+    }
+    if (next.relatedIds === undefined) next.relatedIds = relatedIds;
+    if (next.sourceChronicleIds === undefined) next.sourceChronicleIds = [];
+    if (next.day === undefined) next.day = day;
+    return next;
+  });
+  const writes = filledEntries.map((item, index) => archiveDetail_ACU(item, `patch.chronicleArchive.archiveEntries[${index}]`));
+  const filledRows = raw.overviewRows.map((item, index) => {
+    const path = `patch.chronicleArchive.overviewRows[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`);
+    const next = { ...item };
+    const paired = writes[index];
+    const suppliedRef = typeof next.archiveRef === 'string' ? next.archiveRef.trim() : '';
+    if (!suppliedRef) {
+      next.archiveRef = paired ? paired.archiveRef : allocateWorldSimulationPrefixedId_ACU(`archive-${clockDay}`, takenRefs);
+      takenRefs.add(String(next.archiveRef));
+    }
+    const day = typeof next.day === 'number' && Number.isInteger(next.day) ? next.day : (paired?.day ?? clockDay);
+    if (next.day === undefined) next.day = day;
+    const oneLine = typeof next.oneLine === 'string' ? next.oneLine : '';
+    const fingerprint = typeof next.fingerprint === 'string' ? next.fingerprint.trim() : '';
+    if (!fingerprint) {
+      next.fingerprint = paired?.fingerprints[0] || eventFingerprint_ACU(oneLine, String(day), paired?.relatedIds ?? []);
+    }
+    return next;
+  });
+  const overviewRows = filledRows.map((item, index) => overviewRow_ACU(item, `patch.chronicleArchive.overviewRows[${index}]`));
   const writeRefs = new Set(writes.map(item => item.archiveRef));
   if (writeRefs.size !== writes.length) fail_ACU('patch.chronicleArchive.archiveEntries archiveRef 必须唯一');
   const overviewRefs = new Set(overviewRows.map(item => item.archiveRef));
@@ -303,6 +384,12 @@ export function applyChronicleArchive_ACU(
 function canWritePatchModule_ACU(module: string, writable: ReadonlySet<string>): boolean {
   if (module === 'chronicleArchive') return writable.has('chronicle');
   return (MODULES_ACU as readonly string[]).includes(module) && writable.has(module);
+}
+
+function orderedPatchEntries_ACU(patch: Record<string, unknown>): Array<[string, unknown]> {
+  const entries = Object.entries(patch);
+  entries.sort((left, right) => (left[0] === 'clock' ? -1 : right[0] === 'clock' ? 1 : 0));
+  return entries;
 }
 
 export interface WorldSimulationApplyResult_ACU {
@@ -336,19 +423,19 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
     const writable = new Set<string>(definition.writableModules);
     const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
     if (forgedPermissions.length) fail_ACU('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
-    for (const [module, patch] of Object.entries(candidate.patch)) {
+    for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
       if (!canWritePatchModule_ACU(module, writable)) fail_ACU('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
       switch (module) {
         case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
         case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day); break;
         case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day); break;
         case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day); break;
-        case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
+        case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
         case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
         case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day); break;
         case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
         case 'chronicleArchive': {
-          const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch);
+          const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
           next.chronicleOverview = archived.overview;
           chronicleArchiveWrites.push(...archived.writes);
           break;
@@ -439,7 +526,7 @@ export function preflightWorldSimulationCandidates_ACU(
     const writable = new Set<string>(definition.writableModules);
     const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
     if (forgedPermissions.length) push('', '$.writableModules', `候选声明了角色目录未授权的写入模块: ${forgedPermissions.join(',')}`, { forgedPermissions });
-    for (const [module, patch] of Object.entries(candidate.patch)) {
+    for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
       if (!canWritePatchModule_ACU(module, writable)) {
         push(module, `$.patch.${module}`, '候选越权写入 ledger 模块');
         continue;
@@ -453,11 +540,11 @@ export function preflightWorldSimulationCandidates_ACU(
           case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collectUpsert); break;
           case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collectUpsert); break;
           case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collectUpsert); break;
-          case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch); break;
+          case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
           case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch); break;
           case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert); break;
           case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
-          case 'chronicleArchive': next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch).overview; break;
+          case 'chronicleArchive': next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day).overview; break;
         }
       } catch (error) {
         push(module, `$.patch.${module}`, error instanceof Error ? error.message : String(error));

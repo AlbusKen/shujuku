@@ -165,6 +165,18 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(f.getEnvelope().stages[0]).toMatchObject({ status: 'completed', revisions: [{ frozen: true }] });
   });
 
+  it('resume 传入 resetRunBudget 时转发给 prepare', async () => {
+    const execute = vi.fn(async () => completed);
+    const { prepare, prepareEntered } = abortableFirstPrepare(execute);
+    const f = fixture({ prepare });
+    const running = f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进', triggerConversationMessageId: 'turn-1' });
+    await prepareEntered;
+    await f.orchestrator.interrupt('chat-a');
+    await running;
+    await f.orchestrator.resume({ anchor: anchor(), instruction: '补充：重置预算', resetRunBudget: true });
+    expect(f.prepare.mock.calls[1][0]).toMatchObject({ instruction: '补充：重置预算', resetRunBudget: true });
+  });
+
   it('resume 携带指令时先把用户消息追加到冻结楼层会话', async () => {
     const appendUserMessage = vi.fn(async () => undefined);
     const { prepare, prepareEntered } = abortableFirstPrepare(async () => completed);

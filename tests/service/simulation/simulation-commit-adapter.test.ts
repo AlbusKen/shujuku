@@ -28,7 +28,7 @@ function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
   envelope.stages = [{ stageId: identity.stageId, stageNumber: 1, status: 'running', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: { schemaVersion: 1, title: '阶段', objective: '推进', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock', 'guidance'], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '提交' } }] }];
   chat[0]._qrf_world_simulation = envelope;
   const acceptedCandidates: any[] = [
-    { candidateId: 'candidate:clock', agentName: 'world-analyst', patch: { clock: { days: 1, storyTime: '1h', evidenceRefs: ['e1'] } }, summary: '时间推进', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle'] },
+    { candidateId: 'candidate:clock', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '1h', evidenceRefs: ['e1'] } }, summary: '时间推进', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['clock'] },
     { candidateId: 'candidate:guidance', agentName: 'causality-reviewer', patch: { guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }], evidenceRefs: ['e1'] } }, summary: '安全投影', evidenceRefs: ['e1'], uncertainties: [], writableModules: ['guidance'] },
   ];
   const commitCandidate: any = {
@@ -379,7 +379,7 @@ describe('world simulation commit adapter', () => {
     }];
     acceptedCandidates.push({
       candidateId: 'candidate:archive',
-      agentName: 'world-analyst',
+      agentName: 'chronicler',
       patch: {
         chronicleArchive: {
           archiveEntries: [{
@@ -392,7 +392,7 @@ describe('world simulation commit adapter', () => {
       summary: '归档完结事件',
       evidenceRefs: ['e1'],
       uncertainties: [],
-      writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'],
+      writableModules: ['chronicle'],
     });
 
     await commitWorldSimulationProjection_ACU(commitInput);

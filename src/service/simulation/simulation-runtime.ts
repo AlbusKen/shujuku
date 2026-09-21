@@ -127,7 +127,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         idempotent,
       }, getChatArray_ACU());
     },
-    prepare: async ({ identity, anchor, instruction, envelope, signal }) => {
+    prepare: async ({ identity, anchor, instruction, envelope, signal, resetRunBudget }) => {
       const chat = getChatArray_ACU();
       const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
       const registry = createWorldSimulationEvidenceRegistry_ACU(identity.runId);
@@ -207,6 +207,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
               anchor: currentAnchor,
               chat: getChatArray_ACU(),
+              resetRunBudget,
             }),
           });
           return engine.run({ identity: runIdentity });
@@ -247,13 +248,6 @@ const WORLD_SIMULATION_FLOOR_FIELDS_ACU = [
 ] as const;
 
 const RESUME_KEYWORD_ACU = /^(继续|恢复(?:任务)?|resume|continue)$/i;
-
-function sameAnchorIdentity_ACU(left: WorldSimulationAnchorIdentity_ACU, right: WorldSimulationAnchorIdentity_ACU): boolean {
-  return left.chatIdentity === right.chatIdentity
-    && left.messageKey === right.messageKey
-    && left.swipeId === right.swipeId
-    && left.contentDigest === right.contentDigest;
-}
 
 export class WorldSimulationRuntime_ACU {
   constructor(
@@ -317,10 +311,10 @@ export class WorldSimulationRuntime_ACU {
   }
 
   /**
-   * Agent 会话发送。与智能续写 sendAgentMessage 同语义：
-   * - 在途运行先打断并等待其落盘为 paused/manual；
-   * - 存在暂停中的运行且其冻结锚点仍是当前最新 assistant 楼层（或用户明确说"继续"）→ 带着这句话恢复同一 run；
-   * - 锚点已失效 / 最新 assistant 已是新楼层 → 新建运行，旧运行被取代；
+   * Agent 会话发送。
+   * - 在途运行先打断并等待其落盘为 paused；
+   * - 存在暂停中的运行且冻结锚点仍可恢复 → 带着这句话 resume 同一 run，并重置派工/迭代预算；
+   * - 锚点已失效（楼层删除 / swipe 变更）→ 新建运行；
    * - 空闲 → 新建运行。
    * 无 assistant 楼层或空指令时返回 null，不调用模型。
    */
@@ -335,10 +329,8 @@ export class WorldSimulationRuntime_ACU {
     const resolved = resolveLatestWorldSimulationAssistant_ACU(chat);
     if (pausedRun) {
       const pausedAnchor = this.restoreAnchorOrNull_ACU(pausedRun, chat);
-      const continuesSameFloor = pausedAnchor !== null
-        && (resumeKeyword || resolved.kind !== 'resolved' || sameAnchorIdentity_ACU(pausedAnchor, resolved.anchor));
-      if (pausedAnchor && continuesSameFloor) {
-        return this.orchestrator.resume(resumeKeyword ? { anchor: pausedAnchor } : { anchor: pausedAnchor, instruction });
+      if (pausedAnchor) {
+        return this.orchestrator.resume(resumeKeyword ? { anchor: pausedAnchor, resetRunBudget: true } : { anchor: pausedAnchor, instruction, resetRunBudget: true });
       }
     }
     if (!instruction || resolved.kind !== 'resolved') return null;

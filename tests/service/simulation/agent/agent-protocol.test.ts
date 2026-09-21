@@ -67,16 +67,21 @@ describe('世界推演 Agent 协议', () => {
     });
   });
 
-  it('在 specialist 边界拒绝缺少 id 的实体 upsert，但允许省略 name 与 expectedRevision', () => {
+  it('在 specialist 边界允许省略新建 id，但拒绝空串 id；仍允许省略 name 与 expectedRevision', () => {
     const registry = createWorldSimulationEvidenceRegistry_ACU('missing-entity-label');
     const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    expect(parseWorldSimulationSpecialistResult_ACU({
+      status: 'candidate', agentName: 'undercurrent-analyst',
+      patch: { dimensions: { upsert: [{ expectedRevision: 0, name: '压力' }] } },
+      summary: '省略 id 的新建维度候选', evidenceRefs: [ref], uncertainties: [],
+    }, snapshot)).toMatchObject({ status: 'candidate' });
     let error: unknown;
     try {
       parseWorldSimulationSpecialistResult_ACU({
-        status: 'candidate', agentName: 'world-analyst',
-        patch: { dimensions: { upsert: [{ expectedRevision: 0, name: '压力' }] } },
-        summary: '缺少 id 的维度候选', evidenceRefs: [ref], uncertainties: [],
+        status: 'candidate', agentName: 'undercurrent-analyst',
+        patch: { dimensions: { upsert: [{ id: '   ', expectedRevision: 0, name: '压力' }] } },
+        summary: '空串 id 的维度候选', evidenceRefs: [ref], uncertainties: [],
       }, snapshot);
     } catch (caught) {
       error = caught;
@@ -85,7 +90,7 @@ describe('世界推演 Agent 协议', () => {
       reasonCode: 'INVALID_SPECIALIST_PATCH', path: '$.patch.dimensions.upsert[0].id', expected: 'non-empty string',
     });
     expect(parseWorldSimulationSpecialistResult_ACU({
-      status: 'candidate', agentName: 'world-analyst',
+      status: 'candidate', agentName: 'undercurrent-analyst',
       patch: { dimensions: { upsert: [{ id: 'dimension-1', value: '12' }] } },
       summary: '部分字段维度候选', evidenceRefs: [ref], uncertainties: [],
     }, snapshot)).toMatchObject({ status: 'candidate' });
@@ -114,10 +119,10 @@ describe('世界推演 Agent 协议', () => {
   });
 
   it('specialist 协议拒绝回灌包含角色、枚举、写入范围与合法模板', () => {
-    const message = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'INVALID_SPECIALIST_STATUS', path: '$.status', expected: 'candidate | no_change | failed | blocked', actual: 'success' }, 'world-analyst', ['clock', 'dimensions']);
+    const message = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'INVALID_SPECIALIST_STATUS', path: '$.status', expected: 'candidate | no_change | failed | blocked', actual: 'success' }, 'timekeeper', ['clock']);
     expect(message).toContain('status 必须精确为 candidate、no_change、failed、blocked');
-    expect(message).toContain('agentName 必须精确为 world-analyst');
-    expect(message).toContain('patch 顶层只能使用：clock | dimensions');
+    expect(message).toContain('agentName 必须精确为 timekeeper');
+    expect(message).toContain('patch 顶层只能使用：clock');
     expect(message).toContain('"status":"candidate"');
     expect(message).toContain('expectedRevision 可省略');
     expect(message).toContain('新建 0');
@@ -180,7 +185,7 @@ describe('世界推演 Agent 协议', () => {
   });
 
   it('初始提示词即声明 specialist upsert/expectedRevision 契约与 director 动作字段白名单', () => {
-    const specialist = worldSimulationSpecialistProtocolInstruction_ACU('world-analyst', ['clock', 'dimensions', 'chronicle']);
+    const specialist = worldSimulationSpecialistProtocolInstruction_ACU('chronicler', ['chronicle']);
     expect(specialist).toContain('"upsert"');
     expect(specialist).toContain('expectedRevision 可省略');
     expect(specialist).toContain('新建默认 0');
@@ -198,7 +203,7 @@ describe('世界推演 Agent 协议', () => {
 
   it('默认提示词模板已接线 specialist upsert 契约与 director 字段白名单', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const specialist = prompts['world-analyst'].map(segment => segment.content).join('\n');
+    const specialist = prompts['undercurrent-analyst'].map(segment => segment.content).join('\n');
     expect(specialist).toContain('expectedRevision 可省略');
     expect(specialist).toContain('新建默认 0');
     expect(specialist).toContain('核心字段 dimensions:id,name');
@@ -245,7 +250,7 @@ describe('世界推演 Agent 协议', () => {
     const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
     const parsed = parseWorldSimulationSpecialistResult_ACU({
-      status: 'candidate', agentName: 'world-analyst',
+        status: 'candidate', agentName: 'chronicler',
       patch: {
         chronicleArchive: {
           archiveEntries: [{ archiveRef: 'arc-1', day: 3, summary: '归档', fingerprints: [], relatedIds: [], sourceChronicleIds: [] }],
@@ -256,7 +261,7 @@ describe('世界推演 Agent 协议', () => {
     }, snapshot);
     expect(parsed).toMatchObject({ status: 'candidate' });
     expect(() => parseWorldSimulationSpecialistResult_ACU({
-      status: 'candidate', agentName: 'world-analyst',
+        status: 'candidate', agentName: 'chronicler',
       patch: { chronicleArchive: { archiveEntries: [{ archiveRef: 'arc-1' }], overviewRows: [] } },
       summary: '空目录', evidenceRefs: [ref], uncertainties: [],
     }, snapshot)).toThrowError(/INVALID_SPECIALIST_PATCH/);

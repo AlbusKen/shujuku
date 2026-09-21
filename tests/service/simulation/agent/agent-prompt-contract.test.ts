@@ -9,10 +9,14 @@ import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, ren
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
 describe('世界推演提示词装配契约', () => {
-  it('装配五角色及唯一有序固定 seam', () => {
+  it('装配八角色及唯一有序固定 seam', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
-    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(5);
+    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(8);
+    expect(WORLD_SIMULATION_AGENT_NAMES_ACU).toEqual([
+      'world-director', 'world-stage-planner', 'timekeeper', 'undercurrent-analyst',
+      'dramatis-keeper', 'chronicler', 'causality-reviewer', 'lore-researcher',
+    ]);
     for (const segments of Object.values(prompts)) {
       const positions = WORLD_SIMULATION_ENGINE_SEAMS_ACU.map(seam => segments.findIndex(segment => segment.content.includes(worldSimulationSeamMarker_ACU(seam))));
       expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -84,19 +88,26 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v6 含碰撞占位符、归档职责与各角色动态世界硬约束', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v6');
+  it('提示词 v7 含碰撞占位符、四拆分 specialist、并发派工与各角色动态世界硬约束', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v7');
+    expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget.maxConcurrent).toBe(5);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7',
     ]);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7']);
     const v5 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v5');
     const v6 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v6');
+    const v7 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(v5?.fingerprint).toBe('3749:5e40f616');
+    expect(v6?.fingerprint).toBe('3910:629ead1');
     expect(v6?.fingerprint).not.toBe(v5?.fingerprint);
+    expect(v7?.fingerprint).not.toBe(v6?.fingerprint);
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
     const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');
-    const analystPrompt = prompts['world-analyst'].map(item => item.content).join('\n');
+    const timekeeperPrompt = prompts.timekeeper.map(item => item.content).join('\n');
+    const undercurrentPrompt = prompts['undercurrent-analyst'].map(item => item.content).join('\n');
+    const chroniclerPrompt = prompts.chronicler.map(item => item.content).join('\n');
     const reviewerPrompt = prompts['causality-reviewer'].map(item => item.content).join('\n');
     expect(directorPrompt).toContain('$WORLD_COLLISIONS');
     expect(plannerPrompt).toContain('$WORLD_COLLISIONS');
@@ -106,29 +117,52 @@ describe('世界推演提示词装配契约', () => {
     const director = worldSimulationDirectorProtocolInstruction_ACU();
     expect(director).toContain('player:current');
     expect(director).toContain('rumors:current');
+    expect(director).toContain('相互独立的推演事项必须在同一次 delegate');
+    expect(director).toContain('优先按阶段计划 plannedSpecialists 派工');
+    expect(director).toContain('可先放弃该模块更新');
+    expect(director).toContain('"agentName":"timekeeper"');
     expect(directorPrompt).toContain('碰撞报告');
     expect(directorPrompt).toContain('secluded');
     expect(directorPrompt).toContain('clockAdvance');
     expect(directorPrompt).toContain('伴生');
 
-    const specialist = worldSimulationSpecialistProtocolInstruction_ACU(
-      'world-analyst',
-      WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'world-analyst')!.writableModules,
+    const timekeeper = worldSimulationSpecialistProtocolInstruction_ACU(
+      'timekeeper',
+      WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'timekeeper')!.writableModules,
     );
-    expect(specialist).toContain('clockAdvance');
-    expect(specialist).toContain('禁止直接写 day');
-    expect(specialist).toContain('locationUpdatedAtDay');
-    expect(specialist).toContain('regionVisits');
-    expect(specialist).toContain('secluded');
-    expect(specialist).toContain('exposePolicy');
-    expect(specialist).toContain('life');
-    expect(specialist).toContain('rumors');
-    expect(specialist).toContain('earliestRevealDay');
-    expect(specialist).toContain('sourceId');
-    expect(specialist).toContain('chronicleArchive');
-    expect(specialist).toContain('目录中任一条目都可通过 read 工具按地址调阅详细信息');
-    expect(analystPrompt).toContain(specialist);
-    expect(analystPrompt).toContain('归档职责');
+    expect(timekeeper).toContain('clockAdvance');
+    expect(timekeeper).toContain('禁止直接写 day');
+    expect(timekeeperPrompt).toContain(timekeeper);
+    expect(timekeeperPrompt).toContain('只写入 clock');
+
+    const undercurrent = worldSimulationSpecialistProtocolInstruction_ACU(
+      'undercurrent-analyst',
+      WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'undercurrent-analyst')!.writableModules,
+    );
+    expect(undercurrent).toContain('exposePolicy');
+    expect(undercurrentPrompt).toContain(undercurrent);
+    expect(undercurrentPrompt).toContain('只写入 dimensions 与 seeds');
+
+    const dramatis = worldSimulationSpecialistProtocolInstruction_ACU(
+      'dramatis-keeper',
+      WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'dramatis-keeper')!.writableModules,
+    );
+    expect(dramatis).toContain('locationUpdatedAtDay');
+    expect(dramatis).toContain('regionVisits');
+    expect(dramatis).toContain('secluded');
+    expect(dramatis).toContain('life');
+    expect(dramatis).toContain('rumors');
+    expect(dramatis).toContain('earliestRevealDay');
+
+    const chronicler = worldSimulationSpecialistProtocolInstruction_ACU(
+      'chronicler',
+      WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'chronicler')!.writableModules,
+    );
+    expect(chronicler).toContain('chronicleArchive');
+    expect(chronicler).toContain('目录中任一条目都可通过 read 工具按地址调阅详细信息');
+    expect(chronicler).toContain('可省略 id/at');
+    expect(chroniclerPrompt).toContain(chronicler);
+    expect(chroniclerPrompt).toContain('归档职责');
     expect(director).toContain('chronicle-archive:');
     expect(director).toContain('seeds:{id}');
 

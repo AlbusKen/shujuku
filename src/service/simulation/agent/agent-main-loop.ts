@@ -37,6 +37,7 @@ export interface WorldSimulationMainLoopInput_ACU {
   persistSessionEvent?: (eventKey: string, event: WorldSimulationSessionInput_ACU) => Promise<unknown>;
   anchor?: WorldSimulationAnchorIdentity_ACU;
   chat?: any[];
+  resetRunBudget?: boolean;
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -209,15 +210,16 @@ export class WorldSimulationMainLoop_ACU {
     // 候选与证据全量保留；交接摘要注入 transcript 开头一次。
     // 末轮 persist(iteration+1) 会使 nextIteration 越过 maxIterations；这不是预算终局，
     // 只把迭代游标拉回第 1 轮，保留派工/同角色计数，避免「继续」直接掉进迭代耗尽。
+    const resetRunBudget = input.resetRunBudget === true;
     const budgetExhausted = !!resumedState
       && (resumedState.budgetExhausted === true || LEGACY_BUDGET_FEEDBACK_ACU.has(resumedState.reviewerFeedback));
     const overflowed = !!resumedState
       && resumedState.nextIteration > input.settings.agentRunBudget.maxIterations;
-    const iterationStart = budgetExhausted || overflowed ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
-    const delegationsStart = budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
+    const iterationStart = resetRunBudget || budgetExhausted || overflowed ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
+    const delegationsStart = resetRunBudget || budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
     const outcomes = latestOutcomes_ACU(resumedState?.subagentOutcomes ?? []);
     const candidates: WorldSimulationCandidate_ACU[] = resumedState?.candidates ? [...resumedState.candidates] : [];
-    const perAgent = new Map<string, number>(budgetExhausted ? [] : Object.entries(resumedState?.perAgent ?? {}));
+    const perAgent = new Map<string, number>(resetRunBudget || budgetExhausted ? [] : Object.entries(resumedState?.perAgent ?? {}));
     let delegationsUsed = delegationsStart;
     let iteration = iterationStart;
 
@@ -243,7 +245,7 @@ export class WorldSimulationMainLoop_ACU {
     };
     const runEntryId = beginWorldSimulationSessionRun_ACU(
       input.identity.chatIdentity, '世界推演 Agent 运行',
-      budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`,
+      resetRunBudget ? `用户指令续跑，预算窗口重置（保留 ${candidates.length} 个候选）` : budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`,
       !!resumedState,
     );
     await persistEntry(runEntryId, resumedState ? 'run-resumed' : 'run-started');
@@ -466,9 +468,23 @@ export class WorldSimulationMainLoop_ACU {
             'block-delegation-gate',
           );
         }
+        const candidateSeqByAgent = new Map<string, number>();
+        for (const item of candidates) {
+          candidateSeqByAgent.set(item.agentName, (candidateSeqByAgent.get(item.agentName) ?? 0) + 1);
+        }
         const settled = await Promise.all(accepted.map(async delegation => {
+          const nextSeq = (candidateSeqByAgent.get(delegation.agentName) ?? 0) + 1;
+          candidateSeqByAgent.set(delegation.agentName, nextSeq);
           try {
-            return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
+            return await this.dependencies.subagents.run({
+              delegation,
+              settings: input.settings,
+              promptContext: requestContext,
+              registry: input.registry,
+              tools: input.tools,
+              runId: input.identity.runId,
+              candidateSeq: nextSeq,
+            });
           } catch (error) {
             const issue = compactWorldSimulationProtocolError_ACU(error);
             const reasonCode = issue.reasonCode === 'PROTOCOL_UNKNOWN_ERROR' ? 'WORLD_SIMULATION_SUBAGENT_FAILED' : issue.reasonCode;

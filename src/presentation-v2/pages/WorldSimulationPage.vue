@@ -87,7 +87,7 @@
               <AcuFormRow label="单代理派工上限" hint="同一个子代理在一次推演内最多被派几次。范围 0–20。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxSameAgent" type="number" :min="0" :max="20" />
               </AcuFormRow>
-              <AcuFormRow label="并发派工上限" hint="同一波次最多同时运行几个子代理；API 限流严格时调小。范围 1–20。">
+              <AcuFormRow label="并发派工上限" hint="同一波次最多同时运行几个子代理；默认 5。API 限流严格时调小。范围 1–20。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxConcurrent" type="number" :min="1" :max="20" />
               </AcuFormRow>
               <AcuFormRow label="读取批次上限" hint="主 Agent 一次推演内 read/search 工具批次的次数上限，0 为禁止读取。范围 0–200。">
@@ -573,7 +573,7 @@ const promptImportInput = ref<HTMLInputElement | null>(null);
 const promptIoError = ref('');
 const promptIoNotice = ref('');
 
-/** 导出全部九组 Agent 提示词为 JSON 文件下载。 */
+/** 导出全部八组 Agent 提示词为 JSON 文件下载。 */
 function exportPrompts(): void {
   if (!settingsDraft.value) return;
   promptIoError.value = '';
@@ -594,7 +594,7 @@ function exportPrompts(): void {
   }
 }
 
-/** 导入提示词 JSON：九组全部校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
+/** 导入提示词 JSON：八组全部校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
 async function onImportPromptsFile(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];

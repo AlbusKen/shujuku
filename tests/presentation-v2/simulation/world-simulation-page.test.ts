@@ -292,7 +292,8 @@ describe('WorldSimulationPage', () => {
     const channelGroup = groups.find(group => group.textContent?.includes('各 Agent 渠道'))!;
     channelGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
     await nextTick();
-    expect(channelGroup.textContent).toContain('世界推演');
+    expect(channelGroup.textContent).toContain('时计');
+    expect(channelGroup.textContent).toContain('暗流分析');
     expect(channelGroup.textContent).toContain('设定研究');
     const topLevelLabels = Array.from(host.querySelectorAll<HTMLElement>('.acu-form-row__label'))
       .filter(label => !label.closest('.acu-v2-world-simulation-page__group'))

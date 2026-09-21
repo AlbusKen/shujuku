@@ -97,7 +97,7 @@ describe('world catalog injection', () => {
       worldState: ledger, anchorMessage: '正文', anchorIdentity: {}, worldStagePlan: {},
       worldChronicle: ledger.chronicle,
       worldCandidates: [{
-        candidateId: 'candidate:1', agentName: 'world-analyst', summary: '归档对照',
+        candidateId: 'candidate:1', agentName: 'chronicler', summary: '归档对照',
         patch: { chronicle: { append: [{ summary: '北岭矿洞今夜塌方压伤了三人', at: '第四日', relatedIds: ['seed-other'] }] } },
       }],
       worldCollisions: {},
@@ -118,7 +118,7 @@ describe('world catalog injection', () => {
     expect(catalogJson.length).toBeLessThan(fullJson.length / 2);
     const summary = summarizeCandidatePatches_ACU([{
       candidateId: 'candidate:1',
-      agentName: 'world-analyst',
+      agentName: 'timekeeper',
       summary: '推进',
       patch: { clock: { days: 1 }, chronicle: { append: [{ id: 'ch-x' }] }, chronicleArchive: { overviewRows: [{ archiveRef: 'arc-1' }] } },
     }]);

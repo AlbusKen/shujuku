@@ -6,15 +6,20 @@ export const WORLD_SIMULATION_AGENT_ORDER_ACU: readonly WorldSimulationAgentName
 /**
  * 世界推演各 Agent 的中文展示名。会话流、渠道下拉与提示词分组共用同一张表，
  * 内部 agentName 不直接暴露给用户（与智能续写「各 Agent 渠道」的做法一致）。
+ * 退役角色保留展示名，避免旧会话卡片回退成英文内部名。
  */
-export const WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU: Record<WorldSimulationAgentName_ACU, string> = {
+export const WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU: Record<string, string> = {
   'world-director': '主 Agent',
   'world-stage-planner': '阶段规划',
-  'world-analyst': '世界推演',
+  'timekeeper': '时计',
+  'undercurrent-analyst': '暗流分析',
+  'dramatis-keeper': '人物档案',
+  'chronicler': '编年',
   'causality-reviewer': '因果审核',
   'lore-researcher': '设定研究',
+  'world-analyst': '世界推演',
 };
 
 export function worldSimulationAgentLabel_ACU(agentName: string): string {
-  return (WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU as Record<string, string>)[agentName] ?? agentName;
+  return WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU[agentName] ?? agentName;
 }

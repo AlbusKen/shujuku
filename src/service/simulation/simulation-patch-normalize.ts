@@ -214,11 +214,45 @@ function resolveExpectedRevision_ACU(raw: unknown, actual: number, path: string,
   return coerced.value;
 }
 
-function beginItem_ACU(item: Record<string, unknown>, existing: Record<string, unknown> | null, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[], labelField: 'name' | 'title' | 'fact'): Record<string, unknown> | null {
-  const id = takeText_ACU(item.id, false);
+export const WORLD_SIMULATION_UPSERT_ID_PREFIX_ACU: Record<WorldSimulationUpsertModule_ACU, string> = {
+  dimensions: 'dim',
+  seeds: 'seed',
+  actors: 'actor',
+  rumors: 'rumor',
+};
+
+/** 按 prefix-n 分配未被 taken 占用的编号；n 从 1 起跳过碰撞。 */
+export function allocateWorldSimulationPrefixedId_ACU(prefix: string, taken: Iterable<string>): string {
+  const occupied = taken instanceof Set ? taken : new Set(taken);
+  let serial = 1;
+  let next = `${prefix}-${serial}`;
+  while (occupied.has(next)) {
+    serial += 1;
+    next = `${prefix}-${serial}`;
+  }
+  return next;
+}
+
+function beginItem_ACU(
+  item: Record<string, unknown>,
+  existing: Record<string, unknown> | null,
+  path: string,
+  notes: WorldSimulationPatchNormalizationNote_ACU[],
+  labelField: 'name' | 'title' | 'fact',
+  allocateNewId?: () => string,
+): Record<string, unknown> | null {
+  let id = takeText_ACU(item.id, false);
   if (!id) {
-    note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
-    return null;
+    if (existing) {
+      note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
+      return null;
+    }
+    if (!allocateNewId) {
+      note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
+      return null;
+    }
+    id = allocateNewId();
+    note_ACU(notes, 'autoFixed', `${path}.id`, `${path}.id 已按缺省编号补齐`);
   }
   if (!existing) {
     const label = takeText_ACU(item[labelField], false);
@@ -244,8 +278,14 @@ const DIMENSION_TREND_ACU = ['rising', 'stable', 'falling'] as const;
 const SEED_STATUS_ACU = ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'] as const;
 const VISIBILITY_ACU = ['hidden', 'limited', 'public'] as const;
 
-function normalizeDimension_ACU(item: Record<string, unknown>, existing: Record<string, unknown> | null, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[]): Record<string, unknown> | null {
-  const next = beginItem_ACU(item, existing, path, notes, 'name');
+function normalizeDimension_ACU(
+  item: Record<string, unknown>,
+  existing: Record<string, unknown> | null,
+  path: string,
+  notes: WorldSimulationPatchNormalizationNote_ACU[],
+  allocateNewId?: () => string,
+): Record<string, unknown> | null {
+  const next = beginItem_ACU(item, existing, path, notes, 'name', allocateNewId);
   if (!next) return null;
   if (!applyEnum_ACU(next, 'kind', item.kind, path, notes, DIMENSION_KIND_ACU)) return null;
   if (!applyInteger_ACU(next, 'value', item.value, path, notes, 0, 100)) return null;
@@ -256,8 +296,14 @@ function normalizeDimension_ACU(item: Record<string, unknown>, existing: Record<
   return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, existing ? Number(existing.revision) : 0, path, notes);
 }
 
-function normalizeSeed_ACU(item: Record<string, unknown>, existing: Record<string, unknown> | null, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[]): Record<string, unknown> | null {
-  const next = beginItem_ACU(item, existing, path, notes, 'title');
+function normalizeSeed_ACU(
+  item: Record<string, unknown>,
+  existing: Record<string, unknown> | null,
+  path: string,
+  notes: WorldSimulationPatchNormalizationNote_ACU[],
+  allocateNewId?: () => string,
+): Record<string, unknown> | null {
+  const next = beginItem_ACU(item, existing, path, notes, 'title', allocateNewId);
   if (!next) return null;
   if (!applyEnum_ACU(next, 'status', item.status, path, notes, SEED_STATUS_ACU)) return null;
   if (!applyInteger_ACU(next, 'level', item.level, path, notes, 0, 100)) return null;
@@ -286,8 +332,14 @@ function normalizeSeed_ACU(item: Record<string, unknown>, existing: Record<strin
   return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, existing ? Number(existing.revision) : 0, path, notes);
 }
 
-function normalizeActor_ACU(item: Record<string, unknown>, existing: Record<string, unknown> | null, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[]): Record<string, unknown> | null {
-  const next = beginItem_ACU(item, existing, path, notes, 'name');
+function normalizeActor_ACU(
+  item: Record<string, unknown>,
+  existing: Record<string, unknown> | null,
+  path: string,
+  notes: WorldSimulationPatchNormalizationNote_ACU[],
+  allocateNewId?: () => string,
+): Record<string, unknown> | null {
+  const next = beginItem_ACU(item, existing, path, notes, 'name', allocateNewId);
   if (!next) return null;
   if (!applyStringArray_ACU(next, 'interests', item.interests, path, notes)) return null;
   if (!applyString_ACU(next, 'location', item.location, path, notes, true)) return null;
@@ -314,8 +366,15 @@ function normalizeActor_ACU(item: Record<string, unknown>, existing: Record<stri
   return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, existing ? Number(existing.revision) : 0, path, notes);
 }
 
-function normalizeRumor_ACU(item: Record<string, unknown>, existing: Record<string, unknown> | null, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[], clockDay: number): Record<string, unknown> | null {
-  const next = beginItem_ACU(item, existing, path, notes, 'fact');
+function normalizeRumor_ACU(
+  item: Record<string, unknown>,
+  existing: Record<string, unknown> | null,
+  path: string,
+  notes: WorldSimulationPatchNormalizationNote_ACU[],
+  clockDay: number,
+  allocateNewId?: () => string,
+): Record<string, unknown> | null {
+  const next = beginItem_ACU(item, existing, path, notes, 'fact', allocateNewId);
   if (!next) return null;
   if (!applyInteger_ACU(next, 'originDay', item.originDay, path, notes, 1)) return null;
   if (!applyInteger_ACU(next, 'earliestRevealDay', item.earliestRevealDay, path, notes, 1)) return null;
@@ -348,6 +407,7 @@ export function normalizeWorldSimulationUpsertItem_ACU(input: {
   existing: Record<string, unknown> | null;
   path: string;
   clockDay: number;
+  allocateNewId?: () => string;
 }): WorldSimulationNormalizeUpsertResult_ACU {
   const notes: WorldSimulationPatchNormalizationNote_ACU[] = [];
   if (!isRecord_ACU(input.item)) {
@@ -358,10 +418,10 @@ export function normalizeWorldSimulationUpsertItem_ACU(input: {
   if (resolveExpectedRevision_ACU(input.item.expectedRevision, actual, input.path, notes) === null) {
     return { item: null, notes };
   }
-  const item = input.module === 'dimensions' ? normalizeDimension_ACU(input.item, input.existing, input.path, notes)
-    : input.module === 'seeds' ? normalizeSeed_ACU(input.item, input.existing, input.path, notes)
-      : input.module === 'actors' ? normalizeActor_ACU(input.item, input.existing, input.path, notes)
-        : normalizeRumor_ACU(input.item, input.existing, input.path, notes, input.clockDay);
+  const item = input.module === 'dimensions' ? normalizeDimension_ACU(input.item, input.existing, input.path, notes, input.allocateNewId)
+    : input.module === 'seeds' ? normalizeSeed_ACU(input.item, input.existing, input.path, notes, input.allocateNewId)
+      : input.module === 'actors' ? normalizeActor_ACU(input.item, input.existing, input.path, notes, input.allocateNewId)
+        : normalizeRumor_ACU(input.item, input.existing, input.path, notes, input.clockDay, input.allocateNewId);
   return { item, notes };
 }
 

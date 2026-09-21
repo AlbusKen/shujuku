@@ -152085,11 +152085,15 @@ Expected function or array of functions, received type ${typeof value}.`
     const WORLD_SIMULATION_AGENT_NAMES_ACU = [
         'world-director',
         'world-stage-planner',
-        'world-analyst',
+        'timekeeper',
+        'undercurrent-analyst',
+        'dramatis-keeper',
+        'chronicler',
         'causality-reviewer',
         'lore-researcher',
     ];
     const WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU = [
+        'world-analyst',
         'macro-dynamics-analyst',
         'seed-lifecycle-analyst',
         'actor-information-analyst',
@@ -152099,7 +152103,10 @@ Expected function or array of functions, received type ${typeof value}.`
     const WORLD_SIMULATION_AGENT_CATALOG_ACU = [
         { name: 'world-director', kind: 'director', description: '每轮剧情后推算幕后世界动态：取证、派工、部分采用候选并直接收敛提交', triggers: ['每轮推演'], promptKey: 'world-director', apiRole: 'world-director', writableModules: [] },
         { name: 'world-stage-planner', kind: 'planner', description: '为单轮幕后推演锁定焦点：本轮要推算的暗流、维度与行动者动向', triggers: ['每轮推演开始'], promptKey: 'world-stage-planner', apiRole: 'world-stage-planner', writableModules: [] },
-        { name: 'world-analyst', kind: 'specialist', description: '推演世界时钟、维度压力、暗流种子生命周期与行动者信息边界的幕后演变，一次产出跨模块候选', triggers: ['每轮幕后推演'], promptKey: 'world-analyst', apiRole: 'world-analyst', writableModules: ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'player', 'rumors'] },
+        { name: 'timekeeper', kind: 'specialist', description: '推演世界时钟的幕后推进，产出 clockAdvance 候选', triggers: ['正文出现时间跨度或需要校对时钟'], promptKey: 'timekeeper', apiRole: 'timekeeper', writableModules: ['clock'] },
+        { name: 'undercurrent-analyst', kind: 'specialist', description: '推演维度压力与暗流种子生命周期的幕后演变', triggers: ['维度或暗流需要更新'], promptKey: 'undercurrent-analyst', apiRole: 'undercurrent-analyst', writableModules: ['dimensions', 'seeds'] },
+        { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界、玩家位置接触与传闻的幕后演变', triggers: ['人物移动、生死或玩家位置变化'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player', 'rumors'] },
+        { name: 'chronicler', kind: 'specialist', description: '记录幕后编年，并在热层过长或事件完结时提交归档', triggers: ['需要落编年或归档完结事件'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle'] },
         { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，并把已接受事实压缩为台面安全 guidance', triggers: ['每轮候选形成后'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: ['guidance'] },
         { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
     ];
@@ -152432,7 +152439,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return results;
     }
 
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v6';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v7';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -152458,10 +152465,12 @@ Expected function or array of functions, received type ${typeof value}.`
             `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`,
             'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
             'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
+            '相互独立的推演事项必须在同一次 delegate 的 delegations 数组中同批派出（上限受 maxConcurrent 约束），不要逐轮单派。clock 派 timekeeper，维度与暗流派 undercurrent-analyst，人物/玩家/传闻派 dramatis-keeper，编年与归档派 chronicler。',
+            '优先按阶段计划 plannedSpecialists 派工；计划外角色可用但必须在 instruction 里写明理由。某模块候选频繁失败时，可先放弃该模块更新、finalize 其余已通过模块，下轮再补。',
             '派工预算耗尽即终止并输出 block 卡片，不会静默拦截或空转重试。被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block，不要反复派同一角色。',
             'evidenceRefs 只允许出现在 finalize 顶层；read、search、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
             '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
-            '初始化示例：{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"根据锚点与当前账本形成时钟、维度、暗流或行动者候选","reads":["ledger:current","anchor:message"]}]}',
+            '同批派工示例：{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":["ledger:current","anchor:message"]},{"agentName":"undercurrent-analyst","instruction":"更新维度压力与暗流","reads":["ledger:current"]},{"agentName":"dramatis-keeper","instruction":"同步人物位置与传闻","reads":["player:current","rumors:current"]}]}',
             'finalize 顶层只能包含 action、outcome、summary、evidenceRefs；outcome 必须精确为 commit、no_change、blocked 之一。candidateId、acceptedCandidateIds、status、verdict 属于派工或审核结果，禁止抄入 finalize。',
             '提交示例：{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}',
             '不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
@@ -152476,13 +152485,14 @@ Expected function or array of functions, received type ${typeof value}.`
         if (writableModules.length) {
             lines.push(`candidate 必须包含非空 patch、summary、evidenceRefs、uncertainties；patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
             lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
-            lines.push('dimensions、seeds、actors、rumors 必须使用 {"upsert":[...]}；每条至少含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。');
+            lines.push('dimensions、seeds、actors、rumors 必须使用 {"upsert":[...]}；新建可省略 id（由系统按模块前缀编号），更新已有条目必须给 id；新建还需 name（seeds 用 title，rumors 用 fact）。');
             lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
             lines.push('expectedRevision 可省略：新建默认 0，更新默认当前 revision。');
+            lines.push('chronicle 的 id/at、chronicleArchive 的 archiveRef/fingerprint、以及 candidateId 均可省略，由系统编号；不要为这些机器字段编造格式。');
             lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId?}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
             if (writableModules.includes('chronicle')) {
-                lines.push('chronicle 必须使用 {"append":[...]}。');
-                lines.push('当热层 chronicle 过长或某段事件已完结时，可提交 chronicleArchive：{"archiveEntries":[{archiveRef,day,summary,fingerprints,relatedIds,sourceChronicleIds}],"overviewRows":[{fingerprint,day,oneLine,archiveRef}],"collapseRefs"?}。oneLine 句式示例：「第3日 · 北岭矿洞塌方，三人受伤」。目录追加后超过 512 行必须自带 collapseRefs 合并旧行，否则该候选会被拒绝。');
+                lines.push('chronicle 必须使用 {"append":[...]}；append 条目可省略 id/at，必须含非空 summary。');
+                lines.push('当热层 chronicle 过长或某段事件已完结时，可提交 chronicleArchive：{"archiveEntries":[{day,summary,relatedIds,sourceChronicleIds,archiveRef?,fingerprints?}],"overviewRows":[{day,oneLine,archiveRef?,fingerprint?}],"collapseRefs"?}。oneLine 句式示例：「第3日 · 北岭矿洞塌方，三人受伤」。目录追加后超过 512 行必须自带 collapseRefs 合并旧行，否则该候选会被拒绝。');
             }
             if (writableModules.includes('clock'))
                 lines.push('clock 必须以 clockAdvance 语义提交 {days, storyTime?, slot?, evidenceRefs?}；days 必须是非负整数，禁止直接写 day。');
@@ -152537,11 +152547,17 @@ Expected function or array of functions, received type ${typeof value}.`
             : `${definition.description}。写入范围：${definition.writableModules.join(', ') || '无直接写入权限'}。不得扩大权限或杜撰证据。`;
         let workflow = '每轮推演聚焦短周期幕后演变：先提取本轮剧情已发生的事实，再对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。';
         if (definition.kind === 'planner')
-            workflow += '本轮计划必须优先覆盖 $WORLD_COLLISIONS 中的事项；若有 seed 距过期 ≤ 2 天，计划中列入临界暗流。';
+            workflow += '本轮计划必须优先覆盖 $WORLD_COLLISIONS 中的事项；若有 seed 距过期 ≤ 2 天，计划中列入临界暗流。plannedSpecialists 按模块选择 timekeeper、undercurrent-analyst、dramatis-keeper、chronicler，不要再计划 world-analyst。';
         if (definition.kind === 'director')
-            workflow += '碰撞报告非空必须派 world-analyst 处理当场演化。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入，不得期待 rumor 信号。clockAdvance.days 由正文时间跨度决定。actor 死亡必须伴生 rumor，否则 finalize 会被事务拒绝。';
-        if (definition.kind === 'specialist')
-            workflow += '你是全模块推演专家：一次输出可以同时包含 clock、dimensions、seeds、actors、chronicle、chronicleArchive、player、rumors 中任意多个模块的 patch，但每个模块的 patch 必须独立完整、独立满足必填字段与枚举约束；不得为凑模块而编造无证据支撑的条目，没有证据的模块直接省略。空间纪律：新建事件类 seed 必须给 location.region；actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。时效纪律：有时限事件必须给 expiresAtDay 与 missedOutcome。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行。';
+            workflow += '碰撞报告非空必须同批派相应 specialist 处理当场演化：时间派 timekeeper，暗流/维度派 undercurrent-analyst，人物与传闻派 dramatis-keeper。优先按阶段计划 plannedSpecialists 派工；计划外角色可用但需有理由。某模块候选频繁失败时，可先放弃该模块更新、finalize 其余已通过模块。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入，不得期待 rumor 信号。clockAdvance.days 由正文时间跨度决定。actor 死亡必须伴生 rumor，否则 finalize 会被事务拒绝。';
+        if (name === 'timekeeper')
+            workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。';
+        if (name === 'undercurrent-analyst')
+            workflow += '只写入 dimensions 与 seeds。空间纪律：新建事件类 seed 必须给 location.region。时效纪律：有时限事件必须给 expiresAtDay 与 missedOutcome。不得写入 clock、actors、chronicle。';
+        if (name === 'dramatis-keeper')
+            workflow += '只写入 actors、player、rumors。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。';
+        if (name === 'chronicler')
+            workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行；目录追加后超过 512 行必须自带 collapseRefs。';
         if (definition.kind === 'reviewer')
             workflow += '审核清单：clockAdvance.days 与正文跨度是否匹配；碰撞当场反应是否与玩家位置一致；信息边界终审——rumor 信号须带 sourceId 且玩家 region 命中且 contact=\'open\'，程序层 commit 前硬过滤兜底。';
         return [
@@ -152563,12 +152579,15 @@ Expected function or array of functions, received type ${typeof value}.`
         return Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildDefaultWorldSimulationAgentPrompt_ACU(name)]));
     }
     const WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU = {
-        main: { action: 'delegate', delegations: [{ agentName: 'world-analyst', instruction: '推演本轮幕后时间与资源演变', reads: ['ledger:current', 'anchor:message'] }] },
+        main: { action: 'delegate', delegations: [
+                { agentName: 'timekeeper', instruction: '推演本轮幕后时间推进', reads: ['ledger:current', 'anchor:message'] },
+                { agentName: 'undercurrent-analyst', instruction: '推演维度压力与暗流', reads: ['ledger:current'] },
+            ] },
         planner: {
             action: 'plan', summary: '锁定本轮幕后推演焦点',
-            plan: { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: '推演本轮幕后动态', objective: '根据最新剧情推算世界时钟、维度压力、暗流与行动者的幕后演变', impactScope: ['当前世界状态'], factsToVerify: ['时间是否推进'], plannedTools: ['read'], plannedSpecialists: ['world-analyst'], expectedLedgerChanges: ['clock'], convergenceConditions: ['证据与候选闭合'], blockingConditions: ['缺少锚点'], completedSteps: [], nextStep: '读取当前账本' },
+            plan: { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: '推演本轮幕后动态', objective: '根据最新剧情推算世界时钟、维度压力、暗流与行动者的幕后演变', impactScope: ['当前世界状态'], factsToVerify: ['时间是否推进'], plannedTools: ['read'], plannedSpecialists: ['timekeeper', 'undercurrent-analyst'], expectedLedgerChanges: ['clock'], convergenceConditions: ['证据与候选闭合'], blockingConditions: ['缺少锚点'], completedSteps: [], nextStep: '读取当前账本' },
         },
-        specialist: { status: 'candidate', agentName: 'world-analyst', patch: { clock: { days: 1, storyTime: '次日' } }, summary: '幕后时间推进候选', evidenceRefs: ['evidence:clock:1'], uncertainties: [] },
+        specialist: { status: 'candidate', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '次日' } }, summary: '幕后时间推进候选', evidenceRefs: ['evidence:clock:1'], uncertainties: [] },
         reviewer: { verdict: 'accept', summary: '候选满足证据与权限约束', findings: [], acceptedCandidateIds: ['candidate:1'], guidance: { signals: [{ text: '城中开始流传税银劫案的只言片语', voice: 'rumor', sourceId: 'rumor-tax' }], excludedFacts: ['三十万两税银由深水重船转移'] } },
     };
     function worldSimulationPlannerProtocolInstruction_ACU() {
@@ -152590,28 +152609,32 @@ Expected function or array of functions, received type ${typeof value}.`
     const WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU = {
         'world-director': '3591:f9e4f3ad',
         'world-stage-planner': '2511:f4f30e8c',
-        'world-analyst': '4050:91b577da',
         'causality-reviewer': '3160:99faa038',
         'lore-researcher': '2105:b9f9a7cf',
     };
     const WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU = {
         'world-director': '3777:3d6ed466',
         'world-stage-planner': '2655:855187ab',
-        'world-analyst': '4988:ceb0ce76',
         'causality-reviewer': '3577:29593a91',
         'lore-researcher': '2127:364d5521',
     };
     const WORLD_SIMULATION_PROMPT_V5_FINGERPRINTS_ACU = {
         'world-director': '3749:5e40f616',
         'world-stage-planner': '2655:855187ab',
-        'world-analyst': '3697:fc31085c',
         'causality-reviewer': '3577:29593a91',
         'lore-researcher': '2127:364d5521',
     };
+    const WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU = {
+        'world-director': '3910:629ead1',
+        'world-stage-planner': '2655:855187ab',
+        'causality-reviewer': '3577:29593a91',
+        'lore-researcher': '2213:6b2c5adc',
+    };
     const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
-            { version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] },
-            { version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] },
-            { version: 'world-simulation-v5', fingerprint: WORLD_SIMULATION_PROMPT_V5_FINGERPRINTS_ACU[name] },
+            ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
+            ...(WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] }] : []),
+            ...(WORLD_SIMULATION_PROMPT_V5_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v5', fingerprint: WORLD_SIMULATION_PROMPT_V5_FINGERPRINTS_ACU[name] }] : []),
+            ...(WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v6', fingerprint: WORLD_SIMULATION_PROMPT_V6_FINGERPRINTS_ACU[name] }] : []),
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults) {
@@ -152639,7 +152662,7 @@ Expected function or array of functions, received type ${typeof value}.`
             agentHistoryTokenBudget: 120000,
             agentReadTokenBudget: '20%',
             agentReadFallbackTokens: 6000,
-            agentRunBudget: { maxIterations: 12, maxDelegations: 12, maxSameAgent: 4, maxConcurrent: 3, maxReads: 24, maxExtraReads: 3 },
+            agentRunBudget: { maxIterations: 12, maxDelegations: 12, maxSameAgent: 4, maxConcurrent: 5, maxReads: 24, maxExtraReads: 3 },
             webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false }, searchProvider: 'duckduckgo', searxngBaseUrl: '', pageCharLimit: 4000, blockedDomains: '' },
             apiPresetMode: 'current',
             fixedApiPresetName: '',
@@ -154564,11 +154587,36 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return coerced.value;
     }
-    function beginItem_ACU(item, existing, path, notes, labelField) {
-        const id = takeText_ACU(item.id, false);
+    const WORLD_SIMULATION_UPSERT_ID_PREFIX_ACU = {
+        dimensions: 'dim',
+        seeds: 'seed',
+        actors: 'actor',
+        rumors: 'rumor',
+    };
+    /** 按 prefix-n 分配未被 taken 占用的编号；n 从 1 起跳过碰撞。 */
+    function allocateWorldSimulationPrefixedId_ACU(prefix, taken) {
+        const occupied = taken instanceof Set ? taken : new Set(taken);
+        let serial = 1;
+        let next = `${prefix}-${serial}`;
+        while (occupied.has(next)) {
+            serial += 1;
+            next = `${prefix}-${serial}`;
+        }
+        return next;
+    }
+    function beginItem_ACU(item, existing, path, notes, labelField, allocateNewId) {
+        let id = takeText_ACU(item.id, false);
         if (!id) {
-            note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
-            return null;
+            if (existing) {
+                note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
+                return null;
+            }
+            if (!allocateNewId) {
+                note_ACU(notes, 'blocking', `${path}.id`, `${path}.id 非法`);
+                return null;
+            }
+            id = allocateNewId();
+            note_ACU(notes, 'autoFixed', `${path}.id`, `${path}.id 已按缺省编号补齐`);
         }
         if (!existing) {
             const label = takeText_ACU(item[labelField], false);
@@ -154592,8 +154640,8 @@ Expected function or array of functions, received type ${typeof value}.`
     const DIMENSION_TREND_ACU = ['rising', 'stable', 'falling'];
     const SEED_STATUS_ACU = ['established', 'incubating', 'active', 'converging', 'resolved', 'retired'];
     const VISIBILITY_ACU = ['hidden', 'limited', 'public'];
-    function normalizeDimension_ACU(item, existing, path, notes) {
-        const next = beginItem_ACU(item, existing, path, notes, 'name');
+    function normalizeDimension_ACU(item, existing, path, notes, allocateNewId) {
+        const next = beginItem_ACU(item, existing, path, notes, 'name', allocateNewId);
         if (!next)
             return null;
         if (!applyEnum_ACU(next, 'kind', item.kind, path, notes, DIMENSION_KIND_ACU))
@@ -154610,8 +154658,8 @@ Expected function or array of functions, received type ${typeof value}.`
             fillMissing_ACU(next, { kind: 'pressure', value: 0, trend: 'stable', rationale: '', evidenceRefs: [] }, path, notes);
         return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, existing ? Number(existing.revision) : 0, path, notes);
     }
-    function normalizeSeed_ACU(item, existing, path, notes) {
-        const next = beginItem_ACU(item, existing, path, notes, 'title');
+    function normalizeSeed_ACU(item, existing, path, notes, allocateNewId) {
+        const next = beginItem_ACU(item, existing, path, notes, 'title', allocateNewId);
         if (!next)
             return null;
         if (!applyEnum_ACU(next, 'status', item.status, path, notes, SEED_STATUS_ACU))
@@ -154652,8 +154700,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, existing ? Number(existing.revision) : 0, path, notes);
     }
-    function normalizeActor_ACU(item, existing, path, notes) {
-        const next = beginItem_ACU(item, existing, path, notes, 'name');
+    function normalizeActor_ACU(item, existing, path, notes, allocateNewId) {
+        const next = beginItem_ACU(item, existing, path, notes, 'name', allocateNewId);
         if (!next)
             return null;
         if (!applyStringArray_ACU(next, 'interests', item.interests, path, notes))
@@ -154694,8 +154742,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, existing ? Number(existing.revision) : 0, path, notes);
     }
-    function normalizeRumor_ACU(item, existing, path, notes, clockDay) {
-        const next = beginItem_ACU(item, existing, path, notes, 'fact');
+    function normalizeRumor_ACU(item, existing, path, notes, clockDay, allocateNewId) {
+        const next = beginItem_ACU(item, existing, path, notes, 'fact', allocateNewId);
         if (!next)
             return null;
         if (!applyInteger_ACU(next, 'originDay', item.originDay, path, notes, 1))
@@ -154738,10 +154786,10 @@ Expected function or array of functions, received type ${typeof value}.`
         if (resolveExpectedRevision_ACU(input.item.expectedRevision, actual, input.path, notes) === null) {
             return { item: null, notes };
         }
-        const item = input.module === 'dimensions' ? normalizeDimension_ACU(input.item, input.existing, input.path, notes)
-            : input.module === 'seeds' ? normalizeSeed_ACU(input.item, input.existing, input.path, notes)
-                : input.module === 'actors' ? normalizeActor_ACU(input.item, input.existing, input.path, notes)
-                    : normalizeRumor_ACU(input.item, input.existing, input.path, notes, input.clockDay);
+        const item = input.module === 'dimensions' ? normalizeDimension_ACU(input.item, input.existing, input.path, notes, input.allocateNewId)
+            : input.module === 'seeds' ? normalizeSeed_ACU(input.item, input.existing, input.path, notes, input.allocateNewId)
+                : input.module === 'actors' ? normalizeActor_ACU(input.item, input.existing, input.path, notes, input.allocateNewId)
+                    : normalizeRumor_ACU(input.item, input.existing, input.path, notes, input.clockDay, input.allocateNewId);
         return { item, notes };
     }
     function coerceWorldSimulationContact_ACU(value) {
@@ -154749,6 +154797,127 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function coerceWorldSimulationGuidanceVoice_ACU(value) {
         return coerceWorldSimulationEnum_ACU(value, WORLD_GUIDANCE_SIGNAL_VOICES_ACU);
+    }
+
+    const JACCARD_SIMILAR_THRESHOLD_ACU = 0.7;
+    const SHA1_K_ACU = new Uint32Array([
+        0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6,
+    ]);
+    function rotl_ACU(value, bits) {
+        return (value << bits) | (value >>> (32 - bits));
+    }
+    function sha1Bytes_ACU(input) {
+        const bitLength = input.length * 8;
+        const paddedLength = (((input.length + 9) + 63) >> 6) << 6;
+        const padded = new Uint8Array(paddedLength);
+        padded.set(input);
+        padded[input.length] = 0x80;
+        const view = new DataView(padded.buffer);
+        view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+        view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+        let h0 = 0x67452301;
+        let h1 = 0xefcdab89;
+        let h2 = 0x98badcfe;
+        let h3 = 0x10325476;
+        let h4 = 0xc3d2e1f0;
+        const w = new Uint32Array(80);
+        for (let offset = 0; offset < paddedLength; offset += 64) {
+            for (let i = 0; i < 16; i += 1)
+                w[i] = view.getUint32(offset + i * 4, false);
+            for (let i = 16; i < 80; i += 1)
+                w[i] = rotl_ACU(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1) >>> 0;
+            let a = h0;
+            let b = h1;
+            let c = h2;
+            let d = h3;
+            let e = h4;
+            for (let i = 0; i < 80; i += 1) {
+                let f;
+                let k;
+                if (i < 20) {
+                    f = (b & c) | (~b & d);
+                    k = SHA1_K_ACU[0];
+                }
+                else if (i < 40) {
+                    f = b ^ c ^ d;
+                    k = SHA1_K_ACU[1];
+                }
+                else if (i < 60) {
+                    f = (b & c) | (b & d) | (c & d);
+                    k = SHA1_K_ACU[2];
+                }
+                else {
+                    f = b ^ c ^ d;
+                    k = SHA1_K_ACU[3];
+                }
+                const temp = (rotl_ACU(a, 5) + f + e + k + w[i]) >>> 0;
+                e = d;
+                d = c;
+                c = rotl_ACU(b, 30) >>> 0;
+                b = a;
+                a = temp;
+            }
+            h0 = (h0 + a) >>> 0;
+            h1 = (h1 + b) >>> 0;
+            h2 = (h2 + c) >>> 0;
+            h3 = (h3 + d) >>> 0;
+            h4 = (h4 + e) >>> 0;
+        }
+        const digest = new Uint8Array(20);
+        const out = new DataView(digest.buffer);
+        out.setUint32(0, h0, false);
+        out.setUint32(4, h1, false);
+        out.setUint32(8, h2, false);
+        out.setUint32(12, h3, false);
+        out.setUint32(16, h4, false);
+        return digest;
+    }
+    function hex_ACU(bytes) {
+        let result = '';
+        for (const byte of bytes)
+            result += byte.toString(16).padStart(2, '0');
+        return result;
+    }
+    function utf8_ACU(value) {
+        return new TextEncoder().encode(value);
+    }
+    function sha1Hex_ACU(value) {
+        return hex_ACU(sha1Bytes_ACU(utf8_ACU(value)));
+    }
+    /** 去空白、大小写折叠、去标点/符号后的紧凑文本，用于指纹哈希。 */
+    function normalizeEventText_ACU(value) {
+        return value.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    }
+    function eventTokens_ACU(value) {
+        const prepared = value.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ');
+        const tokens = new Set();
+        for (const part of prepared.split(/\s+/).filter(Boolean)) {
+            if (/[\u3040-\u30ff\u3400-\u9fff]/.test(part)) {
+                for (const char of part)
+                    tokens.add(char);
+            }
+            else {
+                tokens.add(part);
+            }
+        }
+        return tokens;
+    }
+    function eventFingerprint_ACU(summary, at, relatedIds) {
+        const related = [...relatedIds].map(item => item.trim()).filter(Boolean).sort();
+        return sha1Hex_ACU(`${normalizeEventText_ACU(summary)}${at}${related.join(',')}`);
+    }
+    function fuzzySimilarity_ACU(a, b) {
+        const left = eventTokens_ACU(a);
+        const right = eventTokens_ACU(b);
+        if (!left.size && !right.size)
+            return 1;
+        if (!left.size || !right.size)
+            return 0;
+        let intersection = 0;
+        for (const token of left)
+            if (right.has(token))
+                intersection += 1;
+        return intersection / (left.size + right.size - intersection);
     }
 
     const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'];
@@ -154804,9 +154973,13 @@ Expected function or array of functions, received type ${typeof value}.`
         const seen = new Set();
         for (const [index, item] of raw.upsert.entries()) {
             const itemPath = `${path}.upsert[${index}]`;
-            const existingIndex = isRecord_ACU$5(item) && typeof item.id === 'string' ? result.findIndex(entry => entry.id === item.id) : -1;
+            const existingIndex = isRecord_ACU$5(item) && typeof item.id === 'string' && item.id.trim() ? result.findIndex(entry => entry.id === item.id) : -1;
             const existing = existingIndex < 0 ? null : result[existingIndex];
-            const normalized = normalizeWorldSimulationUpsertItem_ACU({ module, item, existing, path: itemPath, clockDay });
+            const allocateNewId = existing ? undefined : () => {
+                const taken = [...result.map(entry => entry.id), ...seen];
+                return allocateWorldSimulationPrefixedId_ACU(WORLD_SIMULATION_UPSERT_ID_PREFIX_ACU[module], taken);
+            };
+            const normalized = normalizeWorldSimulationUpsertItem_ACU({ module, item, existing, path: itemPath, clockDay, allocateNewId });
             let blocked = false;
             for (const note of normalized.notes) {
                 if (onViolation) {
@@ -154971,13 +155144,39 @@ Expected function or array of functions, received type ${typeof value}.`
                 reject('actors 条目 life=dead 缺少伴随 rumor（relatedActorIds 含该 actor、channels 非空、earliestRevealDay >= diedAtDay）', { id: actor.id, diedAtDay: actor.diedAtDay });
         }
     }
-    function applyChronicle_ACU(current, raw) {
+    function applyChronicle_ACU(current, raw, clock) {
         if (!isRecord_ACU$5(raw))
             fail_ACU$2('patch.chronicle 必须是对象');
         exactKeys_ACU$1(raw, ['append'], 'patch.chronicle');
         if (!Array.isArray(raw.append) || raw.append.length === 0)
             fail_ACU$2('patch.chronicle.append 必须是非空数组');
-        return [...clone_ACU$6(current), ...clone_ACU$6(raw.append)];
+        const taken = new Set(current.map(item => item.id));
+        const appended = raw.append.map((item, index) => {
+            const path = `patch.chronicle.append[${index}]`;
+            if (!isRecord_ACU$5(item))
+                fail_ACU$2(`${path} 必须是对象`);
+            const summary = typeof item.summary === 'string' ? item.summary.trim() : '';
+            if (!summary)
+                fail_ACU$2(`${path}.summary 必须是非空字符串`);
+            let id = typeof item.id === 'string' ? item.id.trim() : '';
+            if (!id) {
+                id = allocateWorldSimulationPrefixedId_ACU(`chr-${clock.day}`, taken);
+            }
+            if (taken.has(id))
+                fail_ACU$2(`${path}.id 与现有或本批编年冲突`, { id });
+            taken.add(id);
+            const at = typeof item.at === 'string' && item.at.trim()
+                ? item.at.trim()
+                : (clock.storyTime.trim() || `第${clock.day}日`);
+            const related = coerceWorldSimulationStringArray_ACU(item.relatedIds === undefined ? [] : item.relatedIds);
+            if (!related.ok)
+                fail_ACU$2(`${path}.relatedIds 必须是字符串数组`);
+            const evidence = coerceWorldSimulationStringArray_ACU(item.evidenceRefs === undefined ? [] : item.evidenceRefs);
+            if (!evidence.ok)
+                fail_ACU$2(`${path}.evidenceRefs 必须是字符串数组`);
+            return { id, at, summary, relatedIds: related.value, evidenceRefs: evidence.value };
+        });
+        return [...clone_ACU$6(current), ...appended];
     }
     const ARCHIVE_REF_RE_ACU = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
     function archiveRef_ACU(value, path) {
@@ -155021,7 +155220,7 @@ Expected function or array of functions, received type ${typeof value}.`
             sourceChronicleIds: stringList(raw.sourceChronicleIds, 'sourceChronicleIds'),
         };
     }
-    function applyChronicleArchive_ACU(current, raw) {
+    function applyChronicleArchive_ACU(current, raw, clockDay) {
         if (!isRecord_ACU$5(raw))
             fail_ACU$2('patch.chronicleArchive 必须是对象');
         exactKeys_ACU$1(raw, ['archiveEntries', 'overviewRows', 'collapseRefs'], 'patch.chronicleArchive');
@@ -155034,8 +155233,63 @@ Expected function or array of functions, received type ${typeof value}.`
             : Array.isArray(raw.collapseRefs) && raw.collapseRefs.every(item => typeof item === 'string')
                 ? raw.collapseRefs
                 : fail_ACU$2('patch.chronicleArchive.collapseRefs 必须是字符串数组');
-        const writes = raw.archiveEntries.map((item, index) => archiveDetail_ACU(item, `patch.chronicleArchive.archiveEntries[${index}]`));
-        const overviewRows = raw.overviewRows.map((item, index) => overviewRow_ACU(item, `patch.chronicleArchive.overviewRows[${index}]`));
+        const takenRefs = new Set(current.map(row => row.archiveRef));
+        const filledEntries = raw.archiveEntries.map((item, index) => {
+            const path = `patch.chronicleArchive.archiveEntries[${index}]`;
+            if (!isRecord_ACU$5(item))
+                fail_ACU$2(`${path} 必须是对象`);
+            const next = { ...item };
+            const suppliedRef = typeof next.archiveRef === 'string' ? next.archiveRef.trim() : '';
+            if (!suppliedRef) {
+                const allocated = allocateWorldSimulationPrefixedId_ACU(`archive-${clockDay}`, takenRefs);
+                next.archiveRef = allocated;
+            }
+            takenRefs.add(String(next.archiveRef));
+            const relatedIds = Array.isArray(next.relatedIds) && next.relatedIds.every(value => typeof value === 'string')
+                ? next.relatedIds
+                : [];
+            const fingerprints = Array.isArray(next.fingerprints) && next.fingerprints.every(value => typeof value === 'string')
+                ? next.fingerprints.map(value => value.trim()).filter(Boolean)
+                : [];
+            const day = typeof next.day === 'number' && Number.isInteger(next.day) ? next.day : clockDay;
+            const summary = typeof next.summary === 'string' ? next.summary : '';
+            if (!fingerprints.length) {
+                next.fingerprints = [eventFingerprint_ACU(summary, String(day), relatedIds)];
+            }
+            else {
+                next.fingerprints = fingerprints;
+            }
+            if (next.relatedIds === undefined)
+                next.relatedIds = relatedIds;
+            if (next.sourceChronicleIds === undefined)
+                next.sourceChronicleIds = [];
+            if (next.day === undefined)
+                next.day = day;
+            return next;
+        });
+        const writes = filledEntries.map((item, index) => archiveDetail_ACU(item, `patch.chronicleArchive.archiveEntries[${index}]`));
+        const filledRows = raw.overviewRows.map((item, index) => {
+            const path = `patch.chronicleArchive.overviewRows[${index}]`;
+            if (!isRecord_ACU$5(item))
+                fail_ACU$2(`${path} 必须是对象`);
+            const next = { ...item };
+            const paired = writes[index];
+            const suppliedRef = typeof next.archiveRef === 'string' ? next.archiveRef.trim() : '';
+            if (!suppliedRef) {
+                next.archiveRef = paired ? paired.archiveRef : allocateWorldSimulationPrefixedId_ACU(`archive-${clockDay}`, takenRefs);
+                takenRefs.add(String(next.archiveRef));
+            }
+            const day = typeof next.day === 'number' && Number.isInteger(next.day) ? next.day : (paired?.day ?? clockDay);
+            if (next.day === undefined)
+                next.day = day;
+            const oneLine = typeof next.oneLine === 'string' ? next.oneLine : '';
+            const fingerprint = typeof next.fingerprint === 'string' ? next.fingerprint.trim() : '';
+            if (!fingerprint) {
+                next.fingerprint = paired?.fingerprints[0] || eventFingerprint_ACU(oneLine, String(day), paired?.relatedIds ?? []);
+            }
+            return next;
+        });
+        const overviewRows = filledRows.map((item, index) => overviewRow_ACU(item, `patch.chronicleArchive.overviewRows[${index}]`));
         const writeRefs = new Set(writes.map(item => item.archiveRef));
         if (writeRefs.size !== writes.length)
             fail_ACU$2('patch.chronicleArchive.archiveEntries archiveRef 必须唯一');
@@ -155068,6 +155322,11 @@ Expected function or array of functions, received type ${typeof value}.`
             return writable.has('chronicle');
         return MODULES_ACU.includes(module) && writable.has(module);
     }
+    function orderedPatchEntries_ACU(patch) {
+        const entries = Object.entries(patch);
+        entries.sort((left, right) => (left[0] === 'clock' ? -1 : right[0] === 'clock' ? 1 : 0));
+        return entries;
+    }
     function applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings) {
         const dynamics = resolveDynamics_ACU(settings);
         const validatedBase = validateWorldSimulationLedger_ACU(base, 'agent_persist');
@@ -155097,7 +155356,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
             if (forgedPermissions.length)
                 fail_ACU$2('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
-            for (const [module, patch] of Object.entries(candidate.patch)) {
+            for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
                 if (!canWritePatchModule_ACU(module, writable))
                     fail_ACU$2('候选越权写入 ledger 模块', { candidateId: candidate.candidateId, module });
                 switch (module) {
@@ -155114,7 +155373,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day);
                         break;
                     case 'chronicle':
-                        next.chronicle = applyChronicle_ACU(next.chronicle, patch);
+                        next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock);
                         break;
                     case 'guidance':
                         next.guidance = applyGuidance_ACU(next.guidance, patch);
@@ -155126,7 +155385,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         next.player = applyPlayer_ACU(next.player, patch);
                         break;
                     case 'chronicleArchive': {
-                        const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch);
+                        const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
                         next.chronicleOverview = archived.overview;
                         chronicleArchiveWrites.push(...archived.writes);
                         break;
@@ -155196,7 +155455,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
             if (forgedPermissions.length)
                 push('', '$.writableModules', `候选声明了角色目录未授权的写入模块: ${forgedPermissions.join(',')}`, { forgedPermissions });
-            for (const [module, patch] of Object.entries(candidate.patch)) {
+            for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
                 if (!canWritePatchModule_ACU(module, writable)) {
                     push(module, `$.patch.${module}`, '候选越权写入 ledger 模块');
                     continue;
@@ -155219,7 +155478,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collectUpsert);
                             break;
                         case 'chronicle':
-                            next.chronicle = applyChronicle_ACU(next.chronicle, patch);
+                            next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock);
                             break;
                         case 'guidance':
                             next.guidance = applyGuidance_ACU(next.guidance, patch);
@@ -155231,7 +155490,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             next.player = applyPlayer_ACU(next.player, patch);
                             break;
                         case 'chronicleArchive':
-                            next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch).overview;
+                            next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day).overview;
                             break;
                     }
                 }
@@ -155411,127 +155670,6 @@ Expected function or array of functions, received type ${typeof value}.`
             semantic,
             unrelated,
         };
-    }
-
-    const JACCARD_SIMILAR_THRESHOLD_ACU = 0.7;
-    const SHA1_K_ACU = new Uint32Array([
-        0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6,
-    ]);
-    function rotl_ACU(value, bits) {
-        return (value << bits) | (value >>> (32 - bits));
-    }
-    function sha1Bytes_ACU(input) {
-        const bitLength = input.length * 8;
-        const paddedLength = (((input.length + 9) + 63) >> 6) << 6;
-        const padded = new Uint8Array(paddedLength);
-        padded.set(input);
-        padded[input.length] = 0x80;
-        const view = new DataView(padded.buffer);
-        view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
-        view.setUint32(paddedLength - 4, bitLength >>> 0, false);
-        let h0 = 0x67452301;
-        let h1 = 0xefcdab89;
-        let h2 = 0x98badcfe;
-        let h3 = 0x10325476;
-        let h4 = 0xc3d2e1f0;
-        const w = new Uint32Array(80);
-        for (let offset = 0; offset < paddedLength; offset += 64) {
-            for (let i = 0; i < 16; i += 1)
-                w[i] = view.getUint32(offset + i * 4, false);
-            for (let i = 16; i < 80; i += 1)
-                w[i] = rotl_ACU(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1) >>> 0;
-            let a = h0;
-            let b = h1;
-            let c = h2;
-            let d = h3;
-            let e = h4;
-            for (let i = 0; i < 80; i += 1) {
-                let f;
-                let k;
-                if (i < 20) {
-                    f = (b & c) | (~b & d);
-                    k = SHA1_K_ACU[0];
-                }
-                else if (i < 40) {
-                    f = b ^ c ^ d;
-                    k = SHA1_K_ACU[1];
-                }
-                else if (i < 60) {
-                    f = (b & c) | (b & d) | (c & d);
-                    k = SHA1_K_ACU[2];
-                }
-                else {
-                    f = b ^ c ^ d;
-                    k = SHA1_K_ACU[3];
-                }
-                const temp = (rotl_ACU(a, 5) + f + e + k + w[i]) >>> 0;
-                e = d;
-                d = c;
-                c = rotl_ACU(b, 30) >>> 0;
-                b = a;
-                a = temp;
-            }
-            h0 = (h0 + a) >>> 0;
-            h1 = (h1 + b) >>> 0;
-            h2 = (h2 + c) >>> 0;
-            h3 = (h3 + d) >>> 0;
-            h4 = (h4 + e) >>> 0;
-        }
-        const digest = new Uint8Array(20);
-        const out = new DataView(digest.buffer);
-        out.setUint32(0, h0, false);
-        out.setUint32(4, h1, false);
-        out.setUint32(8, h2, false);
-        out.setUint32(12, h3, false);
-        out.setUint32(16, h4, false);
-        return digest;
-    }
-    function hex_ACU(bytes) {
-        let result = '';
-        for (const byte of bytes)
-            result += byte.toString(16).padStart(2, '0');
-        return result;
-    }
-    function utf8_ACU(value) {
-        return new TextEncoder().encode(value);
-    }
-    function sha1Hex_ACU(value) {
-        return hex_ACU(sha1Bytes_ACU(utf8_ACU(value)));
-    }
-    /** 去空白、大小写折叠、去标点/符号后的紧凑文本，用于指纹哈希。 */
-    function normalizeEventText_ACU(value) {
-        return value.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-    }
-    function eventTokens_ACU(value) {
-        const prepared = value.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ');
-        const tokens = new Set();
-        for (const part of prepared.split(/\s+/).filter(Boolean)) {
-            if (/[\u3040-\u30ff\u3400-\u9fff]/.test(part)) {
-                for (const char of part)
-                    tokens.add(char);
-            }
-            else {
-                tokens.add(part);
-            }
-        }
-        return tokens;
-    }
-    function eventFingerprint_ACU(summary, at, relatedIds) {
-        const related = [...relatedIds].map(item => item.trim()).filter(Boolean).sort();
-        return sha1Hex_ACU(`${normalizeEventText_ACU(summary)}${at}${related.join(',')}`);
-    }
-    function fuzzySimilarity_ACU(a, b) {
-        const left = eventTokens_ACU(a);
-        const right = eventTokens_ACU(b);
-        if (!left.size && !right.size)
-            return 1;
-        if (!left.size || !right.size)
-            return 0;
-        let intersection = 0;
-        for (const token of left)
-            if (right.has(token))
-                intersection += 1;
-        return intersection / (left.size + right.size - intersection);
     }
 
     function buildArchiveHints_ACU(candidateChronicleEntries, chronicleOverview) {
@@ -156158,7 +156296,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 raw.upsert.forEach((item, index) => {
                     if (!isRecord_ACU$4(item))
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
-                    if (!text_ACU$2(item.id))
+                    if (item.id !== undefined && !text_ACU$2(item.id))
                         invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
                     const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
                     if (item[labelField] !== undefined && !text_ACU$2(item[labelField])) {
@@ -156327,7 +156465,7 @@ Expected function or array of functions, received type ${typeof value}.`
             '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
         ];
         if (allowDelegate)
-            lines.push('{"action":"delegate","delegations":[{"agentName":"world-analyst","instruction":"推演本轮幕后时间与资源演变","reads":[]}]}');
+            lines.push('{"action":"delegate","delegations":[{"agentName":"timekeeper","instruction":"按正文时间跨度推进时钟","reads":[]},{"agentName":"undercurrent-analyst","instruction":"更新维度与暗流","reads":[]}]}');
         lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
         lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
         lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
@@ -156344,7 +156482,7 @@ Expected function or array of functions, received type ${typeof value}.`
         ];
         if (writableModules.length) {
             lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
-            lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；每个 upsert 条目必须含非空 id，新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
+            lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId?} 对象数组。');
             const firstModule = writableModules[0];
             const patchExample = firstModule === 'dimensions'
                 ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
@@ -156415,7 +156553,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     impactScope: ['当前世界状态'],
                     factsToVerify: ['时间是否推进'],
                     plannedTools: ['read'],
-                    plannedSpecialists: ['world-analyst'],
+                    plannedSpecialists: ['timekeeper', 'undercurrent-analyst'],
                     expectedLedgerChanges: ['clock'],
                     convergenceConditions: ['证据与候选闭合'],
                     blockingConditions: ['缺少锚点'],
@@ -156897,15 +157035,16 @@ Expected function or array of functions, received type ${typeof value}.`
             // 候选与证据全量保留；交接摘要注入 transcript 开头一次。
             // 末轮 persist(iteration+1) 会使 nextIteration 越过 maxIterations；这不是预算终局，
             // 只把迭代游标拉回第 1 轮，保留派工/同角色计数，避免「继续」直接掉进迭代耗尽。
+            const resetRunBudget = input.resetRunBudget === true;
             const budgetExhausted = !!resumedState
                 && (resumedState.budgetExhausted === true || LEGACY_BUDGET_FEEDBACK_ACU.has(resumedState.reviewerFeedback));
             const overflowed = !!resumedState
                 && resumedState.nextIteration > input.settings.agentRunBudget.maxIterations;
-            const iterationStart = budgetExhausted || overflowed ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
-            const delegationsStart = budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
+            const iterationStart = resetRunBudget || budgetExhausted || overflowed ? 1 : Math.max(1, resumedState?.nextIteration ?? 1);
+            const delegationsStart = resetRunBudget || budgetExhausted ? 0 : resumedState?.delegationsUsed ?? 0;
             const outcomes = latestOutcomes_ACU(resumedState?.subagentOutcomes ?? []);
             const candidates = resumedState?.candidates ? [...resumedState.candidates] : [];
-            const perAgent = new Map(budgetExhausted ? [] : Object.entries(resumedState?.perAgent ?? {}));
+            const perAgent = new Map(resetRunBudget || budgetExhausted ? [] : Object.entries(resumedState?.perAgent ?? {}));
             let delegationsUsed = delegationsStart;
             let iteration = iterationStart;
             const transcript = resumedState?.transcript ? [...resumedState.transcript] : [];
@@ -156930,7 +157069,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     agentName: entry.agentName, ok: entry.ok, status: entry.status,
                 });
             };
-            const runEntryId = beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumedState);
+            const runEntryId = beginWorldSimulationSessionRun_ACU(input.identity.chatIdentity, '世界推演 Agent 运行', resetRunBudget ? `用户指令续跑，预算窗口重置（保留 ${candidates.length} 个候选）` : budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`, !!resumedState);
             await persistEntry(runEntryId, resumedState ? 'run-resumed' : 'run-started');
             const persist = (nextIteration, reviewerFeedback = '', extras = {}) => {
                 const unique = uniqueCandidates_ACU(candidates);
@@ -157124,9 +157263,23 @@ Expected function or array of functions, received type ${typeof value}.`
                         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: rejectionText });
                         return blockOnBudget_ACU(iteration, 'delegation gate exhausted', '派工被预算门禁拦截，无可派工角色', rejectionText, rejected.map(item => `${item.agentName}: ${item.reason}`), 'block-delegation-gate');
                     }
+                    const candidateSeqByAgent = new Map();
+                    for (const item of candidates) {
+                        candidateSeqByAgent.set(item.agentName, (candidateSeqByAgent.get(item.agentName) ?? 0) + 1);
+                    }
                     const settled = await Promise.all(accepted.map(async (delegation) => {
+                        const nextSeq = (candidateSeqByAgent.get(delegation.agentName) ?? 0) + 1;
+                        candidateSeqByAgent.set(delegation.agentName, nextSeq);
                         try {
-                            return await this.dependencies.subagents.run({ delegation, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools });
+                            return await this.dependencies.subagents.run({
+                                delegation,
+                                settings: input.settings,
+                                promptContext: requestContext,
+                                registry: input.registry,
+                                tools: input.tools,
+                                runId: input.identity.runId,
+                                candidateSeq: nextSeq,
+                            });
                         }
                         catch (error) {
                             const issue = compactWorldSimulationProtocolError_ACU(error);
@@ -157254,12 +157407,12 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
 
-    function candidate_ACU(result, writableModules) {
+    function candidate_ACU(result, writableModules, runId, candidateSeq) {
         const keys = Object.keys(result.patch);
         const denied = keys.filter(key => key === 'chronicleArchive' ? !writableModules.includes('chronicle') : !writableModules.includes(key));
         if (denied.length)
             throw new Error(`WORLD_SIMULATION_PATCH_SCOPE_DENIED:${denied.join(',')}`);
-        const candidateId = `candidate:${sha256HexSync_ACU(JSON.stringify([result.agentName, result.patch, result.evidenceRefs, result.summary])).slice(0, 24)}`;
+        const candidateId = `${runId}:${result.agentName}:${candidateSeq}`;
         return { candidateId, agentName: result.agentName, patch: result.patch, summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties, writableModules: [...writableModules] };
     }
     function withTask_ACU(context, task, candidates, writableModules) {
@@ -157348,7 +157501,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (result.agentName !== agentName)
                         throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
                     if (result.status === 'candidate')
-                        return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
+                        return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules, input.runId, input.candidateSeq ?? 1), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
                     if (result.status === 'no_change')
                         return { agentName, status: 'no_change', summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
                     if (result.status === 'blocked')
@@ -158238,6 +158391,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const controller = new AbortController();
             abortByChat_ACU.set(identity.chatIdentity, controller);
             const instruction = typeof input.instruction === 'string' && input.instruction.trim() ? input.instruction.trim() : '';
+            const resetRunBudget = input.resetRunBudget === true;
             const completion = (async () => {
                 try {
                     await this.dependencies.assertAnchorCurrent(input.anchor);
@@ -158247,7 +158401,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     if (controller.signal.aborted)
                         throw new Error('WORLD_SIMULATION_ABORTED');
-                    const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task.originInstruction, envelope, signal: controller.signal });
+                    const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task.originInstruction, envelope, signal: controller.signal, resetRunBudget });
                     return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
                 }
                 catch (error) {
@@ -159023,7 +159177,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     idempotent,
                 }, getChatArray_ACU());
             },
-            prepare: async ({ identity, anchor, instruction, envelope, signal }) => {
+            prepare: async ({ identity, anchor, instruction, envelope, signal, resetRunBudget }) => {
                 const chat = getChatArray_ACU();
                 const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
                 const registry = createWorldSimulationEvidenceRegistry_ACU(identity.runId);
@@ -159094,6 +159248,7 @@ Expected function or array of functions, received type ${typeof value}.`
                                 persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
                                 anchor: currentAnchor,
                                 chat: getChatArray_ACU(),
+                                resetRunBudget,
                             }),
                         });
                         return engine.run({ identity: runIdentity });
@@ -159118,12 +159273,6 @@ Expected function or array of functions, received type ${typeof value}.`
         WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
     ];
     const RESUME_KEYWORD_ACU = /^(继续|恢复(?:任务)?|resume|continue)$/i;
-    function sameAnchorIdentity_ACU(left, right) {
-        return left.chatIdentity === right.chatIdentity
-            && left.messageKey === right.messageKey
-            && left.swipeId === right.swipeId
-            && left.contentDigest === right.contentDigest;
-    }
     class WorldSimulationRuntime_ACU {
         constructor(orchestrator = createProductionOrchestrator_ACU(), getChat = getChatArray_ACU) {
             this.orchestrator = orchestrator;
@@ -159182,10 +159331,10 @@ Expected function or array of functions, received type ${typeof value}.`
             return outcome;
         }
         /**
-         * Agent 会话发送。与智能续写 sendAgentMessage 同语义：
-         * - 在途运行先打断并等待其落盘为 paused/manual；
-         * - 存在暂停中的运行且其冻结锚点仍是当前最新 assistant 楼层（或用户明确说"继续"）→ 带着这句话恢复同一 run；
-         * - 锚点已失效 / 最新 assistant 已是新楼层 → 新建运行，旧运行被取代；
+         * Agent 会话发送。
+         * - 在途运行先打断并等待其落盘为 paused；
+         * - 存在暂停中的运行且冻结锚点仍可恢复 → 带着这句话 resume 同一 run，并重置派工/迭代预算；
+         * - 锚点已失效（楼层删除 / swipe 变更）→ 新建运行；
          * - 空闲 → 新建运行。
          * 无 assistant 楼层或空指令时返回 null，不调用模型。
          */
@@ -159201,10 +159350,8 @@ Expected function or array of functions, received type ${typeof value}.`
             const resolved = resolveLatestWorldSimulationAssistant_ACU(chat);
             if (pausedRun) {
                 const pausedAnchor = this.restoreAnchorOrNull_ACU(pausedRun, chat);
-                const continuesSameFloor = pausedAnchor !== null
-                    && (resumeKeyword || resolved.kind !== 'resolved' || sameAnchorIdentity_ACU(pausedAnchor, resolved.anchor));
-                if (pausedAnchor && continuesSameFloor) {
-                    return this.orchestrator.resume(resumeKeyword ? { anchor: pausedAnchor } : { anchor: pausedAnchor, instruction });
+                if (pausedAnchor) {
+                    return this.orchestrator.resume(resumeKeyword ? { anchor: pausedAnchor, resetRunBudget: true } : { anchor: pausedAnchor, instruction, resetRunBudget: true });
                 }
             }
             if (!instruction || resolved.kind !== 'resolved')
@@ -188732,13 +188879,18 @@ Expected function or array of functions, received type ${typeof value}.`
     /**
      * 世界推演各 Agent 的中文展示名。会话流、渠道下拉与提示词分组共用同一张表，
      * 内部 agentName 不直接暴露给用户（与智能续写「各 Agent 渠道」的做法一致）。
+     * 退役角色保留展示名，避免旧会话卡片回退成英文内部名。
      */
     const WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU = {
         'world-director': '主 Agent',
         'world-stage-planner': '阶段规划',
-        'world-analyst': '世界推演',
+        'timekeeper': '时计',
+        'undercurrent-analyst': '暗流分析',
+        'dramatis-keeper': '人物档案',
+        'chronicler': '编年',
         'causality-reviewer': '因果审核',
         'lore-researcher': '设定研究',
+        'world-analyst': '世界推演',
     };
     function worldSimulationAgentLabel_ACU(agentName) {
         return WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU[agentName] ?? agentName;
@@ -190376,7 +190528,7 @@ Expected function or array of functions, received type ${typeof value}.`
             return restoreWorldSimulationPromptDefault_ACU(current, agentName);
         }
         /**
-         * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 九个角色: 段数组 } }。
+         * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 各角色: 段数组 } }。
          * 任何一组校验失败（角色缺失、seam 缺失、未知占位符）即整体拒绝，绝不产生半套导入。
          */
         function parsePromptBundle(text) {
@@ -190774,7 +190926,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const promptImportInput = ref(null);
             const promptIoError = ref('');
             const promptIoNotice = ref('');
-            /** 导出全部九组 Agent 提示词为 JSON 文件下载。 */
+            /** 导出全部八组 Agent 提示词为 JSON 文件下载。 */
             function exportPrompts() {
                 if (!settingsDraft.value)
                     return;
@@ -190796,7 +190948,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     promptIoError.value = error instanceof Error ? error.message : '提示词导出失败。';
                 }
             }
-            /** 导入提示词 JSON：九组全部校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
+            /** 导入提示词 JSON：八组全部校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
             async function onImportPromptsFile(event) {
                 const input = event.target;
                 const file = input.files?.[0];
@@ -190863,8 +191015,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-7cfe313c] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-7cfe313c] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-7cfe313c] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-7cfe313c] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-7cfe313c] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-7cfe313c] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-7cfe313c] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-7cfe313c] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-7cfe313c] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-7cfe313c] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-7cfe313c] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-7cfe313c] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-7cfe313c] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-7cfe313c] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-7cfe313c] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-7cfe313c] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-7cfe313c] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-7cfe313c]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-7cfe313c] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-7cfe313c] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-7cfe313c] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-7cfe313c] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-7cfe313c] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-7cfe313c");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_7cfe313c_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-b1664de6] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-b1664de6] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-b1664de6] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-b1664de6] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-b1664de6] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-b1664de6] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-b1664de6] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-b1664de6] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-b1664de6] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-b1664de6] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-b1664de6] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-b1664de6] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-b1664de6] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-b1664de6] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-b1664de6] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-b1664de6] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-b1664de6] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-b1664de6]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-b1664de6] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-b1664de6] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-b1664de6] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-b1664de6] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-b1664de6] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-b1664de6");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_b1664de6_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$j = {
@@ -191111,7 +191263,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}),
 								createVNode($setup["AcuFormRow"], {
 									label: "并发派工上限",
-									hint: "同一波次最多同时运行几个子代理；API 限流严格时调小。范围 1–20。"
+									hint: "同一波次最多同时运行几个子代理；默认 5。API 限流严格时调小。范围 1–20。"
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxConcurrent,
@@ -191509,7 +191661,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-7cfe313c"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-b1664de6"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

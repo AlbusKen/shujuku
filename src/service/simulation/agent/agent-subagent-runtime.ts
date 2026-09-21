@@ -1,4 +1,3 @@
-import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import type { WorldSimulationSettings_ACU } from '../model';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
@@ -16,14 +15,27 @@ import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } 
 
 export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string>; }
 export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; }
-export interface WorldSimulationSubagentRunInput_ACU { delegation: WorldSimulationDelegation_ACU; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; }
+export interface WorldSimulationSubagentRunInput_ACU {
+  delegation: WorldSimulationDelegation_ACU;
+  settings: WorldSimulationSettings_ACU;
+  promptContext: WorldSimulationPlaceholderContext_ACU;
+  registry: WorldSimulationEvidenceRegistry_ACU;
+  tools: WorldSimulationToolDependencies_ACU;
+  runId: string;
+  candidateSeq?: number;
+}
 export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; }
 
-function candidate_ACU(result: Extract<WorldSimulationSpecialistResult_ACU, { status: 'candidate' }>, writableModules: readonly string[]): WorldSimulationCandidate_ACU {
+function candidate_ACU(
+  result: Extract<WorldSimulationSpecialistResult_ACU, { status: 'candidate' }>,
+  writableModules: readonly string[],
+  runId: string,
+  candidateSeq: number,
+): WorldSimulationCandidate_ACU {
   const keys = Object.keys(result.patch);
   const denied = keys.filter(key => key === 'chronicleArchive' ? !writableModules.includes('chronicle') : !writableModules.includes(key));
   if (denied.length) throw new Error(`WORLD_SIMULATION_PATCH_SCOPE_DENIED:${denied.join(',')}`);
-  const candidateId = `candidate:${sha256HexSync_ACU(JSON.stringify([result.agentName, result.patch, result.evidenceRefs, result.summary])).slice(0, 24)}`;
+  const candidateId = `${runId}:${result.agentName}:${candidateSeq}`;
   return { candidateId, agentName: result.agentName, patch: result.patch, summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties, writableModules: [...writableModules] };
 }
 
@@ -116,7 +128,7 @@ export class WorldSimulationSubagentRuntime_ACU {
         const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
         const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
         if (result.agentName !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
-        if (result.status === 'candidate') return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
+        if (result.status === 'candidate') return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules, input.runId, input.candidateSeq ?? 1), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
         if (result.status === 'no_change') return { agentName, status: 'no_change', summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
         if (result.status === 'blocked') return { agentName, status: 'blocked', summary: 'blocked', evidenceRefs: [], uncertainties: [], unresolved: result.unresolved };
         return { agentName, status: 'failed', summary: result.message, evidenceRefs: [], uncertainties: [], reasonCode: result.reasonCode };

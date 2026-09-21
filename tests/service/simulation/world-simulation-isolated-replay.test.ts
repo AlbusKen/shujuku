@@ -17,7 +17,6 @@ import { createWorldSimulationCompletionIntent_ACU, restoreWorldSimulationAnchor
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../src/service/simulation/world-simulation-evidence-registry';
 import type { WorldSimulationAgentName_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 import type { WorldSimulationRunIdentity_ACU } from '../../../src/service/simulation/model';
-import { sha256HexSync_ACU } from '../../../src/shared/sha256-sync';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
 type ReplayMode = 'commit_partial' | 'no_change' | 'blocked';
@@ -29,7 +28,7 @@ const plan = {
   impactScope: ['world'],
   factsToVerify: ['冻结锚点仍有效'],
   plannedTools: ['anchor:message'],
-  plannedSpecialists: ['world-analyst', 'lore-researcher'],
+  plannedSpecialists: ['timekeeper', 'lore-researcher'],
   expectedLedgerChanges: ['clock', 'guidance'] as const,
   convergenceConditions: ['形成可审计终局'],
   blockingConditions: ['证据不足'],
@@ -45,9 +44,6 @@ const isolatedPreset = {
     tavernProfile: '',
   })),
 };
-
-const candidateId = (agentName: string, patch: object, evidenceRefs: string[], summary: string): string =>
-  `candidate:${sha256HexSync_ACU(JSON.stringify([agentName, patch, evidenceRefs, summary])).slice(0, 24)}`;
 
 interface ReplayOptions {
   mode: ReplayMode;
@@ -117,7 +113,7 @@ function buildReplay(options: ReplayOptions) {
       clock: { days: 1, storyTime: '1h', evidenceRefs: [initialEvidence] },
     };
     const clockSummary = '钟楼事件使世界时间推进一小时';
-    const clockCandidateId = candidateId('world-analyst', clockPatch, [initialEvidence], clockSummary);
+    const clockCandidateId = `${input.identity.runId}:timekeeper:1`;
     const scripts = new Map<WorldSimulationAgentName_ACU, string[]>([
       ['world-stage-planner', [JSON.stringify({ action: 'plan', summary: '隔离阶段计划已冻结', plan })]],
       ['world-director', [
@@ -129,10 +125,10 @@ function buildReplay(options: ReplayOptions) {
                 action: 'delegate',
                 delegations: options.mode === 'commit_partial'
                   ? [
-                      { agentName: 'world-analyst', instruction: '分析时间推进', reads: [] },
+                      { agentName: 'timekeeper', instruction: '分析时间推进', reads: [] },
                       { agentName: 'lore-researcher', instruction: '分析暗流变化', reads: [] },
                     ]
-                  : [{ agentName: 'world-analyst', instruction: '核验是否变化', reads: [] }],
+                  : [{ agentName: 'timekeeper', instruction: '核验是否变化', reads: [] }],
               }),
               JSON.stringify({
                 action: 'finalize',
@@ -142,17 +138,17 @@ function buildReplay(options: ReplayOptions) {
               }),
             ]),
       ]],
-      ['world-analyst', [options.mode === 'no_change'
+      ['timekeeper', [options.mode === 'no_change'
         ? JSON.stringify({
             status: 'no_change',
-            agentName: 'world-analyst',
+            agentName: 'timekeeper',
             summary: '当前证据不足以支持状态变化',
             evidenceRefs: [initialEvidence],
             uncertainties: [],
           })
         : JSON.stringify({
             status: 'candidate',
-            agentName: 'world-analyst',
+            agentName: 'timekeeper',
             patch: clockPatch,
             summary: clockSummary,
             evidenceRefs: [initialEvidence],
@@ -323,10 +319,10 @@ describe('T9 世界推演隔离 API replay', () => {
     });
     if (!result || result.status !== 'completed' || result.result.outcome !== 'commit') throw new Error('expected committed replay');
     expect(result.result.outcomes.map(item => [item.agentName, item.status, item.reasonCode])).toEqual([
-      ['world-analyst', 'candidate', undefined],
+      ['timekeeper', 'candidate', undefined],
       ['lore-researcher', 'failed', 'SEED_EVIDENCE_MISSING'],
     ]);
-    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['world-analyst', 'causality-reviewer']);
+    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'causality-reviewer']);
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } }, task: { status: 'completed', activeRun: null } });
     expect(replay.commitProjection).toHaveBeenCalledOnce();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);

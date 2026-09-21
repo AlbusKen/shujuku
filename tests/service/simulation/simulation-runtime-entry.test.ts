@@ -152,7 +152,8 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
     await runtime.sendAgentMessage('resume', 'turn-resume');
     expect(resume).toHaveBeenCalledTimes(3);
     expect(resume).toHaveBeenNthCalledWith(1, { anchor });
-    expect(resume).toHaveBeenNthCalledWith(2, { anchor });
+    expect(resume).toHaveBeenNthCalledWith(2, { anchor, resetRunBudget: true });
+    expect(resume).toHaveBeenNthCalledWith(3, { anchor, resetRunBudget: true });
     expect(start).not.toHaveBeenCalled();
   });
 
@@ -182,7 +183,7 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
 
     expect(interrupt).toHaveBeenCalledWith('chat-a');
     expect(interrupt.mock.invocationCallOrder[0]).toBeLessThan(resume.mock.invocationCallOrder[0]);
-    expect(resume).toHaveBeenCalledWith({ anchor, instruction: '把边境压力调高' });
+    expect(resume).toHaveBeenCalledWith({ anchor, instruction: '把边境压力调高', resetRunBudget: true });
     expect(start).not.toHaveBeenCalled();
   });
 
@@ -195,12 +196,12 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
 
     await runtime.sendAgentMessage('补充：北境是重点', 'turn-2');
 
-    expect(resume).toHaveBeenCalledWith({ anchor, instruction: '补充：北境是重点' });
+    expect(resume).toHaveBeenCalledWith({ anchor, instruction: '补充：北境是重点', resetRunBudget: true });
     expect(start).not.toHaveBeenCalled();
     expect(interrupt).not.toHaveBeenCalled();
   });
 
-  it('paused 任务的锚点已不是最新 assistant 时，发送走 start 取代旧任务', async () => {
+  it('paused 任务的锚点已不是最新 assistant 时，只要旧锚点仍可恢复就带 resetRunBudget 续跑同一 run', async () => {
     const chat: any[] = [
       { is_user: false, message_id: 7, mes: 'old anchor', swipe_id: 0 },
       { is_user: true, mes: 'user' },
@@ -213,8 +214,8 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
 
     await runtime.sendAgentMessage('推进新楼层', 'turn-3');
 
-    expect(resume).not.toHaveBeenCalled();
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ triggerKind: 'agent_chat_message', instruction: '推进新楼层', anchor: expect.objectContaining({ messageIndex: 2, messageId: 8 }) }));
+    expect(start).not.toHaveBeenCalled();
+    expect(resume).toHaveBeenCalledWith({ anchor: oldAnchor, instruction: '推进新楼层', resetRunBudget: true });
   });
 
   it('paused 任务的锚点楼层已被删除时，快照不再整体失败，发送按最新 assistant 新建运行', async () => {
