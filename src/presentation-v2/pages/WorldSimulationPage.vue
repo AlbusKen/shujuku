@@ -33,7 +33,7 @@
           :materials="runtime.snapshot.value.materials"
           :user-requirements="runtime.snapshot.value.userRequirements"
           :session="runtime.entries.value"
-          :ledger="runtime.envelope.value?.ledger ?? null"
+          :ledger="runtime.snapshot.value.envelope?.ledger ?? null"
           :anchor="runtime.anchor.value"
           :projection-preview="runtime.snapshot.value.projectionPreview"
           :busy="runtime.busy.value"

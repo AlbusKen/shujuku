@@ -32,10 +32,10 @@
         <div><strong>故事时间</strong><span>{{ ledger?.clock.storyTime || '未知' }}<template v-if="ledger"> · 第 {{ ledger.clock.day }} 天</template><template v-if="ledger?.clock.slot"> · {{ ledger.clock.slot }}</template></span></div>
       </div>
       <p v-if="materials.snapshot" class="acu-v2-ws-materials__meta">
-        最近结算：第 {{ (materials.adoptedIndex ?? 0) + 1 }} 楼 · revision {{ materials.snapshot.ledgerRevision }} · 证据引用 {{ materials.snapshot.evidenceRefs.length }} 条。
-        资料快照跟着楼层走：该楼被删除、重新生成或 swipe 时，账本会回退到更早楼层的快照。
+        资料从最近基线折叠；删除楼层后随该楼增量一并回退。
+        基线楼层 {{ materials.checkpointIndex ?? '无' }} · 已折叠 delta {{ materials.foldedDeltaCount ?? 0 }} 条 · revision {{ materials.snapshot.ledgerRevision }} · 证据引用 {{ materials.snapshot.evidenceRefs.length }} 条。
       </p>
-      <p v-else class="acu-v2-ws-materials__meta">当前分支还没有任何楼层带有已结算的世界账本快照；首次提交后会写到冻结的 assistant 楼层。</p>
+      <p v-else class="acu-v2-ws-materials__meta">当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。</p>
       <details v-if="pendingFixCards.length" class="acu-v2-ws-materials__block" open>
         <summary>待修复 · {{ pendingFixCards.length }} 项</summary>
         <div class="acu-v2-ws-materials__cards">

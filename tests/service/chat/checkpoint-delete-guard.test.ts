@@ -70,6 +70,7 @@ import {
   __getCheckpointVaultForTests_ACU,
   __resetCheckpointDeleteGuardForTests_ACU,
 } from '../../../src/service/chat/checkpoint-delete-guard';
+import { registerMaterialCheckpointRecoveryAdapter_ACU } from '../../../src/service/chat/material-checkpoint-sync';
 
 function fullCheckpoint(data: Record<string, any> = { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } }) {
   return { kind: 'full' as const, createdAt: 1000, reason: 'compaction' as const, data };
@@ -395,5 +396,69 @@ describe('recoverLostCheckpointsAfterMessageDeletion_ACU', () => {
 
     expect(result.recovered).toBe(true);
     expect(incMsg.TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint).toEqual(transition);
+  });
+
+  it('删掉带续写基线的楼层后，基线嫁到后继楼，断言失败则回滚且不保存', async () => {
+    const captureContinuation = (message: unknown) => {
+      const marker = (message as { _qrf_continuation_agent?: { swipeId: string; snapshot: unknown } })._qrf_continuation_agent;
+      return marker ? { continuation: marker, simulation: null } : null;
+    };
+    registerMaterialCheckpointRecoveryAdapter_ACU({
+      capture: captureContinuation,
+      graftContinuation(message, artifact) {
+        const target = message as { _qrf_continuation_agent?: unknown };
+        if (target._qrf_continuation_agent) return false;
+        target._qrf_continuation_agent = artifact;
+        return true;
+      },
+      graftSimulation() { return false; },
+      assertContinuation() { return null; },
+      assertSimulation() { return null; },
+    });
+    const root = aiMsg('root', { version: 2, checkpoint: fullCheckpoint(), logEntries: [] });
+    root._qrf_continuation_agent = { swipeId: '0', snapshot: { hooks: ['H1'] } };
+    const survivor = aiMsg('survivor', logFrame());
+    const chat = [root, survivor];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+    chat.splice(0, 1);
+
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result.recovered).toBe(true);
+    expect(survivor._qrf_continuation_agent).toEqual({ swipeId: '0', snapshot: { hooks: ['H1'] } });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalled();
+
+    delete survivor._qrf_continuation_agent;
+    captureCheckpointVaultForCurrentChat_ACU();
+    const pluginDelete = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+    expect(pluginDelete.recovered).toBe(false);
+    expect(survivor._qrf_continuation_agent).toBeUndefined();
+
+    registerMaterialCheckpointRecoveryAdapter_ACU({
+      capture: captureContinuation,
+      graftContinuation(message, artifact) {
+        (message as { _qrf_continuation_agent?: unknown })._qrf_continuation_agent = artifact;
+        return true;
+      },
+      graftSimulation() { return false; },
+      assertContinuation() { return '续写资料存在多个活跃基线'; },
+      assertSimulation() { return null; },
+    });
+    const again = aiMsg('root2', { version: 2, checkpoint: fullCheckpoint(), logEntries: [] });
+    again._qrf_continuation_agent = { swipeId: '0', snapshot: { hooks: ['H2'] } };
+    const keep = aiMsg('keep', logFrame());
+    const second = [again, keep];
+    mockGetChatArray.mockReturnValue(second);
+    captureCheckpointVaultForCurrentChat_ACU();
+    second.splice(0, 1);
+    mockSaveChatToHostStrict.mockClear();
+
+    const rolled = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(rolled.recovered).toBe(false);
+    expect(rolled.error).toContain('多个活跃基线');
+    expect(keep._qrf_continuation_agent).toBeUndefined();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
 });

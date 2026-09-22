@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" width="640" height="480">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e4e4ea"/>
+    </linearGradient>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#20202a"/>
+      <stop offset="1" stop-color="#101016"/>
+    </linearGradient>
+    <radialGradient id="stickTop" cx="0.35" cy="0.3" r="0.95">
+      <stop offset="0" stop-color="#3c3c48"/>
+      <stop offset="1" stop-color="#1b1b23"/>
+    </radialGradient>
+  </defs>
+
+  <ellipse cx="320" cy="428" rx="215" ry="20" fill="#000000" opacity="0.08"/>
+
+  <!-- white shell: grips + upper body -->
+  <g fill="url(#shell)" stroke="#c7c7d1" stroke-width="2">
+    <rect x="108" y="168" width="84" height="212" rx="42" transform="rotate(19 150 274)"/>
+    <rect x="448" y="168" width="84" height="212" rx="42" transform="rotate(-19 490 274)"/>
+    <rect x="130" y="90" width="380" height="162" rx="72"/>
+  </g>
+
+  <!-- USB-C hint on top edge -->
+  <rect x="306" y="88" width="28" height="7" rx="3.5" fill="#b4b4be"/>
+
+  <!-- black center plate -->
+  <path d="M186 128 L454 128 C462 186 467 218 463 248 C459 273 428 286 320 286 C212 286 181 273 177 248 C173 218 178 186 186 128 Z" fill="url(#plate)" stroke="#2c2c36" stroke-width="2"/>
+
+  <!-- touchpad -->
+  <rect x="238" y="112" width="164" height="96" rx="22" fill="#0c0c12" stroke="#3a3a46" stroke-width="2"/>
+  <rect x="246" y="120" width="148" height="80" rx="16" fill="#16161e"/>
+
+  <!-- PS logo button -->
+  <circle cx="320" cy="238" r="12" fill="#16161e" stroke="#3a3a46" stroke-width="1.5"/>
+  <path d="M315 243 v-9 c0-3 5-3 6-1 v-4 c3 1 4 4 3 8" fill="none" stroke="#7a7a88" stroke-width="1.4" stroke-linecap="round"/>
+
+  <!-- speaker dots -->
+  <g fill="#2e2e3a">
+    <circle cx="296" cy="218" r="1.8"/><circle cx="306" cy="218" r="1.8"/><circle cx="316" cy="218" r="1.8"/>
+    <circle cx="326" cy="218" r="1.8"/><circle cx="336" cy="218" r="1.8"/><circle cx="346" cy="218" r="1.8"/>
+  </g>
+
+  <!-- D-pad -->
+  <path d="M222 128 h18 v14 h14 v18 h-14 v14 h-18 v-14 h-14 v-18 h14 Z" fill="url(#shell)" stroke="#b9b9c4" stroke-width="1.6"/>
+
+  <!-- face buttons -->
+  <g fill="url(#shell)" stroke="#b9b9c4" stroke-width="1.6">
+    <circle cx="420" cy="118" r="11"/>
+    <circle cx="446" cy="144" r="11"/>
+    <circle cx="420" cy="170" r="11"/>
+    <circle cx="394" cy="144" r="11"/>
+  </g>
+  <g fill="none" stroke="#5a5a68" stroke-width="1.6" stroke-linecap="round">
+    <path d="M414 122 l6-9 6 9 Z"/>
+    <circle cx="446" cy="144" r="4.5"/>
+    <path d="M415.5 165.5 l9 9 M424.5 165.5 l-9 9"/>
+    <rect x="389.5" y="139.5" width="9" height="9"/>
+  </g>
+
+  <!-- analog sticks -->
+  <g>
+    <circle cx="236" cy="226" r="26" fill="#0c0c12"/>
+    <circle cx="236" cy="226" r="21" fill="url(#stickTop)" stroke="#3a3a46" stroke-width="1.5"/>
+    <circle cx="236" cy="226" r="12" fill="none" stroke="#4a4a58" stroke-width="1.2"/>
+    <circle cx="384" cy="226" r="26" fill="#0c0c12"/>
+    <circle cx="384" cy="226" r="21" fill="url(#stickTop)" stroke="#3a3a46" stroke-width="1.5"/>
+    <circle cx="384" cy="226" r="12" fill="none" stroke="#4a4a58" stroke-width="1.2"/>
+  </g>
+
+  <!-- create / options -->
+  <rect x="204" y="112" width="16" height="10" rx="5" fill="#16161e" stroke="#3a3a46"/>
+  <rect x="420" y="112" width="16" height="10" rx="5" fill="#16161e" stroke="#3a3a46"/>
+
+  <!-- light strip accent -->
+  <path d="M186 128 L454 128" stroke="#4f7dff" stroke-width="2" opacity="0.55"/>
+</svg>
+

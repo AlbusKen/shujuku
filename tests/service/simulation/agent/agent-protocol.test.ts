@@ -196,7 +196,7 @@ describe('世界推演 Agent 协议', () => {
     expect(specialist).toContain('新建默认 0');
     expect(specialist).toContain('当前 revision');
     expect(specialist).toContain('可只提交变更字段');
-    expect(specialist).toContain('核心字段 dimensions:id,name');
+    expect(specialist).toContain('字段纪律：dimensions 必须给 id,name');
     const noWrite = worldSimulationSpecialistProtocolInstruction_ACU('lore-researcher', []);
     expect(noWrite).toContain('不得输出 candidate');
     expect(noWrite).not.toContain('expectedRevision');
@@ -211,7 +211,7 @@ describe('世界推演 Agent 协议', () => {
     const specialist = prompts['undercurrent-analyst'].map(segment => segment.content).join('\n');
     expect(specialist).toContain('expectedRevision 可省略');
     expect(specialist).toContain('新建默认 0');
-    expect(specialist).toContain('核心字段 dimensions:id,name');
+    expect(specialist).toContain('字段纪律：dimensions 必须给 id,name');
     expect(specialist).toContain('可只提交变更字段');
     const director = prompts['world-director'].map(segment => segment.content).join('\n');
     expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');

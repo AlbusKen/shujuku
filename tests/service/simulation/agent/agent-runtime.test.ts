@@ -463,7 +463,7 @@ describe('世界推演 Agent runtime', () => {
     expect(JSON.stringify(invoke.mock.calls)).toContain('revision 冲突');
     expect(JSON.stringify(invoke.mock.calls)).toContain('重新派工');
     expect(JSON.stringify(invoke.mock.calls)).toContain('完整必填字段模板');
-    expect(JSON.stringify(invoke.mock.calls)).toContain('核心字段 dimensions:id,name');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('字段纪律：dimensions 必须给 id,name');
     expect(subagents.run).toHaveBeenCalledTimes(2);
     expect(subagents.runReviewer.mock.calls.at(-1)![0].candidates).toEqual([corrected]);
   });

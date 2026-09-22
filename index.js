@@ -33837,6 +33837,102 @@ $CONTENT
         return { mode: 'empty' };
     }
 
+    /**
+     * service/chat/material-checkpoint-sync.ts — 续写/推演基线跟随表格 checkpoint 楼层
+     *
+     * 表格在边界、init、bridge 落层时通知这里。监听方把自己的基线折到同一楼。
+     * 本模块不读取缓冲层数或 periodic 步长，避免把表格节奏复制成第二份参数。
+     */
+    /** 随迁时需要和表格保存一起回滚的楼层字段。 */
+    const MATERIAL_CHECKPOINT_FIELDS_ACU = [
+        '_qrf_continuation_agent',
+        '_qrf_world_simulation_state',
+        '_qrf_world_simulation_agent_materials',
+        '_qrf_world_simulation_chronicle_archive',
+    ];
+    const listeners_ACU$1 = [];
+    let recoveryAdapter_ACU = null;
+    function registerMaterialCheckpointRecoveryAdapter_ACU(adapter) {
+        recoveryAdapter_ACU = adapter;
+    }
+    function captureMaterialCheckpointRecovery_ACU(message) {
+        return recoveryAdapter_ACU?.capture(message) ?? null;
+    }
+    function graftMaterialContinuationCheckpoint_ACU(message, artifact) {
+        return recoveryAdapter_ACU?.graftContinuation(message, artifact) ?? false;
+    }
+    function graftMaterialSimulationCheckpoint_ACU(chat, message, artifact) {
+        return recoveryAdapter_ACU?.graftSimulation(chat, message, artifact) ?? false;
+    }
+    function assertMaterialContinuationCheckpoint_ACU(chat) {
+        return recoveryAdapter_ACU?.assertContinuation(chat) ?? null;
+    }
+    function assertMaterialSimulationCheckpoint_ACU(chat) {
+        return recoveryAdapter_ACU?.assertSimulation(chat) ?? null;
+    }
+    function registerMaterialCheckpointFloorSync_ACU(listener) {
+        if (!listeners_ACU$1.includes(listener))
+            listeners_ACU$1.push(listener);
+    }
+    /** 当前聊天里最后一个 V2 full checkpoint 的楼层。没有表格基线时返回 null。 */
+    function findLatestTableFullCheckpointIndex_ACU(chat) {
+        let latest = null;
+        for (let index = 0; index < chat.length; index += 1) {
+            const message = chat[index];
+            if (!message || typeof message !== 'object')
+                continue;
+            const container = message.TavernDB_ACU_IsolatedData;
+            if (!container || typeof container !== 'object' || Array.isArray(container))
+                continue;
+            for (const tagData of Object.values(container)) {
+                if (!isV2TagData_ACU(tagData))
+                    continue;
+                if (tagData.storageFrame.checkpoint?.kind === 'full') {
+                    latest = index;
+                    break;
+                }
+            }
+        }
+        return latest;
+    }
+    function snapshotMaterialCheckpointFields_ACU(chat) {
+        return chat.map(message => MATERIAL_CHECKPOINT_FIELDS_ACU.map(field => ({
+            field,
+            existed: !!message && typeof message === 'object' && Object.prototype.hasOwnProperty.call(message, field),
+            value: message && typeof message === 'object' ? message[field] : undefined,
+        })));
+    }
+    function restoreMaterialCheckpointFields_ACU(chat, snapshots) {
+        snapshots.forEach((fields, index) => {
+            const message = chat[index];
+            if (!message || typeof message !== 'object')
+                return;
+            const container = message;
+            for (const item of fields) {
+                if (item.existed)
+                    container[item.field] = item.value;
+                else
+                    delete container[item.field];
+            }
+        });
+    }
+    function notifyMaterialCheckpointFloor_ACU(chat, anchorIndex) {
+        for (const listener of listeners_ACU$1) {
+            try {
+                listener(chat, anchorIndex);
+            }
+            catch (error) {
+                logWarn_ACU(`[资料基线] 跟随表格 checkpoint 楼层 #${anchorIndex} 失败: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+    }
+    /** 先快照资料字段，再通知随迁。返回的函数把字段还原到通知前。 */
+    function beginMaterialCheckpointSync_ACU(chat, anchorIndex) {
+        const snapshots = snapshotMaterialCheckpointFields_ACU(chat);
+        notifyMaterialCheckpointFloor_ACU(chat, anchorIndex);
+        return () => restoreMaterialCheckpointFields_ACU(chat, snapshots);
+    }
+
     const MAX_SPANS_ACU = 200;
     const DEFAULT_SLOW_THRESHOLD_MS_ACU = 50;
     const DEFAULT_LONG_THRESHOLD_MS_ACU = 200;
@@ -37157,7 +37253,7 @@ $CONTENT
         });
     }
 
-    function isRecord_ACU$l(value) {
+    function isRecord_ACU$n(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function createResult_ACU() {
@@ -37173,7 +37269,7 @@ $CONTENT
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
             return result;
         }
-        if (!isRecord_ACU$l(sheet)) {
+        if (!isRecord_ACU$n(sheet)) {
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
             return result;
         }
@@ -37212,7 +37308,7 @@ $CONTENT
     }
     function validateCanonicalCheckpointData_ACU(data, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$l(data)) {
+        if (!isRecord_ACU$n(data)) {
             addIssue_ACU$1(result, 'data', context, 'invalid_data');
             return result;
         }
@@ -37240,7 +37336,7 @@ $CONTENT
      */
     function validateMigrationProvenanceV1_ACU(provenance) {
         const issues = [];
-        if (!isRecord_ACU$l(provenance)) {
+        if (!isRecord_ACU$n(provenance)) {
             return { valid: false, issues: ['provenance_not_object'] };
         }
         if (provenance.version !== 1)
@@ -37263,7 +37359,7 @@ $CONTENT
             issues.push('invalid_source_ai_floors');
         }
         const lastChangedBySheet = provenance.legacyLastChangedAiFloorBySheet;
-        if (!isRecord_ACU$l(lastChangedBySheet)
+        if (!isRecord_ACU$n(lastChangedBySheet)
             || Object.keys(lastChangedBySheet).some(sheetKey => !sheetKey.startsWith('sheet_') || !isNonNegativeInteger_ACU$1(lastChangedBySheet[sheetKey]))) {
             issues.push('invalid_last_changed_floor_by_sheet');
         }
@@ -37279,7 +37375,7 @@ $CONTENT
     }
     function validateCanonicalCheckpoint_ACU(checkpoint, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$l(checkpoint)) {
+        if (!isRecord_ACU$n(checkpoint)) {
             addIssue_ACU$1(result, 'full', context, 'checkpoint_not_object');
             return result;
         }
@@ -37300,7 +37396,7 @@ $CONTENT
             if (checkpoint.fallbackProvenance !== undefined) {
                 const provenance = checkpoint.fallbackProvenance;
                 let valid = false;
-                if (isRecord_ACU$l(provenance)) {
+                if (isRecord_ACU$n(provenance)) {
                     const rangeStart = provenance.rangeStartMessageIndex;
                     const rangeEnd = provenance.rangeEndMessageIndex;
                     const createdAt = provenance.createdAt;
@@ -39872,12 +39968,12 @@ $CONTENT
         };
     }
 
-    function isRecord_ACU$k(value) {
+    function isRecord_ACU$m(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fingerprint_ACU$1(value) {
         const text = JSON.stringify(value, (_key, item) => {
-            if (!isRecord_ACU$k(item))
+            if (!isRecord_ACU$m(item))
                 return item;
             return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
         });
@@ -39913,7 +40009,7 @@ $CONTENT
         return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
     }
     function resolveRequiredHeaderIndexes_ACU(result, sheetKey, sheet, header, omitLeadingRowId = false) {
-        const ddl = isRecord_ACU$k(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+        const ddl = isRecord_ACU$m(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
         if (!ddl)
             return new Map();
         const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
@@ -40059,11 +40155,11 @@ $CONTENT
      * It deliberately does not touch populated tables or malformed seed pools.
      */
     function normalizeHeaderOnlyRowIdColumns_ACU(data) {
-        if (!isRecord_ACU$k(data))
+        if (!isRecord_ACU$m(data))
             return data;
         let normalized = null;
         for (const [sheetKey, sheet] of Object.entries(data)) {
-            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$k(sheet))
+            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$m(sheet))
                 continue;
             const action = headerOnlyRowIdNormalizationAction_ACU(sheet);
             if (!action)
@@ -40095,7 +40191,7 @@ $CONTENT
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无数据模板缺少 row_id，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
             return { header: ['row_id', ...header], insertsRowId: true };
         }
-        const ddl = isRecord_ACU$k(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddl = isRecord_ACU$m(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
         const ddlText = typeof ddl === 'string' ? ddl : '';
         const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
         // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
@@ -40116,7 +40212,7 @@ $CONTENT
     }
     function auditTableDataForUpgrade_ACU(data) {
         const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU$1(data), sourceData: data };
-        if (!isRecord_ACU$k(data)) {
+        if (!isRecord_ACU$m(data)) {
             addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
             result.status = 'unrecoverable';
             return result;
@@ -40128,7 +40224,7 @@ $CONTENT
             return result;
         }
         for (const [sheetKey, rawSheet] of sheets) {
-            if (!isRecord_ACU$k(rawSheet)) {
+            if (!isRecord_ACU$m(rawSheet)) {
                 addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
                 continue;
             }
@@ -40161,7 +40257,7 @@ $CONTENT
         return result;
     }
 
-    function isRecord_ACU$j(value) {
+    function isRecord_ACU$l(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function cloneData_ACU(data) {
@@ -40229,9 +40325,9 @@ $CONTENT
         const candidateData = cloneData_ACU(audit.sourceData);
         const idRemap = [];
         const overflowCells = [];
-        if (isRecord_ACU$j(candidateData) && audit.status !== 'unrecoverable') {
+        if (isRecord_ACU$l(candidateData) && audit.status !== 'unrecoverable') {
             Object.entries(candidateData).forEach(([sheetKey, sheet]) => {
-                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$j(sheet))
+                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$l(sheet))
                     return;
                 repairSheet_ACU(sheet, sheetKey, audit, idRemap, overflowCells);
             });
@@ -46943,7 +47039,7 @@ $CONTENT
         };
     }
 
-    function cloneJson_ACU$4(value) {
+    function cloneJson_ACU$6(value) {
         if (value == null)
             return value;
         try {
@@ -47011,7 +47107,7 @@ $CONTENT
         const rows = normalizeRows_ACU$1(state.rows);
         const chunks = normalizeChunks_ACU$1(state.chunks);
         const manifest = state.manifest && typeof state.manifest === 'object'
-            ? cloneJson_ACU$4(state.manifest)
+            ? cloneJson_ACU$6(state.manifest)
             : undefined;
         if (rows.length === 0 && !manifest)
             return null;
@@ -47045,14 +47141,14 @@ $CONTENT
             nextState.backend = 'st-files';
             nextState.status = manifest.status;
             nextState.indexId = manifest.indexId;
-            nextState.manifest = cloneJson_ACU$4(manifest);
+            nextState.manifest = cloneJson_ACU$6(manifest);
             delete nextState.chunks;
-            tagData.summaryVectorIndexManifest = cloneJson_ACU$4(manifest);
+            tagData.summaryVectorIndexManifest = cloneJson_ACU$6(manifest);
         }
         else if (nextState.manifest) {
             nextState.backend = 'st-files';
             delete nextState.chunks;
-            tagData.summaryVectorIndexManifest = cloneJson_ACU$4(nextState.manifest);
+            tagData.summaryVectorIndexManifest = cloneJson_ACU$6(nextState.manifest);
         }
         else {
             tagData.summaryVectorIndexManifest = null;
@@ -47065,7 +47161,7 @@ $CONTENT
         const state = cloneSummaryVectorIndexState_ACU$1(tagData.summaryVectorIndexState);
         const manifest = tagData.summaryVectorIndexManifest;
         if (state && manifest && !state.manifest) {
-            state.manifest = cloneJson_ACU$4(manifest);
+            state.manifest = cloneJson_ACU$6(manifest);
             state.backend = 'st-files';
             state.status = manifest.status;
             state.indexId = manifest.indexId;
@@ -47084,7 +47180,7 @@ $CONTENT
                 chunkCount: manifest.chunkCount,
                 skippedRowCount: manifest.skippedRowCount,
                 rows: [],
-                manifest: cloneJson_ACU$4(manifest),
+                manifest: cloneJson_ACU$6(manifest),
             };
         }
         return state;
@@ -55196,6 +55292,7 @@ $CONTENT
             }
             // 6. strict save，失败完整回滚。
             const before = JSON.parse(JSON.stringify(chat));
+            notifyMaterialCheckpointFloor_ACU(candidateChat, rangeStartMessageIndex);
             try {
                 chat.length = 0;
                 chat.push(...candidateChat);
@@ -55388,6 +55485,7 @@ $CONTENT
             }
             // 6. strict save，失败原位回滚。
             const before = JSON.parse(JSON.stringify(chat));
+            notifyMaterialCheckpointFloor_ACU(candidateChat, bridge.originalFullCheckpointIndex);
             try {
                 chat.length = 0;
                 chat.push(...candidateChat);
@@ -55470,6 +55568,7 @@ $CONTENT
                 }
             }
             const before = JSON.parse(JSON.stringify(chat));
+            notifyMaterialCheckpointFloor_ACU(candidateChat, bridge.originalFullCheckpointIndex);
             try {
                 chat.length = 0;
                 chat.push(...candidateChat);
@@ -58708,6 +58807,7 @@ $CONTENT
         return { createdAt, reason: options.reason };
     }
     async function persistTableMutationLogV2Core_ACU(options) {
+        let materialCheckpointAnchor = null;
         const chat = getChatArray_ACU();
         if (!chat || chat.length === 0) {
             return { saved: false, error: 'chat history is empty' };
@@ -58992,6 +59092,7 @@ $CONTENT
                 return { saved: false, error: checkpointResult.error };
             }
             frame.checkpoint = checkpointResult.checkpoint;
+            materialCheckpointAnchor = target.index;
             frame.headRevision = checkpointRevision;
             frame.logEntries = [];
             delete frame.perSheetCheckpoints;
@@ -59205,6 +59306,9 @@ $CONTENT
                 identity: message.TavernDB_ACU_Identity,
             };
         });
+        const rollbackMaterialCheckpoint = materialCheckpointAnchor === null
+            ? null
+            : beginMaterialCheckpointSync_ACU(chat, materialCheckpointAnchor);
         try {
             for (const [messageIndex, nextIsolatedData] of replacementIsolatedDataByMessageIndex) {
                 chat[messageIndex].TavernDB_ACU_IsolatedData = nextIsolatedData;
@@ -59222,6 +59326,7 @@ $CONTENT
             }
         }
         catch (error) {
+            rollbackMaterialCheckpoint?.();
             for (const state of previousMessageState) {
                 if (state.hadIsolatedData)
                     state.message.TavernDB_ACU_IsolatedData = state.isolatedData;
@@ -60170,6 +60275,7 @@ $CONTENT
                     const previousScopeContainer = cloneOptionalJson_ACU(peekChatScopedConfigContainer_ACU(chat));
                     const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
                     const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, true);
+                    let rollbackMaterialCheckpoint = null;
                     try {
                         const checkpointData = deepClone_ACU$2(templateSnapshot);
                         const checkpointSheets = Object.keys(checkpointData).filter(key => key.startsWith('sheet_')).sort();
@@ -60223,10 +60329,12 @@ $CONTENT
                         if (!guideUpdated)
                             throw new Error('预填表模板提交无法原子写入 guideData 与 template scope。');
                         assertTemplateCommitChatContext_ACU(chat, options);
+                        rollbackMaterialCheckpoint = beginMaterialCheckpointSync_ACU(chat, target.index);
                         await saveChatToHostStrict_ACU();
                         return { saved: true, mode: 'v2_commit', messageIndex: target.index, checkpoints: initialSheetCheckpoints, removedNullRowCount: 0 };
                     }
                     catch (error) {
+                        rollbackMaterialCheckpoint?.();
                         restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
                         setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
                         setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
@@ -60257,6 +60365,7 @@ $CONTENT
                 let convergenceRootSnapshot = null;
                 let purgedMessageCount = 0;
                 let hardDeleteCheckpointCreated = false;
+                let rollbackMaterialCheckpoint = null;
                 try {
                     const introductionSheets = new Map();
                     const rebaseSheets = new Map();
@@ -60713,6 +60822,8 @@ $CONTENT
                     if (!guideUpdated)
                         throw new Error('当前楼层模板提交无法写入 guideData。');
                     assertTemplateCommitChatContext_ACU(chat, options);
+                    if (hardDeleteCheckpointCreated)
+                        rollbackMaterialCheckpoint = beginMaterialCheckpointSync_ACU(chat, target.index);
                     primarySaveAttempted = true;
                     await saveChatToHostStrict_ACU();
                     logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: requestId=${options.requestId || 'unknown'}, messageIndex=${target.index}, checkpoints=${checkpoints.length}, checkpointTimelines=${checkpoints.map(checkpoint => `${checkpoint.sheetKey}:${checkpoint.timeline?.kind || 'none'}@${checkpoint.timeline?.afterSeq ?? 'none'}`).join(',') || 'none'}, operations=${operations.length}, baseRevision=${options.baseRevision ?? transactionContext.baseRevision ?? 'unknown'}, commitRevision=${frame.headRevision ?? 'unknown'}, isolationKey=${isolationKey}`);
@@ -60726,6 +60837,7 @@ $CONTENT
                     };
                 }
                 catch (error) {
+                    rollbackMaterialCheckpoint?.();
                     if (sharedStateMutated) {
                         restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
                         if (convergenceRootSnapshot) {
@@ -86041,9 +86153,9 @@ $CONTENT
             this.error = error;
         }
     }
-    const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer'];
+    const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer', 'instructionComposer'];
     /** 可独立配置 AI 渠道的角色：主 Agent、大纲子代理、派工子代理、最终审查与用户要求维护。 */
-    const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer'];
+    const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'requirementsMaintainer', 'instructionComposer'];
     /** 通用网页搜索的提供方。duckduckgo 免 key 经酒馆转发抓 HTML；其余复用酒馆自身「网页搜索」已配置的 key 或实例。 */
     const CONTINUATION_WEB_SEARCH_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'];
     /**
@@ -86088,7 +86200,12 @@ $CONTENT
      */
     /** 楼层锚定快照挂在消息对象上的独立字段名，与首楼 `_qrf_continuation` 并列、互不干扰。 */
     const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
-    const AGENT_MODULE_SCHEMA_VERSION_ACU = 1;
+    /** v1 楼层快照没有 pendingFixes。读取时归一为空数组，成功写入才升到当前版本。 */
+    const AGENT_MODULE_SCHEMA_VERSION_V1_ACU = 1;
+    const AGENT_MODULE_SCHEMA_VERSION_ACU = 2;
+    /** 同一模块自动修复连续失败达到该次数后，不再派修复，升级主会话。 */
+    const AGENT_AUTO_FIX_MAX_ATTEMPTS_ACU = 3;
+    const AGENT_PENDING_FIX_CAP_ACU = 128;
     /** 主 Agent 自身会话记录挂在消息对象上的字段名。与资料快照同楼不同字段，互不干扰。 */
     const AGENT_CONVERSATION_FIELD_ACU = '_qrf_continuation_agent_chat';
     /** v1：末楼全量快照（历史遗留，读取时兼容为基线段）。 */
@@ -86145,10 +86262,16 @@ $CONTENT
     const AGENT_WEB_REF_SOURCES_ACU = ['moegirl', 'wikipedia_zh', 'wikipedia_en', 'baidu', 'web'];
     /** 抓取状态：ok 正常；unavailable 来源不可达或无词条；blocked 被域名策略或内容类型拒绝。 */
     const AGENT_WEB_REF_STATUSES_ACU = ['ok', 'unavailable', 'blocked'];
+    /**
+     * 楼层帧 schema。checkpoint 是全量基线，deltas 是其后的模块写集。
+     * schema 1/2 的全量快照只在读取时归一成基线，成功写入才升到本版本。
+     */
+    const AGENT_MODULE_FRAME_SCHEMA_VERSION_ACU = 3;
     const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'];
-    const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'requirements-maintainer'];
+    const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'requirements-maintainer', 'instruction-composer'];
     const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';
     const AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU = 'requirements-maintainer';
+    const AGENT_INSTRUCTION_COMPOSER_NAME_ACU = 'instruction-composer';
     /** 最终审查是 finalize 前由运行时受控触发的内部代理，不进入主 Agent 可委派名称集合。 */
     const AGENT_FINAL_REVIEWER_NAME_ACU = 'final-reviewer';
     /**
@@ -86222,6 +86345,7 @@ $CONTENT
         reviewer: '{\n  "verdict": "',
         researcher: '{\n  "summary": "',
         requirements: '{\n  "summary": "',
+        composer: '{\n  "instruction": "',
     };
     /** 最终指导骨架，写进主 Agent 的协议规范段，约束 finalize 的 instruction 形态。 */
     const AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU = [
@@ -86291,7 +86415,7 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我能做的：用 read/search 调阅任何目录里列出的资料、派工子代理、通过大纲子代理管理大纲（创建、维护、继续）、收敛结果、交付最终指导、必要时阻断。\n我绝对不做的：不写正文（正文是正文模型的职责）、不亲自编或直接修改大纲（大纲只能由 outline-architect 产出并经运行时校验；卷级台阶由 arc-architect 维护）、不直接改资料模块（维护类子代理按职责写入，长期约束由我裁决后登记）、不把内部信息塞进最终指导（子代理目录、资料目录、读取地址、维护报告、预算、工具轨迹一律不外传）、不为了「也许还能更好」而无限消耗预算或读取额度。',
+            content: '我能做的：用 read/search 调阅任何目录里列出的资料、用 open_round 把本轮交给固定工作流、按需派工 arc-architect / web-researcher / outline-architect、确认工作流交出的写作指令、必要时阻断。\n我绝对不做的：不写正文（正文是正文模型的职责）、不亲自编或直接修改大纲（大纲只能由 outline-architect 产出并经运行时校验；卷级台阶由 arc-architect 维护）、不直接改资料模块（维护类子代理按职责写入，长期约束由 instruction-composer 增量登记）、不自己编写写作指令（instruction 只由 instruction-composer 产出）、不把内部信息塞进最终指导（子代理目录、资料目录、读取地址、维护报告、预算、工具轨迹一律不外传）、不为了「也许还能更好」而无限消耗预算或读取额度。',
             enabled: true,
             deletable: true,
         },
@@ -86315,20 +86439,20 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我的行动规则：\n1. 调阅讲究并发与精准：能一次批量取的资料就在同一次输出里发多个 read/search 对象；工具批次不消耗决策迭代，读取是正常成本而不是浪费。先 search 定位再用窄地址精读，省读取额度；被门禁打回时我按报告缩小目标重试，绝不原样重发。目录摘要与索引行不能代替读正文——指导要落在具体事实上时，我必须亲自读过对应正文或设定。\n2. 世界书是核心设定资料：「本轮语境命中的世界书条目」里列出的条目与本轮直接相关，本轮涉及对应设定时我在 finalize 前先读过，或把地址种给需要它的子代理；命中提示没有覆盖的设定需求，我从世界书目录按 token 标注挑选精读。绝不凭印象编设定。\n3. 派工前先看目录，只派目录里存在的代理；派工时把它需要的资料地址写进 reads 作种子。派工讲究次序：存在未结算历史时先派结算维护，再谈策划与交付。\n4. 总纲要跟着剧情走：真实剧情的走向已越出总纲台阶、底牌被提前翻开、或当前卷事实上已收束/明显提前推迟时，我派工 arc-architect 维护总纲（patch 卷状态、改写后续台阶），不拖到下一阶段。\n5. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工；读取额度用尽时基于已有资料决策。\n6. 子代理的报告我要审核：结论与正文或已调阅资料冲突、明显缺漏时，带着具体意见重派，而不是照单全收。\n7. 任何环节失败，我如实报告失败，不用编造的结果补位。\n8. 我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。\n' + V24_MAIN_AGENT_PACING_RULE_ACU,
+            content: '我的行动规则：\n1. 调阅讲究并发与精准：能一次批量取的资料就在同一次输出里发多个 read/search 对象；工具批次不消耗决策迭代，读取是正常成本而不是浪费。先 search 定位再用窄地址精读，省读取额度；被门禁打回时我按报告缩小目标重试，绝不原样重发。目录摘要与索引行不能代替读正文——指导要落在具体事实上时，我必须亲自读过对应正文或设定。\n2. 世界书是核心设定资料：「本轮语境命中的世界书条目」里列出的条目与本轮直接相关，本轮涉及对应设定时我在 finalize 前先读过，或把地址种给需要它的子代理；命中提示没有覆盖的设定需求，我从世界书目录按 token 标注挑选精读。绝不凭印象编设定。\n3. 固定工作流负责结算、策划、条件审查和写作指令。我每轮用 open_round 写明焦点，并决定是否派 arc-architect 或 web-researcher。不要 delegate hook-cognition-maintainer、mainline-planner、beat-planner、continuity-reviewer 或 instruction-composer。\n4. 总纲要跟着剧情走：真实剧情的走向已越出总纲台阶、底牌被提前翻开、或当前卷事实上已收束/明显提前推迟时，我派工 arc-architect 维护总纲（patch 卷状态、改写后续台阶），不拖到下一阶段。\n5. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工；读取额度用尽时基于已有资料决策。\n6. 子代理的报告我要审核：结论与正文或已调阅资料冲突、明显缺漏时，带着具体意见重派，而不是照单全收。\n7. 任何环节失败，我如实报告失败，不用编造的结果补位。\n8. 我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。\n' + V24_MAIN_AGENT_PACING_RULE_ACU,
             enabled: true,
             deletable: true,
         },
         {
             role: 'user',
-            content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\n\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。交付前自检：存在未结算历史时已派工 hook-cognition-maintainer 结算完毕；instruction 里的伏笔与信息差操作有策划子代理的建议或伏笔账本条目作依据，不是你的即兴发挥；本轮指导涉及的正文事实与世界书设定，你已亲自读过或已核对，而不是凭目录摘要或记忆断言。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 800-1200 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折；指导的压力等级必须与【本轮节奏】一致，低压轮不许写危机）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+            content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|open_round|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\n\n\naction = open_round：每轮一次的开局决策。附加字段 focus（本轮焦点，非空）、可选 summary、dispatchArcArchitect、dispatchWebResearcher。运行时按固定顺序执行结算、策划、条件审查、容错提交、自动修复和 instruction-composer。不要再逐个派这些角色。\n\naction = finalize：确认交付工作流已经产出的写作指令。instruction 必须是 instruction-composer 本轮写出的那一版，不要另写一版。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时会被拒绝，必须先派工 outline-architect。正常路径是先 open_round。交付前自检：存在未结算历史时由工作流结算，不要自己派 hook-cognition-maintainer；instruction 里的伏笔与信息差操作应来自工作流的策划建议或伏笔账本，不是即兴发挥；本轮指导涉及的正文事实与世界书设定，你已亲自读过或已核对，而不是凭目录摘要或记忆断言。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 800-1200 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折；指导的压力等级必须与【本轮节奏】一致，低压轮不许写危机）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
             enabled: true,
             deletable: false,
             pinned: true,
         },
         {
             role: 'user',
-            content: '【子代理使用规则】\n0. 总纲先行与总纲维护：总纲状态显示「尚未建立」时，第一件事是派工 arc-architect 立总纲——总纲为空时派工 outline-architect 会被直接拒绝（不消耗派工额度）。总纲已建立但有已完成阶段没登记进卷台阶时，派工 arc-architect 回写进度；卷台阶走完时让它把当前卷 patch 成 done、下一卷 patch 成 active。此外，剧情实际走向已越出总纲台阶、底牌被正文提前翻开、或当前卷已经由真实完成阶段达到可判定收束状态时，同样必须派它维护总纲。单个阶段完成只回写当前 active 卷的 stageNumbers；所有既有卷完成而用户继续写时，先派 arc-architect 依据最后一卷的后果扩充一个 active 新卷，再派 outline-architect，不要拖到下一阶段。总纲只有它能写。\n1. 大纲优先：总纲就位后，大纲状态显示「还没有阶段大纲」或「阶段已全部完成」时，下一件事就是派工 outline-architect。大纲维护由 outline-architect 串行执行并计入派工预算。\n2. 偏差处理：真实剧情与阶段大纲出现任何目标、节奏或结构偏差时，派工 outline-architect 维护未完成部分；卷级台阶、卷状态或后续卷方向偏差时派工 arc-architect。禁止在大纲已明显失效时硬按旧轮目标 finalize。\n3. 结算先行：只要「未结算历史范围」非空，本轮第一波派工就必须包含 hook-cognition-maintainer，先把伏笔账本与信息差时间线结算到最新正文，再进入策划与 finalize；只有未结算范围为空时才允许跳过。伏笔账本和信息差时间线只有它能写——你自己 read 过正文不等于结算，你在 finalize 里写的伏笔操作也不会进账本，跳过结算就是让资料永远落后于剧情。它的写入范围由职责固定，不需要你授权。派工结算时把上一轮的轮目标写进 prompt，让它对照真实正文评估达成度。\n4. 策划是策划类子代理的职责，不是你的：每轮至少派工 mainline-planner，并在任务里写明本轮 pacing；setup/cooldown 必须允许主线 hold、安静闭合和自然时间流逝，不得要求它补造冲突升级。本轮确有伏笔或信息差操作义务时才加派 beat-planner；低压轮没有真实操作需要时不得为凑钩子强派。最终指导里的相关操作应来自子代理建议或既有账本依据；大转折或已出现冲突时再加连续性审查。你自己调阅资料是为了审核与收敛，不是为了替策划子代理出方案。\n5. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——把地址写进 reads，运行时会把资料注入给它。各角色的刚需资料（概览/尾楼/账本/世界书目录与命中提示）已按职责固定注入，种子只补任务特定的增量：本轮涉及的正文楼层区间（$STORY_RANGE:a-b）、命中提示里与该任务相关的世界书条目地址、需要精读的纪要表行区间（$TABLE:纪要表:a-b）。\n6. 结果回来后先审核再采用：报告与正文、你调阅到的资料或本轮 pacing 冲突、有明显缺漏时，带着具体修正意见重派；达到单代理派工上限仍不合规时，舍弃冲突部分并按已验证资料与 pacing 收敛，不能照单全收。\n7. finalize 前核对关键事实：本轮指导涉及角色当前位置、持有物、关系或能力等事实时，从表格目录按地址调阅对应表格核对；涉及世界观设定（地点、组织、规则、种族等）时，从世界书命中提示或目录按地址调阅条目核对。不要凭大纲或记忆断言。\n8. 用户偏好沉淀：用户在会话里提出的长期风格或内容偏好（如「少写心理独白」「保持第一人称」），经你裁决后用 finalize 的 constraints.add 登记为长期约束，让后续每轮都遵守。\n9. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
+            content: '【子代理使用规则】\n0. 总纲先行与总纲维护：总纲状态显示「尚未建立」时，第一件事是派工 arc-architect 立总纲——总纲为空时派工 outline-architect 会被直接拒绝（不消耗派工额度）。总纲已建立但有已完成阶段没登记进卷台阶时，派工 arc-architect 回写进度；卷台阶走完时让它把当前卷 patch 成 done、下一卷 patch 成 active。此外，剧情实际走向已越出总纲台阶、底牌被正文提前翻开、或当前卷已经由真实完成阶段达到可判定收束状态时，同样必须派它维护总纲。单个阶段完成只回写当前 active 卷的 stageNumbers；所有既有卷完成而用户继续写时，先派 arc-architect 依据最后一卷的后果扩充一个 active 新卷，再派 outline-architect，不要拖到下一阶段。总纲只有它能写。\n1. 大纲优先：总纲就位后，大纲状态显示「还没有阶段大纲」或「阶段已全部完成」时，下一件事就是派工 outline-architect。大纲维护由 outline-architect 串行执行并计入派工预算。\n2. 偏差处理：真实剧情与阶段大纲出现任何目标、节奏或结构偏差时，派工 outline-architect 维护未完成部分；卷级台阶、卷状态或后续卷方向偏差时派工 arc-architect。禁止在大纲已明显失效时硬按旧轮目标 finalize。\n3. 结算、策划、条件审查和写作指令都由固定工作流执行。你输出 open_round 后，程序会在有未结算正文时自动派 hook-cognition-maintainer，每轮派 mainline-planner，仅在本轮有伏笔操作义务时派 beat-planner，仅在策划冲突或大转折时派 continuity-reviewer，然后由 instruction-composer 写出 instruction。你不要 delegate 这些角色。伏笔账本和信息差只有结算代理能写——你自己 read 过正文不等于结算。\n4. 工作流里的策划仍遵守节奏：setup/cooldown 必须允许主线 hold、安静闭合和自然时间流逝，不得在 focus 里要求补造冲突升级。低压轮没有真实操作需要时不得为凑钩子强派。最终指导里的伏笔与信息差操作应来自工作流建议或既有账本。你调阅资料是为了决定焦点和审核，不是为了替策划出方案。\n5. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——把地址写进 reads，运行时会把资料注入给它。各角色的刚需资料（概览/尾楼/账本/世界书目录与命中提示）已按职责固定注入，种子只补任务特定的增量：本轮涉及的正文楼层区间（$STORY_RANGE:a-b）、命中提示里与该任务相关的世界书条目地址、需要精读的纪要表行区间（$TABLE:纪要表:a-b）。\n6. 结果回来后先审核再采用：报告与正文、你调阅到的资料或本轮 pacing 冲突、有明显缺漏时，带着具体修正意见重派；达到单代理派工上限仍不合规时，舍弃冲突部分并按已验证资料与 pacing 收敛，不能照单全收。\n7. finalize 前核对关键事实：本轮指导涉及角色当前位置、持有物、关系或能力等事实时，从表格目录按地址调阅对应表格核对；涉及世界观设定（地点、组织、规则、种族等）时，从世界书命中提示或目录按地址调阅条目核对。不要凭大纲或记忆断言。\n8. 用户偏好沉淀：用户在会话里提出的长期风格或内容偏好（如「少写心理独白」「保持第一人称」），写进 open_round 的 focus，由 instruction-composer 用 constraints.add 登记为长期约束。\n9. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
             enabled: true,
             deletable: true,
         },
@@ -86685,6 +86809,29 @@ $CONTENT
             sections: ['legitimacy_check输出内容', '日常场景分析', '人物分析要求'],
         },
     ];
+    const INSTRUCTION_COMPOSER_PROMPT_ACU = [
+        {
+            role: 'system',
+            content: '你是写作指令编排代理 instruction-composer。你是本轮唯一可以产出写作指令的角色。你不写小说正文，不改伏笔账本、信息差、年代学或总纲。你通读已经结算的资料、策划建议、审查结论、用户累计要求与活跃约束，写出交给正文模型的本轮写作指令。\n\n输出必须是一个 JSON 对象：{"instruction":"非空写作指令","summary":"一句话要点","constraints":{"add":["新增约束"],"retire":["要废除的约束 id 或原文"]}}。constraints 可以省略。instruction 按下列骨架写全，不要把子代理目录、读取地址或内部预算写进去：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\n\n若任务标明这是增量修订，只按反馈清单修改原 instruction 里对应的句子，保留反馈标明必须留下的内容，不要整篇重写。',
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+        {
+            role: 'user',
+            content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【完整当前阶段大纲】\n$OUTLINE_WINDOW\n\n【故事总纲】\n$STORY_ARC\n\n【最近正文】\n$STORY_TAIL\n\n【伏笔账本】\n$HOOKS_LEDGER\n\n【长期约束】\n$ACTIVE_CONSTRAINTS\n\n【故事年代学】\n$CHRONOLOGY\n\n【注入资料】\n$AGENT_READ_MATERIALS\n\n【本轮编排任务】\n$AGENT_TASK\n\n【写入范围】\n$AGENT_WRITE_SCOPE\n\n请输出契约 JSON。资料不够时先 read/search，足够后直接交付。instruction 不能为空。',
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+        {
+            role: 'assistant',
+            content: AGENT_PREFILLS_ACU.composer,
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+    ];
     const FINAL_REVIEWER_PROMPT_ACU = [
         {
             role: 'system',
@@ -86844,6 +86991,13 @@ $CONTENT
             { hash: 'b5eaeca2', length: 960, slot: 'actionRules', note: 'V17–V22 行动规则（无第 9 条节奏规则）' },
             { hash: 'be6e00a6', length: 2646, slot: 'textProtocol', note: 'V17–V22 文本协议规范（旧 finalize 骨架；V17/V18 为 system 角色）' },
             { hash: '0b9166c2', length: 1703, slot: 'subagentRules', note: 'V17–V22 子代理使用规则（无 pacing 派工约束；V17/V18 为 system 角色）' },
+            { hash: '8e7599ac', length: 279, slot: 'capabilityAnswer', note: 'V29 模式边界答（主 Agent 自己派工并交付指导）' },
+            { hash: '211429e3', length: 956, slot: 'actionRules', note: 'V29 行动规则（未结算时先派结算维护）' },
+            { hash: '71a5cc97', length: 2047, slot: 'textProtocol', note: 'V29 文本协议（finalize 自写 instruction，无 open_round）' },
+            { hash: '62758d62', length: 1691, slot: 'subagentRules', note: 'V29 子代理规则（逐轮派结算与策划）' },
+            { hash: '35f04618', length: 945, slot: 'actionRules', note: 'V23 行动规则（含旧第 9 条节奏，尚未并入 V24 措辞）' },
+            { hash: 'd76b0ccf', length: 1924, slot: 'textProtocol', note: 'V23 文本协议（旧 finalize 骨架，无 open_round）' },
+            { hash: 'e98f7a14', length: 1586, slot: 'subagentRules', note: 'V23 子代理规则（必须加派 beat-planner 的旧句）' },
         ],
         arcArchitect: [
             { hash: '23b29f8b', length: 1866, slot: 'outputContract', note: 'V22/V23 总纲输出契约（无 direction/escalation 微型弧要求）' },
@@ -86876,6 +87030,7 @@ $CONTENT
             { hash: '2d46cb2a', length: 606, slot: 'task', note: 'V28 网页检索任务段（【用户初始要求】/$USER_INTENT）' },
         ],
         requirementsMaintainer: [],
+        instructionComposer: [],
     };
     function buildDefaultAgentMainPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
@@ -86904,6 +87059,9 @@ $CONTENT
     function buildDefaultAgentRequirementsMaintainerPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(REQUIREMENTS_MAINTAINER_PROMPT_ACU);
     }
+    function buildDefaultAgentInstructionComposerPrompt_ACU() {
+        return cloneAgentPromptSegments_ACU(INSTRUCTION_COMPOSER_PROMPT_ACU);
+    }
     /**
      * 构造全部 Agent 默认提示词。
      * @returns 各组提示词的深拷贝，可安全写入 settings
@@ -86919,6 +87077,7 @@ $CONTENT
             finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
             webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
             requirementsMaintainer: buildDefaultAgentRequirementsMaintainerPrompt_ACU(),
+            instructionComposer: buildDefaultAgentInstructionComposerPrompt_ACU(),
         };
     }
 
@@ -87107,6 +87266,11 @@ $CONTENT
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU = 'spv3.7-continuation-user-requirements-v29';
     /**
+     * V30 把主会话从逐轮派工改成开局决策。写作指令由 instruction-composer 产出，
+     * 结算、策划和条件审查交给固定工作流。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU = 'spv3.8-continuation-fixed-workflow-v30';
+    /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
      */
@@ -87141,6 +87305,9 @@ $CONTENT
     function buildDefaultContinuationOutlinePrompt_ACU() {
         return clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU);
     }
+    function buildDefaultContinuationWorkflowSettings_ACU() {
+        return { autoFixEnabled: true, autoFixMaxAttempts: 3, reviseLimit: 3, repairMaxExtraReads: 2 };
+    }
     /** 全部渠道角色默认沿用全局渠道配置，保证旧信封无感迁移。 */
     function buildDefaultContinuationAgentApiPresets_ACU() {
         const presets = {};
@@ -87173,6 +87340,7 @@ $CONTENT
             agentReadTokenBudget: AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
             agentReadFallbackTokens: AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
             finalReview: { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxExtraReads: CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU },
+            workflow: buildDefaultContinuationWorkflowSettings_ACU(),
             webResearch: buildDefaultContinuationWebResearchSettings_ACU(),
             contextExtractRules: [],
             contextExcludeRules: [],
@@ -87184,7 +87352,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -87389,7 +87557,7 @@ $CONTENT
     function fail_ACU$8(code, phase, message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
     }
-    function isRecord_ACU$i(value) {
+    function isRecord_ACU$k(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function assertExactKeys_ACU(value, keys, path, optionalKeys = []) {
@@ -87507,7 +87675,7 @@ $CONTENT
         return value.length ? [...new Set(value)] : undefined;
     }
     function validateTurn_ACU(raw, path, strict, role, state, nodeIndex, turnIndex) {
-        if (!isRecord_ACU$i(raw)) {
+        if (!isRecord_ACU$k(raw)) {
             fail_ACU$8('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
         }
         assertExactKeys_ACU(raw, TURN_KEYS_ACU, path, TURN_OPTIONAL_KEYS_ACU);
@@ -87551,7 +87719,7 @@ $CONTENT
     }
     function validateNode_ACU(raw, index, turnIds, role, state, turnOffset) {
         const path = `nodes[${index}]`;
-        if (!isRecord_ACU$i(raw)) {
+        if (!isRecord_ACU$k(raw)) {
             fail_ACU$8('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
         }
         assertExactKeys_ACU(raw, NODE_KEYS_ACU, path);
@@ -87597,7 +87765,7 @@ $CONTENT
         return 'development';
     }
     function validateStageOutlineWithState_ACU(raw, range, state) {
-        if (!isRecord_ACU$i(raw)) {
+        if (!isRecord_ACU$k(raw)) {
             fail_ACU$8('CONTINUATION_OUTLINE_NOT_OBJECT', 'outline_validate', '阶段大纲必须是单一 JSON 对象');
         }
         assertExactKeys_ACU(raw, OUTLINE_KEYS_ACU, 'outline', OUTLINE_OPTIONAL_KEYS_ACU);
@@ -87924,15 +88092,17 @@ $CONTENT
             agentPrompts.webResearcher = buildDefaultAgentWebResearcherPrompt_ACU();
         if (kind === 'agent_requirements_maintainer')
             agentPrompts.requirementsMaintainer = buildDefaultAgentRequirementsMaintainerPrompt_ACU();
+        if (kind === 'agent_instruction_composer')
+            agentPrompts.instructionComposer = buildDefaultAgentInstructionComposerPrompt_ACU();
         return { ...settings, agentPrompts };
     }
 
     /** Legacy quick-reply loop fields are retired and must not be persisted again. */
-    function isRecord_ACU$h(value) {
+    function isRecord_ACU$j(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function stripLegacyLoopPromptFieldsInPlace_ACU(source) {
-        if (!isRecord_ACU$h(source) || !isRecord_ACU$h(source.loopSettings))
+        if (!isRecord_ACU$j(source) || !isRecord_ACU$j(source.loopSettings))
             return false;
         const loopSettings = source.loopSettings;
         const hadLegacyFields = Object.prototype.hasOwnProperty.call(loopSettings, 'quickReplyContent')
@@ -87942,10 +88112,10 @@ $CONTENT
         return hadLegacyFields;
     }
     function stripLegacyLoopPromptFields_ACU(source) {
-        if (!isRecord_ACU$h(source))
+        if (!isRecord_ACU$j(source))
             return source;
         const result = { ...source };
-        if (!isRecord_ACU$h(source.loopSettings))
+        if (!isRecord_ACU$j(source.loopSettings))
             return result;
         result.loopSettings = { ...source.loopSettings };
         stripLegacyLoopPromptFieldsInPlace_ACU(result);
@@ -87960,7 +88130,7 @@ $CONTENT
     const ERROR_PHASES_ACU$1 = ['load', 'persist', 'outline_prompt', 'outline_call', 'outline_parse', 'outline_validate', 'turn_prompt', 'turn_call', 'host_send', 'generation_evaluate', 'replan', 'agent_loop', 'agent_delegate', 'agent_persist'];
     const ERROR_CODES_ACU$1 = ['CONTINUATION_CONFIG_MISSING', 'CONTINUATION_CONFIG_NOT_INTEGER', 'CONTINUATION_CONFIG_OUT_OF_RANGE', 'CONTINUATION_STAGE_SIZE_INVALID', 'CONTINUATION_CUSTOM_RANGE_INVALID', 'CONTINUATION_ENVELOPE_INVALID', 'CONTINUATION_CHAT_UNAVAILABLE', 'CONTINUATION_CHAT_CHANGED', 'CONTINUATION_WRITE_GUARD_MISMATCH', 'CONTINUATION_PERSIST_FAILED', 'CONTINUATION_PROMPT_INVALID', 'CONTINUATION_PROMPT_EMPTY', 'CONTINUATION_API_PRESET_MISSING', 'CONTINUATION_MIGRATION_INVALID', 'CONTINUATION_OUTLINE_NOT_OBJECT', 'CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'CONTINUATION_OUTLINE_FIELD_MISSING', 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'CONTINUATION_OUTLINE_STRING_EMPTY', 'CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'CONTINUATION_OUTLINE_NODES_EMPTY', 'CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'CONTINUATION_OUTLINE_PACING_INVALID', 'CONTINUATION_REPLAN_CONTEXT_INVALID', 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'CONTINUATION_OUTLINE_JSON_INVALID', 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'CONTINUATION_OUTLINE_RETRY_EXHAUSTED', 'CONTINUATION_REVISION_FROZEN', 'CONTINUATION_TURN_INSTRUCTION_EMPTY', 'CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'CONTINUATION_INTERNAL_REQUEST_STALE', 'CONTINUATION_OPERATION_BUSY', 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', 'CONTINUATION_TASK_NOT_FOUND', 'CONTINUATION_TASK_STATE_INVALID', 'CONTINUATION_HOST_INPUT_UNAVAILABLE', 'CONTINUATION_GENERATION_TAGS_MISSING', 'CONTINUATION_GENERATION_FAILED', 'CONTINUATION_GENERATION_TOO_SHORT', 'CONTINUATION_AGENT_PROTOCOL_INVALID', 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', 'CONTINUATION_AGENT_BLOCKED', 'CONTINUATION_AGENT_SUBAGENT_FAILED', 'CONTINUATION_AGENT_WRITE_REJECTED', 'CONTINUATION_AGENT_OUTLINE_REPLANNED', 'CONTINUATION_AGENT_SNAPSHOT_INVALID'];
     const TIMELINE_KINDS_ACU$1 = ['task_created', 'outline_ready', 'turn_sent', 'turn_completed', 'turn_retry', 'stage_completed', 'paused', 'stopped', 'failed'];
-    function isRecord_ACU$g(value) {
+    function isRecord_ACU$i(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fail_ACU$7(code, message, details, phase = 'persist') {
@@ -88010,7 +88180,7 @@ $CONTENT
         if (!Array.isArray(value))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `字段必须是数组：${path}`, { path });
         return value.map((rule, index) => {
-            if (!isRecord_ACU$g(rule))
+            if (!isRecord_ACU$i(rule))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `规则必须是对象：${path}[${index}]`, { path: `${path}[${index}]` });
             requireKeys_ACU(rule, ['start', 'end'], `${path}[${index}]`);
             return { start: requireString_ACU(rule.start, `${path}[${index}].start`), end: requireString_ACU(rule.end, `${path}[${index}].end`) };
@@ -88022,7 +88192,7 @@ $CONTENT
      * @returns 逐组校验后的提示词集合
      */
     function validateAgentPrompts_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentPrompts 必须是对象');
         requireKeys_ACU(raw, CONTINUATION_AGENT_PROMPT_KEYS_ACU, 'settings.agentPrompts');
         return {
@@ -88035,6 +88205,7 @@ $CONTENT
             finalReviewer: validateContinuationPromptSegments_ACU(raw.finalReviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
             webResearcher: validateContinuationPromptSegments_ACU(raw.webResearcher, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
             requirementsMaintainer: validateContinuationPromptSegments_ACU(raw.requirementsMaintainer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
+            instructionComposer: validateContinuationPromptSegments_ACU(raw.instructionComposer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
         };
     }
     /**
@@ -88042,14 +88213,14 @@ $CONTENT
      * 随后仍由 validateAgentPrompts_ACU 执行完整持久化校验。
      */
     function migrateV17AgentPromptsToV18_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             return raw;
         const currentMain = raw.main;
         if (!Array.isArray(currentMain))
             return raw;
         let changed = false;
         const main = currentMain.map(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string' || !segment.content.includes(AGENT_HISTORY_READ_RULE_V17_ACU)) {
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string' || !segment.content.includes(AGENT_HISTORY_READ_RULE_V17_ACU)) {
                 return segment;
             }
             changed = true;
@@ -88066,11 +88237,11 @@ $CONTENT
      * history; retaining one static root system segment protects the cache prefix.
      */
     function migrateV18AgentPromptsToV19_ACU(raw) {
-        if (!isRecord_ACU$g(raw) || !Array.isArray(raw.main))
+        if (!isRecord_ACU$i(raw) || !Array.isArray(raw.main))
             return raw;
         let changed = false;
         const main = raw.main.map(segment => {
-            if (!isRecord_ACU$g(segment)
+            if (!isRecord_ACU$i(segment)
                 || segment.role !== 'system'
                 || !isV18DefaultMainAgentNonRootSystemSegment_ACU(segment.content)) {
                 return segment;
@@ -88085,13 +88256,13 @@ $CONTENT
      * 并定向更新未改写的排布问答与历史导语。用户定制正文保持原样。
      */
     function migrateV19AgentPromptsToV20_ACU(raw) {
-        if (!isRecord_ACU$g(raw) || !Array.isArray(raw.main))
+        if (!isRecord_ACU$i(raw) || !Array.isArray(raw.main))
             return raw;
         let changed = false;
         const layoutAnswer = currentDefaultMainAgentLayoutAnswer_ACU();
         const historyGuide = currentDefaultMainAgentHistoryGuide_ACU();
         const main = raw.main.flatMap(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                 return [segment];
             if (isV19DefaultMainAgentRuntimeSegment_ACU(segment.content)) {
                 changed = true;
@@ -88114,7 +88285,7 @@ $CONTENT
      * 其他角色、用户新增段与用户定制正文保持原样。
      */
     function migrateV20AgentPromptsToV21_ACU(raw) {
-        if (!isRecord_ACU$g(raw) || !Array.isArray(raw.arcArchitect))
+        if (!isRecord_ACU$i(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
         const current = buildDefaultAgentArcArchitectPrompt_ACU();
         // 目标段一律按语义槽位定位。V25 在契约段之后插入了卷级容量段，若仍按下标取 current[7]，
@@ -88129,7 +88300,7 @@ $CONTENT
         ]);
         let changed = false;
         const arcArchitect = raw.arcArchitect.map(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                 return segment;
             const content = replacements.get(segment.content);
             if (content === undefined || content === segment.content)
@@ -88141,7 +88312,7 @@ $CONTENT
     }
     /** V21 → V22 只替换已知默认段中的卷数规则，保留用户其余提示词定制。 */
     function migrateV21AgentPromptsToV22_ACU(raw) {
-        if (!isRecord_ACU$g(raw) || !Array.isArray(raw.arcArchitect))
+        if (!isRecord_ACU$i(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
         const replacements = new Map([
             ['开局立长篇总纲时，默认给出一条 story 条目和 6-10 条 volume 条目；只有用户明确要求短篇或素材容量明显不足时才可少于 6 卷，并在 summary 说明依据。禁止为了省事把完整长篇压成 3-5 个笼统部分。第一卷 status 设 active，其余 planned。', '开局立总纲或全量重构时，卷数必须严格遵守本次请求末尾注入的【总纲卷数计划】：短线 7–8 卷、中线 10–14 卷、长线 20 卷，或自定义的精确卷数。资料不足时可以把远期卷标为待定方向，但不得缩减卷数；第一卷 status 设 active，其余 planned。'],
@@ -88149,7 +88320,7 @@ $CONTENT
         ]);
         let changed = false;
         const arcArchitect = raw.arcArchitect.map(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                 return segment;
             let content = segment.content;
             for (const [from, to] of replacements)
@@ -88163,14 +88334,14 @@ $CONTENT
     }
     /** V22 → V23 对齐卷生命周期契约，只替换未改写的默认规则片段。 */
     function migrateV22AgentPromptsToV23_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             return raw;
         const replaceDefaults = (segments, replacements) => {
             if (!Array.isArray(segments))
                 return segments;
             let changed = false;
             const next = segments.map(segment => {
-                if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+                if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                     return segment;
                 let content = segment.content;
                 for (const [from, to] of replacements)
@@ -88198,7 +88369,7 @@ $CONTENT
         const nextRule = '8. 让阶段目标只承载故事总纲当前 active 卷尚未完成的一段，不触碰总纲里标注为禁止提前释放的底牌；单个阶段结束只留下跨阶段悬念，不擅自收束整卷。只有活动卷规划上下文显示卷级收束条件已被真实完成阶段满足时，才交由 arc-architect 切卷；所有既有卷完成时先扩充后续 active 卷。';
         let changed = false;
         const outlinePrompt = raw.map(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                 return segment;
             const content = segment.content.replace(oldRule, nextRule);
             if (content === segment.content)
@@ -88271,7 +88442,7 @@ $CONTENT
         return prompts;
     }
     function promptSegmentEquals_ACU(left, right) {
-        if (!isRecord_ACU$g(left) || !isRecord_ACU$g(right))
+        if (!isRecord_ACU$i(left) || !isRecord_ACU$i(right))
             return false;
         const leftKeys = Object.keys(left);
         const rightKeys = Object.keys(right);
@@ -88279,7 +88450,7 @@ $CONTENT
     }
     /** V23 → V24 仅升级完整未改写的默认 Agent 段，保留插入段与任意用户改写。 */
     function migrateV23AgentPromptsToV24_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             return raw;
         const v23Defaults = buildV23AgentPromptsForMigration_ACU();
         const v24Defaults = buildV24AgentPromptsForMigration_ACU();
@@ -88302,9 +88473,9 @@ $CONTENT
     }
     /** V24 → V25 只向仍保留默认总纲输出契约的提示词组插入卷级容量契约。 */
     function migrateV24AgentPromptsToV25_ACU(raw) {
-        if (!isRecord_ACU$g(raw) || !Array.isArray(raw.arcArchitect))
+        if (!isRecord_ACU$i(raw) || !Array.isArray(raw.arcArchitect))
             return raw;
-        if (raw.arcArchitect.some(segment => isRecord_ACU$g(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU))
+        if (raw.arcArchitect.some(segment => isRecord_ACU$i(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU))
             return raw;
         const current = buildDefaultAgentArcArchitectPrompt_ACU();
         const capacityIndex = current.findIndex(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
@@ -88330,8 +88501,18 @@ $CONTENT
      * 只在目标组仍保留紧邻的默认锚段（完整段一致）且尚未包含该段时插入；
      * 锚段被用户改写时跳过该组，不向自定义提示词注入默认内容。
      */
+    function historicalPromptSlotMatch_ACU(role, anchor, segment) {
+        if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string' || typeof anchor.content !== 'string')
+            return false;
+        const slots = ['system', 'arcPurpose', 'arcEpistemology', 'capabilityAnswer', 'actionRules', 'textProtocol', 'subagentRules', 'outputContract', 'task'];
+        const slot = slots.find(candidate => findAgentPromptSlot_ACU([anchor], candidate)?.content === anchor.content);
+        if (!slot)
+            return false;
+        const content = segment.content;
+        return AGENT_PROMPT_DEFAULT_LINEAGE_ACU[role].some(entry => entry.slot === slot && entry.length === content.length && entry.hash === hashAgentPromptContent_ACU(content));
+    }
     function migrateV25AgentPromptsToV26_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             return raw;
         const defaults = buildDefaultContinuationAgentPrompts_ACU();
         const next = { ...raw };
@@ -88345,10 +88526,10 @@ $CONTENT
             if (insertIndex <= 0)
                 continue;
             const chronologySegment = defaultsGroup[insertIndex];
-            if (segments.some(segment => isRecord_ACU$g(segment) && segment.content === chronologySegment.content))
+            if (segments.some(segment => isRecord_ACU$i(segment) && segment.content === chronologySegment.content))
                 continue;
             const anchor = defaultsGroup[insertIndex - 1];
-            const anchorIndex = segments.findIndex(segment => promptSegmentEquals_ACU(segment, anchor));
+            const anchorIndex = segments.findIndex(segment => promptSegmentEquals_ACU(segment, anchor) || historicalPromptSlotMatch_ACU(key, anchor, segment));
             if (anchorIndex < 0)
                 continue;
             next[key] = [...segments.slice(0, anchorIndex + 1), chronologySegment, ...segments.slice(anchorIndex + 1)];
@@ -88378,7 +88559,7 @@ $CONTENT
         ]);
         let changed = false;
         let next = raw.map(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                 return segment;
             const replacement = replacements.get(segment.content);
             if (!replacement)
@@ -88386,8 +88567,8 @@ $CONTENT
             changed = true;
             return { ...segment, role: replacement.role, content: replacement.content };
         });
-        if (!next.some(segment => isRecord_ACU$g(segment) && segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)) {
-            const index = next.findIndex(segment => isRecord_ACU$g(segment)
+        if (!next.some(segment => isRecord_ACU$i(segment) && segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)) {
+            const index = next.findIndex(segment => isRecord_ACU$i(segment)
                 && segment.role === 'user'
                 && segment.content === V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU
                 && segment.enabled === true
@@ -88419,7 +88600,7 @@ $CONTENT
             if (!entries.length || !Array.isArray(segments))
                 continue;
             const migrated = segments.map(segment => {
-                if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+                if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                     return segment;
                 const content = segment.content;
                 const entry = entries.find(item => item.length === content.length && item.hash === hashAgentPromptContent_ACU(content));
@@ -88451,12 +88632,12 @@ $CONTENT
             const segments = raw[key];
             if (!Array.isArray(segments))
                 continue;
-            if (segments.some(segment => isRecord_ACU$g(segment) && typeof segment.content === 'string' && segment.content.includes('$AGENT_TASK')))
+            if (segments.some(segment => isRecord_ACU$i(segment) && typeof segment.content === 'string' && segment.content.includes('$AGENT_TASK')))
                 continue;
             const defaultTask = findAgentPromptSlot_ACU(defaults[key], 'task');
             if (!defaultTask)
                 continue;
-            const corruptedIndex = segments.findIndex(segment => isRecord_ACU$g(segment)
+            const corruptedIndex = segments.findIndex(segment => isRecord_ACU$i(segment)
                 && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU
                 && segment.deletable === false);
             if (corruptedIndex < 0)
@@ -88466,7 +88647,7 @@ $CONTENT
             repaired[corruptedIndex] = { ...corrupted, role: defaultTask.role, content: defaultTask.content };
             // 容量契约本身随误迁一起丢了，按默认形态补回到任务段之前。
             const capacityElsewhere = repaired.some((segment, index) => index !== corruptedIndex
-                && isRecord_ACU$g(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
+                && isRecord_ACU$i(segment) && segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
             const defaultCapacity = defaults[key].find(segment => segment.content === V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
             if (!capacityElsewhere && defaultCapacity)
                 repaired.splice(corruptedIndex, 0, { ...defaultCapacity });
@@ -88484,7 +88665,7 @@ $CONTENT
             return raw;
         let changed = false;
         const next = raw.map(segment => {
-            if (!isRecord_ACU$g(segment) || typeof segment.content !== 'string')
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
                 return segment;
             if (segment.content !== V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)
                 return segment;
@@ -88494,13 +88675,19 @@ $CONTENT
         return changed ? next : raw;
     }
     function migrateV28AgentPromptsToV29_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
+            return raw;
+        const lineage = replaceAgentPromptsByLineage_ACU(raw);
+        return lineage.changed ? lineage.next : raw;
+    }
+    function migrateV29AgentPromptsToV30_ACU(raw) {
+        if (!isRecord_ACU$i(raw))
             return raw;
         const lineage = replaceAgentPromptsByLineage_ACU(raw);
         return lineage.changed ? lineage.next : raw;
     }
     function migrateV27AgentPromptsToV28_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             return raw;
         const lineage = replaceAgentPromptsByLineage_ACU(raw);
         const repaired = repairAgentPromptTaskSegments_ACU(lineage.next);
@@ -88515,7 +88702,7 @@ $CONTENT
             return raw;
         let changed = false;
         const next = raw.map(segment => {
-            if (!isRecord_ACU$g(segment) || segment.content !== V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)
+            if (!isRecord_ACU$i(segment) || segment.content !== V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU)
                 return segment;
             changed = true;
             return { ...segment, content: V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU };
@@ -88528,7 +88715,7 @@ $CONTENT
      * @returns 逐角色校验后的渠道配置
      */
     function validateAgentApiPresets_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentApiPresets 必须是对象');
         // 新增渠道角色时存量信封必然缺键。提示词组有版本强刷兜底，渠道配置没有——不在这里补默认
         // 就会让所有旧信封报「缺少持久化字段」而整体加载失败。缺失即 inherit，与新建默认一致。
@@ -88540,7 +88727,7 @@ $CONTENT
         const result = {};
         for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
             const choice = raw[role];
-            if (!isRecord_ACU$g(choice))
+            if (!isRecord_ACU$i(choice))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role} 必须是对象`);
             requireKeys_ACU(choice, ['mode', 'presetName'], `settings.agentApiPresets.${role}`);
             if (!['inherit', 'current', 'fixed'].includes(choice.mode))
@@ -88570,10 +88757,10 @@ $CONTENT
         fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
     }
     function validateWebResearchSettings_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch 必须是对象');
         requireKeys_ACU(raw, ['enabled', 'sources', 'searchProvider', 'searxngBaseUrl', 'maxToolRounds', 'maxPages', 'pageCharLimit', 'blockedDomains'], 'settings.webResearch');
-        if (!isRecord_ACU$g(raw.sources))
+        if (!isRecord_ACU$i(raw.sources))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.webResearch.sources 必须是对象');
         requireKeys_ACU(raw.sources, ['moegirl', 'wikipediaZh', 'wikipediaEn', 'baidu'], 'settings.webResearch.sources');
         if (!CONTINUATION_WEB_SEARCH_PROVIDERS_ACU.includes(raw.searchProvider)) {
@@ -88601,8 +88788,25 @@ $CONTENT
             blockedDomains: requireString_ACU(raw.blockedDomains, 'settings.webResearch.blockedDomains'),
         };
     }
+    function validateWorkflowSettings_ACU(raw) {
+        if (!isRecord_ACU$i(raw))
+            fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.workflow 必须是对象');
+        requireKeys_ACU(raw, ['autoFixEnabled', 'autoFixMaxAttempts', 'reviseLimit', 'repairMaxExtraReads'], 'settings.workflow');
+        const autoFixMaxAttempts = requireBoundedInteger_ACU(raw.autoFixMaxAttempts, 'settings.workflow.autoFixMaxAttempts', 10);
+        const reviseLimit = requireBoundedInteger_ACU(raw.reviseLimit, 'settings.workflow.reviseLimit', 10);
+        if (autoFixMaxAttempts < 1)
+            fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.workflow.autoFixMaxAttempts 至少为 1');
+        if (reviseLimit < 1)
+            fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.workflow.reviseLimit 至少为 1');
+        return {
+            autoFixEnabled: requireBoolean_ACU(raw.autoFixEnabled, 'settings.workflow.autoFixEnabled'),
+            autoFixMaxAttempts,
+            reviseLimit,
+            repairMaxExtraReads: requireBoundedInteger_ACU(raw.repairMaxExtraReads, 'settings.workflow.repairMaxExtraReads', 10),
+        };
+    }
     function validateFinalReviewSettings_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.finalReview 必须是对象');
         requireKeys_ACU(raw, ['enabled', 'readTokenBudget', 'maxExtraReads'], 'settings.finalReview');
         return {
@@ -88616,7 +88820,7 @@ $CONTENT
      * 下界区分「必须至少一次」（迭代/同代理/并发）与「0 即显式关闭」（派工/读取/工具轮）。
      */
     function validateAgentRunBudget_ACU(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings.agentRunBudget 必须是对象');
         requireKeys_ACU(raw, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], 'settings.agentRunBudget');
         const bounded = (value, path, minimum, maximum) => {
@@ -88644,7 +88848,7 @@ $CONTENT
         return validateSettings_ACU$1(raw);
     }
     function validateSettings_ACU$1(raw) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
         // V7 及更早的信封带 turnInstructionPrompt 且没有 agentPrompts。严格键校验会把它判成未知字段，
         // 所以先就地迁移：丢掉退役字段、补上 Agent 提示词，再进入正常校验。
@@ -88652,22 +88856,25 @@ $CONTENT
             delete raw.turnInstructionPrompt;
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentPrompts'))
             raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-        if (isRecord_ACU$g(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
+        if (isRecord_ACU$i(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'finalReviewer')) {
             raw.agentPrompts.finalReviewer = buildDefaultContinuationAgentPrompts_ACU().finalReviewer;
         }
         // 网页检索子代理晚于其余提示词组加入；存量信封缺键即补默认，不必整组重刷。
-        if (isRecord_ACU$g(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
+        if (isRecord_ACU$i(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
             raw.agentPrompts.webResearcher = buildDefaultContinuationAgentPrompts_ACU().webResearcher;
         }
-        if (isRecord_ACU$g(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirementsMaintainer')) {
+        if (isRecord_ACU$i(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirementsMaintainer')) {
             raw.agentPrompts.requirementsMaintainer = buildDefaultContinuationAgentPrompts_ACU().requirementsMaintainer;
+        }
+        if (isRecord_ACU$i(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'instructionComposer')) {
+            raw.agentPrompts.instructionComposer = buildDefaultContinuationAgentPrompts_ACU().instructionComposer;
         }
         if (!Object.prototype.hasOwnProperty.call(raw, 'webResearch'))
             raw.webResearch = buildDefaultContinuationWebResearchSettings_ACU();
         // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets'))
             raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
-        if (isRecord_ACU$g(raw.agentApiPresets)) {
+        if (isRecord_ACU$i(raw.agentApiPresets)) {
             const defaults = buildDefaultContinuationAgentApiPresets_ACU();
             for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
                 if (!Object.prototype.hasOwnProperty.call(raw.agentApiPresets, role))
@@ -88693,6 +88900,8 @@ $CONTENT
         if (!Object.prototype.hasOwnProperty.call(raw, 'finalReview')) {
             raw.finalReview = { enabled: false, readTokenBudget: CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, maxExtraReads: CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU };
         }
+        if (!Object.prototype.hasOwnProperty.call(raw, 'workflow'))
+            raw.workflow = buildDefaultContinuationWorkflowSettings_ACU();
         // 节奏规则从「每阶段固定低压占比」改为「阶段形态 + 跨阶段连续高压上限」，旧键已无对应语义：
         // 直接丢掉并补新键的默认值，保留旧值反而会把用户配过的比例误当成新语义使用。
         if (Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio'))
@@ -88715,7 +88924,7 @@ $CONTENT
             raw.storyArcVolumePlan = 'medium';
         if (!Object.prototype.hasOwnProperty.call(raw, 'customStoryArcVolumeCount'))
             raw.customStoryArcVolumeCount = null;
-        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'webResearch', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'workflow', 'webResearch', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
         requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
         if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
@@ -88786,7 +88995,8 @@ $CONTENT
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU
-            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU) {
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -88821,6 +89031,10 @@ $CONTENT
             outlinePrompt = migrateV28OutlinePromptToV29_ACU(outlinePrompt);
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
         }
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU) {
+            agentPrompts = migrateV29AgentPromptsToV30_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU;
+        }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
             storyArcVolumePlan: raw.storyArcVolumePlan, customStoryArcVolumeCount,
@@ -88831,6 +89045,7 @@ $CONTENT
             storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
             storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
             finalReview: validateFinalReviewSettings_ACU(raw.finalReview),
+            workflow: validateWorkflowSettings_ACU(raw.workflow),
             webResearch: validateWebResearchSettings_ACU(raw.webResearch),
             contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
             agentRunBudget: validateAgentRunBudget_ACU(raw.agentRunBudget),
@@ -88857,7 +89072,7 @@ $CONTENT
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'timeline 必须是数组');
         return raw.map((entry, index) => {
             const path = `activeTask.timeline[${index}]`;
-            if (!isRecord_ACU$g(entry))
+            if (!isRecord_ACU$i(entry))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `时间线条目必须是对象：${path}`);
             for (const key of Object.keys(entry))
                 if (!['id', 'at', 'kind', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId', 'messageIndex', 'errorCode'].includes(key))
@@ -88877,13 +89092,13 @@ $CONTENT
     function validatePendingHostTurn_ACU(raw) {
         if (raw === null || raw === undefined)
             return null;
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn 必须是对象或 null');
         requireKeys_ACU(raw, ['identity', 'capture', 'retryCount', 'status'], 'activeTask.pendingHostTurn');
-        if (!isRecord_ACU$g(raw.identity))
+        if (!isRecord_ACU$i(raw.identity))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.identity 必须是对象');
         requireKeys_ACU(raw.identity, ['chatIdentity', 'taskId', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId'], 'activeTask.pendingHostTurn.identity');
-        if (!isRecord_ACU$g(raw.capture))
+        if (!isRecord_ACU$i(raw.capture))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.capture 必须是对象');
         requireKeys_ACU(raw.capture, ['capturedAt', 'capturedChatLength', 'capturedAiFloorCount', 'generationSeq'], 'activeTask.pendingHostTurn.capture');
         return {
@@ -88907,7 +89122,7 @@ $CONTENT
         };
     }
     function validateTask_ACU(raw, settings) {
-        if (!isRecord_ACU$g(raw))
+        if (!isRecord_ACU$i(raw))
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'activeTask 必须是对象或 null');
         const requiredKeys = ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'runStartedAt', 'deadlineAt', 'runStageCount', 'activeStageId', 'stages', 'timeline', 'stopReason', 'lastError'];
         const allowedKeys = [...requiredKeys, 'pendingHostTurn', 'stageBudgetBaseCount'];
@@ -88928,7 +89143,7 @@ $CONTENT
         const stageIds = new Set();
         const stages = raw.stages.map((stage, index) => {
             const path = `activeTask.stages[${index}]`;
-            if (!isRecord_ACU$g(stage))
+            if (!isRecord_ACU$i(stage))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `阶段必须是对象：${path}`);
             // 阶段纪要统计链（chronicle*）在 V17 彻底退役；旧信封先就地丢弃再进入严格键校验。
             for (const legacyKey of ['chronicleStartCount', 'chronicleEndCount', 'chronicleAddedCount', 'chronicleRange']) {
@@ -88947,7 +89162,7 @@ $CONTENT
             const revisionNumbers = new Set();
             const revisions = stage.revisions.map((revision, revisionIndex) => {
                 const revisionPath = `${path}.revisions[${revisionIndex}]`;
-                if (!isRecord_ACU$g(revision))
+                if (!isRecord_ACU$i(revision))
                     fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', `revision 必须是对象：${revisionPath}`);
                 requireKeys_ACU(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'outline'], revisionPath);
                 const number = requireInteger_ACU(revision.revision, `${revisionPath}.revision`, 1);
@@ -88966,7 +89181,7 @@ $CONTENT
             fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');
         const stopReason = raw.stopReason === null ? null : requireEnum_ACU(raw.stopReason, STOP_REASONS_ACU, 'activeTask.stopReason');
         const lastError = raw.lastError === null ? null : (() => {
-            if (!isRecord_ACU$g(raw.lastError))
+            if (!isRecord_ACU$i(raw.lastError))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'lastError 必须是对象');
             const requiredErrorKeys = ['code', 'message', 'phase', 'retryable'];
             for (const key of requiredErrorKeys)
@@ -88982,7 +89197,7 @@ $CONTENT
                 retryable: requireBoolean_ACU(raw.lastError.retryable, 'activeTask.lastError.retryable'),
             };
             if ('details' in raw.lastError) {
-                if (!isRecord_ACU$g(raw.lastError.details))
+                if (!isRecord_ACU$i(raw.lastError.details))
                     fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', 'lastError.details 必须是对象');
                 error.details = { ...raw.lastError.details };
             }
@@ -88992,7 +89207,7 @@ $CONTENT
     }
     function validateContinuationEnvelope_ACU(raw, phase = 'load') {
         try {
-            if (!isRecord_ACU$g(raw))
+            if (!isRecord_ACU$i(raw))
                 fail_ACU$7('CONTINUATION_ENVELOPE_INVALID', '智能续写状态必须是对象');
             requireKeys_ACU(raw, ['schemaVersion', 'settings', 'activeTask'], 'envelope');
             if (raw.schemaVersion !== CONTINUATION_SCHEMA_VERSION_ACU)
@@ -89160,14 +89375,14 @@ $CONTENT
     function readLegacyRules_ACU(value) {
         if (!Array.isArray(value))
             return [];
-        return value.filter(isRecord_ACU$g).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
+        return value.filter(isRecord_ACU$i).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
     }
     /** One-way migration: retained settings only; prompt rotation fields are intentionally excluded. */
     function buildLegacyContinuationMigration_ACU(legacyPlotSettings, baseSettings) {
         const settings = baseSettings ?? buildDefaultContinuationSettings_ACU();
-        if (!isRecord_ACU$g(legacyPlotSettings))
+        if (!isRecord_ACU$i(legacyPlotSettings))
             return { settings, didMigrate: false };
-        const loopSettings = isRecord_ACU$g(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
+        const loopSettings = isRecord_ACU$i(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
         settings.loopTags = typeof loopSettings.loopTags === 'string' ? loopSettings.loopTags : settings.loopTags;
         settings.loopDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.loopDelay, settings.loopDelaySeconds);
         settings.retryDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.retryDelay, settings.retryDelaySeconds);
@@ -89190,7 +89405,7 @@ $CONTENT
     }
     /** 全局续写设置副本在 settings_ACU 上的字段名。与 continuation-runtime 读写同一通道。 */
     const CONTINUATION_GLOBAL_SETTINGS_KEY_ACU = 'continuationGlobalSettings';
-    function cloneJson_ACU$3(value) {
+    function cloneJson_ACU$5(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function getContinuationFirstFloorMessage_ACU() {
@@ -89257,7 +89472,7 @@ $CONTENT
         if (!first || !Object.prototype.hasOwnProperty.call(first, CONTINUATION_FIRST_FLOOR_FIELD_ACU))
             return undefined;
         try {
-            return cloneJson_ACU$3(first[CONTINUATION_FIRST_FLOOR_FIELD_ACU]);
+            return cloneJson_ACU$5(first[CONTINUATION_FIRST_FLOOR_FIELD_ACU]);
         }
         catch {
             return undefined;
@@ -89332,7 +89547,7 @@ $CONTENT
         rumors: ['id', 'fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'],
     };
     function formatWorldSimulationLedgerRequiredFields_ACU() {
-        return '核心字段 dimensions:id,name；seeds:id,title；actors:id,name；rumors:id,fact。其余字段由服务端按缺省补齐（数组[]、可空null、revision 由入库层接管）；更新已有条目可只提交变更字段';
+        return '字段纪律：dimensions 必须给 id,name,kind,value,trend,rationale,evidenceRefs；seeds 必须给 id,title,status,level,catalyst,visibility,location,evidenceRefs；actors 必须给 id,name,interests,location,goals,informationSources,knownFacts,evidenceRefs；rumors 必须给 id,fact,originDay,channels,evidenceRefs。rationale（依据摘要）、catalyst（催化条件）、interests/goals/knownFacts 等说明性字段必须给出有内容的非空值，禁止留空或写"暂无/未知"凑数；证据不足时不要新建该条目，把缺口写进 uncertainties。仅机器字段可省略：revision 由入库层接管，expiresAtDay/missedOutcome/locationRef 等可空项按缺省补齐；更新已有条目可只提交变更字段';
     }
 
     const WORLD_SIMULATION_EVIDENCE_STATUSES_ACU = ['ok', 'empty', 'failed', 'truncated', 'dependency_unavailable'];
@@ -89672,7 +89887,8 @@ $CONTENT
 
     const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
     const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v10';
+    const WORLD_SIMULATION_PROMPT_VERSION_V10_ACU = 'world-simulation-v10';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v11';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -89737,7 +89953,7 @@ $CONTENT
             if (writableModules.includes('rumors'))
                 lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
             if (writableModules.includes('guidance'))
-                lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文原句或账本事实原句。');
+                lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
         }
         else {
             lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
@@ -89806,7 +90022,7 @@ $CONTENT
         if (definition.kind === 'reviewer')
             workflow += '你只审核时间、空间、因果、revision、权限与证据。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
         if (name === 'guidance-composer')
-            workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。voice 使用 encounter、rumor、ambient。没有新的玩家可感变化时输出 no_change。';
+            workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。投影选题标准（先过这一关再落笔）：每条 signal 描述的事物必须同时满足 (1) 贴近正文——发生在正文剧情所在位置附近，或与正文登场的人/事/物直接相关；(2) 正文未写——锚点正文没有描写过它，是镜头之外的场外动态；(3) 可感知——玩家角色能经由现场痕迹、路人闲谈、传闻等合理渠道察觉。三条缺一就不要产出该 signal。禁止把正文已发生事件做记录、总结或评价（"某事发生后的影响如何"这类复述与点评一律视为违规）。voice 语义：encounter=玩家当前所在处附近、正文镜头外正在发生的具体事态；rumor=经传闻渠道流入的远方或幕后消息；ambient=世界宏观暗流在日常环境中的感官化渗漏。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。没有满足选题标准的新变化时输出 no_change。';
         if (name === WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU) {
             workflow = '整理用户在 Agent 会话里对任务提过的要求。输入是被压缩范围内的实质用户发言加上当前用户要求清单。输出全量替换清单。不写账本、不派工、不产出 candidate。没有撤回依据时不得把已有清单清空。';
         }
@@ -89908,6 +90124,18 @@ $CONTENT
         'lore-researcher': '2278:bc497f63',
         'requirements-maintainer': '2092:987773c2',
     };
+    const WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU = {
+        'world-director': '4486:cf7dd826',
+        'world-stage-planner': '2791:84ce41fc',
+        timekeeper: '3262:b3b15e6c',
+        'undercurrent-analyst': '3252:1f648e5d',
+        'dramatis-keeper': '3586:7de3081c',
+        chronicler: '3663:dd2bfd5f',
+        'causality-reviewer': '3039:1486c4e',
+        'guidance-composer': '3363:eb46ac19',
+        'lore-researcher': '2278:bc497f63',
+        'requirements-maintainer': '2092:987773c2',
+    };
     const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
             ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] }] : []),
@@ -89916,6 +90144,7 @@ $CONTENT
             ...(WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v7', fingerprint: WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V8_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
+            ...(WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V10_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] }] : []),
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults) {
@@ -90113,7 +90342,7 @@ $CONTENT
     const ERROR_CODES_ACU = ['WORLD_SIMULATION_ENVELOPE_INVALID', 'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'WORLD_SIMULATION_CHAT_CHANGED', 'WORLD_SIMULATION_ANCHOR_INVALID', 'WORLD_SIMULATION_ANCHOR_STALE', 'WORLD_SIMULATION_REVISION_CONFLICT', 'WORLD_SIMULATION_PERSIST_FAILED', 'WORLD_SIMULATION_SNAPSHOT_INVALID', 'WORLD_SIMULATION_EVIDENCE_UNAUTHORIZED', 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'WORLD_SIMULATION_API_PRESET_MISSING', 'WORLD_SIMULATION_CONFIG_INVALID'];
     const ERROR_PHASES_ACU = ['load', 'persist', 'anchor', 'agent_persist', 'agent_loop', 'agent_delegate', 'handoff_summary'];
     const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
-    function isRecord_ACU$f(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+    function isRecord_ACU$h(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
     function fail_ACU$5(message, phase, details) { throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_ENVELOPE_INVALID', phase, message, false, details)); }
     function exactKeys_ACU$2(raw, required, optional, path, phase) {
         const allowed = new Set([...required, ...optional]);
@@ -90180,7 +90409,7 @@ $CONTENT
     function validateLocationRef_ACU(value, path, phase) {
         if (value === null)
             return null;
-        if (!isRecord_ACU$f(value))
+        if (!isRecord_ACU$h(value))
             fail_ACU$5(`${path} 必须是对象或 null`, phase, { path });
         exactKeys_ACU$2(value, ['region'], ['place'], path, phase);
         const region = normalizeWorldRegionName_ACU(string_ACU(value.region, `${path}.region`, phase));
@@ -90193,7 +90422,7 @@ $CONTENT
             fail_ACU$5(`${path} 必须是数组`, phase, { path });
         return value.map((item, index) => {
             const itemPath = `${path}[${index}]`;
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`${itemPath} 必须是对象`, phase, { path: itemPath });
             exactKeys_ACU$2(item, ['text', 'voice'], ['sourceId'], itemPath, phase);
             const signal = {
@@ -90206,12 +90435,12 @@ $CONTENT
         });
     }
     function migrateV1Ledger_ACU(raw) {
-        const clockRaw = isRecord_ACU$f(raw.clock) ? raw.clock : {};
+        const clockRaw = isRecord_ACU$h(raw.clock) ? raw.clock : {};
         const day = Number.isInteger(clockRaw.day) && clockRaw.day >= 1
             ? clockRaw.day
             : parseClockDay_ACU(clockRaw.elapsed, clockRaw.storyTime);
-        const fill = (item, extras) => isRecord_ACU$f(item) ? { ...item, ...Object.fromEntries(Object.entries(extras).filter(([key]) => !Object.prototype.hasOwnProperty.call(item, key))) } : item;
-        const guidanceRaw = isRecord_ACU$f(raw.guidance) ? raw.guidance : {};
+        const fill = (item, extras) => isRecord_ACU$h(item) ? { ...item, ...Object.fromEntries(Object.entries(extras).filter(([key]) => !Object.prototype.hasOwnProperty.call(item, key))) } : item;
+        const guidanceRaw = isRecord_ACU$h(raw.guidance) ? raw.guidance : {};
         const signals = Array.isArray(guidanceRaw.signals)
             ? guidanceRaw.signals.map(item => typeof item === 'string' ? { text: item, voice: 'ambient' } : item)
             : guidanceRaw.signals;
@@ -90228,7 +90457,7 @@ $CONTENT
             seeds: Array.isArray(raw.seeds) ? raw.seeds.map(item => fill(item, { location: null, expiresAtDay: null, missedOutcome: null, exposePolicy: 'on_collision' })) : raw.seeds,
             actors: Array.isArray(raw.actors) ? raw.actors.map(item => fill(item, { locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null })) : raw.actors,
             rumors: Array.isArray(raw.rumors) ? raw.rumors : [],
-            player: isRecord_ACU$f(raw.player) ? raw.player : { location: null, locationUpdatedAtDay: day, regionVisits: [], contact: 'open', evidenceRefs: [] },
+            player: isRecord_ACU$h(raw.player) ? raw.player : { location: null, locationUpdatedAtDay: day, regionVisits: [], contact: 'open', evidenceRefs: [] },
             guidance: { ...guidanceRaw, signals },
         };
     }
@@ -90260,7 +90489,7 @@ $CONTENT
         if (!Array.isArray(raw) || raw.length > WORLD_CHRONICLE_OVERVIEW_CAP_ACU)
             fail_ACU$5('ledger.chronicleOverview 容量非法', phase);
         const rows = raw.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.chronicleOverview[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, ['fingerprint', 'day', 'oneLine', 'archiveRef'], [], `ledger.chronicleOverview[${index}]`, phase);
             return {
@@ -90278,21 +90507,21 @@ $CONTENT
         }
         return rows;
     }
-    function validatePendingFixes_ACU(raw, phase) {
+    function validatePendingFixes_ACU$1(raw, phase) {
         if (!Array.isArray(raw))
             fail_ACU$5('ledger.pendingFixes 必须是数组', phase, { path: 'ledger.pendingFixes' });
         if (raw.length > 128)
             fail_ACU$5('ledger.pendingFixes 容量非法', phase);
         return raw.map((item, index) => {
             const path = `ledger.pendingFixes[${index}]`;
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`${path} 必须是对象`, phase);
             exactKeys_ACU$2(item, ['module', 'candidateId', 'agentName', 'violations', 'attempts', 'firstFailedAtDay', 'lastError'], [], path, phase);
             if (!Array.isArray(item.violations))
                 fail_ACU$5(`${path}.violations 必须是数组`, phase);
             const violations = item.violations.map((violation, violationIndex) => {
                 const violationPath = `${path}.violations[${violationIndex}]`;
-                if (!isRecord_ACU$f(violation))
+                if (!isRecord_ACU$h(violation))
                     fail_ACU$5(`${violationPath} 必须是对象`, phase);
                 exactKeys_ACU$2(violation, ['path', 'message'], [], violationPath, phase);
                 return {
@@ -90312,13 +90541,13 @@ $CONTENT
         });
     }
     function validatePlayer_ACU(raw, phase) {
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             fail_ACU$5('ledger.player 必须是对象', phase, { path: 'ledger.player' });
         exactKeys_ACU$2(raw, [...WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU], [], 'ledger.player', phase);
         if (!Array.isArray(raw.regionVisits) || raw.regionVisits.length > WORLD_PLAYER_REGION_VISITS_CAP_ACU)
             fail_ACU$5('ledger.player.regionVisits 容量非法', phase);
         const regionVisits = raw.regionVisits.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.player.regionVisits[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, ['region', 'day'], [], `ledger.player.regionVisits[${index}]`, phase);
             const region = normalizeWorldRegionName_ACU(string_ACU(item.region, `ledger.player.regionVisits[${index}].region`, phase));
@@ -90338,7 +90567,7 @@ $CONTENT
         if (!Array.isArray(raw) || raw.length > 128)
             fail_ACU$5('ledger.rumors 容量非法', phase);
         const rumors = raw.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.rumors[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.rumors, [], `ledger.rumors[${index}]`, phase);
             const originDay = integer_ACU(item.originDay, `ledger.rumors[${index}].originDay`, phase, 1);
@@ -90377,10 +90606,10 @@ $CONTENT
         return rumors;
     }
     function validateSettings_ACU(raw, phase) {
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             fail_ACU$5('settings 必须是对象', phase, { path: 'settings' });
         exactKeys_ACU$2(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow'], 'settings', phase);
-        if (!isRecord_ACU$f(raw.agentRunBudget))
+        if (!isRecord_ACU$h(raw.agentRunBudget))
             fail_ACU$5('settings.agentRunBudget 必须是对象', phase);
         exactKeys_ACU$2(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
         const budget = {
@@ -90391,12 +90620,12 @@ $CONTENT
             maxReads: integer_ACU(raw.agentRunBudget.maxReads, 'settings.agentRunBudget.maxReads', phase, 0, 200),
             maxExtraReads: integer_ACU(raw.agentRunBudget.maxExtraReads, 'settings.agentRunBudget.maxExtraReads', phase, 0, 20),
         };
-        if (!isRecord_ACU$f(raw.agentApiPresets) || !isRecord_ACU$f(raw.agentPrompts))
+        if (!isRecord_ACU$h(raw.agentApiPresets) || !isRecord_ACU$h(raw.agentPrompts))
             fail_ACU$5('settings 的 Agent 配置必须是对象', phase);
         const agentApiPresets = {};
         for (const [key, value] of Object.entries(raw.agentApiPresets)) {
             stableId_ACU(key, `settings.agentApiPresets.${key}`, phase);
-            if (!isRecord_ACU$f(value))
+            if (!isRecord_ACU$h(value))
                 fail_ACU$5(`settings.agentApiPresets.${key} 必须是对象`, phase);
             exactKeys_ACU$2(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
             agentApiPresets[key] = { mode: enum_ACU$1(value.mode, ['current', 'fixed'], `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
@@ -90409,7 +90638,7 @@ $CONTENT
             ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU$5('settings.agentReadTokenBudget 百分比非法', phase))
             : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);
         const webRaw = raw.webResearch === undefined ? buildDefaultWorldSimulationSettings_ACU().webResearch : raw.webResearch;
-        if (!isRecord_ACU$f(webRaw) || !isRecord_ACU$f(webRaw.sources))
+        if (!isRecord_ACU$h(webRaw) || !isRecord_ACU$h(webRaw.sources))
             fail_ACU$5('settings.webResearch 必须是对象', phase);
         exactKeys_ACU$2(webRaw, ['enabled', 'sources', 'searchProvider', 'searxngBaseUrl', 'pageCharLimit', 'blockedDomains'], [], 'settings.webResearch', phase);
         exactKeys_ACU$2(webRaw.sources, ['moegirl', 'wikipediaZh', 'wikipediaEn'], [], 'settings.webResearch.sources', phase);
@@ -90428,7 +90657,7 @@ $CONTENT
         const defaultDynamics = buildDefaultWorldSimulationSettings_ACU().dynamics;
         let dynamics = defaultDynamics;
         if (raw.dynamics !== undefined) {
-            if (!isRecord_ACU$f(raw.dynamics)) {
+            if (!isRecord_ACU$h(raw.dynamics)) {
                 dynamics = defaultDynamics;
             }
             else {
@@ -90445,7 +90674,7 @@ $CONTENT
         const defaultWorkflow = buildDefaultWorldSimulationSettings_ACU().workflow;
         let workflow = defaultWorkflow;
         if (raw.workflow !== undefined) {
-            if (!isRecord_ACU$f(raw.workflow)) {
+            if (!isRecord_ACU$h(raw.workflow)) {
                 workflow = defaultWorkflow;
             }
             else {
@@ -90475,13 +90704,13 @@ $CONTENT
         };
     }
     function validateLedger_ACU(raw, phase) {
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             fail_ACU$5('ledger 必须是对象', phase);
         const normalized = migrateLedgerToCurrent_ACU(raw);
         exactKeys_ACU$2(normalized, LEDGER_EXACT_KEYS_ACU, [], 'ledger', phase);
         if (normalized.schemaVersion !== WORLD_LEDGER_SCHEMA_VERSION_ACU)
             fail_ACU$5(`ledger.schemaVersion 必须为 ${WORLD_LEDGER_SCHEMA_VERSION_ACU}`, phase);
-        if (!isRecord_ACU$f(normalized.clock))
+        if (!isRecord_ACU$h(normalized.clock))
             fail_ACU$5('ledger.clock 必须是对象', phase);
         exactKeys_ACU$2(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
         const clock = {
@@ -90494,7 +90723,7 @@ $CONTENT
         if (!Array.isArray(normalized.dimensions) || normalized.dimensions.length > 32)
             fail_ACU$5('ledger.dimensions 容量非法', phase);
         const dimensions = normalized.dimensions.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.dimensions[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
             return { id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase), name: string_ACU(item.name, `ledger.dimensions[${index}].name`, phase), kind: enum_ACU$1(item.kind, ['pressure', 'growth'], `ledger.dimensions[${index}].kind`, phase), value: integer_ACU(item.value, `ledger.dimensions[${index}].value`, phase, 0, 100), trend: enum_ACU$1(item.trend, ['rising', 'stable', 'falling'], `ledger.dimensions[${index}].trend`, phase), rationale: string_ACU(item.rationale, `ledger.dimensions[${index}].rationale`, phase, true), evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.dimensions[${index}].evidenceRefs`, phase), revision: integer_ACU(item.revision, `ledger.dimensions[${index}].revision`, phase) };
@@ -90502,7 +90731,7 @@ $CONTENT
         if (!Array.isArray(normalized.actors) || normalized.actors.length > 128)
             fail_ACU$5('ledger.actors 容量非法', phase);
         const actors = normalized.actors.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.actors[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
             const life = enum_ACU$1(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
@@ -90525,7 +90754,7 @@ $CONTENT
         if (!Array.isArray(normalized.seeds) || normalized.seeds.length > 128)
             fail_ACU$5('ledger.seeds 容量非法', phase);
         const seeds = normalized.seeds.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.seeds[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
             const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
@@ -90545,7 +90774,7 @@ $CONTENT
             fail_ACU$5('ledger.chronicle 容量非法', phase);
         const knownIds = new Set([...dimensions.map(item => item.id), ...actors.map(item => item.id), ...seeds.map(item => item.id)]);
         const chronicle = normalized.chronicle.map((item, index) => {
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`ledger.chronicle[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
             const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
@@ -90557,15 +90786,15 @@ $CONTENT
         uniqueIds_ACU(chronicle, 'ledger.chronicle', phase);
         const rumors = validateRumors_ACU(normalized.rumors, actorIds, phase);
         const player = validatePlayer_ACU(normalized.player, phase);
-        if (!isRecord_ACU$f(normalized.guidance))
+        if (!isRecord_ACU$h(normalized.guidance))
             fail_ACU$5('ledger.guidance 必须是对象', phase);
         exactKeys_ACU$2(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
         const chronicleOverview = validateChronicleOverview_ACU(normalized.chronicleOverview, phase);
-        const pendingFixes = validatePendingFixes_ACU(normalized.pendingFixes, phase);
+        const pendingFixes = validatePendingFixes_ACU$1(normalized.pendingFixes, phase);
         return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview, pendingFixes };
     }
     function validatePlan_ACU(raw, path, phase) {
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             fail_ACU$5(`${path} 必须是对象`, phase);
         exactKeys_ACU$2(raw, ['schemaVersion', 'title', 'objective', 'impactScope', 'factsToVerify', 'plannedTools', 'plannedSpecialists', 'expectedLedgerChanges', 'convergenceConditions', 'blockingConditions', 'completedSteps', 'nextStep'], [], path, phase);
         if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
@@ -90575,7 +90804,7 @@ $CONTENT
         return { schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU, title: string_ACU(raw.title, `${path}.title`, phase), objective: string_ACU(raw.objective, `${path}.objective`, phase), impactScope: stringArray_ACU(raw.impactScope, `${path}.impactScope`, phase), factsToVerify: stringArray_ACU(raw.factsToVerify, `${path}.factsToVerify`, phase), plannedTools: stringArray_ACU(raw.plannedTools, `${path}.plannedTools`, phase), plannedSpecialists: stringArray_ACU(raw.plannedSpecialists, `${path}.plannedSpecialists`, phase), expectedLedgerChanges: raw.expectedLedgerChanges.map((item, index) => enum_ACU$1(item, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.expectedLedgerChanges[${index}]`, phase)), convergenceConditions: stringArray_ACU(raw.convergenceConditions, `${path}.convergenceConditions`, phase), blockingConditions: stringArray_ACU(raw.blockingConditions, `${path}.blockingConditions`, phase), completedSteps: stringArray_ACU(raw.completedSteps, `${path}.completedSteps`, phase), nextStep: string_ACU(raw.nextStep, `${path}.nextStep`, phase, true) };
     }
     function validateWorldSimulationEnvelope_ACU(raw, phase = 'load') {
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             fail_ACU$5('世界推演状态必须是对象', phase);
         exactKeys_ACU$2(raw, ['schemaVersion', 'settings', 'task', 'stages', 'activeStageId', 'timeline', 'lastError', 'ledger', 'updatedAt'], [], 'envelope', phase);
         if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU)
@@ -90583,13 +90812,13 @@ $CONTENT
         if (!Array.isArray(raw.stages))
             fail_ACU$5('stages 必须是数组', phase);
         const stages = raw.stages.map((stage, stageIndex) => {
-            if (!isRecord_ACU$f(stage))
+            if (!isRecord_ACU$h(stage))
                 fail_ACU$5(`stages[${stageIndex}] 必须是对象`, phase);
             exactKeys_ACU$2(stage, ['stageId', 'stageNumber', 'status', 'activeRevision', 'revisions'], [], `stages[${stageIndex}]`, phase);
             if (!Array.isArray(stage.revisions) || !stage.revisions.length)
                 fail_ACU$5(`stages[${stageIndex}].revisions 不能为空`, phase);
             const revisions = stage.revisions.map((revision, revisionIndex) => {
-                if (!isRecord_ACU$f(revision))
+                if (!isRecord_ACU$h(revision))
                     fail_ACU$5(`stages[${stageIndex}].revisions[${revisionIndex}] 必须是对象`, phase);
                 exactKeys_ACU$2(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'plan'], [], `stages[${stageIndex}].revisions[${revisionIndex}]`, phase);
                 return { revision: integer_ACU(revision.revision, `stages[${stageIndex}].revisions[${revisionIndex}].revision`, phase, 1), createdAt: integer_ACU(revision.createdAt, `stages[${stageIndex}].revisions[${revisionIndex}].createdAt`, phase), reason: enum_ACU$1(revision.reason, REVISION_REASONS_ACU, `stages[${stageIndex}].revisions[${revisionIndex}].reason`, phase), replanInstruction: string_ACU(revision.replanInstruction, `stages[${stageIndex}].revisions[${revisionIndex}].replanInstruction`, phase, true), frozen: boolean_ACU(revision.frozen, `stages[${stageIndex}].revisions[${revisionIndex}].frozen`, phase), plan: validatePlan_ACU(revision.plan, `stages[${stageIndex}].revisions[${revisionIndex}].plan`, phase) };
@@ -90605,13 +90834,13 @@ $CONTENT
             fail_ACU$5('activeStageId 不存在', phase);
         let task = null;
         if (raw.task !== null) {
-            if (!isRecord_ACU$f(raw.task))
+            if (!isRecord_ACU$h(raw.task))
                 fail_ACU$5('task 必须是对象或 null', phase);
             exactKeys_ACU$2(raw.task, ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'activeRun', 'stopReason'], [], 'task', phase);
             task = { taskId: stableId_ACU(raw.task.taskId, 'task.taskId', phase), originInstruction: string_ACU(raw.task.originInstruction, 'task.originInstruction', phase), status: normalizeLegacyEnum_ACU(TASK_STATUSES_ACU, LEGACY_TASK_STATUSES_ACU, raw.task.status, 'task.status', phase), createdAt: integer_ACU(raw.task.createdAt, 'task.createdAt', phase), updatedAt: integer_ACU(raw.task.updatedAt, 'task.updatedAt', phase), activeRun: null, stopReason: raw.task.stopReason === null ? null : string_ACU(raw.task.stopReason, 'task.stopReason', phase) };
             if (raw.task.activeRun !== null) {
                 const run = raw.task.activeRun;
-                if (!isRecord_ACU$f(run))
+                if (!isRecord_ACU$h(run))
                     fail_ACU$5('task.activeRun 必须是对象或 null', phase);
                 exactKeys_ACU$2(run, ['runId', 'chatIdentity', 'triggerKind', 'triggerConversationMessageId', 'anchorMessageId', 'anchorMessageKey', 'anchorSwipeId', 'anchorContentDigest', 'baseLedgerRevision', 'taskId', 'stageId', 'stageRevision'], [], 'task.activeRun', phase);
                 const anchorMessageId = typeof run.anchorMessageId === 'number' ? integer_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase) : string_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase);
@@ -90628,18 +90857,18 @@ $CONTENT
         if (!Array.isArray(raw.timeline))
             fail_ACU$5('timeline 必须是数组', phase);
         const timeline = raw.timeline.map((entry, index) => {
-            if (!isRecord_ACU$f(entry))
+            if (!isRecord_ACU$h(entry))
                 fail_ACU$5(`timeline[${index}] 必须是对象`, phase);
             exactKeys_ACU$2(entry, ['id', 'at', 'kind', 'taskId'], ['stageId', 'revision', 'runId', 'message', 'errorCode'], `timeline[${index}]`, phase);
             return { id: stableId_ACU(entry.id, `timeline[${index}].id`, phase), at: integer_ACU(entry.at, `timeline[${index}].at`, phase), kind: normalizeLegacyEnum_ACU(TIMELINE_KINDS_ACU, LEGACY_TIMELINE_KINDS_ACU, entry.kind, `timeline[${index}].kind`, phase), taskId: stableId_ACU(entry.taskId, `timeline[${index}].taskId`, phase), ...(entry.stageId === undefined ? {} : { stageId: stableId_ACU(entry.stageId, `timeline[${index}].stageId`, phase) }), ...(entry.revision === undefined ? {} : { revision: integer_ACU(entry.revision, `timeline[${index}].revision`, phase, 1) }), ...(entry.runId === undefined ? {} : { runId: stableId_ACU(entry.runId, `timeline[${index}].runId`, phase) }), ...(entry.message === undefined ? {} : { message: string_ACU(entry.message, `timeline[${index}].message`, phase, true) }), ...(entry.errorCode === undefined ? {} : { errorCode: enum_ACU$1(entry.errorCode, ERROR_CODES_ACU, `timeline[${index}].errorCode`, phase) }) };
         });
         let lastError = null;
         if (raw.lastError !== null) {
-            if (!isRecord_ACU$f(raw.lastError))
+            if (!isRecord_ACU$h(raw.lastError))
                 fail_ACU$5('lastError 必须是对象或 null', phase);
             exactKeys_ACU$2(raw.lastError, ['code', 'phase', 'message', 'retryable'], ['details'], 'lastError', phase);
             const details = raw.lastError.details;
-            if (details !== undefined && !isRecord_ACU$f(details))
+            if (details !== undefined && !isRecord_ACU$h(details))
                 fail_ACU$5('lastError.details 必须是对象', phase);
             lastError = {
                 code: enum_ACU$1(raw.lastError.code, ERROR_CODES_ACU, 'lastError.code', phase),
@@ -90647,7 +90876,7 @@ $CONTENT
                 message: string_ACU(raw.lastError.message, 'lastError.message', phase),
                 retryable: boolean_ACU(raw.lastError.retryable, 'lastError.retryable', phase),
             };
-            if (isRecord_ACU$f(details)) {
+            if (isRecord_ACU$h(details)) {
                 lastError.details = { ...details };
             }
         }
@@ -90670,7 +90899,7 @@ $CONTENT
     }
     function captureContext_ACU(guard) {
         const chat = getChatArray_ACU();
-        const firstMessage = Array.isArray(chat) && isRecord_ACU$f(chat[0]) ? chat[0] : null;
+        const firstMessage = Array.isArray(chat) && isRecord_ACU$h(chat[0]) ? chat[0] : null;
         const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
         if (!firstMessage || !chatIdentity)
             reject_ACU$6('WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天首楼不可用');
@@ -90687,8 +90916,19 @@ $CONTENT
         const raw = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
         return raw === undefined ? null : validateWorldSimulationEnvelope_ACU(raw);
     }
+    let ledgerOverlay_ACU = null;
+    /** 由账本折叠模块注册。read() 用折叠结果覆盖 envelope.ledger，磁盘上的 envelope 仍是缓存。 */
+    function registerWorldSimulationLedgerOverlay_ACU(overlay) {
+        ledgerOverlay_ACU = overlay;
+    }
     class FirstFloorWorldSimulationStore_ACU {
-        read() { return readRaw_ACU(captureContext_ACU().firstMessage); }
+        read() {
+            const context = captureContext_ACU();
+            const envelope = readRaw_ACU(context.firstMessage);
+            if (!envelope || !ledgerOverlay_ACU)
+                return envelope;
+            return ledgerOverlay_ACU(envelope, context.chat);
+        }
         readPersisted() { return this.read(); }
         replaceAtomically(candidate, guard) {
             return this.enqueue_ACU(context => this.replaceWithinQueue_ACU(candidate, guard, context), guard);
@@ -90758,7 +90998,7 @@ $CONTENT
     function resolveWorldSimulationAnchor_ACU(messageIndex, chat) {
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
         const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
-        const message = Number.isInteger(messageIndex) && messageIndex >= 0 && isRecord_ACU$f(messages[messageIndex])
+        const message = Number.isInteger(messageIndex) && messageIndex >= 0 && isRecord_ACU$h(messages[messageIndex])
             ? messages[messageIndex]
             : null;
         if (!chatIdentity || !message || !isAssistantMessage_ACU(message)) {
@@ -90796,7 +91036,7 @@ $CONTENT
         }
         for (let index = 0; index < messages.length; index += 1) {
             const message = messages[index];
-            if (!isRecord_ACU$f(message) || !isAssistantMessage_ACU(message))
+            if (!isRecord_ACU$h(message) || !isAssistantMessage_ACU(message))
                 continue;
             const current = resolveWorldSimulationAnchor_ACU(index, messages);
             if (current.chatIdentity === anchor.chatIdentity
@@ -90815,13 +91055,13 @@ $CONTENT
         const rawBucket = message[field];
         if (rawBucket === undefined)
             return null;
-        if (!isRecord_ACU$f(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU$f(rawBucket.entries)) {
+        if (!isRecord_ACU$h(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU$h(rawBucket.entries)) {
             reject_ACU$6('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 分桶结构损坏`);
         }
         const rawEntry = rawBucket.entries[buildWorldSimulationBucketKey_ACU(currentAnchor)];
         if (rawEntry === undefined)
             return null;
-        if (!isRecord_ACU$f(rawEntry) || !isRecord_ACU$f(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
+        if (!isRecord_ACU$h(rawEntry) || !isRecord_ACU$h(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
             reject_ACU$6('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目损坏`);
         }
         const storedAnchor = rawEntry.anchor;
@@ -90836,7 +91076,7 @@ $CONTENT
         const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, messages);
         const message = messages[currentAnchor.messageIndex];
         const previous = message[field];
-        const previousBucket = isRecord_ACU$f(previous) && previous.schemaVersion === 1 && isRecord_ACU$f(previous.entries)
+        const previousBucket = isRecord_ACU$h(previous) && previous.schemaVersion === 1 && isRecord_ACU$h(previous.entries)
             ? previous
             : { schemaVersion: 1, entries: {} };
         const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
@@ -90879,10 +91119,10 @@ $CONTENT
             }
         };
         const phase = 'agent_persist';
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             return ['ledger 必须是对象'];
         const normalized = migrateLedgerToCurrent_ACU(raw);
-        if (!isRecord_ACU$f(normalized))
+        if (!isRecord_ACU$h(normalized))
             return ['ledger 必须是对象'];
         probe(() => {
             exactKeys_ACU$2(normalized, LEDGER_EXACT_KEYS_ACU, [], 'ledger', phase);
@@ -90891,7 +91131,7 @@ $CONTENT
             integer_ACU(normalized.revision, 'ledger.revision', phase);
         });
         probe(() => {
-            if (!isRecord_ACU$f(normalized.clock))
+            if (!isRecord_ACU$h(normalized.clock))
                 fail_ACU$5('ledger.clock 必须是对象', phase);
             exactKeys_ACU$2(normalized.clock, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.clock, [], 'ledger.clock', phase);
             integer_ACU(normalized.clock.day, 'ledger.clock.day', phase, 1);
@@ -90906,7 +91146,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.dimensions.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$f(item))
+                    if (!isRecord_ACU$h(item))
                         fail_ACU$5(`ledger.dimensions[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.dimensions, [], `ledger.dimensions[${index}]`, phase);
                     dimensions.push({ id: stableId_ACU(item.id, `ledger.dimensions[${index}].id`, phase) });
@@ -90928,7 +91168,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.actors.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$f(item))
+                    if (!isRecord_ACU$h(item))
                         fail_ACU$5(`ledger.actors[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
                     const life = enum_ACU$1(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
@@ -90967,7 +91207,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.seeds.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$f(item))
+                    if (!isRecord_ACU$h(item))
                         fail_ACU$5(`ledger.seeds[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.seeds, [], `ledger.seeds[${index}]`, phase);
                     const linkedActors = stringArray_ACU(item.actorIds, `ledger.seeds[${index}].actorIds`, phase);
@@ -91002,7 +91242,7 @@ $CONTENT
         else {
             for (const [index, item] of normalized.chronicle.entries()) {
                 probe(() => {
-                    if (!isRecord_ACU$f(item))
+                    if (!isRecord_ACU$h(item))
                         fail_ACU$5(`ledger.chronicle[${index}] 必须是对象`, phase);
                     exactKeys_ACU$2(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
                     const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
@@ -91020,7 +91260,7 @@ $CONTENT
         probe(() => { validateRumors_ACU(normalized.rumors, actorIds, phase); });
         probe(() => { validatePlayer_ACU(normalized.player, phase); });
         probe(() => {
-            if (!isRecord_ACU$f(normalized.guidance))
+            if (!isRecord_ACU$h(normalized.guidance))
                 fail_ACU$5('ledger.guidance 必须是对象', phase);
             exactKeys_ACU$2(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
             validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase);
@@ -91028,24 +91268,24 @@ $CONTENT
             stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase);
         });
         probe(() => { validateChronicleOverview_ACU(normalized.chronicleOverview, phase); });
-        probe(() => { validatePendingFixes_ACU(normalized.pendingFixes, phase); });
+        probe(() => { validatePendingFixes_ACU$1(normalized.pendingFixes, phase); });
         return violations;
     }
     function buildEmptyWorldChronicleArchiveSnapshot_ACU() {
         return { schemaVersion: WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU, records: {} };
     }
     function validateWorldSimulationChronicleArchiveSnapshot_ACU(raw, phase = 'load') {
-        if (!isRecord_ACU$f(raw))
+        if (!isRecord_ACU$h(raw))
             fail_ACU$5('chronicle archive 必须是对象', phase);
         exactKeys_ACU$2(raw, ['schemaVersion', 'records'], [], 'chronicleArchive', phase);
         if (raw.schemaVersion !== WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU)
             fail_ACU$5('chronicleArchive.schemaVersion 必须为 1', phase);
-        if (!isRecord_ACU$f(raw.records))
+        if (!isRecord_ACU$h(raw.records))
             fail_ACU$5('chronicleArchive.records 必须是对象', phase);
         const records = {};
         for (const [archiveRef, item] of Object.entries(raw.records)) {
             const path = `chronicleArchive.records.${archiveRef}`;
-            if (!isRecord_ACU$f(item))
+            if (!isRecord_ACU$h(item))
                 fail_ACU$5(`${path} 必须是对象`, phase);
             exactKeys_ACU$2(item, ['archiveRef', 'day', 'summary', 'fingerprints', 'relatedIds', 'sourceChronicleIds'], [], path, phase);
             const validatedRef = stableId_ACU(item.archiveRef, `${path}.archiveRef`, phase);
@@ -91062,13 +91302,13 @@ $CONTENT
         }
         return { schemaVersion: WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU, records };
     }
-    function cloneJson_ACU$2(value) {
+    function cloneJson_ACU$4(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function getWorldSimulationFirstFloorMessage_ACU() {
         try {
             const chat = getChatArray_ACU();
-            const first = Array.isArray(chat) && isRecord_ACU$f(chat[0]) ? chat[0] : null;
+            const first = Array.isArray(chat) && isRecord_ACU$h(chat[0]) ? chat[0] : null;
             return first;
         }
         catch {
@@ -91130,7 +91370,7 @@ $CONTENT
         if (!first || !Object.prototype.hasOwnProperty.call(first, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU))
             return undefined;
         try {
-            return cloneJson_ACU$2(first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU]);
+            return cloneJson_ACU$4(first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU]);
         }
         catch {
             return undefined;
@@ -91768,7 +92008,7 @@ $CONTENT
             return true;
         return /(?:timeout|timed out|network(?:\s+error)?|connection reset|socket hang up)/i.test(message);
     }
-    function isRecord_ACU$e(value) {
+    function isRecord_ACU$g(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function copyRecordWithoutPrototype_ACU(value) {
@@ -91805,13 +92045,13 @@ $CONTENT
         if (Array.isArray(parsed)) {
             rootType = 'sequence';
             for (const item of parsed) {
-                if (!isRecord_ACU$e(item))
+                if (!isRecord_ACU$g(item))
                     continue;
                 for (const key of Object.keys(item))
                     merged[key] = item[key];
             }
         }
-        else if (isRecord_ACU$e(parsed)) {
+        else if (isRecord_ACU$g(parsed)) {
             rootType = 'mapping';
             for (const key of Object.keys(parsed))
                 merged[key] = parsed[key];
@@ -91821,13 +92061,13 @@ $CONTENT
         }
         let diagnostic = { reason: 'none', rootType };
         for (const key of pluginKeys) {
-            if (key === 'stream_options' && isRecord_ACU$e(pluginFields[key])) {
+            if (key === 'stream_options' && isRecord_ACU$g(pluginFields[key])) {
                 const current = merged[key];
-                if (current !== undefined && !isRecord_ACU$e(current)) {
+                if (current !== undefined && !isRecord_ACU$g(current)) {
                     diagnostic = { reason: 'stream_options_replaced', rootType };
                 }
                 merged[key] = {
-                    ...(isRecord_ACU$e(current) ? copyRecordWithoutPrototype_ACU(current) : {}),
+                    ...(isRecord_ACU$g(current) ? copyRecordWithoutPrototype_ACU(current) : {}),
                     ...copyRecordWithoutPrototype_ACU(pluginFields[key]),
                 };
                 continue;
@@ -106773,6 +107013,7 @@ $CONTENT
             let downgradedCount = 0;
             let obsoleteInitDowngradedCount = 0;
             let foldFiles = [];
+            const materialSnapshots = snapshotMaterialCheckpointFields_ACU(chat);
             try {
                 const boundaryWrite = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
                 changed = boundaryWrite.changed;
@@ -106793,6 +107034,7 @@ $CONTENT
             }
             catch (error) {
                 snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));
+                restoreMaterialCheckpointFields_ACU(chat, materialSnapshots);
                 return {
                     success: false,
                     changed: false,
@@ -107139,6 +107381,8 @@ $CONTENT
             logDebug_ACU(`[V2 Compaction] 已在 AI 保留边界楼层 #${boundaryAnchorIndex} 写入 isolationKey=[${isolationKey || '无标签'}] 的 full checkpoint（reason=${checkpointReason}）。`);
             await foldVectorMirrorAfterBoundaryWrite_ACU(chat, isolationKey, boundaryAnchorIndex, foldFiles);
         }
+        if (changed)
+            notifyMaterialCheckpointFloor_ACU(chat, boundaryAnchorIndex);
         return { changed, foldFiles };
     }
     /**
@@ -114749,7 +114993,7 @@ $CONTENT
      * 最新可追加的 AI 楼层；与聊天回放内容完全一致的表跳过（避免无意义的日志条目）。
      * 不推进 runtime revision（runtime 本身没有变化），不作为填表记录（不推进调度）。
      */
-    function cloneJson_ACU$1(value) {
+    function cloneJson_ACU$3(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function currentScope_ACU() {
@@ -114762,9 +115006,9 @@ $CONTENT
         if (isSqliteMode()) {
             const provider = await ensureStorageProviderReady_ACU();
             const data = provider.getCurrentData();
-            return data ? cloneJson_ACU$1(data) : null;
+            return data ? cloneJson_ACU$3(data) : null;
         }
-        return currentJsonTableData_ACU ? cloneJson_ACU$1(currentJsonTableData_ACU) : null;
+        return currentJsonTableData_ACU ? cloneJson_ACU$3(currentJsonTableData_ACU) : null;
     }
     function serializeSheetContent_ACU(sheet) {
         const content = sheet?.content;
@@ -114846,7 +115090,7 @@ $CONTENT
         const operations = divergedSheetKeys.map(sheetKey => ({
             kind: 'sheet_replace',
             sheetKey,
-            sheet: cloneJson_ACU$1(runtimeData[sheetKey]),
+            sheet: cloneJson_ACU$3(runtimeData[sheetKey]),
             reason: 'system',
         }));
         const writeSet = divergedSheetKeys.map(sheetKey => ({ kind: 'sheet', sheetKey }));
@@ -120726,7 +120970,7 @@ $CONTENT
      *   - role === 'assistant' <=> extra?.type !== 'narrator' && !is_user
      * 因此 AI 楼层 = !is_user 且非 narrator 系统旁白。仅凭 !is_user 会把系统消息误当 AI。
      */
-    function isAiMessage_ACU(message) {
+    function isAiMessage_ACU$1(message) {
         if (!message || typeof message !== 'object')
             return false;
         if (message.is_user)
@@ -120741,7 +120985,7 @@ $CONTENT
             return 0;
         let count = 0;
         for (const message of liveChat) {
-            if (isAiMessage_ACU(message))
+            if (isAiMessage_ACU$1(message))
                 count += 1;
         }
         return count;
@@ -120769,7 +121013,7 @@ $CONTENT
         const isAi = (index) => {
             if (index < 0 || index >= liveChat.length)
                 return false;
-            return isAiMessage_ACU(liveChat[index]);
+            return isAiMessage_ACU$1(liveChat[index]);
         };
         const capturedLength = Number.isInteger(intent.capturedChatLength) ? intent.capturedChatLength : -1;
         const capturedAiCount = Number.isInteger(intent.capturedAiFloorCount) ? intent.capturedAiFloorCount : -1;
@@ -120859,7 +121103,7 @@ $CONTENT
         const lastMessageIndex = resolvedMessageIndex !== undefined ? resolvedMessageIndex : liveChat.length - 1;
         const lastMessage = liveChat[lastMessageIndex];
         // 显式索引无效：调度层已解析出索引，但楼层已被删除/越界 → 专用原因，不笼统复用 last_message_not_ai。
-        if (resolvedMessageIndex !== undefined && (!lastMessage || lastMessage.is_user || !isAiMessage_ACU(lastMessage))) {
+        if (resolvedMessageIndex !== undefined && (!lastMessage || lastMessage.is_user || !isAiMessage_ACU$1(lastMessage))) {
             return { action: 'skip', reason: 'Resolved message is not an AI reply', skipReason: 'resolved_message_not_ai' };
         }
         // 无 intent 的历史路径：保持"最后一条 AI 消息"语义（若尾部不是 AI 则跳过）。
@@ -124596,7 +124840,7 @@ $CONTENT
      * post-save 同步会先丢弃待恢复产物。生成 / 填表落盘耗时远大于该窗口，实际不可达。
      */
     let vault_ACU = null;
-    let installed_ACU = false;
+    let installed_ACU$1 = false;
     function deepClone_ACU(value) {
         return JSON.parse(JSON.stringify(value));
     }
@@ -124618,6 +124862,7 @@ $CONTENT
         const chat = Array.isArray(chatArg) ? chatArg : getChatArray_ACU();
         const chatKey = String(currentChatFileIdentifier_ACU || '');
         const entriesByIsolationKey = new Map();
+        const materialEntries = [];
         for (const message of chat) {
             if (!message || message.is_user)
                 continue;
@@ -124655,7 +124900,17 @@ $CONTENT
                 entriesByIsolationKey.set(isolationKey, entries);
             }
         }
-        vault_ACU = { chatKey, entriesByIsolationKey };
+        for (const message of chat) {
+            if (!message || message.is_user)
+                continue;
+            const captured = captureMaterialCheckpointRecovery_ACU(message);
+            const continuation = captured?.continuation ?? null;
+            const simulation = captured?.simulation ?? null;
+            if (!continuation && !simulation)
+                continue;
+            materialEntries.push({ messageRef: message, continuation, simulation });
+        }
+        vault_ACU = { chatKey, entriesByIsolationKey, materialEntries };
     }
     /** 切聊 / 测试清理。 */
     function resetCheckpointVault_ACU() {
@@ -124663,9 +124918,9 @@ $CONTENT
     }
     /** 注册 post-save 捕获监听。幂等，重复调用只注册一次。 */
     function installCheckpointDeleteGuard_ACU() {
-        if (installed_ACU)
+        if (installed_ACU$1)
             return;
-        installed_ACU = true;
+        installed_ACU$1 = true;
         registerPostChatSaveListener_ACU(() => {
             try {
                 captureCheckpointVaultForCurrentChat_ACU();
@@ -124764,6 +125019,8 @@ $CONTENT
             };
             let graftedCount = 0;
             const affectedIsolationKeys = new Set();
+            const materialSnapshots = snapshotMaterialCheckpointFields_ACU(chat);
+            const graftTargetByLostMessage = new Map();
             try {
                 // 逆序处理：同 sheetKey 冲突时"原始位置更靠后的产物"先占位，更早的被
                 // 目标已有判定跳过——幸存者/更新者优先的语义由同一条规则统一表达。
@@ -124776,6 +125033,7 @@ $CONTENT
                         continue;
                     }
                     snapshotTarget(target.message);
+                    graftTargetByLostMessage.set(entry.messageRef, target.message);
                     const frame = ensureTargetFrame_ACU(target.message, isolationKey);
                     const targetIndex = chat.indexOf(target.message);
                     if (target.absorbedEarlierFrame && entry.fullCheckpoint && frame.logEntries.length > 0) {
@@ -124841,6 +125099,39 @@ $CONTENT
                     }
                     affectedIsolationKeys.add(isolationKey);
                 }
+                const presentMessagesForMaterial = new Set(chat);
+                for (let lostIndex = vault_ACU.materialEntries.length - 1; lostIndex >= 0; lostIndex -= 1) {
+                    const material = vault_ACU.materialEntries[lostIndex];
+                    if (presentMessagesForMaterial.has(material.messageRef))
+                        continue;
+                    if (!material.continuation && !material.simulation)
+                        continue;
+                    const preferred = graftTargetByLostMessage.get(material.messageRef);
+                    let targetMessage = preferred;
+                    if (!targetMessage) {
+                        for (let index = lostIndex + 1; index < vault_ACU.materialEntries.length; index += 1) {
+                            const candidate = vault_ACU.materialEntries[index];
+                            if (presentMessagesForMaterial.has(candidate.messageRef)) {
+                                targetMessage = candidate.messageRef;
+                                break;
+                            }
+                        }
+                    }
+                    if (!targetMessage) {
+                        for (let index = chat.length - 1; index >= 0; index -= 1) {
+                            if (chat[index] && !chat[index].is_user) {
+                                targetMessage = chat[index];
+                                break;
+                            }
+                        }
+                    }
+                    if (!targetMessage)
+                        continue;
+                    if (material.continuation && graftMaterialContinuationCheckpoint_ACU(targetMessage, material.continuation))
+                        graftedCount += 1;
+                    if (material.simulation && graftMaterialSimulationCheckpoint_ACU(chat, targetMessage, material.simulation))
+                        graftedCount += 1;
+                }
                 if (graftedCount === 0) {
                     // 全部被"目标已有"跳过或无处嫁接：无写入即无需保存。
                     return { recovered: false, graftedCount: 0 };
@@ -124850,6 +125141,12 @@ $CONTENT
                     if (violation)
                         throw new Error(violation);
                 }
+                const continuationViolation = assertMaterialContinuationCheckpoint_ACU(chat);
+                if (continuationViolation)
+                    throw new Error(continuationViolation);
+                const simulationViolation = assertMaterialSimulationCheckpoint_ACU(chat);
+                if (simulationViolation)
+                    throw new Error(simulationViolation);
                 await saveChatToHostStrict_ACU();
                 captureCheckpointVaultForCurrentChat_ACU(chat);
                 logWarn_ACU(`[删楼守卫] 删楼 checkpoint 前移恢复完成：共嫁接 ${graftedCount} 个产物。`);
@@ -124857,6 +125154,7 @@ $CONTENT
             }
             catch (error) {
                 restoreSnapshots();
+                restoreMaterialCheckpointFields_ACU(chat, materialSnapshots);
                 const message = error?.message || String(error || '删楼 checkpoint 恢复失败。');
                 logError_ACU(`[删楼守卫] 删楼 checkpoint 前移恢复失败，已回滚改动（保管库保留，下次删楼事件重试）：${message}`);
                 return { recovered: false, graftedCount: 0, error: message };
@@ -124875,8 +125173,115 @@ $CONTENT
     /** 仅供测试：重置安装状态。 */
     function __resetCheckpointDeleteGuardForTests_ACU() {
         vault_ACU = null;
-        installed_ACU = false;
+        installed_ACU$1 = false;
     }
+
+    /**
+     * service/continuation/agent/agent-run-cache.ts — Agent 循环运行恢复缓存
+     *
+     * 纯内存缓存：主循环在每次迭代边界保存运行账本（派工结论、迭代进度），
+     * 失败中断后用户再发送时据此从中断点恢复，而不是丢掉全部已获得的证据从头重跑。
+     * 键为聊天身份；恢复时按任务与大纲游标严格校验，任何不匹配都作废缓存。
+     * 页面重载会清空缓存——此时资料快照已持久化，从头重跑是安全降级而非错误。
+     */
+    /** 发送前终审在一次主 Agent 运行内的恢复状态。终审反馈正文同时追加到会话，供跨重启读取。 */
+    const AGENT_FINAL_REVIEW_STATUSES_ACU = ['not_started', 'reviewing', 'feedback_ready', 'consumed'];
+    const statesByChat_ACU = new Map();
+    function cloneFinalReviewState_ACU(value) {
+        const status = value?.status;
+        return {
+            status: AGENT_FINAL_REVIEW_STATUSES_ACU.includes(status ?? '') ? status : 'not_started',
+            candidateFingerprint: typeof value?.candidateFingerprint === 'string' ? value.candidateFingerprint : '',
+            candidateSummary: typeof value?.candidateSummary === 'string' ? value.candidateSummary : '',
+            feedback: typeof value?.feedback === 'string' ? value.feedback : '',
+        };
+    }
+    /**
+     * 保存运行状态。同一聊天只保留最新一份（租约保证同聊天无并发循环）。
+     * @param chatIdentity 聊天身份
+     * @param state 运行状态；内部做深拷贝，调用方后续修改不影响缓存
+     */
+    function saveAgentRunState_ACU(chatIdentity, state) {
+        if (!chatIdentity)
+            return;
+        statesByChat_ACU.set(chatIdentity, {
+            taskId: state.taskId,
+            cursorKey: state.cursorKey,
+            nextIteration: state.nextIteration,
+            ledger: {
+                delegationsUsed: state.ledger.delegationsUsed,
+                perAgent: { ...state.ledger.perAgent },
+                outcomes: state.ledger.outcomes.map(outcome => ({ ...outcome })),
+            },
+            finalReview: cloneFinalReviewState_ACU(state.finalReview),
+        });
+    }
+    /**
+     * 读取可恢复的运行状态。任务或游标不匹配即作废并返回 null——
+     * 旧轮次的证据对新轮次而言是污染而不是资产。
+     * @param chatIdentity 聊天身份
+     * @param taskId 当前任务
+     * @param cursorKey 当前大纲游标指纹
+     * @returns 匹配的运行状态深拷贝；无缓存或不匹配时为 null
+     */
+    function readAgentRunState_ACU(chatIdentity, taskId, cursorKey) {
+        const cached = statesByChat_ACU.get(chatIdentity);
+        if (!cached)
+            return null;
+        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
+            statesByChat_ACU.delete(chatIdentity);
+            return null;
+        }
+        return {
+            taskId: cached.taskId,
+            cursorKey: cached.cursorKey,
+            nextIteration: cached.nextIteration,
+            ledger: {
+                delegationsUsed: cached.ledger.delegationsUsed,
+                perAgent: { ...cached.ledger.perAgent },
+                outcomes: cached.ledger.outcomes.map(outcome => ({ ...outcome })),
+            },
+            finalReview: cloneFinalReviewState_ACU(cached.finalReview),
+        };
+    }
+    /**
+     * 清除运行状态。finalize 成功交付与主 Agent 主动 block 时调用：
+     * 前者本轮已完成，后者是明确的终局判断，重跑应给全新预算而不是复播旧证据。
+     * @param chatIdentity 聊天身份
+     */
+    function clearAgentRunState_ACU(chatIdentity) {
+        statesByChat_ACU.delete(chatIdentity);
+    }
+    function resetAgentRunCacheForTests_ACU() {
+        statesByChat_ACU.clear();
+    }
+
+    const states_ACU = new Map();
+    function clone_ACU$7(state) {
+        return {
+            ...state,
+            perAgent: { ...state.perAgent },
+            outcomes: state.outcomes.map(item => ({ ...item })),
+            candidates: state.candidates?.map(item => ({ ...item, patch: { ...item.patch }, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], writableModules: [...item.writableModules] })),
+            subagentOutcomes: state.subagentOutcomes?.map(item => ({ ...item, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], unresolved: item.unresolved ? [...item.unresolved] : undefined, candidate: item.candidate ? { ...item.candidate, patch: { ...item.candidate.patch }, evidenceRefs: [...item.candidate.evidenceRefs], uncertainties: [...item.candidate.uncertainties], writableModules: [...item.candidate.writableModules] } : undefined })),
+            evidenceSnapshot: state.evidenceSnapshot ? { runId: state.evidenceSnapshot.runId, entries: state.evidenceSnapshot.entries.map(entry => ({ ...entry })) } : undefined,
+            transcript: state.transcript?.map(item => ({ ...item })),
+        };
+    }
+    function saveWorldSimulationRunState_ACU(chatIdentity, state) { if (chatIdentity)
+        states_ACU.set(chatIdentity, clone_ACU$7(state)); }
+    function readWorldSimulationRunState_ACU(chatIdentity, taskId, cursorKey) {
+        const cached = states_ACU.get(chatIdentity);
+        if (!cached)
+            return null;
+        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
+            states_ACU.delete(chatIdentity);
+            return null;
+        }
+        return clone_ACU$7(cached);
+    }
+    function clearWorldSimulationRunState_ACU(chatIdentity) { states_ACU.delete(chatIdentity); }
+    function resetWorldSimulationRunCacheForTests_ACU() { states_ACU.clear(); }
 
     /**
      * presentation/bootstrap/chat-mutation-scheduler.ts
@@ -124937,6 +125342,11 @@ $CONTENT
         const startedGeneration = generation_ACU;
         firstRequestAt_ACU = 0;
         try {
+            const chatIdentity = getActiveChatStorageIdentity_ACU(getChatArray_ACU());
+            if (chatIdentity) {
+                clearAgentRunState_ACU(chatIdentity);
+                clearWorldSimulationRunState_ACU(chatIdentity);
+            }
             // S0-4：删楼轮次先做 checkpoint 前移恢复，再进入冷回放——被删楼层携带的
             // 回放根 / 休眠表 checkpoint 若不先嫁接到幸存楼层，冷回放会把丢失固化。
             // 失败隔离：恢复失败（守卫内部已回滚）不阻断后续冷回放。
@@ -125019,6 +125429,1941 @@ $CONTENT
         running_ACU$1 = false;
         pendingAfterRun_ACU = false;
     }
+
+    /**
+     * service/continuation/agent/agent-module-frame.ts — 续写资料的楼层增量帧
+     *
+     * 楼层字段从全量快照升级为 { checkpoint, deltas }。读取从最近基线起按楼层顺序叠加
+     * 当前 swipe 的 delta；删除楼层会让该楼 delta 物理消失，折叠结果自动回到剩余链。
+     * schema 1/2 全量快照只在内存里充当 swipe 0 的基线，成功写入才替换成 schema 3。
+     */
+    function isRecord_ACU$f(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function cloneJson_ACU$2(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function readMessageSwipeId_ACU(message) {
+        if (!isRecord_ACU$f(message))
+            return '0';
+        const swipeId = message.swipe_id;
+        return typeof swipeId === 'number' && Number.isInteger(swipeId) && swipeId >= 0 ? String(swipeId) : '0';
+    }
+    function isAiMessage_ACU(message) {
+        return isRecord_ACU$f(message) && message.is_user !== true;
+    }
+    function latestAiIndex_ACU(chat) {
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            if (isAiMessage_ACU(chat[index]))
+                return index;
+        }
+        return Math.max(0, chat.length - 1);
+    }
+    function clampWaterline_ACU(value, targetIndex) {
+        if (!Number.isInteger(value) || value < 0)
+            return 0;
+        return Math.min(value, Math.max(0, targetIndex));
+    }
+    function semanticPayload_ACU(snapshot) {
+        return JSON.stringify({
+            settledThroughIndex: snapshot.settledThroughIndex,
+            revisions: snapshot.revisions,
+            hooks: snapshot.hooks,
+            infoGap: snapshot.infoGap,
+            constraints: snapshot.constraints,
+            storyArc: snapshot.storyArc,
+            chronology: snapshot.chronology,
+            webRefs: snapshot.webRefs,
+            userRequirements: snapshot.userRequirements,
+            pendingFixes: snapshot.pendingFixes,
+        });
+    }
+    function sameSemantic_ACU(left, right) {
+        return semanticPayload_ACU(left) === semanticPayload_ACU(right);
+    }
+    function emptyFrame_ACU() {
+        return { schemaVersion: AGENT_MODULE_FRAME_SCHEMA_VERSION_ACU, deltas: [] };
+    }
+    function parseDelta_ACU(raw, deps) {
+        if (!isRecord_ACU$f(raw))
+            return null;
+        if (typeof raw.seq !== 'number' || !Number.isInteger(raw.seq) || raw.seq < 1)
+            return null;
+        if (typeof raw.swipeId !== 'string' || !raw.swipeId.trim())
+            return null;
+        if (!isRecord_ACU$f(raw.writes) || !isRecord_ACU$f(raw.revisions))
+            return null;
+        const seed = deps.emptySnapshot();
+        seed.settledThroughIndex = 0;
+        const applied = applyDelta_ACU(seed, {
+            seq: raw.seq,
+            swipeId: raw.swipeId,
+            writes: raw.writes,
+            revisions: raw.revisions,
+            ...(isRecord_ACU$f(raw.removedIds) ? { removedIds: raw.removedIds } : {}),
+            ...(raw.pendingFixes === undefined ? {} : { pendingFixes: raw.pendingFixes }),
+            ...(raw.settledThroughIndex === undefined ? {} : { settledThroughIndex: raw.settledThroughIndex }),
+            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+        });
+        if (!deps.validateSnapshot(applied))
+            return null;
+        const delta = {
+            seq: raw.seq,
+            swipeId: raw.swipeId,
+            writes: cloneJson_ACU$2(raw.writes),
+            revisions: cloneJson_ACU$2(raw.revisions),
+            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+        };
+        if (isRecord_ACU$f(raw.removedIds))
+            delta.removedIds = cloneJson_ACU$2(raw.removedIds);
+        if (Array.isArray(raw.pendingFixes))
+            delta.pendingFixes = cloneJson_ACU$2(applied.pendingFixes);
+        if (typeof raw.settledThroughIndex === 'number' && Number.isInteger(raw.settledThroughIndex) && raw.settledThroughIndex >= 0) {
+            delta.settledThroughIndex = raw.settledThroughIndex;
+        }
+        return delta;
+    }
+    function parseField_ACU(raw, deps) {
+        if (raw === undefined)
+            return { kind: 'empty' };
+        if (!isRecord_ACU$f(raw))
+            return { kind: 'broken', problems: ['资料字段不是对象'], salvaged: null };
+        if (raw.schemaVersion === AGENT_MODULE_FRAME_SCHEMA_VERSION_ACU) {
+            if (!Array.isArray(raw.deltas))
+                return { kind: 'broken', problems: ['schema 3 缺少 deltas 数组'], salvaged: null };
+            const problems = [];
+            const deltas = [];
+            raw.deltas.forEach((item, index) => {
+                const delta = parseDelta_ACU(item, deps);
+                if (delta)
+                    deltas.push(delta);
+                else
+                    problems.push(`deltas[${index}] 无法折叠，已跳过`);
+            });
+            deltas.sort((left, right) => left.seq - right.seq);
+            const frame = { schemaVersion: AGENT_MODULE_FRAME_SCHEMA_VERSION_ACU, deltas };
+            if (isRecord_ACU$f(raw.checkpoint)) {
+                const snapshot = deps.validateSnapshot(raw.checkpoint.snapshot);
+                const swipeId = typeof raw.checkpoint.swipeId === 'string' && raw.checkpoint.swipeId.trim() ? raw.checkpoint.swipeId : '';
+                if (snapshot && swipeId)
+                    frame.checkpoint = { swipeId, snapshot };
+                else
+                    problems.push('checkpoint 未通过严格校验，已忽略');
+            }
+            return { kind: 'frame', frame, problems };
+        }
+        const legacy = deps.validateSnapshot(raw);
+        if (legacy)
+            return { kind: 'legacy', snapshot: legacy };
+        const salvaged = deps.salvageSnapshot(raw);
+        return {
+            kind: 'broken',
+            problems: salvaged?.problems ?? ['快照不是可折叠的资料帧'],
+            salvaged: salvaged?.snapshot ?? null,
+        };
+    }
+    function entryId_ACU(item) {
+        if (!isRecord_ACU$f(item) || typeof item.id !== 'string')
+            return '';
+        return item.id;
+    }
+    function applyModuleWrite_ACU(current, upserts, removed, replaceAll) {
+        if (replaceAll)
+            return cloneJson_ACU$2([...(upserts ?? [])]);
+        const removedIds = new Set(removed ?? []);
+        const replacements = new Map();
+        for (const item of upserts ?? []) {
+            const id = entryId_ACU(item);
+            if (id)
+                replacements.set(id, item);
+        }
+        const next = [];
+        const seen = new Set();
+        for (const item of current) {
+            const id = entryId_ACU(item);
+            if (!id || removedIds.has(id))
+                continue;
+            if (replacements.has(id)) {
+                next.push(cloneJson_ACU$2(replacements.get(id)));
+                seen.add(id);
+            }
+            else
+                next.push(cloneJson_ACU$2(item));
+        }
+        for (const [id, item] of replacements) {
+            if (!seen.has(id) && !removedIds.has(id))
+                next.push(cloneJson_ACU$2(item));
+        }
+        return next;
+    }
+    function applyDelta_ACU(snapshot, delta) {
+        const next = cloneJson_ACU$2(snapshot);
+        for (const key of AGENT_WRITABLE_MODULES_ACU) {
+            if (!Object.prototype.hasOwnProperty.call(delta.writes, key) && !delta.removedIds?.[key])
+                continue;
+            const replaceAll = key === 'userRequirements';
+            const moduleKey = key;
+            next[key] = applyModuleWrite_ACU(next[key], delta.writes[key], replaceAll ? undefined : delta.removedIds?.[moduleKey], replaceAll);
+        }
+        next.revisions = { ...next.revisions, ...delta.revisions };
+        if (delta.pendingFixes)
+            next.pendingFixes = cloneJson_ACU$2(delta.pendingFixes);
+        if (typeof delta.settledThroughIndex === 'number')
+            next.settledThroughIndex = delta.settledThroughIndex;
+        next.updatedAt = delta.updatedAt;
+        return next;
+    }
+    function diffSnapshot_ACU(before, after, swipeId, seq) {
+        const writes = {};
+        const removedIds = {};
+        const revisions = {};
+        let changed = false;
+        for (const key of AGENT_WRITABLE_MODULES_ACU) {
+            if (key === 'userRequirements') {
+                if (JSON.stringify(before.userRequirements) !== JSON.stringify(after.userRequirements)) {
+                    writes.userRequirements = cloneJson_ACU$2(after.userRequirements);
+                    changed = true;
+                }
+            }
+            else {
+                const previous = before[key];
+                const nextItems = after[key];
+                const previousById = new Map(previous.map(item => [entryId_ACU(item), item]));
+                const nextIds = new Set(nextItems.map(item => entryId_ACU(item)));
+                const upserts = nextItems.filter(item => {
+                    const id = entryId_ACU(item);
+                    const prior = previousById.get(id);
+                    return !prior || JSON.stringify(prior) !== JSON.stringify(item);
+                });
+                const removed = previous.map(item => entryId_ACU(item)).filter(id => id && !nextIds.has(id));
+                if (upserts.length) {
+                    writes[key] = cloneJson_ACU$2(upserts);
+                    changed = true;
+                }
+                if (removed.length) {
+                    removedIds[key] = removed;
+                    changed = true;
+                }
+            }
+            if (before.revisions[key] !== after.revisions[key]) {
+                revisions[key] = after.revisions[key];
+                changed = true;
+            }
+        }
+        const delta = { seq, swipeId, writes, revisions, updatedAt: after.updatedAt };
+        if (Object.keys(removedIds).length)
+            delta.removedIds = removedIds;
+        if (JSON.stringify(before.pendingFixes) !== JSON.stringify(after.pendingFixes)) {
+            delta.pendingFixes = cloneJson_ACU$2(after.pendingFixes);
+            changed = true;
+        }
+        if (before.settledThroughIndex !== after.settledThroughIndex) {
+            delta.settledThroughIndex = after.settledThroughIndex;
+            changed = true;
+        }
+        return changed ? delta : null;
+    }
+    function fieldOf_ACU(message) {
+        if (!isRecord_ACU$f(message) || !Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
+            return undefined;
+        return message[AGENT_MODULE_FIELD_ACU];
+    }
+    function maxSeq_ACU(chat, deps) {
+        let max = 0;
+        for (const message of chat) {
+            const parsed = parseField_ACU(fieldOf_ACU(message), deps);
+            if (parsed.kind !== 'frame')
+                continue;
+            for (const delta of parsed.frame.deltas)
+                max = Math.max(max, delta.seq);
+        }
+        return max;
+    }
+    function hasSchema3Checkpoint_ACU(chat, deps) {
+        return chat.some(message => {
+            const parsed = parseField_ACU(fieldOf_ACU(message), deps);
+            return parsed.kind === 'frame' && !!parsed.frame.checkpoint;
+        });
+    }
+    /**
+     * 从聊天头部折叠到 throughIndex（含）。不按数组长度钳制水位。
+     */
+    function foldAgentModuleSnapshot_ACU(chat, deps, throughIndex = chat.length - 1) {
+        let snapshot = deps.emptySnapshot();
+        let contributed = false;
+        let sawSchema3Checkpoint = false;
+        let checkpointIndex = null;
+        let foldedDeltaCount = 0;
+        let adoptedIndex = null;
+        const candidates = [];
+        let salvage = null;
+        const end = Math.min(throughIndex, chat.length - 1);
+        for (let index = 0; index <= end; index += 1) {
+            const message = chat[index];
+            const raw = fieldOf_ACU(message);
+            if (raw === undefined)
+                continue;
+            const parsed = parseField_ACU(raw, deps);
+            const swipeId = readMessageSwipeId_ACU(message);
+            if (parsed.kind === 'legacy') {
+                candidates.push({ index, valid: true, problems: [] });
+                if (!sawSchema3Checkpoint && swipeId === '0') {
+                    snapshot = cloneJson_ACU$2(parsed.snapshot);
+                    contributed = true;
+                    checkpointIndex = index;
+                    adoptedIndex = index;
+                    foldedDeltaCount = 0;
+                }
+                continue;
+            }
+            if (parsed.kind === 'broken') {
+                candidates.push({ index, valid: false, problems: parsed.problems });
+                if (parsed.salvaged)
+                    salvage = { index, snapshot: parsed.salvaged, problems: parsed.problems };
+                continue;
+            }
+            if (parsed.kind !== 'frame')
+                continue;
+            candidates.push({ index, valid: parsed.problems.length === 0, problems: parsed.problems });
+            if (parsed.frame.checkpoint && parsed.frame.checkpoint.swipeId === swipeId) {
+                snapshot = cloneJson_ACU$2(parsed.frame.checkpoint.snapshot);
+                contributed = true;
+                sawSchema3Checkpoint = true;
+                checkpointIndex = index;
+                adoptedIndex = index;
+                foldedDeltaCount = 0;
+            }
+            for (const delta of parsed.frame.deltas) {
+                if (delta.swipeId !== swipeId)
+                    continue;
+                snapshot = applyDelta_ACU(snapshot, delta);
+                contributed = true;
+                foldedDeltaCount += 1;
+                if (adoptedIndex === null)
+                    adoptedIndex = index;
+            }
+        }
+        if (!contributed && salvage) {
+            return {
+                snapshot: cloneJson_ACU$2(salvage.snapshot),
+                candidates,
+                adoptedIndex: salvage.index,
+                salvaged: true,
+                checkpointIndex: salvage.index,
+                foldedDeltaCount: 0,
+                contributed: true,
+            };
+        }
+        return {
+            snapshot,
+            candidates,
+            adoptedIndex: contributed ? adoptedIndex : null,
+            salvaged: false,
+            checkpointIndex: contributed ? checkpointIndex : null,
+            foldedDeltaCount,
+            contributed,
+        };
+    }
+    function readFrame_ACU(message, deps) {
+        const parsed = parseField_ACU(fieldOf_ACU(message), deps);
+        if (parsed.kind === 'frame')
+            return cloneJson_ACU$2(parsed.frame);
+        return emptyFrame_ACU();
+    }
+    function writeFrame_ACU(message, frame) {
+        const next = {
+            schemaVersion: AGENT_MODULE_FRAME_SCHEMA_VERSION_ACU,
+            deltas: frame.deltas,
+        };
+        if (frame.checkpoint)
+            next.checkpoint = frame.checkpoint;
+        message[AGENT_MODULE_FIELD_ACU] = next;
+    }
+    function stripCurrentSwipeThrough_ACU(chat, anchorIndex, deps) {
+        for (let index = 0; index < chat.length; index += 1) {
+            const message = chat[index];
+            if (!isRecord_ACU$f(message))
+                continue;
+            const parsed = parseField_ACU(fieldOf_ACU(message), deps);
+            if (parsed.kind !== 'frame')
+                continue;
+            const swipeId = readMessageSwipeId_ACU(message);
+            const frame = cloneJson_ACU$2(parsed.frame);
+            delete frame.checkpoint;
+            if (index <= anchorIndex)
+                frame.deltas = frame.deltas.filter(delta => delta.swipeId !== swipeId);
+            if (!frame.checkpoint && frame.deltas.length === 0)
+                delete message[AGENT_MODULE_FIELD_ACU];
+            else
+                writeFrame_ACU(message, frame);
+        }
+    }
+    /**
+     * 把 throughIndex 及之前的当前 swipe 链折成锚点楼上的唯一 schema 3 基线。
+     * 锚点之后的 delta 保留。没有可折叠内容时不写空基线。
+     */
+    function relocateContinuationCheckpoint_ACU(chat, anchorIndex, deps) {
+        if (!Number.isInteger(anchorIndex) || anchorIndex < 0 || anchorIndex >= chat.length)
+            return false;
+        const anchor = chat[anchorIndex];
+        if (!isAiMessage_ACU(anchor))
+            return false;
+        const folded = foldAgentModuleSnapshot_ACU(chat, deps, anchorIndex);
+        if (!folded.contributed || folded.salvaged)
+            return false;
+        const before = JSON.stringify(chat.map(message => fieldOf_ACU(message)));
+        stripCurrentSwipeThrough_ACU(chat, anchorIndex, deps);
+        const frame = readFrame_ACU(anchor, deps);
+        frame.checkpoint = { swipeId: readMessageSwipeId_ACU(anchor), snapshot: cloneJson_ACU$2(folded.snapshot) };
+        writeFrame_ACU(anchor, frame);
+        const after = JSON.stringify(chat.map(message => fieldOf_ACU(message)));
+        return before !== after;
+    }
+    function appendDelta_ACU(chat, targetIndex, delta, deps) {
+        const message = chat[targetIndex];
+        if (!isRecord_ACU$f(message))
+            return;
+        const frame = readFrame_ACU(message, deps);
+        frame.deltas = [...frame.deltas, delta].sort((left, right) => left.seq - right.seq);
+        writeFrame_ACU(message, frame);
+    }
+    /**
+     * 规划一次快照写入：已有 schema 3 基线时只追加 delta；否则把首基线放到表格 checkpoint 楼或最新 AI 楼。
+     * 不修改传入的 chat。
+     */
+    function planAgentModuleSnapshotWrite_ACU(chat, targetIndex, next, deps, tableAnchorIndex) {
+        const scratch = chat.map(message => (isRecord_ACU$f(message) ? { ...message } : message));
+        const before = foldAgentModuleSnapshot_ACU(scratch, deps);
+        const clamped = {
+            ...cloneJson_ACU$2(next),
+            settledThroughIndex: clampWaterline_ACU(next.settledThroughIndex, targetIndex),
+            updatedAt: Date.now(),
+        };
+        if (before.contributed && !before.salvaged && sameSemantic_ACU(before.snapshot, clamped)) {
+            return { changed: false, assignments: [] };
+        }
+        const base = before.contributed ? before.snapshot : deps.emptySnapshot();
+        const delta = diffSnapshot_ACU(base, clamped, readMessageSwipeId_ACU(scratch[targetIndex]), maxSeq_ACU(scratch, deps) + 1);
+        const hadSchema3 = hasSchema3Checkpoint_ACU(scratch, deps);
+        if (hadSchema3) {
+            if (delta)
+                appendDelta_ACU(scratch, targetIndex, delta, deps);
+        }
+        else {
+            const tableAnchor = tableAnchorIndex !== null && isAiMessage_ACU(scratch[tableAnchorIndex]) ? tableAnchorIndex : null;
+            const anchor = tableAnchor ?? latestAiIndex_ACU(scratch);
+            const anchorMessage = scratch[anchor];
+            if (isRecord_ACU$f(anchorMessage)) {
+                const checkpointSnapshot = targetIndex <= anchor || !delta ? clamped : base;
+                if (deps.validateSnapshot(checkpointSnapshot)) {
+                    const frame = readFrame_ACU(anchorMessage, deps);
+                    frame.checkpoint = { swipeId: readMessageSwipeId_ACU(anchorMessage), snapshot: cloneJson_ACU$2(checkpointSnapshot) };
+                    if (anchor === targetIndex)
+                        frame.deltas = frame.deltas.filter(item => item.swipeId !== frame.checkpoint?.swipeId);
+                    writeFrame_ACU(anchorMessage, frame);
+                }
+            }
+            if (delta && targetIndex > anchor)
+                appendDelta_ACU(scratch, targetIndex, delta, deps);
+        }
+        const assignments = [];
+        scratch.forEach((message, index) => {
+            const previous = fieldOf_ACU(chat[index]);
+            const value = fieldOf_ACU(message);
+            if (JSON.stringify(previous) === JSON.stringify(value))
+                return;
+            assignments.push({
+                index,
+                existed: previous !== undefined,
+                previous,
+                value,
+            });
+        });
+        return { changed: assignments.length > 0, assignments };
+    }
+    function continuationCheckpointArtifact_ACU(message, deps) {
+        const parsed = parseField_ACU(fieldOf_ACU(message), deps);
+        if (parsed.kind !== 'frame' || !parsed.frame.checkpoint)
+            return null;
+        return cloneJson_ACU$2(parsed.frame.checkpoint);
+    }
+    /** 把丢失的基线嫁到目标楼。目标楼同一 swipe 已有基线时不覆盖。 */
+    function graftContinuationCheckpoint_ACU(message, artifact, deps) {
+        if (!isRecord_ACU$f(message))
+            return false;
+        const frame = readFrame_ACU(message, deps);
+        if (frame.checkpoint && frame.checkpoint.swipeId === artifact.swipeId)
+            return false;
+        if (frame.checkpoint)
+            return false;
+        frame.checkpoint = cloneJson_ACU$2(artifact);
+        writeFrame_ACU(message, frame);
+        return true;
+    }
+    /** 每个当前 swipe 至多一个 schema 3 基线。legacy 全量不计入。 */
+    function assertSingleActiveContinuationCheckpoint_ACU(chat, deps) {
+        const seen = new Map();
+        for (let index = 0; index < chat.length; index += 1) {
+            const message = chat[index];
+            const parsed = parseField_ACU(fieldOf_ACU(message), deps);
+            if (parsed.kind !== 'frame' || !parsed.frame.checkpoint)
+                continue;
+            if (parsed.frame.checkpoint.swipeId !== readMessageSwipeId_ACU(message))
+                continue;
+            const swipeId = parsed.frame.checkpoint.swipeId;
+            const previous = seen.get(swipeId);
+            if (previous !== undefined)
+                return `续写资料 swipe ${swipeId} 存在多个活跃基线：楼层 ${previous} 与 ${index}`;
+            seen.set(swipeId, index);
+        }
+        return null;
+    }
+    function chatHasContinuationMaterial_ACU(chat) {
+        return chat.some(message => fieldOf_ACU(message) !== undefined);
+    }
+
+    /**
+     * service/continuation/agent/agent-module-store.ts — 楼层锚定的叙事资料存储
+     *
+     * 存储策略：schema 3 帧 = checkpoint 全量基线 + 楼层 delta。读取从最近基线起按楼层顺序
+     * 叠加当前 swipe 的 delta。删楼让该楼 delta 消失，折叠结果回到剩余链。
+     * schema 1/2 全量快照只在读取时当成 swipe 0 的基线，成功写入才升级。
+     */
+    const IMPORTANCE_WEIGHTS_ACU = { high: 3, mid: 2, low: 1 };
+    function isRecord_ACU$e(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function readText_ACU$1(value) {
+        return typeof value === 'string' ? value : '';
+    }
+    function readIndex_ACU(value) {
+        return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : -1;
+    }
+    function readEnum_ACU(value, allowed, fallback) {
+        return typeof value === 'string' && allowed.includes(value) ? value : fallback;
+    }
+    function buildEmptyAgentModuleSnapshot_ACU() {
+        return {
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            settledThroughIndex: -1,
+            updatedAt: 0,
+            revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 0, webRefs: 0, userRequirements: 0 },
+            hooks: [],
+            infoGap: [],
+            constraints: [],
+            storyArc: [],
+            chronology: [],
+            webRefs: [],
+            userRequirements: [],
+            pendingFixes: [],
+        };
+    }
+    /** 证据楼层列表：只接受非负整数，去重后升序。是否越过结算水位由事务层校验。 */
+    function normalizeEvidenceIndexes_ACU(value) {
+        if (!Array.isArray(value))
+            return null;
+        const indexes = [];
+        for (const item of value) {
+            if (typeof item !== 'number' || !Number.isInteger(item) || item < 0)
+                return null;
+            indexes.push(item);
+        }
+        return [...new Set(indexes)].sort((left, right) => left - right);
+    }
+    /** 阶段编号列表：只接受正整数，去重后升序。乱序或重复是模型回写进度时的常见噪音。 */
+    function normalizeStageNumbers_ACU(value) {
+        if (!Array.isArray(value))
+            return [];
+        const numbers = value.filter((item) => typeof item === 'number' && Number.isInteger(item) && item >= 1);
+        return [...new Set(numbers)].sort((left, right) => left - right);
+    }
+    function validateHookEntry_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const summary = readText_ACU$1(raw.summary).trim();
+        if (!id || !summary)
+            return null;
+        return {
+            id,
+            summary,
+            status: readEnum_ACU(raw.status, AGENT_HOOK_STATUSES_ACU, 'planted'),
+            importance: readEnum_ACU(raw.importance, AGENT_HOOK_IMPORTANCES_ACU, 'mid'),
+            plantedIndex: readIndex_ACU(raw.plantedIndex),
+            updatedIndex: readIndex_ACU(raw.updatedIndex),
+            plannedPayoff: readText_ACU$1(raw.plannedPayoff),
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
+    function validateInfoGapEntry_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const topic = readText_ACU$1(raw.topic).trim();
+        if (!id || !topic)
+            return null;
+        const knowledge = Array.isArray(raw.characterKnowledge) ? raw.characterKnowledge : [];
+        const revealStatus = readEnum_ACU(raw.revealStatus, AGENT_REVEAL_STATUSES_ACU, 'unrevealed');
+        const revealIndex = readIndex_ACU(raw.revealIndex);
+        return {
+            id,
+            topic,
+            objectiveFact: readText_ACU$1(raw.objectiveFact),
+            readerKnown: readText_ACU$1(raw.readerKnown),
+            characterKnowledge: knowledge.flatMap(item => {
+                if (!isRecord_ACU$e(item))
+                    return [];
+                const name = readText_ACU$1(item.name).trim();
+                return name ? [{ name, knows: readText_ACU$1(item.knows) }] : [];
+            }),
+            revealStatus,
+            // 未揭示的条目不允许携带揭示楼层，这是模型把计划写成事实的典型症状。
+            revealIndex: revealStatus === 'unrevealed' || revealIndex < 0 ? null : revealIndex,
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
+    function readOptionalStoryArcText_ACU(raw, key) {
+        if (!Object.prototype.hasOwnProperty.call(raw, key))
+            return undefined;
+        return typeof raw[key] === 'string' ? raw[key].trim() : null;
+    }
+    function readOptionalStoryArcTextList_ACU(raw, key) {
+        if (!Object.prototype.hasOwnProperty.call(raw, key))
+            return undefined;
+        const value = raw[key];
+        if (!Array.isArray(value))
+            return null;
+        const normalized = [];
+        for (const item of value) {
+            if (typeof item !== 'string' || !item.trim())
+                return null;
+            normalized.push(item.trim());
+        }
+        return normalized;
+    }
+    function readOptionalTargetStageRange_ACU(raw) {
+        if (!Object.prototype.hasOwnProperty.call(raw, 'targetStageRange'))
+            return undefined;
+        const value = raw.targetStageRange;
+        if (!isRecord_ACU$e(value))
+            return null;
+        const { min, max } = value;
+        if (!Number.isInteger(min) || min < 1 || !Number.isInteger(max) || max < 1 || min > max)
+            return null;
+        return { min: min, max: max };
+    }
+    function validateStoryArcEntry_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const title = readText_ACU$1(raw.title).trim();
+        if (!id || !title)
+            return null;
+        const narrativeRole = Object.prototype.hasOwnProperty.call(raw, 'narrativeRole')
+            ? readEnum_ACU(raw.narrativeRole, AGENT_VOLUME_NARRATIVE_ROLES_ACU, '')
+            : undefined;
+        const targetStageRange = readOptionalTargetStageRange_ACU(raw);
+        const targetTimeSpan = readOptionalStoryArcText_ACU(raw, 'targetTimeSpan');
+        const progressCeiling = readOptionalStoryArcText_ACU(raw, 'progressCeiling');
+        const sustainingThreads = readOptionalStoryArcTextList_ACU(raw, 'sustainingThreads');
+        const payoffTargets = readOptionalStoryArcTextList_ACU(raw, 'payoffTargets');
+        const completionRationale = readOptionalStoryArcText_ACU(raw, 'completionRationale');
+        if (narrativeRole === '' || targetStageRange === null || targetTimeSpan === null || progressCeiling === null || sustainingThreads === null || payoffTargets === null || completionRationale === null)
+            return null;
+        return {
+            id,
+            scope: readEnum_ACU(raw.scope, AGENT_STORY_ARC_SCOPES_ACU, 'volume'),
+            title,
+            direction: readText_ACU$1(raw.direction),
+            escalation: readText_ACU$1(raw.escalation),
+            withheld: readText_ACU$1(raw.withheld),
+            status: readEnum_ACU(raw.status, AGENT_STORY_ARC_STATUSES_ACU, 'planned'),
+            stageNumbers: normalizeStageNumbers_ACU(raw.stageNumbers),
+            completionStageNumber: typeof raw.completionStageNumber === 'number' && Number.isInteger(raw.completionStageNumber) && raw.completionStageNumber >= 1 ? raw.completionStageNumber : null,
+            completionState: readText_ACU$1(raw.completionState),
+            continuationRationale: readText_ACU$1(raw.continuationRationale),
+            narrativeRole: narrativeRole,
+            targetStageRange,
+            targetTimeSpan,
+            progressCeiling,
+            sustainingThreads,
+            payoffTargets,
+            completionRationale,
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
+    /**
+     * 严格校验一条持久化的年代学记录。chronology 是 P3 才引入的字段：旧快照根本没有它，
+     * 因此不存在「宽容旧形态」的需要——字段一旦出现就必须结构完整，坏条目不做静默降级。
+     */
+    function validateChronologyEntry_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const anchor = readText_ACU$1(raw.anchor).trim();
+        const elapsed = readText_ACU$1(raw.elapsed).trim();
+        const transition = readText_ACU$1(raw.transition).trim();
+        if (!id || !anchor || !elapsed || !transition)
+            return null;
+        const precision = typeof raw.precision === 'string' && AGENT_CHRONOLOGY_PRECISIONS_ACU.includes(raw.precision) ? raw.precision : null;
+        if (!precision)
+            return null;
+        const evidenceIndexes = normalizeEvidenceIndexes_ACU(raw.evidenceIndexes);
+        if (!evidenceIndexes || !evidenceIndexes.length)
+            return null;
+        const updatedIndex = readIndex_ACU(raw.updatedIndex);
+        if (updatedIndex < 0)
+            return null;
+        const retired = raw.retired === true;
+        const retiredReason = readText_ACU$1(raw.retiredReason);
+        if (retired && !retiredReason.trim())
+            return null;
+        return {
+            id,
+            anchor,
+            elapsed,
+            precision: precision,
+            transition,
+            evidenceIndexes,
+            updatedIndex,
+            retired,
+            retiredReason,
+        };
+    }
+    /** 取一段文本的首句，用作旧条目缺失 brief 时的兼容兜底。 */
+    function firstSentence_ACU(text) {
+        const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+        if (!flat)
+            return '';
+        const cut = flat.split(/(?<=[。！？!?\.])\s*|\n/)[0] ?? flat;
+        return cut.length > 80 ? `${cut.slice(0, 80)}…` : cut;
+    }
+    /**
+     * 校验一条资料库记录。固定内容是 title 与 brief；summary 为可空的自由格式详情。
+     * 旧条目的 extract 字段故意不读取：升级后不再让网页原文继续扩张聊天快照。
+     */
+    function validateWebRefEntry_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const title = readText_ACU$1(raw.title).trim();
+        const url = readText_ACU$1(raw.url).trim();
+        if (!id || !title || !url)
+            return null;
+        const tags = Array.isArray(raw.tags)
+            ? raw.tags.filter((item) => typeof item === 'string' && !!item.trim()).map(item => item.trim())
+            : [];
+        return {
+            id,
+            title,
+            source: readEnum_ACU(raw.source, AGENT_WEB_REF_SOURCES_ACU, 'web'),
+            url,
+            query: readText_ACU$1(raw.query),
+            tags,
+            brief: readText_ACU$1(raw.brief).trim() || firstSentence_ACU(readText_ACU$1(raw.summary)),
+            summary: readText_ACU$1(raw.summary),
+            sourceStatus: readEnum_ACU(raw.sourceStatus, AGENT_WEB_REF_STATUSES_ACU, 'unavailable'),
+            fetchedAt: typeof raw.fetchedAt === 'number' && raw.fetchedAt >= 0 ? raw.fetchedAt : 0,
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
+    function validateConstraintEntry_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const text = readText_ACU$1(raw.text).trim();
+        if (!id || !text)
+            return null;
+        return { id, text, reason: readText_ACU$1(raw.reason), createdIndex: readIndex_ACU(raw.createdIndex) };
+    }
+    function validateUserRequirementLine_ACU(raw) {
+        if (typeof raw !== 'string')
+            return null;
+        const text = raw.trim();
+        return text ? text : null;
+    }
+    /** 缺字段视为空数组。字段存在但不合法时返回 null，调用方决定拒绝或抢救。 */
+    function validatePendingFixes_ACU(raw, present) {
+        if (!present)
+            return [];
+        if (!Array.isArray(raw) || raw.length > AGENT_PENDING_FIX_CAP_ACU)
+            return null;
+        const fixes = [];
+        for (const item of raw) {
+            if (!isRecord_ACU$e(item) || !isAgentWritableModule_ACU(item.module))
+                return null;
+            if (typeof item.agentName !== 'string' || typeof item.lastError !== 'string')
+                return null;
+            if (typeof item.attempts !== 'number' || !Number.isInteger(item.attempts) || item.attempts < 1 || item.attempts > 99)
+                return null;
+            if (typeof item.firstFailedAtIndex !== 'number' || !Number.isInteger(item.firstFailedAtIndex) || item.firstFailedAtIndex < -1)
+                return null;
+            if (!Array.isArray(item.violations) || item.violations.length > 32)
+                return null;
+            const violations = [];
+            for (const violation of item.violations) {
+                if (!isRecord_ACU$e(violation) || typeof violation.path !== 'string' || typeof violation.message !== 'string' || !violation.message.trim())
+                    return null;
+                violations.push({ path: violation.path, message: violation.message });
+            }
+            fixes.push({
+                module: item.module,
+                agentName: item.agentName,
+                violations,
+                attempts: item.attempts,
+                firstFailedAtIndex: item.firstFailedAtIndex,
+                lastError: item.lastError,
+            });
+        }
+        return fixes;
+    }
+    /**
+     * 校验一份持久化快照。非法返回 null 而不抛错，让读取端可以继续向前寻找上一个合法快照，
+     * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
+     */
+    function validateAgentModuleSnapshot_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
+            return null;
+        if (!isRecord_ACU$e(raw.revisions))
+            return null;
+        if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints))
+            return null;
+        const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
+        if (settledThroughIndex < 0)
+            return null;
+        // storyArc 晚于前三个模块加入，存量楼层的快照里没有这个键。写成必需会让全部历史快照
+        // 被判非法、资料静默回退成空，因此这里按「有则校验、无则空数组」处理。
+        const storyArc = Array.isArray(raw.storyArc) ? raw.storyArc : [];
+        const validatedStoryArc = storyArc.map(validateStoryArcEntry_ACU);
+        // 总纲条目不能像普通搜索命中一样被悄悄过滤；任一结构损坏都应让读取端回退上一份完整快照。
+        if (validatedStoryArc.some(entry => entry === null))
+            return null;
+        // chronology 同样后于早期快照加入：缺字段兼容为空账本；但字段一旦存在就必须整体合法——
+        // 时间事实被静默过滤比暂时回退旧快照更危险（后续结算会基于错误的时间线登记新事实）。
+        if (Object.prototype.hasOwnProperty.call(raw, 'chronology') && !Array.isArray(raw.chronology))
+            return null;
+        const chronology = Array.isArray(raw.chronology) ? raw.chronology : [];
+        const validatedChronology = chronology.map(validateChronologyEntry_ACU);
+        if (validatedChronology.some(entry => entry === null))
+            return null;
+        if (Object.prototype.hasOwnProperty.call(raw, 'webRefs') && !Array.isArray(raw.webRefs))
+            return null;
+        const webRefs = Array.isArray(raw.webRefs) ? raw.webRefs : [];
+        // userRequirements 晚于早期快照加入：缺字段兼容为空清单；字段一旦存在就必须是字符串数组，
+        // 且每条 trim 后非空——静默丢掉用户要求比暂时回退旧快照更危险。
+        if (Object.prototype.hasOwnProperty.call(raw, 'userRequirements') && !Array.isArray(raw.userRequirements))
+            return null;
+        const userRequirementsRaw = Array.isArray(raw.userRequirements) ? raw.userRequirements : [];
+        const validatedUserRequirements = userRequirementsRaw.map(validateUserRequirementLine_ACU);
+        if (validatedUserRequirements.some(entry => entry === null))
+            return null;
+        const pendingPresent = Object.prototype.hasOwnProperty.call(raw, 'pendingFixes');
+        const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent);
+        if (!pendingFixes)
+            return null;
+        return {
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            settledThroughIndex,
+            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+            revisions: {
+                hooks: Math.max(0, readIndex_ACU(raw.revisions.hooks)),
+                infoGap: Math.max(0, readIndex_ACU(raw.revisions.infoGap)),
+                constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
+                storyArc: Math.max(0, readIndex_ACU(raw.revisions.storyArc)),
+                chronology: Math.max(0, readIndex_ACU(raw.revisions.chronology)),
+                webRefs: Math.max(0, readIndex_ACU(raw.revisions.webRefs)),
+                userRequirements: Math.max(0, readIndex_ACU(raw.revisions.userRequirements)),
+            },
+            hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
+            infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
+            constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
+            storyArc: validatedStoryArc,
+            chronology: validatedChronology,
+            webRefs: webRefs.flatMap(item => { const entry = validateWebRefEntry_ACU(item); return entry ? [entry] : []; }),
+            userRequirements: validatedUserRequirements,
+            pendingFixes,
+        };
+    }
+    /**
+     * 宽容解析一份损坏的快照：丢掉单条非法记录、修正非法水位，尽量保住其余数据。
+     * 只在严格路径全程无命中时作为兜底使用——静默回退成空快照会让用户误以为数据从未写入。
+     */
+    function salvageAgentModuleSnapshot_ACU(raw) {
+        if (!isRecord_ACU$e(raw))
+            return null;
+        const problems = [];
+        if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) {
+            problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
+        }
+        const revisions = isRecord_ACU$e(raw.revisions) ? raw.revisions : {};
+        const pick = (list, validate, label) => {
+            if (!Array.isArray(list)) {
+                if (list !== undefined)
+                    problems.push(`${label} 不是数组`);
+                return [];
+            }
+            const kept = [];
+            list.forEach((item, index) => { const entry = validate(item); if (entry)
+                kept.push(entry);
+            else
+                problems.push(`${label}[${index}] 结构非法，已丢弃`); });
+            return kept;
+        };
+        const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
+        if (settledThroughIndex < 0)
+            problems.push(`settledThroughIndex=${String(raw.settledThroughIndex)} 非法，按 0 处理`);
+        const pendingPresent = Object.prototype.hasOwnProperty.call(raw, 'pendingFixes');
+        const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent);
+        if (!pendingFixes)
+            problems.push('pendingFixes 结构非法，已按空数组读取');
+        const snapshot = {
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            settledThroughIndex: Math.max(0, settledThroughIndex),
+            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+            revisions: {
+                hooks: Math.max(0, readIndex_ACU(revisions.hooks)),
+                infoGap: Math.max(0, readIndex_ACU(revisions.infoGap)),
+                constraints: Math.max(0, readIndex_ACU(revisions.constraints)),
+                storyArc: Math.max(0, readIndex_ACU(revisions.storyArc)),
+                chronology: Math.max(0, readIndex_ACU(revisions.chronology)),
+                webRefs: Math.max(0, readIndex_ACU(revisions.webRefs)),
+                userRequirements: Math.max(0, readIndex_ACU(revisions.userRequirements)),
+            },
+            hooks: pick(raw.hooks, validateHookEntry_ACU, 'hooks'),
+            infoGap: pick(raw.infoGap, validateInfoGapEntry_ACU, 'infoGap'),
+            constraints: pick(raw.constraints, validateConstraintEntry_ACU, 'constraints'),
+            storyArc: pick(raw.storyArc, validateStoryArcEntry_ACU, 'storyArc'),
+            chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
+            webRefs: pick(raw.webRefs, validateWebRefEntry_ACU, 'webRefs'),
+            userRequirements: pick(raw.userRequirements, validateUserRequirementLine_ACU, 'userRequirements'),
+            pendingFixes: pendingFixes ?? [],
+        };
+        return { snapshot, problems };
+    }
+    let lastReadDiagnostics_ACU = {
+        candidates: [],
+        adoptedIndex: null,
+        salvaged: false,
+        checkpointIndex: null,
+        foldedDeltaCount: 0,
+    };
+    function agentModuleFrameDeps_ACU() {
+        return {
+            validateSnapshot: validateAgentModuleSnapshot_ACU,
+            salvageSnapshot: salvageAgentModuleSnapshot_ACU,
+            emptySnapshot: buildEmptyAgentModuleSnapshot_ACU,
+        };
+    }
+    /** 最近一次 readAgentModuleSnapshot_ACU 的诊断信息，供面板解释“为什么资料是空的/是旧的”。 */
+    function readAgentModuleSnapshotDiagnostics_ACU() {
+        return lastReadDiagnostics_ACU;
+    }
+    /**
+     * 读取当前生效的资料快照。
+     * 从最近的 checkpoint 起按楼层顺序叠加当前 swipe 的 delta。全程无合法基线但存在损坏快照时，
+     * 对最靠近末楼的一份做宽容抢救并记录诊断——数据消失必须可解释。水位不再按数组长度钳制。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 折叠后的快照；没有任何资料时返回 settledThroughIndex = -1 的空快照
+     */
+    function readAgentModuleSnapshot_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const folded = foldAgentModuleSnapshot_ACU(messages, agentModuleFrameDeps_ACU());
+        lastReadDiagnostics_ACU = {
+            candidates: folded.candidates,
+            adoptedIndex: folded.adoptedIndex,
+            salvaged: folded.salvaged,
+            checkpointIndex: folded.checkpointIndex,
+            foldedDeltaCount: folded.foldedDeltaCount,
+        };
+        if (folded.salvaged) {
+            console.warn(`[SP·数据库][续写资料] 楼层 ${folded.adoptedIndex} 的资料快照未通过严格校验，已按宽容模式读取：${folded.candidates.find(item => item.index === folded.adoptedIndex)?.problems.join('；') ?? ''}`);
+        }
+        return folded.snapshot;
+    }
+    /**
+     * 把快照写入指定楼层并真实提交到宿主。
+     *
+     * 结算水位以快照自带的 settledThroughIndex 为准，只做合法性钳制（0 ≤ 水位 ≤ 承载楼层）：
+     * 写盘不推水位——立总纲、用户手动保存都不代表未结算正文被结算过，水位推进只由
+     * 结算派工成功后显式设置。
+     * @param chat 聊天数组
+     * @param targetIndex 承载快照的楼层下标，通常是当前末楼
+     * @param snapshot 待写入的全量快照
+     */
+    async function writeAgentModuleSnapshot_ACU(chat, targetIndex, snapshot) {
+        const message = Array.isArray(chat) ? chat[targetIndex] : null;
+        if (!message || typeof message !== 'object') {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照的目标楼层不可用', false, { targetIndex }));
+        }
+        const plan = planAgentModuleSnapshotWrite_ACU(chat, targetIndex, snapshot, agentModuleFrameDeps_ACU(), findLatestTableFullCheckpointIndex_ACU(chat));
+        if (!plan.changed)
+            return;
+        try {
+            for (const assignment of plan.assignments) {
+                const container = chat[assignment.index];
+                if (assignment.value === undefined)
+                    delete container[AGENT_MODULE_FIELD_ACU];
+                else
+                    container[AGENT_MODULE_FIELD_ACU] = assignment.value;
+            }
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            for (const assignment of plan.assignments) {
+                const container = chat[assignment.index];
+                if (assignment.existed)
+                    container[AGENT_MODULE_FIELD_ACU] = assignment.previous;
+                else
+                    delete container[AGENT_MODULE_FIELD_ACU];
+            }
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
+        }
+    }
+    function rejectSnapshotEdit_ACU(message, details) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
+    }
+    /**
+     * 用户手动改写资料快照。
+     *
+     * 与子代理写入的关键区别是「不容忍静默丢条目」：校验器为了容错会丢掉结构非法的单条记录，
+     * 那对模型输出是合理的降级，但对用户编辑是数据丢失——用户会以为自己保存成功了。因此这里
+     * 逐类比对条目数，只要有条目被丢弃就整份拒绝并指出是哪一类。
+     * @param raw 用户编辑后的快照对象（可只带 hooks / infoGap / constraints / storyArc）
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 落盘后的快照
+     */
+    async function replaceAgentModuleSnapshotByUser_ACU(raw, chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const targetIndex = messages.length - 1;
+        if (targetIndex < 0)
+            rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
+        if (!isRecord_ACU$e(raw))
+            rejectSnapshotEdit_ACU('资料快照必须是 JSON 对象');
+        const current = readAgentModuleSnapshot_ACU(messages);
+        const merged = {
+            ...current,
+            ...raw,
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            // 手动保存不推进结算水位：用户改资料不代表未结算正文被结算过。保留现有水位，
+            // 新聊天的 -1 钳制为 0（校验器拒绝负值），上限钳制交给写盘函数。
+            settledThroughIndex: Math.max(current.settledThroughIndex, 0),
+            // 手动编辑同样推进修订号：否则携带旧修订号的子代理写集会通过并覆盖用户刚保存的内容。
+            revisions: {
+                hooks: current.revisions.hooks + 1,
+                infoGap: current.revisions.infoGap + 1,
+                constraints: current.revisions.constraints + 1,
+                storyArc: current.revisions.storyArc + 1,
+                chronology: current.revisions.chronology + 1,
+                webRefs: current.revisions.webRefs + 1,
+                userRequirements: current.revisions.userRequirements + 1,
+            },
+        };
+        const validated = validateAgentModuleSnapshot_ACU(merged);
+        if (!validated)
+            rejectSnapshotEdit_ACU('资料快照结构非法：hooks / infoGap / constraints 必须是数组；storyArc / chronology 一旦提供必须整体结构合法（chronology 每条需要非空 id/anchor/elapsed/transition、合法 precision、非空非负整数 evidenceIndexes 与非负 updatedIndex，retire 需给理由）');
+        const checks = [
+            ['伏笔账本 hooks', merged.hooks, validated.hooks],
+            ['信息差 infoGap', merged.infoGap, validated.infoGap],
+            ['长期约束 constraints', merged.constraints, validated.constraints],
+            ['故事总纲 storyArc', merged.storyArc, validated.storyArc],
+            ['故事年代学账本 chronology', merged.chronology, validated.chronology],
+            ['百科资料库 webRefs', merged.webRefs, validated.webRefs],
+            ['用户要求 userRequirements', merged.userRequirements, validated.userRequirements],
+        ];
+        for (const [label, input, accepted] of checks) {
+            const inputLength = Array.isArray(input) ? input.length : 0;
+            if (inputLength !== accepted.length) {
+                rejectSnapshotEdit_ACU(`${label} 中有 ${inputLength - accepted.length} 条记录不符合结构要求（id 与关键文本字段不能为空），整份编辑未保存`, { label, inputLength, acceptedLength: accepted.length });
+            }
+        }
+        await writeAgentModuleSnapshot_ACU(messages, targetIndex, validated);
+        return validated;
+    }
+    /**
+     * 从全部楼层清除资料快照字段。用于「一键清空」，只删扩展字段，绝不触碰正文。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 是否有楼层被改动
+     */
+    async function clearAgentModuleField_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        let changed = false;
+        for (const message of messages) {
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
+                continue;
+            delete message[AGENT_MODULE_FIELD_ACU];
+            changed = true;
+        }
+        if (changed)
+            await saveChatToHostStrict_ACU();
+        return changed;
+    }
+    function truncateAgentBlock_ACU(text) {
+        if (text.length <= AGENT_BLOCK_CHAR_LIMIT_ACU)
+            return text;
+        return `${text.slice(0, AGENT_BLOCK_CHAR_LIMIT_ACU)}\n（本资料块超出 ${AGENT_BLOCK_CHAR_LIMIT_ACU} 字上限，已截断；未展示部分不代表不存在）`;
+    }
+    function compareHooks_ACU(left, right) {
+        const weight = (IMPORTANCE_WEIGHTS_ACU[right.importance] ?? 0) - (IMPORTANCE_WEIGHTS_ACU[left.importance] ?? 0);
+        return weight !== 0 ? weight : right.plantedIndex - left.plantedIndex;
+    }
+    /**
+     * 渲染伏笔账本的热上下文。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本；活跃条目超过上限时如实标注未展示数量
+     */
+    function renderAgentHooksLedger_ACU(snapshot) {
+        // 修订号必须放在首行：材料超长被截断时也不会丢失并发校验依据。
+        const head = `当前修订号=${snapshot.revisions.hooks}`;
+        const active = snapshot.hooks.filter(hook => !hook.retired);
+        if (!active.length)
+            return `${head}\n当前没有活跃伏笔。`;
+        const sorted = [...active].sort(compareHooks_ACU);
+        const shown = sorted.slice(0, AGENT_HOT_HOOK_LIMIT_ACU);
+        const lines = shown.map(hook => [
+            `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}`,
+            `  内容：${hook.summary}`,
+            hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
+        ].filter(Boolean).join('\n'));
+        const hidden = sorted.length - shown.length;
+        const tail = hidden > 0 ? `\n另有 ${hidden} 条活跃伏笔未进入本次热上下文，需要时请派工读取完整账本。` : '';
+        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}${tail}`);
+    }
+    /**
+     * 渲染认知与信息差时间线。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本，包含客观事实、读者已知、各角色知晓与揭示状态
+     */
+    function renderAgentInfoGap_ACU(snapshot) {
+        const head = `当前修订号=${snapshot.revisions.infoGap}`;
+        const active = snapshot.infoGap.filter(entry => !entry.retired);
+        if (!active.length)
+            return `${head}\n当前没有登记的信息差条目。`;
+        const lines = active.map(entry => [
+            `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}）`,
+            `  客观事实：${entry.objectiveFact || '（未登记）'}`,
+            `  读者已知：${entry.readerKnown || '（未登记）'}`,
+            entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
+        ].filter(Boolean).join('\n'));
+        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
+    }
+    /**
+     * 渲染长期约束清单。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本，每条包含约束内容与登记理由
+     */
+    function renderAgentConstraints_ACU(snapshot) {
+        const head = `当前修订号=${snapshot.revisions.constraints}`;
+        if (!snapshot.constraints.length)
+            return `${head}\n当前没有登记的长期约束。`;
+        const lines = snapshot.constraints.map(item => `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}`);
+        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
+    }
+    /** 总纲条目排序：全书方向永远在最前，其后按卷推进状态（active → planned → done）排列。 */
+    const STORY_ARC_STATUS_WEIGHTS_ACU = { active: 0, planned: 1, done: 2 };
+    function compareStoryArc_ACU(left, right) {
+        if (left.scope !== right.scope)
+            return left.scope === 'story' ? -1 : 1;
+        return (STORY_ARC_STATUS_WEIGHTS_ACU[left.status] ?? 3) - (STORY_ARC_STATUS_WEIGHTS_ACU[right.status] ?? 3);
+    }
+    function renderStoryArcEntry_ACU(entry) {
+        const head = entry.scope === 'story' ? '全书方向' : '卷台阶';
+        return [
+            `- [${entry.id}] ${head}「${entry.title}」状态=${entry.status}${entry.stageNumbers.length ? ` 已承载阶段=${entry.stageNumbers.join('、')}` : ' 尚未由任何阶段承载'}${entry.retired ? ' 已废止' : ''}`,
+            entry.narrativeRole ? `  结构职责：${entry.narrativeRole}` : '',
+            entry.targetStageRange ? `  阶段容量：${entry.targetStageRange.min}–${entry.targetStageRange.max} 个阶段` : '',
+            entry.targetTimeSpan ? `  故事时间目标：${entry.targetTimeSpan}` : '',
+            entry.direction ? `  方向：${entry.direction}` : '',
+            entry.escalation ? `  升级目标：${entry.escalation}` : '',
+            entry.progressCeiling ? `  主线进度上限：${entry.progressCeiling}` : '',
+            entry.sustainingThreads?.length ? `  持续经营线：${entry.sustainingThreads.join('；')}` : '',
+            entry.payoffTargets?.length ? `  兑现目标：${entry.payoffTargets.join('；')}` : '',
+            entry.withheld ? `  禁止提前翻的底牌：${entry.withheld}` : '',
+            entry.completionStageNumber === null ? '' : `  完成依据：第 ${entry.completionStageNumber} 阶段；卷末状态=${entry.completionState || '（未登记）'}`,
+            entry.completionRationale ? `  容量偏离说明：${entry.completionRationale}` : '',
+            entry.continuationRationale ? `  续卷依据：${entry.continuationRationale}` : '',
+            entry.retired && entry.retiredReason ? `  废止原因：${entry.retiredReason}` : '',
+        ].filter(Boolean).join('\n');
+    }
+    /**
+     * 判断总纲是否已经立起来。全部条目退役等价于没有总纲——门禁按活跃条目判定，
+     * 否则用户清空总纲后大纲派工会以为总纲还在。
+     * @param snapshot 当前快照
+     * @returns 存在任一活跃总纲条目时为 true
+     */
+    function hasActiveStoryArc_ACU(snapshot) {
+        return snapshot.storyArc.some(entry => !entry.retired);
+    }
+    /** 判断是否存在可承载下一份阶段大纲的活动卷。全书方向本身不是阶段规划目标。 */
+    function hasActiveStoryArcVolume_ACU(snapshot) {
+        return snapshot.storyArc.some(entry => (entry.scope === 'volume'
+            && !entry.retired
+            && entry.status === 'active'));
+    }
+    /**
+     * 找出已完成但没有登记进任何活跃 volume 条目 stageNumbers 的阶段编号。
+     * 这些阶段是总纲进度的空洞：卷台阶不知道自己已经被走过，后续判断「本卷该收了没」就没有依据。
+     * @param snapshot 当前快照
+     * @param completedStageNumbers 已完成的阶段编号
+     * @returns 未登记的阶段编号，升序去重
+     */
+    function findUnregisteredStageNumbers_ACU(snapshot, completedStageNumbers) {
+        const registered = new Set();
+        for (const entry of snapshot.storyArc) {
+            if (entry.retired)
+                continue;
+            for (const stageNumber of entry.stageNumbers)
+                registered.add(stageNumber);
+        }
+        return [...new Set(completedStageNumbers)].filter(stageNumber => !registered.has(stageNumber)).sort((left, right) => left - right);
+    }
+    /**
+     * 渲染活动卷给阶段规划与审查使用的集中上下文。
+     * 阶段承载与卷收束是两层事实：stageNumbers 是卷已承载的阶段，completedStageNumbers 才是正文已完成的阶段。
+     */
+    function renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers) {
+        const volumes = snapshot.storyArc.filter(entry => entry.scope === 'volume' && !entry.retired);
+        const active = volumes.filter(entry => entry.status === 'active');
+        const completed = new Set(completedStageNumbers);
+        if (!volumes.length)
+            return '【活动卷规划上下文】\n当前没有卷台阶；必须由 arc-architect 建立总纲后才能创建阶段大纲。';
+        if (!active.length) {
+            return '【活动卷规划上下文】\n所有既有卷均已完成。用户继续写作时，arc-architect 必须先根据最后一卷的结果、代价、关系变化或未解决问题在末尾追加一个 active 卷，再由 outline-architect 创建下一阶段大纲。';
+        }
+        if (active.length > 1)
+            return `【活动卷规划上下文】\n总纲状态无效：当前存在 ${active.length} 个 active 卷（${active.map(entry => entry.id).join('、')}），必须先由 arc-architect 修复。`;
+        const volume = active[0];
+        const completedCarriers = volume.stageNumbers.filter(stageNumber => completed.has(stageNumber));
+        const pendingCarriers = volume.stageNumbers.filter(stageNumber => !completed.has(stageNumber));
+        return [
+            '【活动卷规划上下文】',
+            `当前 active 卷：[${volume.id}]「${volume.title}」`,
+            `卷级结构职责：${volume.narrativeRole ?? '旧快照未标注'}`,
+            `目标阶段容量：${volume.targetStageRange ? `${volume.targetStageRange.min}–${volume.targetStageRange.max} 个阶段` : '旧快照未标注'}`,
+            `目标故事时间：${volume.targetTimeSpan || '旧快照未标注'}`,
+            `已承载阶段：${volume.stageNumbers.length ? volume.stageNumbers.join('、') : '（尚无）'}`,
+            `真实完成进度：${completedCarriers.length ? `已完成阶段 ${completedCarriers.join('、')}` : '尚未有已完成阶段'}${pendingCarriers.length ? `；已登记但尚未完成阶段 ${pendingCarriers.join('、')}` : ''}`,
+            `本阶段只承担本卷尚未完成的一段：${volume.direction}`,
+            `卷级收束条件：${volume.escalation}`,
+            `主线进度上限：${volume.progressCeiling || '旧快照未标注'}`,
+            `持续经营线：${volume.sustainingThreads?.length ? volume.sustainingThreads.join('；') : '旧快照未标注'}`,
+            `兑现目标：${volume.payoffTargets?.length ? volume.payoffTargets.join('；') : '旧快照未标注'}`,
+            `禁止提前释放：${volume.withheld || '（无额外底牌）'}`,
+        ].join('\n');
+    }
+    /**
+     * 渲染故事总纲的热上下文。
+     * @param snapshot 当前快照
+     * @param completedStageNumbers 已真实完成的阶段编号
+     * @returns 自然语言文本；总纲为空时明确指出必须先派工 arc-architect
+     */
+    function renderAgentStoryArc_ACU(snapshot, completedStageNumbers = []) {
+        const head = `当前修订号=${snapshot.revisions.storyArc}`;
+        const active = snapshot.storyArc.filter(entry => !entry.retired);
+        if (!active.length)
+            return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步，必须先派工 arc-architect 立总纲。`;
+        const sorted = [...active].sort(compareStoryArc_ACU);
+        return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`);
+    }
+    function renderHookFull_ACU(hook) {
+        return [
+            `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}${hook.retired ? ' 已退休' : ''}`,
+            `  内容：${hook.summary}`,
+            hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
+            hook.retired && hook.retiredReason ? `  退休原因：${hook.retiredReason}` : '',
+        ].filter(Boolean).join('\n');
+    }
+    function renderInfoGapFull_ACU(entry) {
+        return [
+            `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}${entry.retired ? '，已退休' : ''}）`,
+            `  客观事实：${entry.objectiveFact || '（未登记）'}`,
+            `  读者已知：${entry.readerKnown || '（未登记）'}`,
+            entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
+            entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
+        ].filter(Boolean).join('\n');
+    }
+    function renderConstraintFull_ACU(item) {
+        return `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}（登记楼层=${item.createdIndex}）`;
+    }
+    function renderModuleEntries_ACU(spec, ids) {
+        const head = `当前修订号=${spec.revision}`;
+        if (!ids || !ids.length) {
+            // 全量读默认只列活跃条目；退休条目可被搜索命中并按 ID 精读，避免全量视图被历史噪音撑大。
+            const active = spec.entries.filter(entry => entry.retired !== true);
+            const retiredCount = spec.entries.length - active.length;
+            if (!active.length)
+                return `${head}\n${spec.label}当前没有活跃条目。${retiredCount ? `另有 ${retiredCount} 条已退休条目，可用 search 命中后按 ID 精读。` : ''}`;
+            const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
+            return `${head}\n${spec.label}活跃条目 ${active.length} 条：\n${active.map(spec.render).join('\n')}${tail}`;
+        }
+        const wanted = ids.map(id => id.trim()).filter(Boolean);
+        const found = spec.entries.filter(entry => wanted.includes(entry.id));
+        const missing = wanted.filter(id => !spec.entries.some(entry => entry.id === id));
+        const lines = [head];
+        if (found.length)
+            lines.push(...found.map(spec.render));
+        if (missing.length)
+            lines.push(`以下 ID 不存在于${spec.label}：${missing.join('、')}。可先读全量或 search 确认可用 ID。`);
+        if (!found.length && !missing.length)
+            lines.push('未指定有效 ID。');
+        return lines.join('\n');
+    }
+    /**
+     * 按 ID 精读伏笔账本（含退休条目）；不传 ID 则输出全部活跃条目，支撑 `$HOOKS_LEDGER` / `$HOOKS_LEDGER:ID1,ID2`。
+     */
+    function renderAgentHooksByIds_ACU(snapshot, ids) {
+        return renderModuleEntries_ACU({ label: '伏笔账本', revision: snapshot.revisions.hooks, entries: snapshot.hooks, render: renderHookFull_ACU }, ids);
+    }
+    /**
+     * 按 ID 精读信息差时间线（含退休条目）；不传 ID 则输出全部活跃条目，支撑 `$INFO_GAP` / `$INFO_GAP:ID1,ID2`。
+     */
+    function renderAgentInfoGapByIds_ACU(snapshot, ids) {
+        return renderModuleEntries_ACU({ label: '信息差时间线', revision: snapshot.revisions.infoGap, entries: snapshot.infoGap, render: renderInfoGapFull_ACU }, ids);
+    }
+    /**
+     * 按 ID 精读长期约束；不传 ID 则输出全量，支撑 `$CONSTRAINTS` / `$CONSTRAINTS:ID1,ID2`。
+     */
+    function renderAgentConstraintsByIds_ACU(snapshot, ids) {
+        return renderModuleEntries_ACU({ label: '长期约束清单', revision: snapshot.revisions.constraints, entries: snapshot.constraints, render: renderConstraintFull_ACU }, ids);
+    }
+    /**
+     * 按 ID 精读故事总纲（含已废止条目）；不传 ID 则输出全部活跃条目，支撑 `$STORY_ARC` / `$STORY_ARC:ID1,ID2`。
+     */
+    function renderAgentStoryArcByIds_ACU(snapshot, ids, completedStageNumbers = []) {
+        const entries = renderModuleEntries_ACU({ label: '故事总纲', revision: snapshot.revisions.storyArc, entries: snapshot.storyArc, render: renderStoryArcEntry_ACU }, ids);
+        return ids?.length ? entries : `${entries}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`;
+    }
+    const CHRONOLOGY_PRECISION_LABELS_ACU = { exact: '精确', approximate: '近似', unknown: '未知' };
+    function renderChronologyEntry_ACU(entry) {
+        return [
+            `- [${entry.id}] 时间锚：${entry.anchor}（精度=${CHRONOLOGY_PRECISION_LABELS_ACU[entry.precision] ?? entry.precision}${entry.retired ? '，已作废' : ''}）`,
+            `  累计经过：${entry.elapsed}`,
+            `  时间转换：${entry.transition}`,
+            `  证据楼层：${entry.evidenceIndexes.join('、')}（结算楼层=${entry.updatedIndex}）`,
+            entry.retired && entry.retiredReason ? `  作废原因：${entry.retiredReason}` : '',
+        ].filter(Boolean).join('\n');
+    }
+    /** 年代学记录按结算次序展示：updatedIndex 相同（同一次结算多条转换）时保持登记顺序。 */
+    function sortChronology_ACU(entries) {
+        return [...entries].sort((left, right) => left.updatedIndex - right.updatedIndex);
+    }
+    /**
+     * 渲染故事年代学账本的热上下文。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本；空账本时明确说明时间事实只能由维护代理依据真实正文结算
+     */
+    function renderAgentChronology_ACU(snapshot) {
+        const head = `当前修订号=${snapshot.revisions.chronology}`;
+        const active = sortChronology_ACU(snapshot.chronology.filter(entry => !entry.retired));
+        const retiredCount = snapshot.chronology.length - active.length;
+        const retiredNote = retiredCount ? `\n另有 ${retiredCount} 条已作废记录未列出，可用 search 命中后按 ID 精读。` : '';
+        if (!active.length)
+            return `${head}\n当前没有已结算的故事时间记录。时间事实只能由结算维护代理依据真实正文登记；大纲里的时间字段是计划，不是事实。${retiredNote}`;
+        const latest = active[active.length - 1];
+        return truncateAgentBlock_ACU([
+            head,
+            `当前时间锚：${latest.anchor}（精度=${CHRONOLOGY_PRECISION_LABELS_ACU[latest.precision] ?? latest.precision}）；自故事起点累计经过：${latest.elapsed}。`,
+            ...active.map(renderChronologyEntry_ACU),
+        ].join('\n') + retiredNote);
+    }
+    /**
+     * 按 ID 精读故事年代学账本（含已作废条目）；不传 ID 则输出全部活跃条目，支撑 `$CHRONOLOGY` / `$CHRONOLOGY:ID1,ID2`。
+     */
+    function renderAgentChronologyByIds_ACU(snapshot, ids) {
+        return renderModuleEntries_ACU({ label: '故事年代学账本', revision: snapshot.revisions.chronology, entries: sortChronology_ACU(snapshot.chronology), render: renderChronologyEntry_ACU }, ids);
+    }
+    const WEB_REF_SOURCE_LABELS_ACU = {
+        moegirl: '萌娘百科',
+        wikipedia_zh: '中文维基',
+        wikipedia_en: '英文维基',
+        baidu: '百度百科',
+        web: '网页',
+    };
+    const WEB_REF_STATUS_LABELS_ACU = {
+        ok: '正常',
+        unavailable: '来源不可用',
+        blocked: '被拦截',
+    };
+    /** 唯一会进入预览上下文的资料形态：名称 + 一句话简介。 */
+    function renderWebRefPreview_ACU(entry) {
+        const flags = [
+            entry.tags.length ? entry.tags.join('/') : '',
+            entry.sourceStatus !== 'ok' ? WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus] : '',
+            entry.retired ? '已退休' : '',
+        ].filter(Boolean);
+        return `- [${entry.id}]「${entry.title}」${entry.brief || '（无简介）'}${flags.length ? `（${flags.join('；')}）` : ''}`;
+    }
+    /** 按 ID 查询时才给自由格式详情与来源；网页原文不会被保存。 */
+    function renderWebRefFull_ACU(entry) {
+        return [
+            `- [${entry.id}]「${entry.title}」来源=${WEB_REF_SOURCE_LABELS_ACU[entry.source]} 状态=${WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus]}${entry.retired ? ' 已退休' : ''}`,
+            `  简介：${entry.brief || '（无）'}`,
+            `  链接：${entry.url}`,
+            entry.query ? `  检索词：${entry.query}` : '',
+            entry.tags.length ? `  标签：${entry.tags.join('、')}` : '',
+            entry.summary ? `  详情：\n${entry.summary}` : '  详情：（未写）',
+            entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
+        ].filter(Boolean).join('\n');
+    }
+    /** 将所有活跃资料压成预览，供主 Agent 运行时快照注入。 */
+    function renderAgentWebRefsCatalog_ACU(snapshot, enabled) {
+        const active = snapshot.webRefs.filter(entry => !entry.retired);
+        if (!active.length) {
+            return enabled
+                ? '百科资料库为空。开场检索尚未产出条目，或来源均不可达；需要原作/公开设定时派工 web-researcher。'
+                : '百科资料库为空（网页检索功能未启用）。';
+        }
+        return truncateAgentBlock_ACU([
+            `百科资料库 ${active.length} 条（外部参考资料，非本故事已发生事实；与世界书或正文冲突时以后者为准）。下面只是名称与一句话简介，详情用 read $WEB_REFS:ID 精读：`,
+            ...active.map(renderWebRefPreview_ACU),
+        ].join('\n'));
+    }
+    /** 不传 ID 也只返回预览；按 ID 才返回详情。 */
+    function renderAgentWebRefsByIds_ACU(snapshot, ids) {
+        if (!ids || !ids.length) {
+            const head = `当前修订号=${snapshot.revisions.webRefs}`;
+            const active = snapshot.webRefs.filter(entry => !entry.retired);
+            const retiredCount = snapshot.webRefs.length - active.length;
+            const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
+            if (!active.length)
+                return `${head}\n百科资料库当前没有活跃条目。${tail}`;
+            return `${head}\n百科资料库活跃条目 ${active.length} 条（预览：名称 + 一句话简介；详情用 $WEB_REFS:ID 精读）：\n${active.map(renderWebRefPreview_ACU).join('\n')}${tail}`;
+        }
+        return renderModuleEntries_ACU({ label: '百科资料库', revision: snapshot.revisions.webRefs, entries: snapshot.webRefs, render: renderWebRefFull_ACU }, ids);
+    }
+
+    /**
+     * service/simulation/simulation-ledger-fold.ts — 世界推演账本的楼层增量折叠
+     *
+     * STATE 分桶的当前 swipe 条目从全量账本改为 checkpoint + delta。
+     * 读取按楼层顺序叠加；首楼 envelope.ledger 只是可重建缓存。
+     * 编年归档用同一模式。会话分段已经按楼层增量存储，不在这里改写。
+     */
+    const WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU = 2;
+    const ARRAY_MODULES_ACU = [
+        ['dimensions', 'id'],
+        ['seeds', 'id'],
+        ['actors', 'id'],
+        ['chronicle', 'id'],
+        ['rumors', 'id'],
+        ['chronicleOverview', 'fingerprint'],
+    ];
+    function isRecord_ACU$d(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function cloneJson_ACU$1(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function isAssistant_ACU(message) {
+        return isRecord_ACU$d(message) && message.is_user !== true && message.is_system !== true;
+    }
+    function bucketEntries_ACU(message, field) {
+        const raw = message[field];
+        if (!isRecord_ACU$d(raw) || raw.schemaVersion !== 1 || !isRecord_ACU$d(raw.entries))
+            return {};
+        return raw.entries;
+    }
+    function entryValue_ACU(message, field, anchor) {
+        if (!isRecord_ACU$d(message))
+            return undefined;
+        return bucketEntries_ACU(message, field)[buildWorldSimulationBucketKey_ACU(anchor)]?.value;
+    }
+    function writeEntry_ACU(message, field, anchor, value, updatedAt) {
+        const previous = message[field];
+        const entries = isRecord_ACU$d(previous) && previous.schemaVersion === 1 && isRecord_ACU$d(previous.entries)
+            ? { ...previous.entries }
+            : {};
+        entries[buildWorldSimulationBucketKey_ACU(anchor)] = { anchor: { ...anchor }, value, updatedAt };
+        message[field] = { schemaVersion: 1, entries };
+    }
+    function isLedgerValue_ACU(value) {
+        return isRecord_ACU$d(value) && value.schemaVersion === WORLD_LEDGER_SCHEMA_VERSION_ACU && Array.isArray(value.dimensions) && Array.isArray(value.pendingFixes);
+    }
+    function isLedgerFrame_ACU(value) {
+        return isRecord_ACU$d(value) && value.schemaVersion === WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU && Array.isArray(value.deltas);
+    }
+    function evidenceFromMaterials_ACU(message, anchor) {
+        const value = entryValue_ACU(message, WORLD_SIMULATION_MATERIALS_FIELD_ACU, anchor);
+        if (!isRecord_ACU$d(value) || !Array.isArray(value.evidenceRefs))
+            return null;
+        if (value.evidenceRefs.some(item => typeof item !== 'string' || !item.trim()))
+            return null;
+        return [...value.evidenceRefs];
+    }
+    function itemId_ACU(item, idKey) {
+        const id = item[idKey];
+        return typeof id === 'string' ? id : '';
+    }
+    function applyArrayModule_ACU(current, upserts, removed, idKey) {
+        const removedIds = new Set(removed ?? []);
+        const replacements = new Map();
+        for (const item of upserts ?? []) {
+            const id = itemId_ACU(item, idKey);
+            if (id)
+                replacements.set(id, item);
+        }
+        const next = [];
+        const seen = new Set();
+        for (const item of current) {
+            const id = itemId_ACU(item, idKey);
+            if (!id || removedIds.has(id))
+                continue;
+            if (replacements.has(id)) {
+                next.push(cloneJson_ACU$1(replacements.get(id)));
+                seen.add(id);
+            }
+            else
+                next.push(cloneJson_ACU$1(item));
+        }
+        for (const [id, item] of replacements) {
+            if (!seen.has(id) && !removedIds.has(id))
+                next.push(cloneJson_ACU$1(item));
+        }
+        return next;
+    }
+    function applyLedgerDelta_ACU(ledger, delta) {
+        const next = cloneJson_ACU$1(ledger);
+        for (const [moduleName, idKey] of ARRAY_MODULES_ACU) {
+            const current = next[moduleName];
+            next[moduleName] = applyArrayModule_ACU(current, delta.upserts[moduleName], delta.removedIds[moduleName], idKey);
+        }
+        if (delta.clock)
+            next.clock = cloneJson_ACU$1(delta.clock);
+        if (delta.player)
+            next.player = cloneJson_ACU$1(delta.player);
+        if (delta.guidance)
+            next.guidance = cloneJson_ACU$1(delta.guidance);
+        if (delta.pendingFixes)
+            next.pendingFixes = cloneJson_ACU$1(delta.pendingFixes);
+        next.revision = delta.revision;
+        return next;
+    }
+    function diffWorldSimulationLedger_ACU(before, after, evidenceRefs, updatedAt, seq) {
+        const upserts = {};
+        const removedIds = {};
+        let changed = before.revision !== after.revision;
+        for (const [moduleName, idKey] of ARRAY_MODULES_ACU) {
+            const previous = before[moduleName];
+            const nextItems = after[moduleName];
+            const previousById = new Map(previous.map(item => [itemId_ACU(item, idKey), item]));
+            const nextIds = new Set(nextItems.map(item => itemId_ACU(item, idKey)));
+            const moduleUpserts = nextItems.filter(item => {
+                const id = itemId_ACU(item, idKey);
+                const prior = previousById.get(id);
+                return !prior || JSON.stringify(prior) !== JSON.stringify(item);
+            });
+            const moduleRemoved = previous.map(item => itemId_ACU(item, idKey)).filter(id => id && !nextIds.has(id));
+            if (moduleUpserts.length) {
+                upserts[moduleName] = cloneJson_ACU$1(moduleUpserts);
+                changed = true;
+            }
+            if (moduleRemoved.length) {
+                removedIds[moduleName] = moduleRemoved;
+                changed = true;
+            }
+        }
+        const delta = { seq, revision: after.revision, upserts, removedIds, updatedAt };
+        if (JSON.stringify(before.clock) !== JSON.stringify(after.clock)) {
+            delta.clock = cloneJson_ACU$1(after.clock);
+            changed = true;
+        }
+        if (JSON.stringify(before.player) !== JSON.stringify(after.player)) {
+            delta.player = cloneJson_ACU$1(after.player);
+            changed = true;
+        }
+        if (JSON.stringify(before.guidance) !== JSON.stringify(after.guidance)) {
+            delta.guidance = cloneJson_ACU$1(after.guidance);
+            changed = true;
+        }
+        if (JSON.stringify(before.pendingFixes) !== JSON.stringify(after.pendingFixes)) {
+            delta.pendingFixes = cloneJson_ACU$1(after.pendingFixes);
+            changed = true;
+        }
+        if (evidenceRefs) {
+            delta.evidenceRefs = [...evidenceRefs];
+            changed = true;
+        }
+        return changed ? delta : null;
+    }
+    function maxLedgerSeq_ACU(chat) {
+        let max = 0;
+        for (const message of chat) {
+            if (!isRecord_ACU$d(message))
+                continue;
+            for (const entry of Object.values(bucketEntries_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1))) {
+                if (!isLedgerFrame_ACU(entry.value))
+                    continue;
+                for (const delta of entry.value.deltas)
+                    max = Math.max(max, delta.seq);
+            }
+        }
+        return max;
+    }
+    function foldWorldSimulationLedger_ACU(chat, throughIndex = chat.length - 1) {
+        let ledger = null;
+        let evidenceRefs = [];
+        let updatedAt = 0;
+        let checkpointIndex = null;
+        let foldedDeltaCount = 0;
+        let lastContributedIndex = null;
+        const contributedIndexes = [];
+        const end = Math.min(throughIndex, chat.length - 1);
+        for (let index = 0; index <= end; index += 1) {
+            const message = chat[index];
+            if (!isAssistant_ACU(message))
+                continue;
+            let anchor;
+            try {
+                anchor = resolveWorldSimulationAnchor_ACU(index, chat);
+            }
+            catch {
+                continue;
+            }
+            const value = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor);
+            if (isLedgerValue_ACU(value)) {
+                ledger = validateWorldSimulationLedger_ACU(value, 'load');
+                checkpointIndex = index;
+                foldedDeltaCount = 0;
+                lastContributedIndex = index;
+                contributedIndexes.push(index);
+                const materialsEvidence = evidenceFromMaterials_ACU(message, anchor);
+                if (materialsEvidence)
+                    evidenceRefs = materialsEvidence;
+                continue;
+            }
+            if (!isLedgerFrame_ACU(value))
+                continue;
+            let touched = false;
+            if (value.checkpoint) {
+                ledger = validateWorldSimulationLedger_ACU(value.checkpoint, 'load');
+                checkpointIndex = index;
+                foldedDeltaCount = 0;
+                touched = true;
+            }
+            for (const delta of [...value.deltas].sort((left, right) => left.seq - right.seq)) {
+                if (!ledger)
+                    continue;
+                ledger = validateWorldSimulationLedger_ACU(applyLedgerDelta_ACU(ledger, delta), 'load');
+                foldedDeltaCount += 1;
+                touched = true;
+                if (delta.evidenceRefs)
+                    evidenceRefs = [...delta.evidenceRefs];
+                updatedAt = delta.updatedAt;
+            }
+            if (touched) {
+                lastContributedIndex = index;
+                contributedIndexes.push(index);
+            }
+        }
+        if (!ledger)
+            return null;
+        return { ledger, evidenceRefs, updatedAt, checkpointIndex, foldedDeltaCount, lastContributedIndex, contributedIndexes };
+    }
+    function isArchiveSnapshot_ACU(value) {
+        return isRecord_ACU$d(value) && value.schemaVersion === 1 && isRecord_ACU$d(value.records);
+    }
+    function isArchiveFrame_ACU(value) {
+        return isRecord_ACU$d(value) && value.schemaVersion === WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU && Array.isArray(value.deltas);
+    }
+    function foldWorldSimulationArchive_ACU(chat, throughIndex = chat.length - 1) {
+        let records = {};
+        let checkpointIndex = null;
+        const end = Math.min(throughIndex, chat.length - 1);
+        for (let index = 0; index <= end; index += 1) {
+            const message = chat[index];
+            if (!isAssistant_ACU(message))
+                continue;
+            let anchor;
+            try {
+                anchor = resolveWorldSimulationAnchor_ACU(index, chat);
+            }
+            catch {
+                continue;
+            }
+            const value = entryValue_ACU(message, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, anchor);
+            if (isArchiveSnapshot_ACU(value)) {
+                records = { ...validateWorldSimulationChronicleArchiveSnapshot_ACU(value, 'load').records };
+                checkpointIndex = index;
+                continue;
+            }
+            if (!isArchiveFrame_ACU(value))
+                continue;
+            if (value.checkpoint) {
+                records = { ...validateWorldSimulationChronicleArchiveSnapshot_ACU(value.checkpoint, 'load').records };
+                checkpointIndex = index;
+            }
+            for (const delta of [...value.deltas].sort((left, right) => left.seq - right.seq)) {
+                records = { ...records, ...delta.records };
+            }
+        }
+        return { snapshot: { schemaVersion: 1, records }, checkpointIndex };
+    }
+    function clearActiveLedgerCheckpoints_ACU(chat) {
+        for (let index = 0; index < chat.length; index += 1) {
+            const message = chat[index];
+            if (!isAssistant_ACU(message) || !isRecord_ACU$d(message))
+                continue;
+            let anchor;
+            try {
+                anchor = resolveWorldSimulationAnchor_ACU(index, chat);
+            }
+            catch {
+                continue;
+            }
+            const value = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor);
+            if (!isLedgerFrame_ACU(value) || !value.checkpoint)
+                continue;
+            writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor, {
+                schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                deltas: value.deltas,
+            }, Date.now());
+        }
+    }
+    function appendWorldSimulationCommitChain_ACU(input) {
+        const message = input.chat[input.messageIndex];
+        if (!isRecord_ACU$d(message))
+            return;
+        const seq = maxLedgerSeq_ACU(input.chat) + 1;
+        const delta = diffWorldSimulationLedger_ACU(input.beforeLedger, input.nextLedger, input.evidenceRefs, input.updatedAt, seq);
+        const baselineFloor = input.checkpointIndex ?? ensureWorldSimulationBaselineFloor_ACU(input.chat, input.messageIndex);
+        let baselineAnchor = null;
+        if (baselineFloor !== null && baselineFloor !== input.messageIndex && isRecord_ACU$d(input.chat[baselineFloor])) {
+            try {
+                baselineAnchor = resolveWorldSimulationAnchor_ACU(baselineFloor, input.chat);
+            }
+            catch {
+                baselineAnchor = null;
+            }
+        }
+        const installCheckpoint = baselineAnchor === null;
+        if (baselineAnchor && baselineFloor !== null) {
+            const baselineMessage = input.chat[baselineFloor];
+            writeEntry_ACU(baselineMessage, WORLD_SIMULATION_STATE_FIELD_ACU$1, baselineAnchor, {
+                schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                checkpoint: cloneJson_ACU$1(input.beforeLedger),
+                deltas: [],
+            }, input.updatedAt);
+            writeEntry_ACU(baselineMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, baselineAnchor, {
+                schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                checkpoint: cloneJson_ACU$1(input.beforeArchive),
+                deltas: [],
+            }, input.updatedAt);
+        }
+        if (installCheckpoint) {
+            clearActiveLedgerCheckpoints_ACU(input.chat);
+            const frame = {
+                schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                checkpoint: cloneJson_ACU$1(delta ? input.beforeLedger : input.nextLedger),
+                deltas: delta ? [delta] : [],
+            };
+            writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, input.anchor, frame, input.updatedAt);
+        }
+        else if (delta) {
+            const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, input.anchor);
+            const frame = isLedgerFrame_ACU(current)
+                ? {
+                    schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                    ...(current.checkpoint ? { checkpoint: current.checkpoint } : {}),
+                    deltas: [...current.deltas, delta],
+                }
+                : { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, deltas: [delta] };
+            writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, input.anchor, frame, input.updatedAt);
+        }
+        const changedRecords = {};
+        for (const [archiveRef, record] of Object.entries(input.nextArchive.records)) {
+            if (JSON.stringify(input.beforeArchive.records[archiveRef]) !== JSON.stringify(record))
+                changedRecords[archiveRef] = record;
+        }
+        const archiveValue = entryValue_ACU(message, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, input.anchor);
+        const archiveFrame = isArchiveFrame_ACU(archiveValue)
+            ? {
+                schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                ...(archiveValue.checkpoint ? { checkpoint: archiveValue.checkpoint } : {}),
+                deltas: [...archiveValue.deltas],
+            }
+            : { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, deltas: [] };
+        if (installCheckpoint) {
+            archiveFrame.checkpoint = cloneJson_ACU$1(Object.keys(changedRecords).length ? input.beforeArchive : input.nextArchive);
+            archiveFrame.deltas = Object.keys(changedRecords).length ? [{ seq, records: changedRecords }] : [];
+        }
+        else if (Object.keys(changedRecords).length) {
+            archiveFrame.deltas = [...archiveFrame.deltas, { seq, records: changedRecords }];
+        }
+        else {
+            return;
+        }
+        writeEntry_ACU(message, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, input.anchor, archiveFrame, input.updatedAt);
+    }
+    function relocateWorldSimulationCheckpoint_ACU(chat, anchorIndex) {
+        if (!Number.isInteger(anchorIndex) || anchorIndex < 0 || !isAssistant_ACU(chat[anchorIndex]))
+            return false;
+        const folded = foldWorldSimulationLedger_ACU(chat, anchorIndex);
+        if (!folded)
+            return false;
+        let anchor;
+        try {
+            anchor = resolveWorldSimulationAnchor_ACU(anchorIndex, chat);
+        }
+        catch {
+            return false;
+        }
+        for (let index = 0; index <= anchorIndex; index += 1) {
+            const message = chat[index];
+            if (!isAssistant_ACU(message) || !isRecord_ACU$d(message))
+                continue;
+            let current;
+            try {
+                current = resolveWorldSimulationAnchor_ACU(index, chat);
+            }
+            catch {
+                continue;
+            }
+            const value = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, current);
+            if (!isLedgerFrame_ACU(value))
+                continue;
+            writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, current, {
+                schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+                deltas: index < anchorIndex ? [] : value.deltas,
+            }, Date.now());
+        }
+        writeEntry_ACU(chat[anchorIndex], WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor, {
+            schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+            checkpoint: cloneJson_ACU$1(folded.ledger),
+            deltas: [],
+        }, folded.updatedAt || Date.now());
+        return true;
+    }
+    function readFoldedWorldSimulationLedgerForEnvelope_ACU(envelope, chat) {
+        const folded = foldWorldSimulationLedger_ACU(chat);
+        if (!folded)
+            return envelope;
+        return { ...envelope, ledger: folded.ledger };
+    }
+    function simulationLedgerCheckpointArtifact_ACU(message) {
+        if (!isRecord_ACU$d(message))
+            return null;
+        for (const entry of Object.values(bucketEntries_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1))) {
+            if (!entry.anchor)
+                continue;
+            if (isLedgerFrame_ACU(entry.value) && entry.value.checkpoint) {
+                return { anchor: cloneJson_ACU$1(entry.anchor), ledger: cloneJson_ACU$1(entry.value.checkpoint) };
+            }
+            if (isLedgerValue_ACU(entry.value)) {
+                return { anchor: cloneJson_ACU$1(entry.anchor), ledger: cloneJson_ACU$1(entry.value) };
+            }
+        }
+        return null;
+    }
+    function graftSimulationLedgerCheckpoint_ACU(chat, message, artifact) {
+        if (!isRecord_ACU$d(message))
+            return false;
+        const index = chat.indexOf(message);
+        if (index < 0)
+            return false;
+        let anchor;
+        try {
+            anchor = resolveWorldSimulationAnchor_ACU(index, chat);
+        }
+        catch {
+            return false;
+        }
+        const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor);
+        if ((isLedgerFrame_ACU(current) && current.checkpoint) || isLedgerValue_ACU(current))
+            return false;
+        const frame = isLedgerFrame_ACU(current)
+            ? { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, checkpoint: cloneJson_ACU$1(artifact.ledger), deltas: current.deltas }
+            : { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, checkpoint: cloneJson_ACU$1(artifact.ledger), deltas: [] };
+        writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor, frame, Date.now());
+        return true;
+    }
+    function assertSingleActiveSimulationCheckpoint_ACU(chat) {
+        let seen = null;
+        for (let index = 0; index < chat.length; index += 1) {
+            const message = chat[index];
+            if (!isAssistant_ACU(message))
+                continue;
+            let anchor;
+            try {
+                anchor = resolveWorldSimulationAnchor_ACU(index, chat);
+            }
+            catch {
+                continue;
+            }
+            const value = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor);
+            const active = (isLedgerFrame_ACU(value) && !!value.checkpoint) || isLedgerValue_ACU(value);
+            if (!active)
+                continue;
+            if (seen !== null)
+                return `世界推演账本存在多个活跃基线：楼层 ${seen} 与 ${index}`;
+            seen = index;
+        }
+        return null;
+    }
+    function ensureWorldSimulationBaselineFloor_ACU(chat, latestAiIndex) {
+        const tableAnchor = findLatestTableFullCheckpointIndex_ACU(chat);
+        if (tableAnchor !== null && isAssistant_ACU(chat[tableAnchor]))
+            return tableAnchor;
+        if (latestAiIndex >= 0 && isAssistant_ACU(chat[latestAiIndex]))
+            return latestAiIndex;
+        return null;
+    }
+    registerWorldSimulationLedgerOverlay_ACU((envelope, chat) => readFoldedWorldSimulationLedgerForEnvelope_ACU(envelope, chat));
+
+    /**
+     * service/continuation/agent/agent-checkpoint-scheduler.ts — 续写/推演基线跟随表格落层
+     *
+     * 缓冲层数与 periodic 步长直接引用 chat-service 的现常量，retainRecentLayers 每次读取 settings。
+     * 不在这里复制一份节奏参数。
+     */
+    /** 表格当前生效的 checkpoint 节奏。缓冲与步长是 chat-service 的常量本身，不是副本。 */
+    function readTableCheckpointCadence_ACU() {
+        return {
+            retainRecentLayers: settings_ACU.retainRecentLayers || 0,
+            bufferLayers: RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU,
+            periodicStepLayers: PERIODIC_V2_FULL_CHECKPOINT_ROLL_STEP_AI_LAYERS_ACU,
+        };
+    }
+    function syncMaterialBaselinesToTableFloor_ACU(chat, anchorIndex) {
+        relocateContinuationCheckpoint_ACU(chat, anchorIndex, agentModuleFrameDeps_ACU());
+        relocateWorldSimulationCheckpoint_ACU(chat, anchorIndex);
+    }
+    let installed_ACU = false;
+    function installMaterialCheckpointScheduler_ACU() {
+        if (installed_ACU)
+            return;
+        installed_ACU = true;
+        registerMaterialCheckpointFloorSync_ACU(syncMaterialBaselinesToTableFloor_ACU);
+        const deps = agentModuleFrameDeps_ACU();
+        registerMaterialCheckpointRecoveryAdapter_ACU({
+            capture(message) {
+                const continuation = continuationCheckpointArtifact_ACU(message, deps);
+                const simulation = simulationLedgerCheckpointArtifact_ACU(message);
+                if (!continuation && !simulation)
+                    return null;
+                return { continuation, simulation };
+            },
+            graftContinuation(message, artifact) {
+                return graftContinuationCheckpoint_ACU(message, artifact, deps);
+            },
+            graftSimulation(chat, message, artifact) {
+                return graftSimulationLedgerCheckpoint_ACU(chat, message, artifact);
+            },
+            assertContinuation(chat) {
+                return assertSingleActiveContinuationCheckpoint_ACU(chat, deps);
+            },
+            assertSimulation(chat) {
+                return assertSingleActiveSimulationCheckpoint_ACU(chat);
+            },
+        });
+    }
+    installMaterialCheckpointScheduler_ACU();
 
     /**
      * service/plot/plot-orchestrator.ts — 剧情推进编排逻辑（service 层：纯业务决策）
@@ -143273,9 +145618,9 @@ Expected function or array of functions, received type ${typeof value}.`
             return null;
         const aiCount = countAiMessages_ACU(chat);
         const last = chat[chat.length - 1];
-        if (aiCount === capture.capturedAiFloorCount + 1 && isAiMessage_ACU(last))
+        if (aiCount === capture.capturedAiFloorCount + 1 && isAiMessage_ACU$1(last))
             return 'regenerate';
-        if (aiCount === capture.capturedAiFloorCount && !isAiMessage_ACU(last))
+        if (aiCount === capture.capturedAiFloorCount && !isAiMessage_ACU$1(last))
             return 'generate';
         return null;
     }
@@ -143297,6 +145642,7 @@ Expected function or array of functions, received type ${typeof value}.`
         finalReviewer: 4096,
         webResearcher: 8192,
         requirementsMaintainer: 4096,
+        instructionComposer: 4096,
     };
     /**
      * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
@@ -144496,7 +146842,7 @@ Expected function or array of functions, received type ${typeof value}.`
         turn: '【新的一轮】',
         handoff: '【早期会话交接报告】',
     };
-    function isRecord_ACU$d(value) {
+    function isRecord_ACU$c(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function isKind_ACU(value) {
@@ -144511,7 +146857,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { schemaVersion: AGENT_CONVERSATION_SCHEMA_VERSION_ACU, nextId: 1, updatedAt: 0, messages: [] };
     }
     function validateMessage_ACU$1(raw) {
-        if (!isRecord_ACU$d(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         if (!isKind_ACU(raw.kind))
             return null;
@@ -144539,7 +146885,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * @returns 合法快照或 null
      */
     function validateAgentConversationSnapshot_ACU(raw) {
-        if (!isRecord_ACU$d(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         if (raw.schemaVersion !== AGENT_CONVERSATION_SCHEMA_VERSION_ACU)
             return null;
@@ -144568,7 +146914,7 @@ Expected function or array of functions, received type ${typeof value}.`
             && Object.keys(raw).every(key => allowed.has(key));
     }
     function validateCompactionMark_ACU(raw) {
-        if (!isRecord_ACU$d(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         const compactedThroughId = typeof raw.compactedThroughId === 'number' && Number.isInteger(raw.compactedThroughId) && raw.compactedThroughId > 0 ? raw.compactedThroughId : 0;
         const report = typeof raw.report === 'string' ? raw.report : '';
@@ -144579,7 +146925,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // V1 是已经写入聊天记录的历史格式；兼容读取，直到下一次成功压缩才升级。
             return { compactedThroughId, report, at };
         }
-        if (raw.schemaVersion !== 2 || !isRecord_ACU$d(raw.summaryState) || !isRecord_ACU$d(raw.metrics))
+        if (raw.schemaVersion !== 2 || !isRecord_ACU$c(raw.summaryState) || !isRecord_ACU$c(raw.metrics))
             return null;
         const state = raw.summaryState;
         const stateKeys = ['currentGoal', 'effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
@@ -144650,7 +146996,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * @returns 合法段记录或 null
      */
     function validateAgentConversationFloorRecord_ACU(raw) {
-        if (!isRecord_ACU$d(raw))
+        if (!isRecord_ACU$c(raw))
             return null;
         if (raw.schemaVersion !== AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU)
             return null;
@@ -145021,880 +147367,6 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
-     * service/continuation/agent/agent-module-store.ts — 楼层锚定的叙事资料快照存储
-     *
-     * 存储策略：全量快照写入被结算范围最后一楼的独立字段，读取时从尾向前找最近的合法快照。
-     * 删楼、Swipe、编辑替换都会让该楼层连同快照一起消失，资料自动回退到上一个快照，
-     * 因此这里不需要任何失效协调机制。
-     */
-    const IMPORTANCE_WEIGHTS_ACU = { high: 3, mid: 2, low: 1 };
-    function isRecord_ACU$c(value) {
-        return value !== null && typeof value === 'object' && !Array.isArray(value);
-    }
-    function readText_ACU$1(value) {
-        return typeof value === 'string' ? value : '';
-    }
-    function readIndex_ACU(value) {
-        return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : -1;
-    }
-    function readEnum_ACU(value, allowed, fallback) {
-        return typeof value === 'string' && allowed.includes(value) ? value : fallback;
-    }
-    function buildEmptyAgentModuleSnapshot_ACU() {
-        return {
-            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-            settledThroughIndex: -1,
-            updatedAt: 0,
-            revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0, chronology: 0, webRefs: 0, userRequirements: 0 },
-            hooks: [],
-            infoGap: [],
-            constraints: [],
-            storyArc: [],
-            chronology: [],
-            webRefs: [],
-            userRequirements: [],
-        };
-    }
-    /** 证据楼层列表：只接受非负整数，去重后升序。是否越过结算水位由事务层校验。 */
-    function normalizeEvidenceIndexes_ACU(value) {
-        if (!Array.isArray(value))
-            return null;
-        const indexes = [];
-        for (const item of value) {
-            if (typeof item !== 'number' || !Number.isInteger(item) || item < 0)
-                return null;
-            indexes.push(item);
-        }
-        return [...new Set(indexes)].sort((left, right) => left - right);
-    }
-    /** 阶段编号列表：只接受正整数，去重后升序。乱序或重复是模型回写进度时的常见噪音。 */
-    function normalizeStageNumbers_ACU(value) {
-        if (!Array.isArray(value))
-            return [];
-        const numbers = value.filter((item) => typeof item === 'number' && Number.isInteger(item) && item >= 1);
-        return [...new Set(numbers)].sort((left, right) => left - right);
-    }
-    function validateHookEntry_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const summary = readText_ACU$1(raw.summary).trim();
-        if (!id || !summary)
-            return null;
-        return {
-            id,
-            summary,
-            status: readEnum_ACU(raw.status, AGENT_HOOK_STATUSES_ACU, 'planted'),
-            importance: readEnum_ACU(raw.importance, AGENT_HOOK_IMPORTANCES_ACU, 'mid'),
-            plantedIndex: readIndex_ACU(raw.plantedIndex),
-            updatedIndex: readIndex_ACU(raw.updatedIndex),
-            plannedPayoff: readText_ACU$1(raw.plannedPayoff),
-            retired: raw.retired === true,
-            retiredReason: readText_ACU$1(raw.retiredReason),
-        };
-    }
-    function validateInfoGapEntry_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const topic = readText_ACU$1(raw.topic).trim();
-        if (!id || !topic)
-            return null;
-        const knowledge = Array.isArray(raw.characterKnowledge) ? raw.characterKnowledge : [];
-        const revealStatus = readEnum_ACU(raw.revealStatus, AGENT_REVEAL_STATUSES_ACU, 'unrevealed');
-        const revealIndex = readIndex_ACU(raw.revealIndex);
-        return {
-            id,
-            topic,
-            objectiveFact: readText_ACU$1(raw.objectiveFact),
-            readerKnown: readText_ACU$1(raw.readerKnown),
-            characterKnowledge: knowledge.flatMap(item => {
-                if (!isRecord_ACU$c(item))
-                    return [];
-                const name = readText_ACU$1(item.name).trim();
-                return name ? [{ name, knows: readText_ACU$1(item.knows) }] : [];
-            }),
-            revealStatus,
-            // 未揭示的条目不允许携带揭示楼层，这是模型把计划写成事实的典型症状。
-            revealIndex: revealStatus === 'unrevealed' || revealIndex < 0 ? null : revealIndex,
-            retired: raw.retired === true,
-            retiredReason: readText_ACU$1(raw.retiredReason),
-        };
-    }
-    function readOptionalStoryArcText_ACU(raw, key) {
-        if (!Object.prototype.hasOwnProperty.call(raw, key))
-            return undefined;
-        return typeof raw[key] === 'string' ? raw[key].trim() : null;
-    }
-    function readOptionalStoryArcTextList_ACU(raw, key) {
-        if (!Object.prototype.hasOwnProperty.call(raw, key))
-            return undefined;
-        const value = raw[key];
-        if (!Array.isArray(value))
-            return null;
-        const normalized = [];
-        for (const item of value) {
-            if (typeof item !== 'string' || !item.trim())
-                return null;
-            normalized.push(item.trim());
-        }
-        return normalized;
-    }
-    function readOptionalTargetStageRange_ACU(raw) {
-        if (!Object.prototype.hasOwnProperty.call(raw, 'targetStageRange'))
-            return undefined;
-        const value = raw.targetStageRange;
-        if (!isRecord_ACU$c(value))
-            return null;
-        const { min, max } = value;
-        if (!Number.isInteger(min) || min < 1 || !Number.isInteger(max) || max < 1 || min > max)
-            return null;
-        return { min: min, max: max };
-    }
-    function validateStoryArcEntry_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const title = readText_ACU$1(raw.title).trim();
-        if (!id || !title)
-            return null;
-        const narrativeRole = Object.prototype.hasOwnProperty.call(raw, 'narrativeRole')
-            ? readEnum_ACU(raw.narrativeRole, AGENT_VOLUME_NARRATIVE_ROLES_ACU, '')
-            : undefined;
-        const targetStageRange = readOptionalTargetStageRange_ACU(raw);
-        const targetTimeSpan = readOptionalStoryArcText_ACU(raw, 'targetTimeSpan');
-        const progressCeiling = readOptionalStoryArcText_ACU(raw, 'progressCeiling');
-        const sustainingThreads = readOptionalStoryArcTextList_ACU(raw, 'sustainingThreads');
-        const payoffTargets = readOptionalStoryArcTextList_ACU(raw, 'payoffTargets');
-        const completionRationale = readOptionalStoryArcText_ACU(raw, 'completionRationale');
-        if (narrativeRole === '' || targetStageRange === null || targetTimeSpan === null || progressCeiling === null || sustainingThreads === null || payoffTargets === null || completionRationale === null)
-            return null;
-        return {
-            id,
-            scope: readEnum_ACU(raw.scope, AGENT_STORY_ARC_SCOPES_ACU, 'volume'),
-            title,
-            direction: readText_ACU$1(raw.direction),
-            escalation: readText_ACU$1(raw.escalation),
-            withheld: readText_ACU$1(raw.withheld),
-            status: readEnum_ACU(raw.status, AGENT_STORY_ARC_STATUSES_ACU, 'planned'),
-            stageNumbers: normalizeStageNumbers_ACU(raw.stageNumbers),
-            completionStageNumber: typeof raw.completionStageNumber === 'number' && Number.isInteger(raw.completionStageNumber) && raw.completionStageNumber >= 1 ? raw.completionStageNumber : null,
-            completionState: readText_ACU$1(raw.completionState),
-            continuationRationale: readText_ACU$1(raw.continuationRationale),
-            narrativeRole: narrativeRole,
-            targetStageRange,
-            targetTimeSpan,
-            progressCeiling,
-            sustainingThreads,
-            payoffTargets,
-            completionRationale,
-            retired: raw.retired === true,
-            retiredReason: readText_ACU$1(raw.retiredReason),
-        };
-    }
-    /**
-     * 严格校验一条持久化的年代学记录。chronology 是 P3 才引入的字段：旧快照根本没有它，
-     * 因此不存在「宽容旧形态」的需要——字段一旦出现就必须结构完整，坏条目不做静默降级。
-     */
-    function validateChronologyEntry_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const anchor = readText_ACU$1(raw.anchor).trim();
-        const elapsed = readText_ACU$1(raw.elapsed).trim();
-        const transition = readText_ACU$1(raw.transition).trim();
-        if (!id || !anchor || !elapsed || !transition)
-            return null;
-        const precision = typeof raw.precision === 'string' && AGENT_CHRONOLOGY_PRECISIONS_ACU.includes(raw.precision) ? raw.precision : null;
-        if (!precision)
-            return null;
-        const evidenceIndexes = normalizeEvidenceIndexes_ACU(raw.evidenceIndexes);
-        if (!evidenceIndexes || !evidenceIndexes.length)
-            return null;
-        const updatedIndex = readIndex_ACU(raw.updatedIndex);
-        if (updatedIndex < 0)
-            return null;
-        const retired = raw.retired === true;
-        const retiredReason = readText_ACU$1(raw.retiredReason);
-        if (retired && !retiredReason.trim())
-            return null;
-        return {
-            id,
-            anchor,
-            elapsed,
-            precision: precision,
-            transition,
-            evidenceIndexes,
-            updatedIndex,
-            retired,
-            retiredReason,
-        };
-    }
-    /** 取一段文本的首句，用作旧条目缺失 brief 时的兼容兜底。 */
-    function firstSentence_ACU(text) {
-        const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
-        if (!flat)
-            return '';
-        const cut = flat.split(/(?<=[。！？!?\.])\s*|\n/)[0] ?? flat;
-        return cut.length > 80 ? `${cut.slice(0, 80)}…` : cut;
-    }
-    /**
-     * 校验一条资料库记录。固定内容是 title 与 brief；summary 为可空的自由格式详情。
-     * 旧条目的 extract 字段故意不读取：升级后不再让网页原文继续扩张聊天快照。
-     */
-    function validateWebRefEntry_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const title = readText_ACU$1(raw.title).trim();
-        const url = readText_ACU$1(raw.url).trim();
-        if (!id || !title || !url)
-            return null;
-        const tags = Array.isArray(raw.tags)
-            ? raw.tags.filter((item) => typeof item === 'string' && !!item.trim()).map(item => item.trim())
-            : [];
-        return {
-            id,
-            title,
-            source: readEnum_ACU(raw.source, AGENT_WEB_REF_SOURCES_ACU, 'web'),
-            url,
-            query: readText_ACU$1(raw.query),
-            tags,
-            brief: readText_ACU$1(raw.brief).trim() || firstSentence_ACU(readText_ACU$1(raw.summary)),
-            summary: readText_ACU$1(raw.summary),
-            sourceStatus: readEnum_ACU(raw.sourceStatus, AGENT_WEB_REF_STATUSES_ACU, 'unavailable'),
-            fetchedAt: typeof raw.fetchedAt === 'number' && raw.fetchedAt >= 0 ? raw.fetchedAt : 0,
-            retired: raw.retired === true,
-            retiredReason: readText_ACU$1(raw.retiredReason),
-        };
-    }
-    function validateConstraintEntry_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const text = readText_ACU$1(raw.text).trim();
-        if (!id || !text)
-            return null;
-        return { id, text, reason: readText_ACU$1(raw.reason), createdIndex: readIndex_ACU(raw.createdIndex) };
-    }
-    function validateUserRequirementLine_ACU(raw) {
-        if (typeof raw !== 'string')
-            return null;
-        const text = raw.trim();
-        return text ? text : null;
-    }
-    /**
-     * 校验一份持久化快照。非法返回 null 而不抛错，让读取端可以继续向前寻找上一个合法快照，
-     * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
-     */
-    function validateAgentModuleSnapshot_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
-            return null;
-        if (!isRecord_ACU$c(raw.revisions))
-            return null;
-        if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints))
-            return null;
-        const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
-        if (settledThroughIndex < 0)
-            return null;
-        // storyArc 晚于前三个模块加入，存量楼层的快照里没有这个键。写成必需会让全部历史快照
-        // 被判非法、资料静默回退成空，因此这里按「有则校验、无则空数组」处理。
-        const storyArc = Array.isArray(raw.storyArc) ? raw.storyArc : [];
-        const validatedStoryArc = storyArc.map(validateStoryArcEntry_ACU);
-        // 总纲条目不能像普通搜索命中一样被悄悄过滤；任一结构损坏都应让读取端回退上一份完整快照。
-        if (validatedStoryArc.some(entry => entry === null))
-            return null;
-        // chronology 同样后于早期快照加入：缺字段兼容为空账本；但字段一旦存在就必须整体合法——
-        // 时间事实被静默过滤比暂时回退旧快照更危险（后续结算会基于错误的时间线登记新事实）。
-        if (Object.prototype.hasOwnProperty.call(raw, 'chronology') && !Array.isArray(raw.chronology))
-            return null;
-        const chronology = Array.isArray(raw.chronology) ? raw.chronology : [];
-        const validatedChronology = chronology.map(validateChronologyEntry_ACU);
-        if (validatedChronology.some(entry => entry === null))
-            return null;
-        if (Object.prototype.hasOwnProperty.call(raw, 'webRefs') && !Array.isArray(raw.webRefs))
-            return null;
-        const webRefs = Array.isArray(raw.webRefs) ? raw.webRefs : [];
-        // userRequirements 晚于早期快照加入：缺字段兼容为空清单；字段一旦存在就必须是字符串数组，
-        // 且每条 trim 后非空——静默丢掉用户要求比暂时回退旧快照更危险。
-        if (Object.prototype.hasOwnProperty.call(raw, 'userRequirements') && !Array.isArray(raw.userRequirements))
-            return null;
-        const userRequirementsRaw = Array.isArray(raw.userRequirements) ? raw.userRequirements : [];
-        const validatedUserRequirements = userRequirementsRaw.map(validateUserRequirementLine_ACU);
-        if (validatedUserRequirements.some(entry => entry === null))
-            return null;
-        return {
-            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-            settledThroughIndex,
-            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
-            revisions: {
-                hooks: Math.max(0, readIndex_ACU(raw.revisions.hooks)),
-                infoGap: Math.max(0, readIndex_ACU(raw.revisions.infoGap)),
-                constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
-                storyArc: Math.max(0, readIndex_ACU(raw.revisions.storyArc)),
-                chronology: Math.max(0, readIndex_ACU(raw.revisions.chronology)),
-                webRefs: Math.max(0, readIndex_ACU(raw.revisions.webRefs)),
-                userRequirements: Math.max(0, readIndex_ACU(raw.revisions.userRequirements)),
-            },
-            hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
-            infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
-            constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
-            storyArc: validatedStoryArc,
-            chronology: validatedChronology,
-            webRefs: webRefs.flatMap(item => { const entry = validateWebRefEntry_ACU(item); return entry ? [entry] : []; }),
-            userRequirements: validatedUserRequirements,
-        };
-    }
-    /**
-     * 宽容解析一份损坏的快照：丢掉单条非法记录、修正非法水位，尽量保住其余数据。
-     * 只在严格路径全程无命中时作为兜底使用——静默回退成空快照会让用户误以为数据从未写入。
-     */
-    function salvageAgentModuleSnapshot_ACU(raw) {
-        if (!isRecord_ACU$c(raw))
-            return null;
-        const problems = [];
-        if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
-            problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
-        const revisions = isRecord_ACU$c(raw.revisions) ? raw.revisions : {};
-        const pick = (list, validate, label) => {
-            if (!Array.isArray(list)) {
-                if (list !== undefined)
-                    problems.push(`${label} 不是数组`);
-                return [];
-            }
-            const kept = [];
-            list.forEach((item, index) => { const entry = validate(item); if (entry)
-                kept.push(entry);
-            else
-                problems.push(`${label}[${index}] 结构非法，已丢弃`); });
-            return kept;
-        };
-        const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
-        if (settledThroughIndex < 0)
-            problems.push(`settledThroughIndex=${String(raw.settledThroughIndex)} 非法，按 0 处理`);
-        const snapshot = {
-            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-            settledThroughIndex: Math.max(0, settledThroughIndex),
-            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
-            revisions: {
-                hooks: Math.max(0, readIndex_ACU(revisions.hooks)),
-                infoGap: Math.max(0, readIndex_ACU(revisions.infoGap)),
-                constraints: Math.max(0, readIndex_ACU(revisions.constraints)),
-                storyArc: Math.max(0, readIndex_ACU(revisions.storyArc)),
-                chronology: Math.max(0, readIndex_ACU(revisions.chronology)),
-                webRefs: Math.max(0, readIndex_ACU(revisions.webRefs)),
-                userRequirements: Math.max(0, readIndex_ACU(revisions.userRequirements)),
-            },
-            hooks: pick(raw.hooks, validateHookEntry_ACU, 'hooks'),
-            infoGap: pick(raw.infoGap, validateInfoGapEntry_ACU, 'infoGap'),
-            constraints: pick(raw.constraints, validateConstraintEntry_ACU, 'constraints'),
-            storyArc: pick(raw.storyArc, validateStoryArcEntry_ACU, 'storyArc'),
-            chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
-            webRefs: pick(raw.webRefs, validateWebRefEntry_ACU, 'webRefs'),
-            userRequirements: pick(raw.userRequirements, validateUserRequirementLine_ACU, 'userRequirements'),
-        };
-        return { snapshot, problems };
-    }
-    let lastReadDiagnostics_ACU = { candidates: [], adoptedIndex: null, salvaged: false };
-    /** 最近一次 readAgentModuleSnapshot_ACU 的诊断信息，供面板解释“为什么资料是空的/是旧的”。 */
-    function readAgentModuleSnapshotDiagnostics_ACU() {
-        return lastReadDiagnostics_ACU;
-    }
-    /**
-     * 读取当前生效的资料快照。
-     * 严格路径：从尾向前找第一个完全合法的快照。全程无命中但存在损坏快照时，不再静默返回空，
-     * 而是对最近一份做宽容抢救（丢单条坏记录）并记录诊断——数据消失必须可解释。
-     * @param chat 聊天数组，缺省取当前聊天
-     * @returns 最近的合法快照；全程无命中时返回 settledThroughIndex = -1 的空快照
-     */
-    function readAgentModuleSnapshot_ACU(chat) {
-        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-        const highestIndex = messages.length - 1;
-        const clamp = (snapshot) => (
-        // 删楼后残留快照记录的水位可能指向已不存在的楼层，必须钳制，否则未结算区间会算成负数。
-        snapshot.settledThroughIndex > highestIndex ? { ...snapshot, settledThroughIndex: highestIndex } : snapshot);
-        const diagnostics = { candidates: [], adoptedIndex: null, salvaged: false };
-        let firstBroken = null;
-        for (let index = highestIndex; index >= 0; index -= 1) {
-            const message = messages[index];
-            if (!message || typeof message !== 'object')
-                continue;
-            if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
-                continue;
-            const raw = message[AGENT_MODULE_FIELD_ACU];
-            const snapshot = validateAgentModuleSnapshot_ACU(raw);
-            if (snapshot) {
-                diagnostics.candidates.push({ index, valid: true, problems: [] });
-                diagnostics.adoptedIndex = index;
-                lastReadDiagnostics_ACU = diagnostics;
-                return clamp(snapshot);
-            }
-            const salvaged = salvageAgentModuleSnapshot_ACU(raw);
-            diagnostics.candidates.push({ index, valid: false, problems: salvaged?.problems ?? ['快照不是对象'] });
-            if (!firstBroken)
-                firstBroken = { index, raw };
-        }
-        if (firstBroken) {
-            const salvaged = salvageAgentModuleSnapshot_ACU(firstBroken.raw);
-            if (salvaged) {
-                diagnostics.adoptedIndex = firstBroken.index;
-                diagnostics.salvaged = true;
-                lastReadDiagnostics_ACU = diagnostics;
-                console.warn(`[SP·数据库][续写资料] 楼层 ${firstBroken.index} 的资料快照未通过严格校验，已按宽容模式读取：${salvaged.problems.join('；')}`);
-                return clamp(salvaged.snapshot);
-            }
-        }
-        lastReadDiagnostics_ACU = diagnostics;
-        return buildEmptyAgentModuleSnapshot_ACU();
-    }
-    /**
-     * 把快照写入指定楼层并真实提交到宿主。
-     *
-     * 结算水位以快照自带的 settledThroughIndex 为准，只做合法性钳制（0 ≤ 水位 ≤ 承载楼层）：
-     * 写盘不推水位——立总纲、用户手动保存都不代表未结算正文被结算过，水位推进只由
-     * 结算派工成功后显式设置。
-     * @param chat 聊天数组
-     * @param targetIndex 承载快照的楼层下标，通常是当前末楼
-     * @param snapshot 待写入的全量快照
-     */
-    async function writeAgentModuleSnapshot_ACU(chat, targetIndex, snapshot) {
-        const message = Array.isArray(chat) ? chat[targetIndex] : null;
-        if (!message || typeof message !== 'object') {
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照的目标楼层不可用', false, { targetIndex }));
-        }
-        const container = message;
-        const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_MODULE_FIELD_ACU);
-        const previous = container[AGENT_MODULE_FIELD_ACU];
-        const settledThroughIndex = Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex);
-        try {
-            container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex, updatedAt: Date.now() };
-            await saveChatToHostStrict_ACU();
-        }
-        catch (error) {
-            if (hadPrevious)
-                container[AGENT_MODULE_FIELD_ACU] = previous;
-            else
-                delete container[AGENT_MODULE_FIELD_ACU];
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
-        }
-    }
-    function rejectSnapshotEdit_ACU(message, details) {
-        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
-    }
-    /**
-     * 用户手动改写资料快照。
-     *
-     * 与子代理写入的关键区别是「不容忍静默丢条目」：校验器为了容错会丢掉结构非法的单条记录，
-     * 那对模型输出是合理的降级，但对用户编辑是数据丢失——用户会以为自己保存成功了。因此这里
-     * 逐类比对条目数，只要有条目被丢弃就整份拒绝并指出是哪一类。
-     * @param raw 用户编辑后的快照对象（可只带 hooks / infoGap / constraints / storyArc）
-     * @param chat 聊天数组，缺省取当前聊天
-     * @returns 落盘后的快照
-     */
-    async function replaceAgentModuleSnapshotByUser_ACU(raw, chat) {
-        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-        const targetIndex = messages.length - 1;
-        if (targetIndex < 0)
-            rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
-        if (!isRecord_ACU$c(raw))
-            rejectSnapshotEdit_ACU('资料快照必须是 JSON 对象');
-        const current = readAgentModuleSnapshot_ACU(messages);
-        const merged = {
-            ...current,
-            ...raw,
-            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-            // 手动保存不推进结算水位：用户改资料不代表未结算正文被结算过。保留现有水位，
-            // 新聊天的 -1 钳制为 0（校验器拒绝负值），上限钳制交给写盘函数。
-            settledThroughIndex: Math.max(current.settledThroughIndex, 0),
-            // 手动编辑同样推进修订号：否则携带旧修订号的子代理写集会通过并覆盖用户刚保存的内容。
-            revisions: {
-                hooks: current.revisions.hooks + 1,
-                infoGap: current.revisions.infoGap + 1,
-                constraints: current.revisions.constraints + 1,
-                storyArc: current.revisions.storyArc + 1,
-                chronology: current.revisions.chronology + 1,
-                webRefs: current.revisions.webRefs + 1,
-                userRequirements: current.revisions.userRequirements + 1,
-            },
-        };
-        const validated = validateAgentModuleSnapshot_ACU(merged);
-        if (!validated)
-            rejectSnapshotEdit_ACU('资料快照结构非法：hooks / infoGap / constraints 必须是数组；storyArc / chronology 一旦提供必须整体结构合法（chronology 每条需要非空 id/anchor/elapsed/transition、合法 precision、非空非负整数 evidenceIndexes 与非负 updatedIndex，retire 需给理由）');
-        const checks = [
-            ['伏笔账本 hooks', merged.hooks, validated.hooks],
-            ['信息差 infoGap', merged.infoGap, validated.infoGap],
-            ['长期约束 constraints', merged.constraints, validated.constraints],
-            ['故事总纲 storyArc', merged.storyArc, validated.storyArc],
-            ['故事年代学账本 chronology', merged.chronology, validated.chronology],
-            ['百科资料库 webRefs', merged.webRefs, validated.webRefs],
-            ['用户要求 userRequirements', merged.userRequirements, validated.userRequirements],
-        ];
-        for (const [label, input, accepted] of checks) {
-            const inputLength = Array.isArray(input) ? input.length : 0;
-            if (inputLength !== accepted.length) {
-                rejectSnapshotEdit_ACU(`${label} 中有 ${inputLength - accepted.length} 条记录不符合结构要求（id 与关键文本字段不能为空），整份编辑未保存`, { label, inputLength, acceptedLength: accepted.length });
-            }
-        }
-        await writeAgentModuleSnapshot_ACU(messages, targetIndex, validated);
-        return validated;
-    }
-    /**
-     * 从全部楼层清除资料快照字段。用于「一键清空」，只删扩展字段，绝不触碰正文。
-     * @param chat 聊天数组，缺省取当前聊天
-     * @returns 是否有楼层被改动
-     */
-    async function clearAgentModuleField_ACU(chat) {
-        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-        let changed = false;
-        for (const message of messages) {
-            if (!message || typeof message !== 'object')
-                continue;
-            if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
-                continue;
-            delete message[AGENT_MODULE_FIELD_ACU];
-            changed = true;
-        }
-        if (changed)
-            await saveChatToHostStrict_ACU();
-        return changed;
-    }
-    function truncateAgentBlock_ACU(text) {
-        if (text.length <= AGENT_BLOCK_CHAR_LIMIT_ACU)
-            return text;
-        return `${text.slice(0, AGENT_BLOCK_CHAR_LIMIT_ACU)}\n（本资料块超出 ${AGENT_BLOCK_CHAR_LIMIT_ACU} 字上限，已截断；未展示部分不代表不存在）`;
-    }
-    function compareHooks_ACU(left, right) {
-        const weight = (IMPORTANCE_WEIGHTS_ACU[right.importance] ?? 0) - (IMPORTANCE_WEIGHTS_ACU[left.importance] ?? 0);
-        return weight !== 0 ? weight : right.plantedIndex - left.plantedIndex;
-    }
-    /**
-     * 渲染伏笔账本的热上下文。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本；活跃条目超过上限时如实标注未展示数量
-     */
-    function renderAgentHooksLedger_ACU(snapshot) {
-        // 修订号必须放在首行：材料超长被截断时也不会丢失并发校验依据。
-        const head = `当前修订号=${snapshot.revisions.hooks}`;
-        const active = snapshot.hooks.filter(hook => !hook.retired);
-        if (!active.length)
-            return `${head}\n当前没有活跃伏笔。`;
-        const sorted = [...active].sort(compareHooks_ACU);
-        const shown = sorted.slice(0, AGENT_HOT_HOOK_LIMIT_ACU);
-        const lines = shown.map(hook => [
-            `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}`,
-            `  内容：${hook.summary}`,
-            hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
-        ].filter(Boolean).join('\n'));
-        const hidden = sorted.length - shown.length;
-        const tail = hidden > 0 ? `\n另有 ${hidden} 条活跃伏笔未进入本次热上下文，需要时请派工读取完整账本。` : '';
-        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}${tail}`);
-    }
-    /**
-     * 渲染认知与信息差时间线。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本，包含客观事实、读者已知、各角色知晓与揭示状态
-     */
-    function renderAgentInfoGap_ACU(snapshot) {
-        const head = `当前修订号=${snapshot.revisions.infoGap}`;
-        const active = snapshot.infoGap.filter(entry => !entry.retired);
-        if (!active.length)
-            return `${head}\n当前没有登记的信息差条目。`;
-        const lines = active.map(entry => [
-            `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}）`,
-            `  客观事实：${entry.objectiveFact || '（未登记）'}`,
-            `  读者已知：${entry.readerKnown || '（未登记）'}`,
-            entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
-        ].filter(Boolean).join('\n'));
-        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
-    }
-    /**
-     * 渲染长期约束清单。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本，每条包含约束内容与登记理由
-     */
-    function renderAgentConstraints_ACU(snapshot) {
-        const head = `当前修订号=${snapshot.revisions.constraints}`;
-        if (!snapshot.constraints.length)
-            return `${head}\n当前没有登记的长期约束。`;
-        const lines = snapshot.constraints.map(item => `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}`);
-        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
-    }
-    /** 总纲条目排序：全书方向永远在最前，其后按卷推进状态（active → planned → done）排列。 */
-    const STORY_ARC_STATUS_WEIGHTS_ACU = { active: 0, planned: 1, done: 2 };
-    function compareStoryArc_ACU(left, right) {
-        if (left.scope !== right.scope)
-            return left.scope === 'story' ? -1 : 1;
-        return (STORY_ARC_STATUS_WEIGHTS_ACU[left.status] ?? 3) - (STORY_ARC_STATUS_WEIGHTS_ACU[right.status] ?? 3);
-    }
-    function renderStoryArcEntry_ACU(entry) {
-        const head = entry.scope === 'story' ? '全书方向' : '卷台阶';
-        return [
-            `- [${entry.id}] ${head}「${entry.title}」状态=${entry.status}${entry.stageNumbers.length ? ` 已承载阶段=${entry.stageNumbers.join('、')}` : ' 尚未由任何阶段承载'}${entry.retired ? ' 已废止' : ''}`,
-            entry.narrativeRole ? `  结构职责：${entry.narrativeRole}` : '',
-            entry.targetStageRange ? `  阶段容量：${entry.targetStageRange.min}–${entry.targetStageRange.max} 个阶段` : '',
-            entry.targetTimeSpan ? `  故事时间目标：${entry.targetTimeSpan}` : '',
-            entry.direction ? `  方向：${entry.direction}` : '',
-            entry.escalation ? `  升级目标：${entry.escalation}` : '',
-            entry.progressCeiling ? `  主线进度上限：${entry.progressCeiling}` : '',
-            entry.sustainingThreads?.length ? `  持续经营线：${entry.sustainingThreads.join('；')}` : '',
-            entry.payoffTargets?.length ? `  兑现目标：${entry.payoffTargets.join('；')}` : '',
-            entry.withheld ? `  禁止提前翻的底牌：${entry.withheld}` : '',
-            entry.completionStageNumber === null ? '' : `  完成依据：第 ${entry.completionStageNumber} 阶段；卷末状态=${entry.completionState || '（未登记）'}`,
-            entry.completionRationale ? `  容量偏离说明：${entry.completionRationale}` : '',
-            entry.continuationRationale ? `  续卷依据：${entry.continuationRationale}` : '',
-            entry.retired && entry.retiredReason ? `  废止原因：${entry.retiredReason}` : '',
-        ].filter(Boolean).join('\n');
-    }
-    /**
-     * 判断总纲是否已经立起来。全部条目退役等价于没有总纲——门禁按活跃条目判定，
-     * 否则用户清空总纲后大纲派工会以为总纲还在。
-     * @param snapshot 当前快照
-     * @returns 存在任一活跃总纲条目时为 true
-     */
-    function hasActiveStoryArc_ACU(snapshot) {
-        return snapshot.storyArc.some(entry => !entry.retired);
-    }
-    /** 判断是否存在可承载下一份阶段大纲的活动卷。全书方向本身不是阶段规划目标。 */
-    function hasActiveStoryArcVolume_ACU(snapshot) {
-        return snapshot.storyArc.some(entry => (entry.scope === 'volume'
-            && !entry.retired
-            && entry.status === 'active'));
-    }
-    /**
-     * 找出已完成但没有登记进任何活跃 volume 条目 stageNumbers 的阶段编号。
-     * 这些阶段是总纲进度的空洞：卷台阶不知道自己已经被走过，后续判断「本卷该收了没」就没有依据。
-     * @param snapshot 当前快照
-     * @param completedStageNumbers 已完成的阶段编号
-     * @returns 未登记的阶段编号，升序去重
-     */
-    function findUnregisteredStageNumbers_ACU(snapshot, completedStageNumbers) {
-        const registered = new Set();
-        for (const entry of snapshot.storyArc) {
-            if (entry.retired)
-                continue;
-            for (const stageNumber of entry.stageNumbers)
-                registered.add(stageNumber);
-        }
-        return [...new Set(completedStageNumbers)].filter(stageNumber => !registered.has(stageNumber)).sort((left, right) => left - right);
-    }
-    /**
-     * 渲染活动卷给阶段规划与审查使用的集中上下文。
-     * 阶段承载与卷收束是两层事实：stageNumbers 是卷已承载的阶段，completedStageNumbers 才是正文已完成的阶段。
-     */
-    function renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers) {
-        const volumes = snapshot.storyArc.filter(entry => entry.scope === 'volume' && !entry.retired);
-        const active = volumes.filter(entry => entry.status === 'active');
-        const completed = new Set(completedStageNumbers);
-        if (!volumes.length)
-            return '【活动卷规划上下文】\n当前没有卷台阶；必须由 arc-architect 建立总纲后才能创建阶段大纲。';
-        if (!active.length) {
-            return '【活动卷规划上下文】\n所有既有卷均已完成。用户继续写作时，arc-architect 必须先根据最后一卷的结果、代价、关系变化或未解决问题在末尾追加一个 active 卷，再由 outline-architect 创建下一阶段大纲。';
-        }
-        if (active.length > 1)
-            return `【活动卷规划上下文】\n总纲状态无效：当前存在 ${active.length} 个 active 卷（${active.map(entry => entry.id).join('、')}），必须先由 arc-architect 修复。`;
-        const volume = active[0];
-        const completedCarriers = volume.stageNumbers.filter(stageNumber => completed.has(stageNumber));
-        const pendingCarriers = volume.stageNumbers.filter(stageNumber => !completed.has(stageNumber));
-        return [
-            '【活动卷规划上下文】',
-            `当前 active 卷：[${volume.id}]「${volume.title}」`,
-            `卷级结构职责：${volume.narrativeRole ?? '旧快照未标注'}`,
-            `目标阶段容量：${volume.targetStageRange ? `${volume.targetStageRange.min}–${volume.targetStageRange.max} 个阶段` : '旧快照未标注'}`,
-            `目标故事时间：${volume.targetTimeSpan || '旧快照未标注'}`,
-            `已承载阶段：${volume.stageNumbers.length ? volume.stageNumbers.join('、') : '（尚无）'}`,
-            `真实完成进度：${completedCarriers.length ? `已完成阶段 ${completedCarriers.join('、')}` : '尚未有已完成阶段'}${pendingCarriers.length ? `；已登记但尚未完成阶段 ${pendingCarriers.join('、')}` : ''}`,
-            `本阶段只承担本卷尚未完成的一段：${volume.direction}`,
-            `卷级收束条件：${volume.escalation}`,
-            `主线进度上限：${volume.progressCeiling || '旧快照未标注'}`,
-            `持续经营线：${volume.sustainingThreads?.length ? volume.sustainingThreads.join('；') : '旧快照未标注'}`,
-            `兑现目标：${volume.payoffTargets?.length ? volume.payoffTargets.join('；') : '旧快照未标注'}`,
-            `禁止提前释放：${volume.withheld || '（无额外底牌）'}`,
-        ].join('\n');
-    }
-    /**
-     * 渲染故事总纲的热上下文。
-     * @param snapshot 当前快照
-     * @param completedStageNumbers 已真实完成的阶段编号
-     * @returns 自然语言文本；总纲为空时明确指出必须先派工 arc-architect
-     */
-    function renderAgentStoryArc_ACU(snapshot, completedStageNumbers = []) {
-        const head = `当前修订号=${snapshot.revisions.storyArc}`;
-        const active = snapshot.storyArc.filter(entry => !entry.retired);
-        if (!active.length)
-            return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步，必须先派工 arc-architect 立总纲。`;
-        const sorted = [...active].sort(compareStoryArc_ACU);
-        return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`);
-    }
-    function renderHookFull_ACU(hook) {
-        return [
-            `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}${hook.retired ? ' 已退休' : ''}`,
-            `  内容：${hook.summary}`,
-            hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
-            hook.retired && hook.retiredReason ? `  退休原因：${hook.retiredReason}` : '',
-        ].filter(Boolean).join('\n');
-    }
-    function renderInfoGapFull_ACU(entry) {
-        return [
-            `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}${entry.retired ? '，已退休' : ''}）`,
-            `  客观事实：${entry.objectiveFact || '（未登记）'}`,
-            `  读者已知：${entry.readerKnown || '（未登记）'}`,
-            entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
-            entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
-        ].filter(Boolean).join('\n');
-    }
-    function renderConstraintFull_ACU(item) {
-        return `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}（登记楼层=${item.createdIndex}）`;
-    }
-    function renderModuleEntries_ACU(spec, ids) {
-        const head = `当前修订号=${spec.revision}`;
-        if (!ids || !ids.length) {
-            // 全量读默认只列活跃条目；退休条目可被搜索命中并按 ID 精读，避免全量视图被历史噪音撑大。
-            const active = spec.entries.filter(entry => entry.retired !== true);
-            const retiredCount = spec.entries.length - active.length;
-            if (!active.length)
-                return `${head}\n${spec.label}当前没有活跃条目。${retiredCount ? `另有 ${retiredCount} 条已退休条目，可用 search 命中后按 ID 精读。` : ''}`;
-            const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
-            return `${head}\n${spec.label}活跃条目 ${active.length} 条：\n${active.map(spec.render).join('\n')}${tail}`;
-        }
-        const wanted = ids.map(id => id.trim()).filter(Boolean);
-        const found = spec.entries.filter(entry => wanted.includes(entry.id));
-        const missing = wanted.filter(id => !spec.entries.some(entry => entry.id === id));
-        const lines = [head];
-        if (found.length)
-            lines.push(...found.map(spec.render));
-        if (missing.length)
-            lines.push(`以下 ID 不存在于${spec.label}：${missing.join('、')}。可先读全量或 search 确认可用 ID。`);
-        if (!found.length && !missing.length)
-            lines.push('未指定有效 ID。');
-        return lines.join('\n');
-    }
-    /**
-     * 按 ID 精读伏笔账本（含退休条目）；不传 ID 则输出全部活跃条目，支撑 `$HOOKS_LEDGER` / `$HOOKS_LEDGER:ID1,ID2`。
-     */
-    function renderAgentHooksByIds_ACU(snapshot, ids) {
-        return renderModuleEntries_ACU({ label: '伏笔账本', revision: snapshot.revisions.hooks, entries: snapshot.hooks, render: renderHookFull_ACU }, ids);
-    }
-    /**
-     * 按 ID 精读信息差时间线（含退休条目）；不传 ID 则输出全部活跃条目，支撑 `$INFO_GAP` / `$INFO_GAP:ID1,ID2`。
-     */
-    function renderAgentInfoGapByIds_ACU(snapshot, ids) {
-        return renderModuleEntries_ACU({ label: '信息差时间线', revision: snapshot.revisions.infoGap, entries: snapshot.infoGap, render: renderInfoGapFull_ACU }, ids);
-    }
-    /**
-     * 按 ID 精读长期约束；不传 ID 则输出全量，支撑 `$CONSTRAINTS` / `$CONSTRAINTS:ID1,ID2`。
-     */
-    function renderAgentConstraintsByIds_ACU(snapshot, ids) {
-        return renderModuleEntries_ACU({ label: '长期约束清单', revision: snapshot.revisions.constraints, entries: snapshot.constraints, render: renderConstraintFull_ACU }, ids);
-    }
-    /**
-     * 按 ID 精读故事总纲（含已废止条目）；不传 ID 则输出全部活跃条目，支撑 `$STORY_ARC` / `$STORY_ARC:ID1,ID2`。
-     */
-    function renderAgentStoryArcByIds_ACU(snapshot, ids, completedStageNumbers = []) {
-        const entries = renderModuleEntries_ACU({ label: '故事总纲', revision: snapshot.revisions.storyArc, entries: snapshot.storyArc, render: renderStoryArcEntry_ACU }, ids);
-        return ids?.length ? entries : `${entries}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`;
-    }
-    const CHRONOLOGY_PRECISION_LABELS_ACU = { exact: '精确', approximate: '近似', unknown: '未知' };
-    function renderChronologyEntry_ACU(entry) {
-        return [
-            `- [${entry.id}] 时间锚：${entry.anchor}（精度=${CHRONOLOGY_PRECISION_LABELS_ACU[entry.precision] ?? entry.precision}${entry.retired ? '，已作废' : ''}）`,
-            `  累计经过：${entry.elapsed}`,
-            `  时间转换：${entry.transition}`,
-            `  证据楼层：${entry.evidenceIndexes.join('、')}（结算楼层=${entry.updatedIndex}）`,
-            entry.retired && entry.retiredReason ? `  作废原因：${entry.retiredReason}` : '',
-        ].filter(Boolean).join('\n');
-    }
-    /** 年代学记录按结算次序展示：updatedIndex 相同（同一次结算多条转换）时保持登记顺序。 */
-    function sortChronology_ACU(entries) {
-        return [...entries].sort((left, right) => left.updatedIndex - right.updatedIndex);
-    }
-    /**
-     * 渲染故事年代学账本的热上下文。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本；空账本时明确说明时间事实只能由维护代理依据真实正文结算
-     */
-    function renderAgentChronology_ACU(snapshot) {
-        const head = `当前修订号=${snapshot.revisions.chronology}`;
-        const active = sortChronology_ACU(snapshot.chronology.filter(entry => !entry.retired));
-        const retiredCount = snapshot.chronology.length - active.length;
-        const retiredNote = retiredCount ? `\n另有 ${retiredCount} 条已作废记录未列出，可用 search 命中后按 ID 精读。` : '';
-        if (!active.length)
-            return `${head}\n当前没有已结算的故事时间记录。时间事实只能由结算维护代理依据真实正文登记；大纲里的时间字段是计划，不是事实。${retiredNote}`;
-        const latest = active[active.length - 1];
-        return truncateAgentBlock_ACU([
-            head,
-            `当前时间锚：${latest.anchor}（精度=${CHRONOLOGY_PRECISION_LABELS_ACU[latest.precision] ?? latest.precision}）；自故事起点累计经过：${latest.elapsed}。`,
-            ...active.map(renderChronologyEntry_ACU),
-        ].join('\n') + retiredNote);
-    }
-    /**
-     * 按 ID 精读故事年代学账本（含已作废条目）；不传 ID 则输出全部活跃条目，支撑 `$CHRONOLOGY` / `$CHRONOLOGY:ID1,ID2`。
-     */
-    function renderAgentChronologyByIds_ACU(snapshot, ids) {
-        return renderModuleEntries_ACU({ label: '故事年代学账本', revision: snapshot.revisions.chronology, entries: sortChronology_ACU(snapshot.chronology), render: renderChronologyEntry_ACU }, ids);
-    }
-    const WEB_REF_SOURCE_LABELS_ACU = {
-        moegirl: '萌娘百科',
-        wikipedia_zh: '中文维基',
-        wikipedia_en: '英文维基',
-        baidu: '百度百科',
-        web: '网页',
-    };
-    const WEB_REF_STATUS_LABELS_ACU = {
-        ok: '正常',
-        unavailable: '来源不可用',
-        blocked: '被拦截',
-    };
-    /** 唯一会进入预览上下文的资料形态：名称 + 一句话简介。 */
-    function renderWebRefPreview_ACU(entry) {
-        const flags = [
-            entry.tags.length ? entry.tags.join('/') : '',
-            entry.sourceStatus !== 'ok' ? WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus] : '',
-            entry.retired ? '已退休' : '',
-        ].filter(Boolean);
-        return `- [${entry.id}]「${entry.title}」${entry.brief || '（无简介）'}${flags.length ? `（${flags.join('；')}）` : ''}`;
-    }
-    /** 按 ID 查询时才给自由格式详情与来源；网页原文不会被保存。 */
-    function renderWebRefFull_ACU(entry) {
-        return [
-            `- [${entry.id}]「${entry.title}」来源=${WEB_REF_SOURCE_LABELS_ACU[entry.source]} 状态=${WEB_REF_STATUS_LABELS_ACU[entry.sourceStatus]}${entry.retired ? ' 已退休' : ''}`,
-            `  简介：${entry.brief || '（无）'}`,
-            `  链接：${entry.url}`,
-            entry.query ? `  检索词：${entry.query}` : '',
-            entry.tags.length ? `  标签：${entry.tags.join('、')}` : '',
-            entry.summary ? `  详情：\n${entry.summary}` : '  详情：（未写）',
-            entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
-        ].filter(Boolean).join('\n');
-    }
-    /** 将所有活跃资料压成预览，供主 Agent 运行时快照注入。 */
-    function renderAgentWebRefsCatalog_ACU(snapshot, enabled) {
-        const active = snapshot.webRefs.filter(entry => !entry.retired);
-        if (!active.length) {
-            return enabled
-                ? '百科资料库为空。开场检索尚未产出条目，或来源均不可达；需要原作/公开设定时派工 web-researcher。'
-                : '百科资料库为空（网页检索功能未启用）。';
-        }
-        return truncateAgentBlock_ACU([
-            `百科资料库 ${active.length} 条（外部参考资料，非本故事已发生事实；与世界书或正文冲突时以后者为准）。下面只是名称与一句话简介，详情用 read $WEB_REFS:ID 精读：`,
-            ...active.map(renderWebRefPreview_ACU),
-        ].join('\n'));
-    }
-    /** 不传 ID 也只返回预览；按 ID 才返回详情。 */
-    function renderAgentWebRefsByIds_ACU(snapshot, ids) {
-        if (!ids || !ids.length) {
-            const head = `当前修订号=${snapshot.revisions.webRefs}`;
-            const active = snapshot.webRefs.filter(entry => !entry.retired);
-            const retiredCount = snapshot.webRefs.length - active.length;
-            const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
-            if (!active.length)
-                return `${head}\n百科资料库当前没有活跃条目。${tail}`;
-            return `${head}\n百科资料库活跃条目 ${active.length} 条（预览：名称 + 一句话简介；详情用 $WEB_REFS:ID 精读）：\n${active.map(renderWebRefPreview_ACU).join('\n')}${tail}`;
-        }
-        return renderModuleEntries_ACU({ label: '百科资料库', revision: snapshot.revisions.webRefs, entries: snapshot.webRefs, render: renderWebRefFull_ACU }, ids);
-    }
-
-    /**
      * service/continuation/agent/agent-user-requirements.ts — 用户要求资料区的过滤、渲染与机械写入
      *
      * 与伏笔账本等结构化模块分离：这里只处理 string[] 全量替换。压缩触发的语义合并由
@@ -145983,86 +147455,6 @@ Expected function or array of functions, received type ${typeof value}.`
         if (snapshot.userRequirements.length)
             return;
         await writeAgentModuleSnapshot_ACU(messages, messages.length - 1, applyAgentUserRequirementsReplace_ACU(snapshot, [text]));
-    }
-
-    /**
-     * service/continuation/agent/agent-run-cache.ts — Agent 循环运行恢复缓存
-     *
-     * 纯内存缓存：主循环在每次迭代边界保存运行账本（派工结论、迭代进度），
-     * 失败中断后用户再发送时据此从中断点恢复，而不是丢掉全部已获得的证据从头重跑。
-     * 键为聊天身份；恢复时按任务与大纲游标严格校验，任何不匹配都作废缓存。
-     * 页面重载会清空缓存——此时资料快照已持久化，从头重跑是安全降级而非错误。
-     */
-    /** 发送前终审在一次主 Agent 运行内的恢复状态。终审反馈正文同时追加到会话，供跨重启读取。 */
-    const AGENT_FINAL_REVIEW_STATUSES_ACU = ['not_started', 'reviewing', 'feedback_ready', 'consumed'];
-    const statesByChat_ACU = new Map();
-    function cloneFinalReviewState_ACU(value) {
-        const status = value?.status;
-        return {
-            status: AGENT_FINAL_REVIEW_STATUSES_ACU.includes(status ?? '') ? status : 'not_started',
-            candidateFingerprint: typeof value?.candidateFingerprint === 'string' ? value.candidateFingerprint : '',
-            candidateSummary: typeof value?.candidateSummary === 'string' ? value.candidateSummary : '',
-            feedback: typeof value?.feedback === 'string' ? value.feedback : '',
-        };
-    }
-    /**
-     * 保存运行状态。同一聊天只保留最新一份（租约保证同聊天无并发循环）。
-     * @param chatIdentity 聊天身份
-     * @param state 运行状态；内部做深拷贝，调用方后续修改不影响缓存
-     */
-    function saveAgentRunState_ACU(chatIdentity, state) {
-        if (!chatIdentity)
-            return;
-        statesByChat_ACU.set(chatIdentity, {
-            taskId: state.taskId,
-            cursorKey: state.cursorKey,
-            nextIteration: state.nextIteration,
-            ledger: {
-                delegationsUsed: state.ledger.delegationsUsed,
-                perAgent: { ...state.ledger.perAgent },
-                outcomes: state.ledger.outcomes.map(outcome => ({ ...outcome })),
-            },
-            finalReview: cloneFinalReviewState_ACU(state.finalReview),
-        });
-    }
-    /**
-     * 读取可恢复的运行状态。任务或游标不匹配即作废并返回 null——
-     * 旧轮次的证据对新轮次而言是污染而不是资产。
-     * @param chatIdentity 聊天身份
-     * @param taskId 当前任务
-     * @param cursorKey 当前大纲游标指纹
-     * @returns 匹配的运行状态深拷贝；无缓存或不匹配时为 null
-     */
-    function readAgentRunState_ACU(chatIdentity, taskId, cursorKey) {
-        const cached = statesByChat_ACU.get(chatIdentity);
-        if (!cached)
-            return null;
-        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
-            statesByChat_ACU.delete(chatIdentity);
-            return null;
-        }
-        return {
-            taskId: cached.taskId,
-            cursorKey: cached.cursorKey,
-            nextIteration: cached.nextIteration,
-            ledger: {
-                delegationsUsed: cached.ledger.delegationsUsed,
-                perAgent: { ...cached.ledger.perAgent },
-                outcomes: cached.ledger.outcomes.map(outcome => ({ ...outcome })),
-            },
-            finalReview: cloneFinalReviewState_ACU(cached.finalReview),
-        };
-    }
-    /**
-     * 清除运行状态。finalize 成功交付与主 Agent 主动 block 时调用：
-     * 前者本轮已完成，后者是明确的终局判断，重跑应给全新预算而不是复播旧证据。
-     * @param chatIdentity 聊天身份
-     */
-    function clearAgentRunState_ACU(chatIdentity) {
-        statesByChat_ACU.delete(chatIdentity);
-    }
-    function resetAgentRunCacheForTests_ACU() {
-        statesByChat_ACU.clear();
     }
 
     /**
@@ -147572,6 +148964,13 @@ Expected function or array of functions, received type ${typeof value}.`
             triggers: ['主会话历史压缩后，被浓缩范围内仍有实质用户输入'],
             promptKey: 'requirementsMaintainer',
         },
+        {
+            name: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
+            kind: 'compose',
+            description: '通读结算后的资料、策划建议、审查结论、用户要求与活跃约束，产出本轮写作指令。由固定工作流调用，主 Agent 不能派工。',
+            triggers: ['固定工作流在策划与审查之后自动调用'],
+            promptKey: 'instructionComposer',
+        },
     ];
     const AGENT_MODULE_DEFINITIONS_ACU = [
         {
@@ -147624,6 +149023,7 @@ Expected function or array of functions, received type ${typeof value}.`
         plan: '策划',
         review: '审查',
         research: '网页检索',
+        compose: '写作指令',
     };
     /** 按职责固定的写入说明，进子代理目录的「写入」行。 */
     const KIND_WRITE_LABELS_ACU = {
@@ -147632,9 +149032,12 @@ Expected function or array of functions, received type ${typeof value}.`
         plan: '无（只返回建议）',
         review: '无（只返回判词）',
         research: '$WEB_REFS（职责固定；只写外部参考资料，不碰叙事模块）',
+        compose: '无（只产出写作指令；constraints 增量由运行时容错登记）',
     };
     function isDefinitionVisible_ACU(name, options) {
         if (name === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU)
+            return false;
+        if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU)
             return false;
         if (name === AGENT_WEB_RESEARCHER_NAME_ACU)
             return options?.webResearchEnabled === true;
@@ -148305,8 +149708,9 @@ Expected function or array of functions, received type ${typeof value}.`
     /**
      * service/continuation/agent/agent-transaction.ts — 资料模块写集事务
      *
-     * 所有写入都是全量校验后一次性生效的事务：任一条目不合规就拒绝整份 delta，
-     * 绝不做部分落盘。核心防线是「漏写不等于删除」——删除必须显式 retire 并给出理由。
+     * 默认仍是整份拒绝：任一条目不合规就抛错，调用方拿不到部分结果。
+     * 传入 onViolation 且回调不抛时，按模块隔离：无违规模块入库并推进自己的 revision，
+     * 违规模块保持原值并写入 snapshot.pendingFixes。核心防线仍是「漏写不等于删除」。
      */
     function reject_ACU$5(message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -148332,17 +149736,6 @@ Expected function or array of functions, received type ${typeof value}.`
         for (const key of Object.keys(delta.expectedRevisions)) {
             if (!isAgentWritableModule_ACU(key))
                 reject_ACU$5(`expectedRevisions 含非法模块名：${key}`, { key });
-        }
-    }
-    function assertExpectedRevisions_ACU(delta, snapshot) {
-        for (const module of collectTouchedModules_ACU(delta)) {
-            const expected = delta.expectedRevisions[module];
-            // 未声明不拒绝：并发基准由运行时按渲染时刻捕获后补齐，不依赖子代理自报。
-            if (expected === undefined)
-                continue;
-            if (expected !== snapshot.revisions[module]) {
-                reject_ACU$5(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module] });
-            }
         }
     }
     /**
@@ -148769,54 +150162,138 @@ Expected function or array of functions, received type ${typeof value}.`
         assertStoryArcContractShape_ACU(next);
         return next;
     }
+    function violationOf_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return { message: error.error.message, details: error.error.details };
+        return { message: error instanceof Error ? error.message : String(error) };
+    }
+    function clonePendingFixes_ACU(pending) {
+        return pending.map(item => ({ ...item, violations: item.violations.map(violation => ({ ...violation })) }));
+    }
+    function recordPendingFix_ACU$1(pending, module, agentName, message, details, index) {
+        const path = typeof details?.path === 'string' && details.path ? details.path : module;
+        const violation = { path, message };
+        const found = pending.findIndex(item => item.module === module);
+        if (found >= 0) {
+            const previous = pending[found];
+            pending[found] = {
+                module,
+                agentName: agentName || previous.agentName,
+                violations: [violation],
+                attempts: previous.attempts + 1,
+                firstFailedAtIndex: previous.firstFailedAtIndex,
+                lastError: message,
+            };
+            return;
+        }
+        pending.push({ module, agentName, violations: [violation], attempts: 1, firstFailedAtIndex: index, lastError: message });
+    }
+    function clearPendingModule_ACU$1(pending, module) {
+        for (let index = pending.length - 1; index >= 0; index -= 1) {
+            if (pending[index].module === module)
+                pending.splice(index, 1);
+        }
+    }
+    function assertModuleRevision_ACU(module, delta, snapshot) {
+        const expected = delta.expectedRevisions[module];
+        if (expected === undefined)
+            return;
+        if (expected !== snapshot.revisions[module]) {
+            reject_ACU$5(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module], path: module });
+        }
+    }
+    function isolateModule_ACU(module, current, run, pending, applied, options, settledIndex) {
+        try {
+            const value = run();
+            clearPendingModule_ACU$1(pending, module);
+            applied.push(module);
+            return value;
+        }
+        catch (error) {
+            if (!options?.onViolation)
+                throw error;
+            const parsed = violationOf_ACU(error);
+            options.onViolation(parsed.message, parsed.details);
+            recordPendingFix_ACU$1(pending, module, options.agentName ?? '', parsed.message, parsed.details, settledIndex);
+            return current;
+        }
+    }
+    function unchangedApply_ACU(snapshot) {
+        return { snapshot, pendingFixes: snapshot.pendingFixes, appliedModules: [] };
+    }
     /**
      * 把一份子代理写集事务应用到快照上。
      * @param snapshot 当前快照
      * @param delta 子代理返回的写集
      * @param allowedWrites 该子代理被授权的模块名列表
      * @param settledIndex 本次结算的水位楼层，用于记录条目变动楼层
-     * @returns 应用后的新快照，被写入模块的 revision 各自 +1
+     * @returns 被写入模块的 revision 各自 +1；容错模式下违规模块留在 pendingFixes
      */
-    function applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = []) {
+    function applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options) {
         assertWritePermission_ACU(delta, allowedWrites);
-        assertExpectedRevisions_ACU(delta, snapshot);
         const touched = collectTouchedModules_ACU(delta);
         if (!touched.length)
-            return snapshot;
+            return unchangedApply_ACU(snapshot);
+        const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+        const applied = [];
         const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
         const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
         const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
         const chronologyTouched = delta.chronology.length > 0;
-        let hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
-        if (delta.hookPatches.length)
-            hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
-        let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
-        if (delta.infoGapPatches.length)
-            infoGap = applyInfoGapPatches_ACU(infoGap, delta.infoGapPatches);
-        let storyArc = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
-        if (delta.storyArcPatches.length) {
-            storyArc = applyStoryArcPatches_ACU(storyArc, delta.storyArcPatches);
-            assertSingleActiveStoryScope_ACU(storyArc);
-        }
-        if (storyArcTouched)
-            assertVolumeLifecycle_ACU(snapshot.storyArc, storyArc, new Set(completedStageNumbers));
-        const chronology = chronologyTouched ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;
-        return {
+        const hooks = hooksTouched
+            ? isolateModule_ACU('hooks', snapshot.hooks, () => {
+                assertModuleRevision_ACU('hooks', delta, snapshot);
+                let next = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
+                if (delta.hookPatches.length)
+                    next = applyHookPatches_ACU(next, delta.hookPatches, settledIndex);
+                return next;
+            }, pending, applied, options, settledIndex)
+            : snapshot.hooks;
+        const infoGap = infoGapTouched
+            ? isolateModule_ACU('infoGap', snapshot.infoGap, () => {
+                assertModuleRevision_ACU('infoGap', delta, snapshot);
+                let next = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+                if (delta.infoGapPatches.length)
+                    next = applyInfoGapPatches_ACU(next, delta.infoGapPatches);
+                return next;
+            }, pending, applied, options, settledIndex)
+            : snapshot.infoGap;
+        const storyArc = storyArcTouched
+            ? isolateModule_ACU('storyArc', snapshot.storyArc, () => {
+                assertModuleRevision_ACU('storyArc', delta, snapshot);
+                let next = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
+                if (delta.storyArcPatches.length) {
+                    next = applyStoryArcPatches_ACU(next, delta.storyArcPatches);
+                    assertSingleActiveStoryScope_ACU(next);
+                }
+                assertVolumeLifecycle_ACU(snapshot.storyArc, next, new Set(completedStageNumbers));
+                return next;
+            }, pending, applied, options, settledIndex)
+            : snapshot.storyArc;
+        const chronology = chronologyTouched
+            ? isolateModule_ACU('chronology', snapshot.chronology, () => {
+                assertModuleRevision_ACU('chronology', delta, snapshot);
+                return applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex);
+            }, pending, applied, options, settledIndex)
+            : snapshot.chronology;
+        const next = {
             ...snapshot,
             hooks,
             infoGap,
             storyArc,
             chronology,
+            pendingFixes: pending,
             revisions: {
-                hooks: snapshot.revisions.hooks + (hooksTouched ? 1 : 0),
-                infoGap: snapshot.revisions.infoGap + (infoGapTouched ? 1 : 0),
+                hooks: snapshot.revisions.hooks + (applied.includes('hooks') ? 1 : 0),
+                infoGap: snapshot.revisions.infoGap + (applied.includes('infoGap') ? 1 : 0),
                 constraints: snapshot.revisions.constraints,
-                storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
-                chronology: snapshot.revisions.chronology + (chronologyTouched ? 1 : 0),
+                storyArc: snapshot.revisions.storyArc + (applied.includes('storyArc') ? 1 : 0),
+                chronology: snapshot.revisions.chronology + (applied.includes('chronology') ? 1 : 0),
                 webRefs: snapshot.revisions.webRefs,
                 userRequirements: snapshot.revisions.userRequirements,
             },
         };
+        return { snapshot: next, pendingFixes: pending, appliedModules: applied };
     }
     /** 百科资料库条目 ID 前缀；模型漏写 id 时由运行时按此前缀顺延分配。 */
     const AGENT_WEB_REF_ID_PREFIX_ACU = 'WR-';
@@ -148842,55 +150319,71 @@ Expected function or array of functions, received type ${typeof value}.`
      * @param output 子代理运行时已把 pageRef 回填成完整条目的输出
      * @param expectedRevision 子代理读到资料那一刻的 webRefs 修订号；与当前不一致即拒绝
      * @param now 入库时间
-     * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）
+     * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）。容错模式下失败模块不入库。
      */
-    function applyAgentWebRefsDelta_ACU(snapshot, output, expectedRevision, now = Date.now()) {
+    function applyAgentWebRefsDelta_ACU(snapshot, output, expectedRevision, now = Date.now(), options) {
         if (!output.items.length)
-            return snapshot;
-        if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
-            reject_ACU$5('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs });
-        }
-        const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
-        const taken = new Set();
-        for (const item of output.items) {
-            if (item.action === 'retire') {
-                const current = byId.get(item.id);
-                if (!current)
-                    reject_ACU$5(`retire 的百科条目不存在：${item.id}`, { id: item.id });
-                if (!item.reason.trim())
-                    reject_ACU$5(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
-                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
-                continue;
+            return unchangedApply_ACU(snapshot);
+        try {
+            if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
+                reject_ACU$5('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs, path: 'webRefs' });
             }
-            if (!item.title.trim())
-                reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
-            if (!item.brief.trim())
-                reject_ACU$5(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
-            if (!item.url.trim())
-                reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
-            const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
-            taken.add(id);
-            const previous = byId.get(id);
-            byId.set(id, {
-                id,
-                title: item.title.trim(),
-                source: item.source,
-                url: item.url.trim(),
-                query: item.query,
-                tags: [...new Set(item.tags.map(tag => tag.trim()).filter(Boolean))],
-                brief: item.brief.trim(),
-                summary: item.summary.trim(),
-                sourceStatus: item.sourceStatus,
-                fetchedAt: previous?.fetchedAt || now,
-                retired: false,
-                retiredReason: '',
-            });
+            const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
+            const taken = new Set();
+            for (const item of output.items) {
+                if (item.action === 'retire') {
+                    const current = byId.get(item.id);
+                    if (!current)
+                        reject_ACU$5(`retire 的百科条目不存在：${item.id}`, { id: item.id });
+                    if (!item.reason.trim())
+                        reject_ACU$5(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
+                    byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
+                    continue;
+                }
+                if (!item.title.trim())
+                    reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
+                if (!item.brief.trim())
+                    reject_ACU$5(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
+                if (!item.url.trim())
+                    reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
+                const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
+                taken.add(id);
+                const previous = byId.get(id);
+                byId.set(id, {
+                    id,
+                    title: item.title.trim(),
+                    source: item.source,
+                    url: item.url.trim(),
+                    query: item.query,
+                    tags: [...new Set(item.tags.map(tag => tag.trim()).filter(Boolean))],
+                    brief: item.brief.trim(),
+                    summary: item.summary.trim(),
+                    sourceStatus: item.sourceStatus,
+                    fetchedAt: previous?.fetchedAt || now,
+                    retired: false,
+                    retiredReason: '',
+                });
+            }
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            clearPendingModule_ACU$1(pending, 'webRefs');
+            const next = {
+                ...snapshot,
+                webRefs: [...byId.values()],
+                pendingFixes: pending,
+                revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
+            };
+            return { snapshot: next, pendingFixes: pending, appliedModules: ['webRefs'] };
         }
-        return {
-            ...snapshot,
-            webRefs: [...byId.values()],
-            revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
-        };
+        catch (error) {
+            if (!options?.onViolation)
+                throw error;
+            const parsed = violationOf_ACU(error);
+            options.onViolation(parsed.message, parsed.details);
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            recordPendingFix_ACU$1(pending, 'webRefs', options.agentName ?? '', parsed.message, parsed.details, snapshot.settledThroughIndex);
+            const next = { ...snapshot, pendingFixes: pending };
+            return { snapshot: next, pendingFixes: pending, appliedModules: [] };
+        }
     }
     /** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
     function renderActiveConstraintList_ACU(snapshot) {
@@ -148905,39 +150398,59 @@ Expected function or array of functions, received type ${typeof value}.`
      * @param add 新增的约束文本
      * @param retire 废除的约束（id 或原文）
      * @param settledIndex 登记时的水位楼层
-     * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回
+     * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回。容错模式下失败不入库。
      */
-    function applyAgentConstraintRegistration_ACU(snapshot, add, retire, settledIndex) {
-        const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
-        const retiredIds = new Set();
-        for (const key of retireKeys) {
-            const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
-            if (!matched) {
-                reject_ACU$5(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
+    function applyAgentConstraintRegistration_ACU(snapshot, add, retire, settledIndex, options) {
+        try {
+            const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
+            const retiredIds = new Set();
+            for (const key of retireKeys) {
+                const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
+                if (!matched) {
+                    reject_ACU$5(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
+                }
+                retiredIds.add(matched.id);
             }
-            retiredIds.add(matched.id);
+            const remaining = snapshot.constraints.filter(item => !retiredIds.has(item.id));
+            const existingTexts = new Set(remaining.map(item => item.text));
+            const addTexts = [];
+            for (const raw of add) {
+                const text = raw.trim();
+                // 重复登记既有文本（含旧全量形态重抄整份清单）幂等跳过，不再构成拒绝理由。
+                if (!text || existingTexts.has(text))
+                    continue;
+                existingTexts.add(text);
+                addTexts.push(text);
+            }
+            if (!retiredIds.size && !addTexts.length)
+                return unchangedApply_ACU(snapshot);
+            const nextRevision = snapshot.revisions.constraints + 1;
+            const added = addTexts.map((text, order) => ({
+                id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
+                text,
+                reason: '主 Agent 本轮裁决登记',
+                createdIndex: settledIndex,
+            }));
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            clearPendingModule_ACU$1(pending, 'constraints');
+            const next = {
+                ...snapshot,
+                constraints: [...remaining, ...added],
+                pendingFixes: pending,
+                revisions: { ...snapshot.revisions, constraints: nextRevision },
+            };
+            return { snapshot: next, pendingFixes: pending, appliedModules: ['constraints'] };
         }
-        const remaining = snapshot.constraints.filter(item => !retiredIds.has(item.id));
-        const existingTexts = new Set(remaining.map(item => item.text));
-        const addTexts = [];
-        for (const raw of add) {
-            const text = raw.trim();
-            // 重复登记既有文本（含旧全量形态重抄整份清单）幂等跳过，不再构成拒绝理由。
-            if (!text || existingTexts.has(text))
-                continue;
-            existingTexts.add(text);
-            addTexts.push(text);
+        catch (error) {
+            if (!options?.onViolation)
+                throw error;
+            const parsed = violationOf_ACU(error);
+            options.onViolation(parsed.message, parsed.details);
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            recordPendingFix_ACU$1(pending, 'constraints', options.agentName ?? '', parsed.message, parsed.details, settledIndex);
+            const next = { ...snapshot, pendingFixes: pending };
+            return { snapshot: next, pendingFixes: pending, appliedModules: [] };
         }
-        if (!retiredIds.size && !addTexts.length)
-            return snapshot;
-        const nextRevision = snapshot.revisions.constraints + 1;
-        const added = addTexts.map((text, order) => ({
-            id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
-            text,
-            reason: '主 Agent 本轮裁决登记',
-            createdIndex: settledIndex,
-        }));
-        return { ...snapshot, constraints: [...remaining, ...added], revisions: { ...snapshot.revisions, constraints: nextRevision } };
     }
 
     /**
@@ -149412,6 +150925,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
             return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
         }
+        if (action === 'open_round') {
+            const focus = readText_ACU(payload.focus).trim();
+            if (!focus)
+                failProtocol_ACU('open_round 动作必须提供非空 focus');
+            return {
+                kind: 'open_round',
+                thought,
+                focus,
+                summary: readText_ACU(payload.summary),
+                dispatchArcArchitect: payload.dispatchArcArchitect === true,
+                dispatchWebResearcher: payload.dispatchWebResearcher === true,
+            };
+        }
         if (action === 'finalize') {
             const instruction = readText_ACU(payload.instruction);
             if (!instruction)
@@ -149436,7 +150962,21 @@ Expected function or array of functions, received type ${typeof value}.`
         if (action === 'read' || action === 'search') {
             return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
         }
-        failProtocol_ACU(`action 必须是 read / search / delegate / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+        failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+    }
+    function parseAgentComposerOutput_ACU(payload) {
+        const instruction = readText_ACU(payload.instruction).trim();
+        if (!instruction)
+            failProtocol_ACU('instruction-composer 必须提供非空 instruction');
+        const rawConstraints = payload.constraints;
+        let constraints = null;
+        if (isRecord_ACU$b(rawConstraints)) {
+            const add = readTextList_ACU(rawConstraints.add);
+            const retire = readTextList_ACU(rawConstraints.retire);
+            if (add.length || retire.length)
+                constraints = { add, retire };
+        }
+        return { instruction, summary: readText_ACU(payload.summary), constraints };
     }
     function parseCharacterKnowledge_ACU(value) {
         const knowledge = Array.isArray(value) ? value : [];
@@ -151725,6 +153265,7 @@ Expected function or array of functions, received type ${typeof value}.`
         reviewer: AGENT_PREFILLS_ACU.reviewer,
         webResearcher: AGENT_PREFILLS_ACU.researcher,
         requirementsMaintainer: AGENT_PREFILLS_ACU.requirements,
+        instructionComposer: AGENT_PREFILLS_ACU.composer,
     };
     /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
     const KIND_PAYLOAD_KEYS_ACU = {
@@ -151733,6 +153274,7 @@ Expected function or array of functions, received type ${typeof value}.`
         plan: ['recommendation', 'summary'],
         review: ['verdict'],
         research: ['delta', 'summary'],
+        compose: ['instruction', 'summary'],
     };
     /**
      * 契约类子代理（总纲/维护）在一次派工里最多追加的续写/修补轮数。
@@ -151746,6 +153288,7 @@ Expected function or array of functions, received type ${typeof value}.`
         plan: [],
         review: [],
         research: ['webRefs'],
+        compose: [],
     };
     function rejectDelegation_ACU(message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -152121,6 +153664,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
                         researcher: null,
                         requirements: null,
+                        composer: definition.kind === 'compose' ? parseAgentComposerOutput_ACU(payload) : null,
                         iterations: 1 + toolRoundsUsed,
                         attempts: attempt,
                         expandedReads: [...expandedReads],
@@ -152414,6 +153958,345 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
+     * service/continuation/agent/agent-workflow.ts — 续写固定工作流
+     *
+     * 程序按固定顺序驱动结算、策划、条件审查、容错提交、自动修复与写作指令编排。
+     * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
+     */
+    const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
+    const MAINLINE_NAME_ACU = 'mainline-planner';
+    const BEAT_NAME_ACU = 'beat-planner';
+    const REVIEWER_NAME_ACU = 'continuity-reviewer';
+    const ARC_NAME_ACU = 'arc-architect';
+    const WEB_NAME_ACU = 'web-researcher';
+    const MAINTAINER_MODULES_ACU = ['hooks', 'infoGap', 'chronology'];
+    const BEAT_OBLIGATION_PATTERN_ACU = /伏笔|埋设|回收|误导|信息差|揭示/;
+    const CONFLICT_PATTERN_ACU = /冲突|矛盾|红线/;
+    function continuationBeatObligation_ACU(turn) {
+        if (!turn)
+            return false;
+        if (turn.function === 'payoff' || turn.function === 'reveal')
+            return true;
+        return BEAT_OBLIGATION_PATTERN_ACU.test(turn.goal ?? '');
+    }
+    function continuationMajorTurn_ACU(turn) {
+        if (!turn)
+            return false;
+        return turn.pacing === 'turn' || turn.function === 'reveal';
+    }
+    function continuationContinuityReviewRequired_ACU(input) {
+        if (input.majorTurn)
+            return true;
+        return CONFLICT_PATTERN_ACU.test([...input.recommendations, ...input.risks].join('\n'));
+    }
+    function isStale_ACU(error) {
+        return error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE';
+    }
+    function errorText_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return error.error.message;
+        return error instanceof Error ? error.message : String(error);
+    }
+    function tolerantOptions_ACU(agentName) {
+        return { onViolation: () => undefined, agentName };
+    }
+    function deltaTouched_ACU(delta) {
+        if (!delta)
+            return false;
+        return Boolean(delta.hooks.length || delta.hookPatches.length || delta.infoGap.length || delta.infoGapPatches.length
+            || delta.storyArc.length || delta.storyArcPatches.length || delta.chronology.length);
+    }
+    function repairableAgents_ACU(snapshot, settings) {
+        if (!settings.workflow.autoFixEnabled)
+            return [];
+        const names = new Set();
+        for (const fix of snapshot.pendingFixes) {
+            if (fix.attempts >= settings.workflow.autoFixMaxAttempts)
+                continue;
+            if (fix.module === 'hooks' || fix.module === 'infoGap' || fix.module === 'chronology')
+                names.add(MAINTAINER_NAME_ACU);
+            else if (fix.module === 'storyArc')
+                names.add(ARC_NAME_ACU);
+            else if (fix.module === 'webRefs')
+                names.add(WEB_NAME_ACU);
+        }
+        return [...names];
+    }
+    function needsPendingEscalation_ACU(snapshot, settings) {
+        if (!snapshot.pendingFixes.length)
+            return false;
+        if (!settings.workflow.autoFixEnabled)
+            return true;
+        return snapshot.pendingFixes.some(item => item.attempts >= settings.workflow.autoFixMaxAttempts);
+    }
+    function formatFixes_ACU$1(fixes) {
+        if (!fixes.length)
+            return '无';
+        return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => violation.message).join('；') || item.lastError}`).join(' | ');
+    }
+    function maintainerPrompt_ACU(focus, snapshot, repair) {
+        const fixes = snapshot.pendingFixes.filter(item => MAINTAINER_MODULES_ACU.includes(item.module));
+        return [
+            repair ? '这是独立预算的自动修复。只提交违规模块的增量 patch，不要重写无关模块。' : `本轮焦点：${focus}`,
+            '结算已经发生的正文。没有新事实时 delta 留空并在 summary 写明 no_change。',
+            `待修复：${formatFixes_ACU$1(fixes)}`,
+        ].join('\n');
+    }
+    async function runContinuationAgentWorkflow_ACU(input) {
+        let snapshot = input.snapshot;
+        const steps = [];
+        const plannerNotes = [];
+        const plannerRisks = [];
+        let reviewerNote = '';
+        const runSafe_ACU = async (call) => {
+            try {
+                return await input.runAgent(call);
+            }
+            catch (error) {
+                if (isStale_ACU(error))
+                    throw error;
+                return { ok: false, summary: errorText_ACU(error) };
+            }
+        };
+        const applyMaintainerLike_ACU = (output, writes, readRevisions, agentName) => {
+            if (!output || !deltaTouched_ACU(output.delta))
+                return;
+            const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
+            const applied = applyAgentModuleDelta_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
+            snapshot = applied.snapshot;
+        };
+        if (input.opening.dispatchArcArchitect) {
+            const arc = await runSafe_ACU({
+                agentName: ARC_NAME_ACU,
+                billing: 'opening',
+                repair: false,
+                prompt: `开局要求维护总纲。焦点：${input.opening.focus}`,
+            });
+            steps.push({ agentName: ARC_NAME_ACU, status: arc.ok ? 'ok' : 'failed', summary: arc.summary });
+            if (arc.ok)
+                applyMaintainerLike_ACU(arc.arc, arc.writes ?? ['storyArc'], arc.readRevisions, ARC_NAME_ACU);
+        }
+        if (input.opening.dispatchWebResearcher) {
+            const web = await runSafe_ACU({
+                agentName: WEB_NAME_ACU,
+                billing: 'opening',
+                repair: false,
+                prompt: `开局要求补充外部设定。焦点：${input.opening.focus}`,
+            });
+            steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
+            if (web.ok && web.researcher && web.researcher.items.length) {
+                const applied = applyAgentWebRefsDelta_ACU(snapshot, web.researcher, web.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(WEB_NAME_ACU));
+                snapshot = applied.snapshot;
+            }
+        }
+        const maintainerPending = snapshot.pendingFixes.some(item => MAINTAINER_MODULES_ACU.includes(item.module)
+            && item.attempts < input.settings.workflow.autoFixMaxAttempts);
+        if (!input.hasUnsettledHistory && !maintainerPending) {
+            steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: '没有未结算正文，也没有待修复的结算模块' });
+        }
+        else {
+            const maintainer = await runSafe_ACU({
+                agentName: MAINTAINER_NAME_ACU,
+                billing: 'pipeline',
+                repair: false,
+                prompt: maintainerPrompt_ACU(input.opening.focus, snapshot, false),
+            });
+            if (!maintainer.ok) {
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
+            }
+            else if (maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta)) {
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
+                snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
+            }
+            else {
+                applyMaintainerLike_ACU(maintainer.maintainer, maintainer.writes ?? ['hooks', 'infoGap', 'chronology'], maintainer.readRevisions, MAINTAINER_NAME_ACU);
+                snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'ok', summary: maintainer.summary });
+            }
+        }
+        const plannerCalls = [
+            { agentName: MAINLINE_NAME_ACU, billing: 'pipeline', repair: false, prompt: `策划本轮场景。焦点：${input.opening.focus}` },
+        ];
+        if (input.beatObligation) {
+            plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', repair: false, prompt: `本轮有伏笔操作义务。焦点：${input.opening.focus}` });
+        }
+        else {
+            steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '本轮没有伏笔操作义务' });
+        }
+        const planners = await Promise.all(plannerCalls.map(call => runSafe_ACU(call)));
+        for (let index = 0; index < planners.length; index += 1) {
+            const planner = planners[index];
+            steps.push({ agentName: plannerCalls[index].agentName, status: planner.ok ? 'ok' : 'failed', summary: planner.summary });
+            if (planner.planner) {
+                plannerNotes.push(planner.planner.recommendation);
+                plannerRisks.push(...planner.planner.risks);
+            }
+        }
+        const reviewRequired = continuationContinuityReviewRequired_ACU({
+            majorTurn: input.majorTurn,
+            recommendations: plannerNotes,
+            risks: plannerRisks,
+        });
+        if (!reviewRequired) {
+            steps.push({ agentName: REVIEWER_NAME_ACU, status: 'skipped', summary: '没有策划冲突或大转折' });
+        }
+        else {
+            const reviewer = await runSafe_ACU({
+                agentName: REVIEWER_NAME_ACU,
+                billing: 'pipeline',
+                repair: false,
+                prompt: `审查策划是否冲突。焦点：${input.opening.focus}\n${plannerNotes.join('\n')}`,
+            });
+            steps.push({ agentName: REVIEWER_NAME_ACU, status: reviewer.ok ? 'ok' : 'failed', summary: reviewer.summary });
+            if (reviewer.reviewer)
+                reviewerNote = `${reviewer.reviewer.verdict} ${reviewer.reviewer.reason} ${reviewer.reviewer.fixes.join('；')}`;
+        }
+        const escalateBeforeRepair = needsPendingEscalation_ACU(snapshot, input.settings);
+        const repairAgents = repairableAgents_ACU(snapshot, input.settings);
+        const composerBase = [
+            `本轮焦点：${input.opening.focus}`,
+            input.opening.summary ? `开局摘要：${input.opening.summary}` : '',
+            `策划建议：${plannerNotes.join('\n') || '无'}`,
+            `审查结论：${reviewerNote || '未触发连续性审查'}`,
+            `待修复：${formatFixes_ACU$1(snapshot.pendingFixes)}`,
+            '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。',
+        ].filter(Boolean).join('\n');
+        const repairPromise = Promise.all(repairAgents.map(agentName => runSafe_ACU({
+            agentName,
+            billing: 'repair',
+            repair: true,
+            prompt: `自动修复。只提交违规模块。${formatFixes_ACU$1(snapshot.pendingFixes)}`,
+        })));
+        const composerPromise = input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {
+            if (isStale_ACU(error))
+                throw error;
+            const failed = { instruction: '', summary: errorText_ACU(error), constraints: null };
+            return failed;
+        });
+        const [repairs, composer] = await Promise.all([repairPromise, composerPromise]);
+        for (let index = 0; index < repairs.length; index += 1) {
+            const repair = repairs[index];
+            const agentName = repairAgents[index] ?? 'repair';
+            steps.push({ agentName, status: repair.ok ? 'ok' : 'failed', summary: repair.summary });
+            if (!repair.ok)
+                continue;
+            if (repair.researcher) {
+                snapshot = applyAgentWebRefsDelta_ACU(snapshot, repair.researcher, repair.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(agentName)).snapshot;
+            }
+            applyMaintainerLike_ACU(repair.maintainer ?? repair.arc, repair.writes ?? [], repair.readRevisions, agentName);
+        }
+        steps.push({
+            agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
+            status: composer.instruction.trim() ? 'ok' : 'failed',
+            summary: composer.summary || (composer.instruction.trim() ? '已产出写作指令' : 'instruction 为空'),
+        });
+        if (composer.constraints) {
+            snapshot = applyAgentConstraintRegistration_ACU(snapshot, composer.constraints.add, composer.constraints.retire, input.settledIndex, tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU)).snapshot;
+        }
+        if (escalateBeforeRepair || needsPendingEscalation_ACU(snapshot, input.settings)) {
+            const summary = `工作流停止交付，待修复模块需要主会话处理：${snapshot.pendingFixes.map(item => `${item.module}(${item.attempts})`).join('、') || '自动修复已关闭'}`;
+            return {
+                outcome: 'escalate',
+                summary,
+                instruction: '',
+                pendingFixes: snapshot.pendingFixes,
+                escalated: true,
+                escalationKind: 'pending_fix',
+                snapshot,
+                steps,
+            };
+        }
+        let instruction = composer.instruction.trim();
+        if (!instruction) {
+            return {
+                outcome: 'escalate',
+                summary: composer.summary || 'instruction-composer 没有产出非空写作指令',
+                instruction: '',
+                pendingFixes: snapshot.pendingFixes,
+                escalated: true,
+                escalationKind: 'final_review',
+                snapshot,
+                steps,
+            };
+        }
+        if (input.settings.finalReview.enabled) {
+            let failures = 0;
+            const limit = input.settings.workflow.reviseLimit;
+            while (failures < limit) {
+                let review;
+                try {
+                    review = await input.runFinalReview(instruction, composer.summary);
+                }
+                catch (error) {
+                    if (isStale_ACU(error))
+                        throw error;
+                    failures += 1;
+                    steps.push({ agentName: 'final-reviewer', status: 'failed', summary: errorText_ACU(error) });
+                    if (failures >= limit)
+                        break;
+                    continue;
+                }
+                if (review.verdict === 'pass') {
+                    steps.push({ agentName: 'final-reviewer', status: 'ok', summary: review.summary || 'pass' });
+                    failures = 0;
+                    break;
+                }
+                failures += 1;
+                steps.push({ agentName: 'final-reviewer', status: 'failed', summary: `${review.verdict}：${review.requiredFixes.join('；') || review.summary}` });
+                if (failures >= limit)
+                    break;
+                let revised;
+                try {
+                    revised = await input.runComposer({
+                        prompt: `按反馈清单增量修订，不要全量重写。\n原指令：\n${instruction}`,
+                        revisionFeedback: review.requiredFixes.join('\n'),
+                        priorInstruction: instruction,
+                    });
+                }
+                catch (error) {
+                    if (isStale_ACU(error))
+                        throw error;
+                    failures += 1;
+                    steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: errorText_ACU(error) });
+                    continue;
+                }
+                if (!revised.instruction.trim()) {
+                    failures += 1;
+                    steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: '修订后的 instruction 为空' });
+                    continue;
+                }
+                instruction = revised.instruction.trim();
+                if (revised.constraints) {
+                    snapshot = applyAgentConstraintRegistration_ACU(snapshot, revised.constraints.add, revised.constraints.retire, input.settledIndex, tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU)).snapshot;
+                }
+                steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'ok', summary: '已按反馈增量修订' });
+            }
+            if (failures >= limit) {
+                return {
+                    outcome: 'escalate',
+                    summary: `终审连续 ${limit} 次未通过，已升级主会话`,
+                    instruction: '',
+                    pendingFixes: snapshot.pendingFixes,
+                    escalated: true,
+                    escalationKind: 'final_review',
+                    snapshot,
+                    steps,
+                };
+            }
+        }
+        return {
+            outcome: 'deliver',
+            summary: composer.summary || input.opening.summary || '固定工作流已交付写作指令',
+            instruction,
+            pendingFixes: snapshot.pendingFixes,
+            escalated: false,
+            escalationKind: '',
+            snapshot,
+            steps,
+        };
+    }
+
+    /**
      * service/continuation/agent/agent-prompt-drift.ts — 出站提示词前缀漂移诊断
      *
      * 用途：主 Agent 相邻两次请求理论上共享「静态骨架 + append-only 历史」的字节级前缀，
@@ -152646,6 +154529,8 @@ Expected function or array of functions, received type ${typeof value}.`
             return `调用 ${action.calls.length} 个 read/search 工具`;
         if (action.kind === 'delegate')
             return `派工 ${action.delegations.length} 项`;
+        if (action.kind === 'open_round')
+            return '开局并交给固定工作流';
         if (action.kind === 'finalize')
             return '交付写作指导';
         return '阻断本轮';
@@ -153033,7 +154918,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         detail: action.thought,
                     });
                     const outcomesBefore = ledger.outcomes.length;
-                    if (maintenanceConvergenceAvailable && action.kind !== 'finalize' && action.kind !== 'block') {
+                    if (maintenanceConvergenceAvailable && action.kind !== 'finalize' && action.kind !== 'block' && action.kind !== 'open_round') {
                         failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', '必要大纲维护完成后只允许 finalize 或 block，不能继续读取或派工。', { action: action.kind });
                     }
                     if (postReviewDecisionAvailable && action.kind !== 'tools') {
@@ -153050,6 +154935,35 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (action.kind === 'tools') {
                         // 不推进 iteration：工具批次不占决策迭代额度。
                         await this.runToolBatch_ACU(action.calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration);
+                        continue;
+                    }
+                    if (action.kind === 'open_round') {
+                        const workflowEntry = logAgentSession_ACU({ kind: 'delegation', title: '固定工作流正在执行', detail: action.focus, status: 'running' });
+                        let workflow;
+                        try {
+                            workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, apiDependencies);
+                        }
+                        catch (error) {
+                            updateAgentSession_ACU(workflowEntry, { title: '固定工作流失败', detail: error instanceof Error ? error.message : String(error), ok: false });
+                            throw error;
+                        }
+                        snapshot = context.moduleSnapshot;
+                        updateAgentSession_ACU(workflowEntry, {
+                            title: `固定工作流：${workflow.outcome}`,
+                            detail: workflow.summary,
+                            ok: workflow.outcome === 'deliver',
+                        });
+                        if (workflow.outcome === 'deliver') {
+                            logAgentSession_ACU({ kind: 'finalize', title: '最终写作指导', detail: workflow.instruction });
+                            logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: workflow.summary });
+                            terminalLogged = true;
+                            clearAgentRunState_ACU(identitySeed.chatIdentity);
+                            await session.flush();
+                            return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
+                        }
+                        session.record([{ kind: 'tool', text: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞，或在用户要求维护资料时 delegate arc-architect / web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
+                        await session.flush();
+                        iteration += 1;
                         continue;
                     }
                     if (action.kind === 'finalize') {
@@ -153122,7 +155036,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             // 最后一轮例外：此时回灌已无修正机会，登记降级为警告并照常交付，绝不让约束问题烧掉唯一的交付机会。
                             let constraintsApplied = true;
                             try {
-                                snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.add, action.constraints.retire, chat.length - 1);
+                                snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.add, action.constraints.retire, chat.length - 1).snapshot;
                             }
                             catch (error) {
                                 if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED')
@@ -153601,6 +155515,97 @@ Expected function or array of functions, received type ${typeof value}.`
             session.record(appends);
             await session.flush();
         }
+        async runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, apiDependencies) {
+            const unsettled = renderAgentUnsettledHistory_ACU(context);
+            const mapPayload = (result) => ({
+                ok: true,
+                summary: result.composer?.summary || result.maintainer?.summary || result.arc?.summary || result.planner?.summary || result.reviewer?.reason || result.researcher?.summary || '',
+                maintainer: result.maintainer,
+                arc: result.arc,
+                planner: result.planner,
+                reviewer: result.reviewer,
+                researcher: result.researcher,
+                readRevisions: result.readRevisions,
+                writes: result.writes,
+                noChange: Boolean(result.maintainer && /no_change/.test(result.maintainer.summary)),
+            });
+            const workflow = await runContinuationAgentWorkflow_ACU({
+                settings: request.settings,
+                snapshot: context.moduleSnapshot,
+                opening: {
+                    focus: action.focus,
+                    summary: action.summary,
+                    dispatchArcArchitect: action.dispatchArcArchitect,
+                    dispatchWebResearcher: action.dispatchWebResearcher && request.settings.webResearch.enabled,
+                },
+                hasUnsettledHistory: !unsettled.startsWith('没有尚未结算的真实历史'),
+                beatObligation: continuationBeatObligation_ACU(context.execution.turn),
+                majorTurn: continuationMajorTurn_ACU(context.execution.turn),
+                settledIndex: Math.max(0, chat.length - 1),
+                completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
+                runAgent: async (call) => {
+                    if (call.billing === 'opening') {
+                        const used = ledger.perAgent.get(call.agentName) ?? 0;
+                        if (ledger.delegationsUsed >= budget.maxDelegations || used >= budget.maxSameAgent) {
+                            return { ok: false, summary: '开局派工超出预算，已跳过' };
+                        }
+                    }
+                    const definition = findAgentSubagentDefinition_ACU(call.agentName);
+                    const role = definition?.promptKey ?? 'main';
+                    const preset = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
+                    const repairReads = request.settings.workflow.repairMaxExtraReads;
+                    const result = await this.dependencies.subagentRuntime.run({
+                        delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
+                        settings: request.settings,
+                        resolveContext: context,
+                        budget: call.billing === 'repair' ? { ...budget, maxExtraReads: repairReads } : budget,
+                        preset,
+                        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+                        isCurrent: identity => request.isInternalRequestCurrent(identity),
+                        signal: request.signal,
+                    });
+                    if (call.billing === 'opening') {
+                        ledger.delegationsUsed += 1;
+                        ledger.perAgent.set(call.agentName, (ledger.perAgent.get(call.agentName) ?? 0) + 1);
+                    }
+                    return mapPayload(result);
+                },
+                runComposer: async (call) => {
+                    const preset = this.dependencies.resolveApiPreset(request.settings, 'instructionComposer', 'agent_delegate', apiDependencies);
+                    const feedback = call.revisionFeedback ? `\n终审反馈清单（只改这些，不要全量重写）：\n${call.revisionFeedback}` : '';
+                    const result = await this.dependencies.subagentRuntime.run({
+                        delegation: { agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, prompt: `${call.prompt}${feedback}`, reads: [] },
+                        settings: request.settings,
+                        resolveContext: { ...context, moduleSnapshot: context.moduleSnapshot },
+                        budget,
+                        preset,
+                        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+                        isCurrent: identity => request.isInternalRequestCurrent(identity),
+                        signal: request.signal,
+                    });
+                    if (!result.composer?.instruction.trim()) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', 'instruction-composer 必须提供非空 instruction', false));
+                    }
+                    return result.composer;
+                },
+                runFinalReview: async (instruction, summary) => {
+                    const review = await this.dependencies.subagentRuntime.runFinalReview({
+                        settings: request.settings,
+                        resolveContext: context,
+                        candidateInstruction: instruction,
+                        currentUserInput: context.originInstruction,
+                        planningSummary: summary,
+                        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+                        isCurrent: identity => request.isInternalRequestCurrent(identity),
+                        signal: request.signal,
+                    });
+                    return review.output;
+                },
+            });
+            context.moduleSnapshot = workflow.snapshot;
+            await this.persistSnapshot_ACU(chat, workflow.snapshot);
+            return workflow;
+        }
         /**
          * 渲染未结算楼层区间。只报区间不带正文：未结算正文默认没有注入骨架（尾部全文楼层除外），
          * 主 Agent 要看必须自己 read $HISTORY_UNSETTLED。
@@ -153610,7 +155615,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const last = context.chat.length - 1;
             if (start > last)
                 return '没有尚未结算的真实历史，无需派工结算维护类代理。';
-            return `未结算楼层区间：${start} 到 ${last}（共 ${last - start + 1} 楼）。本轮必须先派工 hook-cognition-maintainer 把这些楼层结算进伏笔账本与信息差时间线，再进入策划与 finalize——你自己读过这些正文不等于结算。注意：这些楼层的正文默认没有注入（只有尾部全文楼层在【最近正文】里），规划前先 read $HISTORY_UNSETTLED 亲自读过，再派工结算。`;
+            return `未结算楼层区间：${start} 到 ${last}（共 ${last - start + 1} 楼）。输出 open_round 后，固定工作流会自动派 hook-cognition-maintainer 结算这些楼层。不要 delegate 结算、策划或审查角色。这些楼层的正文默认没有注入，需要核对时 read $HISTORY_UNSETTLED。`;
         }
         /**
          * 渲染总纲状态证据。只报「有没有、进度登记齐不齐」，总纲正文由 $STORY_ARC 按需调阅——
@@ -153706,7 +155711,7 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             try {
                 const expected = researcher.expectedRevision ?? result.readRevisions.webRefs;
-                const applied = applyAgentWebRefsDelta_ACU(snapshot, researcher, expected);
+                const applied = applyAgentWebRefsDelta_ACU(snapshot, researcher, expected).snapshot;
                 const upserts = researcher.items.filter(item => item.action === 'upsert');
                 const retires = researcher.items.filter(item => item.action === 'retire');
                 const catalog = upserts.map(item => `[${item.id || '新'}]「${item.title}」${item.brief}`).join('；');
@@ -153804,8 +155809,10 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             const accepted = [];
             for (const delegation of normalDelegations) {
-                if (delegation.agentName === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU) {
-                    rejectImmediately(delegation.agentName, 'requirements-maintainer 只能由会话压缩后的系统派工触发，主 Agent 不能直接派它。本次未消耗派工额度。');
+                if (delegation.agentName === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU || delegation.agentName === AGENT_INSTRUCTION_COMPOSER_NAME_ACU || delegation.agentName === 'final-reviewer') {
+                    rejectImmediately(delegation.agentName, delegation.agentName === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU
+                        ? 'requirements-maintainer 只能由会话压缩后的系统派工触发，主 Agent 不能直接派它。本次未消耗派工额度。'
+                        : '该角色由固定工作流调用，主 Agent 不能 delegate。请输出 open_round。本次未消耗派工额度。');
                     continue;
                 }
                 if (outlineMaintenanceReserveAvailable) {
@@ -153894,7 +155901,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (result.maintainer) {
                     try {
                         const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-                        const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1);
+                        const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1).snapshot;
                         // 结算派工成功交付契约即推进水位到当轮末楼：空 delta（这段楼层没有新增伏笔/信息差）
                         // 同样代表已被处理过，不推水位会让同一区间每轮重复要求结算、白烧派工。
                         const settledTarget = chat.length - 1;
@@ -153926,7 +155933,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         const completedStageNumbers = context.execution.task.stages
                             .filter(stage => stage.status === 'completed')
                             .map(stage => stage.stageNumber);
-                        const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers);
+                        const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers).snapshot;
                         // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
                         // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
                         if (applied !== nextSnapshot) {
@@ -154004,7 +156011,7 @@ Expected function or array of functions, received type ${typeof value}.`
             logAgentSession_ACU({
                 kind: 'thought',
                 title: `资料快照已写入楼层 ${targetIndex}`,
-                detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
+                detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.max(snapshot.settledThroughIndex, 0)}。资料按最近基线折叠；该楼增量会随删除或 swipe 一起退出折叠。`,
                 ok: true,
             });
         }
@@ -155475,7 +157482,12 @@ Expected function or array of functions, received type ${typeof value}.`
         return { schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU, ledgerRevision: raw.ledgerRevision, ledger, evidenceRefs: validateEvidenceRefs_ACU(raw.evidenceRefs), updatedAt: raw.updatedAt };
     }
     function readWorldSimulationLedgerAtAnchor_ACU(anchor, chat) {
-        return readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor, raw => validateWorldSimulationLedger_ACU(raw), chat);
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const current = resolveCurrentWorldSimulationAnchor_ACU(anchor, messages);
+        const folded = foldWorldSimulationLedger_ACU(messages, current.messageIndex);
+        if (!folded || !folded.contributedIndexes.includes(current.messageIndex))
+            return null;
+        return folded.ledger;
     }
     async function writeWorldSimulationLedgerAtAnchor_ACU(anchor, ledger, chat) {
         await writeWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU$1, anchor, validateWorldSimulationLedger_ACU(ledger, 'persist'), chat);
@@ -155486,6 +157498,22 @@ Expected function or array of functions, received type ${typeof value}.`
      */
     function readLatestWorldSimulationMaterials_ACU(chat) {
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const folded = foldWorldSimulationLedger_ACU(messages);
+        if (folded && folded.lastContributedIndex !== null) {
+            return {
+                snapshot: {
+                    schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
+                    ledgerRevision: folded.ledger.revision,
+                    ledger: folded.ledger,
+                    evidenceRefs: folded.evidenceRefs,
+                    updatedAt: folded.updatedAt,
+                },
+                diagnostics: [],
+                adoptedIndex: folded.lastContributedIndex,
+                checkpointIndex: folded.checkpointIndex,
+                foldedDeltaCount: folded.foldedDeltaCount,
+            };
+        }
         const diagnostics = [];
         let sawBrokenSnapshot = false;
         for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -155926,33 +157954,6 @@ Expected function or array of functions, received type ${typeof value}.`
             }).catch(() => undefined);
         }
     }
-
-    const states_ACU = new Map();
-    function clone_ACU$7(state) {
-        return {
-            ...state,
-            perAgent: { ...state.perAgent },
-            outcomes: state.outcomes.map(item => ({ ...item })),
-            candidates: state.candidates?.map(item => ({ ...item, patch: { ...item.patch }, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], writableModules: [...item.writableModules] })),
-            subagentOutcomes: state.subagentOutcomes?.map(item => ({ ...item, evidenceRefs: [...item.evidenceRefs], uncertainties: [...item.uncertainties], unresolved: item.unresolved ? [...item.unresolved] : undefined, candidate: item.candidate ? { ...item.candidate, patch: { ...item.candidate.patch }, evidenceRefs: [...item.candidate.evidenceRefs], uncertainties: [...item.candidate.uncertainties], writableModules: [...item.candidate.writableModules] } : undefined })),
-            evidenceSnapshot: state.evidenceSnapshot ? { runId: state.evidenceSnapshot.runId, entries: state.evidenceSnapshot.entries.map(entry => ({ ...entry })) } : undefined,
-            transcript: state.transcript?.map(item => ({ ...item })),
-        };
-    }
-    function saveWorldSimulationRunState_ACU(chatIdentity, state) { if (chatIdentity)
-        states_ACU.set(chatIdentity, clone_ACU$7(state)); }
-    function readWorldSimulationRunState_ACU(chatIdentity, taskId, cursorKey) {
-        const cached = states_ACU.get(chatIdentity);
-        if (!cached)
-            return null;
-        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
-            states_ACU.delete(chatIdentity);
-            return null;
-        }
-        return clone_ACU$7(cached);
-    }
-    function clearWorldSimulationRunState_ACU(chatIdentity) { states_ACU.delete(chatIdentity); }
-    function resetWorldSimulationRunCacheForTests_ACU() { states_ACU.clear(); }
 
     const isRecord_ACU$6 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
     function coerceWorldSimulationStringArray_ACU(value) {
@@ -160125,20 +162126,6 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return map;
     }
-    function readArchiveSnapshot_ACU(raw, anchor) {
-        if (raw === undefined)
-            return buildEmptyWorldChronicleArchiveSnapshot_ACU();
-        if (!isRecord_ACU$3(raw) || raw.schemaVersion !== 1 || !isRecord_ACU$3(raw.entries)) {
-            reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU} 分桶结构损坏`);
-        }
-        const entry = raw.entries[buildWorldSimulationBucketKey_ACU(anchor)];
-        if (entry === undefined)
-            return buildEmptyWorldChronicleArchiveSnapshot_ACU();
-        if (!isRecord_ACU$3(entry) || !Object.prototype.hasOwnProperty.call(entry, 'value')) {
-            reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU} 当前 swipe 条目损坏`);
-        }
-        return validateWorldSimulationChronicleArchiveSnapshot_ACU(entry.value, 'persist');
-    }
     function assertRun_ACU(envelope, input) {
         const run = envelope.task?.activeRun;
         const candidate = input.commitCandidate;
@@ -160151,12 +162138,6 @@ Expected function or array of functions, received type ${typeof value}.`
         if (candidate.runId !== input.identity.runId || candidate.taskId !== input.identity.taskId || candidate.stageId !== input.identity.stageId || candidate.stageRevision !== input.identity.stageRevision || candidate.baseLedgerRevision !== input.identity.baseLedgerRevision) {
             reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', 'commit candidate 身份与运行租约不一致');
         }
-    }
-    function bucketWithEntry_ACU(raw, anchor, value, updatedAt, field) {
-        if (raw !== undefined && (!isRecord_ACU$3(raw) || raw.schemaVersion !== 1 || !isRecord_ACU$3(raw.entries)))
-            reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${field} 分桶结构损坏`);
-        const entries = raw === undefined ? {} : raw.entries;
-        return { schemaVersion: 1, entries: { ...entries, [buildWorldSimulationBucketKey_ACU(anchor)]: { anchor: { ...anchor }, value, updatedAt } } };
     }
     function exactKeys_ACU(raw, allowed, path) {
         for (const key of Object.keys(raw)) {
@@ -160287,7 +162268,9 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!firstMessage || !anchorMessage)
             reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交目标楼层不可用');
         const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-        const envelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+        const validatedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+        const foldedBefore = foldWorldSimulationLedger_ACU(chat);
+        const envelope = foldedBefore ? { ...validatedEnvelope, ledger: foldedBefore.ledger } : validatedEnvelope;
         assertRun_ACU(envelope, input);
         const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
         const applied = applyWorldSimulationCandidatesDetailed_ACU(envelope.ledger, input.commitCandidate.acceptedCandidates, new Set(input.commitCandidate.evidenceRefs), envelope.settings, { anchorMessage: storyText });
@@ -160367,19 +162350,13 @@ Expected function or array of functions, received type ${typeof value}.`
             contentDigest: sha256HexSync_ACU(newContent),
         };
         const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline);
-        const materials = {
-            schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
-            ledgerRevision: ledger.revision,
-            ledger: validateWorldSimulationLedger_ACU(ledger, 'agent_persist'),
-            evidenceRefs: [...input.commitCandidate.evidenceRefs],
-            updatedAt: input.completedAt,
+        const archiveBefore = foldWorldSimulationArchive_ACU(chat).snapshot;
+        const archiveSnapshot = {
+            schemaVersion: archiveBefore.schemaVersion,
+            records: { ...archiveBefore.records },
         };
-        const nextStateBucket = bucketWithEntry_ACU(anchorMessage[WORLD_SIMULATION_STATE_FIELD_ACU$1], persistedAnchor, ledger, input.completedAt, WORLD_SIMULATION_STATE_FIELD_ACU$1);
-        const nextMaterialsBucket = bucketWithEntry_ACU(anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU], persistedAnchor, materials, input.completedAt, WORLD_SIMULATION_MATERIALS_FIELD_ACU);
-        const archiveSnapshot = readArchiveSnapshot_ACU(anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU], currentAnchor);
         for (const write of applied.chronicleArchiveWrites)
             archiveSnapshot.records[write.archiveRef] = write;
-        const nextArchiveBucket = bucketWithEntry_ACU(anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU], persistedAnchor, archiveSnapshot, input.completedAt, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU);
         const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU], anchorMessage, currentAnchor, persistedAnchor, input.completedAt);
         const snapshots = [
             { target: firstMessage, key: WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(firstMessage, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU), value: rawEnvelope },
@@ -160394,12 +162371,21 @@ Expected function or array of functions, received type ${typeof value}.`
         let saveAttempted = false;
         try {
             firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] = nextEnvelope;
-            anchorMessage[WORLD_SIMULATION_STATE_FIELD_ACU$1] = nextStateBucket;
-            anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU] = nextMaterialsBucket;
             if (nextConversationBucket)
                 anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = nextConversationBucket;
-            anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU] = nextArchiveBucket;
             writeWorldSimulationActiveSwipeContent_ACU(anchorMessage, newContent);
+            appendWorldSimulationCommitChain_ACU({
+                chat,
+                messageIndex: currentAnchor.messageIndex,
+                anchor: persistedAnchor,
+                beforeLedger: envelope.ledger,
+                nextLedger: ledger,
+                evidenceRefs: input.commitCandidate.evidenceRefs,
+                updatedAt: input.completedAt,
+                checkpointIndex: foldedBefore?.checkpointIndex ?? null,
+                beforeArchive: archiveBefore,
+                nextArchive: archiveSnapshot,
+            });
             if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
                 reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交前聊天上下文已变化');
             }
@@ -161312,7 +163298,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 return { kind: 'blocked', reason: 'chat_changed' };
             const result = resolveGeneratedAiMessageIndex_ACU({ liveChat: chat, intent });
             if (result.kind === 'resolved') {
-                if (!isAiMessage_ACU(chat[result.messageIndex]))
+                if (!isAiMessage_ACU$1(chat[result.messageIndex]))
                     return { kind: 'blocked', reason: 'invalid_intent' };
                 return waitForWorldSimulationAnchorSettle_ACU(result.messageIndex, chatIdentity, dependencies);
             }
@@ -161327,14 +163313,14 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function resolveLatestWorldSimulationAssistant_ACU(chat) {
         for (let index = chat.length - 1; index >= 0; index -= 1) {
-            if (isAiMessage_ACU(chat[index]))
+            if (isAiMessage_ACU$1(chat[index]))
                 return { kind: 'resolved', anchor: resolveWorldSimulationAnchor_ACU(index, chat) };
         }
         return { kind: 'blocked', reason: 'no_assistant' };
     }
     function restoreWorldSimulationAnchor_ACU(identity, chat) {
         for (let index = 0; index < chat.length; index += 1) {
-            if (!isAiMessage_ACU(chat[index]))
+            if (!isAiMessage_ACU$1(chat[index]))
                 continue;
             const anchor = resolveWorldSimulationAnchor_ACU(index, chat);
             if (anchor.chatIdentity === identity.chatIdentity
@@ -161825,6 +163811,7 @@ Expected function or array of functions, received type ${typeof value}.`
             loadSettings_ACU();
             // S0-4：注册插件保存后的 checkpoint 保管库同步（删楼恢复的影子基线）。
             installCheckpointDeleteGuard_ACU();
+            installMaterialCheckpointScheduler_ACU();
             // Register the bridge before generation events are subscribed. Runtime
             // migration remains page-owned so no chat persistence is touched at startup.
             getContinuationRuntime_ACU();
@@ -187526,7 +189513,13 @@ Expected function or array of functions, received type ${typeof value}.`
         const snapshot = ref(null);
         const loadError = ref('');
         /** 最近一次读取的来源诊断：采用了哪一楼、是否宽容抢救、有哪些损坏楼层。 */
-        const diagnostics = ref({ candidates: [], adoptedIndex: null, salvaged: false });
+        const diagnostics = ref({
+            candidates: [],
+            adoptedIndex: null,
+            salvaged: false,
+            checkpointIndex: null,
+            foldedDeltaCount: 0,
+        });
         const modules = reactive({
             hooks: emptyModuleState_ACU(),
             infoGap: emptyModuleState_ACU(),
@@ -187609,6 +189602,26 @@ Expected function or array of functions, received type ${typeof value}.`
         return { snapshot, loadError, diagnostics, modules, reload, save, discard, updateDraft };
     }
 
+    const MODULE_LABELS_ACU = {
+        hooks: '伏笔账本',
+        infoGap: '信息差',
+        constraints: '长期约束',
+        storyArc: '故事总纲',
+        chronology: '故事年代学',
+        webRefs: '百科资料库',
+        userRequirements: '用户要求',
+    };
+    /** 空数组不产生卡片，资料面板据此整段隐藏。 */
+    function buildContinuationPendingFixCards_ACU(fixes) {
+        return (fixes ?? []).map(item => ({
+            module: item.module,
+            title: MODULE_LABELS_ACU[item.module] ?? item.module,
+            attempts: item.attempts,
+            detail: item.violations.map(violation => violation.message).filter(Boolean).join('；') || item.lastError,
+            meta: `${item.agentName || '未记录角色'} · 第 ${item.attempts} 次 · 自楼层 ${item.firstFailedAtIndex} · ${item.lastError}`,
+        }));
+    }
+
     var _sfc_main$r = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationMaterialsPanel',
         props: {
@@ -187646,6 +189659,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const INFERRED_FIELD_LABELS = { function: '功能', mainlineDelta: '主线', timeAdvance: '时间' };
             const activeTab = ref('outline');
             const materials = useContinuationMaterials();
+            const pendingFixCards = computed(() => buildContinuationPendingFixCards_ACU(materials.snapshot.value?.pendingFixes));
             const outlineDraft = ref('');
             const outlineError = ref('');
             const outlineDirty = ref(false);
@@ -187747,14 +189761,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     syncOutlineDraft();
             }, { immediate: true });
             __expose({ reload });
-            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, outlineDraft, outlineError, outlineDirty, clearPending, expandedHistoryStageIds, activeVolume, historyStages, onHistoryStageToggle, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
+            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, pendingFixCards, outlineDraft, outlineError, outlineDirty, clearPending, expandedHistoryStageIds, activeVolume, historyStages, onHistoryStageToggle, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-cfcd13b8] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-cfcd13b8] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-cfcd13b8] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-cfcd13b8] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-cfcd13b8] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-cfcd13b8] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-cfcd13b8] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-cfcd13b8] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-cfcd13b8] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-cfcd13b8] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-cfcd13b8] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-cfcd13b8] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-cfcd13b8] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-cfcd13b8] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-cfcd13b8] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-cfcd13b8] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-cfcd13b8], .acu-v2-continuation-materials__outline-node[data-v-cfcd13b8] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-cfcd13b8] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-cfcd13b8] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-cfcd13b8] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-cfcd13b8] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-cfcd13b8] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-cfcd13b8] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-cfcd13b8] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-cfcd13b8] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-cfcd13b8] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--retired[data-v-cfcd13b8] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-cfcd13b8] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-cfcd13b8] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-cfcd13b8] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-cfcd13b8] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-cfcd13b8] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-cfcd13b8] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-cfcd13b8] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-cfcd13b8] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-cfcd13b8] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-cfcd13b8] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-cfcd13b8] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-cfcd13b8] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-cfcd13b8] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-cfcd13b8] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-cfcd13b8");
-    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_cfcd13b8_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-c462cb5f] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-c462cb5f] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-c462cb5f] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-c462cb5f] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-c462cb5f] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-c462cb5f] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-c462cb5f] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-c462cb5f] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-c462cb5f] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-c462cb5f] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-c462cb5f] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-c462cb5f] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-c462cb5f] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-c462cb5f] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-c462cb5f] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-c462cb5f] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-c462cb5f], .acu-v2-continuation-materials__outline-node[data-v-c462cb5f] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-c462cb5f] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-c462cb5f] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-c462cb5f] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-c462cb5f] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-c462cb5f] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-c462cb5f] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-c462cb5f] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-c462cb5f] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-c462cb5f] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--retired[data-v-c462cb5f] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-c462cb5f] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-c462cb5f] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-c462cb5f] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-c462cb5f] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-c462cb5f] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-c462cb5f] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-c462cb5f] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-c462cb5f] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-c462cb5f] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-c462cb5f] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-c462cb5f] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-c462cb5f] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-c462cb5f] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-c462cb5f] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-c462cb5f");
+    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_c462cb5f_lang = null;
 
     const _hoisted_1$r = { class: "acu-v2-continuation-materials" };
     const _hoisted_2$p = { class: "acu-v2-continuation-materials__tabs" };
@@ -187787,8 +189801,8 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_20$8 = { class: "acu-v2-continuation-materials__outline-nodes" };
     const _hoisted_21$8 = { class: "acu-v2-continuation-materials__card-head" };
     const _hoisted_22$7 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_23$5 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_24$5 = { class: "acu-v2-continuation-materials__turns" };
+    const _hoisted_23$6 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_24$6 = { class: "acu-v2-continuation-materials__turns" };
     const _hoisted_25$5 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_26$4 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_27$4 = { class: "acu-v2-continuation-materials__badge" };
@@ -187834,237 +189848,245 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_45$1 = { class: "acu-v2-continuation-materials__list" };
     const _hoisted_46$1 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__meta"
+	class: "acu-v2-continuation-materials__outline-summary"
     };
-    const _hoisted_47$1 = {
+    const _hoisted_47$1 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_48$1 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_49$1 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_50$1 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_51$1 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__meta"
-    };
-    const _hoisted_48$1 = {
-	key: 2,
-	class: "acu-v2-continuation-materials__error"
-    };
-    const _hoisted_49$1 = {
-	class: "acu-v2-continuation-materials__block",
-	open: ""
-    };
-    const _hoisted_50$1 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
-    };
-    const _hoisted_51$1 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__empty"
     };
     const _hoisted_52$1 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__cards"
+	key: 2,
+	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_53$1 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_54$1 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_55$1 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_53$1 = {
+	key: 3,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_54$1 = {
+	class: "acu-v2-continuation-materials__block",
+	open: ""
+    };
+    const _hoisted_55$1 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge"
+    };
     const _hoisted_56$1 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
-    };
-    const _hoisted_57$1 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_58 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_59 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_60 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__error"
-    };
-    const _hoisted_61 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_62 = {
-	class: "acu-v2-continuation-materials__block",
-	open: ""
-    };
-    const _hoisted_63 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
-    };
-    const _hoisted_64 = {
-	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_65 = {
+    const _hoisted_57$1 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_66 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_67 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_58 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_59 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_60 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_61 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
+    const _hoisted_62 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_63 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_64 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_65 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_66 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_67 = {
+	class: "acu-v2-continuation-materials__block",
+	open: ""
+    };
     const _hoisted_68 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+	class: "acu-v2-continuation-materials__badge"
     };
     const _hoisted_69 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_70 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_71 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_72 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_70 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__cards"
+    };
+    const _hoisted_71 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_72 = { class: "acu-v2-continuation-materials__badge" };
     const _hoisted_73 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__error"
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_74 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_75 = {
-	class: "acu-v2-continuation-materials__block",
-	open: ""
+    const _hoisted_74 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_76 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
-    };
-    const _hoisted_77 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__empty"
-    };
+    const _hoisted_75 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_76 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_77 = { class: "acu-v2-continuation-materials__json" };
     const _hoisted_78 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__cards"
-    };
-    const _hoisted_79 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_80 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_81 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_82 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_83 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_84 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_85 = {
+    const _hoisted_79 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_80 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
     };
-    const _hoisted_86 = {
+    const _hoisted_81 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge"
     };
-    const _hoisted_87 = {
+    const _hoisted_82 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_88 = {
+    const _hoisted_83 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_89 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_90 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_84 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_85 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_86 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_87 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_88 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_89 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_90 = {
+	class: "acu-v2-continuation-materials__block",
+	open: ""
+    };
     const _hoisted_91 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge"
+    };
+    const _hoisted_92 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_93 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__cards"
+    };
+    const _hoisted_94 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_95 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_96 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_92 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_93 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_94 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_95 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_96 = {
+    const _hoisted_97 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_98 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_99 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_100 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_101 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_97 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_98 = {
+    const _hoisted_102 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_103 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_99 = {
+    const _hoisted_104 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_100 = {
+    const _hoisted_105 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_101 = {
+    const _hoisted_106 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_102 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_103 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_104 = {
+    const _hoisted_107 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_108 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
+    const _hoisted_109 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_105 = {
+    const _hoisted_110 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_106 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_107 = {
+    const _hoisted_111 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_112 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_108 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_109 = ["href"];
-    const _hoisted_110 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_111 = {
+    const _hoisted_113 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_114 = ["href"];
+    const _hoisted_115 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_116 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_112 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_113 = {
+    const _hoisted_117 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_118 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_114 = {
+    const _hoisted_119 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_115 = {
+    const _hoisted_120 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_116 = {
+    const _hoisted_121 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__list"
     };
-    const _hoisted_117 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_118 = {
+    const _hoisted_122 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_123 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_119 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_120 = {
+    const _hoisted_124 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_125 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_121 = {
+    const _hoisted_126 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_122 = {
+    const _hoisted_127 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_123 = {
+    const _hoisted_128 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_124 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_125 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_126 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_127 = {
+    const _hoisted_129 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_130 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
+    const _hoisted_131 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_132 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_128 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_129 = {
+    const _hoisted_133 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_134 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_130 = {
+    const _hoisted_135 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__card-meta"
     };
-    const _hoisted_131 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_132 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_133 = {
+    const _hoisted_136 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_137 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_138 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_134 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_139 = { class: "acu-v2-continuation-materials__actions" };
     function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$r, [
 		createBaseVNode("div", _hoisted_2$p, [(openBlock(), createElementBlock(
@@ -188230,12 +190252,12 @@ Expected function or array of functions, received type ${typeof value}.`
 								)]),
 								createBaseVNode(
 									"p",
-									_hoisted_23$5,
+									_hoisted_23$6,
 									"节点目标：" + toDisplayString(node.goal),
 									1
 									/* TEXT */
 								),
-								createBaseVNode("ol", _hoisted_24$5, [(openBlock(true), createElementBlock(
+								createBaseVNode("ol", _hoisted_24$6, [(openBlock(true), createElementBlock(
 									Fragment,
 									null,
 									renderList(node.turns, (turn, turnIndex) => {
@@ -188542,17 +190564,60 @@ Expected function or array of functions, received type ${typeof value}.`
 					-1
 					/* CACHED */
 				)),
+				$setup.pendingFixCards.length ? (openBlock(), createElementBlock("section", _hoisted_46$1, [_cache[32] || (_cache[32] = createBaseVNode(
+					"p",
+					{ class: "acu-v2-continuation-materials__outline-heading" },
+					[createBaseVNode("strong", null, "待修复")],
+					-1
+					/* CACHED */
+				)), (openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.pendingFixCards, (card) => {
+						return openBlock(), createElementBlock("article", { key: card.module }, [
+							createBaseVNode("p", _hoisted_47$1, [createBaseVNode(
+								"strong",
+								null,
+								toDisplayString(card.title),
+								1
+								/* TEXT */
+							), createBaseVNode(
+								"span",
+								_hoisted_48$1,
+								"第 " + toDisplayString(card.attempts) + " 次",
+								1
+								/* TEXT */
+							)]),
+							createBaseVNode(
+								"p",
+								_hoisted_49$1,
+								toDisplayString(card.detail),
+								1
+								/* TEXT */
+							),
+							createBaseVNode(
+								"p",
+								_hoisted_50$1,
+								toDisplayString(card.meta),
+								1
+								/* TEXT */
+							)
+						]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])) : createCommentVNode("v-if", true),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_46$1,
+					_hoisted_51$1,
 					" 结算水位：楼层 " + toDisplayString($setup.materials.snapshot.value.settledThroughIndex) + " · 伏笔 " + toDisplayString($setup.materials.snapshot.value.hooks.length) + " 条 · 信息差 " + toDisplayString($setup.materials.snapshot.value.infoGap.length) + " 条 · 长期约束 " + toDisplayString($setup.materials.snapshot.value.constraints.length) + " 条 · 故事时间 " + toDisplayString($setup.materials.snapshot.value.chronology.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.hooks) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.infoGap) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.constraints) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.chronology),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				$setup.materials.snapshot.value ? (openBlock(), createElementBlock("p", _hoisted_47$1, [$setup.materials.diagnostics.value.adoptedIndex === null ? (openBlock(), createElementBlock(
+				$setup.materials.snapshot.value ? (openBlock(), createElementBlock("p", _hoisted_52$1, [$setup.materials.diagnostics.value.checkpointIndex === null && $setup.materials.diagnostics.value.foldedDeltaCount === 0 ? (openBlock(), createElementBlock(
 					Fragment,
 					{ key: 0 },
-					[createTextVNode(" 当前聊天没有任何楼层带有资料快照。快照由子代理结算后写到当时的末楼，并跟着该楼层走：该楼被删除、重新生成或 swipe 时，资料会回退到更早楼层的快照；若此前只写过一次，就会回到空。 ")],
+					[createTextVNode(" 当前没有基线，也没有楼层增量。结算后会把增量写到当时的楼层；删除该楼或切到别的 swipe 后，这份增量不再参与折叠。 ")],
 					64
 					/* STABLE_FRAGMENT */
 				)) : (openBlock(), createElementBlock(
@@ -188560,22 +190625,17 @@ Expected function or array of functions, received type ${typeof value}.`
 					{ key: 1 },
 					[
 						createTextVNode(
-							" 资料来源：楼层 " + toDisplayString($setup.materials.diagnostics.value.adoptedIndex),
+							" 资料从最近基线折叠；删除楼层后随该楼增量一并回退。 基线楼层 " + toDisplayString($setup.materials.diagnostics.value.checkpointIndex ?? "无") + " · 已折叠 delta " + toDisplayString($setup.materials.diagnostics.value.foldedDeltaCount) + " 条。 ",
 							1
 							/* TEXT */
 						),
 						$setup.materials.diagnostics.value.salvaged ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 0 },
-							[createTextVNode("（该楼快照未通过严格校验，已按宽容模式读取，损坏记录已丢弃）")],
+							[createTextVNode("（基线未通过严格校验，已按宽容模式读取，损坏记录已丢弃）")],
 							64
 							/* STABLE_FRAGMENT */
 						)) : createCommentVNode("v-if", true),
-						_cache[32] || (_cache[32] = createTextVNode(
-							"。 ",
-							-1
-							/* CACHED */
-						)),
 						$setup.materials.diagnostics.value.candidates.some((item) => !item.valid) ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 1 },
@@ -188607,19 +190667,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				))])) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_48$1,
+					_hoisted_53$1,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				createCommentVNode(" 伏笔账本 "),
-				createBaseVNode("details", _hoisted_49$1, [
+				createBaseVNode("details", _hoisted_54$1, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"伏笔账本 · " + toDisplayString($setup.materials.snapshot.value?.hooks.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_50$1, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_51$1, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_52$1, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_55$1, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_56$1, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_57$1, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.hooks, (hook) => {
@@ -188630,7 +190690,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": hook.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_53$1, [
+									createBaseVNode("p", _hoisted_58, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -188640,21 +190700,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_54$1,
+											_hoisted_59,
 											toDisplayString($setup.HOOK_STATUS_LABELS[hook.status] ?? hook.status),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_55$1,
+											_hoisted_60,
 											toDisplayString($setup.HOOK_IMPORTANCE_LABELS[hook.importance] ?? hook.importance),
 											1
 											/* TEXT */
 										),
 										hook.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_56$1,
+											_hoisted_61,
 											"已退休" + toDisplayString(hook.retiredReason ? `：${hook.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -188662,12 +190722,12 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_57$1,
+										_hoisted_62,
 										toDisplayString(hook.summary),
 										1
 										/* TEXT */
 									),
-									createBaseVNode("p", _hoisted_58, [createTextVNode(
+									createBaseVNode("p", _hoisted_63, [createTextVNode(
 										"植入楼层 " + toDisplayString(hook.plantedIndex) + " · 最近更新楼层 " + toDisplayString(hook.updatedIndex),
 										1
 										/* TEXT */
@@ -188690,7 +190750,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_59, [
+					createBaseVNode("details", _hoisted_64, [
 						_cache[35] || (_cache[35] = createBaseVNode(
 							"summary",
 							null,
@@ -188705,12 +190765,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.hooks.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_60,
+							_hoisted_65,
 							toDisplayString($setup.materials.modules.hooks.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_61, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_66, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.hooks.dirty,
 							onClick: _cache[3] || (_cache[3] = ($event) => $setup.materials.discard("hooks"))
 						}, {
@@ -188736,13 +190796,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 认知与信息差 "),
-				createBaseVNode("details", _hoisted_62, [
+				createBaseVNode("details", _hoisted_67, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"认知与信息差 · " + toDisplayString($setup.materials.snapshot.value?.infoGap.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.infoGap.dirty ? (openBlock(), createElementBlock("span", _hoisted_63, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.infoGap.length ? (openBlock(), createElementBlock("p", _hoisted_64, "还没有信息差条目。")) : (openBlock(), createElementBlock("div", _hoisted_65, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.infoGap.dirty ? (openBlock(), createElementBlock("span", _hoisted_68, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.infoGap.length ? (openBlock(), createElementBlock("p", _hoisted_69, "还没有信息差条目。")) : (openBlock(), createElementBlock("div", _hoisted_70, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.infoGap, (gap) => {
@@ -188753,7 +190813,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": gap.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_66, [
+									createBaseVNode("p", _hoisted_71, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -188770,21 +190830,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_67,
+											_hoisted_72,
 											toDisplayString($setup.REVEAL_STATUS_LABELS[gap.revealStatus] ?? gap.revealStatus),
 											1
 											/* TEXT */
 										),
 										gap.revealIndex !== null ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_68,
+											_hoisted_73,
 											"揭示楼层 " + toDisplayString(gap.revealIndex),
 											1
 											/* TEXT */
 										)) : createCommentVNode("v-if", true),
 										gap.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_69,
+											_hoisted_74,
 											"已退休" + toDisplayString(gap.retiredReason ? `：${gap.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -188792,14 +190852,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_70,
+										_hoisted_75,
 										"客观事实：" + toDisplayString(gap.objectiveFact),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_71,
+										_hoisted_76,
 										"读者已知：" + toDisplayString(gap.readerKnown || "（未记录）"),
 										1
 										/* TEXT */
@@ -188830,7 +190890,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_72, [
+					createBaseVNode("details", _hoisted_77, [
 						_cache[38] || (_cache[38] = createBaseVNode(
 							"summary",
 							null,
@@ -188845,12 +190905,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.infoGap.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_73,
+							_hoisted_78,
 							toDisplayString($setup.materials.modules.infoGap.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_74, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_79, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.infoGap.dirty,
 							onClick: _cache[6] || (_cache[6] = ($event) => $setup.materials.discard("infoGap"))
 						}, {
@@ -188876,13 +190936,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 长期约束 "),
-				createBaseVNode("details", _hoisted_75, [
+				createBaseVNode("details", _hoisted_80, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"长期约束 · " + toDisplayString($setup.materials.snapshot.value?.constraints.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.constraints.dirty ? (openBlock(), createElementBlock("span", _hoisted_76, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.constraints.length ? (openBlock(), createElementBlock("p", _hoisted_77, "还没有长期约束。")) : (openBlock(), createElementBlock("div", _hoisted_78, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.constraints.dirty ? (openBlock(), createElementBlock("span", _hoisted_81, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.constraints.length ? (openBlock(), createElementBlock("p", _hoisted_82, "还没有长期约束。")) : (openBlock(), createElementBlock("div", _hoisted_83, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.constraints, (constraint) => {
@@ -188890,7 +190950,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								key: constraint.id,
 								class: "acu-v2-continuation-materials__card"
 							}, [
-								createBaseVNode("p", _hoisted_79, [createBaseVNode(
+								createBaseVNode("p", _hoisted_84, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(constraint.id),
@@ -188899,12 +190959,12 @@ Expected function or array of functions, received type ${typeof value}.`
 								)]),
 								createBaseVNode(
 									"p",
-									_hoisted_80,
+									_hoisted_85,
 									toDisplayString(constraint.text),
 									1
 									/* TEXT */
 								),
-								createBaseVNode("p", _hoisted_81, [createTextVNode(
+								createBaseVNode("p", _hoisted_86, [createTextVNode(
 									"登记楼层 " + toDisplayString(constraint.createdIndex),
 									1
 									/* TEXT */
@@ -188924,7 +190984,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_82, [
+					createBaseVNode("details", _hoisted_87, [
 						_cache[41] || (_cache[41] = createBaseVNode(
 							"summary",
 							null,
@@ -188939,12 +190999,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.constraints.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_83,
+							_hoisted_88,
 							toDisplayString($setup.materials.modules.constraints.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_84, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_89, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.constraints.dirty,
 							onClick: _cache[9] || (_cache[9] = ($event) => $setup.materials.discard("constraints"))
 						}, {
@@ -188970,13 +191030,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 故事年代学账本 "),
-				createBaseVNode("details", _hoisted_85, [
+				createBaseVNode("details", _hoisted_90, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"故事年代学账本 · " + toDisplayString($setup.materials.snapshot.value?.chronology.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.chronology.dirty ? (openBlock(), createElementBlock("span", _hoisted_86, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.chronology.length ? (openBlock(), createElementBlock("p", _hoisted_87, "还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。")) : (openBlock(), createElementBlock("div", _hoisted_88, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.chronology.dirty ? (openBlock(), createElementBlock("span", _hoisted_91, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.chronology.length ? (openBlock(), createElementBlock("p", _hoisted_92, "还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。")) : (openBlock(), createElementBlock("div", _hoisted_93, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.chronology, (entry) => {
@@ -188987,7 +191047,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": entry.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_89, [
+									createBaseVNode("p", _hoisted_94, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -189004,14 +191064,14 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_90,
+											_hoisted_95,
 											toDisplayString($setup.CHRONOLOGY_PRECISION_LABELS[entry.precision] ?? entry.precision),
 											1
 											/* TEXT */
 										),
 										entry.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_91,
+											_hoisted_96,
 											"已作废" + toDisplayString(entry.retiredReason ? `：${entry.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -189019,21 +191079,21 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_92,
+										_hoisted_97,
 										"累计经过：" + toDisplayString(entry.elapsed),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_93,
+										_hoisted_98,
 										"时间转换：" + toDisplayString(entry.transition),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_94,
+										_hoisted_99,
 										"证据楼层 " + toDisplayString(entry.evidenceIndexes.join("、")) + " · 结算楼层 " + toDisplayString(entry.updatedIndex),
 										1
 										/* TEXT */
@@ -189046,7 +191106,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_95, [
+					createBaseVNode("details", _hoisted_100, [
 						_cache[44] || (_cache[44] = createBaseVNode(
 							"summary",
 							null,
@@ -189061,12 +191121,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.chronology.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_96,
+							_hoisted_101,
 							toDisplayString($setup.materials.modules.chronology.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_97, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_102, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.chronology.dirty,
 							onClick: _cache[12] || (_cache[12] = ($event) => $setup.materials.discard("chronology"))
 						}, {
@@ -189108,19 +191168,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_98,
+					_hoisted_103,
 					" 条目 " + toDisplayString($setup.materials.snapshot.value.webRefs.length) + " 条（活跃 " + toDisplayString($setup.materials.snapshot.value.webRefs.filter((entry) => !entry.retired).length) + "）· 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.webRefs),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_99,
+					_hoisted_104,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_100, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_101, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_105, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_106, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.webRefs, (ref) => {
@@ -189131,7 +191191,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": ref.retired }])
 							},
 							[
-								createBaseVNode("summary", _hoisted_102, [
+								createBaseVNode("summary", _hoisted_107, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -189148,7 +191208,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_103,
+										_hoisted_108,
 										toDisplayString($setup.WEB_REF_SOURCE_LABELS[ref.source] ?? ref.source),
 										1
 										/* TEXT */
@@ -189173,14 +191233,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									)),
 									ref.sourceStatus !== "ok" ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_104,
+										_hoisted_109,
 										toDisplayString($setup.WEB_REF_STATUS_LABELS[ref.sourceStatus] ?? ref.sourceStatus),
 										1
 										/* TEXT */
 									)) : createCommentVNode("v-if", true),
 									ref.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_105,
+										_hoisted_110,
 										"已退休" + toDisplayString(ref.retiredReason ? `：${ref.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -189188,24 +191248,24 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_106,
+									_hoisted_111,
 									toDisplayString(ref.brief),
 									1
 									/* TEXT */
 								),
 								ref.summary ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_107,
+									_hoisted_112,
 									toDisplayString(ref.summary),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
-								createBaseVNode("p", _hoisted_108, [
+								createBaseVNode("p", _hoisted_113, [
 									createBaseVNode("a", {
 										href: ref.url,
 										target: "_blank",
 										rel: "noopener noreferrer"
-									}, toDisplayString(ref.url), 9, _hoisted_109),
+									}, toDisplayString(ref.url), 9, _hoisted_114),
 									ref.query ? (openBlock(), createElementBlock(
 										Fragment,
 										{ key: 0 },
@@ -189237,7 +191297,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_110, [
+				createBaseVNode("details", _hoisted_115, [
 					_cache[48] || (_cache[48] = createBaseVNode(
 						"summary",
 						null,
@@ -189259,12 +191319,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.webRefs.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_111,
+						_hoisted_116,
 						toDisplayString($setup.materials.modules.webRefs.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_112, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_117, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.webRefs.dirty,
 						onClick: _cache[15] || (_cache[15] = ($event) => $setup.materials.discard("webRefs"))
 					}, {
@@ -189305,19 +191365,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_113,
+					_hoisted_118,
 					" 条目 " + toDisplayString($setup.materials.snapshot.value.userRequirements.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.userRequirements),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_114,
+					_hoisted_119,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.userRequirements.length ? (openBlock(), createElementBlock("p", _hoisted_115, " 还没有用户要求条目。创建任务后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。 ")) : (openBlock(), createElementBlock("ol", _hoisted_116, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.userRequirements.length ? (openBlock(), createElementBlock("p", _hoisted_120, " 还没有用户要求条目。创建任务后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。 ")) : (openBlock(), createElementBlock("ol", _hoisted_121, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.userRequirements, (line, index) => {
@@ -189332,7 +191392,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_117, [
+				createBaseVNode("details", _hoisted_122, [
 					_cache[53] || (_cache[53] = createBaseVNode(
 						"summary",
 						null,
@@ -189354,12 +191414,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.userRequirements.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_118,
+						_hoisted_123,
 						toDisplayString($setup.materials.modules.userRequirements.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_119, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_124, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.userRequirements.dirty,
 						onClick: _cache[18] || (_cache[18] = ($event) => $setup.materials.discard("userRequirements"))
 					}, {
@@ -189400,19 +191460,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_120,
+					_hoisted_125,
 					" 总纲 " + toDisplayString($setup.materials.snapshot.value.storyArc.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.storyArc),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_121,
+					_hoisted_126,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_122, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_123, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_127, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_128, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.storyArc, (arc) => {
@@ -189423,7 +191483,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": arc.retired }])
 							},
 							[
-								createBaseVNode("p", _hoisted_124, [
+								createBaseVNode("p", _hoisted_129, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -189433,14 +191493,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_125,
+										_hoisted_130,
 										toDisplayString(arc.scope === "story" ? "全书方向" : "卷台阶"),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_126,
+										_hoisted_131,
 										toDisplayString($setup.ARC_STATUS_LABELS[arc.status] ?? arc.status),
 										1
 										/* TEXT */
@@ -189454,7 +191514,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									arc.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_127,
+										_hoisted_132,
 										"已退休" + toDisplayString(arc.retiredReason ? `：${arc.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -189462,28 +191522,28 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_128,
+									_hoisted_133,
 									"方向：" + toDisplayString(arc.direction),
 									1
 									/* TEXT */
 								),
 								arc.escalation ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_129,
+									_hoisted_134,
 									"冲突高度：" + toDisplayString(arc.escalation),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								arc.withheld ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_130,
+									_hoisted_135,
 									"禁翻底牌：" + toDisplayString(arc.withheld),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								createBaseVNode(
 									"p",
-									_hoisted_131,
+									_hoisted_136,
 									" 已承载阶段：" + toDisplayString(arc.stageNumbers.length ? arc.stageNumbers.join("、") : "（尚未承载）"),
 									1
 									/* TEXT */
@@ -189496,7 +191556,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_132, [
+				createBaseVNode("details", _hoisted_137, [
 					_cache[58] || (_cache[58] = createBaseVNode(
 						"summary",
 						null,
@@ -189511,12 +191571,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.storyArc.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_133,
+						_hoisted_138,
 						toDisplayString($setup.materials.modules.storyArc.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_134, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_139, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.storyArc.dirty,
 						onClick: _cache[21] || (_cache[21] = ($event) => $setup.materials.discard("storyArc"))
 					}, {
@@ -189546,7 +191606,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-cfcd13b8"]]);
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-c462cb5f"]]);
 
     /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -190039,6 +192099,36 @@ Expected function or array of functions, received type ${typeof value}.`
         return { entries, running, hydrate, rehydrate, resyncAfterChatMutation };
     }
 
+    const continuationCopy = {
+        panels: {
+            conditions: {
+                title: "循环条件",
+                description: "控制续写条件与续写时间。",
+            },
+            prompts: {
+                title: "循环提示词",
+                description: "按顺序自动发送，队列结束后将从头循环。为空无法启动，请确保至少一条可发送内容。",
+            },
+            controls: {
+                title: "运行控制",
+                description: "启动后自动填入下一条提示词并发送，每次 AI 回复后继续。停止仅停止后续，不影响已发送内容。",
+            },
+        },
+        workflow: {
+            title: "固定工作流",
+            description: "主会话每轮只做开局决策。结算、策划、条件审查、容错提交、自动修复和写作指令由程序按固定顺序执行。这里只改配置，提示词仍在下方各角色分组里改。",
+            autoFix: "自动修复违规模块（连续失败达到上限后交给主会话）",
+        },
+        composer: {
+            title: "写作指令编排子代理（instruction-composer）提示词",
+            note: "固定工作流在策划与审查之后调用，是唯一产出本轮写作指令的角色。不进入主 Agent 可派工目录。契约 JSON 为 {instruction, summary, constraints}。",
+        },
+        pendingFix: {
+            title: "待修复模块",
+            empty: "",
+        },
+    };
+
     const INHERIT_CHANNEL_VALUE$1 = '__inherit__';
     const MATERIALS_AUTO_REFRESH_DEBOUNCE_MS = 400;
     var _sfc_main$q = /*@__PURE__*/ defineComponent({
@@ -190115,6 +192205,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 { role: 'finalReviewer', label: '发送前终审' },
                 { role: 'webResearcher', label: '网页检索' },
                 { role: 'requirementsMaintainer', label: '用户要求维护' },
+                { role: 'instructionComposer', label: '写作指令编排' },
             ];
             const webSearchProviderOptions = [
                 { value: 'duckduckgo', label: 'DuckDuckGo（免 key）' },
@@ -190149,6 +192240,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 return `迭代 ${s.agentRunBudget.maxIterations} · 派工 ${s.agentRunBudget.maxDelegations} · 并发 ${s.agentRunBudget.maxConcurrent}`;
             });
             const finalReviewGroupMeta = computed(() => (settingsDraft.value?.finalReview.enabled ? '已开启' : '已关闭'));
+            const workflowGroupMeta = computed(() => {
+                const workflow = settingsDraft.value?.workflow;
+                if (!workflow)
+                    return '';
+                return `${workflow.autoFixEnabled ? '自动修复开' : '自动修复关'} · 修复 ${workflow.autoFixMaxAttempts} 次 · 打回 ${workflow.reviseLimit} 次`;
+            });
             const webResearchGroupMeta = computed(() => {
                 const web = settingsDraft.value?.webResearch;
                 if (!web)
@@ -190211,6 +192308,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
                     agentRunBudget: { ...settings.agentRunBudget },
                     finalReview: { ...settings.finalReview },
+                    workflow: { autoFixEnabled: true, autoFixMaxAttempts: 3, reviseLimit: 3, repairMaxExtraReads: 2, ...settings.workflow },
                     webResearch: { ...settings.webResearch, sources: { ...settings.webResearch.sources } },
                     agentApiPresets: {
                         main: { ...settings.agentApiPresets.main },
@@ -190223,6 +192321,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         finalReviewer: { ...settings.agentApiPresets.finalReviewer },
                         webResearcher: { ...settings.agentApiPresets.webResearcher },
                         requirementsMaintainer: { ...settings.agentApiPresets.requirementsMaintainer },
+                        instructionComposer: { ...(settings.agentApiPresets.instructionComposer ?? { mode: 'inherit', presetName: '' }) },
                     },
                     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
                     agentPrompts: {
@@ -190235,6 +192334,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
                         webResearcher: settings.agentPrompts.webResearcher.map(segment => ({ ...segment })),
                         requirementsMaintainer: settings.agentPrompts.requirementsMaintainer.map(segment => ({ ...segment })),
+                        instructionComposer: (settings.agentPrompts.instructionComposer ?? []).map(segment => ({ ...segment })),
                     },
                 };
             }
@@ -190374,6 +192474,12 @@ Expected function or array of functions, received type ${typeof value}.`
                         readTokenBudget: normalizedReadBudget(source.finalReview.readTokenBudget),
                         maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
                     },
+                    workflow: {
+                        autoFixEnabled: source.workflow.autoFixEnabled,
+                        autoFixMaxAttempts: requiredRangeInteger(source.workflow.autoFixMaxAttempts, '自动修复次数上限', 1, 10),
+                        reviseLimit: requiredRangeInteger(source.workflow.reviseLimit, '终审打回上限', 1, 10),
+                        repairMaxExtraReads: requiredRangeInteger(source.workflow.repairMaxExtraReads, '修复额外读取轮数', 0, 10),
+                    },
                     webResearch: {
                         enabled: source.webResearch.enabled,
                         sources: { ...source.webResearch.sources },
@@ -190472,7 +192578,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 { key: 'mainlinePlanner', kind: 'agent_mainline', title: '主线推进策划子代理提示词', restoreLabel: '恢复主线策划默认值' },
                 { key: 'beatPlanner', kind: 'agent_beat', title: '伏笔与节拍策划子代理提示词', restoreLabel: '恢复节拍策划默认值' },
                 { key: 'reviewer', kind: 'agent_reviewer', title: '连续性审查子代理提示词', restoreLabel: '恢复审查子代理默认值' },
-                { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时才会被调用。' },
+                { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时，固定工作流会在 instruction-composer 之后调用它。' },
+                { key: 'instructionComposer', kind: 'agent_instruction_composer', title: continuationCopy.composer.title, restoreLabel: '恢复写作指令编排默认值', note: continuationCopy.composer.note },
                 { key: 'webResearcher', kind: 'agent_web_researcher', title: '网页检索子代理（web-researcher）提示词', restoreLabel: '恢复网页检索默认值', note: '仅在「启用开场百科检索」开启时才会被调用。专属占位符：$WEB_TOOL_CATALOG（出网工具说明与本次配额）、$WEB_REFS（百科资料库预览）。' },
                 { key: 'requirementsMaintainer', kind: 'agent_requirements_maintainer', title: '用户要求维护子代理（requirements-maintainer）提示词', restoreLabel: '恢复用户要求维护默认值', note: '由会话压缩后的系统派工触发，不进入主 Agent 可派工目录。契约 JSON 为 {requirements, summary} 全量替换。' },
             ];
@@ -190647,14 +192754,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, agentChannelRoles, webSearchProviderOptions, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, webResearchGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, get materialsAutoRefreshTimer() { return materialsAutoRefreshTimer; }, set materialsAutoRefreshTimer(v) { materialsAutoRefreshTimer = v; }, MATERIALS_AUTO_REFRESH_DEBOUNCE_MS, scheduleMaterialsAutoRefresh, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, agentChannelRoles, webSearchProviderOptions, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, workflowGroupMeta, webResearchGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, get materialsAutoRefreshTimer() { return materialsAutoRefreshTimer; }, set materialsAutoRefreshTimer(v) { materialsAutoRefreshTimer = v; }, MATERIALS_AUTO_REFRESH_DEBOUNCE_MS, scheduleMaterialsAutoRefresh, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel, get continuationCopy() { return continuationCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-7681145a] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-7681145a] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-7681145a] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-7681145a] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-7681145a] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-7681145a] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-7681145a] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-7681145a] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-7681145a] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-7681145a] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-7681145a] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-7681145a] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-7681145a] {\r\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-7681145a] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-7681145a] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-7681145a] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-7681145a] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-7681145a] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-7681145a] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-7681145a]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-7681145a] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-7681145a] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-7681145a] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-7681145a] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-7681145a] .acu-disclosure-group__meta { display: none;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-7681145a");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_7681145a_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-73cdd189] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-73cdd189] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-73cdd189] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-73cdd189] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-73cdd189] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-73cdd189] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-73cdd189] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-73cdd189] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-73cdd189] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-73cdd189] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-73cdd189] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-73cdd189] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-73cdd189] {\r\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-73cdd189] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-73cdd189] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-73cdd189] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-73cdd189] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-73cdd189] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-73cdd189] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-73cdd189]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-73cdd189] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-73cdd189] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-73cdd189] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-73cdd189] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-73cdd189] .acu-disclosure-group__meta { display: none;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-73cdd189");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_73cdd189_lang = null;
 
     const _hoisted_1$q = { class: "acu-v2-continuation-page" };
     const _hoisted_2$o = {
@@ -190665,37 +192772,39 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_4$i = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_5$g = { class: "acu-v2-continuation-page__toggles" };
     const _hoisted_6$f = { class: "acu-v2-continuation-page__groups" };
-    const _hoisted_7$d = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_7$d = { class: "acu-v2-continuation-page__meta" };
     const _hoisted_8$d = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_9$c = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_10$c = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_11$c = { class: "acu-v2-continuation-page__toggles" };
+    const _hoisted_11$c = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_12$b = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_13$9 = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_14$9 = {
+    const _hoisted_13$9 = { class: "acu-v2-continuation-page__toggles" };
+    const _hoisted_14$9 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_15$9 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_16$9 = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_15$9 = {
-	key: 1,
-	class: "acu-v2-continuation-page__meta"
-    };
-    const _hoisted_16$9 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
     const _hoisted_17$8 = {
-	key: 0,
-	class: "acu-v2-continuation-page__error"
-    };
-    const _hoisted_18$8 = {
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_19$8 = { class: "acu-v2-continuation-page__groups" };
-    const _hoisted_20$7 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_21$7 = {
+    const _hoisted_18$8 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
+    const _hoisted_19$8 = {
+	key: 0,
+	class: "acu-v2-continuation-page__error"
+    };
+    const _hoisted_20$7 = {
+	key: 1,
+	class: "acu-v2-continuation-page__meta"
+    };
+    const _hoisted_21$7 = { class: "acu-v2-continuation-page__groups" };
+    const _hoisted_22$6 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_23$5 = {
 	key: 0,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_22$6 = {
+    const _hoisted_24$5 = {
 	key: 2,
 	class: "acu-v2-continuation-page__error"
     };
@@ -190761,7 +192870,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[53] || (_cache[53] = [createTextVNode(
+					default: withCtx(() => [..._cache[58] || (_cache[58] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -190806,7 +192915,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.settingsDraft.stageSize = $event) },
-								[..._cache[54] || (_cache[54] = [
+								[..._cache[59] || (_cache[59] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -190848,7 +192957,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.settingsDraft.storyArcVolumePlan = $event) },
-								[..._cache[55] || (_cache[55] = [
+								[..._cache[60] || (_cache[60] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -190966,28 +193075,94 @@ Expected function or array of functions, received type ${typeof value}.`
 							label: "启用发送前世界书终审"
 						}, null, 8, ["modelValue"]),
 						createVNode($setup["AcuCheckbox"], {
+							modelValue: $setup.settingsDraft.workflow.autoFixEnabled,
+							"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.workflow.autoFixEnabled = $event),
+							label: $setup.continuationCopy.workflow.autoFix
+						}, null, 8, ["modelValue", "label"]),
+						createVNode($setup["AcuCheckbox"], {
 							modelValue: $setup.settingsDraft.webResearch.enabled,
-							"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.webResearch.enabled = $event),
+							"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.webResearch.enabled = $event),
 							label: "启用开场百科检索（同人推荐）"
 						}, null, 8, ["modelValue"])
 					]),
 					createBaseVNode("div", _hoisted_6$f, [
 						createVNode($setup["AcuDisclosureGroup"], {
 							class: "acu-v2-continuation-page__group",
+							label: $setup.continuationCopy.workflow.title,
+							meta: $setup.workflowGroupMeta,
+							expanded: $setup.isGroupExpanded("workflow"),
+							"body-id": "acu-continuation-group-workflow",
+							onToggle: _cache[15] || (_cache[15] = ($event) => $setup.toggleGroup("workflow"))
+						}, {
+							default: withCtx(() => [createBaseVNode(
+								"p",
+								_hoisted_7$d,
+								toDisplayString($setup.continuationCopy.workflow.description),
+								1
+								/* TEXT */
+							), createBaseVNode("div", _hoisted_8$d, [
+								createVNode($setup["AcuFormRow"], {
+									label: "自动修复次数上限",
+									hint: "同一模块连续失败达到该次数后停止修复，交给主会话。范围 1–10。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.workflow.autoFixMaxAttempts,
+										"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.workflow.autoFixMaxAttempts = $event),
+										type: "number",
+										min: 1,
+										max: 10
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "终审打回上限",
+									hint: "instruction-composer 按反馈清单增量修订的次数。范围 1–10。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.workflow.reviseLimit,
+										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.workflow.reviseLimit = $event),
+										type: "number",
+										min: 1,
+										max: 10
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								}),
+								createVNode($setup["AcuFormRow"], {
+									label: "修复额外读取轮数",
+									hint: "自动修复派工自己的 read/search 轮数，不占主会话同角色派工上限。范围 0–10。"
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuInput"], {
+										modelValue: $setup.settingsDraft.workflow.repairMaxExtraReads,
+										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.workflow.repairMaxExtraReads = $event),
+										type: "number",
+										min: 0,
+										max: 10
+									}, null, 8, ["modelValue"])]),
+									_: 1
+								})
+							])]),
+							_: 1
+						}, 8, [
+							"label",
+							"meta",
+							"expanded"
+						]),
+						createVNode($setup["AcuDisclosureGroup"], {
+							class: "acu-v2-continuation-page__group",
 							label: "运行与重试",
 							meta: $setup.runGroupMeta,
 							expanded: $setup.isGroupExpanded("run"),
 							"body-id": "acu-continuation-group-run",
-							onToggle: _cache[19] || (_cache[19] = ($event) => $setup.toggleGroup("run"))
+							onToggle: _cache[24] || (_cache[24] = ($event) => $setup.toggleGroup("run"))
 						}, {
-							default: withCtx(() => [createBaseVNode("div", _hoisted_7$d, [
+							default: withCtx(() => [createBaseVNode("div", _hoisted_9$c, [
 								createVNode($setup["AcuFormRow"], {
 									label: "自动阶段上限",
 									hint: "连续自动推进多少个阶段后暂停，等待你确认。"
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.maxAutomaticStages,
-										"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
+										"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
 										type: "number",
 										min: 1
 									}, null, 8, ["modelValue"])]),
@@ -190999,7 +193174,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.generationRetryLimit,
-										"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
+										"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191011,7 +193186,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.minGenerationTokens,
-										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.minGenerationTokens = $event),
+										"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.minGenerationTokens = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191023,7 +193198,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.internalAiRetryLimit,
-										"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
+										"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191035,7 +193210,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.loopDelaySeconds,
-										"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
+										"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191047,7 +193222,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.retryDelaySeconds,
-										"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
+										"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191059,7 +193234,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.maxConsecutivePressureTurns,
-										"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
+										"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
 										type: "number",
 										min: 0,
 										max: $setup.maxConsecutivePressureTurnsMax
@@ -191072,7 +193247,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.loopTags,
-										"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.loopTags = $event),
+										"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.loopTags = $event),
 										type: "text"
 									}, null, 8, ["modelValue"])]),
 									_: 1
@@ -191086,16 +193261,16 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.contextGroupMeta,
 							expanded: $setup.isGroupExpanded("context"),
 							"body-id": "acu-continuation-group-context",
-							onToggle: _cache[25] || (_cache[25] = ($event) => $setup.toggleGroup("context"))
+							onToggle: _cache[30] || (_cache[30] = ($event) => $setup.toggleGroup("context"))
 						}, {
-							default: withCtx(() => [createBaseVNode("div", _hoisted_8$d, [
+							default: withCtx(() => [createBaseVNode("div", _hoisted_10$c, [
 								createVNode($setup["AcuFormRow"], {
 									label: "正文可读窗口楼数",
 									hint: "只有最近这么多 AI 楼层能被 Agent 读取/搜索，更早剧情走纪要回溯；0 为不开放正文读取。"
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.storyWindowFloors,
-										"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
+										"onUpdate:modelValue": _cache[25] || (_cache[25] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191107,7 +193282,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.storyTailFloors,
-										"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.storyTailFloors = $event),
+										"onUpdate:modelValue": _cache[26] || (_cache[26] = ($event) => $setup.settingsDraft.storyTailFloors = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191119,7 +193294,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentHistoryTokenBudget,
-										"onUpdate:modelValue": _cache[22] || (_cache[22] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
+										"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
 										type: "number",
 										min: 0
 									}, null, 8, ["modelValue"])]),
@@ -191131,7 +193306,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentReadTokenBudget,
-										"onUpdate:modelValue": _cache[23] || (_cache[23] = ($event) => $setup.settingsDraft.agentReadTokenBudget = $event),
+										"onUpdate:modelValue": _cache[28] || (_cache[28] = ($event) => $setup.settingsDraft.agentReadTokenBudget = $event),
 										type: "text"
 									}, null, 8, ["modelValue"])]),
 									_: 1
@@ -191142,7 +193317,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentReadFallbackTokens,
-										"onUpdate:modelValue": _cache[24] || (_cache[24] = ($event) => $setup.settingsDraft.agentReadFallbackTokens = $event),
+										"onUpdate:modelValue": _cache[29] || (_cache[29] = ($event) => $setup.settingsDraft.agentReadFallbackTokens = $event),
 										type: "number",
 										min: 1
 									}, null, 8, ["modelValue"])]),
@@ -191157,16 +193332,16 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.budgetGroupMeta,
 							expanded: $setup.isGroupExpanded("budget"),
 							"body-id": "acu-continuation-group-budget",
-							onToggle: _cache[32] || (_cache[32] = ($event) => $setup.toggleGroup("budget"))
+							onToggle: _cache[37] || (_cache[37] = ($event) => $setup.toggleGroup("budget"))
 						}, {
-							default: withCtx(() => [createBaseVNode("div", _hoisted_9$c, [
+							default: withCtx(() => [createBaseVNode("div", _hoisted_11$c, [
 								createVNode($setup["AcuFormRow"], {
 									label: "主 Agent 迭代上限",
 									hint: "一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）。范围 1–30。"
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxIterations,
-										"onUpdate:modelValue": _cache[26] || (_cache[26] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
+										"onUpdate:modelValue": _cache[31] || (_cache[31] = ($event) => $setup.settingsDraft.agentRunBudget.maxIterations = $event),
 										type: "number",
 										min: 1,
 										max: 30
@@ -191179,7 +193354,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxDelegations,
-										"onUpdate:modelValue": _cache[27] || (_cache[27] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
+										"onUpdate:modelValue": _cache[32] || (_cache[32] = ($event) => $setup.settingsDraft.agentRunBudget.maxDelegations = $event),
 										type: "number",
 										min: 0,
 										max: 20
@@ -191192,7 +193367,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxSameAgent,
-										"onUpdate:modelValue": _cache[28] || (_cache[28] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
+										"onUpdate:modelValue": _cache[33] || (_cache[33] = ($event) => $setup.settingsDraft.agentRunBudget.maxSameAgent = $event),
 										type: "number",
 										min: 1,
 										max: 10
@@ -191205,7 +193380,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxConcurrent,
-										"onUpdate:modelValue": _cache[29] || (_cache[29] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
+										"onUpdate:modelValue": _cache[34] || (_cache[34] = ($event) => $setup.settingsDraft.agentRunBudget.maxConcurrent = $event),
 										type: "number",
 										min: 1,
 										max: 6
@@ -191218,7 +193393,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxReads,
-										"onUpdate:modelValue": _cache[30] || (_cache[30] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
+										"onUpdate:modelValue": _cache[35] || (_cache[35] = ($event) => $setup.settingsDraft.agentRunBudget.maxReads = $event),
 										type: "number",
 										min: 0,
 										max: 30
@@ -191231,7 +193406,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, {
 									default: withCtx(() => [createVNode($setup["AcuInput"], {
 										modelValue: $setup.settingsDraft.agentRunBudget.maxExtraReads,
-										"onUpdate:modelValue": _cache[31] || (_cache[31] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
+										"onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => $setup.settingsDraft.agentRunBudget.maxExtraReads = $event),
 										type: "number",
 										min: 0,
 										max: 10
@@ -191247,15 +193422,15 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.finalReviewGroupMeta,
 							expanded: $setup.isGroupExpanded("finalReview"),
 							"body-id": "acu-continuation-group-final-review",
-							onToggle: _cache[35] || (_cache[35] = ($event) => $setup.toggleGroup("finalReview"))
+							onToggle: _cache[40] || (_cache[40] = ($event) => $setup.toggleGroup("finalReview"))
 						}, {
-							default: withCtx(() => [createBaseVNode("div", _hoisted_10$c, [createVNode($setup["AcuFormRow"], {
+							default: withCtx(() => [createBaseVNode("div", _hoisted_12$b, [createVNode($setup["AcuFormRow"], {
 								label: "终审单批次读取上限",
 								hint: "终审每次 read/search 工具批次最多可注入多少 token；超过整批打回。填正整数或形如 20% 的百分比（按总结阈值折算）。"
 							}, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.settingsDraft.finalReview.readTokenBudget,
-									"onUpdate:modelValue": _cache[33] || (_cache[33] = ($event) => $setup.settingsDraft.finalReview.readTokenBudget = $event),
+									"onUpdate:modelValue": _cache[38] || (_cache[38] = ($event) => $setup.settingsDraft.finalReview.readTokenBudget = $event),
 									type: "text"
 								}, null, 8, ["modelValue"])]),
 								_: 1
@@ -191265,13 +193440,13 @@ Expected function or array of functions, received type ${typeof value}.`
 							}, {
 								default: withCtx(() => [createVNode($setup["AcuInput"], {
 									modelValue: $setup.settingsDraft.finalReview.maxExtraReads,
-									"onUpdate:modelValue": _cache[34] || (_cache[34] = ($event) => $setup.settingsDraft.finalReview.maxExtraReads = $event),
+									"onUpdate:modelValue": _cache[39] || (_cache[39] = ($event) => $setup.settingsDraft.finalReview.maxExtraReads = $event),
 									type: "number",
 									min: 0,
 									max: 10
 								}, null, 8, ["modelValue"])]),
 								_: 1
-							})]), _cache[56] || (_cache[56] = createBaseVNode(
+							})]), _cache[61] || (_cache[61] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-continuation-page__meta" },
 								"终审默认关闭；开启后会额外调用 final-reviewer，先看世界书目录与命中预览，再按实际需要 search/read 精读条目。它使用独立的单批次读取上限与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。",
@@ -191286,46 +193461,46 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.webResearchGroupMeta,
 							expanded: $setup.isGroupExpanded("webResearch"),
 							"body-id": "acu-continuation-group-web-research",
-							onToggle: _cache[46] || (_cache[46] = ($event) => $setup.toggleGroup("webResearch"))
+							onToggle: _cache[51] || (_cache[51] = ($event) => $setup.toggleGroup("webResearch"))
 						}, {
 							default: withCtx(() => [
-								_cache[57] || (_cache[57] = createBaseVNode(
+								_cache[62] || (_cache[62] = createBaseVNode(
 									"p",
 									{ class: "acu-v2-continuation-page__meta" },
 									"开启后，新任务第一次规划前会自动派工 web-researcher，从勾选的百科查清原作人物、组织、能力与设定，按实体分条写进「百科资料库」（资料面板 → 百科资料）；之后主 Agent 也能按需再派。所有出网只由该子代理执行：维基与萌娘走浏览器直连，百度与网页抓取经酒馆服务器同源转发。",
 									-1
 									/* CACHED */
 								)),
-								createBaseVNode("div", _hoisted_11$c, [
+								createBaseVNode("div", _hoisted_13$9, [
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.moegirl,
-										"onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => $setup.settingsDraft.webResearch.sources.moegirl = $event),
+										"onUpdate:modelValue": _cache[41] || (_cache[41] = ($event) => $setup.settingsDraft.webResearch.sources.moegirl = $event),
 										label: "萌娘百科"
 									}, null, 8, ["modelValue"]),
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.wikipediaZh,
-										"onUpdate:modelValue": _cache[37] || (_cache[37] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaZh = $event),
+										"onUpdate:modelValue": _cache[42] || (_cache[42] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaZh = $event),
 										label: "中文维基百科"
 									}, null, 8, ["modelValue"]),
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.wikipediaEn,
-										"onUpdate:modelValue": _cache[38] || (_cache[38] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaEn = $event),
+										"onUpdate:modelValue": _cache[43] || (_cache[43] = ($event) => $setup.settingsDraft.webResearch.sources.wikipediaEn = $event),
 										label: "英文维基百科"
 									}, null, 8, ["modelValue"]),
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.baidu,
-										"onUpdate:modelValue": _cache[39] || (_cache[39] = ($event) => $setup.settingsDraft.webResearch.sources.baidu = $event),
+										"onUpdate:modelValue": _cache[44] || (_cache[44] = ($event) => $setup.settingsDraft.webResearch.sources.baidu = $event),
 										label: "百度百科（经酒馆转发）"
 									}, null, 8, ["modelValue"])
 								]),
-								createBaseVNode("div", _hoisted_12$b, [
+								createBaseVNode("div", _hoisted_14$9, [
 									createVNode($setup["AcuFormRow"], {
 										label: "搜索引擎",
 										hint: "百科查不到时的兜底搜索。DuckDuckGo 免 key；Serper / Tavily 使用酒馆「API 密钥」里已配置的 key；SearXNG 需填实例地址。"
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuSelect"], {
 											modelValue: $setup.settingsDraft.webResearch.searchProvider,
-											"onUpdate:modelValue": _cache[40] || (_cache[40] = ($event) => $setup.settingsDraft.webResearch.searchProvider = $event),
+											"onUpdate:modelValue": _cache[45] || (_cache[45] = ($event) => $setup.settingsDraft.webResearch.searchProvider = $event),
 											options: $setup.webSearchProviderOptions
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -191337,7 +193512,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.webResearch.searxngBaseUrl,
-											"onUpdate:modelValue": _cache[41] || (_cache[41] = ($event) => $setup.settingsDraft.webResearch.searxngBaseUrl = $event),
+											"onUpdate:modelValue": _cache[46] || (_cache[46] = ($event) => $setup.settingsDraft.webResearch.searxngBaseUrl = $event),
 											type: "text"
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -191348,7 +193523,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.webResearch.maxToolRounds,
-											"onUpdate:modelValue": _cache[42] || (_cache[42] = ($event) => $setup.settingsDraft.webResearch.maxToolRounds = $event),
+											"onUpdate:modelValue": _cache[47] || (_cache[47] = ($event) => $setup.settingsDraft.webResearch.maxToolRounds = $event),
 											type: "number",
 											min: 1,
 											max: 20
@@ -191361,7 +193536,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.webResearch.maxPages,
-											"onUpdate:modelValue": _cache[43] || (_cache[43] = ($event) => $setup.settingsDraft.webResearch.maxPages = $event),
+											"onUpdate:modelValue": _cache[48] || (_cache[48] = ($event) => $setup.settingsDraft.webResearch.maxPages = $event),
 											type: "number",
 											min: 1,
 											max: 30
@@ -191374,7 +193549,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuInput"], {
 											modelValue: $setup.settingsDraft.webResearch.pageCharLimit,
-											"onUpdate:modelValue": _cache[44] || (_cache[44] = ($event) => $setup.settingsDraft.webResearch.pageCharLimit = $event),
+											"onUpdate:modelValue": _cache[49] || (_cache[49] = ($event) => $setup.settingsDraft.webResearch.pageCharLimit = $event),
 											type: "number",
 											min: 500,
 											max: 2e4
@@ -191387,7 +193562,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, {
 										default: withCtx(() => [createVNode($setup["AcuTextarea"], {
 											modelValue: $setup.settingsDraft.webResearch.blockedDomains,
-											"onUpdate:modelValue": _cache[45] || (_cache[45] = ($event) => $setup.settingsDraft.webResearch.blockedDomains = $event),
+											"onUpdate:modelValue": _cache[50] || (_cache[50] = ($event) => $setup.settingsDraft.webResearch.blockedDomains = $event),
 											rows: 3
 										}, null, 8, ["modelValue"])]),
 										_: 1
@@ -191402,15 +193577,15 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.channelGroupMeta,
 							expanded: $setup.isGroupExpanded("channels"),
 							"body-id": "acu-continuation-group-channels",
-							onToggle: _cache[47] || (_cache[47] = ($event) => $setup.toggleGroup("channels"))
+							onToggle: _cache[52] || (_cache[52] = ($event) => $setup.toggleGroup("channels"))
 						}, {
-							default: withCtx(() => [_cache[58] || (_cache[58] = createBaseVNode(
+							default: withCtx(() => [_cache[63] || (_cache[63] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-continuation-page__meta" },
 								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审查类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。",
 								-1
 								/* CACHED */
-							)), createBaseVNode("div", _hoisted_13$9, [(openBlock(), createElementBlock(
+							)), createBaseVNode("div", _hoisted_15$9, [(openBlock(), createElementBlock(
 								Fragment,
 								null,
 								renderList($setup.agentChannelRoles, (channel) => {
@@ -191441,10 +193616,10 @@ Expected function or array of functions, received type ${typeof value}.`
 							meta: $setup.rulesGroupMeta,
 							expanded: $setup.isGroupExpanded("rules"),
 							"body-id": "acu-continuation-group-rules",
-							onToggle: _cache[50] || (_cache[50] = ($event) => $setup.toggleGroup("rules"))
+							onToggle: _cache[55] || (_cache[55] = ($event) => $setup.toggleGroup("rules"))
 						}, {
 							default: withCtx(() => [
-								_cache[59] || (_cache[59] = createBaseVNode(
+								_cache[64] || (_cache[64] = createBaseVNode(
 									"p",
 									{ class: "acu-v2-continuation-page__meta" },
 									"提取规则只保留正文中匹配「起始–结束」标记之间的内容；排除规则则把匹配段落剔除。两者都为空时使用完整正文。",
@@ -191453,12 +193628,12 @@ Expected function or array of functions, received type ${typeof value}.`
 								)),
 								createVNode($setup["AcuRulePairList"], {
 									modelValue: $setup.settingsDraft.contextExtractRules,
-									"onUpdate:modelValue": _cache[48] || (_cache[48] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+									"onUpdate:modelValue": _cache[53] || (_cache[53] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
 									label: "上下文提取规则"
 								}, null, 8, ["modelValue"]),
 								createVNode($setup["AcuRulePairList"], {
 									modelValue: $setup.settingsDraft.contextExcludeRules,
-									"onUpdate:modelValue": _cache[49] || (_cache[49] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+									"onUpdate:modelValue": _cache[54] || (_cache[54] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
 									label: "上下文排除规则"
 								}, null, 8, ["modelValue"])
 							]),
@@ -191467,14 +193642,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					]),
 					$setup.settingsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_14$9,
+						_hoisted_16$9,
 						toDisplayString($setup.settingsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
 					$setup.settingsNotice ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_15$9,
+						_hoisted_17$8,
 						toDisplayString($setup.settingsNotice),
 						1
 						/* TEXT */
@@ -191490,17 +193665,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。"
 		}, {
 			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_16$9, [
+				createBaseVNode("div", _hoisted_18$8, [
 					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
-						default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
+						default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
 							"导出提示词 JSON",
 							-1
 							/* CACHED */
 						)])]),
 						_: 1
 					}),
-					createVNode($setup["AcuButton"], { onClick: _cache[51] || (_cache[51] = ($event) => $setup.promptImportInput?.click()) }, {
-						default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
+					createVNode($setup["AcuButton"], { onClick: _cache[56] || (_cache[56] = ($event) => $setup.promptImportInput?.click()) }, {
+						default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
 							"导入提示词 JSON",
 							-1
 							/* CACHED */
@@ -191523,19 +193698,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				$setup.promptIoError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_17$8,
+					_hoisted_19$8,
 					toDisplayString($setup.promptIoError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.promptIoNotice ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_18$8,
+					_hoisted_20$7,
 					toDisplayString($setup.promptIoNotice),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_19$8, [(openBlock(), createElementBlock(
+				createBaseVNode("div", _hoisted_21$7, [(openBlock(), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.promptGroups, (group) => {
@@ -191566,7 +193741,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									"onMove",
 									"onUpdate"
 								]),
-								createBaseVNode("div", _hoisted_20$7, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(group.kind) }, {
+								createBaseVNode("div", _hoisted_22$6, [createVNode($setup["AcuButton"], { onClick: ($event) => $setup.restorePrompt(group.kind) }, {
 									default: withCtx(() => [createTextVNode(
 										toDisplayString(group.restoreLabel),
 										1
@@ -191576,7 +193751,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, 1032, ["onClick"])]),
 								group.note ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_21$7,
+									_hoisted_23$5,
 									toDisplayString(group.note),
 									1
 									/* TEXT */
@@ -191599,9 +193774,9 @@ Expected function or array of functions, received type ${typeof value}.`
 					meta: "参考",
 					expanded: $setup.isGroupExpanded("prompt:reference"),
 					"body-id": "acu-continuation-prompt-reference",
-					onToggle: _cache[52] || (_cache[52] = ($event) => $setup.toggleGroup("prompt:reference"))
+					onToggle: _cache[57] || (_cache[57] = ($event) => $setup.toggleGroup("prompt:reference"))
 				}, {
-					default: withCtx(() => [..._cache[62] || (_cache[62] = [
+					default: withCtx(() => [..._cache[67] || (_cache[67] = [
 						createBaseVNode(
 							"h4",
 							{ class: "acu-v2-continuation-page__subheading" },
@@ -191649,7 +193824,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, 8, ["expanded"])]),
 				$setup.settingsError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_22$6,
+					_hoisted_24$5,
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
@@ -191659,7 +193834,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-7681145a"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-73cdd189"]]);
 
     /** 页面（.vue）不能直接引用 service 值，角色顺序经此处中转。 */
     const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU;
@@ -192517,8 +194692,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-f416abe4] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-f416abe4] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-f416abe4] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-f416abe4] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-f416abe4] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__confirm[data-v-f416abe4] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-f416abe4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-f416abe4] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-f416abe4] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-f416abe4] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-f416abe4] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-f416abe4] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-f416abe4] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-f416abe4] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-f416abe4] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-f416abe4] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-f416abe4] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-f416abe4] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-f416abe4] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-f416abe4] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-f416abe4] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-f416abe4] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-f416abe4] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-f416abe4] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-f416abe4] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-f416abe4] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-f416abe4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-f416abe4] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__projection[data-v-f416abe4] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-f416abe4] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-f416abe4] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-f416abe4] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-f416abe4] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-f416abe4");
-    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_f416abe4_lang = null;
+    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-6849481c] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-6849481c] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-6849481c] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-6849481c] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-6849481c] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__confirm[data-v-6849481c] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-6849481c] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-6849481c] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-6849481c] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-6849481c] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-6849481c] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-6849481c] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-6849481c] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-6849481c] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-6849481c] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-6849481c] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-6849481c] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-6849481c] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-6849481c] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-6849481c] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-6849481c] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-6849481c] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-6849481c] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-6849481c] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-6849481c] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-6849481c] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-6849481c] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-6849481c] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__projection[data-v-6849481c] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-6849481c] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-6849481c] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-6849481c] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-6849481c] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-6849481c");
+    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_6849481c_lang = null;
 
     const _hoisted_1$n = { class: "acu-v2-ws-materials" };
     const _hoisted_2$l = { class: "acu-v2-ws-materials__tabs" };
@@ -192793,10 +194968,10 @@ Expected function or array of functions, received type ${typeof value}.`
 				$props.materials.snapshot ? (openBlock(), createElementBlock(
 					"p",
 					_hoisted_8$a,
-					" 最近结算：第 " + toDisplayString(($props.materials.adoptedIndex ?? 0) + 1) + " 楼 · revision " + toDisplayString($props.materials.snapshot.ledgerRevision) + " · 证据引用 " + toDisplayString($props.materials.snapshot.evidenceRefs.length) + " 条。 资料快照跟着楼层走：该楼被删除、重新生成或 swipe 时，账本会回退到更早楼层的快照。 ",
+					" 资料从最近基线折叠；删除楼层后随该楼增量一并回退。 基线楼层 " + toDisplayString($props.materials.checkpointIndex ?? "无") + " · 已折叠 delta " + toDisplayString($props.materials.foldedDeltaCount ?? 0) + " 条 · revision " + toDisplayString($props.materials.snapshot.ledgerRevision) + " · 证据引用 " + toDisplayString($props.materials.snapshot.evidenceRefs.length) + " 条。 ",
 					1
 					/* TEXT */
-				)) : (openBlock(), createElementBlock("p", _hoisted_9$9, "当前分支还没有任何楼层带有已结算的世界账本快照；首次提交后会写到冻结的 assistant 楼层。")),
+				)) : (openBlock(), createElementBlock("p", _hoisted_9$9, "当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。")),
 				$setup.pendingFixCards.length ? (openBlock(), createElementBlock("details", _hoisted_10$9, [createBaseVNode(
 					"summary",
 					null,
@@ -193255,7 +195430,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-f416abe4"]]);
+    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-6849481c"]]);
 
     const TASK_STATUS_LABELS_ACU = {
         drafting: '运行中',
@@ -194057,8 +196232,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-83780261] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-83780261] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-83780261] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-83780261] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-83780261] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-83780261] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-83780261] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-83780261] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-83780261] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-83780261] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-83780261] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-83780261] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-83780261]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-83780261] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-83780261] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-83780261] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-83780261] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-83780261] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-83780261");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_83780261_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-7b73d0a7] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-7b73d0a7] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-7b73d0a7] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-7b73d0a7] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-7b73d0a7] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-7b73d0a7] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-7b73d0a7] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-7b73d0a7] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-7b73d0a7] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-7b73d0a7] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-7b73d0a7] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-7b73d0a7] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-7b73d0a7] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-7b73d0a7] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-7b73d0a7] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-7b73d0a7] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-7b73d0a7] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-7b73d0a7]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-7b73d0a7] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-7b73d0a7] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-7b73d0a7] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-7b73d0a7] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-7b73d0a7] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-7b73d0a7");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_7b73d0a7_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$k = {
@@ -194168,7 +196343,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					materials: $setup.runtime.snapshot.value.materials,
 					"user-requirements": $setup.runtime.snapshot.value.userRequirements,
 					session: $setup.runtime.entries.value,
-					ledger: $setup.runtime.envelope.value?.ledger ?? null,
+					ledger: $setup.runtime.snapshot.value.envelope?.ledger ?? null,
 					anchor: $setup.runtime.anchor.value,
 					"projection-preview": $setup.runtime.snapshot.value.projectionPreview,
 					busy: $setup.runtime.busy.value,
@@ -194744,7 +196919,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-83780261"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-7b73d0a7"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

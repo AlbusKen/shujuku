@@ -556,10 +556,23 @@ function readRaw_ACU(firstMessage: Record<string, unknown>): WorldSimulationEnve
   return raw === undefined ? null : validateWorldSimulationEnvelope_ACU(raw);
 }
 
+type WorldSimulationLedgerOverlay_ACU = (envelope: WorldSimulationEnvelope_ACU, chat: any[]) => WorldSimulationEnvelope_ACU;
+let ledgerOverlay_ACU: WorldSimulationLedgerOverlay_ACU | null = null;
+
+/** 由账本折叠模块注册。read() 用折叠结果覆盖 envelope.ledger，磁盘上的 envelope 仍是缓存。 */
+export function registerWorldSimulationLedgerOverlay_ACU(overlay: WorldSimulationLedgerOverlay_ACU): void {
+  ledgerOverlay_ACU = overlay;
+}
+
 export class FirstFloorWorldSimulationStore_ACU {
   private static tailsByChat_ACU = new Map<string, Promise<void>>();
 
-  read(): WorldSimulationEnvelope_ACU | null { return readRaw_ACU(captureContext_ACU().firstMessage); }
+  read(): WorldSimulationEnvelope_ACU | null {
+    const context = captureContext_ACU();
+    const envelope = readRaw_ACU(context.firstMessage);
+    if (!envelope || !ledgerOverlay_ACU) return envelope;
+    return ledgerOverlay_ACU(envelope, context.chat);
+  }
   readPersisted(): WorldSimulationEnvelope_ACU | null { return this.read(); }
 
   replaceAtomically(candidate: WorldSimulationEnvelope_ACU, guard?: WorldSimulationWriteGuard_ACU): Promise<void> {

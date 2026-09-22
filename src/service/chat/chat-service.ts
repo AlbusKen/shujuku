@@ -48,10 +48,11 @@ import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoi
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from '../table/canonical-checkpoint-builder';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 import { purgeCurrentChatDatabaseState_ACU, type ChatDatabasePurgeResult_ACU } from './chat-database-purge';
+import { notifyMaterialCheckpointFloor_ACU, restoreMaterialCheckpointFields_ACU, snapshotMaterialCheckpointFields_ACU } from './material-checkpoint-sync';
 
 // ─── 业务逻辑函数（从 presentation 层搬迁） ───
 
-const RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU = 20;
+export const RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU = 20;
 
 interface RetainedCheckpointBoundary_ACU {
     shouldCompact: boolean;
@@ -406,7 +407,7 @@ function resolveRetainedCheckpointBoundary_ACU(chat: any[], retainCount: number)
  * periodic 前滚步长（S3-2）：根滚动到尾部缓冲线后，每再累积这么多 AI 楼层就触发下一次前滚。
  * 与 cleanup compaction 的缓冲节流（RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU）保持同一节奏。
  */
-const PERIODIC_V2_FULL_CHECKPOINT_ROLL_STEP_AI_LAYERS_ACU = 20;
+export const PERIODIC_V2_FULL_CHECKPOINT_ROLL_STEP_AI_LAYERS_ACU = 20;
 
 /**
  * S3-2 periodic full checkpoint 冗余：当最陈旧隔离键的 replay 根距聊天尾部过远时，
@@ -649,6 +650,7 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
         let downgradedCount = 0;
         let obsoleteInitDowngradedCount = 0;
         let foldFiles: SummaryVectorIndexExternalFileRef_ACU[] = [];
+        const materialSnapshots = snapshotMaterialCheckpointFields_ACU(chat);
         try {
             const boundaryWrite = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
             changed = boundaryWrite.changed;
@@ -668,6 +670,7 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
             }
         } catch (error: any) {
             snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));
+            restoreMaterialCheckpointFields_ACU(chat, materialSnapshots);
             return {
                 success: false,
                 changed: false,
@@ -1049,6 +1052,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         await foldVectorMirrorAfterBoundaryWrite_ACU(chat, isolationKey, boundaryAnchorIndex, foldFiles);
     }
 
+    if (changed) notifyMaterialCheckpointFloor_ACU(chat, boundaryAnchorIndex);
     return { changed, foldFiles };
 }
 

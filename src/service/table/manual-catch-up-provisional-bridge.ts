@@ -16,6 +16,7 @@
  *  - 终态：complete/stopped/failed/sync_pending 只在 session finalize/rollback 后写入。
  */
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { notifyMaterialCheckpointFloor_ACU } from '../chat/material-checkpoint-sync';
 import { readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
@@ -585,6 +586,7 @@ export async function establishProvisionalBridge_ACU(
 
     // 6. strict save，失败完整回滚。
     const before = JSON.parse(JSON.stringify(chat));
+    notifyMaterialCheckpointFloor_ACU(candidateChat, rangeStartMessageIndex);
     try {
       chat.length = 0;
       chat.push(...candidateChat);
@@ -797,6 +799,7 @@ export async function finalizeProvisionalBridge_ACU(
 
     // 6. strict save，失败原位回滚。
     const before = JSON.parse(JSON.stringify(chat));
+    notifyMaterialCheckpointFloor_ACU(candidateChat, bridge.originalFullCheckpointIndex);
     try {
       chat.length = 0;
       chat.push(...candidateChat);
@@ -888,6 +891,7 @@ export async function rollbackProvisionalBridge_ACU(
     }
 
     const before = JSON.parse(JSON.stringify(chat));
+    notifyMaterialCheckpointFloor_ACU(candidateChat, bridge.originalFullCheckpointIndex);
     try {
       chat.length =0;
       chat.push(...candidateChat);

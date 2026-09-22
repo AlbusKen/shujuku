@@ -46,9 +46,10 @@ describe('Agent 资料快照存储', () => {
     expect(readAgentModuleSnapshot_ACU([{ mes: 'a' }]).settledThroughIndex).toBe(-1);
   });
 
-  it('删楼后残留的越界水位被钳制回当前最后一楼', () => {
+  it('读取不再把基线里的水位钳到当前数组长度', () => {
     const chat: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: snapshotAt_ACU(9) }];
-    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(0);
+    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(9);
+    expect(chat[0][AGENT_MODULE_FIELD_ACU].schemaVersion).toBe(2);
   });
 
   it('未揭示条目携带揭示楼层时读取阶段就把楼层清空', () => {
@@ -198,7 +199,13 @@ describe('Agent 资料快照存储', () => {
     // 有合法快照时诊断记录采用楼层且不标记抢救。
     const chatOk: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: snapshotAt_ACU(0) }];
     readAgentModuleSnapshot_ACU(chatOk);
-    expect(readAgentModuleSnapshotDiagnostics_ACU()).toEqual({ candidates: [{ index: 0, valid: true, problems: [] }], adoptedIndex: 0, salvaged: false });
+    expect(readAgentModuleSnapshotDiagnostics_ACU()).toEqual({
+      candidates: [{ index: 0, valid: true, problems: [] }],
+      adoptedIndex: 0,
+      salvaged: false,
+      checkpointIndex: 0,
+      foldedDeltaCount: 0,
+    });
     readAgentModuleSnapshot_ACU([{ mes: 'a' }]);
     expect(readAgentModuleSnapshotDiagnostics_ACU().adoptedIndex).toBeNull();
   });
@@ -211,16 +218,17 @@ describe('Agent 资料快照存储', () => {
     // 水位只由结算子代理成功交付时显式推进：写盘时快照声明多少就是多少。
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(0, { hooks: [hook_ACU('H1') as any] }));
     expect(saveChat).toHaveBeenCalledOnce();
-    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(0);
+    expect(chat[1][AGENT_MODULE_FIELD_ACU].schemaVersion).toBe(3);
+    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(0);
     expect(readAgentModuleSnapshot_ACU(chat).hooks).toHaveLength(1);
 
-    // 显式声明的水位如实落盘；越界声明（超过目标楼层 / 负值）被钳制回合法区间。
+    // 显式声明的水位如实进入折叠；越界声明（超过目标楼层 / 负值）在写入时钳回合法区间。
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(1));
-    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(1);
+    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(1);
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(9));
-    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(1);
+    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(1);
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(-1));
-    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(0);
+    expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(0);
   });
 
   it('写盘失败时还原楼层字段而不留下半成品', async () => {

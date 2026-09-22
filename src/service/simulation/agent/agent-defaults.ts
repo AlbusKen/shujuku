@@ -4,7 +4,8 @@ import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_REQUIREMENTS_MAINT
 
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
 export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v10';
+export const WORLD_SIMULATION_PROMPT_VERSION_V10_ACU = 'world-simulation-v10';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v11';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -80,7 +81,7 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
       lines.push('contact 维护纪律：正文出现闭关/昏迷/囚禁/荒野独行等无社交渠道信号置 secluded，城镇/客栈/人群置 open，无明确信号保守维持原值。');
     }
     if (writableModules.includes('rumors')) lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
-    if (writableModules.includes('guidance')) lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文原句或账本事实原句。');
+    if (writableModules.includes('guidance')) lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
   }
@@ -140,7 +141,7 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
   if (name === 'dramatis-keeper') workflow += '只写入 actors、player、rumors。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
   if (name === 'chronicler') workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
   if (definition.kind === 'reviewer') workflow += '你只审核时间、空间、因果、revision、权限与证据。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
-  if (name === 'guidance-composer') workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。voice 使用 encounter、rumor、ambient。没有新的玩家可感变化时输出 no_change。';
+  if (name === 'guidance-composer') workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。投影选题标准（先过这一关再落笔）：每条 signal 描述的事物必须同时满足 (1) 贴近正文——发生在正文剧情所在位置附近，或与正文登场的人/事/物直接相关；(2) 正文未写——锚点正文没有描写过它，是镜头之外的场外动态；(3) 可感知——玩家角色能经由现场痕迹、路人闲谈、传闻等合理渠道察觉。三条缺一就不要产出该 signal。禁止把正文已发生事件做记录、总结或评价（"某事发生后的影响如何"这类复述与点评一律视为违规）。voice 语义：encounter=玩家当前所在处附近、正文镜头外正在发生的具体事态；rumor=经传闻渠道流入的远方或幕后消息；ambient=世界宏观暗流在日常环境中的感官化渗漏。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。没有满足选题标准的新变化时输出 no_change。';
   if (name === WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU) {
     workflow = '整理用户在 Agent 会话里对任务提过的要求。输入是被压缩范围内的实质用户发言加上当前用户要求清单。输出全量替换清单。不写账本、不派工、不产出 candidate。没有撤回依据时不得把已有清单清空。';
   }
@@ -254,6 +255,19 @@ const WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU: Partial<Record<WorldSimulatio
   'requirements-maintainer': '2092:987773c2',
 };
 
+const WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
+  'world-director': '4486:cf7dd826',
+  'world-stage-planner': '2791:84ce41fc',
+  timekeeper: '3262:b3b15e6c',
+  'undercurrent-analyst': '3252:1f648e5d',
+  'dramatis-keeper': '3586:7de3081c',
+  chronicler: '3663:dd2bfd5f',
+  'causality-reviewer': '3039:1486c4e',
+  'guidance-composer': '3363:eb46ac19',
+  'lore-researcher': '2278:bc497f63',
+  'requirements-maintainer': '2092:987773c2',
+};
+
 export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
   WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
     ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
@@ -263,6 +277,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v7', fingerprint: WORLD_SIMULATION_PROMPT_V7_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V8_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
+    ...(WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V10_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] }] : []),
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;

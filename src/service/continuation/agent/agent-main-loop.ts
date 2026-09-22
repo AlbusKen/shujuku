@@ -1909,7 +1909,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     logAgentSession_ACU({
       kind: 'thought',
       title: `资料快照已写入楼层 ${targetIndex}`,
-      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex)}。该楼层若被删除、重新生成或 swipe，资料会回退到更早楼层的快照。`,
+      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.max(snapshot.settledThroughIndex, 0)}。资料按最近基线折叠；该楼增量会随删除或 swipe 一起退出折叠。`,
       ok: true,
     });
   }

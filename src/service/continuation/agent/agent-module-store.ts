@@ -1,12 +1,18 @@
 /**
- * service/continuation/agent/agent-module-store.ts — 楼层锚定的叙事资料快照存储
+ * service/continuation/agent/agent-module-store.ts — 楼层锚定的叙事资料存储
  *
- * 存储策略：全量快照写入被结算范围最后一楼的独立字段，读取时从尾向前找最近的合法快照。
- * 删楼、Swipe、编辑替换都会让该楼层连同快照一起消失，资料自动回退到上一个快照，
- * 因此这里不需要任何失效协调机制。
+ * 存储策略：schema 3 帧 = checkpoint 全量基线 + 楼层 delta。读取从最近基线起按楼层顺序
+ * 叠加当前 swipe 的 delta。删楼让该楼 delta 消失，折叠结果回到剩余链。
+ * schema 1/2 全量快照只在读取时当成 swipe 0 的基线，成功写入才升级。
  */
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
+import { findLatestTableFullCheckpointIndex_ACU } from '../../chat/material-checkpoint-sync';
+import {
+  foldAgentModuleSnapshot_ACU,
+  planAgentModuleSnapshotWrite_ACU,
+  type AgentModuleFrameDeps_ACU,
+} from './agent-module-frame';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import {
   AGENT_BLOCK_CHAR_LIMIT_ACU,
@@ -371,7 +377,7 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
  * 宽容解析一份损坏的快照：丢掉单条非法记录、修正非法水位，尽量保住其余数据。
  * 只在严格路径全程无命中时作为兜底使用——静默回退成空快照会让用户误以为数据从未写入。
  */
-function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSnapshot_ACU; problems: string[] } | null {
+export function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSnapshot_ACU; problems: string[] } | null {
   if (!isRecord_ACU(raw)) return null;
   const problems: string[] = [];
   if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) {
@@ -414,17 +420,35 @@ function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSn
   return { snapshot, problems };
 }
 
-/** 一次读取的诊断：哪些楼层带有快照字段、是否通过严格校验、最终采用了哪一楼。 */
+/** 一次读取的诊断：哪些楼层带有资料字段、基线在哪一楼、折叠了多少 delta。 */
 export interface AgentModuleSnapshotReadDiagnostics_ACU {
-  /** 带快照字段的楼层（从末楼往前）。 */
+  /** 带资料字段的楼层（从头到尾）。 */
   candidates: Array<{ index: number; valid: boolean; problems: string[] }>;
-  /** 最终采用的楼层；无任何快照时为 null。 */
+  /** 当前基线所在楼层；无基线时为 null。 */
   adoptedIndex: number | null;
   /** 采用的是否为宽容抢救结果。 */
   salvaged: boolean;
+  /** 生效 schema 3 / legacy 基线的楼层。 */
+  checkpointIndex: number | null;
+  /** 基线之后实际叠加上的 delta 数。 */
+  foldedDeltaCount: number;
 }
 
-let lastReadDiagnostics_ACU: AgentModuleSnapshotReadDiagnostics_ACU = { candidates: [], adoptedIndex: null, salvaged: false };
+let lastReadDiagnostics_ACU: AgentModuleSnapshotReadDiagnostics_ACU = {
+  candidates: [],
+  adoptedIndex: null,
+  salvaged: false,
+  checkpointIndex: null,
+  foldedDeltaCount: 0,
+};
+
+export function agentModuleFrameDeps_ACU(): AgentModuleFrameDeps_ACU {
+  return {
+    validateSnapshot: validateAgentModuleSnapshot_ACU,
+    salvageSnapshot: salvageAgentModuleSnapshot_ACU,
+    emptySnapshot: buildEmptyAgentModuleSnapshot_ACU,
+  };
+}
 
 /** 最近一次 readAgentModuleSnapshot_ACU 的诊断信息，供面板解释“为什么资料是空的/是旧的”。 */
 export function readAgentModuleSnapshotDiagnostics_ACU(): AgentModuleSnapshotReadDiagnostics_ACU {
@@ -433,48 +457,25 @@ export function readAgentModuleSnapshotDiagnostics_ACU(): AgentModuleSnapshotRea
 
 /**
  * 读取当前生效的资料快照。
- * 严格路径：从尾向前找第一个完全合法的快照。全程无命中但存在损坏快照时，不再静默返回空，
- * 而是对最近一份做宽容抢救（丢单条坏记录）并记录诊断——数据消失必须可解释。
+ * 从最近的 checkpoint 起按楼层顺序叠加当前 swipe 的 delta。全程无合法基线但存在损坏快照时，
+ * 对最靠近末楼的一份做宽容抢救并记录诊断——数据消失必须可解释。水位不再按数组长度钳制。
  * @param chat 聊天数组，缺省取当前聊天
- * @returns 最近的合法快照；全程无命中时返回 settledThroughIndex = -1 的空快照
+ * @returns 折叠后的快照；没有任何资料时返回 settledThroughIndex = -1 的空快照
  */
 export function readAgentModuleSnapshot_ACU(chat?: any[]): AgentModuleSnapshot_ACU {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-  const highestIndex = messages.length - 1;
-  const clamp = (snapshot: AgentModuleSnapshot_ACU): AgentModuleSnapshot_ACU => (
-    // 删楼后残留快照记录的水位可能指向已不存在的楼层，必须钳制，否则未结算区间会算成负数。
-    snapshot.settledThroughIndex > highestIndex ? { ...snapshot, settledThroughIndex: highestIndex } : snapshot
-  );
-  const diagnostics: AgentModuleSnapshotReadDiagnostics_ACU = { candidates: [], adoptedIndex: null, salvaged: false };
-  let firstBroken: { index: number; raw: unknown } | null = null;
-  for (let index = highestIndex; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message || typeof message !== 'object') continue;
-    if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU)) continue;
-    const raw = (message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU];
-    const snapshot = validateAgentModuleSnapshot_ACU(raw);
-    if (snapshot) {
-      diagnostics.candidates.push({ index, valid: true, problems: [] });
-      diagnostics.adoptedIndex = index;
-      lastReadDiagnostics_ACU = diagnostics;
-      return clamp(snapshot);
-    }
-    const salvaged = salvageAgentModuleSnapshot_ACU(raw);
-    diagnostics.candidates.push({ index, valid: false, problems: salvaged?.problems ?? ['快照不是对象'] });
-    if (!firstBroken) firstBroken = { index, raw };
+  const folded = foldAgentModuleSnapshot_ACU(messages, agentModuleFrameDeps_ACU());
+  lastReadDiagnostics_ACU = {
+    candidates: folded.candidates,
+    adoptedIndex: folded.adoptedIndex,
+    salvaged: folded.salvaged,
+    checkpointIndex: folded.checkpointIndex,
+    foldedDeltaCount: folded.foldedDeltaCount,
+  };
+  if (folded.salvaged) {
+    console.warn(`[SP·数据库][续写资料] 楼层 ${folded.adoptedIndex} 的资料快照未通过严格校验，已按宽容模式读取：${folded.candidates.find(item => item.index === folded.adoptedIndex)?.problems.join('；') ?? ''}`);
   }
-  if (firstBroken) {
-    const salvaged = salvageAgentModuleSnapshot_ACU(firstBroken.raw);
-    if (salvaged) {
-      diagnostics.adoptedIndex = firstBroken.index;
-      diagnostics.salvaged = true;
-      lastReadDiagnostics_ACU = diagnostics;
-      console.warn(`[SP·数据库][续写资料] 楼层 ${firstBroken.index} 的资料快照未通过严格校验，已按宽容模式读取：${salvaged.problems.join('；')}`);
-      return clamp(salvaged.snapshot);
-    }
-  }
-  lastReadDiagnostics_ACU = diagnostics;
-  return buildEmptyAgentModuleSnapshot_ACU();
+  return folded.snapshot;
 }
 
 /**
@@ -492,16 +493,27 @@ export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: num
   if (!message || typeof message !== 'object') {
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照的目标楼层不可用', false, { targetIndex }));
   }
-  const container = message as Record<string, unknown>;
-  const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_MODULE_FIELD_ACU);
-  const previous = container[AGENT_MODULE_FIELD_ACU];
-  const settledThroughIndex = Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex);
+  const plan = planAgentModuleSnapshotWrite_ACU(
+    chat,
+    targetIndex,
+    snapshot,
+    agentModuleFrameDeps_ACU(),
+    findLatestTableFullCheckpointIndex_ACU(chat),
+  );
+  if (!plan.changed) return;
   try {
-    container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex, updatedAt: Date.now() };
+    for (const assignment of plan.assignments) {
+      const container = chat[assignment.index] as Record<string, unknown>;
+      if (assignment.value === undefined) delete container[AGENT_MODULE_FIELD_ACU];
+      else container[AGENT_MODULE_FIELD_ACU] = assignment.value;
+    }
     await saveChatToHostStrict_ACU();
   } catch (error) {
-    if (hadPrevious) container[AGENT_MODULE_FIELD_ACU] = previous;
-    else delete container[AGENT_MODULE_FIELD_ACU];
+    for (const assignment of plan.assignments) {
+      const container = chat[assignment.index] as Record<string, unknown>;
+      if (assignment.existed) container[AGENT_MODULE_FIELD_ACU] = assignment.previous;
+      else delete container[AGENT_MODULE_FIELD_ACU];
+    }
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
   }
 }

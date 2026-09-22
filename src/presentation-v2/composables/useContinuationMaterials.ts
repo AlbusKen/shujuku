@@ -58,7 +58,13 @@ export function useContinuationMaterials() {
   const snapshot = ref<AgentModuleSnapshot_ACU | null>(null);
   const loadError = ref('');
   /** 最近一次读取的来源诊断：采用了哪一楼、是否宽容抢救、有哪些损坏楼层。 */
-  const diagnostics = ref<AgentModuleSnapshotReadDiagnostics_ACU>({ candidates: [], adoptedIndex: null, salvaged: false });
+  const diagnostics = ref<AgentModuleSnapshotReadDiagnostics_ACU>({
+    candidates: [],
+    adoptedIndex: null,
+    salvaged: false,
+    checkpointIndex: null,
+    foldedDeltaCount: 0,
+  });
   const modules = reactive<Record<ContinuationMaterialModule_ACU, ModuleDraftState_ACU>>({
     hooks: emptyModuleState_ACU(),
     infoGap: emptyModuleState_ACU(),

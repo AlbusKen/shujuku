@@ -74,7 +74,7 @@ describe('续写用户要求资料区', () => {
 
     await seedAgentUserRequirementsIfEmpty_ACU('另一条要求', chat);
     expect(saveChat).toHaveBeenCalledOnce();
-    expect(chat[0][AGENT_MODULE_FIELD_ACU].userRequirements).toEqual(['推进禁区']);
+    expect(readAgentModuleSnapshot_ACU(chat).userRequirements).toEqual(['推进禁区']);
   });
 
   it('空白 originInstruction 不写盘', async () => {

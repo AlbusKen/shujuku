@@ -1,7 +1,8 @@
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationLedger_ACU } from '../model';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
-import { readWorldSimulationBucketEntry_ACU, resolveWorldSimulationAnchor_ACU, validateWorldSimulationLedger_ACU, writeWorldSimulationBucketEntry_ACU } from '../simulation-store';
+import { foldWorldSimulationLedger_ACU } from '../simulation-ledger-fold';
+import { readWorldSimulationBucketEntry_ACU, resolveCurrentWorldSimulationAnchor_ACU, resolveWorldSimulationAnchor_ACU, validateWorldSimulationLedger_ACU, writeWorldSimulationBucketEntry_ACU } from '../simulation-store';
 import {
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
@@ -42,7 +43,11 @@ export function validateWorldSimulationMaterialsSnapshot_ACU(raw: unknown): Worl
 }
 
 export function readWorldSimulationLedgerAtAnchor_ACU(anchor: WorldSimulationAnchorIdentity_ACU, chat?: any[]): WorldSimulationLedger_ACU | null {
-  return readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, anchor, raw => validateWorldSimulationLedger_ACU(raw), chat);
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  const current = resolveCurrentWorldSimulationAnchor_ACU(anchor, messages);
+  const folded = foldWorldSimulationLedger_ACU(messages, current.messageIndex);
+  if (!folded || !folded.contributedIndexes.includes(current.messageIndex)) return null;
+  return folded.ledger;
 }
 
 export async function writeWorldSimulationLedgerAtAnchor_ACU(anchor: WorldSimulationAnchorIdentity_ACU, ledger: WorldSimulationLedger_ACU, chat?: any[]): Promise<void> {
@@ -55,6 +60,22 @@ export async function writeWorldSimulationLedgerAtAnchor_ACU(anchor: WorldSimula
  */
 export function readLatestWorldSimulationMaterials_ACU(chat?: any[]): WorldSimulationMaterialsReadResult_ACU {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  const folded = foldWorldSimulationLedger_ACU(messages);
+  if (folded && folded.lastContributedIndex !== null) {
+    return {
+      snapshot: {
+        schemaVersion: WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU,
+        ledgerRevision: folded.ledger.revision,
+        ledger: folded.ledger,
+        evidenceRefs: folded.evidenceRefs,
+        updatedAt: folded.updatedAt,
+      },
+      diagnostics: [],
+      adoptedIndex: folded.lastContributedIndex,
+      checkpointIndex: folded.checkpointIndex,
+      foldedDeltaCount: folded.foldedDeltaCount,
+    };
+  }
   const diagnostics: string[] = [];
   let sawBrokenSnapshot = false;
 

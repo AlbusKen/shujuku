@@ -84,7 +84,15 @@ export interface WorldChronicleArchiveSnapshot_ACU {
   records: Record<string, WorldChronicleArchiveDetail_ACU>;
 }
 export interface WorldSimulationConversationView_ACU { nextId: number; messages: WorldSimulationConversationMessage_ACU[]; compaction: WorldSimulationConversationCompaction_ACU | null; diagnostics: string[]; }
-export interface WorldSimulationMaterialsReadResult_ACU { snapshot: WorldSimulationMaterialsSnapshot_ACU | null; diagnostics: string[]; adoptedIndex: number | null; }
+export interface WorldSimulationMaterialsReadResult_ACU {
+  snapshot: WorldSimulationMaterialsSnapshot_ACU | null;
+  diagnostics: string[];
+  adoptedIndex: number | null;
+  /** 折叠链当前基线楼层。旧的「最近一份全量材料」读取没有这个字段。 */
+  checkpointIndex?: number | null;
+  /** 基线之后叠加上的 commit delta 数。 */
+  foldedDeltaCount?: number;
+}
 export interface WorldSimulationUserRequirementsReadResult_ACU {
   snapshot: WorldSimulationUserRequirementsSnapshot_ACU | null;
   diagnostics: string[];

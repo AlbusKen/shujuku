@@ -96,7 +96,7 @@ export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
 } as const;
 
 export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
-  return '核心字段 dimensions:id,name；seeds:id,title；actors:id,name；rumors:id,fact。其余字段由服务端按缺省补齐（数组[]、可空null、revision 由入库层接管）；更新已有条目可只提交变更字段';
+  return '字段纪律：dimensions 必须给 id,name,kind,value,trend,rationale,evidenceRefs；seeds 必须给 id,title,status,level,catalyst,visibility,location,evidenceRefs；actors 必须给 id,name,interests,location,goals,informationSources,knownFacts,evidenceRefs；rumors 必须给 id,fact,originDay,channels,evidenceRefs。rationale（依据摘要）、catalyst（催化条件）、interests/goals/knownFacts 等说明性字段必须给出有内容的非空值，禁止留空或写"暂无/未知"凑数；证据不足时不要新建该条目，把缺口写进 uncertainties。仅机器字段可省略：revision 由入库层接管，expiresAtDay/missedOutcome/locationRef 等可空项按缺省补齐；更新已有条目可只提交变更字段';
 }
 
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';

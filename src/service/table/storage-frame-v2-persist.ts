@@ -1,4 +1,5 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { beginMaterialCheckpointSync_ACU } from '../chat/material-checkpoint-sync';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
 import { cloneIsolatedData_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
@@ -2205,6 +2206,7 @@ function validateSheetCheckpointInput_ACU(
 async function persistTableMutationLogV2Core_ACU(
   options: PersistTableMutationV2Options_ACU,
 ): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; error?: string }> {
+  let materialCheckpointAnchor: number | null = null;
   const chat = getChatArray_ACU();
   if (!chat || chat.length === 0) {
     return { saved: false, error: 'chat history is empty' };
@@ -2522,6 +2524,7 @@ async function persistTableMutationLogV2Core_ACU(
       return { saved: false, error: checkpointResult.error };
     }
     frame.checkpoint = checkpointResult.checkpoint;
+    materialCheckpointAnchor = target.index;
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];
     delete frame.perSheetCheckpoints;
@@ -2755,6 +2758,9 @@ async function persistTableMutationLogV2Core_ACU(
       identity: message.TavernDB_ACU_Identity,
     };
   });
+  const rollbackMaterialCheckpoint = materialCheckpointAnchor === null
+    ? null
+    : beginMaterialCheckpointSync_ACU(chat, materialCheckpointAnchor);
   try {
     for (const [messageIndex, nextIsolatedData] of replacementIsolatedDataByMessageIndex) {
       chat[messageIndex].TavernDB_ACU_IsolatedData = nextIsolatedData;
@@ -2770,6 +2776,7 @@ async function persistTableMutationLogV2Core_ACU(
       await saveChatToHost_ACU();
     }
   } catch (error) {
+    rollbackMaterialCheckpoint?.();
     for (const state of previousMessageState) {
       if (state.hadIsolatedData) state.message.TavernDB_ACU_IsolatedData = state.isolatedData;
       else delete state.message.TavernDB_ACU_IsolatedData;
@@ -3784,6 +3791,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       const previousScopeContainer = cloneOptionalJson_ACU(peekChatScopedConfigContainer_ACU(chat));
       const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
       const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, true);
+      let rollbackMaterialCheckpoint: (() => void) | null = null;
       try {
         const checkpointData = deepClone_ACU(templateSnapshot);
         const checkpointSheets = Object.keys(checkpointData).filter(key => key.startsWith('sheet_')).sort();
@@ -3836,9 +3844,11 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         });
         if (!guideUpdated) throw new Error('预填表模板提交无法原子写入 guideData 与 template scope。');
         assertTemplateCommitChatContext_ACU(chat, options);
+        rollbackMaterialCheckpoint = beginMaterialCheckpointSync_ACU(chat, target.index);
         await saveChatToHostStrict_ACU();
         return { saved: true, mode: 'v2_commit', messageIndex: target.index, checkpoints: initialSheetCheckpoints, removedNullRowCount: 0 };
       } catch (error: any) {
+        rollbackMaterialCheckpoint?.();
         restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
         setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
         setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
@@ -3870,6 +3880,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     let convergenceRootSnapshot: { message: any; hadIsolatedData: boolean; isolatedData: unknown } | null = null;
     let purgedMessageCount = 0;
     let hardDeleteCheckpointCreated = false;
+    let rollbackMaterialCheckpoint: (() => void) | null = null;
 
     try {
     const introductionSheets = new Map<string, Sheet_ACU>();
@@ -4370,6 +4381,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       });
       if (!guideUpdated) throw new Error('当前楼层模板提交无法写入 guideData。');
       assertTemplateCommitChatContext_ACU(chat, options);
+      if (hardDeleteCheckpointCreated) rollbackMaterialCheckpoint = beginMaterialCheckpointSync_ACU(chat, target.index);
       primarySaveAttempted = true;
       await saveChatToHostStrict_ACU();
       logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: requestId=${options.requestId || 'unknown'}, messageIndex=${target.index}, checkpoints=${checkpoints.length}, checkpointTimelines=${checkpoints.map(checkpoint => `${checkpoint.sheetKey}:${checkpoint.timeline?.kind || 'none'}@${checkpoint.timeline?.afterSeq ?? 'none'}`).join(',') || 'none'}, operations=${operations.length}, baseRevision=${options.baseRevision ?? transactionContext.baseRevision ?? 'unknown'}, commitRevision=${frame.headRevision ?? 'unknown'}, isolationKey=${isolationKey}`);
@@ -4382,6 +4394,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         ...(deletedSheetKeys.length > 0 ? { deletedSheetKeys, purgedMessageCount, hardDeleteCheckpointCreated } : {}),
       };
     } catch (error: any) {
+      rollbackMaterialCheckpoint?.();
       if (sharedStateMutated) {
         restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
         if (convergenceRootSnapshot) {

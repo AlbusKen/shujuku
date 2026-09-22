@@ -19,6 +19,9 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary
 import { chatHasSummaryVectorMirror_ACU } from '../../service/vector/summary-vector-mirror-rebuild';
 import { runScopedRetentionGcAfterFlush_ACU } from '../../service/vector/summary-vector-index-chat-deletion-gc';
 import { getChatArray_ACU } from '../../service/chat/chat-service';
+import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { clearAgentRunState_ACU } from '../../service/continuation/agent/agent-run-cache';
+import { clearWorldSimulationRunState_ACU } from '../../service/simulation/agent/agent-run-cache';
 import { globalMeta_ACU } from '../../data/repositories/profile-repo';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -79,6 +82,11 @@ async function runMutationRound_ACU(): Promise<void> {
   firstRequestAt_ACU = 0;
 
   try {
+    const chatIdentity = getActiveChatStorageIdentity_ACU(getChatArray_ACU());
+    if (chatIdentity) {
+      clearAgentRunState_ACU(chatIdentity);
+      clearWorldSimulationRunState_ACU(chatIdentity);
+    }
     // S0-4：删楼轮次先做 checkpoint 前移恢复，再进入冷回放——被删楼层携带的
     // 回放根 / 休眠表 checkpoint 若不先嫁接到幸存楼层，冷回放会把丢失固化。
     // 失败隔离：恢复失败（守卫内部已回滚）不阻断后续冷回放。
