@@ -91,26 +91,31 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v11 含开局决策、固定工作流、纯审核与投影决定，并把 v9/v10 默认指纹保留为历史版本', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v11');
+  it('提示词 v12 含开局决策、固定工作流、纯审核与投影决定，并把 v9/v10/v11 默认指纹保留为历史版本', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v12');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12']);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
     const v9 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v9');
     const v10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v10');
-    const v11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const v11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v11');
+    const v12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(v8?.fingerprint).toBe('4767:87f876e3');
     expect(v9?.fingerprint).toBe('4777:cd4e92ac');
     expect(v9?.fingerprint).not.toBe(v8?.fingerprint);
     expect(v10?.fingerprint).toBe('4486:cf7dd826');
-    expect(v11).toBeDefined();
+    expect(v11?.fingerprint).toBe('4486:cf7dd826');
+    expect(v12).toBeDefined();
+    expect(v12?.fingerprint).not.toBe(v11?.fingerprint);
     const composerV10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v10');
-    const composerV11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const composerV11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v11');
+    const composerV12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(composerV10?.fingerprint).toBe('3363:eb46ac19');
-    expect(composerV11?.fingerprint).not.toBe(composerV10?.fingerprint);
+    expect(composerV11?.fingerprint).toBe('4082:ac59da90');
+    expect(composerV12?.fingerprint).not.toBe(composerV11?.fingerprint);
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
     const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');
@@ -188,6 +193,24 @@ describe('世界推演提示词装配契约', () => {
     );
     expect(composerInstruction).toContain('选题纪律');
     expect(composerInstruction).toContain('正文剧情所在位置附近、或与正文强相关、但正文尚未描写');
+    expect(composerPrompt).toContain('数量与注入门槛');
+    expect(composerPrompt).toContain('宁缺毋滥');
+    expect(composerPrompt).toContain('secluded 时 rumor 语态禁止产出');
+    expect(composerPrompt).toContain('excludedFacts');
+    expect(directorPrompt).toContain('focus 写法');
+    expect(directorPrompt).toContain('禁止「更新世界动态」这类空泛套话');
+    expect(timekeeperPrompt).toContain('时间判定细则');
+    expect(timekeeperPrompt).toContain('正文无时间流逝证据时 days=0');
+    expect(undercurrentPrompt).toContain('维度细则');
+    expect(undercurrentPrompt).toContain('catalyst 必须写清什么条件触发升级或显形');
+    expect(undercurrentPrompt).toContain('只前进不后退');
+    const dramatisPrompt = prompts['dramatis-keeper'].map(item => item.content).join('\n');
+    expect(dramatisPrompt).toContain('行动者细则');
+    expect(dramatisPrompt).toContain('NPC 言行不得超出 knownFacts 与 informationSources 可达范围');
+    expect(dramatisPrompt).toContain('传闻细则');
+    expect(chroniclerPrompt).toContain('编年细则');
+    expect(reviewerPrompt).toContain('审核清单逐项过');
+    expect(reviewerPrompt).toContain('空壳条目按 MISSING_FIELD 打回');
     expect(undercurrent).toContain('rationale（依据摘要）、catalyst（催化条件）');
     expect(undercurrent).toContain('证据不足时不要新建该条目，把缺口写进 uncertainties');
     expect(undercurrent).not.toContain('其余字段由服务端按缺省补齐');

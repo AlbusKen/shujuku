@@ -5,7 +5,8 @@ import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_REQUIREMENTS_MAINT
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
 export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
 export const WORLD_SIMULATION_PROMPT_VERSION_V10_ACU = 'world-simulation-v10';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v11';
+export const WORLD_SIMULATION_PROMPT_VERSION_V11_ACU = 'world-simulation-v11';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v12';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -135,13 +136,13 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
     : `${definition.description}。写入范围：${definition.writableModules.join(', ') || '无直接写入权限'}。不得扩大权限或杜撰证据。`;
   let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。';
   if (definition.kind === 'planner') workflow += '兼容展示：单轮焦点已由主会话 open_round 吸收。若仍被调用，计划必须优先覆盖 $WORLD_COLLISIONS；若有 seed 距过期 ≤ 2 天，列入临界暗流。不要再计划 world-analyst。';
-  if (definition.kind === 'director') workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。';
-  if (name === 'timekeeper') workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
-  if (name === 'undercurrent-analyst') workflow += '只写入 dimensions 与 seeds。空间纪律：新建事件类 seed 必须给 location.region。时效纪律：有时限事件必须给 expiresAtDay 与 missedOutcome。不得写入 clock、actors、chronicle。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
-  if (name === 'dramatis-keeper') workflow += '只写入 actors、player、rumors。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
-  if (name === 'chronicler') workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
-  if (definition.kind === 'reviewer') workflow += '你只审核时间、空间、因果、revision、权限与证据。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
-  if (name === 'guidance-composer') workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。投影选题标准（先过这一关再落笔）：每条 signal 描述的事物必须同时满足 (1) 贴近正文——发生在正文剧情所在位置附近，或与正文登场的人/事/物直接相关；(2) 正文未写——锚点正文没有描写过它，是镜头之外的场外动态；(3) 可感知——玩家角色能经由现场痕迹、路人闲谈、传闻等合理渠道察觉。三条缺一就不要产出该 signal。禁止把正文已发生事件做记录、总结或评价（"某事发生后的影响如何"这类复述与点评一律视为违规）。voice 语义：encounter=玩家当前所在处附近、正文镜头外正在发生的具体事态；rumor=经传闻渠道流入的远方或幕后消息；ambient=世界宏观暗流在日常环境中的感官化渗漏。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。没有满足选题标准的新变化时输出 no_change。';
+  if (definition.kind === 'director') workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。focus 写法：点名本轮幕后焦点的模块、具体对象与预期变化方向（如「推进九江水寨监视网扩张、藏剑山庄财务危机发酵」），禁止「更新世界动态」这类空泛套话。';
+  if (name === 'timekeeper') workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。时间判定细则：days 按正文明确经过的昼夜与旬月推算，正文无时间流逝证据时 days=0；storyTime 沿用世界既有历法句式（如「九月初十·午后」），不发明新历法；slot 用粗粒度时段词（清晨/午后/入夜等）；precision 按证据强度取 exact/approximate/unknown，正文有明确日期才用 exact。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
+  if (name === 'undercurrent-analyst') workflow += '只写入 dimensions 与 seeds。维度细则：rationale 必须写清当前值由什么事实支撑、为何是这个趋势（30~80字）；value 是 0-100 的当前烈度，trend 由本轮证据方向决定，无变化证据时沿用原值并置 stable。种子细则：catalyst 必须写清什么条件触发升级或显形（具体到事件或天数）；status 按生命周期迁移（established→incubating→active→converging→resolved/retired），只前进不后退，retired 必须给 retiredReason；level 0-4 按影响范围定级（0 局部琐事 → 4 世界级风暴）；visibility 反映玩家当前可感知度；exposePolicy 决定揭示节奏（on_collision 撞见才暴露，gradual 逐轮渗漏，public 公开信息）。空间纪律：新建事件类 seed 必须给 location.region。时效纪律：有时限事件必须给 expiresAtDay 与 missedOutcome（错过后的世界代价）。不得写入 clock、actors、chronicle。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
+  if (name === 'dramatis-keeper') workflow += '只写入 actors、player、rumors。行动者细则：interests 写核心利益诉求（1~3 条短语），goals 写当前阶段目标，informationSources 写其信息获取渠道（决定他能知道什么），knownFacts 写他确实掌握的事实清单——NPC 言行不得超出 knownFacts 与 informationSources 可达范围；resources/constraints 写可调动资源与行动限制。传闻细则：fact 是传闻内容本体，channels 是传播渠道（市井/商会/官府等），originDay 为事发日，earliestRevealDay 为玩家最早可能得知日且不得早于 originDay。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
+  if (name === 'chronicler') workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。编年细则：summary 只记录幕后世界线的事实性事件（什么发生了、什么变了），不评价、不复述玩家对话；relatedIds 关联涉及的 seed/actor/rumor id。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行（oneLine 句式：「第3日 · 北岭矿洞塌方，三人受伤」）；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
+  if (definition.kind === 'reviewer') workflow += '你只审核时间、空间、因果、revision、权限与证据。审核清单逐项过：(1) 时间——clockAdvance 与正文跨度一致，expiresAtDay/originDay 不早于当前日；(2) 空间——新建事件 seed 有 location.region，actor 移动带 locationRef；(3) 因果——状态迁移有证据链支撑，无证据的跳变按 EVIDENCE_GAP 打回；(4) 字段——rationale/catalyst/knownFacts 等说明性字段非空且有实质内容，空壳条目按 MISSING_FIELD 打回；(5) 权限——候选只写其 writableModules 内模块。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
+  if (name === 'guidance-composer') workflow += '通读全量账本、锚点正文与玩家 contact/region。只写入 guidance。投影选题标准（先过这一关再落笔）：每条 signal 描述的事物必须同时满足 (1) 贴近正文——发生在正文剧情所在位置附近，或与正文登场的人/事/物直接相关；(2) 正文未写——锚点正文没有描写过它，是镜头之外的场外动态；(3) 可感知——玩家角色能经由现场痕迹、路人闲谈、传闻等合理渠道察觉。三条缺一就不要产出该 signal。禁止把正文已发生事件做记录、总结或评价（"某事发生后的影响如何"这类复述与点评一律视为违规）。voice 语义：encounter=玩家当前所在处附近、正文镜头外正在发生的具体事态；rumor=经传闻渠道流入的远方或幕后消息；ambient=世界宏观暗流在日常环境中的感官化渗漏。每条 signal 必须带 sourceId（账本已有 id，或合成源 clock / player），text 不超过 80 字，不得复述锚点正文或账本事实原句。数量与注入门槛：每轮 signals 总数 0~4 条，宁缺毋滥；encounter 至多 2 条，每轮只呈现最贴近玩家的信号；玩家 contact 为 secluded 时 rumor 语态禁止产出（无社交渠道传入）；sourceId 必须指向支撑该信号的账本条目，禁止凭空关联。excludedFacts 登记「幕后存在但本轮判定不可上桌」的事实与原因，供下轮避让。没有满足选题标准的新变化时输出 no_change。';
   if (name === WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU) {
     workflow = '整理用户在 Agent 会话里对任务提过的要求。输入是被压缩范围内的实质用户发言加上当前用户要求清单。输出全量替换清单。不写账本、不派工、不产出 candidate。没有撤回依据时不得把已有清单清空。';
   }
@@ -268,6 +269,19 @@ const WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU: Partial<Record<WorldSimulati
   'requirements-maintainer': '2092:987773c2',
 };
 
+const WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
+  'world-director': '4486:cf7dd826',
+  'world-stage-planner': '2791:84ce41fc',
+  timekeeper: '3631:eb7fb35b',
+  'undercurrent-analyst': '3621:482c85be',
+  'dramatis-keeper': '3955:e9bdf963',
+  chronicler: '4032:87ec609e',
+  'causality-reviewer': '3039:1486c4e',
+  'guidance-composer': '4082:ac59da90',
+  'lore-researcher': '2278:bc497f63',
+  'requirements-maintainer': '2092:987773c2',
+};
+
 export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
   WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
     ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
@@ -278,6 +292,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V8_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V8_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V10_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] }] : []),
+    ...(WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V11_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] }] : []),
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
