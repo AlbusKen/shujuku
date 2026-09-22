@@ -74,6 +74,7 @@ import {
 import { AGENT_FINAL_REVIEWER_NAME_ACU } from './agent-model';
 import type {
   AgentComposerOutput_ACU,
+  AgentMaterialCompletionState_ACU,
   AgentDelegation_ACU,
   AgentFinalReviewerOutput_ACU,
   AgentMaintainerOutput_ACU,
@@ -102,6 +103,14 @@ export const AGENT_SUBAGENT_OVERVIEW_ROWS_ACU = {
   default: 100,
 } as const;
 
+export interface AgentSubagentUnresolvedIssue_ACU {
+  module: AgentWritableModule_ACU;
+  source: 'truncated' | 'contract_rejected';
+  path: string;
+  message: string;
+  id?: string;
+}
+
 /** 一次子代理执行的结果。写集事务留给主循环应用，这里只交出解析后的输出。 */
 export interface AgentSubagentRunResult_ACU {
   agentName: string;
@@ -123,6 +132,14 @@ export interface AgentSubagentRunResult_ACU {
   requirements: string[] | null;
   /** instruction-composer 的写作指令；其它角色省略。 */
   composer?: AgentComposerOutput_ACU | null;
+  /** 契约类子代理的结构化完成状态；其它角色省略。 */
+  completion?: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>;
+  /** 契约类子代理按职责模块给出的完成状态。 */
+  moduleCompletion?: Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>>;
+  /** 补足额度耗尽后仍未清偿的问题。 */
+  unresolvedIssues?: AgentSubagentUnresolvedIssue_ACU[];
+  /** 已通过解析并暂存的稳定条目键，供后续补足去重。 */
+  acceptedKeys?: string[];
   /** 有效轮次数：1（首轮）+ 实际用掉的工具轮次。 */
   iterations: number;
   attempts: number;
@@ -507,7 +524,42 @@ export class AgentSubagentRuntime_ACU {
       ...[...output.delta.storyArc, ...output.delta.storyArcPatches].map(item => `storyArc:${item.id}`),
       ...output.delta.chronology.map(item => `chronology:${item.id}`),
     ]);
-    const deliverContract = (output: AgentMaintainerOutput_ACU): AgentSubagentRunResult_ACU => ({
+    const deliverContract = (
+      output: AgentMaintainerOutput_ACU,
+      rejected: readonly AgentContractRejection_ACU[] = [],
+      truncated = false,
+    ): AgentSubagentRunResult_ACU => {
+      const accepted = [...acceptedKeys(output)];
+      const unresolvedIssues: AgentSubagentUnresolvedIssue_ACU[] = rejected.map(item => ({
+        module: item.module,
+        source: 'contract_rejected',
+        path: `${item.module}[${item.index}]`,
+        message: item.reason,
+        ...(item.id ? { id: item.id } : {}),
+      }));
+      if (truncated) {
+        for (const module of writes) {
+          unresolvedIssues.push({
+            module,
+            source: 'truncated',
+            path: module,
+            message: '契约输出在 JSON 中途截断，尾部条目尚未确认完整',
+          });
+        }
+      }
+      const issueModules = new Set(unresolvedIssues.map(item => item.module));
+      const moduleCompletion: AgentSubagentRunResult_ACU['moduleCompletion'] = {};
+      for (const module of writes) {
+        const hasAccepted = accepted.some(key => key.startsWith(`${module}:`));
+        moduleCompletion[module] = issueModules.has(module)
+          ? (hasAccepted ? 'partial' : 'failed')
+          : (hasAccepted ? 'complete_changed' : 'complete_no_change');
+      }
+      const changed = accepted.length > 0 || output.delta.constraintProposals.length > 0;
+      const completion: NonNullable<AgentSubagentRunResult_ACU['completion']> = unresolvedIssues.length
+        ? (changed ? 'partial' : 'failed')
+        : (changed ? 'complete_changed' : 'complete_no_change');
+      return {
       agentName: definition.name,
       kind: definition.kind,
       writes,
@@ -517,12 +569,17 @@ export class AgentSubagentRuntime_ACU {
       reviewer: null,
       researcher: null,
       requirements: null,
+      completion,
+      moduleCompletion,
+      unresolvedIssues,
+      acceptedKeys: accepted,
       iterations: 1 + toolRoundsUsed,
       attempts: attempt,
       expandedReads: [...expandedReads],
       readRevisions,
       usage: usageTotal,
-    });
+      };
+    };
 
     for (let call = 0; call < maxCalls; call += 1) {
       const identity = input.createIdentity(definition.name, attempt);
@@ -632,10 +689,10 @@ export class AgentSubagentRuntime_ACU {
           if (!draft.truncated && !pending.length) return deliverContract(accumulated);
           if (continuationsUsed >= maxContinuations) {
             if (pending.length) {
-              throw subagentFailed_ACU(`${definition.name} 仍有 ${pending.length} 条条目不符合契约（续写/修补 ${continuationsUsed} 轮后）`, false, { agentName: definition.name, lastReason: pending[0].reason, rejected: pending });
+              return deliverContract(accumulated, pending, draft.truncated);
             }
-            // 只剩截断：已收下的条目本身都完整，接受它们，未写出的部分留给下一轮派工。
-            return deliverContract(accumulated);
+            // 只剩截断：保留已验证条目，但显式返回 partial/failed，不能冒充完整交付。
+            return deliverContract(accumulated, [], true);
           }
           continuationsUsed += 1;
           transcript.push({ role: 'assistant', content: rawText || '(空输出)' });

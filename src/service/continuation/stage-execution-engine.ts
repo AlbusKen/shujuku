@@ -1,5 +1,6 @@
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationInternalAiRequestIdentity_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type StageNode_ACU, type StageRevision_ACU, type StageTurn_ACU, type TurnAttemptIdentity_ACU } from './model';
-import type { AgentOutlineOpResult_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
+import type { AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentWritableModule_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
+import type { ContinuationMaterialRepairResult_ACU } from './agent/agent-workflow';
 import type { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 
 /** 严格执行快照：只在铸造宿主归属身份时使用，要求大纲游标完整且已冻结。 */
@@ -83,6 +84,23 @@ export function currentAgentContext_ACU(envelope: ContinuationEnvelope_ACU | nul
   return { envelope: envelope!, task, stage, revision, node, turn, turnNumber: previousTurns + 1, nodeTurnNumber: stage.activeTurnIndex + 1 };
 }
 
+/** 资料补足只要求任务处于安全的 paused 空档，不要求把任务伪装成正文生成中的 running。 */
+function currentMaterialRepairContext_ACU(envelope: ContinuationEnvelope_ACU | null): ContinuationAgentExecutionContext_ACU {
+  const task = envelope?.activeTask;
+  if (!task) fail_ACU('CONTINUATION_TASK_NOT_FOUND', '当前聊天没有可承载资料补足的智能续写任务');
+  if (task.status !== 'paused') fail_ACU('CONTINUATION_TASK_STATE_INVALID', '只有暂停空档允许补足智能续写资料');
+  const empty: ContinuationAgentExecutionContext_ACU = { envelope: envelope!, task, stage: null, revision: null, node: null, turn: null, turnNumber: null, nodeTurnNumber: null };
+  const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+  if (!stage) return empty;
+  const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
+  if (!revision) return { ...empty, stage };
+  const node = revision.outline.nodes[stage.activeNodeIndex] ?? null;
+  const turn = node?.turns[stage.activeTurnIndex] ?? null;
+  if (!node || !turn) return { ...empty, stage, revision };
+  const previousTurns = revision.outline.nodes.slice(0, stage.activeNodeIndex).reduce((total, item) => total + item.turns.length, 0) + stage.activeTurnIndex;
+  return { envelope: envelope!, task, stage, revision, node, turn, turnNumber: previousTurns + 1, nodeTurnNumber: stage.activeTurnIndex + 1 };
+}
+
 export class StageExecutionEngine_ACU {
   constructor(private readonly dependencies: StageExecutionEngineDependencies_ACU) {}
 
@@ -151,6 +169,48 @@ export class StageExecutionEngine_ACU {
       },
       instruction,
     };
+  }
+
+  /** 运行定向资料补足；只返回资料候选，不铸造宿主正文归属身份。 */
+  async repairMaterials(
+    snapshot: AgentModuleSnapshot_ACU,
+    targetModules: readonly AgentWritableModule_ACU[],
+    isLeaseCurrent: () => boolean = () => true,
+    signal?: AbortSignal | null,
+  ): Promise<ContinuationMaterialRepairResult_ACU> {
+    const chatIdentity = this.dependencies.getChatIdentity();
+    const initial = currentMaterialRepairContext_ACU(this.dependencies.readEnvelope());
+    const taskId = initial.task.taskId;
+    const attemptId = this.dependencies.allocateId('material-repair-attempt');
+    const readContext = () => currentMaterialRepairContext_ACU(this.dependencies.readEnvelope());
+    const isCurrent = (candidate: ContinuationInternalAiRequestIdentity_ACU): boolean => {
+      if (!isLeaseCurrent() || candidate.chatIdentity !== chatIdentity || candidate.taskId !== taskId) return false;
+      if (this.dependencies.getChatIdentity() !== chatIdentity || signal?.aborted) return false;
+      const task = this.dependencies.readEnvelope()?.activeTask;
+      return !!task && task.taskId === taskId && task.status === 'paused';
+    };
+    return this.dependencies.planner.repairMaterials({
+      settings: initial.envelope.settings,
+      readContext,
+      snapshot,
+      targetModules,
+      createInternalRequestIdentity: attempt => {
+        const context = readContext();
+        return {
+          source: 'turn_instruction',
+          requestId: this.dependencies.allocateId('material-repair-request'),
+          chatIdentity,
+          taskId,
+          stageId: context.stage?.stageId ?? 'material-repair',
+          revision: context.revision?.revision ?? 0,
+          nodeId: context.node?.id,
+          turnId: context.turn?.id,
+          attemptId: `${attemptId}-${attempt}`,
+        };
+      },
+      isInternalRequestCurrent: isCurrent,
+      signal,
+    });
   }
 
   private assertAttemptMatchesCursor_ACU(attempt: TurnAttemptIdentity_ACU, chatIdentity: string): void {

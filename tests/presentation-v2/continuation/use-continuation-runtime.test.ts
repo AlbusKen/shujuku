@@ -18,6 +18,7 @@ const harness = vi.hoisted(() => ({
   abandonAndCreate: vi.fn(),
   replaceSettings: vi.fn(),
   sendAgentMessage: vi.fn(),
+  repairPendingMaterials: vi.fn(),
   replaceActiveOutline: vi.fn(),
   clearContinuationData: vi.fn(),
   initialize: vi.fn(async () => null),
@@ -42,6 +43,7 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
       abandonAndCreate: harness.abandonAndCreate,
       replaceSettings: harness.replaceSettings,
       sendAgentMessage: harness.sendAgentMessage,
+      repairPendingMaterials: harness.repairPendingMaterials,
       replaceActiveOutline: harness.replaceActiveOutline,
       clearContinuationData: harness.clearContinuationData,
     },
@@ -82,6 +84,7 @@ beforeEach(() => {
     detail: '当前状态暂不能恢复。',
     shouldContinue: false,
   });
+  harness.repairPendingMaterials.mockResolvedValue({ ...result, repairedModules: ['hooks'], failedModules: [], steps: [] });
   harness.replaceActiveOutline.mockResolvedValue(result);
   harness.clearContinuationData.mockResolvedValue({ envelope, clearedModules: true, clearedConversation: true });
 });
@@ -342,6 +345,19 @@ describe('useContinuationRuntime', () => {
     expect(await continuation.sendAgentMessage('打断一下')).toBe(false);
     expect(harness.continueTask).not.toHaveBeenCalled();
     expect(harness.toastError).toHaveBeenCalledOnce();
+  });
+
+  it('定向资料补足调用结构化入口且不触发宿主正文桥', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    await expect(continuation.repairPendingMaterials(['hooks'])).resolves.toBe(true);
+
+    expect(harness.repairPendingMaterials).toHaveBeenCalledWith({ modules: ['hooks'] });
+    expect(harness.bridgeSend).not.toHaveBeenCalled();
+    expect(harness.bridgeRetryHostGeneration).not.toHaveBeenCalled();
+    expect(harness.continueTask).not.toHaveBeenCalled();
+    expect(harness.toastSuccess).toHaveBeenCalledWith('已完成所选智能续写资料模块的定向补足。');
   });
 
   it('手动保存大纲与一键清空都经编排器，不直接发送宿主消息', async () => {

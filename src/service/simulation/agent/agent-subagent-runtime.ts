@@ -1,13 +1,24 @@
-import type { WorldSimulationSettings_ACU } from '../model';
+import type {
+  WorldSimulationLedgerModule_ACU,
+  WorldSimulationPendingFixSource_ACU,
+  WorldSimulationSettings_ACU,
+} from '../model';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
-import type { WorldSimulationCandidate_ACU, WorldSimulationDelegation_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
+import type {
+  WorldSimulationCandidate_ACU,
+  WorldSimulationDelegation_ACU,
+  WorldSimulationReviewerResult_ACU,
+  WorldSimulationSpecialistResult_ACU,
+  WorldSimulationSubagentIssue_ACU,
+  WorldSimulationSubagentOutcome_ACU,
+} from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -60,6 +71,165 @@ function withTask_ACU(
 function bindSpecialistIdentity_ACU(payload: Record<string, unknown>, agentName: WorldSimulationAgentName_ACU): Record<string, unknown> {
   const supplied = typeof payload.agentName === 'string' ? payload.agentName.trim() : '';
   return supplied ? payload : { ...payload, agentName };
+}
+
+const ITEM_PATCH_MODULES_ACU = new Set<WorldSimulationLedgerModule_ACU>(['dimensions', 'seeds', 'actors', 'rumors']);
+
+function patchModule_ACU(key: string): WorldSimulationLedgerModule_ACU | null {
+  if (key === 'chronicleArchive') return 'chronicle';
+  return ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'].includes(key)
+    ? key as WorldSimulationLedgerModule_ACU
+    : null;
+}
+
+function protocolPath_ACU(error: unknown, fallback: string): string {
+  if (!error || typeof error !== 'object') return fallback;
+  const wrapped = error as { error?: { details?: Record<string, unknown> } };
+  return typeof wrapped.error?.details?.path === 'string' ? wrapped.error.details.path : fallback;
+}
+
+function issue_ACU(
+  module: WorldSimulationLedgerModule_ACU,
+  source: WorldSimulationPendingFixSource_ACU,
+  error: unknown,
+  fallbackPath: string,
+  id?: string,
+): WorldSimulationSubagentIssue_ACU {
+  return {
+    module,
+    source,
+    path: protocolPath_ACU(error, fallbackPath),
+    message: error instanceof Error ? error.message : String(error),
+    ...(id ? { id } : {}),
+  };
+}
+
+function acceptedPatchKeys_ACU(patch: Record<string, unknown>): string[] {
+  const keys: string[] = [];
+  for (const [rawModule, value] of Object.entries(patch)) {
+    const module = patchModule_ACU(rawModule);
+    if (!module) continue;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      const items = Array.isArray(record.upsert) ? record.upsert : Array.isArray(record.append) ? record.append : null;
+      if (items) {
+        items.forEach((item, index) => {
+          const id = item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).id === 'string'
+            ? String((item as Record<string, unknown>).id).trim()
+            : '';
+          keys.push(`${module}:${id || `index:${index}`}`);
+        });
+        continue;
+      }
+    }
+    keys.push(`${module}:$`);
+  }
+  return keys;
+}
+
+function outcomeFromSpecialistResult_ACU(
+  result: WorldSimulationSpecialistResult_ACU,
+  writableModules: readonly WorldSimulationLedgerModule_ACU[],
+  runId: string,
+  candidateSeq: number,
+  truncated: boolean,
+): WorldSimulationSubagentOutcome_ACU {
+  const moduleCompletion: WorldSimulationSubagentOutcome_ACU['moduleCompletion'] = {};
+  const unresolvedIssues: WorldSimulationSubagentIssue_ACU[] = [];
+  if (result.status === 'candidate') {
+    const candidate = candidate_ACU(result, writableModules, runId, candidateSeq);
+    const acceptedKeys = acceptedPatchKeys_ACU(result.patch);
+    for (const module of writableModules) {
+      const changed = Object.keys(result.patch).some(key => patchModule_ACU(key) === module);
+      moduleCompletion[module] = truncated ? (changed ? 'partial' : 'failed') : (changed ? 'complete_changed' : 'complete_no_change');
+      if (truncated) unresolvedIssues.push({ module, source: 'truncated', path: `$.patch.${module}`, message: 'specialist JSON 在输出中途截断，尾部写集尚未确认完整' });
+    }
+    return {
+      agentName: result.agentName,
+      status: 'candidate',
+      summary: result.summary,
+      candidate,
+      evidenceRefs: result.evidenceRefs,
+      uncertainties: result.uncertainties,
+      completion: truncated ? 'partial' : 'complete_changed',
+      moduleCompletion,
+      unresolvedIssues,
+      acceptedKeys,
+    };
+  }
+  if (result.status === 'no_change') {
+    for (const module of writableModules) {
+      moduleCompletion[module] = truncated ? 'failed' : 'complete_no_change';
+      if (truncated) unresolvedIssues.push({ module, source: 'truncated', path: module, message: 'no_change 输出被截断，不能据此确认模块完整' });
+    }
+    return { agentName: result.agentName, status: result.status, summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties, completion: truncated ? 'failed' : 'complete_no_change', moduleCompletion, unresolvedIssues, acceptedKeys: [] };
+  }
+  for (const module of writableModules) moduleCompletion[module] = 'failed';
+  const message = result.status === 'blocked' ? result.unresolved.join('；') : result.message;
+  const source: WorldSimulationPendingFixSource_ACU = 'protocol_failed';
+  for (const module of writableModules) unresolvedIssues.push({ module, source, path: module, message });
+  return result.status === 'blocked'
+    ? { agentName: result.agentName, status: result.status, summary: 'blocked', evidenceRefs: [], uncertainties: [], unresolved: result.unresolved, completion: 'failed', moduleCompletion, unresolvedIssues, acceptedKeys: [] }
+    : { agentName: result.agentName, status: result.status, summary: result.message, evidenceRefs: [], uncertainties: [], reasonCode: result.reasonCode, completion: 'failed', moduleCompletion, unresolvedIssues, acceptedKeys: [] };
+}
+
+function salvageCandidateOutcome_ACU(
+  payload: Record<string, unknown>,
+  writableModules: readonly WorldSimulationLedgerModule_ACU[],
+  snapshot: WorldSimulationEvidenceRegistrySnapshot_ACU,
+  runId: string,
+  candidateSeq: number,
+  truncated: boolean,
+): WorldSimulationSubagentOutcome_ACU {
+  const patch = payload.patch;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('WORLD_SIMULATION_SPECIALIST_PATCH_REQUIRED');
+  const acceptedPatch: Record<string, unknown> = {};
+  const issues: WorldSimulationSubagentIssue_ACU[] = [];
+  for (const [rawModule, rawPatch] of Object.entries(patch as Record<string, unknown>)) {
+    const module = patchModule_ACU(rawModule);
+    if (!module || !writableModules.includes(module)) {
+      for (const target of writableModules) issues.push({ module: target, source: 'contract_rejected', path: `$.patch.${rawModule}`, message: `Agent 无权写入模块 ${rawModule}` });
+      continue;
+    }
+    const base = { ...payload, patch: { [rawModule]: rawPatch } };
+    if (ITEM_PATCH_MODULES_ACU.has(module) && rawPatch && typeof rawPatch === 'object' && !Array.isArray(rawPatch) && Array.isArray((rawPatch as Record<string, unknown>).upsert)) {
+      const record = rawPatch as Record<string, unknown>;
+      const acceptedItems: unknown[] = [];
+      (record.upsert as unknown[]).forEach((item, index) => {
+        const id = item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).id === 'string' ? String((item as Record<string, unknown>).id).trim() : '';
+        try {
+          parseWorldSimulationSpecialistResult_ACU({ ...payload, patch: { [rawModule]: { upsert: [item] } } }, snapshot);
+          acceptedItems.push(item);
+        } catch (error) {
+          issues.push(issue_ACU(module, 'contract_rejected', error, `$.patch.${rawModule}.upsert[${index}]`, id));
+        }
+      });
+      const extra = Object.keys(record).filter(key => key !== 'upsert');
+      if (extra.length) issues.push({ module, source: 'contract_rejected', path: `$.patch.${rawModule}.${extra[0]}`, message: `模块 patch 含未授权字段：${extra.join(',')}` });
+      if (acceptedItems.length) acceptedPatch[rawModule] = { upsert: acceptedItems };
+      continue;
+    }
+    try {
+      const parsed = parseWorldSimulationSpecialistResult_ACU(base, snapshot);
+      if (parsed.status === 'candidate') acceptedPatch[rawModule] = parsed.patch[rawModule];
+    } catch (error) {
+      issues.push(issue_ACU(module, 'contract_rejected', error, `$.patch.${rawModule}`));
+    }
+  }
+  if (truncated) {
+    for (const module of writableModules) issues.push({ module, source: 'truncated', path: `$.patch.${module}`, message: 'specialist JSON 在输出中途截断，尾部写集尚未确认完整' });
+  }
+  if (!Object.keys(acceptedPatch).length && !issues.length) throw new Error('WORLD_SIMULATION_SPECIALIST_PATCH_EMPTY');
+  const result = parseWorldSimulationSpecialistResult_ACU({ ...payload, patch: acceptedPatch }, snapshot) as Extract<WorldSimulationSpecialistResult_ACU, { status: 'candidate' }>;
+  const candidate = candidate_ACU(result, writableModules, runId, candidateSeq);
+  const acceptedKeys = acceptedPatchKeys_ACU(acceptedPatch);
+  const issueModules = new Set(issues.map(item => item.module));
+  const moduleCompletion: WorldSimulationSubagentOutcome_ACU['moduleCompletion'] = {};
+  for (const module of writableModules) {
+    const changed = Object.keys(acceptedPatch).some(key => patchModule_ACU(key) === module);
+    moduleCompletion[module] = issueModules.has(module) ? (changed ? 'partial' : 'failed') : (changed ? 'complete_changed' : 'complete_no_change');
+  }
+  return { agentName: result.agentName, status: 'candidate', summary: result.summary, candidate, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties, completion: issues.length ? 'partial' : 'complete_changed', moduleCompletion, unresolvedIssues: issues, acceptedKeys };
 }
 
 function toolCalls_ACU(raw: string, prefill: string, snapshot: WorldSimulationEvidenceRegistrySnapshot_ACU) {
@@ -136,13 +306,32 @@ export class WorldSimulationSubagentRuntime_ACU {
         continue;
       }
       try {
-        const payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
-        const result = parseWorldSimulationSpecialistResult_ACU(bindSpecialistIdentity_ACU(payload, agentName), requestSnapshot);
-        if (result.agentName !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
-        if (result.status === 'candidate') return { agentName, status: 'candidate', summary: result.summary, candidate: candidate_ACU(result, definition.writableModules, input.runId, input.candidateSeq ?? 1), evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
-        if (result.status === 'no_change') return { agentName, status: 'no_change', summary: result.summary, evidenceRefs: result.evidenceRefs, uncertainties: result.uncertainties };
-        if (result.status === 'blocked') return { agentName, status: 'blocked', summary: 'blocked', evidenceRefs: [], uncertainties: [], unresolved: result.unresolved };
-        return { agentName, status: 'failed', summary: result.message, evidenceRefs: [], uncertainties: [], reasonCode: result.reasonCode };
+        const draft = parseWorldSimulationJsonDraft_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], ['status']);
+        const payload = bindSpecialistIdentity_ACU(draft.payload, agentName);
+        if (String(payload.agentName ?? '').trim() !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
+        try {
+          const result = parseWorldSimulationSpecialistResult_ACU(payload, requestSnapshot);
+          return outcomeFromSpecialistResult_ACU(
+            result,
+            definition.writableModules,
+            input.runId,
+            input.candidateSeq ?? 1,
+            draft.truncated,
+          );
+        } catch (strictError) {
+          try {
+            return salvageCandidateOutcome_ACU(
+              payload,
+              definition.writableModules,
+              requestSnapshot,
+              input.runId,
+              input.candidateSeq ?? 1,
+              draft.truncated,
+            );
+          } catch {
+            throw strictError;
+          }
+        }
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
         if (!failure.retry) throw error;

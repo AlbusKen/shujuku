@@ -495,6 +495,7 @@ function recordPendingFix_ACU(
 ): void {
   const path = typeof details?.path === 'string' && details.path ? details.path : module;
   const violation = { path, message };
+  const now = Date.now();
   const found = pending.findIndex(item => item.module === module);
   if (found >= 0) {
     const previous = pending[found];
@@ -505,10 +506,19 @@ function recordPendingFix_ACU(
       attempts: previous.attempts + 1,
       firstFailedAtIndex: previous.firstFailedAtIndex,
       lastError: message,
+      source: 'transaction_rejected',
+      completion: previous.acceptedKeys.length ? 'partial' : 'failed',
+      rangeStartIndex: previous.rangeStartIndex,
+      rangeEndIndex: Math.max(previous.rangeEndIndex, index),
+      acceptedKeys: previous.acceptedKeys,
+      createdAt: previous.createdAt,
+      updatedAt: now,
     };
     return;
   }
-  pending.push({ module, agentName, violations: [violation], attempts: 1, firstFailedAtIndex: index, lastError: message });
+  pending.push({ module, agentName, violations: [violation], attempts: 1, firstFailedAtIndex: index, lastError: message,
+    source: 'transaction_rejected', completion: 'failed', rangeStartIndex: index, rangeEndIndex: index,
+    acceptedKeys: [], createdAt: now, updatedAt: now });
 }
 
 function clearPendingModule_ACU(pending: AgentPendingFix_ACU[], module: AgentPendingFix_ACU['module']): void {

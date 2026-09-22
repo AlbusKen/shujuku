@@ -21,8 +21,10 @@ export const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
 
 /** v1 楼层快照没有 pendingFixes。读取时归一为空数组，成功写入才升到当前版本。 */
 export const AGENT_MODULE_SCHEMA_VERSION_V1_ACU = 1 as const;
-
-export const AGENT_MODULE_SCHEMA_VERSION_ACU = 2 as const;
+/** v2 楼层快照有 pendingFixes，但没有资料完成状态与结构化缺口来源。 */
+export const AGENT_MODULE_SCHEMA_VERSION_V2_ACU = 2 as const;
+/** v4 增加资料完成状态，并扩展 pendingFixes 为可恢复缺口；3 已由楼层 frame 使用，禁止复用。 */
+export const AGENT_MODULE_SCHEMA_VERSION_ACU = 4 as const;
 
 /** 同一模块自动修复连续失败达到该次数后，不再派修复，升级主会话。 */
 export const AGENT_AUTO_FIX_MAX_ATTEMPTS_ACU = 3 as const;
@@ -339,6 +341,35 @@ export interface AgentWebRefEntry_ACU {
   retiredReason: string;
 }
 
+export const AGENT_MATERIAL_COMPLETION_STATES_ACU = [
+  'complete_changed',
+  'complete_no_change',
+  'partial',
+  'failed',
+  'legacy_unknown',
+] as const;
+export type AgentMaterialCompletionState_ACU = typeof AGENT_MATERIAL_COMPLETION_STATES_ACU[number];
+
+export const AGENT_PENDING_FIX_SOURCES_ACU = [
+  'truncated',
+  'contract_rejected',
+  'protocol_failed',
+  'invoke_failed',
+  'transaction_rejected',
+] as const;
+export type AgentPendingFixSource_ACU = typeof AGENT_PENDING_FIX_SOURCES_ACU[number];
+
+export interface AgentMaterialCompletionRecord_ACU {
+  state: AgentMaterialCompletionState_ACU;
+  /** 本次维护覆盖的真实正文范围；-1 表示尚无可判定范围。 */
+  rangeStartIndex: number;
+  rangeEndIndex: number;
+  /** 模块级状态用于限制后续补足写集；缺键表示本轮不负责该模块。 */
+  modules: Partial<Record<AgentWritableModule_ACU, AgentMaterialCompletionState_ACU>>;
+  updatedAt: number;
+}
+
+
 export interface AgentPendingFixViolation_ACU {
   path: string;
   message: string;
@@ -352,6 +383,13 @@ export interface AgentPendingFix_ACU {
   attempts: number;
   firstFailedAtIndex: number;
   lastError: string;
+  source: AgentPendingFixSource_ACU;
+  completion: 'partial' | 'failed';
+  rangeStartIndex: number;
+  rangeEndIndex: number;
+  acceptedKeys: string[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 /**
@@ -370,6 +408,7 @@ export interface AgentModuleFloorDelta_ACU {
   removedIds?: Partial<Record<Exclude<AgentWritableModule_ACU, 'userRequirements'>, string[]>>;
   revisions: Partial<AgentModuleRevisions_ACU>;
   pendingFixes?: AgentPendingFix_ACU[];
+  materialCompletion?: AgentMaterialCompletionRecord_ACU;
   /** 本条显式推进的结算水位。省略表示不改水位。 */
   settledThroughIndex?: number;
   updatedAt: number;
@@ -399,6 +438,8 @@ export interface AgentModuleSnapshot_ACU {
   webRefs: AgentWebRefEntry_ACU[];
   /** 用户在 Agent 会话里提过的要求。创建任务时机械写入初始要求作为首条，之后只由用户手动维护。 */
   userRequirements: string[];
+  /** 最近一次正文资料维护的完成状态；旧快照读取为 legacy_unknown。 */
+  materialCompletion: AgentMaterialCompletionRecord_ACU;
   /** 最近一次容错提交没能入库的模块。旧快照缺该字段时读取为空数组。 */
   pendingFixes: AgentPendingFix_ACU[];
 }

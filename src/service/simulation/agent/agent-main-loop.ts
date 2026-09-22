@@ -1,5 +1,5 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
-import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldCollisionReport_ACU, type WorldSimulationLedger_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
+import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldCollisionReport_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerModule_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
 import { applyWorldSimulationCandidatesDetailed_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
@@ -41,6 +41,8 @@ export interface WorldSimulationMainLoopInput_ACU {
   resetRunBudget?: boolean;
   /** 当前锚点正文已经有结算快照时为 true；pendingFixes 非空时工作流仍会进入自动修复。 */
   anchorMaterialsCommitted?: boolean;
+  /** 显式补足入口传入的程序级目标写集。 */
+  targetModules?: readonly WorldSimulationLedgerModule_ACU[];
 }
 
 const compact_ACU = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -488,6 +490,7 @@ export class WorldSimulationMainLoop_ACU {
               skipModules: action.skipModules,
             },
             anchorMaterialsCommitted: input.anchorMaterialsCommitted === true,
+            targetModules: input.targetModules,
             subagents: this.dependencies.subagents,
           });
         } catch (error) {

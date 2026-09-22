@@ -13,7 +13,7 @@ import {
   validateAgentModuleSnapshot_ACU,
   writeAgentModuleSnapshot_ACU,
 } from '../../../../src/service/continuation/agent/agent-module-store';
-import { AGENT_BLOCK_CHAR_LIMIT_ACU, AGENT_HOT_HOOK_LIMIT_ACU, AGENT_MODULE_FIELD_ACU, type AgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import { AGENT_BLOCK_CHAR_LIMIT_ACU, AGENT_HOT_HOOK_LIMIT_ACU, AGENT_MODULE_FIELD_ACU, AGENT_MODULE_SCHEMA_VERSION_ACU, type AgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-model';
 import { ContinuationValidationError_ACU } from '../../../../src/service/continuation/model';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 
@@ -49,7 +49,7 @@ describe('Agent 资料快照存储', () => {
   it('读取不再把基线里的水位钳到当前数组长度', () => {
     const chat: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: snapshotAt_ACU(9) }];
     expect(readAgentModuleSnapshot_ACU(chat).settledThroughIndex).toBe(9);
-    expect(chat[0][AGENT_MODULE_FIELD_ACU].schemaVersion).toBe(2);
+    expect(chat[0][AGENT_MODULE_FIELD_ACU].schemaVersion).toBe(AGENT_MODULE_SCHEMA_VERSION_ACU);
   });
 
   it('未揭示条目携带揭示楼层时读取阶段就把楼层清空', () => {
@@ -115,7 +115,7 @@ describe('Agent 资料快照存储', () => {
       hooks: [hook_ACU('H1')], infoGap: [], constraints: [],
     };
     const loaded = validateAgentModuleSnapshot_ACU(legacy);
-    expect(loaded!.schemaVersion).toBe(2);
+    expect(loaded!.schemaVersion).toBe(AGENT_MODULE_SCHEMA_VERSION_ACU);
     expect(loaded!.pendingFixes).toEqual([]);
     expect(loaded!.hooks).toHaveLength(1);
     const current = validateAgentModuleSnapshot_ACU({ ...legacy, schemaVersion: 2, pendingFixes: [] });
@@ -128,7 +128,7 @@ describe('Agent 资料快照存储', () => {
     })!.pendingFixes).toHaveLength(1);
     const chat: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: legacy }];
     expect(readAgentModuleSnapshot_ACU(chat).pendingFixes).toEqual([]);
-    expect(readAgentModuleSnapshot_ACU(chat).schemaVersion).toBe(2);
+    expect(readAgentModuleSnapshot_ACU(chat).schemaVersion).toBe(AGENT_MODULE_SCHEMA_VERSION_ACU);
     expect(chat[0][AGENT_MODULE_FIELD_ACU].schemaVersion).toBe(1);
   });
 

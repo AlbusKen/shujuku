@@ -7,6 +7,7 @@ import {
   continuationContinuityReviewRequired_ACU,
   continuationMajorTurn_ACU,
   runContinuationAgentWorkflow_ACU,
+  runContinuationMaterialRepair_ACU,
   type ContinuationWorkflowAgentCall_ACU,
   type ContinuationWorkflowAgentPayload_ACU,
   type ContinuationWorkflowInput_ACU,
@@ -96,6 +97,48 @@ describe('续写固定工作流', () => {
     expect(harness.calls[0].prompt).toContain('守门人的回避');
     expect(harness.composerPrompts[0]).toContain('守门人的回避');
     expect(result.snapshot.revisions.hooks).toBe(1);
+  });
+
+  it('部分契约保留合法资料、挂账缺失模块且不推进结算水位', async () => {
+    const base = snapshot_ACU();
+    const harness = harness_ACU({
+      snapshot: base,
+      runAgent: async call => {
+        if (call.agentName === 'hook-cognition-maintainer') {
+          return {
+            ok: true,
+            summary: '伏笔已结算，年代学尾部截断',
+            maintainer: {
+              summary: '伏笔已结算，年代学尾部截断',
+              delta: delta_ACU({ hooks: [{ action: 'upsert', id: 'H1', summary: '断裂的封印', status: 'planted', importance: 'mid', plantedIndex: 2, plannedPayoff: '后文回收', reason: '' }] }),
+            },
+            writes: ['hooks', 'infoGap', 'chronology'],
+            readRevisions: base.revisions,
+            completion: 'partial',
+            moduleCompletion: { hooks: 'complete_changed', infoGap: 'complete_no_change', chronology: 'failed' },
+            unresolvedIssues: [{ module: 'chronology', source: 'truncated', path: 'chronology', message: '年代学尾部尚未确认完整' }],
+            acceptedKeys: ['hooks:H1'],
+          };
+        }
+        return {
+          ok: true,
+          summary: call.agentName,
+          planner: { summary: '建议', recommendation: '安静地问一句', mustPreserve: [], risks: [] },
+          reviewer: { verdict: 'pass', reason: '无冲突', fixes: [] },
+        };
+      },
+    });
+
+    const result = await harness.run();
+    expect(result.snapshot.hooks.map(item => item.id)).toContain('H1');
+    expect(result.snapshot.settledThroughIndex).toBe(4);
+    expect(result.snapshot.materialCompletion).toMatchObject({
+      state: 'partial', rangeStartIndex: 5, rangeEndIndex: 6,
+      modules: { hooks: 'complete_changed', infoGap: 'complete_no_change', chronology: 'failed' },
+    });
+    expect(result.pendingFixes).toEqual([expect.objectContaining({
+      module: 'chronology', source: 'truncated', completion: 'failed', rangeStartIndex: 5, rangeEndIndex: 6,
+    })]);
   });
 
   it('没有未结算正文时 maintainer 短路，不调用模型', async () => {
@@ -226,5 +269,77 @@ describe('续写固定工作流', () => {
     const emptyResult = await empty.run();
     expect(emptyResult.outcome).toBe('escalate');
     expect(emptyResult.instruction).toBe('');
+  });
+
+  it('显式补足只提交目标模块并保留其他 pending 与结算水位', async () => {
+    const base = snapshot_ACU({
+      pendingFixes: [
+        { module: 'hooks', agentName: 'hook-cognition-maintainer', violations: [{ path: 'hooks', message: '伏笔截断' }], attempts: 1, firstFailedAtIndex: 3, lastError: '伏笔截断' },
+        { module: 'chronology', agentName: 'hook-cognition-maintainer', violations: [{ path: 'chronology', message: '年代学截断' }], attempts: 1, firstFailedAtIndex: 3, lastError: '年代学截断' },
+      ],
+      materialCompletion: {
+        state: 'partial', rangeStartIndex: 3, rangeEndIndex: 4,
+        modules: { hooks: 'failed', chronology: 'failed', storyArc: 'complete_no_change' }, updatedAt: 1,
+      },
+    });
+    const calls: ContinuationWorkflowAgentCall_ACU[] = [];
+    const result = await runContinuationMaterialRepair_ACU({
+      snapshot: base,
+      targetModules: ['hooks'],
+      settledIndex: 8,
+      completedStageNumbers: [],
+      runAgent: async call => {
+        calls.push(call);
+        return {
+          ok: true,
+          summary: '只补伏笔',
+          maintainer: {
+            summary: '只补伏笔',
+            delta: delta_ACU({
+              hooks: [{ action: 'upsert', id: 'H1', summary: '断裂的封印', status: 'planted', importance: 'mid', plantedIndex: 2, plannedPayoff: '后文回收', reason: '' }],
+              storyArc: [{
+                action: 'upsert', id: 'ARC-OUT-OF-SCOPE', scope: 'volume', title: '越权总纲', direction: '不得写入',
+                escalation: '', withheld: '', status: 'planned', stageNumbers: [], completionStageNumber: null,
+                completionState: '', continuationRationale: '', reason: '',
+              }],
+            }),
+          },
+          writes: ['hooks', 'storyArc'],
+          readRevisions: base.revisions,
+          completion: 'complete_changed',
+          moduleCompletion: { hooks: 'complete_changed', storyArc: 'complete_changed' },
+          acceptedKeys: ['hooks:H1'],
+        };
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ agentName: 'hook-cognition-maintainer', repair: true, targetModules: ['hooks'] });
+    expect(result.snapshot.hooks.map(item => item.id)).toContain('H1');
+    expect(result.snapshot.storyArc).toEqual(base.storyArc);
+    expect(result.snapshot.revisions.storyArc).toBe(base.revisions.storyArc);
+    expect(result.snapshot.pendingFixes.map(item => item.module)).toEqual(['chronology']);
+    expect(result.snapshot.settledThroughIndex).toBe(4);
+    expect(result.repairedModules).toEqual(['hooks']);
+    expect(result.failedModules).toEqual([]);
+  });
+
+  it('子代理声称 changed 但没有候选写入时不清除 pending', async () => {
+    const base = snapshot_ACU({
+      pendingFixes: [{ module: 'hooks', agentName: 'hook-cognition-maintainer', violations: [{ path: 'hooks', message: '仍缺正文依据' }], attempts: 1, firstFailedAtIndex: 4, lastError: '仍缺正文依据' }],
+      materialCompletion: { state: 'failed', rangeStartIndex: 4, rangeEndIndex: 4, modules: { hooks: 'failed' }, updatedAt: 1 },
+    });
+    const result = await runContinuationMaterialRepair_ACU({
+      snapshot: base,
+      targetModules: ['hooks'],
+      settledIndex: 4,
+      completedStageNumbers: [],
+      runAgent: async () => ({ ok: true, summary: '声称已改', completion: 'complete_changed', moduleCompletion: { hooks: 'complete_changed' } }),
+    });
+
+    expect(result.snapshot.pendingFixes.map(item => item.module)).toEqual(['hooks']);
+    expect(result.snapshot.materialCompletion.modules.hooks).toBe('failed');
+    expect(result.repairedModules).toEqual([]);
+    expect(result.failedModules).toEqual(['hooks']);
   });
 });

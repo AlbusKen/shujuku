@@ -230,7 +230,15 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     envelope.settings,
     { anchorMessage: storyText },
   );
-  let ledger = applied.ledger;
+  let ledger = {
+    ...applied.ledger,
+    ...(input.commitCandidate.pendingFixes
+      ? { pendingFixes: clone_ACU(input.commitCandidate.pendingFixes) }
+      : {}),
+    ...(input.commitCandidate.materialCompletion
+      ? { materialCompletion: clone_ACU(input.commitCandidate.materialCompletion) }
+      : {}),
+  };
   ledger = maintainWorldPlayer_ACU(ledger, envelope.ledger.player);
   const extraTimeline: WorldSimulationTimelineEntry_ACU[] = [];
   const daysAdvanced = Math.max(0, ledger.clock.day - envelope.ledger.clock.day);

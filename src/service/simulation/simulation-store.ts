@@ -12,7 +12,9 @@ import {
   WORLD_LEDGER_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_LEDGER_MODULES_ACU,
+  WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU,
   WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU,
+  WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU,
   WORLD_SIMULATION_PLAYER_REQUIRED_FIELDS_ACU,
   WORLD_GUIDANCE_SIGNAL_VOICES_ACU,
   WORLD_SEED_EXPOSE_POLICIES_ACU,
@@ -26,6 +28,7 @@ import {
   type WorldSimulationEnvelope_ACU,
   type WorldSimulationErrorPhase_ACU,
   type WorldSimulationLedger_ACU,
+  type WorldSimulationMaterialCompletionRecord_ACU,
   type WorldSimulationPendingFix_ACU,
   type WorldSimulationWriteGuard_ACU,
   type WorldChronicleOverviewRow_ACU,
@@ -42,7 +45,7 @@ const TASK_STATUSES_ACU = ['drafting', 'paused', 'running', 'stopping_after_infl
 const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'] as const;
 const REVISION_REASONS_ACU = ['initial', 'automatic_replan', 'manual_replan', 'resume_repair'] as const;
 const TIMELINE_KINDS_ACU = ['task_created', 'plan_ready', 'stage_started', 'stage_completed', 'paused', 'resumed', 'stopped', 'committed', 'no_change', 'blocked', 'failed', 'swept', 'progressed'] as const;
-const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview', 'pendingFixes'] as const;
+const LEDGER_EXACT_KEYS_ACU = ['schemaVersion', 'revision', 'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors', 'player', 'guidance', 'chronicleOverview', 'materialCompletion', 'pendingFixes'] as const;
 // 计划确认流程退役后的旧数据归一化：读取历史存量聊天时不再 fail-closed。
 const LEGACY_TASK_STATUSES_ACU: Record<string, NonNullable<WorldSimulationEnvelope_ACU['task']>['status']> = { awaiting_plan_review: 'paused' };
 const LEGACY_STAGE_STATUSES_ACU: Record<string, WorldSimulationEnvelope_ACU['stages'][number]['status']> = { awaiting_review: 'planning' };
@@ -177,8 +180,30 @@ function migrateV2Ledger_ACU(raw: Record<string, unknown>): Record<string, unkno
 function migrateV3Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
   return {
     ...raw,
-    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    schemaVersion: 4,
     pendingFixes: Array.isArray(raw.pendingFixes) ? raw.pendingFixes : [],
+  };
+}
+
+function migrateV4Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
+  const pendingFixes = Array.isArray(raw.pendingFixes)
+    ? raw.pendingFixes.map(item => isRecord_ACU(item) ? {
+        ...item,
+        source: WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU.includes(item.source as any) ? item.source : 'transaction_rejected',
+        completion: item.completion === 'partial' || item.completion === 'failed' ? item.completion : 'failed',
+        acceptedKeys: Array.isArray(item.acceptedKeys) ? item.acceptedKeys : [],
+        anchor: item.anchor === undefined ? null : item.anchor,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : 0,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
+      } : item)
+    : [];
+  return {
+    ...raw,
+    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    materialCompletion: isRecord_ACU(raw.materialCompletion)
+      ? raw.materialCompletion
+      : { state: 'legacy_unknown', expectedModules: [], modules: {}, sourceRunId: '', updatedAt: 0 },
+    pendingFixes,
   };
 }
 
@@ -187,6 +212,7 @@ function migrateLedgerToCurrent_ACU(raw: Record<string, unknown>): Record<string
   if (current.schemaVersion === 1) current = migrateV1Ledger_ACU(current);
   if (current.schemaVersion === 2) current = migrateV2Ledger_ACU(current);
   if (current.schemaVersion === 3) current = migrateV3Ledger_ACU(current);
+  if (current.schemaVersion === 4) current = migrateV4Ledger_ACU(current);
   return current;
 }
 
@@ -216,7 +242,7 @@ function validatePendingFixes_ACU(raw: unknown, phase: WorldSimulationErrorPhase
   return raw.map((item, index) => {
     const path = `ledger.pendingFixes[${index}]`;
     if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`, phase);
-    exactKeys_ACU(item, ['module', 'candidateId', 'agentName', 'violations', 'attempts', 'firstFailedAtDay', 'lastError'], [], path, phase);
+    exactKeys_ACU(item, ['module', 'candidateId', 'agentName', 'violations', 'attempts', 'firstFailedAtDay', 'lastError', 'source', 'completion', 'acceptedKeys', 'anchor', 'createdAt', 'updatedAt'], [], path, phase);
     if (!Array.isArray(item.violations)) fail_ACU(`${path}.violations 必须是数组`, phase);
     const violations = item.violations.map((violation, violationIndex) => {
       const violationPath = `${path}.violations[${violationIndex}]`;
@@ -227,6 +253,20 @@ function validatePendingFixes_ACU(raw: unknown, phase: WorldSimulationErrorPhase
         message: string_ACU(violation.message, `${violationPath}.message`, phase),
       };
     });
+    let anchor: WorldSimulationPendingFix_ACU['anchor'] = null;
+    if (item.anchor !== null) {
+      if (!isRecord_ACU(item.anchor)) fail_ACU(`${path}.anchor 必须是对象或 null`, phase);
+      exactKeys_ACU(item.anchor, ['messageKey', 'swipeId', 'contentDigest', 'baseLedgerRevision'], [], `${path}.anchor`, phase);
+      anchor = {
+        messageKey: string_ACU(item.anchor.messageKey, `${path}.anchor.messageKey`, phase),
+        swipeId: string_ACU(item.anchor.swipeId, `${path}.anchor.swipeId`, phase),
+        contentDigest: string_ACU(item.anchor.contentDigest, `${path}.anchor.contentDigest`, phase),
+        baseLedgerRevision: integer_ACU(item.anchor.baseLedgerRevision, `${path}.anchor.baseLedgerRevision`, phase),
+      };
+    }
+    const createdAt = integer_ACU(item.createdAt, `${path}.createdAt`, phase);
+    const updatedAt = integer_ACU(item.updatedAt, `${path}.updatedAt`, phase);
+    if (updatedAt < createdAt) fail_ACU(`${path}.updatedAt 不能早于 createdAt`, phase);
     return {
       module: enum_ACU(item.module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.module`, phase),
       candidateId: string_ACU(item.candidateId, `${path}.candidateId`, phase, true),
@@ -235,8 +275,36 @@ function validatePendingFixes_ACU(raw: unknown, phase: WorldSimulationErrorPhase
       attempts: integer_ACU(item.attempts, `${path}.attempts`, phase, 0, 100),
       firstFailedAtDay: integer_ACU(item.firstFailedAtDay, `${path}.firstFailedAtDay`, phase, 1),
       lastError: string_ACU(item.lastError, `${path}.lastError`, phase, true),
+      source: enum_ACU(item.source, WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU, `${path}.source`, phase),
+      completion: enum_ACU(item.completion, ['partial', 'failed'] as const, `${path}.completion`, phase),
+      acceptedKeys: stringArray_ACU(item.acceptedKeys, `${path}.acceptedKeys`, phase),
+      anchor,
+      createdAt,
+      updatedAt,
     };
   });
+}
+
+function validateMaterialCompletion_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationMaterialCompletionRecord_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU('ledger.materialCompletion 必须是对象', phase);
+  exactKeys_ACU(raw, ['state', 'expectedModules', 'modules', 'sourceRunId', 'updatedAt'], [], 'ledger.materialCompletion', phase);
+  if (!Array.isArray(raw.expectedModules)) fail_ACU('ledger.materialCompletion.expectedModules 必须是数组', phase);
+  const expectedModules = raw.expectedModules.map((module, index) =>
+    enum_ACU(module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `ledger.materialCompletion.expectedModules[${index}]`, phase));
+  if (new Set(expectedModules).size !== expectedModules.length) fail_ACU('ledger.materialCompletion.expectedModules 存在重复模块', phase);
+  if (!isRecord_ACU(raw.modules)) fail_ACU('ledger.materialCompletion.modules 必须是对象', phase);
+  const modules: WorldSimulationMaterialCompletionRecord_ACU['modules'] = {};
+  for (const [module, state] of Object.entries(raw.modules)) {
+    const validatedModule = enum_ACU(module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `ledger.materialCompletion.modules.${module}`, phase);
+    modules[validatedModule] = enum_ACU(state, WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU, `ledger.materialCompletion.modules.${module}`, phase);
+  }
+  return {
+    state: enum_ACU(raw.state, WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU, 'ledger.materialCompletion.state', phase),
+    expectedModules,
+    modules,
+    sourceRunId: string_ACU(raw.sourceRunId, 'ledger.materialCompletion.sourceRunId', phase, true),
+    updatedAt: integer_ACU(raw.updatedAt, 'ledger.materialCompletion.updatedAt', phase),
+  };
 }
 
 function validatePlayer_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldPlayer_ACU {
@@ -455,8 +523,9 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
   if (!isRecord_ACU(normalized.guidance)) fail_ACU('ledger.guidance 必须是对象', phase);
   exactKeys_ACU(normalized.guidance, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.guidance, [], 'ledger.guidance', phase);
   const chronicleOverview = validateChronicleOverview_ACU(normalized.chronicleOverview, phase);
+  const materialCompletion = validateMaterialCompletion_ACU(normalized.materialCompletion, phase);
   const pendingFixes = validatePendingFixes_ACU(normalized.pendingFixes, phase);
-  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview, pendingFixes };
+  return { schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU, revision: integer_ACU(normalized.revision, 'ledger.revision', phase), clock, dimensions, seeds, actors, chronicle, rumors, player, guidance: { signals: validateGuidanceSignals_ACU(normalized.guidance.signals, 'ledger.guidance.signals', phase), excludedFacts: stringArray_ACU(normalized.guidance.excludedFacts, 'ledger.guidance.excludedFacts', phase), evidenceRefs: stringArray_ACU(normalized.guidance.evidenceRefs, 'ledger.guidance.evidenceRefs', phase) }, chronicleOverview, materialCompletion, pendingFixes };
 }
 
 function validatePlan_ACU(raw: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['stages'][number]['revisions'][number]['plan'] {

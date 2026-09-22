@@ -122,6 +122,34 @@
         本地资料由子代理结算写入，也可以在这里分模块手动修正。保存走与子代理相同的结构校验并推进修订号；
         每个模块独立保存，只提交本模块数据，不影响其他模块（含未保存的草稿）。
       </p>
+      <section class="acu-v2-continuation-materials__outline-summary">
+        <p class="acu-v2-continuation-materials__outline-heading"><strong>资料完成状态</strong></p>
+        <article v-for="card in materialStatusCards" :key="card.module" class="acu-v2-continuation-materials__card" :class="{ 'acu-v2-continuation-materials__card--failed': card.state === 'pending' || card.state === 'load_failed' }">
+          <p class="acu-v2-continuation-materials__card-head">
+            <strong>{{ materialStatusTitle(card.module) }}</strong>
+            <span class="acu-v2-continuation-materials__badge">{{ card.label }}</span>
+          </p>
+          <p class="acu-v2-continuation-materials__card-body">{{ card.detail }}</p>
+        </article>
+      </section>
+      <section v-if="repairableModules.length" class="acu-v2-continuation-materials__outline-summary">
+        <p class="acu-v2-continuation-materials__outline-heading"><strong>定向补足</strong></p>
+        <p class="acu-v2-continuation-materials__card-body">只开放所选待补模块的程序级写集；已完成模块不会被重写。历史状态未知的模块必须在此显式选择。</p>
+        <div class="acu-v2-continuation-materials__repair-options">
+          <label v-for="module in repairableModules" :key="module">
+            <input
+              type="checkbox"
+              :checked="selectedRepairModules.includes(module)"
+              :disabled="busy"
+              @change="toggleRepairModule(module)"
+            >
+            {{ MATERIAL_STATUS_LABELS_ACU[module] ?? module }}
+          </label>
+        </div>
+        <div class="acu-v2-continuation-materials__actions">
+          <AcuButton variant="primary" :loading="busy" :disabled="!selectedRepairModules.length" @click="requestRepair">补足所选模块</AcuButton>
+        </div>
+      </section>
       <section v-if="pendingFixCards.length" class="acu-v2-continuation-materials__outline-summary">
         <p class="acu-v2-continuation-materials__outline-heading"><strong>待修复</strong></p>
         <article v-for="card in pendingFixCards" :key="card.module">
@@ -410,6 +438,8 @@ import AcuTextarea from './_lib/AcuTextarea.vue';
 import { useContinuationMaterials } from '../composables/useContinuationMaterials';
 import { buildContinuationPendingFixCards_ACU } from '../continuation/pending-fix-cards';
 import type { ContinuationStage_ACU, ContinuationTask_ACU, StageOutline_ACU, StageRevision_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { AgentWritableModule_ACU } from '../../service/continuation/agent/agent-model'; // arch-ok: 仅类型导入
+import { buildMaterialCompletionCards_ACU } from '../material-completion-status';
 
 const props = defineProps<{
   task: ContinuationTask_ACU | null;
@@ -421,6 +451,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'save-outline', outline: StageOutline_ACU): void;
   (event: 'clear'): void;
+  (event: 'repair', modules: AgentWritableModule_ACU[]): void;
 }>();
 
 const TABS = [
@@ -452,7 +483,52 @@ const INFERRED_FIELD_LABELS: Record<string, string> = { function: '功能', main
 
 const activeTab = ref<TabId>('outline');
 const materials = useContinuationMaterials();
+const selectedRepairModules = ref<AgentWritableModule_ACU[]>([]);
 const pendingFixCards = computed(() => buildContinuationPendingFixCards_ACU(materials.snapshot.value?.pendingFixes));
+const materialStatusCards = computed(() => buildMaterialCompletionCards_ACU({
+  overallState: materials.snapshot.value?.materialCompletion.state,
+  expectedModules: Object.keys(materials.snapshot.value?.materialCompletion.modules ?? {}),
+  modules: materials.snapshot.value?.materialCompletion.modules,
+  pendingModules: materials.snapshot.value?.pendingFixes.map(item => item.module),
+  loadError: materials.loadError.value || null,
+}));
+const MATERIAL_STATUS_LABELS_ACU: Record<string, string> = {
+  hooks: '伏笔账本', infoGap: '认知与信息差', constraints: '长期约束', storyArc: '故事总纲',
+  chronology: '故事年代学账本', webRefs: '百科资料库', userRequirements: '用户要求',
+};
+
+const REPAIRABLE_MODULES_ACU: readonly AgentWritableModule_ACU[] = ['hooks', 'infoGap', 'chronology', 'storyArc', 'webRefs'];
+const repairableModules = computed<AgentWritableModule_ACU[]>(() => {
+  const snapshot = materials.snapshot.value;
+  if (!snapshot) return [];
+  const pending = new Set((snapshot.pendingFixes ?? []).map(item => item.module));
+  const completion = snapshot.materialCompletion;
+  const legacyOverall = !completion || completion.state === 'legacy_unknown';
+  return REPAIRABLE_MODULES_ACU.filter(module => pending.has(module)
+    || completion?.modules?.[module] === 'legacy_unknown'
+    || legacyOverall);
+});
+
+watch(repairableModules, modules => {
+  const allowed = new Set(modules);
+  selectedRepairModules.value = selectedRepairModules.value.filter(module => allowed.has(module));
+});
+
+function toggleRepairModule(module: AgentWritableModule_ACU): void {
+  selectedRepairModules.value = selectedRepairModules.value.includes(module)
+    ? selectedRepairModules.value.filter(item => item !== module)
+    : [...selectedRepairModules.value, module];
+}
+
+function requestRepair(): void {
+  if (!selectedRepairModules.value.length) return;
+  emit('repair', [...selectedRepairModules.value]);
+}
+
+function materialStatusTitle(module: string): string {
+  return module === '*' ? '资料维护状态' : MATERIAL_STATUS_LABELS_ACU[module] ?? module;
+}
+
 const outlineDraft = ref('');
 const outlineError = ref('');
 const outlineDirty = ref(false);
@@ -575,6 +651,8 @@ defineExpose({ reload });
 .acu-v2-continuation-materials__meta { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
 .acu-v2-continuation-materials__error { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-continuation-materials__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.acu-v2-continuation-materials__repair-options { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-continuation-materials__repair-options label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .acu-v2-continuation-materials__block { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px; }
 .acu-v2-continuation-materials__block > summary { cursor: pointer; color: var(--acu-text-1); }
 .acu-v2-continuation-materials__block--current { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent); }
@@ -589,6 +667,7 @@ defineExpose({ reload });
 .acu-v2-continuation-materials__turn--planned { color: var(--acu-text-2); }
 .acu-v2-continuation-materials__cards { display: grid; gap: 8px; }
 .acu-v2-continuation-materials__card { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px; }
+.acu-v2-continuation-materials__card--failed { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); }
 .acu-v2-continuation-materials__card--retired { opacity: 0.55; }
 .acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head { cursor: pointer; list-style: none; }
 .acu-v2-continuation-materials__card-meta a { color: inherit; word-break: break-all; }

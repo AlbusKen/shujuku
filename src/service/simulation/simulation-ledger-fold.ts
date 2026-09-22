@@ -52,6 +52,7 @@ export interface WorldSimulationLedgerDelta_ACU {
   clock?: WorldClock_ACU;
   player?: WorldPlayer_ACU;
   guidance?: WorldGuidance_ACU;
+  materialCompletion?: WorldSimulationLedger_ACU['materialCompletion'];
   pendingFixes?: WorldSimulationPendingFix_ACU[];
   evidenceRefs?: string[];
   updatedAt: number;
@@ -173,6 +174,7 @@ function applyLedgerDelta_ACU(ledger: WorldSimulationLedger_ACU, delta: WorldSim
   if (delta.clock) next.clock = cloneJson_ACU(delta.clock);
   if (delta.player) next.player = cloneJson_ACU(delta.player);
   if (delta.guidance) next.guidance = cloneJson_ACU(delta.guidance);
+  if (delta.materialCompletion) next.materialCompletion = cloneJson_ACU(delta.materialCompletion);
   if (delta.pendingFixes) next.pendingFixes = cloneJson_ACU(delta.pendingFixes);
   next.revision = delta.revision;
   return next;
@@ -219,6 +221,10 @@ export function diffWorldSimulationLedger_ACU(
   }
   if (JSON.stringify(before.guidance) !== JSON.stringify(after.guidance)) {
     delta.guidance = cloneJson_ACU(after.guidance);
+    changed = true;
+  }
+  if (JSON.stringify(before.materialCompletion) !== JSON.stringify(after.materialCompletion)) {
+    delta.materialCompletion = cloneJson_ACU(after.materialCompletion);
     changed = true;
   }
   if (JSON.stringify(before.pendingFixes) !== JSON.stringify(after.pendingFixes)) {

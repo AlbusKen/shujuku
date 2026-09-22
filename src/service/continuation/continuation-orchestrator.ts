@@ -1,4 +1,5 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
+import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import { reconcileTaskCursorFromChat_ACU } from './stage-cursor';
@@ -7,9 +8,10 @@ import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createP
 import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveStageOutlinePacingContext_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
-import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
+import { AGENT_WRITABLE_MODULES_ACU, type AgentConversationAppend_ACU, type AgentModuleSnapshot_ACU, type AgentOutlineEditOp_ACU, type AgentOutlineOpResult_ACU, type AgentWritableModule_ACU } from './agent/agent-model';
+import { CONTINUATION_REPAIRABLE_MODULES_ACU, type ContinuationWorkflowStep_ACU } from './agent/agent-workflow';
 import { appendAgentConversationToChat_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
-import { clearAgentModuleField_ACU } from './agent/agent-module-store';
+import { clearAgentModuleField_ACU, readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from './agent/agent-module-store';
 import { seedAgentUserRequirementsIfEmpty_ACU } from './agent/agent-user-requirements';
 import { clearAgentRunState_ACU } from './agent/agent-run-cache';
 import { clearAgentSessionLog_ACU, logAgentSession_ACU } from './agent/agent-session-log';
@@ -36,6 +38,12 @@ export interface CreateContinuationTaskInput_ACU { originInstruction: string; }
 export interface ReplanContinuationInput_ACU { instruction?: string; }
 export interface AcceptOutlineInput_ACU { outline?: StageOutline_ACU; }
 export interface ReplaceContinuationSettingsInput_ACU { settings: ContinuationEnvelope_ACU['settings']; }
+export interface RepairContinuationMaterialsInput_ACU { modules: readonly AgentWritableModule_ACU[]; }
+export interface RepairContinuationMaterialsResult_ACU extends ContinuationOrchestratorResult_ACU {
+  repairedModules: AgentWritableModule_ACU[];
+  failedModules: AgentWritableModule_ACU[];
+  steps: ContinuationWorkflowStep_ACU[];
+}
 export interface ContinuationOrchestratorResult_ACU { envelope: ContinuationEnvelope_ACU; task: ContinuationTask_ACU; planning?: Pick<ContinuationOutlinePlanningResult_ACU, 'attempts' | 'apiPreset' | 'requiresReview'>; }
 export interface ContinuationHostTurnActionResult_ACU extends ContinuationOrchestratorResult_ACU {
   preparedTurn?: ContinuationPreparedTurnInstruction_ACU;
@@ -80,6 +88,91 @@ const abortControllersByChat_ACU = new Map<string, AbortController>();
 
 function fail_ACU(code: 'CONTINUATION_OPERATION_BUSY' | 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY' | 'CONTINUATION_TASK_NOT_FOUND' | 'CONTINUATION_TASK_STATE_INVALID', message: string): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'persist', message, false));
+}
+
+interface ContinuationMaterialAnchor_ACU {
+  chatIdentity: string;
+  messageIndex: number;
+  messageKey: string;
+  swipeId: string;
+  contentDigest: string;
+  chatLength: number;
+}
+
+function rejectMaterialRepair_ACU(
+  code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' | 'CONTINUATION_INTERNAL_REQUEST_STALE',
+  message: string,
+  details?: Record<string, unknown>,
+): never {
+  throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'agent_persist', message, false, details));
+}
+
+function messageContent_ACU(message: Record<string, unknown>): string {
+  return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
+}
+
+function resolveContinuationMaterialAnchor_ACU(chat: any[], chatIdentity: string): ContinuationMaterialAnchor_ACU {
+  const messageIndex = chat.length - 1;
+  const message = messageIndex >= 0 && chat[messageIndex] && typeof chat[messageIndex] === 'object' && !Array.isArray(chat[messageIndex])
+    ? chat[messageIndex] as Record<string, unknown>
+    : null;
+  if (!chatIdentity || !message) {
+    rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', '当前聊天没有可承载资料补足结果的楼层');
+  }
+  const rawMessageId = message.message_id;
+  const messageId = typeof rawMessageId === 'string' || typeof rawMessageId === 'number' ? rawMessageId : messageIndex;
+  const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0
+    ? String(message.swipe_id)
+    : '0';
+  return {
+    chatIdentity,
+    messageIndex,
+    messageKey: `${typeof messageId}:${String(messageId)}`,
+    swipeId,
+    contentDigest: sha256HexSync_ACU(messageContent_ACU(message)),
+    chatLength: chat.length,
+  };
+}
+
+function assertContinuationMaterialAnchorCurrent_ACU(anchor: ContinuationMaterialAnchor_ACU, chat: any[], chatIdentity: string): void {
+  if (chat.length !== anchor.chatLength || chat.length - 1 !== anchor.messageIndex) {
+    rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足期间聊天楼层已变化，拒绝写入迟到结果');
+  }
+  const current = resolveContinuationMaterialAnchor_ACU(chat, chatIdentity);
+  if (current.chatIdentity !== anchor.chatIdentity || current.messageKey !== anchor.messageKey
+    || current.swipeId !== anchor.swipeId || current.contentDigest !== anchor.contentDigest) {
+    rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足的冻结楼层或 swipe 已变化，拒绝写入迟到结果', { expected: anchor, actual: current });
+  }
+}
+
+function materialAuthorityFingerprint_ACU(snapshot: AgentModuleSnapshot_ACU): string {
+  return sha256HexSync_ACU(JSON.stringify(snapshot));
+}
+
+function assertContinuationMaterialWriteSet_ACU(
+  before: AgentModuleSnapshot_ACU,
+  after: AgentModuleSnapshot_ACU,
+  targets: readonly AgentWritableModule_ACU[],
+): void {
+  const allowed = new Set(targets);
+  if (before.schemaVersion !== after.schemaVersion || before.settledThroughIndex !== after.settledThroughIndex
+    || before.materialCompletion.rangeStartIndex !== after.materialCompletion.rangeStartIndex
+    || before.materialCompletion.rangeEndIndex !== after.materialCompletion.rangeEndIndex) {
+    rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', '定向补足越权修改了资料版本、水位或结算范围');
+  }
+  for (const module of AGENT_WRITABLE_MODULES_ACU) {
+    if (allowed.has(module)) continue;
+    if (JSON.stringify(before[module]) !== JSON.stringify(after[module])
+      || before.revisions[module] !== after.revisions[module]
+      || before.materialCompletion.modules[module] !== after.materialCompletion.modules[module]) {
+      rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', `定向补足越权修改了非目标模块：${module}`);
+    }
+  }
+  const beforePending = before.pendingFixes.filter(item => !allowed.has(item.module));
+  const afterPending = after.pendingFixes.filter(item => !allowed.has(item.module));
+  if (JSON.stringify(beforePending) !== JSON.stringify(afterPending)) {
+    rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', '定向补足越权修改了非目标模块的 pendingFixes');
+  }
 }
 
 function cloneOutline_ACU(outline: StageOutline_ACU): StageOutline_ACU {
@@ -320,6 +413,81 @@ export class ContinuationOrchestrator_ACU {
       // 镜像到全局副本（尽力而为）：本聊天信封已落盘成功，全局写失败由回调内部处理，不上抛。
       this.dependencies.onSettingsReplaced?.(input.settings);
       return result!;
+    });
+  }
+
+  /**
+   * 显式补足续写资料。整个调用持有聊天租约，模型结果提交前复核任务、冻结末楼和资料权威指纹；
+   * 仅持久化目标模块候选，不进入 continueTask，也不会铸造或发送宿主正文指令。
+   */
+  async repairPendingMaterials(input: RepairContinuationMaterialsInput_ACU): Promise<RepairContinuationMaterialsResult_ACU> {
+    return this.withLease_ACU(async (chatIdentity, lease) => {
+      const allowed = new Set<AgentWritableModule_ACU>(CONTINUATION_REPAIRABLE_MODULES_ACU);
+      const rawModules: readonly unknown[] = Array.isArray(input.modules) ? input.modules : [];
+      const invalid = rawModules.filter(module => typeof module !== 'string' || !allowed.has(module as AgentWritableModule_ACU));
+      if (!rawModules.length || invalid.length) {
+        rejectMaterialRepair_ACU(
+          'CONTINUATION_AGENT_SNAPSHOT_INVALID',
+          invalid.length ? `这些资料模块没有安全的定向补足入口：${invalid.join(', ')}` : '请选择至少一个可补足的资料模块',
+        );
+      }
+      const targets = [...new Set(rawModules as readonly AgentWritableModule_ACU[])];
+
+      const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+      const task = this.requireTask_ACU(envelope);
+      if (task.status !== 'paused') fail_ACU('CONTINUATION_TASK_STATE_INVALID', '只有续写暂停空档允许补足资料');
+      if (this.dependencies.hasLiveHostClaim?.(chatIdentity)) fail_ACU('CONTINUATION_OPERATION_BUSY', '宿主正文仍在生成，暂不能补足资料');
+
+      const chat = getChatArray_ACU();
+      const anchor = resolveContinuationMaterialAnchor_ACU(chat, chatIdentity);
+      const liveSnapshot = readAgentModuleSnapshot_ACU(chat);
+      const baseSnapshot = JSON.parse(JSON.stringify(liveSnapshot)) as AgentModuleSnapshot_ACU;
+      const baseFingerprint = materialAuthorityFingerprint_ACU(baseSnapshot);
+      const pendingModules = new Set(baseSnapshot.pendingFixes.map(item => item.module));
+      const legacyOverall = baseSnapshot.materialCompletion.state === 'legacy_unknown';
+      const ineligible = targets.filter(module => !pendingModules.has(module)
+        && baseSnapshot.materialCompletion.modules[module] !== 'legacy_unknown'
+        && !legacyOverall);
+      if (ineligible.length) {
+        rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', `这些模块当前没有待补足缺口：${ineligible.join(', ')}`);
+      }
+
+      const controller = new AbortController();
+      abortControllersByChat_ACU.set(chatIdentity, controller);
+      try {
+        const repair = await this.dependencies.executionEngine.repairMaterials(
+          baseSnapshot,
+          targets,
+          () => this.isLeaseCurrent_ACU(chatIdentity, lease),
+          controller.signal,
+        );
+        this.assertLeaseCurrent_ACU(chatIdentity, lease);
+        if (controller.signal.aborted) {
+          rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足已被中断，拒绝写入迟到结果');
+        }
+        const currentEnvelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+        const currentTask = this.requireTask_ACU(currentEnvelope);
+        if (currentTask.taskId !== task.taskId || currentTask.status !== 'paused') {
+          rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足对应的续写任务状态已变化，拒绝写入迟到结果');
+        }
+        const currentChat = getChatArray_ACU();
+        assertContinuationMaterialAnchorCurrent_ACU(anchor, currentChat, this.dependencies.getChatIdentity());
+        const currentSnapshot = readAgentModuleSnapshot_ACU(currentChat);
+        if (materialAuthorityFingerprint_ACU(currentSnapshot) !== baseFingerprint) {
+          rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足期间模块 revision、pending 或完成状态已变化，拒绝覆盖更新资料');
+        }
+        assertContinuationMaterialWriteSet_ACU(baseSnapshot, repair.snapshot, targets);
+        await writeAgentModuleSnapshot_ACU(currentChat, anchor.messageIndex, repair.snapshot);
+        logAgentSession_ACU({
+          kind: repair.failedModules.length ? 'run_failed' : 'run_completed',
+          title: repair.failedModules.length ? '定向资料补足部分完成' : '定向资料补足完成',
+          detail: `目标：${targets.join('、')}；完成：${repair.repairedModules.join('、') || '无'}；待补：${repair.failedModules.join('、') || '无'}`,
+          ok: repair.failedModules.length === 0,
+        });
+        return { ...taskResult_ACU(currentEnvelope), repairedModules: repair.repairedModules, failedModules: repair.failedModules, steps: repair.steps };
+      } finally {
+        if (abortControllersByChat_ACU.get(chatIdentity) === controller) abortControllersByChat_ACU.delete(chatIdentity);
+      }
     });
   }
 

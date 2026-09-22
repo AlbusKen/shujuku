@@ -6,6 +6,7 @@ import type { WorldSimulationLedger_ACU, WorldSimulationPendingFix_ACU } from '.
 import type { WorldSimulationSubagentOutcome_ACU } from '../../../../src/service/simulation/agent/agent-model';
 
 function pending(module: WorldSimulationPendingFix_ACU['module'], attempts: number): WorldSimulationPendingFix_ACU {
+  const now = Date.now();
   return {
     module,
     candidateId: `candidate:${module}`,
@@ -14,6 +15,12 @@ function pending(module: WorldSimulationPendingFix_ACU['module'], attempts: numb
     attempts,
     firstFailedAtDay: 1,
     lastError: `${module} 待修复`,
+    source: 'transaction_rejected',
+    completion: 'failed',
+    acceptedKeys: [],
+    anchor: null,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
@@ -66,8 +73,23 @@ describe('世界推演固定工作流', () => {
     expect(result.outcome).toBe('no_change');
   });
 
-  it('正文指纹未变且没有待修复项时不调用任何子代理', async () => {
-    const env = harness(buildEmptyWorldSimulationLedger_ACU(), {});
+  it('正文指纹未变且预期模块均完成时不调用任何子代理', async () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    ledger.materialCompletion = {
+      state: 'complete_no_change',
+      expectedModules: ['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player'],
+      modules: {
+        clock: 'complete_no_change',
+        dimensions: 'complete_no_change',
+        seeds: 'complete_no_change',
+        actors: 'complete_no_change',
+        rumors: 'complete_no_change',
+        player: 'complete_no_change',
+      },
+      sourceRunId: 'run-completed',
+      updatedAt: Date.now(),
+    };
+    const env = harness(ledger, {});
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
       opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
@@ -76,6 +98,24 @@ describe('世界推演固定工作流', () => {
     });
     expect(env.subagents.run).not.toHaveBeenCalled();
     expect(result).toMatchObject({ outcome: 'no_change', pendingFixes: [] });
+  });
+
+  it('只有材料快照但 completion 为 legacy_unknown 时不能短路', async () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    const env = harness(ledger, {
+      timekeeper: [noChange('timekeeper')],
+      'undercurrent-analyst': [noChange('undercurrent-analyst')],
+      'dramatis-keeper': [noChange('dramatis-keeper')],
+    });
+    const result = await runWorldSimulationWorkflow_ACU({
+      identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
+      opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
+      anchorMaterialsCommitted: true,
+      subagents: env.subagents,
+    });
+    expect(env.calls).toEqual(expect.arrayContaining(['timekeeper', 'undercurrent-analyst', 'dramatis-keeper']));
+    expect(result.outcome).toBe('no_change');
+    expect(result.ledger.materialCompletion.state).toBe('complete_no_change');
   });
 
   it('时钟变化后调用投影决定；悬挂 sourceId 记入 pendingFixes 且不写入信号', async () => {

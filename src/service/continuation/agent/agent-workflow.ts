@@ -5,19 +5,23 @@
  * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
  */
 
-import { ContinuationValidationError_ACU } from '../model';
+import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import type { ContinuationSettings_ACU } from '../model';
 import {
   AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
+  AGENT_WRITABLE_MODULES_ACU,
   type AgentComposerOutput_ACU,
   type AgentFinalReviewerOutput_ACU,
+  type AgentMaterialCompletionState_ACU,
   type AgentMaintainerOutput_ACU,
   type AgentModuleRevisions_ACU,
   type AgentModuleSnapshot_ACU,
   type AgentPendingFix_ACU,
+  type AgentPendingFixSource_ACU,
   type AgentPlannerOutput_ACU,
   type AgentResearcherOutput_ACU,
   type AgentReviewerOutput_ACU,
+  type AgentWritableModule_ACU,
 } from './agent-model';
 import {
   applyAgentConstraintRegistration_ACU,
@@ -41,6 +45,15 @@ export interface ContinuationWorkflowAgentCall_ACU {
   prompt: string;
   billing: ContinuationWorkflowBilling_ACU;
   repair: boolean;
+  targetModules?: AgentWritableModule_ACU[];
+}
+
+export interface ContinuationWorkflowUnresolvedIssue_ACU {
+  module: AgentWritableModule_ACU;
+  source: AgentPendingFixSource_ACU;
+  path: string;
+  message: string;
+  id?: string;
 }
 
 export interface ContinuationWorkflowAgentPayload_ACU {
@@ -54,6 +67,10 @@ export interface ContinuationWorkflowAgentPayload_ACU {
   researcher?: AgentResearcherOutput_ACU | null;
   readRevisions?: AgentModuleRevisions_ACU;
   writes?: readonly string[];
+  completion?: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>;
+  moduleCompletion?: Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>>;
+  unresolvedIssues?: ContinuationWorkflowUnresolvedIssue_ACU[];
+  acceptedKeys?: string[];
 }
 
 export interface ContinuationWorkflowStep_ACU {
@@ -87,6 +104,21 @@ export interface ContinuationWorkflowInput_ACU {
   runFinalReview: (instruction: string, summary: string) => Promise<AgentFinalReviewerOutput_ACU>;
 }
 
+export interface ContinuationMaterialRepairInput_ACU {
+  snapshot: AgentModuleSnapshot_ACU;
+  targetModules: readonly AgentWritableModule_ACU[];
+  settledIndex: number;
+  completedStageNumbers: readonly number[];
+  runAgent: (call: ContinuationWorkflowAgentCall_ACU) => Promise<ContinuationWorkflowAgentPayload_ACU>;
+}
+
+export interface ContinuationMaterialRepairResult_ACU {
+  snapshot: AgentModuleSnapshot_ACU;
+  repairedModules: AgentWritableModule_ACU[];
+  failedModules: AgentWritableModule_ACU[];
+  steps: ContinuationWorkflowStep_ACU[];
+}
+
 const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
 const MAINLINE_NAME_ACU = 'mainline-planner';
 const BEAT_NAME_ACU = 'beat-planner';
@@ -94,6 +126,7 @@ const REVIEWER_NAME_ACU = 'continuity-reviewer';
 const ARC_NAME_ACU = 'arc-architect';
 const WEB_NAME_ACU = 'web-researcher';
 const MAINTAINER_MODULES_ACU = ['hooks', 'infoGap', 'chronology'] as const;
+export const CONTINUATION_REPAIRABLE_MODULES_ACU = [...MAINTAINER_MODULES_ACU, 'storyArc', 'webRefs'] as const;
 const BEAT_OBLIGATION_PATTERN_ACU = /伏笔|埋设|回收|误导|信息差|揭示/;
 const CONFLICT_PATTERN_ACU = /冲突|矛盾|红线/;
 
@@ -150,6 +183,39 @@ function repairableAgents_ACU(snapshot: AgentModuleSnapshot_ACU, settings: Conti
   return [...names];
 }
 
+function repairModulesForAgent_ACU(snapshot: AgentModuleSnapshot_ACU, agentName: string): AgentWritableModule_ACU[] {
+  return [...new Set(snapshot.pendingFixes
+    .filter(item => {
+      if (agentName === MAINTAINER_NAME_ACU) return (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module);
+      if (agentName === ARC_NAME_ACU) return item.module === 'storyArc';
+      if (agentName === WEB_NAME_ACU) return item.module === 'webRefs';
+      return false;
+    })
+    .map(item => item.module))];
+}
+
+function restrictMaintainerOutput_ACU(
+  output: AgentMaintainerOutput_ACU | null | undefined,
+  allowedModules: readonly AgentWritableModule_ACU[],
+): AgentMaintainerOutput_ACU | null | undefined {
+  if (!output) return output;
+  const allowed = new Set<AgentWritableModule_ACU>(allowedModules);
+  return {
+    ...output,
+    delta: {
+      ...output.delta,
+      hooks: allowed.has('hooks') ? output.delta.hooks : [],
+      hookPatches: allowed.has('hooks') ? output.delta.hookPatches : [],
+      infoGap: allowed.has('infoGap') ? output.delta.infoGap : [],
+      infoGapPatches: allowed.has('infoGap') ? output.delta.infoGapPatches : [],
+      storyArc: allowed.has('storyArc') ? output.delta.storyArc : [],
+      storyArcPatches: allowed.has('storyArc') ? output.delta.storyArcPatches : [],
+      chronology: allowed.has('chronology') ? output.delta.chronology : [],
+      constraintProposals: allowed.has('constraints') ? output.delta.constraintProposals : [],
+    },
+  };
+}
+
 function needsPendingEscalation_ACU(snapshot: AgentModuleSnapshot_ACU, settings: ContinuationSettings_ACU): boolean {
   if (!snapshot.pendingFixes.length) return false;
   if (!settings.workflow.autoFixEnabled) return true;
@@ -161,6 +227,77 @@ function formatFixes_ACU(fixes: readonly AgentPendingFix_ACU[]): string {
   return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => violation.message).join('；') || item.lastError}`).join(' | ');
 }
 
+function acceptedKeysForModule_ACU(keys: readonly string[] | undefined, module: AgentWritableModule_ACU): string[] {
+  return [...new Set((keys ?? []).filter(key => key.startsWith(`${module}:`)))];
+}
+
+function recordWorkflowIssues_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  issues: readonly ContinuationWorkflowUnresolvedIssue_ACU[],
+  agentName: string,
+  rangeStartIndex: number,
+  rangeEndIndex: number,
+  acceptedKeys: readonly string[] | undefined,
+): AgentModuleSnapshot_ACU {
+  if (!issues.length) return snapshot;
+  const now = Date.now();
+  const pending = snapshot.pendingFixes.map(item => ({
+    ...item,
+    violations: item.violations.map(violation => ({ ...violation })),
+    acceptedKeys: [...(item.acceptedKeys ?? [])],
+  }));
+  const byModule = new Map<AgentWritableModule_ACU, ContinuationWorkflowUnresolvedIssue_ACU[]>();
+  for (const issue of issues) {
+    const list = byModule.get(issue.module) ?? [];
+    list.push(issue);
+    byModule.set(issue.module, list);
+  }
+  for (const [module, moduleIssues] of byModule) {
+    const found = pending.findIndex(item => item.module === module);
+    const previous = found >= 0 ? pending[found] : null;
+    const accepted = acceptedKeysForModule_ACU(acceptedKeys, module);
+    const next: AgentPendingFix_ACU = {
+      module,
+      agentName: agentName || previous?.agentName || '',
+      violations: moduleIssues.map(issue => ({ path: issue.path, message: issue.message })),
+      attempts: (previous?.attempts ?? 0) + 1,
+      firstFailedAtIndex: previous?.firstFailedAtIndex ?? rangeStartIndex,
+      lastError: moduleIssues.map(issue => issue.message).join('；'),
+      source: moduleIssues[0]?.source ?? 'protocol_failed',
+      completion: accepted.length ? 'partial' : 'failed',
+      rangeStartIndex: previous?.rangeStartIndex ?? rangeStartIndex,
+      rangeEndIndex: Math.max(previous?.rangeEndIndex ?? rangeEndIndex, rangeEndIndex),
+      acceptedKeys: [...new Set([...(previous?.acceptedKeys ?? []), ...accepted])],
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+    };
+    if (found >= 0) pending[found] = next;
+    else pending.push(next);
+  }
+  return { ...snapshot, pendingFixes: pending };
+}
+
+function completionModules_ACU(
+  payload: ContinuationWorkflowAgentPayload_ACU,
+  writes: readonly AgentWritableModule_ACU[],
+  fallback: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>,
+): Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>> {
+  const modules = { ...(payload.moduleCompletion ?? {}) };
+  for (const module of writes) if (!modules[module]) modules[module] = fallback;
+  return modules;
+}
+
+function clearCompletedPending_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  modules: Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>>,
+): AgentModuleSnapshot_ACU {
+  const completed = new Set(Object.entries(modules)
+    .filter(([, state]) => state === 'complete_changed' || state === 'complete_no_change')
+    .map(([module]) => module));
+  if (!completed.size) return snapshot;
+  return { ...snapshot, pendingFixes: snapshot.pendingFixes.filter(item => !completed.has(item.module)) };
+}
+
 function maintainerPrompt_ACU(focus: string, snapshot: AgentModuleSnapshot_ACU, repair: boolean): string {
   const fixes = snapshot.pendingFixes.filter(item => (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module));
   return [
@@ -170,12 +307,186 @@ function maintainerPrompt_ACU(focus: string, snapshot: AgentModuleSnapshot_ACU, 
   ].join('\n');
 }
 
+function repairAgentForModule_ACU(module: AgentWritableModule_ACU): string | null {
+  if ((MAINTAINER_MODULES_ACU as readonly string[]).includes(module)) return MAINTAINER_NAME_ACU;
+  if (module === 'storyArc') return ARC_NAME_ACU;
+  if (module === 'webRefs') return WEB_NAME_ACU;
+  return null;
+}
+
+function outputTouchesModule_ACU(payload: ContinuationWorkflowAgentPayload_ACU, module: AgentWritableModule_ACU): boolean {
+  if (module === 'webRefs') return Boolean(payload.researcher?.items.length);
+  const delta = (payload.maintainer ?? payload.arc)?.delta;
+  if (!delta) return false;
+  if (module === 'hooks') return Boolean(delta.hooks.length || delta.hookPatches.length);
+  if (module === 'infoGap') return Boolean(delta.infoGap.length || delta.infoGapPatches.length);
+  if (module === 'storyArc') return Boolean(delta.storyArc.length || delta.storyArcPatches.length);
+  if (module === 'chronology') return Boolean(delta.chronology.length);
+  return false;
+}
+
+/**
+ * 只运行资料补足子代理，不进入策划、编排或宿主正文发送。目标模块同时用于派工分组和
+ * 程序级写集裁剪；非目标 pending、模块内容与 revision 均保持原样。
+ */
+export async function runContinuationMaterialRepair_ACU(
+  input: ContinuationMaterialRepairInput_ACU,
+): Promise<ContinuationMaterialRepairResult_ACU> {
+  const targets = [...new Set(input.targetModules)];
+  const unsupported = targets.filter(module => !repairAgentForModule_ACU(module));
+  if (!targets.length || unsupported.length) {
+    throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+      'CONTINUATION_AGENT_SNAPSHOT_INVALID',
+      'agent_loop',
+      unsupported.length
+        ? `这些资料模块没有安全的定向补足代理：${unsupported.join(', ')}`
+        : '请选择至少一个可补足的资料模块',
+      false,
+    ));
+  }
+
+  let snapshot = input.snapshot;
+  const steps: ContinuationWorkflowStep_ACU[] = [];
+  const moduleStates: Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>> = {};
+  const groups = new Map<string, AgentWritableModule_ACU[]>();
+  for (const module of targets) {
+    const agentName = repairAgentForModule_ACU(module)!;
+    groups.set(agentName, [...(groups.get(agentName) ?? []), module]);
+  }
+  const calls = [...groups.entries()].map(([agentName, targetModules]) => ({
+    agentName,
+    billing: 'repair' as const,
+    repair: true,
+    targetModules,
+    prompt: `用户显式要求定向补足。程序只接受这些模块：${targetModules.join(', ')}。${formatFixes_ACU(snapshot.pendingFixes.filter(item => targetModules.includes(item.module)))}`,
+  }));
+
+  const results = await Promise.all(calls.map(async call => {
+    try {
+      return await input.runAgent(call);
+    } catch (error) {
+      if (isStale_ACU(error)) throw error;
+      return { ok: false, summary: errorText_ACU(error) } satisfies ContinuationWorkflowAgentPayload_ACU;
+    }
+  }));
+
+  for (let index = 0; index < calls.length; index += 1) {
+    const call = calls[index];
+    const payload = results[index];
+    const fallback: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'> = !payload.ok
+      ? 'failed'
+      : payload.noChange ? 'complete_no_change' : 'complete_changed';
+    const reported = completionModules_ACU(payload, call.targetModules, fallback);
+    const appliedModules: AgentWritableModule_ACU[] = [];
+    const issues = (payload.unresolvedIssues ?? []).filter(issue => call.targetModules.includes(issue.module));
+
+    if (payload.ok) {
+      try {
+        if (call.targetModules.includes('webRefs') && payload.researcher) {
+          const applied = applyAgentWebRefsDelta_ACU(
+            snapshot,
+            payload.researcher,
+            payload.readRevisions?.webRefs,
+            Date.now(),
+            tolerantOptions_ACU(call.agentName),
+          );
+          snapshot = applied.snapshot;
+          appliedModules.push(...applied.appliedModules);
+        }
+        const restricted = restrictMaintainerOutput_ACU(payload.maintainer ?? payload.arc, call.targetModules);
+        if (restricted && deltaTouched_ACU(restricted.delta)) {
+          const delta = payload.readRevisions
+            ? mergeAgentDeltaRevisions_ACU(restricted.delta, payload.readRevisions)
+            : restricted.delta;
+          const applied = applyAgentModuleDelta_ACU(
+            snapshot,
+            delta,
+            call.targetModules,
+            input.settledIndex,
+            input.completedStageNumbers,
+            tolerantOptions_ACU(call.agentName),
+          );
+          snapshot = applied.snapshot;
+          appliedModules.push(...applied.appliedModules);
+        }
+      } catch (error) {
+        if (isStale_ACU(error)) throw error;
+        for (const module of call.targetModules) {
+          issues.push({ module, source: 'transaction_rejected', path: module, message: errorText_ACU(error) });
+        }
+      }
+    } else {
+      for (const module of call.targetModules) {
+        issues.push({ module, source: 'invoke_failed', path: module, message: payload.summary || '定向补足子代理调用失败' });
+      }
+    }
+
+    if (issues.length) {
+      snapshot = recordWorkflowIssues_ACU(
+        snapshot,
+        issues,
+        call.agentName,
+        snapshot.materialCompletion.rangeStartIndex,
+        Math.max(input.settledIndex, snapshot.materialCompletion.rangeEndIndex),
+        payload.acceptedKeys,
+      );
+    }
+
+    const completedWithoutIssue: Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>> = {};
+    for (const module of call.targetModules) {
+      const moduleIssues = issues.some(issue => issue.module === module);
+      const touched = outputTouchesModule_ACU(payload, module);
+      const applied = appliedModules.includes(module);
+      const state = reported[module] ?? fallback;
+      if (!moduleIssues && (applied || (!touched && state === 'complete_no_change'))) {
+        completedWithoutIssue[module] = applied || state === 'complete_changed' ? 'complete_changed' : 'complete_no_change';
+      }
+    }
+    snapshot = clearCompletedPending_ACU(snapshot, completedWithoutIssue);
+
+    for (const module of call.targetModules) {
+      const pending = snapshot.pendingFixes.some(item => item.module === module);
+      const applied = appliedModules.includes(module);
+      moduleStates[module] = pending ? (applied ? 'partial' : 'failed')
+        : completedWithoutIssue[module] ?? (applied ? 'complete_changed' : 'complete_no_change');
+    }
+    const failed = call.targetModules.filter(module => moduleStates[module] === 'failed' || moduleStates[module] === 'partial');
+    steps.push({
+      agentName: call.agentName,
+      status: failed.length ? 'failed' : payload.noChange ? 'no_change' : 'ok',
+      summary: payload.summary || (failed.length ? `仍有待补模块：${failed.join(', ')}` : '定向补足完成'),
+    });
+  }
+
+  const now = Date.now();
+  const mergedModules = { ...snapshot.materialCompletion.modules, ...moduleStates };
+  const targetSet = new Set(targets);
+  const unresolvedLegacy = snapshot.materialCompletion.state === 'legacy_unknown'
+    && (AGENT_WRITABLE_MODULES_ACU as readonly AgentWritableModule_ACU[])
+      .some(module => !targetSet.has(module) && (mergedModules[module] === undefined || mergedModules[module] === 'legacy_unknown'));
+  const repairedModules = targets.filter(module => moduleStates[module] === 'complete_changed' || moduleStates[module] === 'complete_no_change');
+  const failedModules = targets.filter(module => !repairedModules.includes(module));
+  const overall: AgentMaterialCompletionState_ACU = snapshot.pendingFixes.length
+    ? (repairedModules.length ? 'partial' : 'failed')
+    : unresolvedLegacy ? 'legacy_unknown'
+      : Object.values(moduleStates).includes('complete_changed') ? 'complete_changed' : 'complete_no_change';
+  snapshot = {
+    ...snapshot,
+    materialCompletion: { ...snapshot.materialCompletion, state: overall, modules: mergedModules, updatedAt: now },
+    updatedAt: Math.max(snapshot.updatedAt, now),
+  };
+  return { snapshot, repairedModules, failedModules, steps };
+}
+
 export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkflowInput_ACU): Promise<ContinuationWorkflowResult_ACU> {
   let snapshot = input.snapshot;
   const steps: ContinuationWorkflowStep_ACU[] = [];
   const plannerNotes: string[] = [];
   const plannerRisks: string[] = [];
   let reviewerNote = '';
+  const pendingRangeStarts = snapshot.pendingFixes.map(item => item.rangeStartIndex).filter(index => Number.isInteger(index) && index >= 0);
+  const settlementStartIndex = pendingRangeStarts.length ? Math.min(...pendingRangeStarts) : Math.max(0, snapshot.settledThroughIndex + 1);
+  const settlementEndIndex = input.settledIndex;
 
   const runSafe_ACU = async (call: ContinuationWorkflowAgentCall_ACU): Promise<ContinuationWorkflowAgentPayload_ACU> => {
     try {
@@ -191,11 +502,12 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     writes: readonly string[],
     readRevisions: AgentModuleRevisions_ACU | undefined,
     agentName: string,
-  ): void => {
-    if (!output || !deltaTouched_ACU(output.delta)) return;
+  ): AgentWritableModule_ACU[] => {
+    if (!output || !deltaTouched_ACU(output.delta)) return [];
     const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
     const applied = applyAgentModuleDelta_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
     snapshot = applied.snapshot;
+    return applied.appliedModules;
   };
 
   if (input.opening.dispatchArcArchitect) {
@@ -240,14 +552,57 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       repair: false,
       prompt: maintainerPrompt_ACU(input.opening.focus, snapshot, false),
     });
-    if (!maintainer.ok) {
-      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
-    } else if (maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta)) {
-      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
-      snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
+    const writes = (maintainer.writes ?? [...MAINTAINER_MODULES_ACU])
+      .filter((module): module is AgentWritableModule_ACU => (MAINTAINER_MODULES_ACU as readonly string[]).includes(module));
+    let completion: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'> = maintainer.completion
+      ?? (!maintainer.ok ? 'failed' : maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta) ? 'complete_no_change' : 'complete_changed');
+    let modules = completionModules_ACU(maintainer, writes, completion);
+    const appliedModules = maintainer.ok
+      ? applyMaintainerLike_ACU(maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
+      : [];
+    const issues = [...(maintainer.unresolvedIssues ?? [])];
+    if (!maintainer.ok && !issues.length) {
+      for (const module of writes.length ? writes : [...MAINTAINER_MODULES_ACU]) {
+        issues.push({ module, source: 'invoke_failed', path: module, message: maintainer.summary || '维护子代理调用失败' });
+        modules[module] = 'failed';
+      }
+    }
+    if (issues.length) {
+      snapshot = recordWorkflowIssues_ACU(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
+      completion = appliedModules.length ? 'partial' : 'failed';
+    }
+    const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module));
+    if (transactionPending.length) {
+      for (const fix of transactionPending) {
+        const moduleAccepted = appliedModules.includes(fix.module) || acceptedKeysForModule_ACU(maintainer.acceptedKeys, fix.module).length > 0;
+        modules[fix.module] = moduleAccepted ? 'partial' : 'failed';
+      }
+      completion = appliedModules.length ? 'partial' : 'failed';
     } else {
-      applyMaintainerLike_ACU(maintainer.maintainer, maintainer.writes ?? ['hooks', 'infoGap', 'chronology'], maintainer.readRevisions, MAINTAINER_NAME_ACU);
+      snapshot = clearCompletedPending_ACU(snapshot, modules);
+    }
+    const now = Date.now();
+    snapshot = {
+      ...snapshot,
+      materialCompletion: {
+        state: completion,
+        rangeStartIndex: settlementStartIndex,
+        rangeEndIndex: settlementEndIndex,
+        modules,
+        updatedAt: now,
+      },
+      updatedAt: Math.max(snapshot.updatedAt, now),
+    };
+    if (completion === 'complete_changed' || completion === 'complete_no_change') {
       snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
+    }
+    if (!maintainer.ok || completion === 'failed') {
+      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
+    } else if (completion === 'complete_no_change') {
+      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
+    } else if (completion === 'partial') {
+      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: `${maintainer.summary || '已保留部分资料'}；仍有待补条目` });
+    } else {
       steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'ok', summary: maintainer.summary });
     }
   }
@@ -299,12 +654,18 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。',
   ].filter(Boolean).join('\n');
 
-  const repairPromise = Promise.all(repairAgents.map(agentName => runSafe_ACU({
-    agentName,
-    billing: 'repair',
-    repair: true,
-    prompt: `自动修复。只提交违规模块。${formatFixes_ACU(snapshot.pendingFixes)}`,
-  })));
+  const repairCalls = repairAgents.map(agentName => {
+    const targetModules = repairModulesForAgent_ACU(snapshot, agentName);
+    const targetFixes = snapshot.pendingFixes.filter(item => targetModules.includes(item.module));
+    return {
+      agentName,
+      billing: 'repair' as const,
+      repair: true,
+      targetModules,
+      prompt: `自动修复。程序只接受这些待补模块：${targetModules.join(', ') || '无'}。${formatFixes_ACU(targetFixes)}`,
+    };
+  });
+  const repairPromise = Promise.all(repairCalls.map(call => runSafe_ACU(call)));
   const composerPromise = input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {
     if (isStale_ACU(error)) throw error;
     const failed: AgentComposerOutput_ACU = { instruction: '', summary: errorText_ACU(error), constraints: null };
@@ -316,10 +677,12 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     const agentName = repairAgents[index] ?? 'repair';
     steps.push({ agentName, status: repair.ok ? 'ok' : 'failed', summary: repair.summary });
     if (!repair.ok) continue;
-    if (repair.researcher) {
+    const targetModules = repairCalls[index]?.targetModules ?? [];
+    if (repair.researcher && targetModules.includes('webRefs')) {
       snapshot = applyAgentWebRefsDelta_ACU(snapshot, repair.researcher, repair.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(agentName)).snapshot;
     }
-    applyMaintainerLike_ACU(repair.maintainer ?? repair.arc, repair.writes ?? [], repair.readRevisions, agentName);
+    const restricted = restrictMaintainerOutput_ACU(repair.maintainer ?? repair.arc, targetModules);
+    applyMaintainerLike_ACU(restricted, targetModules, repair.readRevisions, agentName);
   }
   steps.push({
     agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,

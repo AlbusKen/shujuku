@@ -407,6 +407,7 @@ function recordPendingFix_ACU(
   violations: Array<{ path: string; message: string }>,
   day: number,
 ): void {
+  const now = Date.now();
   const lastError = violations.map(item => item.message).join('；') || '模块入库失败';
   const index = pending.findIndex(item => item.module === module);
   if (index >= 0) {
@@ -419,6 +420,12 @@ function recordPendingFix_ACU(
       attempts: previous.attempts + 1,
       firstFailedAtDay: previous.firstFailedAtDay,
       lastError,
+      source: 'transaction_rejected',
+      completion: previous.acceptedKeys.length ? 'partial' : 'failed',
+      acceptedKeys: previous.acceptedKeys,
+      anchor: previous.anchor,
+      createdAt: previous.createdAt,
+      updatedAt: now,
     };
     return;
   }
@@ -430,6 +437,12 @@ function recordPendingFix_ACU(
     attempts: 1,
     firstFailedAtDay: day,
     lastError,
+    source: 'transaction_rejected',
+    completion: 'failed',
+    acceptedKeys: [],
+    anchor: null,
+    createdAt: now,
+    updatedAt: now,
   });
 }
 

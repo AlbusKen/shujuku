@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../../src/service/simulation/defaults';
 import { beginWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 import { WorldSimulationRuntime_ACU } from '../../../src/service/simulation/simulation-runtime';
+import type { WorldSimulationLedgerModule_ACU } from '../../../src/service/simulation/model';
 import { resolveWorldSimulationAnchor_ACU } from '../../../src/service/simulation/simulation-store';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
@@ -31,6 +32,32 @@ function pausedEnvelope(anchor: ReturnType<typeof resolveWorldSimulationAnchor_A
   envelope.activeStageId = 'stage';
   envelope.stages = [{ stageId: 'stage', stageNumber: 1, status: 'running', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: stagePlan }] }];
   return { envelope, identity };
+}
+
+function pendingFix(
+  module: WorldSimulationLedgerModule_ACU,
+  anchor: ReturnType<typeof resolveWorldSimulationAnchor_ACU>,
+) {
+  return {
+    module,
+    candidateId: `candidate-${module}`,
+    agentName: module === 'actors' ? 'dramatis-keeper' : 'undercurrent-analyst',
+    violations: [{ path: module, message: `${module} 输出截断` }],
+    attempts: 1,
+    firstFailedAtDay: 1,
+    lastError: `${module} 输出截断`,
+    source: 'truncated' as const,
+    completion: 'failed' as const,
+    acceptedKeys: [],
+    anchor: {
+      messageKey: anchor.messageKey,
+      swipeId: anchor.swipeId,
+      contentDigest: anchor.contentDigest,
+      baseLedgerRevision: 0,
+    },
+    createdAt: 1,
+    updatedAt: 1,
+  };
 }
 
 beforeEach(() => {
@@ -263,6 +290,99 @@ describe('WorldSimulationRuntime_ACU 公共入口', () => {
     inFlight = true;
     await expect(runtime.saveSettings(settings)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', retryable: true } });
     expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('显式补足只把 pending 模块作为程序级写集下传，非缺口模块被拒绝', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    envelope.ledger.materialCompletion = {
+      state: 'partial',
+      expectedModules: ['dimensions', 'seeds'],
+      modules: { dimensions: 'failed', seeds: 'complete_changed' },
+      sourceRunId: 'run-old',
+      updatedAt: 1,
+    };
+    envelope.ledger.pendingFixes = [pendingFix('dimensions', anchor)];
+    chat[0]._qrf_world_simulation = envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await runtime.repairPendingMaterials(['dimensions']);
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      triggerKind: 'agent_chat_message',
+      anchor,
+      targetModules: ['dimensions'],
+    }));
+    expect(resume).not.toHaveBeenCalled();
+    await expect(runtime.repairPendingMaterials(['seeds'])).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' },
+    });
+  });
+
+  it('暂停任务补足时复用冻结 run 锚点并重置预算，不新建任务', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const { envelope } = pausedEnvelope(anchor);
+    envelope.ledger.materialCompletion = {
+      state: 'failed', expectedModules: ['dimensions'], modules: { dimensions: 'failed' }, sourceRunId: 'run', updatedAt: 1,
+    };
+    envelope.ledger.pendingFixes = [pendingFix('dimensions', anchor)];
+    chat[0]._qrf_world_simulation = envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await runtime.repairPendingMaterials(['dimensions']);
+
+    expect(resume).toHaveBeenCalledWith({
+      anchor,
+      instruction: '显式补足资料模块：dimensions',
+      resetRunBudget: true,
+      targetModules: ['dimensions'],
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('补足在途运行与 pending 冻结锚点漂移时 fail-closed', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    envelope.ledger.materialCompletion = {
+      state: 'failed', expectedModules: ['dimensions'], modules: { dimensions: 'failed' }, sourceRunId: 'run-old', updatedAt: 1,
+    };
+    const fix = pendingFix('dimensions', anchor);
+    fix.anchor = { ...fix.anchor!, contentDigest: 'stale-content-digest' };
+    envelope.ledger.pendingFixes = [fix];
+    chat[0]._qrf_world_simulation = envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await expect(runtime.repairPendingMaterials(['dimensions'])).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' },
+    });
+    expect(start).not.toHaveBeenCalled();
+
+    envelope.ledger.pendingFixes = [pendingFix('dimensions', anchor)];
+    chat[0]._qrf_world_simulation = envelope;
+    inFlight = true;
+    await expect(runtime.repairPendingMaterials(['dimensions'])).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', retryable: true },
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('legacy_unknown 只有显式选择的模块进入补足写集', async () => {
+    const chat: any[] = [{ is_user: false, message_id: 7, mes: 'anchor', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    chat[0]._qrf_world_simulation = envelope;
+    const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
+
+    await runtime.repairPendingMaterials(['seeds']);
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ targetModules: ['seeds'] }));
+    expect(start.mock.calls[0][0].targetModules).not.toContain('dimensions');
   });
 
   it('一键清空重置信封与账本、删除各楼层分桶字段、保留设置，并拒绝在途时清空', async () => {

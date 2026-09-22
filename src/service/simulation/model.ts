@@ -1,5 +1,5 @@
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
-export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 4 as const;
+export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 5 as const;
 export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
 export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;
 export const WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU = 3 as const;
@@ -73,6 +73,39 @@ export interface WorldGuidance_ACU { signals: WorldGuidanceSignal_ACU[]; exclude
 
 export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
+export const WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU = [
+  'complete_changed',
+  'complete_no_change',
+  'partial',
+  'failed',
+  'legacy_unknown',
+] as const;
+export type WorldSimulationMaterialCompletionState_ACU = typeof WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU[number];
+
+export const WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU = [
+  'truncated',
+  'contract_rejected',
+  'protocol_failed',
+  'invoke_failed',
+  'transaction_rejected',
+] as const;
+export type WorldSimulationPendingFixSource_ACU = typeof WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU[number];
+
+export interface WorldSimulationMaterialCompletionRecord_ACU {
+  state: WorldSimulationMaterialCompletionState_ACU;
+  expectedModules: WorldSimulationLedgerModule_ACU[];
+  modules: Partial<Record<WorldSimulationLedgerModule_ACU, WorldSimulationMaterialCompletionState_ACU>>;
+  sourceRunId: string;
+  updatedAt: number;
+}
+
+export interface WorldSimulationPendingAnchor_ACU {
+  messageKey: string;
+  swipeId: string;
+  contentDigest: string;
+  baseLedgerRevision: number;
+}
+
 export interface WorldSimulationPendingFixViolation_ACU { path: string; message: string; }
 export interface WorldSimulationPendingFix_ACU {
   module: WorldSimulationLedgerModule_ACU;
@@ -82,8 +115,22 @@ export interface WorldSimulationPendingFix_ACU {
   attempts: number;
   firstFailedAtDay: number;
   lastError: string;
+  source: WorldSimulationPendingFixSource_ACU;
+  completion: 'partial' | 'failed';
+  acceptedKeys: string[];
+  anchor: WorldSimulationPendingAnchor_ACU | null;
+  createdAt: number;
+  updatedAt: number;
 }
-export interface WorldSimulationLedger_ACU { schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU; revision: number; clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[]; chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU; chronicleOverview: WorldChronicleOverviewRow_ACU[]; pendingFixes: WorldSimulationPendingFix_ACU[]; }
+export interface WorldSimulationLedger_ACU {
+  schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU;
+  revision: number;
+  clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[];
+  chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU;
+  chronicleOverview: WorldChronicleOverviewRow_ACU[];
+  materialCompletion: WorldSimulationMaterialCompletionRecord_ACU;
+  pendingFixes: WorldSimulationPendingFix_ACU[];
+}
 
 export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
   clock: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'],

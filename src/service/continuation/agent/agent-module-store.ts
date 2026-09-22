@@ -20,10 +20,13 @@ import {
   AGENT_HOOK_IMPORTANCES_ACU,
   AGENT_HOOK_STATUSES_ACU,
   AGENT_HOT_HOOK_LIMIT_ACU,
+  AGENT_MATERIAL_COMPLETION_STATES_ACU,
   AGENT_MODULE_FIELD_ACU,
   AGENT_MODULE_SCHEMA_VERSION_ACU,
   AGENT_MODULE_SCHEMA_VERSION_V1_ACU,
+  AGENT_MODULE_SCHEMA_VERSION_V2_ACU,
   AGENT_PENDING_FIX_CAP_ACU,
+  AGENT_PENDING_FIX_SOURCES_ACU,
   AGENT_REVEAL_STATUSES_ACU,
   AGENT_STORY_ARC_SCOPES_ACU,
   AGENT_STORY_ARC_STATUSES_ACU,
@@ -34,6 +37,7 @@ import {
   type AgentConstraintEntry_ACU,
   type AgentHookEntry_ACU,
   type AgentInfoGapEntry_ACU,
+  type AgentMaterialCompletionRecord_ACU,
   type AgentModuleSnapshot_ACU,
   type AgentPendingFix_ACU,
   type AgentStoryArcEntry_ACU,
@@ -72,6 +76,7 @@ export function buildEmptyAgentModuleSnapshot_ACU(): AgentModuleSnapshot_ACU {
     chronology: [],
     webRefs: [],
     userRequirements: [],
+    materialCompletion: { state: 'legacy_unknown', rangeStartIndex: -1, rangeEndIndex: -1, modules: {}, updatedAt: 0 },
     pendingFixes: [],
   };
 }
@@ -287,14 +292,36 @@ function validateUserRequirementLine_ACU(raw: unknown): string | null {
   return text ? text : null;
 }
 
+function readRangeIndex_ACU(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= -1 ? value : null;
+}
+
+function validateMaterialCompletion_ACU(raw: unknown, present: boolean, legacy: boolean, fallbackUpdatedAt: number): AgentMaterialCompletionRecord_ACU | null {
+  if (!present) return legacy
+    ? { state: 'legacy_unknown', rangeStartIndex: -1, rangeEndIndex: -1, modules: {}, updatedAt: fallbackUpdatedAt }
+    : null;
+  if (!isRecord_ACU(raw) || !AGENT_MATERIAL_COMPLETION_STATES_ACU.includes(raw.state as any)) return null;
+  const rangeStartIndex = readRangeIndex_ACU(raw.rangeStartIndex);
+  const rangeEndIndex = readRangeIndex_ACU(raw.rangeEndIndex);
+  if (rangeStartIndex === null || rangeEndIndex === null || (rangeStartIndex === -1) !== (rangeEndIndex === -1) || rangeEndIndex < rangeStartIndex) return null;
+  if (!isRecord_ACU(raw.modules)) return null;
+  const modules: AgentMaterialCompletionRecord_ACU['modules'] = {};
+  for (const [module, state] of Object.entries(raw.modules)) {
+    if (!isAgentWritableModule_ACU(module) || !AGENT_MATERIAL_COMPLETION_STATES_ACU.includes(state as any)) return null;
+    modules[module] = state as AgentMaterialCompletionRecord_ACU['state'];
+  }
+  if (typeof raw.updatedAt !== 'number' || !Number.isInteger(raw.updatedAt) || raw.updatedAt < 0) return null;
+  return { state: raw.state as AgentMaterialCompletionRecord_ACU['state'], rangeStartIndex, rangeEndIndex, modules, updatedAt: raw.updatedAt };
+}
+
 /** 缺字段视为空数组。字段存在但不合法时返回 null，调用方决定拒绝或抢救。 */
-function validatePendingFixes_ACU(raw: unknown, present: boolean): AgentPendingFix_ACU[] | null {
+function validatePendingFixes_ACU(raw: unknown, present: boolean, legacy: boolean, fallbackUpdatedAt: number): AgentPendingFix_ACU[] | null {
   if (!present) return [];
   if (!Array.isArray(raw) || raw.length > AGENT_PENDING_FIX_CAP_ACU) return null;
   const fixes: AgentPendingFix_ACU[] = [];
   for (const item of raw) {
     if (!isRecord_ACU(item) || !isAgentWritableModule_ACU(item.module)) return null;
-    if (typeof item.agentName !== 'string' || typeof item.lastError !== 'string') return null;
+    if (typeof item.agentName !== 'string' || !item.agentName.trim() || typeof item.lastError !== 'string' || !item.lastError.trim()) return null;
     if (typeof item.attempts !== 'number' || !Number.isInteger(item.attempts) || item.attempts < 1 || item.attempts > 99) return null;
     if (typeof item.firstFailedAtIndex !== 'number' || !Number.isInteger(item.firstFailedAtIndex) || item.firstFailedAtIndex < -1) return null;
     if (!Array.isArray(item.violations) || item.violations.length > 32) return null;
@@ -303,6 +330,18 @@ function validatePendingFixes_ACU(raw: unknown, present: boolean): AgentPendingF
       if (!isRecord_ACU(violation) || typeof violation.path !== 'string' || typeof violation.message !== 'string' || !violation.message.trim()) return null;
       violations.push({ path: violation.path, message: violation.message });
     }
+    const source = AGENT_PENDING_FIX_SOURCES_ACU.includes(item.source as any) ? item.source as AgentPendingFix_ACU['source'] : legacy ? 'transaction_rejected' : null;
+    const completion = item.completion === 'partial' || item.completion === 'failed' ? item.completion : legacy ? 'failed' : null;
+    const rangeStartIndex = readRangeIndex_ACU(item.rangeStartIndex ?? (legacy ? item.firstFailedAtIndex : undefined));
+    const rangeEndIndex = readRangeIndex_ACU(item.rangeEndIndex ?? (legacy ? item.firstFailedAtIndex : undefined));
+    const acceptedKeys = Array.isArray(item.acceptedKeys)
+      ? item.acceptedKeys.filter((value): value is string => typeof value === 'string' && !!value.trim())
+      : legacy ? [] : null;
+    const createdAt = typeof item.createdAt === 'number' && Number.isInteger(item.createdAt) && item.createdAt >= 0
+      ? item.createdAt : legacy ? fallbackUpdatedAt : null;
+    const updatedAt = typeof item.updatedAt === 'number' && Number.isInteger(item.updatedAt) && item.updatedAt >= 0
+      ? item.updatedAt : legacy ? fallbackUpdatedAt : null;
+    if (!source || !completion || rangeStartIndex === null || rangeEndIndex === null || rangeEndIndex < rangeStartIndex || !acceptedKeys || createdAt === null || updatedAt === null || updatedAt < createdAt) return null;
     fixes.push({
       module: item.module,
       agentName: item.agentName,
@@ -310,6 +349,13 @@ function validatePendingFixes_ACU(raw: unknown, present: boolean): AgentPendingF
       attempts: item.attempts,
       firstFailedAtIndex: item.firstFailedAtIndex,
       lastError: item.lastError,
+      source,
+      completion,
+      rangeStartIndex,
+      rangeEndIndex,
+      acceptedKeys: [...new Set(acceptedKeys)],
+      createdAt,
+      updatedAt,
     });
   }
   return fixes;
@@ -321,7 +367,9 @@ function validatePendingFixes_ACU(raw: unknown, present: boolean): AgentPendingF
  */
 export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapshot_ACU | null {
   if (!isRecord_ACU(raw)) return null;
-  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) return null;
+  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V2_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) return null;
+  const legacy = raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU;
+  const updatedAt = typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0;
   if (!isRecord_ACU(raw.revisions)) return null;
   if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints)) return null;
   const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
@@ -347,12 +395,15 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
   const validatedUserRequirements = userRequirementsRaw.map(validateUserRequirementLine_ACU);
   if (validatedUserRequirements.some(entry => entry === null)) return null;
   const pendingPresent = Object.prototype.hasOwnProperty.call(raw, 'pendingFixes');
-  const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent);
+  const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent, legacy, updatedAt);
   if (!pendingFixes) return null;
+  const completionPresent = Object.prototype.hasOwnProperty.call(raw, 'materialCompletion');
+  const materialCompletion = validateMaterialCompletion_ACU(raw.materialCompletion, completionPresent, legacy, updatedAt);
+  if (!materialCompletion) return null;
   return {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex,
-    updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+    updatedAt,
     revisions: {
       hooks: Math.max(0, readIndex_ACU(raw.revisions.hooks)),
       infoGap: Math.max(0, readIndex_ACU(raw.revisions.infoGap)),
@@ -369,6 +420,7 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
     chronology: validatedChronology as AgentChronologyEntry_ACU[],
     webRefs: webRefs.flatMap(item => { const entry = validateWebRefEntry_ACU(item); return entry ? [entry] : []; }),
     userRequirements: validatedUserRequirements as string[],
+    materialCompletion,
     pendingFixes,
   };
 }
@@ -380,7 +432,7 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
 export function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentModuleSnapshot_ACU; problems: string[] } | null {
   if (!isRecord_ACU(raw)) return null;
   const problems: string[] = [];
-  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) {
+  if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V1_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_V2_ACU && raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU) {
     problems.push(`schemaVersion=${String(raw.schemaVersion)} 与当前 ${AGENT_MODULE_SCHEMA_VERSION_ACU} 不一致`);
   }
   const revisions = isRecord_ACU(raw.revisions) ? raw.revisions : {};
@@ -392,13 +444,18 @@ export function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentM
   };
   const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
   if (settledThroughIndex < 0) problems.push(`settledThroughIndex=${String(raw.settledThroughIndex)} 非法，按 0 处理`);
+  const updatedAt = typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0;
+  const legacy = raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU;
   const pendingPresent = Object.prototype.hasOwnProperty.call(raw, 'pendingFixes');
-  const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent);
+  const pendingFixes = validatePendingFixes_ACU(raw.pendingFixes, pendingPresent, legacy, updatedAt);
   if (!pendingFixes) problems.push('pendingFixes 结构非法，已按空数组读取');
+  const completionPresent = Object.prototype.hasOwnProperty.call(raw, 'materialCompletion');
+  const materialCompletion = validateMaterialCompletion_ACU(raw.materialCompletion, completionPresent, legacy, updatedAt);
+  if (!materialCompletion) problems.push('materialCompletion 结构非法，已按 legacy_unknown 读取');
   const snapshot: AgentModuleSnapshot_ACU = {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex: Math.max(0, settledThroughIndex),
-    updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+    updatedAt,
     revisions: {
       hooks: Math.max(0, readIndex_ACU(revisions.hooks)),
       infoGap: Math.max(0, readIndex_ACU(revisions.infoGap)),
@@ -415,6 +472,7 @@ export function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentM
     chronology: pick(raw.chronology, validateChronologyEntry_ACU, 'chronology'),
     webRefs: pick(raw.webRefs, validateWebRefEntry_ACU, 'webRefs'),
     userRequirements: pick(raw.userRequirements, validateUserRequirementLine_ACU, 'userRequirements'),
+    materialCompletion: materialCompletion ?? { state: 'legacy_unknown', rangeStartIndex: -1, rangeEndIndex: -1, modules: {}, updatedAt },
     pendingFixes: pendingFixes ?? [],
   };
   return { snapshot, problems };

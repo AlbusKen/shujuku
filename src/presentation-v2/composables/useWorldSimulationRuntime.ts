@@ -223,6 +223,18 @@ export function useWorldSimulationRuntime() {
     return run_ACU(async () => reportSendOutcome_ACU(await runtime.sendAgentMessage(text)));
   }
 
+  /** 显式补足所选资料模块。模块列表作为程序级写集下传，不依赖自然语言提示约束。 */
+  function repairPendingMaterials(
+    modules: readonly import('../../service/simulation/model').WorldSimulationLedgerModule_ACU[],
+  ): Promise<boolean> {
+    if (!modules.length) return Promise.resolve(false);
+    return run_ACU(async () => {
+      const accepted = reportSendOutcome_ACU(await runtime.repairPendingMaterials(modules));
+      if (accepted) toast.success('已完成所选世界资料模块的定向补足。');
+      return accepted;
+    });
+  }
+
   /**
    * 停止在途运行。刻意不经 busy 闸：busy 恰好在运行期间为 true，走闸会把停止吞掉。
    * 先在会话流留痕并清掉 running 标记（按钮立刻切回发送），再等待编排器把任务落为 paused/manual。
@@ -370,6 +382,7 @@ export function useWorldSimulationRuntime() {
     revisionText,
     refresh,
     send,
+    repairPendingMaterials,
     stop,
     resume,
     saveSettings,

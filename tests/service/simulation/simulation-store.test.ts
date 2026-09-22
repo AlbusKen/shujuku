@@ -14,7 +14,7 @@ import {
   renameApiPresetReferencesInWorldSimulationSettings_ACU,
   clearApiPresetReferencesInWorldSimulationSettings_ACU,
 } from '../../../src/service/simulation/simulation-store';
-import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
+import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
@@ -84,7 +84,7 @@ describe('world simulation envelope store', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
-  it('读取 v1 账本时内存归一化为 v4，且不写回原对象', () => {
+  it('读取 v1 账本时内存归一化为当前版本，且不写回原对象', () => {
     const raw: any = {
       schemaVersion: 1,
       revision: 0,
@@ -97,7 +97,7 @@ describe('world simulation envelope store', () => {
     };
     const snapshot = JSON.parse(JSON.stringify(raw));
     const next = validateWorldSimulationLedger_ACU(raw);
-    expect(next.schemaVersion).toBe(4);
+    expect(next.schemaVersion).toBe(WORLD_LEDGER_SCHEMA_VERSION_ACU);
     expect(next.clock.day).toBe(3);
     expect(next.clock.slot).toBe('');
     expect(next.rumors).toEqual([]);
@@ -105,38 +105,67 @@ describe('world simulation envelope store', () => {
     expect(next.guidance.signals).toEqual([{ text: '风声', voice: 'ambient' }]);
     expect(next.chronicleOverview).toEqual([]);
     expect(next.pendingFixes).toEqual([]);
+    expect(next.materialCompletion).toMatchObject({ state: 'legacy_unknown', expectedModules: [], modules: {} });
     expect(raw).toEqual(snapshot);
   });
 
-  it('读取 v2 账本时补 chronicleOverview 空数组归一化为 v4，且不写回原对象', () => {
+  it('读取 v2 账本时补 chronicleOverview 与完成状态并归一化为当前版本，且不写回原对象', () => {
     const raw: any = {
       ...buildEmptyWorldSimulationLedger_ACU(),
       schemaVersion: 2,
     };
     delete raw.chronicleOverview;
     delete raw.pendingFixes;
+    delete raw.materialCompletion;
     const snapshot = JSON.parse(JSON.stringify(raw));
     const next = validateWorldSimulationLedger_ACU(raw);
-    expect(next.schemaVersion).toBe(4);
+    expect(next.schemaVersion).toBe(WORLD_LEDGER_SCHEMA_VERSION_ACU);
     expect(next.chronicleOverview).toEqual([]);
     expect(next.pendingFixes).toEqual([]);
+    expect(next.materialCompletion.state).toBe('legacy_unknown');
     expect(raw).toEqual(snapshot);
     expect(raw).not.toHaveProperty('chronicleOverview');
     expect(raw).not.toHaveProperty('pendingFixes');
+    expect(raw).not.toHaveProperty('materialCompletion');
   });
 
-  it('读取 v3 账本时补 pendingFixes 空数组归一化为 v4，且不写回原对象', () => {
+  it('读取 v3 账本时补 pendingFixes 与完成状态并归一化为当前版本，且不写回原对象', () => {
     const raw: any = {
       ...buildEmptyWorldSimulationLedger_ACU(),
       schemaVersion: 3,
     };
     delete raw.pendingFixes;
+    delete raw.materialCompletion;
     const snapshot = JSON.parse(JSON.stringify(raw));
     const next = validateWorldSimulationLedger_ACU(raw);
-    expect(next.schemaVersion).toBe(4);
+    expect(next.schemaVersion).toBe(WORLD_LEDGER_SCHEMA_VERSION_ACU);
     expect(next.pendingFixes).toEqual([]);
+    expect(next.materialCompletion.state).toBe('legacy_unknown');
     expect(raw).toEqual(snapshot);
     expect(raw).not.toHaveProperty('pendingFixes');
+    expect(raw).not.toHaveProperty('materialCompletion');
+  });
+
+  it('读取 v4 账本时把旧 pending 缺口与缺失完成状态仅在内存归一化为 v5', () => {
+    const raw: any = {
+      ...buildEmptyWorldSimulationLedger_ACU(),
+      schemaVersion: 4,
+      pendingFixes: [{
+        module: 'dimensions', candidateId: 'candidate:legacy', agentName: 'undercurrent-analyst',
+        violations: [{ path: '$.patch.dimensions', message: '旧候选非法' }],
+        attempts: 1, firstFailedAtDay: 1, lastError: '旧候选非法',
+      }],
+    };
+    delete raw.materialCompletion;
+    const snapshot = JSON.parse(JSON.stringify(raw));
+    const next = validateWorldSimulationLedger_ACU(raw);
+    expect(next.schemaVersion).toBe(WORLD_LEDGER_SCHEMA_VERSION_ACU);
+    expect(next.materialCompletion.state).toBe('legacy_unknown');
+    expect(next.pendingFixes[0]).toMatchObject({
+      module: 'dimensions', source: 'transaction_rejected', completion: 'failed',
+      acceptedKeys: [], anchor: null, createdAt: 0, updatedAt: 0,
+    });
+    expect(raw).toEqual(snapshot);
   });
 
   it('pendingFixes 非数组或条目缺键 fail-closed', () => {

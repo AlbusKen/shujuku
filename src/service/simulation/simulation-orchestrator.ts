@@ -5,6 +5,7 @@ import {
   WorldSimulationValidationError_ACU,
   type WorldSimulationEnvelope_ACU,
   type WorldSimulationError_ACU,
+  type WorldSimulationLedgerModule_ACU,
   type WorldSimulationRunIdentity_ACU,
   type WorldSimulationStagePlan_ACU,
   type WorldSimulationStageRevision_ACU,
@@ -24,7 +25,7 @@ export interface WorldSimulationOrchestratorDependencies_ACU {
   store: WorldSimulationStorePort_ACU;
   now(): number;
   allocateId(kind: 'task' | 'stage' | 'run' | 'timeline'): string;
-  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean }): Promise<WorldSimulationPreparedRun_ACU>;
+  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationPreparedRun_ACU>;
   assertAnchorCurrent(anchor: WorldSimulationAnchorIdentity_ACU): void | Promise<void>;
   appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string; idempotent?: boolean }): Promise<void>;
   commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string }): Promise<void>;
@@ -47,6 +48,7 @@ export interface WorldSimulationStartInput_ACU {
   anchor: WorldSimulationAnchorIdentity_ACU;
   instruction: string;
   triggerConversationMessageId?: string | null;
+  targetModules?: readonly WorldSimulationLedgerModule_ACU[];
 }
 
 /** 手动停止 / 页面重载中断 / 被更新楼层取代 三种非模型终局的稳定 stopReason。 */
@@ -190,7 +192,7 @@ export class WorldSimulationOrchestrator_ACU {
     return this.runNew_ACU(input, existing, pausedRun ? existing!.task!.taskId : null);
   }
 
-  async resume(input: { anchor: WorldSimulationAnchorIdentity_ACU; instruction?: string; resetRunBudget?: boolean }): Promise<WorldSimulationOrchestratorResult_ACU> {
+  async resume(input: { anchor: WorldSimulationAnchorIdentity_ACU; instruction?: string; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationOrchestratorResult_ACU> {
     const envelope = this.deriveEnvelopeView(this.dependencies.store.read());
     const identity = envelope?.task?.activeRun;
     if (!envelope?.task || !identity || envelope.activeStageId !== identity.stageId) return { status: 'skipped', reason: 'duplicate' };
@@ -209,7 +211,7 @@ export class WorldSimulationOrchestrator_ACU {
           await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction, idempotent: true });
         }
         if (controller.signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
-        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task!.originInstruction, envelope, signal: controller.signal, resetRunBudget });
+        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task!.originInstruction, envelope, signal: controller.signal, resetRunBudget, targetModules: input.targetModules });
         return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
       } catch (error) {
         return this.finishFailure_ACU(identity, error, controller.signal.aborted);
@@ -274,7 +276,7 @@ export class WorldSimulationOrchestrator_ACU {
         assertRunCurrent_ACU(reserved, identity);
         await this.dependencies.assertAnchorCurrent(input.anchor);
         if (controller.signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
-        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: input.instruction, envelope: reserved!, signal: controller.signal });
+        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: input.instruction, envelope: reserved!, signal: controller.signal, targetModules: input.targetModules });
         return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
       } catch (error) {
         return this.finishFailure_ACU(identity, error, controller.signal.aborted);

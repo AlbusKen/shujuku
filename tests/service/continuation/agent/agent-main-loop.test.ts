@@ -1489,18 +1489,24 @@ describe('子代理运行时', () => {
     expect(result.reviewer?.verdict).toBe('pass');
   });
 
-  it('连续返回不符合契约时抛出子代理失败，且把拒绝理由喂回下一次尝试', async () => {
+  it('协议修补耗尽时返回结构化 failed，保留拒绝理由供 workflow 挂账', async () => {
     replies = ['不是 JSON', '{"delta":{"hooks":[{"action":"delete","id":"H1"}]}}'];
     const settings = buildDefaultContinuationSettings_ACU();
     settings.internalAiRetryLimit = 1;
-    // 第 2 次回复结构合法但 H1 非法：进入条目修补轮（2 轮），模型始终不重发 H1 修正版 → 失败。
-    await expect(runtime.run(input_ACU({ settings } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SUBAGENT_FAILED', details: { rejected: [{ module: 'hooks', id: 'H1' }] } } });
+    // 第 2 次回复结构合法但 H1 非法：进入条目修补轮，模型始终不重发 H1 修正版。
+    const result = await runtime.run(input_ACU({ settings } as any));
     expect(calls).toHaveLength(4);
     expect(calls[1].map(message => message.content).join('\n')).toContain('没有被采纳');
     const repair = calls[2].map(message => message.content).join('\n');
     expect(repair).toContain('需要修正的条目');
     expect(repair).toContain('hooks[0]（id=H1）');
     expect(repair).toContain('upsert / patch / retire');
+    expect(result).toMatchObject({
+      completion: 'failed',
+      moduleCompletion: { hooks: 'failed', infoGap: 'complete_no_change', chronology: 'complete_no_change' },
+      unresolvedIssues: [{ module: 'hooks', source: 'contract_rejected', id: 'H1' }],
+      acceptedKeys: [],
+    });
   });
 
   it('完整契约一次交付：不触发续写轮，条目全部进入写集', async () => {

@@ -1,4 +1,12 @@
-import type { WorldCollisionReport_ACU, WorldSimulationLedger_ACU } from '../model';
+import type {
+  WorldCollisionReport_ACU,
+  WorldSimulationLedger_ACU,
+  WorldSimulationLedgerModule_ACU,
+  WorldSimulationMaterialCompletionRecord_ACU,
+  WorldSimulationMaterialCompletionState_ACU,
+  WorldSimulationPendingFix_ACU,
+  WorldSimulationPendingFixSource_ACU,
+} from '../model';
 
 export const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
 export const WORLD_SIMULATION_CONVERSATION_FIELD_ACU = '_qrf_world_simulation_agent_chat';
@@ -135,6 +143,13 @@ export interface WorldSimulationReviewerResult_ACU {
   findings: WorldSimulationReviewerFinding_ACU[];
   acceptedCandidateIds: string[];
 }
+export interface WorldSimulationSubagentIssue_ACU {
+  module: WorldSimulationLedgerModule_ACU;
+  source: WorldSimulationPendingFixSource_ACU;
+  path: string;
+  message: string;
+  id?: string;
+}
 export interface WorldSimulationSubagentOutcome_ACU {
   agentName: string;
   status: WorldSimulationSpecialistResult_ACU['status'];
@@ -144,6 +159,10 @@ export interface WorldSimulationSubagentOutcome_ACU {
   uncertainties: string[];
   reasonCode?: string;
   unresolved?: string[];
+  completion?: Exclude<WorldSimulationMaterialCompletionState_ACU, 'legacy_unknown'>;
+  moduleCompletion?: Partial<Record<WorldSimulationLedgerModule_ACU, Exclude<WorldSimulationMaterialCompletionState_ACU, 'legacy_unknown'>>>;
+  unresolvedIssues?: WorldSimulationSubagentIssue_ACU[];
+  acceptedKeys?: string[];
 }
 export interface WorldSimulationCommitCandidate_ACU {
   runId: string;
@@ -154,6 +173,8 @@ export interface WorldSimulationCommitCandidate_ACU {
   summary: string;
   acceptedCandidates: WorldSimulationCandidate_ACU[];
   evidenceRefs: string[];
+  pendingFixes?: WorldSimulationPendingFix_ACU[];
+  materialCompletion?: WorldSimulationMaterialCompletionRecord_ACU;
   reviewer?: WorldSimulationReviewerResult_ACU;
   collisionReport?: WorldCollisionReport_ACU;
 }
