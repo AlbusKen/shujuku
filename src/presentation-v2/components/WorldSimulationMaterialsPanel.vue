@@ -36,46 +36,7 @@
         基线楼层 {{ materials.checkpointIndex ?? '无' }} · 已折叠 delta {{ materials.foldedDeltaCount ?? 0 }} 条 · revision {{ materials.snapshot.ledgerRevision }} · 证据引用 {{ materials.snapshot.evidenceRefs.length }} 条。
       </p>
       <p v-else class="acu-v2-ws-materials__meta">当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。</p>
-      <details class="acu-v2-ws-materials__block" open>
-        <summary>资料完成状态 · {{ materialStatusCards.length }} 项</summary>
-        <div class="acu-v2-ws-materials__cards">
-          <article v-for="card in materialStatusCards" :key="card.module" class="acu-v2-ws-materials__card" :class="{ 'acu-v2-ws-materials__card--failed': card.state === 'pending' || card.state === 'load_failed' }">
-            <p class="acu-v2-ws-materials__card-head">
-              <strong>{{ materialStatusTitle(card.module) }}</strong>
-              <span class="acu-v2-ws-materials__badge">{{ card.label }}</span>
-            </p>
-            <p class="acu-v2-ws-materials__card-body">{{ card.detail }}</p>
-          </article>
-        </div>
-      </details>
-      <section v-if="repairableModules.length" class="acu-v2-ws-materials__repair">
-        <p class="acu-v2-ws-materials__card-head"><strong>定向补足</strong></p>
-        <p class="acu-v2-ws-materials__card-body">只会开放所选待补模块的程序级写集；已完成模块不会被重写。历史状态未知的模块必须在此显式选择。</p>
-        <div class="acu-v2-ws-materials__repair-options">
-          <label v-for="module in repairableModules" :key="module">
-            <input
-              type="checkbox"
-              :checked="selectedRepairModules.includes(module)"
-              :disabled="busy"
-              @change="toggleRepairModule(module)"
-            >
-            {{ MODULE_LABELS[module] ?? module }}
-          </label>
-        </div>
-        <div class="acu-v2-ws-materials__actions">
-          <AcuButton variant="primary" :loading="busy" :disabled="!selectedRepairModules.length" @click="requestRepair">补足所选模块</AcuButton>
-        </div>
-      </section>
-      <details v-if="pendingFixCards.length" class="acu-v2-ws-materials__block" open>
-        <summary>待修复 · {{ pendingFixCards.length }} 项</summary>
-        <div class="acu-v2-ws-materials__cards">
-          <article v-for="item in pendingFixCards" :key="item.module" class="acu-v2-ws-materials__card acu-v2-ws-materials__card--failed">
-            <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span class="acu-v2-ws-materials__badge">第 {{ item.attempts }} 次</span></p>
-            <p class="acu-v2-ws-materials__card-body">{{ item.detail }}</p>
-            <p class="acu-v2-ws-materials__card-meta">{{ item.meta }}</p>
-          </article>
-        </div>
-      </details>
+
       <p v-if="!ledger || !ledgerGroups.some(group => group.items.length)" class="acu-v2-ws-materials__empty">世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。</p>
       <details v-for="group in ledgerGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
         <summary>{{ group.label }} · {{ group.items.length }} 条</summary>
@@ -192,10 +153,10 @@ import AcuButton from './_lib/AcuButton.vue';
 import AcuTextarea from './_lib/AcuTextarea.vue';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
-import type { WorldSimulationLedger_ACU, WorldSimulationLedgerModule_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { WorldSimulationLedger_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
 import { buildWorldChronicleContrast_ACU, buildWorldMissedList_ACU, buildWorldRumorQueue_ACU, type WorldChronicleContrastRow_ACU, type WorldMissedItem_ACU, type WorldRumorQueueItem_ACU } from '../simulation/world-simulation-dynamics-views';
-import { buildMaterialCompletionCards_ACU, resolveMaterialLoadError_ACU } from '../material-completion-status';
+
 
 const props = withDefaults(defineProps<{
   conversation: WorldSimulationConversationView_ACU;
@@ -211,7 +172,6 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (event: 'refresh' | 'clear'): void;
   (event: 'saveUserRequirements', requirements: unknown): void;
-  (event: 'repair', modules: WorldSimulationLedgerModule_ACU[]): void;
 }>();
 
 const TABS = [
@@ -231,7 +191,6 @@ const clearPending = ref(false);
 const requirementsDraft = ref('[]');
 const requirementsDirty = ref(false);
 const requirementsError = ref('');
-const selectedRepairModules = ref<WorldSimulationLedgerModule_ACU[]>([]);
 
 function snapshotRequirementsJson(): string {
   return JSON.stringify(props.userRequirements.snapshot?.requirements ?? [], null, 2);
@@ -337,63 +296,6 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
   ];
 });
 
-const MODULE_LABELS: Record<string, string> = {
-  clock: '时钟', dimensions: '世界维度', seeds: '暗流种子', actors: '行动者', chronicle: '世界编年', guidance: '投影', rumors: '传闻', player: '玩家',
-};
-
-const WORLD_MATERIAL_MODULES_ACU: readonly WorldSimulationLedgerModule_ACU[] = [
-  'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player',
-];
-
-const repairableModules = computed<WorldSimulationLedgerModule_ACU[]>(() => {
-  const ledger = props.ledger;
-  if (!ledger) return [];
-  const pending = new Set(ledger.pendingFixes.map(item => item.module));
-  const legacyOverall = ledger.materialCompletion.state === 'legacy_unknown';
-  return WORLD_MATERIAL_MODULES_ACU.filter(module => pending.has(module)
-    || ledger.materialCompletion.modules[module] === 'legacy_unknown'
-    || legacyOverall);
-});
-
-watch(repairableModules, modules => {
-  const allowed = new Set(modules);
-  selectedRepairModules.value = selectedRepairModules.value.filter(module => allowed.has(module));
-});
-
-function toggleRepairModule(module: WorldSimulationLedgerModule_ACU): void {
-  selectedRepairModules.value = selectedRepairModules.value.includes(module)
-    ? selectedRepairModules.value.filter(item => item !== module)
-    : [...selectedRepairModules.value, module];
-}
-
-function requestRepair(): void {
-  if (!selectedRepairModules.value.length) return;
-  emit('repair', [...selectedRepairModules.value]);
-}
-
-const materialStatusCards = computed(() => buildMaterialCompletionCards_ACU({
-  overallState: props.ledger?.materialCompletion.state,
-  expectedModules: props.ledger?.materialCompletion.expectedModules,
-  modules: props.ledger?.materialCompletion.modules,
-  pendingModules: props.ledger?.pendingFixes.map(item => item.module),
-  loadError: resolveMaterialLoadError_ACU({
-    snapshotPresent: props.materials.snapshot !== null,
-    diagnostics: props.materials.diagnostics,
-  }),
-}));
-
-function materialStatusTitle(module: string): string {
-  return module === '*' ? '资料维护状态' : MODULE_LABELS[module] ?? module;
-}
-
-const pendingFixCards = computed(() => (props.ledger?.pendingFixes ?? []).map(item => ({
-  module: item.module,
-  title: MODULE_LABELS[item.module] ?? item.module,
-  attempts: item.attempts,
-  detail: item.violations.map(violation => violation.message).join('；') || item.lastError,
-  meta: `${item.agentName} · 第 ${item.firstFailedAtDay} 天起 · ${item.lastError}`,
-})));
-
 const CONTACT_LABELS: Record<string, string> = { open: '开放', secluded: '隔绝' };
 const RUMOR_STATUS_LABELS: Record<string, string> = { latent: '潜伏', ripe: '待命', revealed: '已得知', dead: '已失效' };
 const HIT_STATE_LABELS: Record<string, string> = { 'open-hit': '开放可命中', 'secluded-delay': '隔绝延迟中', waiting: '等待到访' };
@@ -444,9 +346,6 @@ function rumorMeta(item: WorldRumorQueueItem_ACU): string {
 .acu-v2-ws-materials__tab { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-ws-materials__tab--active { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1); }
 .acu-v2-ws-materials__tab-actions { display: flex; gap: 6px; margin-left: auto; }
-.acu-v2-ws-materials__repair { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 35%, transparent); border-radius: 7px; }
-.acu-v2-ws-materials__repair-options { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
-.acu-v2-ws-materials__repair-options label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .acu-v2-ws-materials__confirm { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-ws-materials__confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .acu-v2-ws-materials__overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }

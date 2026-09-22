@@ -349,8 +349,8 @@ describe('WorldSimulationPage', () => {
     next.envelope.timeline = [{ id: 'run:swept', at: 't1', kind: 'swept', taskId: 'task', message: 'seed-miss' }];
     snapshot.value = next;
     const { host } = await mountPage();
-    expect(host.textContent).toContain('待修复');
-    expect(host.textContent).toContain('locationRef 必须是对象或 null');
+    expect(host.textContent).not.toContain('待修复');
+    expect(host.textContent).not.toContain('locationRef 必须是对象或 null');
     expect(host.textContent).toContain('编年对照');
     expect(host.textContent).toContain('错过清单');
     expect(host.textContent).toContain('传闻队列');

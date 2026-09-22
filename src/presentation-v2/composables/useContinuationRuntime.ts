@@ -226,20 +226,6 @@ export function useContinuationRuntime() {
     }
   }
 
-  /** 定向补足资料，不生成或发送宿主正文。 */
-  async function repairPendingMaterials(
-    modules: readonly import('../../service/continuation/agent/agent-model').AgentWritableModule_ACU[],
-  ): Promise<boolean> {
-    if (!modules.length) return false;
-    let outcome: Awaited<ReturnType<typeof runtime.orchestrator.repairPendingMaterials>> | null = null;
-    const completed = await run_ACU(async () => (outcome = await runtime.orchestrator.repairPendingMaterials({ modules })));
-    if (completed && outcome) {
-      if (outcome.failedModules.length) toast.info(`已保留成功模块；仍待补足：${outcome.failedModules.join('、')}`);
-      else toast.success('已完成所选智能续写资料模块的定向补足。');
-    }
-    return completed;
-  }
-
   function continueTask(): Promise<boolean> {
     return run_ACU(() => runtime.orchestrator.continueTask());
   }
@@ -413,7 +399,6 @@ export function useContinuationRuntime() {
     initialize,
     isAwaitingHostResult,
     originInstruction,
-    repairPendingMaterials,
     refresh,
     replanRemaining,
     replanRemainingWithInstruction,

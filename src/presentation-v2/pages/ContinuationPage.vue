@@ -39,7 +39,6 @@
           :busy="runtime.busy.value"
           @save-outline="saveOutline"
           @clear="clearData"
-          @repair="repairMaterials"
         />
       </AcuPanel>
 
@@ -393,12 +392,6 @@ const settingsNotice = ref('');
 const materialsPanel = ref<InstanceType<typeof ContinuationMaterialsPanel> | null>(null);
 const clock = ref(Date.now());
 let countdownTimer: ReturnType<typeof setInterval> | undefined;
-
-async function repairMaterials(
-  modules: readonly import('../../service/continuation/agent/agent-model').AgentWritableModule_ACU[],
-): Promise<void> {
-  if (await runtime.repairPendingMaterials(modules)) materialsPanel.value?.reload({ preserveDirty: true });
-}
 
 const stageText = computed(() => {
   const stage = runtime.activeStage.value;

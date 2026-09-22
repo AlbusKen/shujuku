@@ -88,8 +88,6 @@ import {
   continuationBeatObligation_ACU,
   continuationMajorTurn_ACU,
   runContinuationAgentWorkflow_ACU,
-  runContinuationMaterialRepair_ACU,
-  type ContinuationMaterialRepairResult_ACU,
   type ContinuationWorkflowAgentPayload_ACU,
   type ContinuationWorkflowResult_ACU,
 } from './agent-workflow';
@@ -111,7 +109,6 @@ import {
   type AgentOutlineOpResult_ACU,
   type AgentRunBudget_ACU,
   type AgentToolCall_ACU,
-  type AgentWritableModule_ACU,
   type ContinuationAgentTurnPlanRequest_ACU,
   type ContinuationAgentTurnPlanResult_ACU,
 } from './agent-model';
@@ -144,16 +141,6 @@ export interface ContinuationAgentTurnPlannerDependencies_ACU {
   budget: AgentRunBudget_ACU;
   /** token 统计函数。缺省走宿主分词器；测试注入确定性计数以摆脱对默认提示词长度的依赖。 */
   countTokens?: TokenCounter_ACU;
-}
-
-export interface ContinuationMaterialRepairPlanRequest_ACU {
-  settings: ContinuationSettings_ACU;
-  readContext: () => ContinuationAgentExecutionContext_ACU;
-  snapshot: AgentModuleSnapshot_ACU;
-  targetModules: readonly AgentWritableModule_ACU[];
-  createInternalRequestIdentity: (attempt: number) => ContinuationInternalAiRequestIdentity_ACU & { source: 'turn_instruction' };
-  isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
-  signal?: AbortSignal | null;
 }
 
 const defaultDependencies_ACU: ContinuationAgentTurnPlannerDependencies_ACU = {
@@ -470,78 +457,6 @@ function readFinalReviewStateFromConversation_ACU(snapshot: AgentConversationSna
 /** 主 Agent 轮次规划器。替代 V7 的一次性指令生成器，对外只暴露 plan 一个入口。 */
 export class ContinuationAgentTurnPlanner_ACU {
   constructor(private readonly dependencies: ContinuationAgentTurnPlannerDependencies_ACU = defaultDependencies_ACU) {}
-
-  /**
-   * 显式资料补足入口。只调用目标模块对应的维护子代理并返回候选快照；不运行主 Agent、
-   * 策划、指令编排或终审，也不会生成宿主正文指令。持久化由持有租约与冻结锚点的编排器完成。
-   */
-  async repairMaterials(
-    request: ContinuationMaterialRepairPlanRequest_ACU,
-    apiDependencies?: ContinuationApiPresetDependencies_ACU,
-  ): Promise<ContinuationMaterialRepairResult_ACU> {
-    const chat = this.dependencies.readChat();
-    const execution = request.readContext();
-    const snapshot = request.snapshot;
-    const context: AgentResolveContext_ACU = {
-      chat,
-      moduleSnapshot: snapshot,
-      settledThroughIndex: snapshot.settledThroughIndex,
-      execution,
-      originInstruction: execution.task.originInstruction,
-      storyWindowFloors: request.settings.storyWindowFloors,
-      storyTailFloors: request.settings.storyTailFloors,
-      contextRules: { extractRules: request.settings.contextExtractRules, excludeRules: request.settings.contextExcludeRules },
-      recallCodes: extractAgentRecallCodesFromChat_ACU(chat),
-    };
-    try {
-      context.worldbook = await this.dependencies.loadWorldbook();
-    } catch {
-      context.worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false);
-    }
-    const budget = request.settings.agentRunBudget ?? this.dependencies.budget;
-    const mapPayload = (result: AgentSubagentRunResult_ACU): ContinuationWorkflowAgentPayload_ACU => ({
-      ok: true,
-      summary: result.maintainer?.summary || result.arc?.summary || result.researcher?.summary || '',
-      maintainer: result.maintainer,
-      arc: result.arc,
-      researcher: result.researcher,
-      readRevisions: result.readRevisions,
-      writes: result.writes,
-      completion: result.completion,
-      moduleCompletion: result.moduleCompletion,
-      unresolvedIssues: result.unresolvedIssues,
-      acceptedKeys: result.acceptedKeys,
-      noChange: result.completion === 'complete_no_change',
-    });
-    return runContinuationMaterialRepair_ACU({
-      snapshot,
-      targetModules: request.targetModules,
-      settledIndex: Math.max(0, chat.length - 1),
-      completedStageNumbers: execution.task.stages
-        .filter(stage => stage.status === 'completed')
-        .map(stage => stage.stageNumber),
-      runAgent: async call => {
-        const definition = findAgentSubagentDefinition_ACU(call.agentName);
-        if (!definition) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU(
-            'CONTINUATION_AGENT_SUBAGENT_FAILED', 'agent_delegate', `未知的资料补足子代理：${call.agentName}`, false,
-          ));
-        }
-        const preset = this.dependencies.resolveApiPreset(request.settings, definition.promptKey, 'agent_delegate', apiDependencies);
-        const result = await this.dependencies.subagentRuntime.run({
-          delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
-          settings: request.settings,
-          resolveContext: context,
-          budget: { ...budget, maxExtraReads: request.settings.workflow.repairMaxExtraReads },
-          preset,
-          createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
-          isCurrent: identity => request.isInternalRequestCurrent(identity),
-          signal: request.signal,
-        });
-        return mapPayload(result);
-      },
-    });
-  }
 
   /**
    * 跑完一轮 Agent 循环，产出最终写作指导。

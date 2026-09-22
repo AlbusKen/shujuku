@@ -146961,1399 +146961,6 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
-     * service/continuation/agent/agent-transaction.ts — 资料模块写集事务
-     *
-     * 默认仍是整份拒绝：任一条目不合规就抛错，调用方拿不到部分结果。
-     * 传入 onViolation 且回调不抛时，按模块隔离：无违规模块入库并推进自己的 revision，
-     * 违规模块保持原值并写入 snapshot.pendingFixes。核心防线仍是「漏写不等于删除」。
-     */
-    function reject_ACU$5(message, details) {
-        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
-    }
-    function collectTouchedModules_ACU(delta) {
-        const touched = [];
-        if (delta.hooks.length || delta.hookPatches.length)
-            touched.push('hooks');
-        if (delta.infoGap.length || delta.infoGapPatches.length)
-            touched.push('infoGap');
-        if (delta.storyArc.length || delta.storyArcPatches.length)
-            touched.push('storyArc');
-        if (delta.chronology.length)
-            touched.push('chronology');
-        return touched;
-    }
-    function assertWritePermission_ACU(delta, allowedWrites) {
-        for (const module of collectTouchedModules_ACU(delta)) {
-            if (!allowedWrites.includes(module)) {
-                reject_ACU$5(`子代理试图写入未授权模块：${module}`, { module, allowedWrites: [...allowedWrites] });
-            }
-        }
-        for (const key of Object.keys(delta.expectedRevisions)) {
-            if (!isAgentWritableModule_ACU(key))
-                reject_ACU$5(`expectedRevisions 含非法模块名：${key}`, { key });
-        }
-    }
-    /**
-     * 用「子代理读到资料的那一刻」的修订号补齐未声明的模块。
-     * @param delta 子代理返回的写集
-     * @param readRevisions 渲染读集材料时捕获的快照修订号
-     * @returns 新的 delta；子代理已显式声明的模块保持原值，仍按显式断言校验
-     */
-    function mergeAgentDeltaRevisions_ACU(delta, readRevisions) {
-        const merged = { ...delta.expectedRevisions };
-        for (const module of collectTouchedModules_ACU(delta)) {
-            if (merged[module] === undefined)
-                merged[module] = readRevisions[module];
-        }
-        return { ...delta, expectedRevisions: merged };
-    }
-    function applyHookDelta_ACU(existing, items, settledIndex) {
-        const byId = new Map(existing.map(entry => [entry.id, entry]));
-        for (const item of items) {
-            if (!item.id.trim())
-                reject_ACU$5('伏笔条目缺少 id');
-            if (item.action === 'retire') {
-                const current = byId.get(item.id);
-                if (!current)
-                    reject_ACU$5(`retire 的伏笔不存在：${item.id}`, { id: item.id });
-                if (!item.reason.trim())
-                    reject_ACU$5(`retire 伏笔 ${item.id} 必须给出理由`, { id: item.id });
-                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
-                continue;
-            }
-            if (!item.summary.trim())
-                reject_ACU$5(`伏笔 ${item.id} 的 summary 不能为空`, { id: item.id });
-            const previous = byId.get(item.id);
-            byId.set(item.id, {
-                id: item.id,
-                summary: item.summary.trim(),
-                status: item.status,
-                importance: item.importance,
-                plantedIndex: previous ? previous.plantedIndex : item.plantedIndex,
-                updatedIndex: settledIndex,
-                plannedPayoff: item.plannedPayoff,
-                retired: false,
-                retiredReason: '',
-            });
-        }
-        return [...byId.values()];
-    }
-    function applyHookPatches_ACU(entries, patches, settledIndex) {
-        const byId = new Map(entries.map(entry => [entry.id, entry]));
-        for (const patch of patches) {
-            const current = byId.get(patch.id);
-            if (!current)
-                reject_ACU$5(`patch 的伏笔不存在：${patch.id}`, { id: patch.id });
-            if (current.retired)
-                reject_ACU$5(`伏笔 ${patch.id} 已退役，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
-            byId.set(patch.id, {
-                ...current,
-                summary: patch.summary ?? current.summary,
-                status: patch.status ?? current.status,
-                importance: patch.importance ?? current.importance,
-                plannedPayoff: patch.plannedPayoff ?? current.plannedPayoff,
-                updatedIndex: settledIndex,
-            });
-        }
-        return [...byId.values()];
-    }
-    function applyInfoGapDelta_ACU(existing, items, settledIndex) {
-        const byId = new Map(existing.map(entry => [entry.id, entry]));
-        for (const item of items) {
-            if (!item.id.trim())
-                reject_ACU$5('信息差条目缺少 id');
-            if (item.action === 'retire') {
-                const current = byId.get(item.id);
-                if (!current)
-                    reject_ACU$5(`retire 的信息差条目不存在：${item.id}`, { id: item.id });
-                if (!item.reason.trim())
-                    reject_ACU$5(`retire 信息差条目 ${item.id} 必须给出理由`, { id: item.id });
-                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
-                continue;
-            }
-            if (!item.topic.trim())
-                reject_ACU$5(`信息差条目 ${item.id} 的 topic 不能为空`, { id: item.id });
-            // 未揭示的事件不允许携带揭示楼层，否则等于把计划写成了已发生事实。
-            if (item.revealStatus === 'unrevealed' && item.revealIndex !== null) {
-                reject_ACU$5(`信息差条目 ${item.id} 标记为未揭示，揭示楼层必须为空`, { id: item.id, revealIndex: item.revealIndex });
-            }
-            if (item.revealStatus !== 'unrevealed' && item.revealIndex === null) {
-                reject_ACU$5(`信息差条目 ${item.id} 已揭示，必须给出揭示楼层`, { id: item.id });
-            }
-            byId.set(item.id, {
-                id: item.id,
-                topic: item.topic.trim(),
-                objectiveFact: item.objectiveFact,
-                readerKnown: item.readerKnown,
-                characterKnowledge: item.characterKnowledge,
-                revealStatus: item.revealStatus,
-                revealIndex: item.revealIndex,
-                retired: false,
-                retiredReason: '',
-            });
-        }
-        void settledIndex;
-        return [...byId.values()];
-    }
-    function applyInfoGapPatches_ACU(entries, patches) {
-        const byId = new Map(entries.map(entry => [entry.id, entry]));
-        for (const patch of patches) {
-            const current = byId.get(patch.id);
-            if (!current)
-                reject_ACU$5(`patch 的信息差条目不存在：${patch.id}`, { id: patch.id });
-            if (current.retired)
-                reject_ACU$5(`信息差条目 ${patch.id} 已退役，不可 patch`, { id: patch.id });
-            const merged = {
-                ...current,
-                topic: patch.topic ?? current.topic,
-                objectiveFact: patch.objectiveFact ?? current.objectiveFact,
-                readerKnown: patch.readerKnown ?? current.readerKnown,
-                characterKnowledge: patch.characterKnowledge ?? current.characterKnowledge,
-                revealStatus: patch.revealStatus ?? current.revealStatus,
-                revealIndex: 'revealIndex' in patch ? patch.revealIndex : current.revealIndex,
-            };
-            // 合并结果必须满足与 upsert 相同的一致性规则：把计划写成事实的典型症状在 patch 路径同样要拦。
-            if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null) {
-                reject_ACU$5(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
-            }
-            if (merged.revealStatus !== 'unrevealed' && merged.revealIndex === null) {
-                reject_ACU$5(`信息差条目 ${patch.id} patch 后已揭示，必须给出揭示楼层`, { id: patch.id });
-            }
-            byId.set(patch.id, merged);
-        }
-        return [...byId.values()];
-    }
-    /**
-     * 全书方向在任何时刻只能有一条活跃条目。允许在同一份 delta 里先 retire 旧的再 upsert 新的，
-     * 因此判定放在全部条目应用完之后，而不是逐条拦截。
-     */
-    function assertSingleActiveStoryScope_ACU(entries) {
-        const active = entries.filter(entry => entry.scope === 'story' && !entry.retired);
-        if (active.length > 1) {
-            reject_ACU$5(`全书方向（scope=story）只能有一条活跃条目，当前会变成 ${active.length} 条：${active.map(entry => entry.id).join('、')}。修订全书方向请 patch 既有条目，或在同一份写集里先 retire 旧条目`, { ids: active.map(entry => entry.id) });
-        }
-    }
-    function hasVolumeContractField_ACU(entry) {
-        return entry.narrativeRole !== undefined
-            || entry.targetStageRange !== undefined
-            || entry.targetTimeSpan !== undefined
-            || entry.progressCeiling !== undefined
-            || entry.sustainingThreads !== undefined
-            || entry.payoffTargets !== undefined
-            || entry.completionRationale !== undefined;
-    }
-    function assertCompleteVolumeContract_ACU(volume, context) {
-        if (!volume.narrativeRole)
-            reject_ACU$5(`卷台阶 ${volume.id} 缺少 narrativeRole`, { id: volume.id, context });
-        if (!volume.targetStageRange)
-            reject_ACU$5(`卷台阶 ${volume.id} 缺少 targetStageRange`, { id: volume.id, context });
-        if (!Number.isInteger(volume.targetStageRange.min) || !Number.isInteger(volume.targetStageRange.max)
-            || volume.targetStageRange.min < 1 || volume.targetStageRange.max < volume.targetStageRange.min) {
-            reject_ACU$5(`卷台阶 ${volume.id} 的 targetStageRange 必须是 min≥1 且 max≥min 的整数范围`, { id: volume.id, context, targetStageRange: volume.targetStageRange });
-        }
-        if (!volume.targetTimeSpan?.trim())
-            reject_ACU$5(`卷台阶 ${volume.id} 缺少 targetTimeSpan`, { id: volume.id, context });
-        if (!volume.progressCeiling?.trim())
-            reject_ACU$5(`卷台阶 ${volume.id} 缺少 progressCeiling`, { id: volume.id, context });
-        if (!volume.sustainingThreads?.length)
-            reject_ACU$5(`卷台阶 ${volume.id} 至少需要一条 sustainingThreads`, { id: volume.id, context });
-        if (volume.sustainingThreads.some(thread => !thread.trim()))
-            reject_ACU$5(`卷台阶 ${volume.id} 的 sustainingThreads 不得包含空项`, { id: volume.id, context });
-        if (!volume.payoffTargets?.length)
-            reject_ACU$5(`卷台阶 ${volume.id} 至少需要一条 payoffTargets`, { id: volume.id, context });
-        if (volume.payoffTargets.some(target => !target.trim()))
-            reject_ACU$5(`卷台阶 ${volume.id} 的 payoffTargets 不得包含空项`, { id: volume.id, context });
-    }
-    function assertVolumeCompletionContract_ACU(volume) {
-        if (!volume.targetStageRange)
-            return;
-        assertCompleteVolumeContract_ACU(volume, 'done');
-        const stageCount = volume.stageNumbers.length;
-        const withinTarget = stageCount >= volume.targetStageRange.min && stageCount <= volume.targetStageRange.max;
-        if (!withinTarget && !volume.completionRationale?.trim()) {
-            reject_ACU$5(`卷台阶 ${volume.id} 实际承载 ${stageCount} 个阶段，偏离目标 ${volume.targetStageRange.min}–${volume.targetStageRange.max} 时必须给出 completionRationale`, { id: volume.id, stageCount, targetStageRange: volume.targetStageRange });
-        }
-        for (const target of volume.payoffTargets ?? []) {
-            if (!volume.completionState.includes(target)) {
-                reject_ACU$5(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 payoffTargets 的兑现证据：${target}`, { id: volume.id, target });
-            }
-        }
-        for (const thread of volume.sustainingThreads ?? []) {
-            if (!volume.completionState.includes(thread)) {
-                reject_ACU$5(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 sustainingThreads 的完成、转入后续卷或 retire 去向：${thread}`, { id: volume.id, thread });
-            }
-        }
-    }
-    function assertStoryArcContractShape_ACU(entries) {
-        for (const entry of entries) {
-            if (entry.retired || !hasVolumeContractField_ACU(entry))
-                continue;
-            if (entry.scope !== 'volume') {
-                reject_ACU$5(`全书方向 ${entry.id} 不得携带卷级容量字段`, { id: entry.id, scope: entry.scope });
-            }
-            assertCompleteVolumeContract_ACU(entry, 'new');
-        }
-    }
-    /** 验证卷台阶的生命周期；阶段完成与卷完成是两层事实，不能互相替代。 */
-    function assertVolumeLifecycle_ACU(previous, next, completedStageNumbers) {
-        const volumes = next.filter(entry => entry.scope === 'volume' && !entry.retired);
-        if (!volumes.length)
-            return;
-        const previousById = new Map(previous.filter(entry => entry.scope === 'volume' && !entry.retired).map(entry => [entry.id, entry]));
-        const previouslyActive = previous.filter(entry => entry.scope === 'volume' && !entry.retired && entry.status === 'active');
-        for (const volume of volumes) {
-            const prior = previousById.get(volume.id);
-            if (!prior)
-                continue;
-            const newlyRegistered = volume.stageNumbers.filter(stageNumber => !prior.stageNumbers.includes(stageNumber));
-            if (newlyRegistered.length && prior.status !== 'active') {
-                reject_ACU$5(`阶段进度只能登记到当前 active 卷，卷 ${volume.id} 在改写前状态为 ${prior.status}`, { id: volume.id, priorStatus: prior.status, stageNumbers: newlyRegistered });
-            }
-            for (const stageNumber of newlyRegistered) {
-                if (!completedStageNumbers.has(stageNumber)) {
-                    reject_ACU$5(`卷台阶 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
-                }
-            }
-            if (prior.status === 'done' && volume.status !== 'done') {
-                reject_ACU$5(`已完成卷 ${volume.id} 不可重新激活`, { id: volume.id, from: prior.status, to: volume.status });
-            }
-            const order = { planned: 0, active: 1, done: 2 };
-            if (order[volume.status] < order[prior.status]) {
-                reject_ACU$5(`卷台阶 ${volume.id} 状态只能 planned → active → done 单向推进`, { id: volume.id, from: prior.status, to: volume.status });
-            }
-            if (order[volume.status] > order[prior.status] + 1) {
-                reject_ACU$5(`卷台阶 ${volume.id} 不可跳过 active 直接从 ${prior.status} 变为 ${volume.status}`, { id: volume.id, from: prior.status, to: volume.status });
-            }
-        }
-        if (previouslyActive.length > 1) {
-            reject_ACU$5(`写入前存在 ${previouslyActive.length} 个 active 卷，无法判定阶段承载归属`, { activeIds: previouslyActive.map(volume => volume.id) });
-        }
-        for (const volume of volumes) {
-            if (previousById.has(volume.id))
-                continue;
-            assertCompleteVolumeContract_ACU(volume, 'new');
-            if (volume.status === 'done') {
-                reject_ACU$5(`新卷 ${volume.id} 不可直接登记为 done`, { id: volume.id });
-            }
-            for (const stageNumber of volume.stageNumbers) {
-                if (!completedStageNumbers.has(stageNumber)) {
-                    reject_ACU$5(`新卷 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
-                }
-            }
-        }
-        for (const volume of volumes) {
-            const prior = previous.find(entry => entry.id === volume.id);
-            if (volume.status !== 'done')
-                continue;
-            if (volume.completionStageNumber === null) {
-                reject_ACU$5(`卷台阶 ${volume.id} 标记 done 时必须提供 completionStageNumber`, { id: volume.id });
-            }
-            if (!volume.stageNumbers.includes(volume.completionStageNumber)) {
-                reject_ACU$5(`卷台阶 ${volume.id} 的完成阶段必须已登记进 stageNumbers`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
-            }
-            if (!completedStageNumbers.has(volume.completionStageNumber)) {
-                reject_ACU$5(`卷台阶 ${volume.id} 的完成阶段尚未真实完成`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
-            }
-            if (!volume.completionState.trim()) {
-                reject_ACU$5(`卷台阶 ${volume.id} 标记 done 时必须说明已达到的卷末状态`, { id: volume.id });
-            }
-            assertVolumeCompletionContract_ACU(volume);
-        }
-        const unfinished = volumes.filter(volume => volume.status !== 'done');
-        const active = volumes.filter(volume => volume.status === 'active');
-        if (unfinished.length && active.length !== 1) {
-            reject_ACU$5(`存在未完成卷时必须恰有一个 active 卷，当前为 ${active.length} 个`, { activeIds: active.map(volume => volume.id) });
-        }
-        const previousVolumes = previous.filter(entry => entry.scope === 'volume' && !entry.retired);
-        if (previousVolumes.length && previousVolumes.every(volume => volume.status === 'done')) {
-            for (const volume of active) {
-                if (!volume.continuationRationale.trim()) {
-                    reject_ACU$5(`在既有卷全部完成后追加或激活卷 ${volume.id} 时必须说明续卷依据`, { id: volume.id });
-                }
-            }
-        }
-    }
-    /**
-     * 应用年代学写集。核心防线有三条：
-     * 1. 时间事实必须有真实正文证据，且证据不得越过本次结算水位——未来楼层不是已发生事实。
-     * 2. retire 必须命中既有条目并给理由；漏写不等于删除。
-     * 3. 任一条目失败即整份 delta 拒绝，不做部分登记。
-     */
-    function applyChronologyDelta_ACU(existing, items, settledIndex) {
-        const byId = new Map(existing.map(entry => [entry.id, entry]));
-        for (const item of items) {
-            if (!item.id.trim())
-                reject_ACU$5('年代学条目缺少 id');
-            if (item.action === 'retire') {
-                const current = byId.get(item.id);
-                if (!current)
-                    reject_ACU$5(`retire 的年代学条目不存在：${item.id}`, { id: item.id });
-                if (!item.reason.trim())
-                    reject_ACU$5(`retire 年代学条目 ${item.id} 必须给出理由`, { id: item.id });
-                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
-                continue;
-            }
-            if (!item.anchor.trim())
-                reject_ACU$5(`年代学条目 ${item.id} 的 anchor 不能为空`, { id: item.id });
-            if (!item.elapsed.trim())
-                reject_ACU$5(`年代学条目 ${item.id} 的 elapsed 不能为空；无法可靠量化就明确写「未知」或「约……」`, { id: item.id });
-            if (!item.transition.trim())
-                reject_ACU$5(`年代学条目 ${item.id} 的 transition 不能为空`, { id: item.id });
-            const evidenceIndexes = normalizeEvidenceIndexes_ACU(item.evidenceIndexes);
-            if (!evidenceIndexes || !evidenceIndexes.length) {
-                reject_ACU$5(`年代学条目 ${item.id} 的 evidenceIndexes 必须是非空的非负整数楼层数组`, { id: item.id, evidenceIndexes: item.evidenceIndexes });
-            }
-            const future = evidenceIndexes.filter(index => index > settledIndex);
-            if (future.length) {
-                reject_ACU$5(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
-            }
-            byId.set(item.id, {
-                id: item.id,
-                anchor: item.anchor.trim(),
-                elapsed: item.elapsed.trim(),
-                precision: item.precision,
-                transition: item.transition.trim(),
-                evidenceIndexes,
-                updatedIndex: settledIndex,
-                retired: false,
-                retiredReason: '',
-            });
-        }
-        return [...byId.values()];
-    }
-    function applyStoryArcDelta_ACU(existing, items) {
-        const byId = new Map(existing.map(entry => [entry.id, entry]));
-        for (const item of items) {
-            if (!item.id.trim())
-                reject_ACU$5('总纲条目缺少 id');
-            if (item.action === 'retire') {
-                const current = byId.get(item.id);
-                if (!current)
-                    reject_ACU$5(`retire 的总纲条目不存在：${item.id}`, { id: item.id });
-                if (!item.reason.trim())
-                    reject_ACU$5(`retire 总纲条目 ${item.id} 必须给出理由`, { id: item.id });
-                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
-                continue;
-            }
-            const previous = byId.get(item.id);
-            // 对既有条目重复 upsert 时，省略或留空的字段沿用原值：主 Agent 常按惯性每轮派总纲“更新”，
-            // 若把省略当成清空，几轮下来 escalation / withheld 会被抹掉、active 卷会被打回 planned。
-            const title = item.title.trim() || previous?.title || '';
-            const direction = item.direction.trim() || previous?.direction || '';
-            const escalation = item.escalation.trim() || previous?.escalation || '';
-            const withheld = item.withheld.trim() || previous?.withheld || '';
-            const status = item.statusProvided || !previous ? item.status : previous.status;
-            if (!title)
-                reject_ACU$5(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
-            // direction 是这个模块存在的意义：没有方向的条目只是一个标题，对大纲毫无约束力。
-            if (!direction)
-                reject_ACU$5(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
-            if (item.scope === 'volume' && !escalation) {
-                reject_ACU$5(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
-            }
-            byId.set(item.id, {
-                id: item.id,
-                scope: item.scope,
-                title,
-                direction,
-                escalation,
-                withheld,
-                status,
-                // 进度锚只增不减：upsert 不携带 stageNumbers 时保留既有记录，避免改一次方向就把承载历史抹平。
-                stageNumbers: item.stageNumbers.length ? normalizeStageNumbers_ACU(item.stageNumbers) : (previous ? previous.stageNumbers : []),
-                completionStageNumber: item.completionStageNumber ?? (previous?.completionStageNumber ?? null),
-                completionState: item.completionState || previous?.completionState || '',
-                continuationRationale: item.continuationRationale || previous?.continuationRationale || '',
-                narrativeRole: item.narrativeRole ?? previous?.narrativeRole,
-                targetStageRange: item.targetStageRange ?? previous?.targetStageRange,
-                targetTimeSpan: item.targetTimeSpan ?? previous?.targetTimeSpan,
-                progressCeiling: item.progressCeiling ?? previous?.progressCeiling,
-                sustainingThreads: item.sustainingThreads ?? previous?.sustainingThreads,
-                payoffTargets: item.payoffTargets ?? previous?.payoffTargets,
-                completionRationale: item.completionRationale ?? previous?.completionRationale,
-                retired: false,
-                retiredReason: '',
-            });
-        }
-        const next = [...byId.values()];
-        assertSingleActiveStoryScope_ACU(next);
-        assertStoryArcContractShape_ACU(next);
-        return next;
-    }
-    function applyStoryArcPatches_ACU(entries, patches) {
-        const byId = new Map(entries.map(entry => [entry.id, entry]));
-        for (const patch of patches) {
-            const current = byId.get(patch.id);
-            if (!current)
-                reject_ACU$5(`patch 的总纲条目不存在：${patch.id}`, { id: patch.id });
-            if (current.retired)
-                reject_ACU$5(`总纲条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
-            const merged = {
-                ...current,
-                title: patch.title ?? current.title,
-                direction: patch.direction ?? current.direction,
-                escalation: patch.escalation ?? current.escalation,
-                withheld: patch.withheld ?? current.withheld,
-                status: patch.status ?? current.status,
-                stageNumbers: patch.stageNumbers ? normalizeStageNumbers_ACU(patch.stageNumbers) : current.stageNumbers,
-                completionStageNumber: Object.prototype.hasOwnProperty.call(patch, 'completionStageNumber') ? patch.completionStageNumber : current.completionStageNumber,
-                completionState: patch.completionState ?? current.completionState,
-                continuationRationale: patch.continuationRationale ?? current.continuationRationale,
-                narrativeRole: patch.narrativeRole ?? current.narrativeRole,
-                targetStageRange: patch.targetStageRange ?? current.targetStageRange,
-                targetTimeSpan: patch.targetTimeSpan ?? current.targetTimeSpan,
-                progressCeiling: patch.progressCeiling ?? current.progressCeiling,
-                sustainingThreads: patch.sustainingThreads ?? current.sustainingThreads,
-                payoffTargets: patch.payoffTargets ?? current.payoffTargets,
-                completionRationale: patch.completionRationale ?? current.completionRationale,
-            };
-            if (!merged.title.trim())
-                reject_ACU$5(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
-            if (!merged.direction.trim())
-                reject_ACU$5(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
-            byId.set(patch.id, merged);
-        }
-        const next = [...byId.values()];
-        assertStoryArcContractShape_ACU(next);
-        return next;
-    }
-    function violationOf_ACU(error) {
-        if (error instanceof ContinuationValidationError_ACU)
-            return { message: error.error.message, details: error.error.details };
-        return { message: error instanceof Error ? error.message : String(error) };
-    }
-    function clonePendingFixes_ACU(pending) {
-        return pending.map(item => ({ ...item, violations: item.violations.map(violation => ({ ...violation })) }));
-    }
-    function recordPendingFix_ACU$1(pending, module, agentName, message, details, index) {
-        const path = typeof details?.path === 'string' && details.path ? details.path : module;
-        const violation = { path, message };
-        const now = Date.now();
-        const found = pending.findIndex(item => item.module === module);
-        if (found >= 0) {
-            const previous = pending[found];
-            pending[found] = {
-                module,
-                agentName: agentName || previous.agentName,
-                violations: [violation],
-                attempts: previous.attempts + 1,
-                firstFailedAtIndex: previous.firstFailedAtIndex,
-                lastError: message,
-                source: 'transaction_rejected',
-                completion: previous.acceptedKeys.length ? 'partial' : 'failed',
-                rangeStartIndex: previous.rangeStartIndex,
-                rangeEndIndex: Math.max(previous.rangeEndIndex, index),
-                acceptedKeys: previous.acceptedKeys,
-                createdAt: previous.createdAt,
-                updatedAt: now,
-            };
-            return;
-        }
-        pending.push({ module, agentName, violations: [violation], attempts: 1, firstFailedAtIndex: index, lastError: message,
-            source: 'transaction_rejected', completion: 'failed', rangeStartIndex: index, rangeEndIndex: index,
-            acceptedKeys: [], createdAt: now, updatedAt: now });
-    }
-    function clearPendingModule_ACU$1(pending, module) {
-        for (let index = pending.length - 1; index >= 0; index -= 1) {
-            if (pending[index].module === module)
-                pending.splice(index, 1);
-        }
-    }
-    function assertModuleRevision_ACU(module, delta, snapshot) {
-        const expected = delta.expectedRevisions[module];
-        if (expected === undefined)
-            return;
-        if (expected !== snapshot.revisions[module]) {
-            reject_ACU$5(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module], path: module });
-        }
-    }
-    function isolateModule_ACU(module, current, run, pending, applied, options, settledIndex) {
-        try {
-            const value = run();
-            clearPendingModule_ACU$1(pending, module);
-            applied.push(module);
-            return value;
-        }
-        catch (error) {
-            if (!options?.onViolation)
-                throw error;
-            const parsed = violationOf_ACU(error);
-            options.onViolation(parsed.message, parsed.details);
-            recordPendingFix_ACU$1(pending, module, options.agentName ?? '', parsed.message, parsed.details, settledIndex);
-            return current;
-        }
-    }
-    function unchangedApply_ACU(snapshot) {
-        return { snapshot, pendingFixes: snapshot.pendingFixes, appliedModules: [] };
-    }
-    /**
-     * 把一份子代理写集事务应用到快照上。
-     * @param snapshot 当前快照
-     * @param delta 子代理返回的写集
-     * @param allowedWrites 该子代理被授权的模块名列表
-     * @param settledIndex 本次结算的水位楼层，用于记录条目变动楼层
-     * @returns 被写入模块的 revision 各自 +1；容错模式下违规模块留在 pendingFixes
-     */
-    function applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options) {
-        assertWritePermission_ACU(delta, allowedWrites);
-        const touched = collectTouchedModules_ACU(delta);
-        if (!touched.length)
-            return unchangedApply_ACU(snapshot);
-        const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
-        const applied = [];
-        const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
-        const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
-        const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
-        const chronologyTouched = delta.chronology.length > 0;
-        const hooks = hooksTouched
-            ? isolateModule_ACU('hooks', snapshot.hooks, () => {
-                assertModuleRevision_ACU('hooks', delta, snapshot);
-                let next = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
-                if (delta.hookPatches.length)
-                    next = applyHookPatches_ACU(next, delta.hookPatches, settledIndex);
-                return next;
-            }, pending, applied, options, settledIndex)
-            : snapshot.hooks;
-        const infoGap = infoGapTouched
-            ? isolateModule_ACU('infoGap', snapshot.infoGap, () => {
-                assertModuleRevision_ACU('infoGap', delta, snapshot);
-                let next = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
-                if (delta.infoGapPatches.length)
-                    next = applyInfoGapPatches_ACU(next, delta.infoGapPatches);
-                return next;
-            }, pending, applied, options, settledIndex)
-            : snapshot.infoGap;
-        const storyArc = storyArcTouched
-            ? isolateModule_ACU('storyArc', snapshot.storyArc, () => {
-                assertModuleRevision_ACU('storyArc', delta, snapshot);
-                let next = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
-                if (delta.storyArcPatches.length) {
-                    next = applyStoryArcPatches_ACU(next, delta.storyArcPatches);
-                    assertSingleActiveStoryScope_ACU(next);
-                }
-                assertVolumeLifecycle_ACU(snapshot.storyArc, next, new Set(completedStageNumbers));
-                return next;
-            }, pending, applied, options, settledIndex)
-            : snapshot.storyArc;
-        const chronology = chronologyTouched
-            ? isolateModule_ACU('chronology', snapshot.chronology, () => {
-                assertModuleRevision_ACU('chronology', delta, snapshot);
-                return applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex);
-            }, pending, applied, options, settledIndex)
-            : snapshot.chronology;
-        const next = {
-            ...snapshot,
-            hooks,
-            infoGap,
-            storyArc,
-            chronology,
-            pendingFixes: pending,
-            revisions: {
-                hooks: snapshot.revisions.hooks + (applied.includes('hooks') ? 1 : 0),
-                infoGap: snapshot.revisions.infoGap + (applied.includes('infoGap') ? 1 : 0),
-                constraints: snapshot.revisions.constraints,
-                storyArc: snapshot.revisions.storyArc + (applied.includes('storyArc') ? 1 : 0),
-                chronology: snapshot.revisions.chronology + (applied.includes('chronology') ? 1 : 0),
-                webRefs: snapshot.revisions.webRefs,
-                userRequirements: snapshot.revisions.userRequirements,
-            },
-        };
-        return { snapshot: next, pendingFixes: pending, appliedModules: applied };
-    }
-    /** 百科资料库条目 ID 前缀；模型漏写 id 时由运行时按此前缀顺延分配。 */
-    const AGENT_WEB_REF_ID_PREFIX_ACU = 'WR-';
-    /**
-     * 分配下一个可用的百科资料库 ID。按既有 WR-### 最大序号 +1，避免与退休条目撞号。
-     * @param existing 当前全部条目（含退休）
-     * @param taken 本次写集里已占用的 id
-     */
-    function nextAgentWebRefId_ACU(existing, taken = new Set()) {
-        let max = 0;
-        for (const id of [...existing.map(entry => entry.id), ...taken]) {
-            const matched = /^WR-(\d+)$/.exec(id);
-            if (matched)
-                max = Math.max(max, Number.parseInt(matched[1], 10));
-        }
-        return `${AGENT_WEB_REF_ID_PREFIX_ACU}${String(max + 1).padStart(3, '0')}`;
-    }
-    /**
-     * 应用 web-researcher 的百科资料库写集。与叙事模块同一防线：retire 必须命中且给理由、
-     * 任一条目失败整份拒绝、修订号并发校验；upsert 对既有条目按 id 覆盖但保留首次入库时间。
-     * 写入不推进结算水位——百科条目不是正文事实。
-     * @param snapshot 当前快照
-     * @param output 子代理运行时已把 pageRef 回填成完整条目的输出
-     * @param expectedRevision 子代理读到资料那一刻的 webRefs 修订号；与当前不一致即拒绝
-     * @param now 入库时间
-     * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）。容错模式下失败模块不入库。
-     */
-    function applyAgentWebRefsDelta_ACU(snapshot, output, expectedRevision, now = Date.now(), options) {
-        if (!output.items.length)
-            return unchangedApply_ACU(snapshot);
-        try {
-            if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
-                reject_ACU$5('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs, path: 'webRefs' });
-            }
-            const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
-            const taken = new Set();
-            for (const item of output.items) {
-                if (item.action === 'retire') {
-                    const current = byId.get(item.id);
-                    if (!current)
-                        reject_ACU$5(`retire 的百科条目不存在：${item.id}`, { id: item.id });
-                    if (!item.reason.trim())
-                        reject_ACU$5(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
-                    byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
-                    continue;
-                }
-                if (!item.title.trim())
-                    reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
-                if (!item.brief.trim())
-                    reject_ACU$5(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
-                if (!item.url.trim())
-                    reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
-                const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
-                taken.add(id);
-                const previous = byId.get(id);
-                byId.set(id, {
-                    id,
-                    title: item.title.trim(),
-                    source: item.source,
-                    url: item.url.trim(),
-                    query: item.query,
-                    tags: [...new Set(item.tags.map(tag => tag.trim()).filter(Boolean))],
-                    brief: item.brief.trim(),
-                    summary: item.summary.trim(),
-                    sourceStatus: item.sourceStatus,
-                    fetchedAt: previous?.fetchedAt || now,
-                    retired: false,
-                    retiredReason: '',
-                });
-            }
-            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
-            clearPendingModule_ACU$1(pending, 'webRefs');
-            const next = {
-                ...snapshot,
-                webRefs: [...byId.values()],
-                pendingFixes: pending,
-                revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
-            };
-            return { snapshot: next, pendingFixes: pending, appliedModules: ['webRefs'] };
-        }
-        catch (error) {
-            if (!options?.onViolation)
-                throw error;
-            const parsed = violationOf_ACU(error);
-            options.onViolation(parsed.message, parsed.details);
-            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
-            recordPendingFix_ACU$1(pending, 'webRefs', options.agentName ?? '', parsed.message, parsed.details, snapshot.settledThroughIndex);
-            const next = { ...snapshot, pendingFixes: pending };
-            return { snapshot: next, pendingFixes: pending, appliedModules: [] };
-        }
-    }
-    /** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
-    function renderActiveConstraintList_ACU(snapshot) {
-        if (!snapshot.constraints.length)
-            return '（当前没有任何活跃约束）';
-        return snapshot.constraints.map(item => `${item.id}：${item.text}`).join('；');
-    }
-    /**
-     * 登记主 Agent 裁决后的长期约束。增量语义：add 只写新增文本，retire 只写要废除的
-     * 条目（按 id 或原文精确匹配）。漏写既有条目不等于删除；重复登记已有文本幂等跳过。
-     * @param snapshot 当前快照
-     * @param add 新增的约束文本
-     * @param retire 废除的约束（id 或原文）
-     * @param settledIndex 登记时的水位楼层
-     * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回。容错模式下失败不入库。
-     */
-    function applyAgentConstraintRegistration_ACU(snapshot, add, retire, settledIndex, options) {
-        try {
-            const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
-            const retiredIds = new Set();
-            for (const key of retireKeys) {
-                const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
-                if (!matched) {
-                    reject_ACU$5(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
-                }
-                retiredIds.add(matched.id);
-            }
-            const remaining = snapshot.constraints.filter(item => !retiredIds.has(item.id));
-            const existingTexts = new Set(remaining.map(item => item.text));
-            const addTexts = [];
-            for (const raw of add) {
-                const text = raw.trim();
-                // 重复登记既有文本（含旧全量形态重抄整份清单）幂等跳过，不再构成拒绝理由。
-                if (!text || existingTexts.has(text))
-                    continue;
-                existingTexts.add(text);
-                addTexts.push(text);
-            }
-            if (!retiredIds.size && !addTexts.length)
-                return unchangedApply_ACU(snapshot);
-            const nextRevision = snapshot.revisions.constraints + 1;
-            const added = addTexts.map((text, order) => ({
-                id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
-                text,
-                reason: '主 Agent 本轮裁决登记',
-                createdIndex: settledIndex,
-            }));
-            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
-            clearPendingModule_ACU$1(pending, 'constraints');
-            const next = {
-                ...snapshot,
-                constraints: [...remaining, ...added],
-                pendingFixes: pending,
-                revisions: { ...snapshot.revisions, constraints: nextRevision },
-            };
-            return { snapshot: next, pendingFixes: pending, appliedModules: ['constraints'] };
-        }
-        catch (error) {
-            if (!options?.onViolation)
-                throw error;
-            const parsed = violationOf_ACU(error);
-            options.onViolation(parsed.message, parsed.details);
-            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
-            recordPendingFix_ACU$1(pending, 'constraints', options.agentName ?? '', parsed.message, parsed.details, settledIndex);
-            const next = { ...snapshot, pendingFixes: pending };
-            return { snapshot: next, pendingFixes: pending, appliedModules: [] };
-        }
-    }
-
-    /**
-     * service/continuation/agent/agent-workflow.ts — 续写固定工作流
-     *
-     * 程序按固定顺序驱动结算、策划、条件审查、容错提交、自动修复与写作指令编排。
-     * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
-     */
-    const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
-    const MAINLINE_NAME_ACU = 'mainline-planner';
-    const BEAT_NAME_ACU = 'beat-planner';
-    const REVIEWER_NAME_ACU = 'continuity-reviewer';
-    const ARC_NAME_ACU = 'arc-architect';
-    const WEB_NAME_ACU = 'web-researcher';
-    const MAINTAINER_MODULES_ACU = ['hooks', 'infoGap', 'chronology'];
-    const CONTINUATION_REPAIRABLE_MODULES_ACU = [...MAINTAINER_MODULES_ACU, 'storyArc', 'webRefs'];
-    const BEAT_OBLIGATION_PATTERN_ACU = /伏笔|埋设|回收|误导|信息差|揭示/;
-    const CONFLICT_PATTERN_ACU = /冲突|矛盾|红线/;
-    function continuationBeatObligation_ACU(turn) {
-        if (!turn)
-            return false;
-        if (turn.function === 'payoff' || turn.function === 'reveal')
-            return true;
-        return BEAT_OBLIGATION_PATTERN_ACU.test(turn.goal ?? '');
-    }
-    function continuationMajorTurn_ACU(turn) {
-        if (!turn)
-            return false;
-        return turn.pacing === 'turn' || turn.function === 'reveal';
-    }
-    function continuationContinuityReviewRequired_ACU(input) {
-        if (input.majorTurn)
-            return true;
-        return CONFLICT_PATTERN_ACU.test([...input.recommendations, ...input.risks].join('\n'));
-    }
-    function isStale_ACU(error) {
-        return error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE';
-    }
-    function errorText_ACU(error) {
-        if (error instanceof ContinuationValidationError_ACU)
-            return error.error.message;
-        return error instanceof Error ? error.message : String(error);
-    }
-    function tolerantOptions_ACU(agentName) {
-        return { onViolation: () => undefined, agentName };
-    }
-    function deltaTouched_ACU(delta) {
-        if (!delta)
-            return false;
-        return Boolean(delta.hooks.length || delta.hookPatches.length || delta.infoGap.length || delta.infoGapPatches.length
-            || delta.storyArc.length || delta.storyArcPatches.length || delta.chronology.length);
-    }
-    function repairableAgents_ACU(snapshot, settings) {
-        if (!settings.workflow.autoFixEnabled)
-            return [];
-        const names = new Set();
-        for (const fix of snapshot.pendingFixes) {
-            if (fix.attempts >= settings.workflow.autoFixMaxAttempts)
-                continue;
-            if (fix.module === 'hooks' || fix.module === 'infoGap' || fix.module === 'chronology')
-                names.add(MAINTAINER_NAME_ACU);
-            else if (fix.module === 'storyArc')
-                names.add(ARC_NAME_ACU);
-            else if (fix.module === 'webRefs')
-                names.add(WEB_NAME_ACU);
-        }
-        return [...names];
-    }
-    function repairModulesForAgent_ACU(snapshot, agentName) {
-        return [...new Set(snapshot.pendingFixes
-                .filter(item => {
-                if (agentName === MAINTAINER_NAME_ACU)
-                    return MAINTAINER_MODULES_ACU.includes(item.module);
-                if (agentName === ARC_NAME_ACU)
-                    return item.module === 'storyArc';
-                if (agentName === WEB_NAME_ACU)
-                    return item.module === 'webRefs';
-                return false;
-            })
-                .map(item => item.module))];
-    }
-    function restrictMaintainerOutput_ACU(output, allowedModules) {
-        if (!output)
-            return output;
-        const allowed = new Set(allowedModules);
-        return {
-            ...output,
-            delta: {
-                ...output.delta,
-                hooks: allowed.has('hooks') ? output.delta.hooks : [],
-                hookPatches: allowed.has('hooks') ? output.delta.hookPatches : [],
-                infoGap: allowed.has('infoGap') ? output.delta.infoGap : [],
-                infoGapPatches: allowed.has('infoGap') ? output.delta.infoGapPatches : [],
-                storyArc: allowed.has('storyArc') ? output.delta.storyArc : [],
-                storyArcPatches: allowed.has('storyArc') ? output.delta.storyArcPatches : [],
-                chronology: allowed.has('chronology') ? output.delta.chronology : [],
-                constraintProposals: allowed.has('constraints') ? output.delta.constraintProposals : [],
-            },
-        };
-    }
-    function needsPendingEscalation_ACU(snapshot, settings) {
-        if (!snapshot.pendingFixes.length)
-            return false;
-        if (!settings.workflow.autoFixEnabled)
-            return true;
-        return snapshot.pendingFixes.some(item => item.attempts >= settings.workflow.autoFixMaxAttempts);
-    }
-    function formatFixes_ACU$1(fixes) {
-        if (!fixes.length)
-            return '无';
-        return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => violation.message).join('；') || item.lastError}`).join(' | ');
-    }
-    function acceptedKeysForModule_ACU$1(keys, module) {
-        return [...new Set((keys ?? []).filter(key => key.startsWith(`${module}:`)))];
-    }
-    function recordWorkflowIssues_ACU$1(snapshot, issues, agentName, rangeStartIndex, rangeEndIndex, acceptedKeys) {
-        if (!issues.length)
-            return snapshot;
-        const now = Date.now();
-        const pending = snapshot.pendingFixes.map(item => ({
-            ...item,
-            violations: item.violations.map(violation => ({ ...violation })),
-            acceptedKeys: [...(item.acceptedKeys ?? [])],
-        }));
-        const byModule = new Map();
-        for (const issue of issues) {
-            const list = byModule.get(issue.module) ?? [];
-            list.push(issue);
-            byModule.set(issue.module, list);
-        }
-        for (const [module, moduleIssues] of byModule) {
-            const found = pending.findIndex(item => item.module === module);
-            const previous = found >= 0 ? pending[found] : null;
-            const accepted = acceptedKeysForModule_ACU$1(acceptedKeys, module);
-            const next = {
-                module,
-                agentName: agentName || previous?.agentName || '',
-                violations: moduleIssues.map(issue => ({ path: issue.path, message: issue.message })),
-                attempts: (previous?.attempts ?? 0) + 1,
-                firstFailedAtIndex: previous?.firstFailedAtIndex ?? rangeStartIndex,
-                lastError: moduleIssues.map(issue => issue.message).join('；'),
-                source: moduleIssues[0]?.source ?? 'protocol_failed',
-                completion: accepted.length ? 'partial' : 'failed',
-                rangeStartIndex: previous?.rangeStartIndex ?? rangeStartIndex,
-                rangeEndIndex: Math.max(previous?.rangeEndIndex ?? rangeEndIndex, rangeEndIndex),
-                acceptedKeys: [...new Set([...(previous?.acceptedKeys ?? []), ...accepted])],
-                createdAt: previous?.createdAt ?? now,
-                updatedAt: now,
-            };
-            if (found >= 0)
-                pending[found] = next;
-            else
-                pending.push(next);
-        }
-        return { ...snapshot, pendingFixes: pending };
-    }
-    function completionModules_ACU(payload, writes, fallback) {
-        const modules = { ...(payload.moduleCompletion ?? {}) };
-        for (const module of writes)
-            if (!modules[module])
-                modules[module] = fallback;
-        return modules;
-    }
-    function clearCompletedPending_ACU$1(snapshot, modules) {
-        const completed = new Set(Object.entries(modules)
-            .filter(([, state]) => state === 'complete_changed' || state === 'complete_no_change')
-            .map(([module]) => module));
-        if (!completed.size)
-            return snapshot;
-        return { ...snapshot, pendingFixes: snapshot.pendingFixes.filter(item => !completed.has(item.module)) };
-    }
-    function maintainerPrompt_ACU(focus, snapshot, repair) {
-        const fixes = snapshot.pendingFixes.filter(item => MAINTAINER_MODULES_ACU.includes(item.module));
-        return [
-            repair ? '这是独立预算的自动修复。只提交违规模块的增量 patch，不要重写无关模块。' : `本轮焦点：${focus}`,
-            '结算已经发生的正文。没有新事实时 delta 留空并在 summary 写明 no_change。',
-            `待修复：${formatFixes_ACU$1(fixes)}`,
-        ].join('\n');
-    }
-    function repairAgentForModule_ACU(module) {
-        if (MAINTAINER_MODULES_ACU.includes(module))
-            return MAINTAINER_NAME_ACU;
-        if (module === 'storyArc')
-            return ARC_NAME_ACU;
-        if (module === 'webRefs')
-            return WEB_NAME_ACU;
-        return null;
-    }
-    function outputTouchesModule_ACU(payload, module) {
-        if (module === 'webRefs')
-            return Boolean(payload.researcher?.items.length);
-        const delta = (payload.maintainer ?? payload.arc)?.delta;
-        if (!delta)
-            return false;
-        if (module === 'hooks')
-            return Boolean(delta.hooks.length || delta.hookPatches.length);
-        if (module === 'infoGap')
-            return Boolean(delta.infoGap.length || delta.infoGapPatches.length);
-        if (module === 'storyArc')
-            return Boolean(delta.storyArc.length || delta.storyArcPatches.length);
-        if (module === 'chronology')
-            return Boolean(delta.chronology.length);
-        return false;
-    }
-    /**
-     * 只运行资料补足子代理，不进入策划、编排或宿主正文发送。目标模块同时用于派工分组和
-     * 程序级写集裁剪；非目标 pending、模块内容与 revision 均保持原样。
-     */
-    async function runContinuationMaterialRepair_ACU(input) {
-        const targets = [...new Set(input.targetModules)];
-        const unsupported = targets.filter(module => !repairAgentForModule_ACU(module));
-        if (!targets.length || unsupported.length) {
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', unsupported.length
-                ? `这些资料模块没有安全的定向补足代理：${unsupported.join(', ')}`
-                : '请选择至少一个可补足的资料模块', false));
-        }
-        let snapshot = input.snapshot;
-        const steps = [];
-        const moduleStates = {};
-        const groups = new Map();
-        for (const module of targets) {
-            const agentName = repairAgentForModule_ACU(module);
-            groups.set(agentName, [...(groups.get(agentName) ?? []), module]);
-        }
-        const calls = [...groups.entries()].map(([agentName, targetModules]) => ({
-            agentName,
-            billing: 'repair',
-            repair: true,
-            targetModules,
-            prompt: `用户显式要求定向补足。程序只接受这些模块：${targetModules.join(', ')}。${formatFixes_ACU$1(snapshot.pendingFixes.filter(item => targetModules.includes(item.module)))}`,
-        }));
-        const results = await Promise.all(calls.map(async (call) => {
-            try {
-                return await input.runAgent(call);
-            }
-            catch (error) {
-                if (isStale_ACU(error))
-                    throw error;
-                return { ok: false, summary: errorText_ACU(error) };
-            }
-        }));
-        for (let index = 0; index < calls.length; index += 1) {
-            const call = calls[index];
-            const payload = results[index];
-            const fallback = !payload.ok
-                ? 'failed'
-                : payload.noChange ? 'complete_no_change' : 'complete_changed';
-            const reported = completionModules_ACU(payload, call.targetModules, fallback);
-            const appliedModules = [];
-            const issues = (payload.unresolvedIssues ?? []).filter(issue => call.targetModules.includes(issue.module));
-            if (payload.ok) {
-                try {
-                    if (call.targetModules.includes('webRefs') && payload.researcher) {
-                        const applied = applyAgentWebRefsDelta_ACU(snapshot, payload.researcher, payload.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(call.agentName));
-                        snapshot = applied.snapshot;
-                        appliedModules.push(...applied.appliedModules);
-                    }
-                    const restricted = restrictMaintainerOutput_ACU(payload.maintainer ?? payload.arc, call.targetModules);
-                    if (restricted && deltaTouched_ACU(restricted.delta)) {
-                        const delta = payload.readRevisions
-                            ? mergeAgentDeltaRevisions_ACU(restricted.delta, payload.readRevisions)
-                            : restricted.delta;
-                        const applied = applyAgentModuleDelta_ACU(snapshot, delta, call.targetModules, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(call.agentName));
-                        snapshot = applied.snapshot;
-                        appliedModules.push(...applied.appliedModules);
-                    }
-                }
-                catch (error) {
-                    if (isStale_ACU(error))
-                        throw error;
-                    for (const module of call.targetModules) {
-                        issues.push({ module, source: 'transaction_rejected', path: module, message: errorText_ACU(error) });
-                    }
-                }
-            }
-            else {
-                for (const module of call.targetModules) {
-                    issues.push({ module, source: 'invoke_failed', path: module, message: payload.summary || '定向补足子代理调用失败' });
-                }
-            }
-            if (issues.length) {
-                snapshot = recordWorkflowIssues_ACU$1(snapshot, issues, call.agentName, snapshot.materialCompletion.rangeStartIndex, Math.max(input.settledIndex, snapshot.materialCompletion.rangeEndIndex), payload.acceptedKeys);
-            }
-            const completedWithoutIssue = {};
-            for (const module of call.targetModules) {
-                const moduleIssues = issues.some(issue => issue.module === module);
-                const touched = outputTouchesModule_ACU(payload, module);
-                const applied = appliedModules.includes(module);
-                const state = reported[module] ?? fallback;
-                if (!moduleIssues && (applied || (!touched && state === 'complete_no_change'))) {
-                    completedWithoutIssue[module] = applied || state === 'complete_changed' ? 'complete_changed' : 'complete_no_change';
-                }
-            }
-            snapshot = clearCompletedPending_ACU$1(snapshot, completedWithoutIssue);
-            for (const module of call.targetModules) {
-                const pending = snapshot.pendingFixes.some(item => item.module === module);
-                const applied = appliedModules.includes(module);
-                moduleStates[module] = pending ? (applied ? 'partial' : 'failed')
-                    : completedWithoutIssue[module] ?? (applied ? 'complete_changed' : 'complete_no_change');
-            }
-            const failed = call.targetModules.filter(module => moduleStates[module] === 'failed' || moduleStates[module] === 'partial');
-            steps.push({
-                agentName: call.agentName,
-                status: failed.length ? 'failed' : payload.noChange ? 'no_change' : 'ok',
-                summary: payload.summary || (failed.length ? `仍有待补模块：${failed.join(', ')}` : '定向补足完成'),
-            });
-        }
-        const now = Date.now();
-        const mergedModules = { ...snapshot.materialCompletion.modules, ...moduleStates };
-        const targetSet = new Set(targets);
-        const unresolvedLegacy = snapshot.materialCompletion.state === 'legacy_unknown'
-            && AGENT_WRITABLE_MODULES_ACU
-                .some(module => !targetSet.has(module) && (mergedModules[module] === undefined || mergedModules[module] === 'legacy_unknown'));
-        const repairedModules = targets.filter(module => moduleStates[module] === 'complete_changed' || moduleStates[module] === 'complete_no_change');
-        const failedModules = targets.filter(module => !repairedModules.includes(module));
-        const overall = snapshot.pendingFixes.length
-            ? (repairedModules.length ? 'partial' : 'failed')
-            : unresolvedLegacy ? 'legacy_unknown'
-                : Object.values(moduleStates).includes('complete_changed') ? 'complete_changed' : 'complete_no_change';
-        snapshot = {
-            ...snapshot,
-            materialCompletion: { ...snapshot.materialCompletion, state: overall, modules: mergedModules, updatedAt: now },
-            updatedAt: Math.max(snapshot.updatedAt, now),
-        };
-        return { snapshot, repairedModules, failedModules, steps };
-    }
-    async function runContinuationAgentWorkflow_ACU(input) {
-        let snapshot = input.snapshot;
-        const steps = [];
-        const plannerNotes = [];
-        const plannerRisks = [];
-        let reviewerNote = '';
-        const pendingRangeStarts = snapshot.pendingFixes.map(item => item.rangeStartIndex).filter(index => Number.isInteger(index) && index >= 0);
-        const settlementStartIndex = pendingRangeStarts.length ? Math.min(...pendingRangeStarts) : Math.max(0, snapshot.settledThroughIndex + 1);
-        const settlementEndIndex = input.settledIndex;
-        const runSafe_ACU = async (call) => {
-            try {
-                return await input.runAgent(call);
-            }
-            catch (error) {
-                if (isStale_ACU(error))
-                    throw error;
-                return { ok: false, summary: errorText_ACU(error) };
-            }
-        };
-        const applyMaintainerLike_ACU = (output, writes, readRevisions, agentName) => {
-            if (!output || !deltaTouched_ACU(output.delta))
-                return [];
-            const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
-            const applied = applyAgentModuleDelta_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
-            snapshot = applied.snapshot;
-            return applied.appliedModules;
-        };
-        if (input.opening.dispatchArcArchitect) {
-            const arc = await runSafe_ACU({
-                agentName: ARC_NAME_ACU,
-                billing: 'opening',
-                repair: false,
-                prompt: `开局要求维护总纲。焦点：${input.opening.focus}`,
-            });
-            steps.push({ agentName: ARC_NAME_ACU, status: arc.ok ? 'ok' : 'failed', summary: arc.summary });
-            if (arc.ok)
-                applyMaintainerLike_ACU(arc.arc, arc.writes ?? ['storyArc'], arc.readRevisions, ARC_NAME_ACU);
-        }
-        if (input.opening.dispatchWebResearcher) {
-            const web = await runSafe_ACU({
-                agentName: WEB_NAME_ACU,
-                billing: 'opening',
-                repair: false,
-                prompt: `开局要求补充外部设定。焦点：${input.opening.focus}`,
-            });
-            steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
-            if (web.ok && web.researcher && web.researcher.items.length) {
-                const applied = applyAgentWebRefsDelta_ACU(snapshot, web.researcher, web.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(WEB_NAME_ACU));
-                snapshot = applied.snapshot;
-            }
-        }
-        const maintainerPending = snapshot.pendingFixes.some(item => MAINTAINER_MODULES_ACU.includes(item.module)
-            && item.attempts < input.settings.workflow.autoFixMaxAttempts);
-        if (!input.hasUnsettledHistory && !maintainerPending) {
-            steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: '没有未结算正文，也没有待修复的结算模块' });
-        }
-        else {
-            const maintainer = await runSafe_ACU({
-                agentName: MAINTAINER_NAME_ACU,
-                billing: 'pipeline',
-                repair: false,
-                prompt: maintainerPrompt_ACU(input.opening.focus, snapshot, false),
-            });
-            const writes = (maintainer.writes ?? [...MAINTAINER_MODULES_ACU])
-                .filter((module) => MAINTAINER_MODULES_ACU.includes(module));
-            let completion = maintainer.completion
-                ?? (!maintainer.ok ? 'failed' : maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta) ? 'complete_no_change' : 'complete_changed');
-            let modules = completionModules_ACU(maintainer, writes, completion);
-            const appliedModules = maintainer.ok
-                ? applyMaintainerLike_ACU(maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
-                : [];
-            const issues = [...(maintainer.unresolvedIssues ?? [])];
-            if (!maintainer.ok && !issues.length) {
-                for (const module of writes.length ? writes : [...MAINTAINER_MODULES_ACU]) {
-                    issues.push({ module, source: 'invoke_failed', path: module, message: maintainer.summary || '维护子代理调用失败' });
-                    modules[module] = 'failed';
-                }
-            }
-            if (issues.length) {
-                snapshot = recordWorkflowIssues_ACU$1(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
-                completion = appliedModules.length ? 'partial' : 'failed';
-            }
-            const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module));
-            if (transactionPending.length) {
-                for (const fix of transactionPending) {
-                    const moduleAccepted = appliedModules.includes(fix.module) || acceptedKeysForModule_ACU$1(maintainer.acceptedKeys, fix.module).length > 0;
-                    modules[fix.module] = moduleAccepted ? 'partial' : 'failed';
-                }
-                completion = appliedModules.length ? 'partial' : 'failed';
-            }
-            else {
-                snapshot = clearCompletedPending_ACU$1(snapshot, modules);
-            }
-            const now = Date.now();
-            snapshot = {
-                ...snapshot,
-                materialCompletion: {
-                    state: completion,
-                    rangeStartIndex: settlementStartIndex,
-                    rangeEndIndex: settlementEndIndex,
-                    modules,
-                    updatedAt: now,
-                },
-                updatedAt: Math.max(snapshot.updatedAt, now),
-            };
-            if (completion === 'complete_changed' || completion === 'complete_no_change') {
-                snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
-            }
-            if (!maintainer.ok || completion === 'failed') {
-                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
-            }
-            else if (completion === 'complete_no_change') {
-                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
-            }
-            else if (completion === 'partial') {
-                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: `${maintainer.summary || '已保留部分资料'}；仍有待补条目` });
-            }
-            else {
-                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'ok', summary: maintainer.summary });
-            }
-        }
-        const plannerCalls = [
-            { agentName: MAINLINE_NAME_ACU, billing: 'pipeline', repair: false, prompt: `策划本轮场景。焦点：${input.opening.focus}` },
-        ];
-        if (input.beatObligation) {
-            plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', repair: false, prompt: `本轮有伏笔操作义务。焦点：${input.opening.focus}` });
-        }
-        else {
-            steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '本轮没有伏笔操作义务' });
-        }
-        const planners = await Promise.all(plannerCalls.map(call => runSafe_ACU(call)));
-        for (let index = 0; index < planners.length; index += 1) {
-            const planner = planners[index];
-            steps.push({ agentName: plannerCalls[index].agentName, status: planner.ok ? 'ok' : 'failed', summary: planner.summary });
-            if (planner.planner) {
-                plannerNotes.push(planner.planner.recommendation);
-                plannerRisks.push(...planner.planner.risks);
-            }
-        }
-        const reviewRequired = continuationContinuityReviewRequired_ACU({
-            majorTurn: input.majorTurn,
-            recommendations: plannerNotes,
-            risks: plannerRisks,
-        });
-        if (!reviewRequired) {
-            steps.push({ agentName: REVIEWER_NAME_ACU, status: 'skipped', summary: '没有策划冲突或大转折' });
-        }
-        else {
-            const reviewer = await runSafe_ACU({
-                agentName: REVIEWER_NAME_ACU,
-                billing: 'pipeline',
-                repair: false,
-                prompt: `审查策划是否冲突。焦点：${input.opening.focus}\n${plannerNotes.join('\n')}`,
-            });
-            steps.push({ agentName: REVIEWER_NAME_ACU, status: reviewer.ok ? 'ok' : 'failed', summary: reviewer.summary });
-            if (reviewer.reviewer)
-                reviewerNote = `${reviewer.reviewer.verdict} ${reviewer.reviewer.reason} ${reviewer.reviewer.fixes.join('；')}`;
-        }
-        const escalateBeforeRepair = needsPendingEscalation_ACU(snapshot, input.settings);
-        const repairAgents = repairableAgents_ACU(snapshot, input.settings);
-        const composerBase = [
-            `本轮焦点：${input.opening.focus}`,
-            input.opening.summary ? `开局摘要：${input.opening.summary}` : '',
-            `策划建议：${plannerNotes.join('\n') || '无'}`,
-            `审查结论：${reviewerNote || '未触发连续性审查'}`,
-            `待修复：${formatFixes_ACU$1(snapshot.pendingFixes)}`,
-            '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。',
-        ].filter(Boolean).join('\n');
-        const repairCalls = repairAgents.map(agentName => {
-            const targetModules = repairModulesForAgent_ACU(snapshot, agentName);
-            const targetFixes = snapshot.pendingFixes.filter(item => targetModules.includes(item.module));
-            return {
-                agentName,
-                billing: 'repair',
-                repair: true,
-                targetModules,
-                prompt: `自动修复。程序只接受这些待补模块：${targetModules.join(', ') || '无'}。${formatFixes_ACU$1(targetFixes)}`,
-            };
-        });
-        const repairPromise = Promise.all(repairCalls.map(call => runSafe_ACU(call)));
-        const composerPromise = input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {
-            if (isStale_ACU(error))
-                throw error;
-            const failed = { instruction: '', summary: errorText_ACU(error), constraints: null };
-            return failed;
-        });
-        const [repairs, composer] = await Promise.all([repairPromise, composerPromise]);
-        for (let index = 0; index < repairs.length; index += 1) {
-            const repair = repairs[index];
-            const agentName = repairAgents[index] ?? 'repair';
-            steps.push({ agentName, status: repair.ok ? 'ok' : 'failed', summary: repair.summary });
-            if (!repair.ok)
-                continue;
-            const targetModules = repairCalls[index]?.targetModules ?? [];
-            if (repair.researcher && targetModules.includes('webRefs')) {
-                snapshot = applyAgentWebRefsDelta_ACU(snapshot, repair.researcher, repair.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(agentName)).snapshot;
-            }
-            const restricted = restrictMaintainerOutput_ACU(repair.maintainer ?? repair.arc, targetModules);
-            applyMaintainerLike_ACU(restricted, targetModules, repair.readRevisions, agentName);
-        }
-        steps.push({
-            agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
-            status: composer.instruction.trim() ? 'ok' : 'failed',
-            summary: composer.summary || (composer.instruction.trim() ? '已产出写作指令' : 'instruction 为空'),
-        });
-        if (composer.constraints) {
-            snapshot = applyAgentConstraintRegistration_ACU(snapshot, composer.constraints.add, composer.constraints.retire, input.settledIndex, tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU)).snapshot;
-        }
-        if (escalateBeforeRepair || needsPendingEscalation_ACU(snapshot, input.settings)) {
-            const summary = `工作流停止交付，待修复模块需要主会话处理：${snapshot.pendingFixes.map(item => `${item.module}(${item.attempts})`).join('、') || '自动修复已关闭'}`;
-            return {
-                outcome: 'escalate',
-                summary,
-                instruction: '',
-                pendingFixes: snapshot.pendingFixes,
-                escalated: true,
-                escalationKind: 'pending_fix',
-                snapshot,
-                steps,
-            };
-        }
-        let instruction = composer.instruction.trim();
-        if (!instruction) {
-            return {
-                outcome: 'escalate',
-                summary: composer.summary || 'instruction-composer 没有产出非空写作指令',
-                instruction: '',
-                pendingFixes: snapshot.pendingFixes,
-                escalated: true,
-                escalationKind: 'final_review',
-                snapshot,
-                steps,
-            };
-        }
-        if (input.settings.finalReview.enabled) {
-            let failures = 0;
-            const limit = input.settings.workflow.reviseLimit;
-            while (failures < limit) {
-                let review;
-                try {
-                    review = await input.runFinalReview(instruction, composer.summary);
-                }
-                catch (error) {
-                    if (isStale_ACU(error))
-                        throw error;
-                    failures += 1;
-                    steps.push({ agentName: 'final-reviewer', status: 'failed', summary: errorText_ACU(error) });
-                    if (failures >= limit)
-                        break;
-                    continue;
-                }
-                if (review.verdict === 'pass') {
-                    steps.push({ agentName: 'final-reviewer', status: 'ok', summary: review.summary || 'pass' });
-                    failures = 0;
-                    break;
-                }
-                failures += 1;
-                steps.push({ agentName: 'final-reviewer', status: 'failed', summary: `${review.verdict}：${review.requiredFixes.join('；') || review.summary}` });
-                if (failures >= limit)
-                    break;
-                let revised;
-                try {
-                    revised = await input.runComposer({
-                        prompt: `按反馈清单增量修订，不要全量重写。\n原指令：\n${instruction}`,
-                        revisionFeedback: review.requiredFixes.join('\n'),
-                        priorInstruction: instruction,
-                    });
-                }
-                catch (error) {
-                    if (isStale_ACU(error))
-                        throw error;
-                    failures += 1;
-                    steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: errorText_ACU(error) });
-                    continue;
-                }
-                if (!revised.instruction.trim()) {
-                    failures += 1;
-                    steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: '修订后的 instruction 为空' });
-                    continue;
-                }
-                instruction = revised.instruction.trim();
-                if (revised.constraints) {
-                    snapshot = applyAgentConstraintRegistration_ACU(snapshot, revised.constraints.add, revised.constraints.retire, input.settledIndex, tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU)).snapshot;
-                }
-                steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'ok', summary: '已按反馈增量修订' });
-            }
-            if (failures >= limit) {
-                return {
-                    outcome: 'escalate',
-                    summary: `终审连续 ${limit} 次未通过，已升级主会话`,
-                    instruction: '',
-                    pendingFixes: snapshot.pendingFixes,
-                    escalated: true,
-                    escalationKind: 'final_review',
-                    snapshot,
-                    steps,
-                };
-            }
-        }
-        return {
-            outcome: 'deliver',
-            summary: composer.summary || input.opening.summary || '固定工作流已交付写作指令',
-            instruction,
-            pendingFixes: snapshot.pendingFixes,
-            escalated: false,
-            escalationKind: '',
-            snapshot,
-            steps,
-        };
-    }
-
-    /**
      * service/continuation/agent/agent-conversation-store.ts — 主 Agent 自身会话记录的楼层分段存储
      *
      * 主 Agent 像标准 coding agent 一样看得到自己的对话：用户的输入、它历次迭代的原始输出、
@@ -149135,69 +147742,6 @@ Expected function or array of functions, received type ${typeof value}.`
     function fail_ACU$4(code, message) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'persist', message, false));
     }
-    function rejectMaterialRepair_ACU(code, message, details) {
-        throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'agent_persist', message, false, details));
-    }
-    function messageContent_ACU(message) {
-        return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
-    }
-    function resolveContinuationMaterialAnchor_ACU(chat, chatIdentity) {
-        const messageIndex = chat.length - 1;
-        const message = messageIndex >= 0 && chat[messageIndex] && typeof chat[messageIndex] === 'object' && !Array.isArray(chat[messageIndex])
-            ? chat[messageIndex]
-            : null;
-        if (!chatIdentity || !message) {
-            rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', '当前聊天没有可承载资料补足结果的楼层');
-        }
-        const rawMessageId = message.message_id;
-        const messageId = typeof rawMessageId === 'string' || typeof rawMessageId === 'number' ? rawMessageId : messageIndex;
-        const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0
-            ? String(message.swipe_id)
-            : '0';
-        return {
-            chatIdentity,
-            messageIndex,
-            messageKey: `${typeof messageId}:${String(messageId)}`,
-            swipeId,
-            contentDigest: sha256HexSync_ACU(messageContent_ACU(message)),
-            chatLength: chat.length,
-        };
-    }
-    function assertContinuationMaterialAnchorCurrent_ACU(anchor, chat, chatIdentity) {
-        if (chat.length !== anchor.chatLength || chat.length - 1 !== anchor.messageIndex) {
-            rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足期间聊天楼层已变化，拒绝写入迟到结果');
-        }
-        const current = resolveContinuationMaterialAnchor_ACU(chat, chatIdentity);
-        if (current.chatIdentity !== anchor.chatIdentity || current.messageKey !== anchor.messageKey
-            || current.swipeId !== anchor.swipeId || current.contentDigest !== anchor.contentDigest) {
-            rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足的冻结楼层或 swipe 已变化，拒绝写入迟到结果', { expected: anchor, actual: current });
-        }
-    }
-    function materialAuthorityFingerprint_ACU(snapshot) {
-        return sha256HexSync_ACU(JSON.stringify(snapshot));
-    }
-    function assertContinuationMaterialWriteSet_ACU(before, after, targets) {
-        const allowed = new Set(targets);
-        if (before.schemaVersion !== after.schemaVersion || before.settledThroughIndex !== after.settledThroughIndex
-            || before.materialCompletion.rangeStartIndex !== after.materialCompletion.rangeStartIndex
-            || before.materialCompletion.rangeEndIndex !== after.materialCompletion.rangeEndIndex) {
-            rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', '定向补足越权修改了资料版本、水位或结算范围');
-        }
-        for (const module of AGENT_WRITABLE_MODULES_ACU) {
-            if (allowed.has(module))
-                continue;
-            if (JSON.stringify(before[module]) !== JSON.stringify(after[module])
-                || before.revisions[module] !== after.revisions[module]
-                || before.materialCompletion.modules[module] !== after.materialCompletion.modules[module]) {
-                rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', `定向补足越权修改了非目标模块：${module}`);
-            }
-        }
-        const beforePending = before.pendingFixes.filter(item => !allowed.has(item.module));
-        const afterPending = after.pendingFixes.filter(item => !allowed.has(item.module));
-        if (JSON.stringify(beforePending) !== JSON.stringify(afterPending)) {
-            rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', '定向补足越权修改了非目标模块的 pendingFixes');
-        }
-    }
     function cloneOutline_ACU(outline) {
         return { ...outline, nodes: outline.nodes.map(node => ({ ...node, turns: node.turns.map(turn => ({ ...turn })) })) };
     }
@@ -149442,73 +147986,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 镜像到全局副本（尽力而为）：本聊天信封已落盘成功，全局写失败由回调内部处理，不上抛。
                 this.dependencies.onSettingsReplaced?.(input.settings);
                 return result;
-            });
-        }
-        /**
-         * 显式补足续写资料。整个调用持有聊天租约，模型结果提交前复核任务、冻结末楼和资料权威指纹；
-         * 仅持久化目标模块候选，不进入 continueTask，也不会铸造或发送宿主正文指令。
-         */
-        async repairPendingMaterials(input) {
-            return this.withLease_ACU(async (chatIdentity, lease) => {
-                const allowed = new Set(CONTINUATION_REPAIRABLE_MODULES_ACU);
-                const rawModules = Array.isArray(input.modules) ? input.modules : [];
-                const invalid = rawModules.filter(module => typeof module !== 'string' || !allowed.has(module));
-                if (!rawModules.length || invalid.length) {
-                    rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', invalid.length ? `这些资料模块没有安全的定向补足入口：${invalid.join(', ')}` : '请选择至少一个可补足的资料模块');
-                }
-                const targets = [...new Set(rawModules)];
-                const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
-                const task = this.requireTask_ACU(envelope);
-                if (task.status !== 'paused')
-                    fail_ACU$4('CONTINUATION_TASK_STATE_INVALID', '只有续写暂停空档允许补足资料');
-                if (this.dependencies.hasLiveHostClaim?.(chatIdentity))
-                    fail_ACU$4('CONTINUATION_OPERATION_BUSY', '宿主正文仍在生成，暂不能补足资料');
-                const chat = getChatArray_ACU();
-                const anchor = resolveContinuationMaterialAnchor_ACU(chat, chatIdentity);
-                const liveSnapshot = readAgentModuleSnapshot_ACU(chat);
-                const baseSnapshot = JSON.parse(JSON.stringify(liveSnapshot));
-                const baseFingerprint = materialAuthorityFingerprint_ACU(baseSnapshot);
-                const pendingModules = new Set(baseSnapshot.pendingFixes.map(item => item.module));
-                const legacyOverall = baseSnapshot.materialCompletion.state === 'legacy_unknown';
-                const ineligible = targets.filter(module => !pendingModules.has(module)
-                    && baseSnapshot.materialCompletion.modules[module] !== 'legacy_unknown'
-                    && !legacyOverall);
-                if (ineligible.length) {
-                    rejectMaterialRepair_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', `这些模块当前没有待补足缺口：${ineligible.join(', ')}`);
-                }
-                const controller = new AbortController();
-                abortControllersByChat_ACU.set(chatIdentity, controller);
-                try {
-                    const repair = await this.dependencies.executionEngine.repairMaterials(baseSnapshot, targets, () => this.isLeaseCurrent_ACU(chatIdentity, lease), controller.signal);
-                    this.assertLeaseCurrent_ACU(chatIdentity, lease);
-                    if (controller.signal.aborted) {
-                        rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足已被中断，拒绝写入迟到结果');
-                    }
-                    const currentEnvelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
-                    const currentTask = this.requireTask_ACU(currentEnvelope);
-                    if (currentTask.taskId !== task.taskId || currentTask.status !== 'paused') {
-                        rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足对应的续写任务状态已变化，拒绝写入迟到结果');
-                    }
-                    const currentChat = getChatArray_ACU();
-                    assertContinuationMaterialAnchorCurrent_ACU(anchor, currentChat, this.dependencies.getChatIdentity());
-                    const currentSnapshot = readAgentModuleSnapshot_ACU(currentChat);
-                    if (materialAuthorityFingerprint_ACU(currentSnapshot) !== baseFingerprint) {
-                        rejectMaterialRepair_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '资料补足期间模块 revision、pending 或完成状态已变化，拒绝覆盖更新资料');
-                    }
-                    assertContinuationMaterialWriteSet_ACU(baseSnapshot, repair.snapshot, targets);
-                    await writeAgentModuleSnapshot_ACU(currentChat, anchor.messageIndex, repair.snapshot);
-                    logAgentSession_ACU({
-                        kind: repair.failedModules.length ? 'run_failed' : 'run_completed',
-                        title: repair.failedModules.length ? '定向资料补足部分完成' : '定向资料补足完成',
-                        detail: `目标：${targets.join('、')}；完成：${repair.repairedModules.join('、') || '无'}；待补：${repair.failedModules.join('、') || '无'}`,
-                        ok: repair.failedModules.length === 0,
-                    });
-                    return { ...taskResult_ACU(currentEnvelope), repairedModules: repair.repairedModules, failedModules: repair.failedModules, steps: repair.steps };
-                }
-                finally {
-                    if (abortControllersByChat_ACU.get(chatIdentity) === controller)
-                        abortControllersByChat_ACU.delete(chatIdentity);
-                }
             });
         }
         async continueTask() {
@@ -150452,27 +148929,6 @@ Expected function or array of functions, received type ${typeof value}.`
         const previousTurns = revision.outline.nodes.slice(0, stage.activeNodeIndex).reduce((total, item) => total + item.turns.length, 0) + stage.activeTurnIndex;
         return { envelope: envelope, task, stage, revision, node, turn, turnNumber: previousTurns + 1, nodeTurnNumber: stage.activeTurnIndex + 1 };
     }
-    /** 资料补足只要求任务处于安全的 paused 空档，不要求把任务伪装成正文生成中的 running。 */
-    function currentMaterialRepairContext_ACU(envelope) {
-        const task = envelope?.activeTask;
-        if (!task)
-            fail_ACU$3('CONTINUATION_TASK_NOT_FOUND', '当前聊天没有可承载资料补足的智能续写任务');
-        if (task.status !== 'paused')
-            fail_ACU$3('CONTINUATION_TASK_STATE_INVALID', '只有暂停空档允许补足智能续写资料');
-        const empty = { envelope: envelope, task, stage: null, revision: null, node: null, turn: null, turnNumber: null, nodeTurnNumber: null };
-        const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
-        if (!stage)
-            return empty;
-        const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
-        if (!revision)
-            return { ...empty, stage };
-        const node = revision.outline.nodes[stage.activeNodeIndex] ?? null;
-        const turn = node?.turns[stage.activeTurnIndex] ?? null;
-        if (!node || !turn)
-            return { ...empty, stage, revision };
-        const previousTurns = revision.outline.nodes.slice(0, stage.activeNodeIndex).reduce((total, item) => total + item.turns.length, 0) + stage.activeTurnIndex;
-        return { envelope: envelope, task, stage, revision, node, turn, turnNumber: previousTurns + 1, nodeTurnNumber: stage.activeTurnIndex + 1 };
-    }
     class StageExecutionEngine_ACU {
         constructor(dependencies) {
             this.dependencies = dependencies;
@@ -150537,44 +148993,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 },
                 instruction,
             };
-        }
-        /** 运行定向资料补足；只返回资料候选，不铸造宿主正文归属身份。 */
-        async repairMaterials(snapshot, targetModules, isLeaseCurrent = () => true, signal) {
-            const chatIdentity = this.dependencies.getChatIdentity();
-            const initial = currentMaterialRepairContext_ACU(this.dependencies.readEnvelope());
-            const taskId = initial.task.taskId;
-            const attemptId = this.dependencies.allocateId('material-repair-attempt');
-            const readContext = () => currentMaterialRepairContext_ACU(this.dependencies.readEnvelope());
-            const isCurrent = (candidate) => {
-                if (!isLeaseCurrent() || candidate.chatIdentity !== chatIdentity || candidate.taskId !== taskId)
-                    return false;
-                if (this.dependencies.getChatIdentity() !== chatIdentity || signal?.aborted)
-                    return false;
-                const task = this.dependencies.readEnvelope()?.activeTask;
-                return !!task && task.taskId === taskId && task.status === 'paused';
-            };
-            return this.dependencies.planner.repairMaterials({
-                settings: initial.envelope.settings,
-                readContext,
-                snapshot,
-                targetModules,
-                createInternalRequestIdentity: attempt => {
-                    const context = readContext();
-                    return {
-                        source: 'turn_instruction',
-                        requestId: this.dependencies.allocateId('material-repair-request'),
-                        chatIdentity,
-                        taskId,
-                        stageId: context.stage?.stageId ?? 'material-repair',
-                        revision: context.revision?.revision ?? 0,
-                        nodeId: context.node?.id,
-                        turnId: context.turn?.id,
-                        attemptId: `${attemptId}-${attempt}`,
-                    };
-                },
-                isInternalRequestCurrent: isCurrent,
-                signal,
-            });
         }
         assertAttemptMatchesCursor_ACU(attempt, chatIdentity) {
             const snapshot = currentSnapshot_ACU(this.dependencies.readEnvelope());
@@ -151383,6 +149801,764 @@ Expected function or array of functions, received type ${typeof value}.`
             return '当前聊天没有任何可读表格。';
         const lines = views.map(view => `- ${view.name}（${view.rows.length} 行）列：${view.header.join(' | ')}｜整表读取：$TABLE:${view.name}｜行区间读取：$TABLE:${view.name}:起始行-结束行`);
         return ['以下是当前聊天实际存在的全部表格；只有这里列出的表才能读取：', ...lines].join('\n');
+    }
+
+    /**
+     * service/continuation/agent/agent-transaction.ts — 资料模块写集事务
+     *
+     * 默认仍是整份拒绝：任一条目不合规就抛错，调用方拿不到部分结果。
+     * 传入 onViolation 且回调不抛时，按模块隔离：无违规模块入库并推进自己的 revision，
+     * 违规模块保持原值并写入 snapshot.pendingFixes。核心防线仍是「漏写不等于删除」。
+     */
+    function reject_ACU$5(message, details) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
+    }
+    function collectTouchedModules_ACU(delta) {
+        const touched = [];
+        if (delta.hooks.length || delta.hookPatches.length)
+            touched.push('hooks');
+        if (delta.infoGap.length || delta.infoGapPatches.length)
+            touched.push('infoGap');
+        if (delta.storyArc.length || delta.storyArcPatches.length)
+            touched.push('storyArc');
+        if (delta.chronology.length)
+            touched.push('chronology');
+        return touched;
+    }
+    function assertWritePermission_ACU(delta, allowedWrites) {
+        for (const module of collectTouchedModules_ACU(delta)) {
+            if (!allowedWrites.includes(module)) {
+                reject_ACU$5(`子代理试图写入未授权模块：${module}`, { module, allowedWrites: [...allowedWrites] });
+            }
+        }
+        for (const key of Object.keys(delta.expectedRevisions)) {
+            if (!isAgentWritableModule_ACU(key))
+                reject_ACU$5(`expectedRevisions 含非法模块名：${key}`, { key });
+        }
+    }
+    /**
+     * 用「子代理读到资料的那一刻」的修订号补齐未声明的模块。
+     * @param delta 子代理返回的写集
+     * @param readRevisions 渲染读集材料时捕获的快照修订号
+     * @returns 新的 delta；子代理已显式声明的模块保持原值，仍按显式断言校验
+     */
+    function mergeAgentDeltaRevisions_ACU(delta, readRevisions) {
+        const merged = { ...delta.expectedRevisions };
+        for (const module of collectTouchedModules_ACU(delta)) {
+            if (merged[module] === undefined)
+                merged[module] = readRevisions[module];
+        }
+        return { ...delta, expectedRevisions: merged };
+    }
+    function applyHookDelta_ACU(existing, items, settledIndex) {
+        const byId = new Map(existing.map(entry => [entry.id, entry]));
+        for (const item of items) {
+            if (!item.id.trim())
+                reject_ACU$5('伏笔条目缺少 id');
+            if (item.action === 'retire') {
+                const current = byId.get(item.id);
+                if (!current)
+                    reject_ACU$5(`retire 的伏笔不存在：${item.id}`, { id: item.id });
+                if (!item.reason.trim())
+                    reject_ACU$5(`retire 伏笔 ${item.id} 必须给出理由`, { id: item.id });
+                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
+                continue;
+            }
+            if (!item.summary.trim())
+                reject_ACU$5(`伏笔 ${item.id} 的 summary 不能为空`, { id: item.id });
+            const previous = byId.get(item.id);
+            byId.set(item.id, {
+                id: item.id,
+                summary: item.summary.trim(),
+                status: item.status,
+                importance: item.importance,
+                plantedIndex: previous ? previous.plantedIndex : item.plantedIndex,
+                updatedIndex: settledIndex,
+                plannedPayoff: item.plannedPayoff,
+                retired: false,
+                retiredReason: '',
+            });
+        }
+        return [...byId.values()];
+    }
+    function applyHookPatches_ACU(entries, patches, settledIndex) {
+        const byId = new Map(entries.map(entry => [entry.id, entry]));
+        for (const patch of patches) {
+            const current = byId.get(patch.id);
+            if (!current)
+                reject_ACU$5(`patch 的伏笔不存在：${patch.id}`, { id: patch.id });
+            if (current.retired)
+                reject_ACU$5(`伏笔 ${patch.id} 已退役，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+            byId.set(patch.id, {
+                ...current,
+                summary: patch.summary ?? current.summary,
+                status: patch.status ?? current.status,
+                importance: patch.importance ?? current.importance,
+                plannedPayoff: patch.plannedPayoff ?? current.plannedPayoff,
+                updatedIndex: settledIndex,
+            });
+        }
+        return [...byId.values()];
+    }
+    function applyInfoGapDelta_ACU(existing, items, settledIndex) {
+        const byId = new Map(existing.map(entry => [entry.id, entry]));
+        for (const item of items) {
+            if (!item.id.trim())
+                reject_ACU$5('信息差条目缺少 id');
+            if (item.action === 'retire') {
+                const current = byId.get(item.id);
+                if (!current)
+                    reject_ACU$5(`retire 的信息差条目不存在：${item.id}`, { id: item.id });
+                if (!item.reason.trim())
+                    reject_ACU$5(`retire 信息差条目 ${item.id} 必须给出理由`, { id: item.id });
+                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
+                continue;
+            }
+            if (!item.topic.trim())
+                reject_ACU$5(`信息差条目 ${item.id} 的 topic 不能为空`, { id: item.id });
+            // 未揭示的事件不允许携带揭示楼层，否则等于把计划写成了已发生事实。
+            if (item.revealStatus === 'unrevealed' && item.revealIndex !== null) {
+                reject_ACU$5(`信息差条目 ${item.id} 标记为未揭示，揭示楼层必须为空`, { id: item.id, revealIndex: item.revealIndex });
+            }
+            if (item.revealStatus !== 'unrevealed' && item.revealIndex === null) {
+                reject_ACU$5(`信息差条目 ${item.id} 已揭示，必须给出揭示楼层`, { id: item.id });
+            }
+            byId.set(item.id, {
+                id: item.id,
+                topic: item.topic.trim(),
+                objectiveFact: item.objectiveFact,
+                readerKnown: item.readerKnown,
+                characterKnowledge: item.characterKnowledge,
+                revealStatus: item.revealStatus,
+                revealIndex: item.revealIndex,
+                retired: false,
+                retiredReason: '',
+            });
+        }
+        void settledIndex;
+        return [...byId.values()];
+    }
+    function applyInfoGapPatches_ACU(entries, patches) {
+        const byId = new Map(entries.map(entry => [entry.id, entry]));
+        for (const patch of patches) {
+            const current = byId.get(patch.id);
+            if (!current)
+                reject_ACU$5(`patch 的信息差条目不存在：${patch.id}`, { id: patch.id });
+            if (current.retired)
+                reject_ACU$5(`信息差条目 ${patch.id} 已退役，不可 patch`, { id: patch.id });
+            const merged = {
+                ...current,
+                topic: patch.topic ?? current.topic,
+                objectiveFact: patch.objectiveFact ?? current.objectiveFact,
+                readerKnown: patch.readerKnown ?? current.readerKnown,
+                characterKnowledge: patch.characterKnowledge ?? current.characterKnowledge,
+                revealStatus: patch.revealStatus ?? current.revealStatus,
+                revealIndex: 'revealIndex' in patch ? patch.revealIndex : current.revealIndex,
+            };
+            // 合并结果必须满足与 upsert 相同的一致性规则：把计划写成事实的典型症状在 patch 路径同样要拦。
+            if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null) {
+                reject_ACU$5(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
+            }
+            if (merged.revealStatus !== 'unrevealed' && merged.revealIndex === null) {
+                reject_ACU$5(`信息差条目 ${patch.id} patch 后已揭示，必须给出揭示楼层`, { id: patch.id });
+            }
+            byId.set(patch.id, merged);
+        }
+        return [...byId.values()];
+    }
+    /**
+     * 全书方向在任何时刻只能有一条活跃条目。允许在同一份 delta 里先 retire 旧的再 upsert 新的，
+     * 因此判定放在全部条目应用完之后，而不是逐条拦截。
+     */
+    function assertSingleActiveStoryScope_ACU(entries) {
+        const active = entries.filter(entry => entry.scope === 'story' && !entry.retired);
+        if (active.length > 1) {
+            reject_ACU$5(`全书方向（scope=story）只能有一条活跃条目，当前会变成 ${active.length} 条：${active.map(entry => entry.id).join('、')}。修订全书方向请 patch 既有条目，或在同一份写集里先 retire 旧条目`, { ids: active.map(entry => entry.id) });
+        }
+    }
+    function hasVolumeContractField_ACU(entry) {
+        return entry.narrativeRole !== undefined
+            || entry.targetStageRange !== undefined
+            || entry.targetTimeSpan !== undefined
+            || entry.progressCeiling !== undefined
+            || entry.sustainingThreads !== undefined
+            || entry.payoffTargets !== undefined
+            || entry.completionRationale !== undefined;
+    }
+    function assertCompleteVolumeContract_ACU(volume, context) {
+        if (!volume.narrativeRole)
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 narrativeRole`, { id: volume.id, context });
+        if (!volume.targetStageRange)
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 targetStageRange`, { id: volume.id, context });
+        if (!Number.isInteger(volume.targetStageRange.min) || !Number.isInteger(volume.targetStageRange.max)
+            || volume.targetStageRange.min < 1 || volume.targetStageRange.max < volume.targetStageRange.min) {
+            reject_ACU$5(`卷台阶 ${volume.id} 的 targetStageRange 必须是 min≥1 且 max≥min 的整数范围`, { id: volume.id, context, targetStageRange: volume.targetStageRange });
+        }
+        if (!volume.targetTimeSpan?.trim())
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 targetTimeSpan`, { id: volume.id, context });
+        if (!volume.progressCeiling?.trim())
+            reject_ACU$5(`卷台阶 ${volume.id} 缺少 progressCeiling`, { id: volume.id, context });
+        if (!volume.sustainingThreads?.length)
+            reject_ACU$5(`卷台阶 ${volume.id} 至少需要一条 sustainingThreads`, { id: volume.id, context });
+        if (volume.sustainingThreads.some(thread => !thread.trim()))
+            reject_ACU$5(`卷台阶 ${volume.id} 的 sustainingThreads 不得包含空项`, { id: volume.id, context });
+        if (!volume.payoffTargets?.length)
+            reject_ACU$5(`卷台阶 ${volume.id} 至少需要一条 payoffTargets`, { id: volume.id, context });
+        if (volume.payoffTargets.some(target => !target.trim()))
+            reject_ACU$5(`卷台阶 ${volume.id} 的 payoffTargets 不得包含空项`, { id: volume.id, context });
+    }
+    function assertVolumeCompletionContract_ACU(volume) {
+        if (!volume.targetStageRange)
+            return;
+        assertCompleteVolumeContract_ACU(volume, 'done');
+        const stageCount = volume.stageNumbers.length;
+        const withinTarget = stageCount >= volume.targetStageRange.min && stageCount <= volume.targetStageRange.max;
+        if (!withinTarget && !volume.completionRationale?.trim()) {
+            reject_ACU$5(`卷台阶 ${volume.id} 实际承载 ${stageCount} 个阶段，偏离目标 ${volume.targetStageRange.min}–${volume.targetStageRange.max} 时必须给出 completionRationale`, { id: volume.id, stageCount, targetStageRange: volume.targetStageRange });
+        }
+        for (const target of volume.payoffTargets ?? []) {
+            if (!volume.completionState.includes(target)) {
+                reject_ACU$5(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 payoffTargets 的兑现证据：${target}`, { id: volume.id, target });
+            }
+        }
+        for (const thread of volume.sustainingThreads ?? []) {
+            if (!volume.completionState.includes(thread)) {
+                reject_ACU$5(`卷台阶 ${volume.id} 的 completionState 必须逐项说明 sustainingThreads 的完成、转入后续卷或 retire 去向：${thread}`, { id: volume.id, thread });
+            }
+        }
+    }
+    function assertStoryArcContractShape_ACU(entries) {
+        for (const entry of entries) {
+            if (entry.retired || !hasVolumeContractField_ACU(entry))
+                continue;
+            if (entry.scope !== 'volume') {
+                reject_ACU$5(`全书方向 ${entry.id} 不得携带卷级容量字段`, { id: entry.id, scope: entry.scope });
+            }
+            assertCompleteVolumeContract_ACU(entry, 'new');
+        }
+    }
+    /** 验证卷台阶的生命周期；阶段完成与卷完成是两层事实，不能互相替代。 */
+    function assertVolumeLifecycle_ACU(previous, next, completedStageNumbers) {
+        const volumes = next.filter(entry => entry.scope === 'volume' && !entry.retired);
+        if (!volumes.length)
+            return;
+        const previousById = new Map(previous.filter(entry => entry.scope === 'volume' && !entry.retired).map(entry => [entry.id, entry]));
+        const previouslyActive = previous.filter(entry => entry.scope === 'volume' && !entry.retired && entry.status === 'active');
+        for (const volume of volumes) {
+            const prior = previousById.get(volume.id);
+            if (!prior)
+                continue;
+            const newlyRegistered = volume.stageNumbers.filter(stageNumber => !prior.stageNumbers.includes(stageNumber));
+            if (newlyRegistered.length && prior.status !== 'active') {
+                reject_ACU$5(`阶段进度只能登记到当前 active 卷，卷 ${volume.id} 在改写前状态为 ${prior.status}`, { id: volume.id, priorStatus: prior.status, stageNumbers: newlyRegistered });
+            }
+            for (const stageNumber of newlyRegistered) {
+                if (!completedStageNumbers.has(stageNumber)) {
+                    reject_ACU$5(`卷台阶 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
+                }
+            }
+            if (prior.status === 'done' && volume.status !== 'done') {
+                reject_ACU$5(`已完成卷 ${volume.id} 不可重新激活`, { id: volume.id, from: prior.status, to: volume.status });
+            }
+            const order = { planned: 0, active: 1, done: 2 };
+            if (order[volume.status] < order[prior.status]) {
+                reject_ACU$5(`卷台阶 ${volume.id} 状态只能 planned → active → done 单向推进`, { id: volume.id, from: prior.status, to: volume.status });
+            }
+            if (order[volume.status] > order[prior.status] + 1) {
+                reject_ACU$5(`卷台阶 ${volume.id} 不可跳过 active 直接从 ${prior.status} 变为 ${volume.status}`, { id: volume.id, from: prior.status, to: volume.status });
+            }
+        }
+        if (previouslyActive.length > 1) {
+            reject_ACU$5(`写入前存在 ${previouslyActive.length} 个 active 卷，无法判定阶段承载归属`, { activeIds: previouslyActive.map(volume => volume.id) });
+        }
+        for (const volume of volumes) {
+            if (previousById.has(volume.id))
+                continue;
+            assertCompleteVolumeContract_ACU(volume, 'new');
+            if (volume.status === 'done') {
+                reject_ACU$5(`新卷 ${volume.id} 不可直接登记为 done`, { id: volume.id });
+            }
+            for (const stageNumber of volume.stageNumbers) {
+                if (!completedStageNumbers.has(stageNumber)) {
+                    reject_ACU$5(`新卷 ${volume.id} 只能登记真实完成的阶段`, { id: volume.id, stageNumber });
+                }
+            }
+        }
+        for (const volume of volumes) {
+            const prior = previous.find(entry => entry.id === volume.id);
+            if (volume.status !== 'done')
+                continue;
+            if (volume.completionStageNumber === null) {
+                reject_ACU$5(`卷台阶 ${volume.id} 标记 done 时必须提供 completionStageNumber`, { id: volume.id });
+            }
+            if (!volume.stageNumbers.includes(volume.completionStageNumber)) {
+                reject_ACU$5(`卷台阶 ${volume.id} 的完成阶段必须已登记进 stageNumbers`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
+            }
+            if (!completedStageNumbers.has(volume.completionStageNumber)) {
+                reject_ACU$5(`卷台阶 ${volume.id} 的完成阶段尚未真实完成`, { id: volume.id, completionStageNumber: volume.completionStageNumber });
+            }
+            if (!volume.completionState.trim()) {
+                reject_ACU$5(`卷台阶 ${volume.id} 标记 done 时必须说明已达到的卷末状态`, { id: volume.id });
+            }
+            assertVolumeCompletionContract_ACU(volume);
+        }
+        const unfinished = volumes.filter(volume => volume.status !== 'done');
+        const active = volumes.filter(volume => volume.status === 'active');
+        if (unfinished.length && active.length !== 1) {
+            reject_ACU$5(`存在未完成卷时必须恰有一个 active 卷，当前为 ${active.length} 个`, { activeIds: active.map(volume => volume.id) });
+        }
+        const previousVolumes = previous.filter(entry => entry.scope === 'volume' && !entry.retired);
+        if (previousVolumes.length && previousVolumes.every(volume => volume.status === 'done')) {
+            for (const volume of active) {
+                if (!volume.continuationRationale.trim()) {
+                    reject_ACU$5(`在既有卷全部完成后追加或激活卷 ${volume.id} 时必须说明续卷依据`, { id: volume.id });
+                }
+            }
+        }
+    }
+    /**
+     * 应用年代学写集。核心防线有三条：
+     * 1. 时间事实必须有真实正文证据，且证据不得越过本次结算水位——未来楼层不是已发生事实。
+     * 2. retire 必须命中既有条目并给理由；漏写不等于删除。
+     * 3. 任一条目失败即整份 delta 拒绝，不做部分登记。
+     */
+    function applyChronologyDelta_ACU(existing, items, settledIndex) {
+        const byId = new Map(existing.map(entry => [entry.id, entry]));
+        for (const item of items) {
+            if (!item.id.trim())
+                reject_ACU$5('年代学条目缺少 id');
+            if (item.action === 'retire') {
+                const current = byId.get(item.id);
+                if (!current)
+                    reject_ACU$5(`retire 的年代学条目不存在：${item.id}`, { id: item.id });
+                if (!item.reason.trim())
+                    reject_ACU$5(`retire 年代学条目 ${item.id} 必须给出理由`, { id: item.id });
+                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim(), updatedIndex: settledIndex });
+                continue;
+            }
+            if (!item.anchor.trim())
+                reject_ACU$5(`年代学条目 ${item.id} 的 anchor 不能为空`, { id: item.id });
+            if (!item.elapsed.trim())
+                reject_ACU$5(`年代学条目 ${item.id} 的 elapsed 不能为空；无法可靠量化就明确写「未知」或「约……」`, { id: item.id });
+            if (!item.transition.trim())
+                reject_ACU$5(`年代学条目 ${item.id} 的 transition 不能为空`, { id: item.id });
+            const evidenceIndexes = normalizeEvidenceIndexes_ACU(item.evidenceIndexes);
+            if (!evidenceIndexes || !evidenceIndexes.length) {
+                reject_ACU$5(`年代学条目 ${item.id} 的 evidenceIndexes 必须是非空的非负整数楼层数组`, { id: item.id, evidenceIndexes: item.evidenceIndexes });
+            }
+            const future = evidenceIndexes.filter(index => index > settledIndex);
+            if (future.length) {
+                reject_ACU$5(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
+            }
+            byId.set(item.id, {
+                id: item.id,
+                anchor: item.anchor.trim(),
+                elapsed: item.elapsed.trim(),
+                precision: item.precision,
+                transition: item.transition.trim(),
+                evidenceIndexes,
+                updatedIndex: settledIndex,
+                retired: false,
+                retiredReason: '',
+            });
+        }
+        return [...byId.values()];
+    }
+    function applyStoryArcDelta_ACU(existing, items) {
+        const byId = new Map(existing.map(entry => [entry.id, entry]));
+        for (const item of items) {
+            if (!item.id.trim())
+                reject_ACU$5('总纲条目缺少 id');
+            if (item.action === 'retire') {
+                const current = byId.get(item.id);
+                if (!current)
+                    reject_ACU$5(`retire 的总纲条目不存在：${item.id}`, { id: item.id });
+                if (!item.reason.trim())
+                    reject_ACU$5(`retire 总纲条目 ${item.id} 必须给出理由`, { id: item.id });
+                byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
+                continue;
+            }
+            const previous = byId.get(item.id);
+            // 对既有条目重复 upsert 时，省略或留空的字段沿用原值：主 Agent 常按惯性每轮派总纲“更新”，
+            // 若把省略当成清空，几轮下来 escalation / withheld 会被抹掉、active 卷会被打回 planned。
+            const title = item.title.trim() || previous?.title || '';
+            const direction = item.direction.trim() || previous?.direction || '';
+            const escalation = item.escalation.trim() || previous?.escalation || '';
+            const withheld = item.withheld.trim() || previous?.withheld || '';
+            const status = item.statusProvided || !previous ? item.status : previous.status;
+            if (!title)
+                reject_ACU$5(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
+            // direction 是这个模块存在的意义：没有方向的条目只是一个标题，对大纲毫无约束力。
+            if (!direction)
+                reject_ACU$5(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
+            if (item.scope === 'volume' && !escalation) {
+                reject_ACU$5(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
+            }
+            byId.set(item.id, {
+                id: item.id,
+                scope: item.scope,
+                title,
+                direction,
+                escalation,
+                withheld,
+                status,
+                // 进度锚只增不减：upsert 不携带 stageNumbers 时保留既有记录，避免改一次方向就把承载历史抹平。
+                stageNumbers: item.stageNumbers.length ? normalizeStageNumbers_ACU(item.stageNumbers) : (previous ? previous.stageNumbers : []),
+                completionStageNumber: item.completionStageNumber ?? (previous?.completionStageNumber ?? null),
+                completionState: item.completionState || previous?.completionState || '',
+                continuationRationale: item.continuationRationale || previous?.continuationRationale || '',
+                narrativeRole: item.narrativeRole ?? previous?.narrativeRole,
+                targetStageRange: item.targetStageRange ?? previous?.targetStageRange,
+                targetTimeSpan: item.targetTimeSpan ?? previous?.targetTimeSpan,
+                progressCeiling: item.progressCeiling ?? previous?.progressCeiling,
+                sustainingThreads: item.sustainingThreads ?? previous?.sustainingThreads,
+                payoffTargets: item.payoffTargets ?? previous?.payoffTargets,
+                completionRationale: item.completionRationale ?? previous?.completionRationale,
+                retired: false,
+                retiredReason: '',
+            });
+        }
+        const next = [...byId.values()];
+        assertSingleActiveStoryScope_ACU(next);
+        assertStoryArcContractShape_ACU(next);
+        return next;
+    }
+    function applyStoryArcPatches_ACU(entries, patches) {
+        const byId = new Map(entries.map(entry => [entry.id, entry]));
+        for (const patch of patches) {
+            const current = byId.get(patch.id);
+            if (!current)
+                reject_ACU$5(`patch 的总纲条目不存在：${patch.id}`, { id: patch.id });
+            if (current.retired)
+                reject_ACU$5(`总纲条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+            const merged = {
+                ...current,
+                title: patch.title ?? current.title,
+                direction: patch.direction ?? current.direction,
+                escalation: patch.escalation ?? current.escalation,
+                withheld: patch.withheld ?? current.withheld,
+                status: patch.status ?? current.status,
+                stageNumbers: patch.stageNumbers ? normalizeStageNumbers_ACU(patch.stageNumbers) : current.stageNumbers,
+                completionStageNumber: Object.prototype.hasOwnProperty.call(patch, 'completionStageNumber') ? patch.completionStageNumber : current.completionStageNumber,
+                completionState: patch.completionState ?? current.completionState,
+                continuationRationale: patch.continuationRationale ?? current.continuationRationale,
+                narrativeRole: patch.narrativeRole ?? current.narrativeRole,
+                targetStageRange: patch.targetStageRange ?? current.targetStageRange,
+                targetTimeSpan: patch.targetTimeSpan ?? current.targetTimeSpan,
+                progressCeiling: patch.progressCeiling ?? current.progressCeiling,
+                sustainingThreads: patch.sustainingThreads ?? current.sustainingThreads,
+                payoffTargets: patch.payoffTargets ?? current.payoffTargets,
+                completionRationale: patch.completionRationale ?? current.completionRationale,
+            };
+            if (!merged.title.trim())
+                reject_ACU$5(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
+            if (!merged.direction.trim())
+                reject_ACU$5(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
+            byId.set(patch.id, merged);
+        }
+        const next = [...byId.values()];
+        assertStoryArcContractShape_ACU(next);
+        return next;
+    }
+    function violationOf_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return { message: error.error.message, details: error.error.details };
+        return { message: error instanceof Error ? error.message : String(error) };
+    }
+    function clonePendingFixes_ACU(pending) {
+        return pending.map(item => ({ ...item, violations: item.violations.map(violation => ({ ...violation })) }));
+    }
+    function recordPendingFix_ACU$1(pending, module, agentName, message, details, index) {
+        const path = typeof details?.path === 'string' && details.path ? details.path : module;
+        const violation = { path, message };
+        const now = Date.now();
+        const found = pending.findIndex(item => item.module === module);
+        if (found >= 0) {
+            const previous = pending[found];
+            pending[found] = {
+                module,
+                agentName: agentName || previous.agentName,
+                violations: [violation],
+                attempts: previous.attempts + 1,
+                firstFailedAtIndex: previous.firstFailedAtIndex,
+                lastError: message,
+                source: 'transaction_rejected',
+                completion: previous.acceptedKeys.length ? 'partial' : 'failed',
+                rangeStartIndex: previous.rangeStartIndex,
+                rangeEndIndex: Math.max(previous.rangeEndIndex, index),
+                acceptedKeys: previous.acceptedKeys,
+                createdAt: previous.createdAt,
+                updatedAt: now,
+            };
+            return;
+        }
+        pending.push({ module, agentName, violations: [violation], attempts: 1, firstFailedAtIndex: index, lastError: message,
+            source: 'transaction_rejected', completion: 'failed', rangeStartIndex: index, rangeEndIndex: index,
+            acceptedKeys: [], createdAt: now, updatedAt: now });
+    }
+    function clearPendingModule_ACU$1(pending, module) {
+        for (let index = pending.length - 1; index >= 0; index -= 1) {
+            if (pending[index].module === module)
+                pending.splice(index, 1);
+        }
+    }
+    function assertModuleRevision_ACU(module, delta, snapshot) {
+        const expected = delta.expectedRevisions[module];
+        if (expected === undefined)
+            return;
+        if (expected !== snapshot.revisions[module]) {
+            reject_ACU$5(`${module} 的 revision 已变化，写入被拒绝`, { module, expected, actual: snapshot.revisions[module], path: module });
+        }
+    }
+    function isolateModule_ACU(module, current, run, pending, applied, options, settledIndex) {
+        try {
+            const value = run();
+            clearPendingModule_ACU$1(pending, module);
+            applied.push(module);
+            return value;
+        }
+        catch (error) {
+            if (!options?.onViolation)
+                throw error;
+            const parsed = violationOf_ACU(error);
+            options.onViolation(parsed.message, parsed.details);
+            recordPendingFix_ACU$1(pending, module, options.agentName ?? '', parsed.message, parsed.details, settledIndex);
+            return current;
+        }
+    }
+    function unchangedApply_ACU(snapshot) {
+        return { snapshot, pendingFixes: snapshot.pendingFixes, appliedModules: [] };
+    }
+    /**
+     * 把一份子代理写集事务应用到快照上。
+     * @param snapshot 当前快照
+     * @param delta 子代理返回的写集
+     * @param allowedWrites 该子代理被授权的模块名列表
+     * @param settledIndex 本次结算的水位楼层，用于记录条目变动楼层
+     * @returns 被写入模块的 revision 各自 +1；容错模式下违规模块留在 pendingFixes
+     */
+    function applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options) {
+        assertWritePermission_ACU(delta, allowedWrites);
+        const touched = collectTouchedModules_ACU(delta);
+        if (!touched.length)
+            return unchangedApply_ACU(snapshot);
+        const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+        const applied = [];
+        const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
+        const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
+        const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
+        const chronologyTouched = delta.chronology.length > 0;
+        const hooks = hooksTouched
+            ? isolateModule_ACU('hooks', snapshot.hooks, () => {
+                assertModuleRevision_ACU('hooks', delta, snapshot);
+                let next = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
+                if (delta.hookPatches.length)
+                    next = applyHookPatches_ACU(next, delta.hookPatches, settledIndex);
+                return next;
+            }, pending, applied, options, settledIndex)
+            : snapshot.hooks;
+        const infoGap = infoGapTouched
+            ? isolateModule_ACU('infoGap', snapshot.infoGap, () => {
+                assertModuleRevision_ACU('infoGap', delta, snapshot);
+                let next = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+                if (delta.infoGapPatches.length)
+                    next = applyInfoGapPatches_ACU(next, delta.infoGapPatches);
+                return next;
+            }, pending, applied, options, settledIndex)
+            : snapshot.infoGap;
+        const storyArc = storyArcTouched
+            ? isolateModule_ACU('storyArc', snapshot.storyArc, () => {
+                assertModuleRevision_ACU('storyArc', delta, snapshot);
+                let next = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
+                if (delta.storyArcPatches.length) {
+                    next = applyStoryArcPatches_ACU(next, delta.storyArcPatches);
+                    assertSingleActiveStoryScope_ACU(next);
+                }
+                assertVolumeLifecycle_ACU(snapshot.storyArc, next, new Set(completedStageNumbers));
+                return next;
+            }, pending, applied, options, settledIndex)
+            : snapshot.storyArc;
+        const chronology = chronologyTouched
+            ? isolateModule_ACU('chronology', snapshot.chronology, () => {
+                assertModuleRevision_ACU('chronology', delta, snapshot);
+                return applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex);
+            }, pending, applied, options, settledIndex)
+            : snapshot.chronology;
+        const next = {
+            ...snapshot,
+            hooks,
+            infoGap,
+            storyArc,
+            chronology,
+            pendingFixes: pending,
+            revisions: {
+                hooks: snapshot.revisions.hooks + (applied.includes('hooks') ? 1 : 0),
+                infoGap: snapshot.revisions.infoGap + (applied.includes('infoGap') ? 1 : 0),
+                constraints: snapshot.revisions.constraints,
+                storyArc: snapshot.revisions.storyArc + (applied.includes('storyArc') ? 1 : 0),
+                chronology: snapshot.revisions.chronology + (applied.includes('chronology') ? 1 : 0),
+                webRefs: snapshot.revisions.webRefs,
+                userRequirements: snapshot.revisions.userRequirements,
+            },
+        };
+        return { snapshot: next, pendingFixes: pending, appliedModules: applied };
+    }
+    /** 百科资料库条目 ID 前缀；模型漏写 id 时由运行时按此前缀顺延分配。 */
+    const AGENT_WEB_REF_ID_PREFIX_ACU = 'WR-';
+    /**
+     * 分配下一个可用的百科资料库 ID。按既有 WR-### 最大序号 +1，避免与退休条目撞号。
+     * @param existing 当前全部条目（含退休）
+     * @param taken 本次写集里已占用的 id
+     */
+    function nextAgentWebRefId_ACU(existing, taken = new Set()) {
+        let max = 0;
+        for (const id of [...existing.map(entry => entry.id), ...taken]) {
+            const matched = /^WR-(\d+)$/.exec(id);
+            if (matched)
+                max = Math.max(max, Number.parseInt(matched[1], 10));
+        }
+        return `${AGENT_WEB_REF_ID_PREFIX_ACU}${String(max + 1).padStart(3, '0')}`;
+    }
+    /**
+     * 应用 web-researcher 的百科资料库写集。与叙事模块同一防线：retire 必须命中且给理由、
+     * 任一条目失败整份拒绝、修订号并发校验；upsert 对既有条目按 id 覆盖但保留首次入库时间。
+     * 写入不推进结算水位——百科条目不是正文事实。
+     * @param snapshot 当前快照
+     * @param output 子代理运行时已把 pageRef 回填成完整条目的输出
+     * @param expectedRevision 子代理读到资料那一刻的 webRefs 修订号；与当前不一致即拒绝
+     * @param now 入库时间
+     * @returns 应用后的新快照；webRefs 修订号 +1（无实际变更时原样返回）。容错模式下失败模块不入库。
+     */
+    function applyAgentWebRefsDelta_ACU(snapshot, output, expectedRevision, now = Date.now(), options) {
+        if (!output.items.length)
+            return unchangedApply_ACU(snapshot);
+        try {
+            if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
+                reject_ACU$5('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs, path: 'webRefs' });
+            }
+            const byId = new Map(snapshot.webRefs.map(entry => [entry.id, entry]));
+            const taken = new Set();
+            for (const item of output.items) {
+                if (item.action === 'retire') {
+                    const current = byId.get(item.id);
+                    if (!current)
+                        reject_ACU$5(`retire 的百科条目不存在：${item.id}`, { id: item.id });
+                    if (!item.reason.trim())
+                        reject_ACU$5(`retire 百科条目 ${item.id} 必须给出理由`, { id: item.id });
+                    byId.set(item.id, { ...current, retired: true, retiredReason: item.reason.trim() });
+                    continue;
+                }
+                if (!item.title.trim())
+                    reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 的 title（名称）不能为空`, { id: item.id });
+                if (!item.brief.trim())
+                    reject_ACU$5(`百科条目「${item.title}」的 brief（一句话简介）不能为空`, { id: item.id });
+                if (!item.url.trim())
+                    reject_ACU$5(`百科条目 ${item.id || '(未命名)'} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: item.id });
+                const id = item.id.trim() || nextAgentWebRefId_ACU([...byId.values()], taken);
+                taken.add(id);
+                const previous = byId.get(id);
+                byId.set(id, {
+                    id,
+                    title: item.title.trim(),
+                    source: item.source,
+                    url: item.url.trim(),
+                    query: item.query,
+                    tags: [...new Set(item.tags.map(tag => tag.trim()).filter(Boolean))],
+                    brief: item.brief.trim(),
+                    summary: item.summary.trim(),
+                    sourceStatus: item.sourceStatus,
+                    fetchedAt: previous?.fetchedAt || now,
+                    retired: false,
+                    retiredReason: '',
+                });
+            }
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            clearPendingModule_ACU$1(pending, 'webRefs');
+            const next = {
+                ...snapshot,
+                webRefs: [...byId.values()],
+                pendingFixes: pending,
+                revisions: { ...snapshot.revisions, webRefs: snapshot.revisions.webRefs + 1 },
+            };
+            return { snapshot: next, pendingFixes: pending, appliedModules: ['webRefs'] };
+        }
+        catch (error) {
+            if (!options?.onViolation)
+                throw error;
+            const parsed = violationOf_ACU(error);
+            options.onViolation(parsed.message, parsed.details);
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            recordPendingFix_ACU$1(pending, 'webRefs', options.agentName ?? '', parsed.message, parsed.details, snapshot.settledThroughIndex);
+            const next = { ...snapshot, pendingFixes: pending };
+            return { snapshot: next, pendingFixes: pending, appliedModules: [] };
+        }
+    }
+    /** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
+    function renderActiveConstraintList_ACU(snapshot) {
+        if (!snapshot.constraints.length)
+            return '（当前没有任何活跃约束）';
+        return snapshot.constraints.map(item => `${item.id}：${item.text}`).join('；');
+    }
+    /**
+     * 登记主 Agent 裁决后的长期约束。增量语义：add 只写新增文本，retire 只写要废除的
+     * 条目（按 id 或原文精确匹配）。漏写既有条目不等于删除；重复登记已有文本幂等跳过。
+     * @param snapshot 当前快照
+     * @param add 新增的约束文本
+     * @param retire 废除的约束（id 或原文）
+     * @param settledIndex 登记时的水位楼层
+     * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回。容错模式下失败不入库。
+     */
+    function applyAgentConstraintRegistration_ACU(snapshot, add, retire, settledIndex, options) {
+        try {
+            const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
+            const retiredIds = new Set();
+            for (const key of retireKeys) {
+                const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
+                if (!matched) {
+                    reject_ACU$5(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
+                }
+                retiredIds.add(matched.id);
+            }
+            const remaining = snapshot.constraints.filter(item => !retiredIds.has(item.id));
+            const existingTexts = new Set(remaining.map(item => item.text));
+            const addTexts = [];
+            for (const raw of add) {
+                const text = raw.trim();
+                // 重复登记既有文本（含旧全量形态重抄整份清单）幂等跳过，不再构成拒绝理由。
+                if (!text || existingTexts.has(text))
+                    continue;
+                existingTexts.add(text);
+                addTexts.push(text);
+            }
+            if (!retiredIds.size && !addTexts.length)
+                return unchangedApply_ACU(snapshot);
+            const nextRevision = snapshot.revisions.constraints + 1;
+            const added = addTexts.map((text, order) => ({
+                id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
+                text,
+                reason: '主 Agent 本轮裁决登记',
+                createdIndex: settledIndex,
+            }));
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            clearPendingModule_ACU$1(pending, 'constraints');
+            const next = {
+                ...snapshot,
+                constraints: [...remaining, ...added],
+                pendingFixes: pending,
+                revisions: { ...snapshot.revisions, constraints: nextRevision },
+            };
+            return { snapshot: next, pendingFixes: pending, appliedModules: ['constraints'] };
+        }
+        catch (error) {
+            if (!options?.onViolation)
+                throw error;
+            const parsed = violationOf_ACU(error);
+            options.onViolation(parsed.message, parsed.details);
+            const pending = clonePendingFixes_ACU(snapshot.pendingFixes);
+            recordPendingFix_ACU$1(pending, 'constraints', options.agentName ?? '', parsed.message, parsed.details, settledIndex);
+            const next = { ...snapshot, pendingFixes: pending };
+            return { snapshot: next, pendingFixes: pending, appliedModules: [] };
+        }
     }
 
     /**
@@ -154925,6 +154101,641 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
+     * service/continuation/agent/agent-workflow.ts — 续写固定工作流
+     *
+     * 程序按固定顺序驱动结算、策划、条件审查、容错提交、自动修复与写作指令编排。
+     * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
+     */
+    const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
+    const MAINLINE_NAME_ACU = 'mainline-planner';
+    const BEAT_NAME_ACU = 'beat-planner';
+    const REVIEWER_NAME_ACU = 'continuity-reviewer';
+    const ARC_NAME_ACU = 'arc-architect';
+    const WEB_NAME_ACU = 'web-researcher';
+    const MAINTAINER_MODULES_ACU = ['hooks', 'infoGap', 'chronology'];
+    const CONTINUATION_REPAIRABLE_MODULES_ACU = [...MAINTAINER_MODULES_ACU, 'storyArc', 'webRefs'];
+    const BEAT_OBLIGATION_PATTERN_ACU = /伏笔|埋设|回收|误导|信息差|揭示/;
+    const CONFLICT_PATTERN_ACU = /冲突|矛盾|红线/;
+    function continuationBeatObligation_ACU(turn) {
+        if (!turn)
+            return false;
+        if (turn.function === 'payoff' || turn.function === 'reveal')
+            return true;
+        return BEAT_OBLIGATION_PATTERN_ACU.test(turn.goal ?? '');
+    }
+    function continuationMajorTurn_ACU(turn) {
+        if (!turn)
+            return false;
+        return turn.pacing === 'turn' || turn.function === 'reveal';
+    }
+    function continuationContinuityReviewRequired_ACU(input) {
+        if (input.majorTurn)
+            return true;
+        return CONFLICT_PATTERN_ACU.test([...input.recommendations, ...input.risks].join('\n'));
+    }
+    function isStale_ACU(error) {
+        return error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE';
+    }
+    function errorText_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return error.error.message;
+        return error instanceof Error ? error.message : String(error);
+    }
+    function tolerantOptions_ACU(agentName) {
+        return { onViolation: () => undefined, agentName };
+    }
+    function deltaTouched_ACU(delta) {
+        if (!delta)
+            return false;
+        return Boolean(delta.hooks.length || delta.hookPatches.length || delta.infoGap.length || delta.infoGapPatches.length
+            || delta.storyArc.length || delta.storyArcPatches.length || delta.chronology.length);
+    }
+    function repairableAgents_ACU(snapshot, settings) {
+        if (!settings.workflow.autoFixEnabled)
+            return [];
+        const names = new Set();
+        for (const fix of snapshot.pendingFixes) {
+            if (fix.attempts >= settings.workflow.autoFixMaxAttempts)
+                continue;
+            if (fix.module === 'hooks' || fix.module === 'infoGap' || fix.module === 'chronology')
+                names.add(MAINTAINER_NAME_ACU);
+            else if (fix.module === 'storyArc')
+                names.add(ARC_NAME_ACU);
+            else if (fix.module === 'webRefs')
+                names.add(WEB_NAME_ACU);
+        }
+        return [...names];
+    }
+    function repairModulesForAgent_ACU(snapshot, agentName) {
+        return [...new Set(snapshot.pendingFixes
+                .filter(item => {
+                if (agentName === MAINTAINER_NAME_ACU)
+                    return MAINTAINER_MODULES_ACU.includes(item.module);
+                if (agentName === ARC_NAME_ACU)
+                    return item.module === 'storyArc';
+                if (agentName === WEB_NAME_ACU)
+                    return item.module === 'webRefs';
+                return false;
+            })
+                .map(item => item.module))];
+    }
+    function restrictMaintainerOutput_ACU(output, allowedModules) {
+        if (!output)
+            return output;
+        const allowed = new Set(allowedModules);
+        return {
+            ...output,
+            delta: {
+                ...output.delta,
+                hooks: allowed.has('hooks') ? output.delta.hooks : [],
+                hookPatches: allowed.has('hooks') ? output.delta.hookPatches : [],
+                infoGap: allowed.has('infoGap') ? output.delta.infoGap : [],
+                infoGapPatches: allowed.has('infoGap') ? output.delta.infoGapPatches : [],
+                storyArc: allowed.has('storyArc') ? output.delta.storyArc : [],
+                storyArcPatches: allowed.has('storyArc') ? output.delta.storyArcPatches : [],
+                chronology: allowed.has('chronology') ? output.delta.chronology : [],
+                constraintProposals: allowed.has('constraints') ? output.delta.constraintProposals : [],
+            },
+        };
+    }
+    function needsPendingEscalation_ACU(snapshot, settings) {
+        if (!snapshot.pendingFixes.length)
+            return false;
+        if (!settings.workflow.autoFixEnabled)
+            return true;
+        return snapshot.pendingFixes.some(item => item.attempts >= settings.workflow.autoFixMaxAttempts);
+    }
+    function formatFixes_ACU$1(fixes) {
+        if (!fixes.length)
+            return '无';
+        return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => violation.message).join('；') || item.lastError}`).join(' | ');
+    }
+    function acceptedKeysForModule_ACU$1(keys, module) {
+        return [...new Set((keys ?? []).filter(key => key.startsWith(`${module}:`)))];
+    }
+    function recordWorkflowIssues_ACU$1(snapshot, issues, agentName, rangeStartIndex, rangeEndIndex, acceptedKeys) {
+        if (!issues.length)
+            return snapshot;
+        const now = Date.now();
+        const pending = snapshot.pendingFixes.map(item => ({
+            ...item,
+            violations: item.violations.map(violation => ({ ...violation })),
+            acceptedKeys: [...(item.acceptedKeys ?? [])],
+        }));
+        const byModule = new Map();
+        for (const issue of issues) {
+            const list = byModule.get(issue.module) ?? [];
+            list.push(issue);
+            byModule.set(issue.module, list);
+        }
+        for (const [module, moduleIssues] of byModule) {
+            const found = pending.findIndex(item => item.module === module);
+            const previous = found >= 0 ? pending[found] : null;
+            const accepted = acceptedKeysForModule_ACU$1(acceptedKeys, module);
+            const next = {
+                module,
+                agentName: agentName || previous?.agentName || '',
+                violations: moduleIssues.map(issue => ({ path: issue.path, message: issue.message })),
+                attempts: (previous?.attempts ?? 0) + 1,
+                firstFailedAtIndex: previous?.firstFailedAtIndex ?? rangeStartIndex,
+                lastError: moduleIssues.map(issue => issue.message).join('；'),
+                source: moduleIssues[0]?.source ?? 'protocol_failed',
+                completion: accepted.length ? 'partial' : 'failed',
+                rangeStartIndex: previous?.rangeStartIndex ?? rangeStartIndex,
+                rangeEndIndex: Math.max(previous?.rangeEndIndex ?? rangeEndIndex, rangeEndIndex),
+                acceptedKeys: [...new Set([...(previous?.acceptedKeys ?? []), ...accepted])],
+                createdAt: previous?.createdAt ?? now,
+                updatedAt: now,
+            };
+            if (found >= 0)
+                pending[found] = next;
+            else
+                pending.push(next);
+        }
+        return { ...snapshot, pendingFixes: pending };
+    }
+    function completionModules_ACU(payload, writes, fallback) {
+        const modules = { ...(payload.moduleCompletion ?? {}) };
+        for (const module of writes)
+            if (!modules[module])
+                modules[module] = fallback;
+        return modules;
+    }
+    function clearCompletedPending_ACU$1(snapshot, modules) {
+        const completed = new Set(Object.entries(modules)
+            .filter(([, state]) => state === 'complete_changed' || state === 'complete_no_change')
+            .map(([module]) => module));
+        if (!completed.size)
+            return snapshot;
+        return { ...snapshot, pendingFixes: snapshot.pendingFixes.filter(item => !completed.has(item.module)) };
+    }
+    function maintainerPrompt_ACU(focus, snapshot, repair) {
+        const fixes = snapshot.pendingFixes.filter(item => MAINTAINER_MODULES_ACU.includes(item.module));
+        return [
+            repair ? '这是独立预算的自动修复。只提交违规模块的增量 patch，不要重写无关模块。' : `本轮焦点：${focus}`,
+            '结算已经发生的正文。没有新事实时 delta 留空并在 summary 写明 no_change。',
+            `待修复：${formatFixes_ACU$1(fixes)}`,
+        ].join('\n');
+    }
+    function repairAgentForModule_ACU(module) {
+        if (MAINTAINER_MODULES_ACU.includes(module))
+            return MAINTAINER_NAME_ACU;
+        if (module === 'storyArc')
+            return ARC_NAME_ACU;
+        if (module === 'webRefs')
+            return WEB_NAME_ACU;
+        return null;
+    }
+    function outputTouchesModule_ACU(payload, module) {
+        if (module === 'webRefs')
+            return Boolean(payload.researcher?.items.length);
+        const delta = (payload.maintainer ?? payload.arc)?.delta;
+        if (!delta)
+            return false;
+        if (module === 'hooks')
+            return Boolean(delta.hooks.length || delta.hookPatches.length);
+        if (module === 'infoGap')
+            return Boolean(delta.infoGap.length || delta.infoGapPatches.length);
+        if (module === 'storyArc')
+            return Boolean(delta.storyArc.length || delta.storyArcPatches.length);
+        if (module === 'chronology')
+            return Boolean(delta.chronology.length);
+        return false;
+    }
+    /**
+     * 只运行资料补足子代理，不进入策划、编排或宿主正文发送。目标模块同时用于派工分组和
+     * 程序级写集裁剪；非目标 pending、模块内容与 revision 均保持原样。
+     */
+    async function runContinuationMaterialRepair_ACU(input) {
+        const targets = [...new Set(input.targetModules)];
+        const unsupported = targets.filter(module => !repairAgentForModule_ACU(module));
+        if (!targets.length || unsupported.length) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', unsupported.length
+                ? `这些资料模块没有安全的定向补足代理：${unsupported.join(', ')}`
+                : '请选择至少一个可补足的资料模块', false));
+        }
+        let snapshot = input.snapshot;
+        const steps = [];
+        const moduleStates = {};
+        const groups = new Map();
+        for (const module of targets) {
+            const agentName = repairAgentForModule_ACU(module);
+            groups.set(agentName, [...(groups.get(agentName) ?? []), module]);
+        }
+        const calls = [...groups.entries()].map(([agentName, targetModules]) => ({
+            agentName,
+            billing: 'repair',
+            repair: true,
+            targetModules,
+            prompt: `用户显式要求定向补足。程序只接受这些模块：${targetModules.join(', ')}。${formatFixes_ACU$1(snapshot.pendingFixes.filter(item => targetModules.includes(item.module)))}`,
+        }));
+        const results = await Promise.all(calls.map(async (call) => {
+            try {
+                return await input.runAgent(call);
+            }
+            catch (error) {
+                if (isStale_ACU(error))
+                    throw error;
+                return { ok: false, summary: errorText_ACU(error) };
+            }
+        }));
+        for (let index = 0; index < calls.length; index += 1) {
+            const call = calls[index];
+            const payload = results[index];
+            const fallback = !payload.ok
+                ? 'failed'
+                : payload.noChange ? 'complete_no_change' : 'complete_changed';
+            const reported = completionModules_ACU(payload, call.targetModules, fallback);
+            const appliedModules = [];
+            const issues = (payload.unresolvedIssues ?? []).filter(issue => call.targetModules.includes(issue.module));
+            if (payload.ok) {
+                try {
+                    if (call.targetModules.includes('webRefs') && payload.researcher) {
+                        const applied = applyAgentWebRefsDelta_ACU(snapshot, payload.researcher, payload.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(call.agentName));
+                        snapshot = applied.snapshot;
+                        appliedModules.push(...applied.appliedModules);
+                    }
+                    const restricted = restrictMaintainerOutput_ACU(payload.maintainer ?? payload.arc, call.targetModules);
+                    if (restricted && deltaTouched_ACU(restricted.delta)) {
+                        const delta = payload.readRevisions
+                            ? mergeAgentDeltaRevisions_ACU(restricted.delta, payload.readRevisions)
+                            : restricted.delta;
+                        const applied = applyAgentModuleDelta_ACU(snapshot, delta, call.targetModules, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(call.agentName));
+                        snapshot = applied.snapshot;
+                        appliedModules.push(...applied.appliedModules);
+                    }
+                }
+                catch (error) {
+                    if (isStale_ACU(error))
+                        throw error;
+                    for (const module of call.targetModules) {
+                        issues.push({ module, source: 'transaction_rejected', path: module, message: errorText_ACU(error) });
+                    }
+                }
+            }
+            else {
+                for (const module of call.targetModules) {
+                    issues.push({ module, source: 'invoke_failed', path: module, message: payload.summary || '定向补足子代理调用失败' });
+                }
+            }
+            if (issues.length) {
+                snapshot = recordWorkflowIssues_ACU$1(snapshot, issues, call.agentName, snapshot.materialCompletion.rangeStartIndex, Math.max(input.settledIndex, snapshot.materialCompletion.rangeEndIndex), payload.acceptedKeys);
+            }
+            const completedWithoutIssue = {};
+            for (const module of call.targetModules) {
+                const moduleIssues = issues.some(issue => issue.module === module);
+                const touched = outputTouchesModule_ACU(payload, module);
+                const applied = appliedModules.includes(module);
+                const state = reported[module] ?? fallback;
+                if (!moduleIssues && (applied || (!touched && state === 'complete_no_change'))) {
+                    completedWithoutIssue[module] = applied || state === 'complete_changed' ? 'complete_changed' : 'complete_no_change';
+                }
+            }
+            snapshot = clearCompletedPending_ACU$1(snapshot, completedWithoutIssue);
+            for (const module of call.targetModules) {
+                const pending = snapshot.pendingFixes.some(item => item.module === module);
+                const applied = appliedModules.includes(module);
+                moduleStates[module] = pending ? (applied ? 'partial' : 'failed')
+                    : completedWithoutIssue[module] ?? (applied ? 'complete_changed' : 'complete_no_change');
+            }
+            const failed = call.targetModules.filter(module => moduleStates[module] === 'failed' || moduleStates[module] === 'partial');
+            steps.push({
+                agentName: call.agentName,
+                status: failed.length ? 'failed' : payload.noChange ? 'no_change' : 'ok',
+                summary: payload.summary || (failed.length ? `仍有待补模块：${failed.join(', ')}` : '定向补足完成'),
+            });
+        }
+        const now = Date.now();
+        const mergedModules = { ...snapshot.materialCompletion.modules, ...moduleStates };
+        const targetSet = new Set(targets);
+        const unresolvedLegacy = snapshot.materialCompletion.state === 'legacy_unknown'
+            && AGENT_WRITABLE_MODULES_ACU
+                .some(module => !targetSet.has(module) && (mergedModules[module] === undefined || mergedModules[module] === 'legacy_unknown'));
+        const repairedModules = targets.filter(module => moduleStates[module] === 'complete_changed' || moduleStates[module] === 'complete_no_change');
+        const failedModules = targets.filter(module => !repairedModules.includes(module));
+        const overall = snapshot.pendingFixes.length
+            ? (repairedModules.length ? 'partial' : 'failed')
+            : unresolvedLegacy ? 'legacy_unknown'
+                : Object.values(moduleStates).includes('complete_changed') ? 'complete_changed' : 'complete_no_change';
+        snapshot = {
+            ...snapshot,
+            materialCompletion: { ...snapshot.materialCompletion, state: overall, modules: mergedModules, updatedAt: now },
+            updatedAt: Math.max(snapshot.updatedAt, now),
+        };
+        return { snapshot, repairedModules, failedModules, steps };
+    }
+    async function runContinuationAgentWorkflow_ACU(input) {
+        let snapshot = input.snapshot;
+        const steps = [];
+        const plannerNotes = [];
+        const plannerRisks = [];
+        let reviewerNote = '';
+        const pendingRangeStarts = snapshot.pendingFixes.map(item => item.rangeStartIndex).filter(index => Number.isInteger(index) && index >= 0);
+        const settlementStartIndex = pendingRangeStarts.length ? Math.min(...pendingRangeStarts) : Math.max(0, snapshot.settledThroughIndex + 1);
+        const settlementEndIndex = input.settledIndex;
+        const runSafe_ACU = async (call) => {
+            try {
+                return await input.runAgent(call);
+            }
+            catch (error) {
+                if (isStale_ACU(error))
+                    throw error;
+                return { ok: false, summary: errorText_ACU(error) };
+            }
+        };
+        const applyMaintainerLike_ACU = (output, writes, readRevisions, agentName) => {
+            if (!output || !deltaTouched_ACU(output.delta))
+                return [];
+            const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
+            const applied = applyAgentModuleDelta_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
+            snapshot = applied.snapshot;
+            return applied.appliedModules;
+        };
+        if (input.opening.dispatchArcArchitect) {
+            const arc = await runSafe_ACU({
+                agentName: ARC_NAME_ACU,
+                billing: 'opening',
+                repair: false,
+                prompt: `开局要求维护总纲。焦点：${input.opening.focus}`,
+            });
+            steps.push({ agentName: ARC_NAME_ACU, status: arc.ok ? 'ok' : 'failed', summary: arc.summary });
+            if (arc.ok)
+                applyMaintainerLike_ACU(arc.arc, arc.writes ?? ['storyArc'], arc.readRevisions, ARC_NAME_ACU);
+        }
+        if (input.opening.dispatchWebResearcher) {
+            const web = await runSafe_ACU({
+                agentName: WEB_NAME_ACU,
+                billing: 'opening',
+                repair: false,
+                prompt: `开局要求补充外部设定。焦点：${input.opening.focus}`,
+            });
+            steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
+            if (web.ok && web.researcher && web.researcher.items.length) {
+                const applied = applyAgentWebRefsDelta_ACU(snapshot, web.researcher, web.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(WEB_NAME_ACU));
+                snapshot = applied.snapshot;
+            }
+        }
+        const maintainerPending = snapshot.pendingFixes.some(item => MAINTAINER_MODULES_ACU.includes(item.module)
+            && item.attempts < input.settings.workflow.autoFixMaxAttempts);
+        if (!input.hasUnsettledHistory && !maintainerPending) {
+            steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: '没有未结算正文，也没有待修复的结算模块' });
+        }
+        else {
+            const maintainer = await runSafe_ACU({
+                agentName: MAINTAINER_NAME_ACU,
+                billing: 'pipeline',
+                repair: false,
+                prompt: maintainerPrompt_ACU(input.opening.focus, snapshot, false),
+            });
+            const writes = (maintainer.writes ?? [...MAINTAINER_MODULES_ACU])
+                .filter((module) => MAINTAINER_MODULES_ACU.includes(module));
+            let completion = maintainer.completion
+                ?? (!maintainer.ok ? 'failed' : maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta) ? 'complete_no_change' : 'complete_changed');
+            let modules = completionModules_ACU(maintainer, writes, completion);
+            const appliedModules = maintainer.ok
+                ? applyMaintainerLike_ACU(maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
+                : [];
+            const issues = [...(maintainer.unresolvedIssues ?? [])];
+            if (!maintainer.ok && !issues.length) {
+                for (const module of writes.length ? writes : [...MAINTAINER_MODULES_ACU]) {
+                    issues.push({ module, source: 'invoke_failed', path: module, message: maintainer.summary || '维护子代理调用失败' });
+                    modules[module] = 'failed';
+                }
+            }
+            if (issues.length) {
+                snapshot = recordWorkflowIssues_ACU$1(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
+                completion = appliedModules.length ? 'partial' : 'failed';
+            }
+            const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module));
+            if (transactionPending.length) {
+                for (const fix of transactionPending) {
+                    const moduleAccepted = appliedModules.includes(fix.module) || acceptedKeysForModule_ACU$1(maintainer.acceptedKeys, fix.module).length > 0;
+                    modules[fix.module] = moduleAccepted ? 'partial' : 'failed';
+                }
+                completion = appliedModules.length ? 'partial' : 'failed';
+            }
+            else {
+                snapshot = clearCompletedPending_ACU$1(snapshot, modules);
+            }
+            const now = Date.now();
+            snapshot = {
+                ...snapshot,
+                materialCompletion: {
+                    state: completion,
+                    rangeStartIndex: settlementStartIndex,
+                    rangeEndIndex: settlementEndIndex,
+                    modules,
+                    updatedAt: now,
+                },
+                updatedAt: Math.max(snapshot.updatedAt, now),
+            };
+            if (completion === 'complete_changed' || completion === 'complete_no_change') {
+                snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
+            }
+            if (!maintainer.ok || completion === 'failed') {
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
+            }
+            else if (completion === 'complete_no_change') {
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
+            }
+            else if (completion === 'partial') {
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: `${maintainer.summary || '已保留部分资料'}；仍有待补条目` });
+            }
+            else {
+                steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'ok', summary: maintainer.summary });
+            }
+        }
+        const plannerCalls = [
+            { agentName: MAINLINE_NAME_ACU, billing: 'pipeline', repair: false, prompt: `策划本轮场景。焦点：${input.opening.focus}` },
+        ];
+        if (input.beatObligation) {
+            plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', repair: false, prompt: `本轮有伏笔操作义务。焦点：${input.opening.focus}` });
+        }
+        else {
+            steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '本轮没有伏笔操作义务' });
+        }
+        const planners = await Promise.all(plannerCalls.map(call => runSafe_ACU(call)));
+        for (let index = 0; index < planners.length; index += 1) {
+            const planner = planners[index];
+            steps.push({ agentName: plannerCalls[index].agentName, status: planner.ok ? 'ok' : 'failed', summary: planner.summary });
+            if (planner.planner) {
+                plannerNotes.push(planner.planner.recommendation);
+                plannerRisks.push(...planner.planner.risks);
+            }
+        }
+        const reviewRequired = continuationContinuityReviewRequired_ACU({
+            majorTurn: input.majorTurn,
+            recommendations: plannerNotes,
+            risks: plannerRisks,
+        });
+        if (!reviewRequired) {
+            steps.push({ agentName: REVIEWER_NAME_ACU, status: 'skipped', summary: '没有策划冲突或大转折' });
+        }
+        else {
+            const reviewer = await runSafe_ACU({
+                agentName: REVIEWER_NAME_ACU,
+                billing: 'pipeline',
+                repair: false,
+                prompt: `审查策划是否冲突。焦点：${input.opening.focus}\n${plannerNotes.join('\n')}`,
+            });
+            steps.push({ agentName: REVIEWER_NAME_ACU, status: reviewer.ok ? 'ok' : 'failed', summary: reviewer.summary });
+            if (reviewer.reviewer)
+                reviewerNote = `${reviewer.reviewer.verdict} ${reviewer.reviewer.reason} ${reviewer.reviewer.fixes.join('；')}`;
+        }
+        const escalateBeforeRepair = needsPendingEscalation_ACU(snapshot, input.settings);
+        const repairAgents = repairableAgents_ACU(snapshot, input.settings);
+        const composerBase = [
+            `本轮焦点：${input.opening.focus}`,
+            input.opening.summary ? `开局摘要：${input.opening.summary}` : '',
+            `策划建议：${plannerNotes.join('\n') || '无'}`,
+            `审查结论：${reviewerNote || '未触发连续性审查'}`,
+            `待修复：${formatFixes_ACU$1(snapshot.pendingFixes)}`,
+            '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。',
+        ].filter(Boolean).join('\n');
+        const repairCalls = repairAgents.map(agentName => {
+            const targetModules = repairModulesForAgent_ACU(snapshot, agentName);
+            const targetFixes = snapshot.pendingFixes.filter(item => targetModules.includes(item.module));
+            return {
+                agentName,
+                billing: 'repair',
+                repair: true,
+                targetModules,
+                prompt: `自动修复。程序只接受这些待补模块：${targetModules.join(', ') || '无'}。${formatFixes_ACU$1(targetFixes)}`,
+            };
+        });
+        const repairPromise = Promise.all(repairCalls.map(call => runSafe_ACU(call)));
+        const composerPromise = input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {
+            if (isStale_ACU(error))
+                throw error;
+            const failed = { instruction: '', summary: errorText_ACU(error), constraints: null };
+            return failed;
+        });
+        const [repairs, composer] = await Promise.all([repairPromise, composerPromise]);
+        for (let index = 0; index < repairs.length; index += 1) {
+            const repair = repairs[index];
+            const agentName = repairAgents[index] ?? 'repair';
+            steps.push({ agentName, status: repair.ok ? 'ok' : 'failed', summary: repair.summary });
+            if (!repair.ok)
+                continue;
+            const targetModules = repairCalls[index]?.targetModules ?? [];
+            if (repair.researcher && targetModules.includes('webRefs')) {
+                snapshot = applyAgentWebRefsDelta_ACU(snapshot, repair.researcher, repair.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(agentName)).snapshot;
+            }
+            const restricted = restrictMaintainerOutput_ACU(repair.maintainer ?? repair.arc, targetModules);
+            applyMaintainerLike_ACU(restricted, targetModules, repair.readRevisions, agentName);
+        }
+        steps.push({
+            agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
+            status: composer.instruction.trim() ? 'ok' : 'failed',
+            summary: composer.summary || (composer.instruction.trim() ? '已产出写作指令' : 'instruction 为空'),
+        });
+        if (composer.constraints) {
+            snapshot = applyAgentConstraintRegistration_ACU(snapshot, composer.constraints.add, composer.constraints.retire, input.settledIndex, tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU)).snapshot;
+        }
+        if (escalateBeforeRepair || needsPendingEscalation_ACU(snapshot, input.settings)) {
+            const summary = `工作流停止交付，待修复模块需要主会话处理：${snapshot.pendingFixes.map(item => `${item.module}(${item.attempts})`).join('、') || '自动修复已关闭'}`;
+            return {
+                outcome: 'escalate',
+                summary,
+                instruction: '',
+                pendingFixes: snapshot.pendingFixes,
+                escalated: true,
+                escalationKind: 'pending_fix',
+                snapshot,
+                steps,
+            };
+        }
+        let instruction = composer.instruction.trim();
+        if (!instruction) {
+            return {
+                outcome: 'escalate',
+                summary: composer.summary || 'instruction-composer 没有产出非空写作指令',
+                instruction: '',
+                pendingFixes: snapshot.pendingFixes,
+                escalated: true,
+                escalationKind: 'final_review',
+                snapshot,
+                steps,
+            };
+        }
+        if (input.settings.finalReview.enabled) {
+            let failures = 0;
+            const limit = input.settings.workflow.reviseLimit;
+            while (failures < limit) {
+                let review;
+                try {
+                    review = await input.runFinalReview(instruction, composer.summary);
+                }
+                catch (error) {
+                    if (isStale_ACU(error))
+                        throw error;
+                    failures += 1;
+                    steps.push({ agentName: 'final-reviewer', status: 'failed', summary: errorText_ACU(error) });
+                    if (failures >= limit)
+                        break;
+                    continue;
+                }
+                if (review.verdict === 'pass') {
+                    steps.push({ agentName: 'final-reviewer', status: 'ok', summary: review.summary || 'pass' });
+                    failures = 0;
+                    break;
+                }
+                failures += 1;
+                steps.push({ agentName: 'final-reviewer', status: 'failed', summary: `${review.verdict}：${review.requiredFixes.join('；') || review.summary}` });
+                if (failures >= limit)
+                    break;
+                let revised;
+                try {
+                    revised = await input.runComposer({
+                        prompt: `按反馈清单增量修订，不要全量重写。\n原指令：\n${instruction}`,
+                        revisionFeedback: review.requiredFixes.join('\n'),
+                        priorInstruction: instruction,
+                    });
+                }
+                catch (error) {
+                    if (isStale_ACU(error))
+                        throw error;
+                    failures += 1;
+                    steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: errorText_ACU(error) });
+                    continue;
+                }
+                if (!revised.instruction.trim()) {
+                    failures += 1;
+                    steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: '修订后的 instruction 为空' });
+                    continue;
+                }
+                instruction = revised.instruction.trim();
+                if (revised.constraints) {
+                    snapshot = applyAgentConstraintRegistration_ACU(snapshot, revised.constraints.add, revised.constraints.retire, input.settledIndex, tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU)).snapshot;
+                }
+                steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'ok', summary: '已按反馈增量修订' });
+            }
+            if (failures >= limit) {
+                return {
+                    outcome: 'escalate',
+                    summary: `终审连续 ${limit} 次未通过，已升级主会话`,
+                    instruction: '',
+                    pendingFixes: snapshot.pendingFixes,
+                    escalated: true,
+                    escalationKind: 'final_review',
+                    snapshot,
+                    steps,
+                };
+            }
+        }
+        return {
+            outcome: 'deliver',
+            summary: composer.summary || input.opening.summary || '固定工作流已交付写作指令',
+            instruction,
+            pendingFixes: snapshot.pendingFixes,
+            escalated: false,
+            escalationKind: '',
+            snapshot,
+            steps,
+        };
+    }
+
+    /**
      * service/continuation/agent/agent-prompt-drift.ts — 出站提示词前缀漂移诊断
      *
      * 用途：主 Agent 相邻两次请求理论上共享「静态骨架 + append-only 历史」的字节级前缀，
@@ -155329,73 +155140,6 @@ Expected function or array of functions, received type ${typeof value}.`
     class ContinuationAgentTurnPlanner_ACU {
         constructor(dependencies = defaultDependencies_ACU) {
             this.dependencies = dependencies;
-        }
-        /**
-         * 显式资料补足入口。只调用目标模块对应的维护子代理并返回候选快照；不运行主 Agent、
-         * 策划、指令编排或终审，也不会生成宿主正文指令。持久化由持有租约与冻结锚点的编排器完成。
-         */
-        async repairMaterials(request, apiDependencies) {
-            const chat = this.dependencies.readChat();
-            const execution = request.readContext();
-            const snapshot = request.snapshot;
-            const context = {
-                chat,
-                moduleSnapshot: snapshot,
-                settledThroughIndex: snapshot.settledThroughIndex,
-                execution,
-                originInstruction: execution.task.originInstruction,
-                storyWindowFloors: request.settings.storyWindowFloors,
-                storyTailFloors: request.settings.storyTailFloors,
-                contextRules: { extractRules: request.settings.contextExtractRules, excludeRules: request.settings.contextExcludeRules },
-                recallCodes: extractAgentRecallCodesFromChat_ACU(chat),
-            };
-            try {
-                context.worldbook = await this.dependencies.loadWorldbook();
-            }
-            catch {
-                context.worldbook = buildEmptyAgentWorldbookSnapshot_ACU(false);
-            }
-            const budget = request.settings.agentRunBudget ?? this.dependencies.budget;
-            const mapPayload = (result) => ({
-                ok: true,
-                summary: result.maintainer?.summary || result.arc?.summary || result.researcher?.summary || '',
-                maintainer: result.maintainer,
-                arc: result.arc,
-                researcher: result.researcher,
-                readRevisions: result.readRevisions,
-                writes: result.writes,
-                completion: result.completion,
-                moduleCompletion: result.moduleCompletion,
-                unresolvedIssues: result.unresolvedIssues,
-                acceptedKeys: result.acceptedKeys,
-                noChange: result.completion === 'complete_no_change',
-            });
-            return runContinuationMaterialRepair_ACU({
-                snapshot,
-                targetModules: request.targetModules,
-                settledIndex: Math.max(0, chat.length - 1),
-                completedStageNumbers: execution.task.stages
-                    .filter(stage => stage.status === 'completed')
-                    .map(stage => stage.stageNumber),
-                runAgent: async (call) => {
-                    const definition = findAgentSubagentDefinition_ACU(call.agentName);
-                    if (!definition) {
-                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SUBAGENT_FAILED', 'agent_delegate', `未知的资料补足子代理：${call.agentName}`, false));
-                    }
-                    const preset = this.dependencies.resolveApiPreset(request.settings, definition.promptKey, 'agent_delegate', apiDependencies);
-                    const result = await this.dependencies.subagentRuntime.run({
-                        delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
-                        settings: request.settings,
-                        resolveContext: context,
-                        budget: { ...budget, maxExtraReads: request.settings.workflow.repairMaxExtraReads },
-                        preset,
-                        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
-                        isCurrent: identity => request.isInternalRequestCurrent(identity),
-                        signal: request.signal,
-                    });
-                    return mapPayload(result);
-                },
-            });
         }
         /**
          * 跑完一轮 Agent 循环，产出最终写作指导。
@@ -164469,60 +164213,6 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!instruction || resolved.kind !== 'resolved')
                 return null;
             return this.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: resolved.anchor, instruction, triggerConversationMessageId: triggerConversationMessageId ?? allocateId_ACU('run') });
-        }
-        /**
-         * 显式补足世界资料。目标模块是程序级写集，不依赖提示词约束；只有当前 pending
-         * 或用户明确选择的 legacy_unknown 模块可进入。实际执行仍复用 orchestrator 的
-         * 在途租约、冻结锚点与 ledger revision 门禁。
-         */
-        async repairPendingMaterials(modules) {
-            const allowed = new Set([
-                'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player',
-            ]);
-            const targets = [...new Set(modules)].filter(module => allowed.has(module));
-            if (!targets.length || targets.length !== new Set(modules).size) {
-                throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'agent_loop', '请选择至少一个合法的资料模块进行补足', false));
-            }
-            const chat = this.getChat();
-            const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
-            if (!chatIdentity) {
-                throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_CHAT_UNAVAILABLE', 'agent_loop', '当前聊天不可用，无法补足世界资料', false));
-            }
-            if (this.orchestrator.isInFlight(chatIdentity)) {
-                throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_REVISION_CONFLICT', 'agent_loop', '世界推演正在运行，请等待本轮结束后再补足资料', true));
-            }
-            const envelope = this.readEnvelopeView_ACU();
-            if (!envelope) {
-                throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'agent_loop', '世界账本尚未建立，不能执行资料补足', false));
-            }
-            const pendingByModule = new Map(envelope.ledger.pendingFixes.map(item => [item.module, item]));
-            const legacyOverall = envelope.ledger.materialCompletion.state === 'legacy_unknown';
-            const ineligible = targets.filter(module => !pendingByModule.has(module)
-                && envelope.ledger.materialCompletion.modules[module] !== 'legacy_unknown'
-                && !legacyOverall);
-            if (ineligible.length) {
-                throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_REVISION_CONFLICT', 'agent_loop', `这些模块当前没有待补足缺口：${ineligible.join(', ')}`, false));
-            }
-            const instruction = `显式补足资料模块：${targets.join(', ')}`;
-            const pausedRun = envelope.task?.status === 'paused' ? envelope.task.activeRun : null;
-            const latest = resolveLatestWorldSimulationAssistant_ACU(chat);
-            const anchor = pausedRun
-                ? this.restoreAnchorOrNull_ACU(pausedRun, chat)
-                : (latest.kind === 'resolved'
-                    ? latest.anchor
-                    : null);
-            if (!anchor) {
-                throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '资料缺口对应的 assistant 锚点已不可恢复', false));
-            }
-            for (const module of targets) {
-                const frozen = pendingByModule.get(module)?.anchor;
-                if (frozen && (frozen.messageKey !== anchor.messageKey || frozen.swipeId !== anchor.swipeId || frozen.contentDigest !== anchor.contentDigest)) {
-                    throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', `模块 ${module} 的冻结锚点已变化，拒绝补足`, false));
-                }
-            }
-            return pausedRun
-                ? this.orchestrator.resume({ anchor, instruction, resetRunBudget: true, targetModules: targets })
-                : this.orchestrator.start({ triggerKind: 'agent_chat_message', anchor, instruction, triggerConversationMessageId: allocateId_ACU('run'), targetModules: targets });
         }
         async resume() {
             const envelope = this.readEnvelopeView_ACU();
@@ -190521,75 +190211,6 @@ Expected function or array of functions, received type ${typeof value}.`
         return { snapshot, loadError, diagnostics, modules, reload, save, discard, updateDraft };
     }
 
-    const MODULE_LABELS_ACU = {
-        hooks: '伏笔账本',
-        infoGap: '信息差',
-        constraints: '长期约束',
-        storyArc: '故事总纲',
-        chronology: '故事年代学',
-        webRefs: '百科资料库',
-        userRequirements: '用户要求',
-    };
-    /** 空数组不产生卡片，资料面板据此整段隐藏。 */
-    function buildContinuationPendingFixCards_ACU(fixes) {
-        return (fixes ?? []).map(item => ({
-            module: item.module,
-            title: MODULE_LABELS_ACU[item.module] ?? item.module,
-            attempts: item.attempts,
-            detail: item.violations.map(violation => violation.message).filter(Boolean).join('；') || item.lastError,
-            meta: `${item.agentName || '未记录角色'} · 第 ${item.attempts} 次 · 自楼层 ${item.firstFailedAtIndex} · ${item.lastError}`,
-        }));
-    }
-
-    const DISPLAY_ACU = {
-        complete: { label: '已完成', detail: '该模块已有经校验的资料变更。' },
-        valid_empty: { label: '合法为空', detail: '该模块已完成检查，本轮确认无需新增资料。' },
-        pending: { label: '待补足', detail: '该模块存在未完成或被拒绝的资料缺口。' },
-        legacy_unknown: { label: '历史状态未知', detail: '旧资料没有模块级完成记录；不会自动回填。' },
-        load_failed: { label: '加载失败', detail: '资料读取失败，不能按空资料处理。' },
-    };
-    function displayState_ACU(state, pending) {
-        if (pending || state === 'partial' || state === 'failed')
-            return 'pending';
-        if (state === 'complete_changed')
-            return 'complete';
-        if (state === 'complete_no_change')
-            return 'valid_empty';
-        return 'legacy_unknown';
-    }
-    /**
-     * 读取诊断只有在没有任何可采用快照时才表示加载失败。
-     * 找到较早合法快照时，诊断仅解释被跳过的损坏候选，不能覆盖已成功读取的资料状态。
-     */
-    function resolveMaterialLoadError_ACU(input) {
-        if (input.snapshotPresent)
-            return null;
-        const diagnostics = (input.diagnostics ?? []).map(item => item.trim()).filter(Boolean);
-        return diagnostics.length ? diagnostics.join('；') : null;
-    }
-    function buildMaterialCompletionCards_ACU(input) {
-        if (input.loadError) {
-            return [{
-                    module: '*',
-                    state: 'load_failed',
-                    label: DISPLAY_ACU.load_failed.label,
-                    detail: `${DISPLAY_ACU.load_failed.detail} ${input.loadError}`.trim(),
-                }];
-        }
-        const pending = new Set(input.pendingModules ?? []);
-        const modules = [...new Set([
-                ...(input.expectedModules ?? []),
-                ...Object.keys(input.modules ?? {}),
-                ...pending,
-            ])];
-        if (!modules.length)
-            modules.push('*');
-        return modules.map(module => {
-            const state = displayState_ACU(module === '*' ? input.overallState : input.modules?.[module], pending.has(module));
-            return { module, state, ...DISPLAY_ACU[state] };
-        });
-    }
-
     var _sfc_main$r = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationMaterialsPanel',
         props: {
@@ -190627,48 +190248,10 @@ Expected function or array of functions, received type ${typeof value}.`
             const INFERRED_FIELD_LABELS = { function: '功能', mainlineDelta: '主线', timeAdvance: '时间' };
             const activeTab = ref('outline');
             const materials = useContinuationMaterials();
-            const selectedRepairModules = ref([]);
-            const pendingFixCards = computed(() => buildContinuationPendingFixCards_ACU(materials.snapshot.value?.pendingFixes));
-            const materialStatusCards = computed(() => buildMaterialCompletionCards_ACU({
-                overallState: materials.snapshot.value?.materialCompletion.state,
-                expectedModules: Object.keys(materials.snapshot.value?.materialCompletion.modules ?? {}),
-                modules: materials.snapshot.value?.materialCompletion.modules,
-                pendingModules: materials.snapshot.value?.pendingFixes.map(item => item.module),
-                loadError: materials.loadError.value || null,
-            }));
             const MATERIAL_STATUS_LABELS_ACU = {
                 hooks: '伏笔账本', infoGap: '认知与信息差', constraints: '长期约束', storyArc: '故事总纲',
                 chronology: '故事年代学账本', webRefs: '百科资料库', userRequirements: '用户要求',
             };
-            const REPAIRABLE_MODULES_ACU = ['hooks', 'infoGap', 'chronology', 'storyArc', 'webRefs'];
-            const repairableModules = computed(() => {
-                const snapshot = materials.snapshot.value;
-                if (!snapshot)
-                    return [];
-                const pending = new Set((snapshot.pendingFixes ?? []).map(item => item.module));
-                const completion = snapshot.materialCompletion;
-                const legacyOverall = !completion || completion.state === 'legacy_unknown';
-                return REPAIRABLE_MODULES_ACU.filter(module => pending.has(module)
-                    || completion?.modules?.[module] === 'legacy_unknown'
-                    || legacyOverall);
-            });
-            watch(repairableModules, modules => {
-                const allowed = new Set(modules);
-                selectedRepairModules.value = selectedRepairModules.value.filter(module => allowed.has(module));
-            });
-            function toggleRepairModule(module) {
-                selectedRepairModules.value = selectedRepairModules.value.includes(module)
-                    ? selectedRepairModules.value.filter(item => item !== module)
-                    : [...selectedRepairModules.value, module];
-            }
-            function requestRepair() {
-                if (!selectedRepairModules.value.length)
-                    return;
-                emit('repair', [...selectedRepairModules.value]);
-            }
-            function materialStatusTitle(module) {
-                return module === '*' ? '资料维护状态' : MATERIAL_STATUS_LABELS_ACU[module] ?? module;
-            }
             const outlineDraft = ref('');
             const outlineError = ref('');
             const outlineDirty = ref(false);
@@ -190770,14 +190353,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     syncOutlineDraft();
             }, { immediate: true });
             __expose({ reload });
-            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, selectedRepairModules, pendingFixCards, materialStatusCards, MATERIAL_STATUS_LABELS_ACU, REPAIRABLE_MODULES_ACU, repairableModules, toggleRepairModule, requestRepair, materialStatusTitle, outlineDraft, outlineError, outlineDirty, clearPending, expandedHistoryStageIds, activeVolume, historyStages, onHistoryStageToggle, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
+            const __returned__ = { props, emit, TABS, HOOK_STATUS_LABELS, HOOK_IMPORTANCE_LABELS, REVEAL_STATUS_LABELS, CHRONOLOGY_PRECISION_LABELS, ARC_STATUS_LABELS, WEB_REF_SOURCE_LABELS, WEB_REF_STATUS_LABELS, TEMPO_LABELS, ROLE_LABELS, PACING_LABELS, FUNCTION_LABELS, MAINLINE_LABELS, TIME_LABELS, INFERRED_FIELD_LABELS, activeTab, materials, MATERIAL_STATUS_LABELS_ACU, outlineDraft, outlineError, outlineDirty, clearPending, expandedHistoryStageIds, activeVolume, historyStages, onHistoryStageToggle, displayRevision, olderRevisions, remainingTurns, stageTotalTurns, turnPosition, turnState, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, ref, AcuButton, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-0c7fcfcb] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-0c7fcfcb] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-0c7fcfcb] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-0c7fcfcb] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-0c7fcfcb] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-0c7fcfcb] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-0c7fcfcb] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-0c7fcfcb] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-0c7fcfcb] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-0c7fcfcb] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-0c7fcfcb] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-0c7fcfcb] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__repair-options[data-v-0c7fcfcb] { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__repair-options label[data-v-0c7fcfcb] { display: inline-flex; align-items: center; gap: 5px; cursor: pointer;\n}\n.acu-v2-continuation-materials__block[data-v-0c7fcfcb] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-0c7fcfcb] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-0c7fcfcb] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-0c7fcfcb] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-0c7fcfcb], .acu-v2-continuation-materials__outline-node[data-v-0c7fcfcb] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-0c7fcfcb] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-0c7fcfcb] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-0c7fcfcb] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-0c7fcfcb] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-0c7fcfcb] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-0c7fcfcb] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-0c7fcfcb] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-0c7fcfcb] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-0c7fcfcb] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--failed[data-v-0c7fcfcb] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-continuation-materials__card--retired[data-v-0c7fcfcb] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-0c7fcfcb] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-0c7fcfcb] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-0c7fcfcb] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-0c7fcfcb] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-0c7fcfcb] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-0c7fcfcb] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-0c7fcfcb] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-0c7fcfcb] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-0c7fcfcb] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-0c7fcfcb] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-0c7fcfcb] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-0c7fcfcb] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-0c7fcfcb] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-0c7fcfcb] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-0c7fcfcb");
-    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_0c7fcfcb_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-c3e7691a] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-c3e7691a] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-c3e7691a] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-c3e7691a] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-c3e7691a] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-c3e7691a] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-c3e7691a] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-c3e7691a] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-c3e7691a] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-c3e7691a] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-c3e7691a] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-c3e7691a] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-c3e7691a] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-c3e7691a] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-c3e7691a] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-c3e7691a] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-c3e7691a], .acu-v2-continuation-materials__outline-node[data-v-c3e7691a] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-c3e7691a] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-c3e7691a] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-c3e7691a] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-c3e7691a] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-c3e7691a] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-c3e7691a] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-c3e7691a] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-c3e7691a] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-c3e7691a] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--failed[data-v-c3e7691a] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-continuation-materials__card--retired[data-v-c3e7691a] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-c3e7691a] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-c3e7691a] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-c3e7691a] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-c3e7691a] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-c3e7691a] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-c3e7691a] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-c3e7691a] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-c3e7691a] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-c3e7691a] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-c3e7691a] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-c3e7691a] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-c3e7691a] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-c3e7691a] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-c3e7691a] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-c3e7691a");
+    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_c3e7691a_lang = null;
 
     const _hoisted_1$r = { class: "acu-v2-continuation-materials" };
     const _hoisted_2$p = { class: "acu-v2-continuation-materials__tabs" };
@@ -190855,62 +190438,73 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-continuation-materials__history"
     };
     const _hoisted_45$1 = { class: "acu-v2-continuation-materials__list" };
-    const _hoisted_46$1 = { class: "acu-v2-continuation-materials__outline-summary" };
-    const _hoisted_47$1 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_48$1 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_49$1 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_50$1 = {
+    const _hoisted_46$1 = {
 	key: 0,
-	class: "acu-v2-continuation-materials__outline-summary"
+	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_51$1 = { class: "acu-v2-continuation-materials__repair-options" };
-    const _hoisted_52$1 = [
-	"checked",
-	"disabled",
-	"onChange"
-    ];
-    const _hoisted_53$1 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_54$1 = {
+    const _hoisted_47$1 = {
 	key: 1,
-	class: "acu-v2-continuation-materials__outline-summary"
+	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_55$1 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_56$1 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_57$1 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_58$1 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_59$1 = {
+    const _hoisted_48$1 = {
 	key: 2,
-	class: "acu-v2-continuation-materials__meta"
-    };
-    const _hoisted_60$1 = {
-	key: 3,
-	class: "acu-v2-continuation-materials__meta"
-    };
-    const _hoisted_61$1 = {
-	key: 4,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_62$1 = {
+    const _hoisted_49$1 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
     };
-    const _hoisted_63$1 = {
+    const _hoisted_50$1 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge"
     };
-    const _hoisted_64$1 = {
+    const _hoisted_51$1 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_65$1 = {
+    const _hoisted_52 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_66$1 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_67 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_68 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_69 = {
+    const _hoisted_53 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_54 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_55 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_56 = {
 	key: 0,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
+    const _hoisted_57 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_58 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_59 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_60 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_61 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_62 = {
+	class: "acu-v2-continuation-materials__block",
+	open: ""
+    };
+    const _hoisted_63 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge"
+    };
+    const _hoisted_64 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_65 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__cards"
+    };
+    const _hoisted_66 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_67 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_68 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
+    const _hoisted_69 = {
+	key: 1,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
     const _hoisted_70 = { class: "acu-v2-continuation-materials__card-body" };
@@ -190938,40 +190532,37 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-continuation-materials__cards"
     };
     const _hoisted_79 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_80 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_81 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
-    };
-    const _hoisted_82 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
-    };
-    const _hoisted_83 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_84 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_85 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_86 = {
+    const _hoisted_80 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_81 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_82 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_83 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_87 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_88 = {
+    const _hoisted_84 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_85 = {
 	class: "acu-v2-continuation-materials__block",
 	open: ""
     };
-    const _hoisted_89 = {
+    const _hoisted_86 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge"
     };
-    const _hoisted_90 = {
+    const _hoisted_87 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_91 = {
+    const _hoisted_88 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_92 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_89 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_90 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_91 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
+    const _hoisted_92 = { class: "acu-v2-continuation-materials__card-body" };
     const _hoisted_93 = { class: "acu-v2-continuation-materials__card-body" };
     const _hoisted_94 = { class: "acu-v2-continuation-materials__card-meta" };
     const _hoisted_95 = { class: "acu-v2-continuation-materials__json" };
@@ -190981,136 +190572,105 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_97 = { class: "acu-v2-continuation-materials__actions" };
     const _hoisted_98 = {
-	class: "acu-v2-continuation-materials__block",
-	open: ""
+	key: 0,
+	class: "acu-v2-continuation-materials__meta"
     };
     const _hoisted_99 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge"
+	key: 1,
+	class: "acu-v2-continuation-materials__error"
     };
     const _hoisted_100 = {
-	key: 0,
+	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
     const _hoisted_101 = {
-	key: 1,
+	key: 3,
 	class: "acu-v2-continuation-materials__cards"
     };
     const _hoisted_102 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_103 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_103 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
     const _hoisted_104 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_105 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_105 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
+    };
     const _hoisted_106 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_107 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_108 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_109 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__error"
-    };
-    const _hoisted_110 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_111 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__meta"
-    };
-    const _hoisted_112 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__error"
-    };
-    const _hoisted_113 = {
-	key: 2,
-	class: "acu-v2-continuation-materials__empty"
-    };
-    const _hoisted_114 = {
-	key: 3,
-	class: "acu-v2-continuation-materials__cards"
-    };
-    const _hoisted_115 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_116 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_117 = {
-	key: 0,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
-    };
-    const _hoisted_118 = {
-	key: 1,
-	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
-    };
-    const _hoisted_119 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_120 = {
+    const _hoisted_107 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_121 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_122 = ["href"];
-    const _hoisted_123 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_124 = {
+    const _hoisted_108 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_109 = ["href"];
+    const _hoisted_110 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_111 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_125 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_126 = {
+    const _hoisted_112 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_113 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_127 = {
+    const _hoisted_114 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_128 = {
+    const _hoisted_115 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_129 = {
+    const _hoisted_116 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__list"
     };
-    const _hoisted_130 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_131 = {
+    const _hoisted_117 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_118 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_132 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_133 = {
+    const _hoisted_119 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_120 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_134 = {
+    const _hoisted_121 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_135 = {
+    const _hoisted_122 = {
 	key: 2,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_136 = {
+    const _hoisted_123 = {
 	key: 3,
 	class: "acu-v2-continuation-materials__cards"
     };
-    const _hoisted_137 = { class: "acu-v2-continuation-materials__card-head" };
-    const _hoisted_138 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
-    const _hoisted_139 = { class: "acu-v2-continuation-materials__badge" };
-    const _hoisted_140 = {
+    const _hoisted_124 = { class: "acu-v2-continuation-materials__card-head" };
+    const _hoisted_125 = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
+    const _hoisted_126 = { class: "acu-v2-continuation-materials__badge" };
+    const _hoisted_127 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted"
     };
-    const _hoisted_141 = { class: "acu-v2-continuation-materials__card-body" };
-    const _hoisted_142 = {
+    const _hoisted_128 = { class: "acu-v2-continuation-materials__card-body" };
+    const _hoisted_129 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__card-body"
     };
-    const _hoisted_143 = {
+    const _hoisted_130 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__card-meta"
     };
-    const _hoisted_144 = { class: "acu-v2-continuation-materials__card-meta" };
-    const _hoisted_145 = { class: "acu-v2-continuation-materials__json" };
-    const _hoisted_146 = {
+    const _hoisted_131 = { class: "acu-v2-continuation-materials__card-meta" };
+    const _hoisted_132 = { class: "acu-v2-continuation-materials__json" };
+    const _hoisted_133 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_147 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_134 = { class: "acu-v2-continuation-materials__actions" };
     function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$r, [
 		createBaseVNode("div", _hoisted_2$p, [(openBlock(), createElementBlock(
@@ -191581,153 +191141,21 @@ Expected function or array of functions, received type ${typeof value}.`
 			{ key: 2 },
 			[
 				createCommentVNode(" 本地资料：伏笔 / 信息差 / 长期约束 分类型结构化展示，各自独立 JSON 编辑与保存 "),
-				_cache[49] || (_cache[49] = createBaseVNode(
+				_cache[44] || (_cache[44] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-materials__meta" },
 					" 本地资料由子代理结算写入，也可以在这里分模块手动修正。保存走与子代理相同的结构校验并推进修订号； 每个模块独立保存，只提交本模块数据，不影响其他模块（含未保存的草稿）。 ",
 					-1
 					/* CACHED */
 				)),
-				createBaseVNode("section", _hoisted_46$1, [_cache[32] || (_cache[32] = createBaseVNode(
-					"p",
-					{ class: "acu-v2-continuation-materials__outline-heading" },
-					[createBaseVNode("strong", null, "资料完成状态")],
-					-1
-					/* CACHED */
-				)), (openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.materialStatusCards, (card) => {
-						return openBlock(), createElementBlock(
-							"article",
-							{
-								key: card.module,
-								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--failed": card.state === "pending" || card.state === "load_failed" }])
-							},
-							[createBaseVNode("p", _hoisted_47$1, [createBaseVNode(
-								"strong",
-								null,
-								toDisplayString($setup.materialStatusTitle(card.module)),
-								1
-								/* TEXT */
-							), createBaseVNode(
-								"span",
-								_hoisted_48$1,
-								toDisplayString(card.label),
-								1
-								/* TEXT */
-							)]), createBaseVNode(
-								"p",
-								_hoisted_49$1,
-								toDisplayString(card.detail),
-								1
-								/* TEXT */
-							)],
-							2
-							/* CLASS */
-						);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))]),
-				$setup.repairableModules.length ? (openBlock(), createElementBlock("section", _hoisted_50$1, [
-					_cache[34] || (_cache[34] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-continuation-materials__outline-heading" },
-						[createBaseVNode("strong", null, "定向补足")],
-						-1
-						/* CACHED */
-					)),
-					_cache[35] || (_cache[35] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-continuation-materials__card-body" },
-						"只开放所选待补模块的程序级写集；已完成模块不会被重写。历史状态未知的模块必须在此显式选择。",
-						-1
-						/* CACHED */
-					)),
-					createBaseVNode("div", _hoisted_51$1, [(openBlock(true), createElementBlock(
-						Fragment,
-						null,
-						renderList($setup.repairableModules, (module) => {
-							return openBlock(), createElementBlock("label", { key: module }, [createBaseVNode("input", {
-								type: "checkbox",
-								checked: $setup.selectedRepairModules.includes(module),
-								disabled: $props.busy,
-								onChange: ($event) => $setup.toggleRepairModule(module)
-							}, null, 40, _hoisted_52$1), createTextVNode(
-								" " + toDisplayString($setup.MATERIAL_STATUS_LABELS_ACU[module] ?? module),
-								1
-								/* TEXT */
-							)]);
-						}),
-						128
-						/* KEYED_FRAGMENT */
-					))]),
-					createBaseVNode("div", _hoisted_53$1, [createVNode($setup["AcuButton"], {
-						variant: "primary",
-						loading: $props.busy,
-						disabled: !$setup.selectedRepairModules.length,
-						onClick: $setup.requestRepair
-					}, {
-						default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
-							"补足所选模块",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["loading", "disabled"])])
-				])) : createCommentVNode("v-if", true),
-				$setup.pendingFixCards.length ? (openBlock(), createElementBlock("section", _hoisted_54$1, [_cache[36] || (_cache[36] = createBaseVNode(
-					"p",
-					{ class: "acu-v2-continuation-materials__outline-heading" },
-					[createBaseVNode("strong", null, "待修复")],
-					-1
-					/* CACHED */
-				)), (openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.pendingFixCards, (card) => {
-						return openBlock(), createElementBlock("article", { key: card.module }, [
-							createBaseVNode("p", _hoisted_55$1, [createBaseVNode(
-								"strong",
-								null,
-								toDisplayString(card.title),
-								1
-								/* TEXT */
-							), createBaseVNode(
-								"span",
-								_hoisted_56$1,
-								"第 " + toDisplayString(card.attempts) + " 次",
-								1
-								/* TEXT */
-							)]),
-							createBaseVNode(
-								"p",
-								_hoisted_57$1,
-								toDisplayString(card.detail),
-								1
-								/* TEXT */
-							),
-							createBaseVNode(
-								"p",
-								_hoisted_58$1,
-								toDisplayString(card.meta),
-								1
-								/* TEXT */
-							)
-						]);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))])) : createCommentVNode("v-if", true),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_59$1,
+					_hoisted_46$1,
 					" 结算水位：楼层 " + toDisplayString($setup.materials.snapshot.value.settledThroughIndex) + " · 伏笔 " + toDisplayString($setup.materials.snapshot.value.hooks.length) + " 条 · 信息差 " + toDisplayString($setup.materials.snapshot.value.infoGap.length) + " 条 · 长期约束 " + toDisplayString($setup.materials.snapshot.value.constraints.length) + " 条 · 故事时间 " + toDisplayString($setup.materials.snapshot.value.chronology.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.hooks) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.infoGap) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.constraints) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.chronology),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				$setup.materials.snapshot.value ? (openBlock(), createElementBlock("p", _hoisted_60$1, [$setup.materials.diagnostics.value.checkpointIndex === null && $setup.materials.diagnostics.value.foldedDeltaCount === 0 ? (openBlock(), createElementBlock(
+				$setup.materials.snapshot.value ? (openBlock(), createElementBlock("p", _hoisted_47$1, [$setup.materials.diagnostics.value.checkpointIndex === null && $setup.materials.diagnostics.value.foldedDeltaCount === 0 ? (openBlock(), createElementBlock(
 					Fragment,
 					{ key: 0 },
 					[createTextVNode(" 当前没有基线，也没有楼层增量。结算后会把增量写到当时的楼层；删除该楼或切到别的 swipe 后，这份增量不再参与折叠。 ")],
@@ -191780,19 +191208,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				))])) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_61$1,
+					_hoisted_48$1,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				createCommentVNode(" 伏笔账本 "),
-				createBaseVNode("details", _hoisted_62$1, [
+				createBaseVNode("details", _hoisted_49$1, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"伏笔账本 · " + toDisplayString($setup.materials.snapshot.value?.hooks.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_63$1, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_64$1, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_65$1, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.hooks.dirty ? (openBlock(), createElementBlock("span", _hoisted_50$1, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.hooks.length ? (openBlock(), createElementBlock("p", _hoisted_51$1, "还没有伏笔条目。")) : (openBlock(), createElementBlock("div", _hoisted_52, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.hooks, (hook) => {
@@ -191803,7 +191231,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": hook.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_66$1, [
+									createBaseVNode("p", _hoisted_53, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -191813,21 +191241,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_67,
+											_hoisted_54,
 											toDisplayString($setup.HOOK_STATUS_LABELS[hook.status] ?? hook.status),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_68,
+											_hoisted_55,
 											toDisplayString($setup.HOOK_IMPORTANCE_LABELS[hook.importance] ?? hook.importance),
 											1
 											/* TEXT */
 										),
 										hook.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_69,
+											_hoisted_56,
 											"已退休" + toDisplayString(hook.retiredReason ? `：${hook.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -191835,12 +191263,12 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_70,
+										_hoisted_57,
 										toDisplayString(hook.summary),
 										1
 										/* TEXT */
 									),
-									createBaseVNode("p", _hoisted_71, [createTextVNode(
+									createBaseVNode("p", _hoisted_58, [createTextVNode(
 										"植入楼层 " + toDisplayString(hook.plantedIndex) + " · 最近更新楼层 " + toDisplayString(hook.updatedIndex),
 										1
 										/* TEXT */
@@ -191863,8 +191291,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_72, [
-						_cache[39] || (_cache[39] = createBaseVNode(
+					createBaseVNode("details", _hoisted_59, [
+						_cache[34] || (_cache[34] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -191878,16 +191306,16 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.hooks.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_73,
+							_hoisted_60,
 							toDisplayString($setup.materials.modules.hooks.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_74, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_61, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.hooks.dirty,
 							onClick: _cache[3] || (_cache[3] = ($event) => $setup.materials.discard("hooks"))
 						}, {
-							default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
+							default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -191899,7 +191327,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.hooks.dirty,
 							onClick: _cache[4] || (_cache[4] = ($event) => $setup.materials.save("hooks"))
 						}, {
-							default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
+							default: withCtx(() => [..._cache[33] || (_cache[33] = [createTextVNode(
 								"保存伏笔账本",
 								-1
 								/* CACHED */
@@ -191909,13 +191337,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 认知与信息差 "),
-				createBaseVNode("details", _hoisted_75, [
+				createBaseVNode("details", _hoisted_62, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"认知与信息差 · " + toDisplayString($setup.materials.snapshot.value?.infoGap.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.infoGap.dirty ? (openBlock(), createElementBlock("span", _hoisted_76, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.infoGap.length ? (openBlock(), createElementBlock("p", _hoisted_77, "还没有信息差条目。")) : (openBlock(), createElementBlock("div", _hoisted_78, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.infoGap.dirty ? (openBlock(), createElementBlock("span", _hoisted_63, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.infoGap.length ? (openBlock(), createElementBlock("p", _hoisted_64, "还没有信息差条目。")) : (openBlock(), createElementBlock("div", _hoisted_65, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.infoGap, (gap) => {
@@ -191926,7 +191354,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": gap.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_79, [
+									createBaseVNode("p", _hoisted_66, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -191943,21 +191371,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_80,
+											_hoisted_67,
 											toDisplayString($setup.REVEAL_STATUS_LABELS[gap.revealStatus] ?? gap.revealStatus),
 											1
 											/* TEXT */
 										),
 										gap.revealIndex !== null ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_81,
+											_hoisted_68,
 											"揭示楼层 " + toDisplayString(gap.revealIndex),
 											1
 											/* TEXT */
 										)) : createCommentVNode("v-if", true),
 										gap.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_82,
+											_hoisted_69,
 											"已退休" + toDisplayString(gap.retiredReason ? `：${gap.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -191965,14 +191393,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_83,
+										_hoisted_70,
 										"客观事实：" + toDisplayString(gap.objectiveFact),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_84,
+										_hoisted_71,
 										"读者已知：" + toDisplayString(gap.readerKnown || "（未记录）"),
 										1
 										/* TEXT */
@@ -192003,8 +191431,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_85, [
-						_cache[42] || (_cache[42] = createBaseVNode(
+					createBaseVNode("details", _hoisted_72, [
+						_cache[37] || (_cache[37] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -192018,16 +191446,16 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.infoGap.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_86,
+							_hoisted_73,
 							toDisplayString($setup.materials.modules.infoGap.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_87, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_74, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.infoGap.dirty,
 							onClick: _cache[6] || (_cache[6] = ($event) => $setup.materials.discard("infoGap"))
 						}, {
-							default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
+							default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -192039,7 +191467,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.infoGap.dirty,
 							onClick: _cache[7] || (_cache[7] = ($event) => $setup.materials.save("infoGap"))
 						}, {
-							default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
+							default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
 								"保存信息差",
 								-1
 								/* CACHED */
@@ -192049,13 +191477,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 长期约束 "),
-				createBaseVNode("details", _hoisted_88, [
+				createBaseVNode("details", _hoisted_75, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"长期约束 · " + toDisplayString($setup.materials.snapshot.value?.constraints.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.constraints.dirty ? (openBlock(), createElementBlock("span", _hoisted_89, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.constraints.length ? (openBlock(), createElementBlock("p", _hoisted_90, "还没有长期约束。")) : (openBlock(), createElementBlock("div", _hoisted_91, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.constraints.dirty ? (openBlock(), createElementBlock("span", _hoisted_76, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.constraints.length ? (openBlock(), createElementBlock("p", _hoisted_77, "还没有长期约束。")) : (openBlock(), createElementBlock("div", _hoisted_78, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.constraints, (constraint) => {
@@ -192063,7 +191491,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								key: constraint.id,
 								class: "acu-v2-continuation-materials__card"
 							}, [
-								createBaseVNode("p", _hoisted_92, [createBaseVNode(
+								createBaseVNode("p", _hoisted_79, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(constraint.id),
@@ -192072,12 +191500,12 @@ Expected function or array of functions, received type ${typeof value}.`
 								)]),
 								createBaseVNode(
 									"p",
-									_hoisted_93,
+									_hoisted_80,
 									toDisplayString(constraint.text),
 									1
 									/* TEXT */
 								),
-								createBaseVNode("p", _hoisted_94, [createTextVNode(
+								createBaseVNode("p", _hoisted_81, [createTextVNode(
 									"登记楼层 " + toDisplayString(constraint.createdIndex),
 									1
 									/* TEXT */
@@ -192097,8 +191525,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_95, [
-						_cache[45] || (_cache[45] = createBaseVNode(
+					createBaseVNode("details", _hoisted_82, [
+						_cache[40] || (_cache[40] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -192112,16 +191540,16 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.constraints.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_96,
+							_hoisted_83,
 							toDisplayString($setup.materials.modules.constraints.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_97, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_84, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.constraints.dirty,
 							onClick: _cache[9] || (_cache[9] = ($event) => $setup.materials.discard("constraints"))
 						}, {
-							default: withCtx(() => [..._cache[43] || (_cache[43] = [createTextVNode(
+							default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -192133,7 +191561,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.constraints.dirty,
 							onClick: _cache[10] || (_cache[10] = ($event) => $setup.materials.save("constraints"))
 						}, {
-							default: withCtx(() => [..._cache[44] || (_cache[44] = [createTextVNode(
+							default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
 								"保存长期约束",
 								-1
 								/* CACHED */
@@ -192143,13 +191571,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					])
 				]),
 				createCommentVNode(" 故事年代学账本 "),
-				createBaseVNode("details", _hoisted_98, [
+				createBaseVNode("details", _hoisted_85, [
 					createBaseVNode("summary", null, [createTextVNode(
 						"故事年代学账本 · " + toDisplayString($setup.materials.snapshot.value?.chronology.length ?? 0) + " 条",
 						1
 						/* TEXT */
-					), $setup.materials.modules.chronology.dirty ? (openBlock(), createElementBlock("span", _hoisted_99, "未保存")) : createCommentVNode("v-if", true)]),
-					!$setup.materials.snapshot.value?.chronology.length ? (openBlock(), createElementBlock("p", _hoisted_100, "还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。")) : (openBlock(), createElementBlock("div", _hoisted_101, [(openBlock(true), createElementBlock(
+					), $setup.materials.modules.chronology.dirty ? (openBlock(), createElementBlock("span", _hoisted_86, "未保存")) : createCommentVNode("v-if", true)]),
+					!$setup.materials.snapshot.value?.chronology.length ? (openBlock(), createElementBlock("p", _hoisted_87, "还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。")) : (openBlock(), createElementBlock("div", _hoisted_88, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.materials.snapshot.value.chronology, (entry) => {
@@ -192160,7 +191588,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": entry.retired }])
 								},
 								[
-									createBaseVNode("p", _hoisted_102, [
+									createBaseVNode("p", _hoisted_89, [
 										createBaseVNode(
 											"strong",
 											null,
@@ -192177,14 +191605,14 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_103,
+											_hoisted_90,
 											toDisplayString($setup.CHRONOLOGY_PRECISION_LABELS[entry.precision] ?? entry.precision),
 											1
 											/* TEXT */
 										),
 										entry.retired ? (openBlock(), createElementBlock(
 											"span",
-											_hoisted_104,
+											_hoisted_91,
 											"已作废" + toDisplayString(entry.retiredReason ? `：${entry.retiredReason}` : ""),
 											1
 											/* TEXT */
@@ -192192,21 +191620,21 @@ Expected function or array of functions, received type ${typeof value}.`
 									]),
 									createBaseVNode(
 										"p",
-										_hoisted_105,
+										_hoisted_92,
 										"累计经过：" + toDisplayString(entry.elapsed),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_106,
+										_hoisted_93,
 										"时间转换：" + toDisplayString(entry.transition),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"p",
-										_hoisted_107,
+										_hoisted_94,
 										"证据楼层 " + toDisplayString(entry.evidenceIndexes.join("、")) + " · 结算楼层 " + toDisplayString(entry.updatedIndex),
 										1
 										/* TEXT */
@@ -192219,8 +191647,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						128
 						/* KEYED_FRAGMENT */
 					))])),
-					createBaseVNode("details", _hoisted_108, [
-						_cache[48] || (_cache[48] = createBaseVNode(
+					createBaseVNode("details", _hoisted_95, [
+						_cache[43] || (_cache[43] = createBaseVNode(
 							"summary",
 							null,
 							"编辑原始 JSON",
@@ -192234,16 +191662,16 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"]),
 						$setup.materials.modules.chronology.error ? (openBlock(), createElementBlock(
 							"p",
-							_hoisted_109,
+							_hoisted_96,
 							toDisplayString($setup.materials.modules.chronology.error),
 							1
 							/* TEXT */
 						)) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_110, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_97, [createVNode($setup["AcuButton"], {
 							disabled: !$setup.materials.modules.chronology.dirty,
 							onClick: _cache[12] || (_cache[12] = ($event) => $setup.materials.discard("chronology"))
 						}, {
-							default: withCtx(() => [..._cache[46] || (_cache[46] = [createTextVNode(
+							default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
 								"放弃修改",
 								-1
 								/* CACHED */
@@ -192255,7 +191683,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							disabled: !$setup.materials.modules.chronology.dirty,
 							onClick: _cache[13] || (_cache[13] = ($event) => $setup.materials.save("chronology"))
 						}, {
-							default: withCtx(() => [..._cache[47] || (_cache[47] = [createTextVNode(
+							default: withCtx(() => [..._cache[42] || (_cache[42] = [createTextVNode(
 								"保存年代学账本",
 								-1
 								/* CACHED */
@@ -192272,7 +191700,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			{ key: 3 },
 			[
 				createCommentVNode(" 百科资料库：web-researcher 从互联网查到的原作/公开设定，按实体分条 "),
-				_cache[54] || (_cache[54] = createBaseVNode(
+				_cache[49] || (_cache[49] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-materials__meta" },
 					" 百科资料库由 web-researcher 子代理从萌娘百科、维基百科、百度百科或网页查到后写入，按实体（人物、法术、物品、事件…）分条。 每条固定只有「名称 + 一句话简介」，详情自由格式。Agent 上下文里只注入预览行，详情由它们按 ID 精读。 它记录的是原作/公开设定，不是本故事已发生的事实；与世界书或正文冲突时以后者为准。 ",
@@ -192281,19 +191709,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_111,
+					_hoisted_98,
 					" 条目 " + toDisplayString($setup.materials.snapshot.value.webRefs.length) + " 条（活跃 " + toDisplayString($setup.materials.snapshot.value.webRefs.filter((entry) => !entry.retired).length) + "）· 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.webRefs),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_112,
+					_hoisted_99,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_113, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_114, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.webRefs.length ? (openBlock(), createElementBlock("p", _hoisted_100, " 还没有百科资料。在续写设置里勾选「启用开场百科检索」后，新任务第一次规划前会自动检索；主 Agent 之后也可按需派工 web-researcher。 ")) : (openBlock(), createElementBlock("div", _hoisted_101, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.webRefs, (ref) => {
@@ -192304,7 +191732,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": ref.retired }])
 							},
 							[
-								createBaseVNode("summary", _hoisted_115, [
+								createBaseVNode("summary", _hoisted_102, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -192321,7 +191749,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_116,
+										_hoisted_103,
 										toDisplayString($setup.WEB_REF_SOURCE_LABELS[ref.source] ?? ref.source),
 										1
 										/* TEXT */
@@ -192346,14 +191774,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									)),
 									ref.sourceStatus !== "ok" ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_117,
+										_hoisted_104,
 										toDisplayString($setup.WEB_REF_STATUS_LABELS[ref.sourceStatus] ?? ref.sourceStatus),
 										1
 										/* TEXT */
 									)) : createCommentVNode("v-if", true),
 									ref.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_118,
+										_hoisted_105,
 										"已退休" + toDisplayString(ref.retiredReason ? `：${ref.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -192361,24 +191789,24 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_119,
+									_hoisted_106,
 									toDisplayString(ref.brief),
 									1
 									/* TEXT */
 								),
 								ref.summary ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_120,
+									_hoisted_107,
 									toDisplayString(ref.summary),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
-								createBaseVNode("p", _hoisted_121, [
+								createBaseVNode("p", _hoisted_108, [
 									createBaseVNode("a", {
 										href: ref.url,
 										target: "_blank",
 										rel: "noopener noreferrer"
-									}, toDisplayString(ref.url), 9, _hoisted_122),
+									}, toDisplayString(ref.url), 9, _hoisted_109),
 									ref.query ? (openBlock(), createElementBlock(
 										Fragment,
 										{ key: 0 },
@@ -192410,15 +191838,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_123, [
-					_cache[52] || (_cache[52] = createBaseVNode(
+				createBaseVNode("details", _hoisted_110, [
+					_cache[47] || (_cache[47] = createBaseVNode(
 						"summary",
 						null,
 						"编辑原始 JSON",
 						-1
 						/* CACHED */
 					)),
-					_cache[53] || (_cache[53] = createBaseVNode(
+					_cache[48] || (_cache[48] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-continuation-materials__card-meta" },
 						"每条至少需要 id、title（名称）、url、brief（一句话简介）；summary 为自由格式详情，tags 可选。网页原文不保存。手动新增的条目 source 可写 web。",
@@ -192432,16 +191860,16 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.webRefs.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_124,
+						_hoisted_111,
 						toDisplayString($setup.materials.modules.webRefs.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_125, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_112, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.webRefs.dirty,
 						onClick: _cache[15] || (_cache[15] = ($event) => $setup.materials.discard("webRefs"))
 					}, {
-						default: withCtx(() => [..._cache[50] || (_cache[50] = [createTextVNode(
+						default: withCtx(() => [..._cache[45] || (_cache[45] = [createTextVNode(
 							"放弃修改",
 							-1
 							/* CACHED */
@@ -192453,7 +191881,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !$setup.materials.modules.webRefs.dirty,
 						onClick: _cache[16] || (_cache[16] = ($event) => $setup.materials.save("webRefs"))
 					}, {
-						default: withCtx(() => [..._cache[51] || (_cache[51] = [createTextVNode(
+						default: withCtx(() => [..._cache[46] || (_cache[46] = [createTextVNode(
 							"保存百科资料库",
 							-1
 							/* CACHED */
@@ -192469,7 +191897,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			{ key: 4 },
 			[
 				createCommentVNode(" 用户要求：Agent 会话里用户累计提出的任务要求 "),
-				_cache[59] || (_cache[59] = createBaseVNode(
+				_cache[54] || (_cache[54] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-materials__meta" },
 					" 用户要求在资料库里手动维护。创建任务时会把初始要求机械写成首条。 保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。 ",
@@ -192478,19 +191906,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_126,
+					_hoisted_113,
 					" 条目 " + toDisplayString($setup.materials.snapshot.value.userRequirements.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.userRequirements),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_127,
+					_hoisted_114,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.userRequirements.length ? (openBlock(), createElementBlock("p", _hoisted_128, " 还没有用户要求条目。创建任务后会写入初始要求；之后请在这里手动增删改。 ")) : (openBlock(), createElementBlock("ol", _hoisted_129, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.userRequirements.length ? (openBlock(), createElementBlock("p", _hoisted_115, " 还没有用户要求条目。创建任务后会写入初始要求；之后请在这里手动增删改。 ")) : (openBlock(), createElementBlock("ol", _hoisted_116, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.userRequirements, (line, index) => {
@@ -192505,15 +191933,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_130, [
-					_cache[57] || (_cache[57] = createBaseVNode(
+				createBaseVNode("details", _hoisted_117, [
+					_cache[52] || (_cache[52] = createBaseVNode(
 						"summary",
 						null,
 						"编辑原始 JSON",
 						-1
 						/* CACHED */
 					)),
-					_cache[58] || (_cache[58] = createBaseVNode(
+					_cache[53] || (_cache[53] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-continuation-materials__card-meta" },
 						"必须是字符串数组，例如 [\"不要提前揭底牌\",\"继续用第一人称\"]。空数组表示清空；空串条目会被拒绝。",
@@ -192527,16 +191955,16 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.userRequirements.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_131,
+						_hoisted_118,
 						toDisplayString($setup.materials.modules.userRequirements.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_132, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_119, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.userRequirements.dirty,
 						onClick: _cache[18] || (_cache[18] = ($event) => $setup.materials.discard("userRequirements"))
 					}, {
-						default: withCtx(() => [..._cache[55] || (_cache[55] = [createTextVNode(
+						default: withCtx(() => [..._cache[50] || (_cache[50] = [createTextVNode(
 							"放弃修改",
 							-1
 							/* CACHED */
@@ -192548,7 +191976,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !$setup.materials.modules.userRequirements.dirty,
 						onClick: _cache[19] || (_cache[19] = ($event) => $setup.materials.save("userRequirements"))
 					}, {
-						default: withCtx(() => [..._cache[56] || (_cache[56] = [createTextVNode(
+						default: withCtx(() => [..._cache[51] || (_cache[51] = [createTextVNode(
 							"保存用户要求",
 							-1
 							/* CACHED */
@@ -192564,7 +191992,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			{ key: 5 },
 			[
 				createCommentVNode(" 故事总纲：结构化展示 + JSON 编辑 "),
-				_cache[63] || (_cache[63] = createBaseVNode(
+				_cache[58] || (_cache[58] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-materials__meta" },
 					" 故事总纲由 arc-architect 子代理维护：全书方向一条 + 若干卷台阶。也可以在这里手动修正，保存走同一套结构校验并推进修订号。 ",
@@ -192573,19 +192001,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_133,
+					_hoisted_120,
 					" 总纲 " + toDisplayString($setup.materials.snapshot.value.storyArc.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.storyArc),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.materials.loadError.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_134,
+					_hoisted_121,
 					toDisplayString($setup.materials.loadError.value),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_135, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_136, [(openBlock(true), createElementBlock(
+				!$setup.materials.snapshot.value?.storyArc.length ? (openBlock(), createElementBlock("p", _hoisted_122, " 还没有故事总纲。开始规划后主 Agent 会先派工 arc-architect 立总纲。 ")) : (openBlock(), createElementBlock("div", _hoisted_123, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.materials.snapshot.value.storyArc, (arc) => {
@@ -192596,7 +192024,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								class: normalizeClass(["acu-v2-continuation-materials__card", { "acu-v2-continuation-materials__card--retired": arc.retired }])
 							},
 							[
-								createBaseVNode("p", _hoisted_137, [
+								createBaseVNode("p", _hoisted_124, [
 									createBaseVNode(
 										"strong",
 										null,
@@ -192606,14 +192034,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_138,
+										_hoisted_125,
 										toDisplayString(arc.scope === "story" ? "全书方向" : "卷台阶"),
 										1
 										/* TEXT */
 									),
 									createBaseVNode(
 										"span",
-										_hoisted_139,
+										_hoisted_126,
 										toDisplayString($setup.ARC_STATUS_LABELS[arc.status] ?? arc.status),
 										1
 										/* TEXT */
@@ -192627,7 +192055,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									),
 									arc.retired ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_140,
+										_hoisted_127,
 										"已退休" + toDisplayString(arc.retiredReason ? `：${arc.retiredReason}` : ""),
 										1
 										/* TEXT */
@@ -192635,28 +192063,28 @@ Expected function or array of functions, received type ${typeof value}.`
 								]),
 								createBaseVNode(
 									"p",
-									_hoisted_141,
+									_hoisted_128,
 									"方向：" + toDisplayString(arc.direction),
 									1
 									/* TEXT */
 								),
 								arc.escalation ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_142,
+									_hoisted_129,
 									"冲突高度：" + toDisplayString(arc.escalation),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								arc.withheld ? (openBlock(), createElementBlock(
 									"p",
-									_hoisted_143,
+									_hoisted_130,
 									"禁翻底牌：" + toDisplayString(arc.withheld),
 									1
 									/* TEXT */
 								)) : createCommentVNode("v-if", true),
 								createBaseVNode(
 									"p",
-									_hoisted_144,
+									_hoisted_131,
 									" 已承载阶段：" + toDisplayString(arc.stageNumbers.length ? arc.stageNumbers.join("、") : "（尚未承载）"),
 									1
 									/* TEXT */
@@ -192669,8 +192097,8 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_145, [
-					_cache[62] || (_cache[62] = createBaseVNode(
+				createBaseVNode("details", _hoisted_132, [
+					_cache[57] || (_cache[57] = createBaseVNode(
 						"summary",
 						null,
 						"编辑原始 JSON",
@@ -192684,16 +192112,16 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.materials.modules.storyArc.error ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_146,
+						_hoisted_133,
 						toDisplayString($setup.materials.modules.storyArc.error),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_147, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_134, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.materials.modules.storyArc.dirty,
 						onClick: _cache[21] || (_cache[21] = ($event) => $setup.materials.discard("storyArc"))
 					}, {
-						default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
+						default: withCtx(() => [..._cache[55] || (_cache[55] = [createTextVNode(
 							"放弃修改",
 							-1
 							/* CACHED */
@@ -192705,7 +192133,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !$setup.materials.modules.storyArc.dirty,
 						onClick: _cache[22] || (_cache[22] = ($event) => $setup.materials.save("storyArc"))
 					}, {
-						default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
+						default: withCtx(() => [..._cache[56] || (_cache[56] = [createTextVNode(
 							"保存故事总纲",
 							-1
 							/* CACHED */
@@ -192719,7 +192147,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-0c7fcfcb"]]);
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-c3e7691a"]]);
 
     /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -192934,20 +192362,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 return false;
             }
         }
-        /** 定向补足资料，不生成或发送宿主正文。 */
-        async function repairPendingMaterials(modules) {
-            if (!modules.length)
-                return false;
-            let outcome = null;
-            const completed = await run_ACU(async () => (outcome = await runtime.orchestrator.repairPendingMaterials({ modules })));
-            if (completed && outcome) {
-                if (outcome.failedModules.length)
-                    toast.info(`已保留成功模块；仍待补足：${outcome.failedModules.join('、')}`);
-                else
-                    toast.success('已完成所选智能续写资料模块的定向补足。');
-            }
-            return completed;
-        }
         function continueTask() {
             return run_ACU(() => runtime.orchestrator.continueTask());
         }
@@ -193124,7 +192538,6 @@ Expected function or array of functions, received type ${typeof value}.`
             initialize,
             isAwaitingHostResult,
             originInstruction,
-            repairPendingMaterials,
             refresh,
             replanRemaining,
             replanRemainingWithInstruction,
@@ -193251,10 +192664,6 @@ Expected function or array of functions, received type ${typeof value}.`
             title: "写作指令编排子代理（instruction-composer）提示词",
             note: "固定工作流在策划与审查之后调用，是唯一产出本轮写作指令的角色。不进入主 Agent 可派工目录。契约 JSON 为 {instruction, summary, constraints}。",
         },
-        pendingFix: {
-            title: "待修复模块",
-            empty: "",
-        },
     };
 
     const INHERIT_CHANNEL_VALUE$1 = '__inherit__';
@@ -193277,10 +192686,6 @@ Expected function or array of functions, received type ${typeof value}.`
             const materialsPanel = ref(null);
             const clock = ref(Date.now());
             let countdownTimer;
-            async function repairMaterials(modules) {
-                if (await runtime.repairPendingMaterials(modules))
-                    materialsPanel.value?.reload({ preserveDirty: true });
-            }
             const stageText = computed(() => {
                 const stage = runtime.activeStage.value;
                 if (!runtime.task.value)
@@ -193882,14 +193287,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, repairMaterials, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, agentChannelRoles, webSearchProviderOptions, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, workflowGroupMeta, webResearchGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, get materialsAutoRefreshTimer() { return materialsAutoRefreshTimer; }, set materialsAutoRefreshTimer(v) { materialsAutoRefreshTimer = v; }, MATERIALS_AUTO_REFRESH_DEBOUNCE_MS, scheduleMaterialsAutoRefresh, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel, get continuationCopy() { return continuationCopy; } };
+            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE: INHERIT_CHANNEL_VALUE$1, agentChannelRoles, webSearchProviderOptions, expandedGroups, isGroupExpanded, toggleGroup, runGroupMeta, contextGroupMeta, budgetGroupMeta, finalReviewGroupMeta, workflowGroupMeta, webResearchGroupMeta, channelGroupMeta, rulesGroupMeta, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptGroups, promptGroupMeta, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, refreshAfterChatMutation, get materialsAutoRefreshTimer() { return materialsAutoRefreshTimer; }, set materialsAutoRefreshTimer(v) { materialsAutoRefreshTimer = v; }, MATERIALS_AUTO_REFRESH_DEBOUNCE_MS, scheduleMaterialsAutoRefresh, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel, get continuationCopy() { return continuationCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-d10d7564] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-d10d7564] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-d10d7564] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-d10d7564] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-d10d7564] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-d10d7564] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-d10d7564] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-d10d7564] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-d10d7564] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-d10d7564] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-d10d7564] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-d10d7564] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-d10d7564] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-d10d7564] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-d10d7564] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-d10d7564] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-d10d7564] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-d10d7564] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-d10d7564] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-d10d7564]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-d10d7564] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-d10d7564] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-d10d7564] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-d10d7564] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-d10d7564] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-d10d7564");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_d10d7564_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-bc748644] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-bc748644] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-bc748644] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-bc748644] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-bc748644] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-bc748644] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-bc748644] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-bc748644] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-bc748644] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-bc748644] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-bc748644] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-bc748644] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-bc748644] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-bc748644] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-bc748644] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-bc748644] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-bc748644] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-bc748644] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-bc748644] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-bc748644]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-bc748644] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-bc748644] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-bc748644] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-bc748644] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-bc748644] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-bc748644");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_bc748644_lang = null;
 
     const _hoisted_1$q = { class: "acu-v2-continuation-page" };
     const _hoisted_2$o = {
@@ -194021,8 +193426,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"active-revision": $setup.runtime.activeRevision.value,
 					busy: $setup.runtime.busy.value,
 					onSaveOutline: $setup.saveOutline,
-					onClear: $setup.clearData,
-					onRepair: $setup.repairMaterials
+					onClear: $setup.clearData
 				}, null, 8, [
 					"task",
 					"active-stage",
@@ -194963,7 +194367,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-d10d7564"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-bc748644"]]);
 
     /** 页面（.vue）不能直接引用 service 值，角色顺序经此处中转。 */
     const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU;
@@ -195650,7 +195054,7 @@ Expected function or array of functions, received type ${typeof value}.`
             busy: { type: Boolean, default: false },
             timeline: { default: () => [] }
         },
-        emits: ["refresh", "clear", "saveUserRequirements", "repair"],
+        emits: ["refresh", "clear", "saveUserRequirements"],
         setup(__props, { expose: __expose, emit: __emit }) {
             __expose();
             const props = __props;
@@ -195670,7 +195074,6 @@ Expected function or array of functions, received type ${typeof value}.`
             const requirementsDraft = ref('[]');
             const requirementsDirty = ref(false);
             const requirementsError = ref('');
-            const selectedRepairModules = ref([]);
             function snapshotRequirementsJson() {
                 return JSON.stringify(props.userRequirements.snapshot?.requirements ?? [], null, 2);
             }
@@ -195764,56 +195167,6 @@ Expected function or array of functions, received type ${typeof value}.`
                     },
                 ];
             });
-            const MODULE_LABELS = {
-                clock: '时钟', dimensions: '世界维度', seeds: '暗流种子', actors: '行动者', chronicle: '世界编年', guidance: '投影', rumors: '传闻', player: '玩家',
-            };
-            const WORLD_MATERIAL_MODULES_ACU = [
-                'clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player',
-            ];
-            const repairableModules = computed(() => {
-                const ledger = props.ledger;
-                if (!ledger)
-                    return [];
-                const pending = new Set(ledger.pendingFixes.map(item => item.module));
-                const legacyOverall = ledger.materialCompletion.state === 'legacy_unknown';
-                return WORLD_MATERIAL_MODULES_ACU.filter(module => pending.has(module)
-                    || ledger.materialCompletion.modules[module] === 'legacy_unknown'
-                    || legacyOverall);
-            });
-            watch(repairableModules, modules => {
-                const allowed = new Set(modules);
-                selectedRepairModules.value = selectedRepairModules.value.filter(module => allowed.has(module));
-            });
-            function toggleRepairModule(module) {
-                selectedRepairModules.value = selectedRepairModules.value.includes(module)
-                    ? selectedRepairModules.value.filter(item => item !== module)
-                    : [...selectedRepairModules.value, module];
-            }
-            function requestRepair() {
-                if (!selectedRepairModules.value.length)
-                    return;
-                emit('repair', [...selectedRepairModules.value]);
-            }
-            const materialStatusCards = computed(() => buildMaterialCompletionCards_ACU({
-                overallState: props.ledger?.materialCompletion.state,
-                expectedModules: props.ledger?.materialCompletion.expectedModules,
-                modules: props.ledger?.materialCompletion.modules,
-                pendingModules: props.ledger?.pendingFixes.map(item => item.module),
-                loadError: resolveMaterialLoadError_ACU({
-                    snapshotPresent: props.materials.snapshot !== null,
-                    diagnostics: props.materials.diagnostics,
-                }),
-            }));
-            function materialStatusTitle(module) {
-                return module === '*' ? '资料维护状态' : MODULE_LABELS[module] ?? module;
-            }
-            const pendingFixCards = computed(() => (props.ledger?.pendingFixes ?? []).map(item => ({
-                module: item.module,
-                title: MODULE_LABELS[item.module] ?? item.module,
-                attempts: item.attempts,
-                detail: item.violations.map(violation => violation.message).join('；') || item.lastError,
-                meta: `${item.agentName} · 第 ${item.firstFailedAtDay} 天起 · ${item.lastError}`,
-            })));
             const CONTACT_LABELS = { open: '开放', secluded: '隔绝' };
             const RUMOR_STATUS_LABELS = { latent: '潜伏', ripe: '待命', revealed: '已得知', dead: '已失效' };
             const HIT_STATE_LABELS = { 'open-hit': '开放可命中', 'secluded-delay': '隔绝延迟中', waiting: '等待到访' };
@@ -195856,14 +195209,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     return `${channels} · 得知日 第 ${item.revealedAtDay} 天`;
                 return channels;
             }
-            const __returned__ = { props, emit, TABS, activeTab, clearPending, requirementsDraft, requirementsDirty, requirementsError, selectedRepairModules, snapshotRequirementsJson, updateRequirementsDraft, discardRequirementsDraft, saveRequirementsDraft, confirmClear, anchorText, diagnostics, candidateEntries, agentLabel, SEED_STATUS_LABELS, VISIBILITY_LABELS, TREND_LABELS, DIMENSION_KIND_LABELS, ledgerGroups, MODULE_LABELS, WORLD_MATERIAL_MODULES_ACU, repairableModules, toggleRepairModule, requestRepair, materialStatusCards, materialStatusTitle, pendingFixCards, CONTACT_LABELS, RUMOR_STATUS_LABELS, HIT_STATE_LABELS, chronicleRows, missedItems, rumorQueue, rumorQueueGroups, chronicleMeta, missedMeta, rumorMeta, AcuButton, AcuTextarea };
+            const __returned__ = { props, emit, TABS, activeTab, clearPending, requirementsDraft, requirementsDirty, requirementsError, snapshotRequirementsJson, updateRequirementsDraft, discardRequirementsDraft, saveRequirementsDraft, confirmClear, anchorText, diagnostics, candidateEntries, agentLabel, SEED_STATUS_LABELS, VISIBILITY_LABELS, TREND_LABELS, DIMENSION_KIND_LABELS, ledgerGroups, CONTACT_LABELS, RUMOR_STATUS_LABELS, HIT_STATE_LABELS, chronicleRows, missedItems, rumorQueue, rumorQueueGroups, chronicleMeta, missedMeta, rumorMeta, AcuButton, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-c4550ecc] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-c4550ecc] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-c4550ecc] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-c4550ecc] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-c4550ecc] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__repair[data-v-c4550ecc] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 35%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__repair-options[data-v-c4550ecc] { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__repair-options label[data-v-c4550ecc] { display: inline-flex; align-items: center; gap: 5px; cursor: pointer;\n}\n.acu-v2-ws-materials__confirm[data-v-c4550ecc] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-c4550ecc] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-c4550ecc] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-c4550ecc] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-c4550ecc] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-c4550ecc] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-c4550ecc] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-c4550ecc] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-c4550ecc] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-c4550ecc] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-c4550ecc] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-c4550ecc] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-c4550ecc] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-c4550ecc] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-c4550ecc] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-c4550ecc] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-c4550ecc] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-c4550ecc] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-c4550ecc] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-c4550ecc] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-c4550ecc] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-c4550ecc] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-c4550ecc] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__projection[data-v-c4550ecc] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-c4550ecc] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-c4550ecc] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-c4550ecc] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-c4550ecc] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-c4550ecc");
-    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_c4550ecc_lang = null;
+    injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-c659f642] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-c659f642] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-c659f642] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-c659f642] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-c659f642] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__confirm[data-v-c659f642] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-c659f642] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-c659f642] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-c659f642] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-c659f642] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-c659f642] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-c659f642] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-c659f642] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-c659f642] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-c659f642] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-c659f642] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-c659f642] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-c659f642] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-c659f642] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-c659f642] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-c659f642] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-c659f642] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-c659f642] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-c659f642] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-c659f642] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-c659f642] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-c659f642] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-c659f642] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__projection[data-v-c659f642] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-c659f642] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-c659f642] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-c659f642] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-c659f642] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-c659f642");
+    var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_c659f642_lang = null;
 
     const _hoisted_1$n = { class: "acu-v2-ws-materials" };
     const _hoisted_2$l = { class: "acu-v2-ws-materials__tabs" };
@@ -195884,148 +195237,119 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-ws-materials__meta"
     };
     const _hoisted_10$9 = {
-	class: "acu-v2-ws-materials__block",
-	open: ""
-    };
-    const _hoisted_11$9 = { class: "acu-v2-ws-materials__cards" };
-    const _hoisted_12$9 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_13$7 = { class: "acu-v2-ws-materials__badge" };
-    const _hoisted_14$7 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_15$7 = {
 	key: 2,
-	class: "acu-v2-ws-materials__repair"
-    };
-    const _hoisted_16$7 = { class: "acu-v2-ws-materials__repair-options" };
-    const _hoisted_17$6 = [
-	"checked",
-	"disabled",
-	"onChange"
-    ];
-    const _hoisted_18$6 = { class: "acu-v2-ws-materials__actions" };
-    const _hoisted_19$6 = {
-	key: 3,
-	class: "acu-v2-ws-materials__block",
-	open: ""
-    };
-    const _hoisted_20$5 = { class: "acu-v2-ws-materials__cards" };
-    const _hoisted_21$5 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_22$4 = { class: "acu-v2-ws-materials__badge" };
-    const _hoisted_23$3 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_24$3 = { class: "acu-v2-ws-materials__card-meta" };
-    const _hoisted_25$3 = {
-	key: 4,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_26$3 = {
+    const _hoisted_11$9 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_27$3 = {
+    const _hoisted_12$9 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_28$2 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_29$2 = {
+    const _hoisted_13$7 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_14$7 = {
 	key: 0,
 	class: "acu-v2-ws-materials__badge"
     };
-    const _hoisted_30$2 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_31$2 = {
+    const _hoisted_15$7 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_16$7 = {
 	key: 0,
 	class: "acu-v2-ws-materials__card-meta"
     };
-    const _hoisted_32$2 = {
+    const _hoisted_17$6 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_33$2 = {
+    const _hoisted_18$6 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_34$1 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_35$1 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_36$1 = {
+    const _hoisted_19$6 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_20$5 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_21$5 = {
 	class: "acu-v2-ws-materials__block",
 	open: ""
     };
-    const _hoisted_37$1 = {
+    const _hoisted_22$4 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_38$1 = {
+    const _hoisted_23$3 = {
 	key: 1,
 	class: "acu-v2-ws-materials__list"
     };
-    const _hoisted_39$1 = { class: "acu-v2-ws-materials__projection" };
-    const _hoisted_40$1 = {
+    const _hoisted_24$3 = { class: "acu-v2-ws-materials__projection" };
+    const _hoisted_25$3 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_41 = {
+    const _hoisted_26$3 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_42 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_43 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_44 = { class: "acu-v2-ws-materials__card-meta" };
-    const _hoisted_45 = {
+    const _hoisted_27$3 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_28$2 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_29$2 = { class: "acu-v2-ws-materials__card-meta" };
+    const _hoisted_30$2 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_46 = {
+    const _hoisted_31$2 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_47 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_48 = { class: "acu-v2-ws-materials__badge" };
-    const _hoisted_49 = { class: "acu-v2-ws-materials__card-body" };
-    const _hoisted_50 = { class: "acu-v2-ws-materials__card-meta" };
-    const _hoisted_51 = {
+    const _hoisted_32$2 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_33$2 = { class: "acu-v2-ws-materials__badge" };
+    const _hoisted_34$1 = { class: "acu-v2-ws-materials__card-body" };
+    const _hoisted_35$1 = { class: "acu-v2-ws-materials__card-meta" };
+    const _hoisted_36$1 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_52 = { class: "acu-v2-ws-materials__meta" };
-    const _hoisted_53 = {
+    const _hoisted_37$1 = { class: "acu-v2-ws-materials__meta" };
+    const _hoisted_38$1 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_54 = {
+    const _hoisted_39$1 = {
 	key: 1,
 	class: "acu-v2-ws-materials__cards"
     };
-    const _hoisted_55 = { class: "acu-v2-ws-materials__card-head" };
-    const _hoisted_56 = { class: "acu-v2-ws-materials__badge" };
-    const _hoisted_57 = { class: "acu-v2-ws-materials__card-meta" };
-    const _hoisted_58 = {
+    const _hoisted_40$1 = { class: "acu-v2-ws-materials__card-head" };
+    const _hoisted_41 = { class: "acu-v2-ws-materials__badge" };
+    const _hoisted_42 = { class: "acu-v2-ws-materials__card-meta" };
+    const _hoisted_43 = {
 	key: 0,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_59 = {
+    const _hoisted_44 = {
 	key: 1,
 	class: "acu-v2-ws-materials__diagnostics"
     };
-    const _hoisted_60 = {
+    const _hoisted_45 = {
 	key: 0,
 	class: "acu-v2-ws-materials__meta"
     };
-    const _hoisted_61 = {
+    const _hoisted_46 = {
 	key: 1,
 	class: "acu-v2-ws-materials__error"
     };
-    const _hoisted_62 = {
+    const _hoisted_47 = {
 	key: 2,
 	class: "acu-v2-ws-materials__empty"
     };
-    const _hoisted_63 = {
+    const _hoisted_48 = {
 	key: 3,
 	class: "acu-v2-ws-materials__list"
     };
-    const _hoisted_64 = { class: "acu-v2-ws-materials__json" };
-    const _hoisted_65 = {
+    const _hoisted_49 = { class: "acu-v2-ws-materials__json" };
+    const _hoisted_50 = {
 	key: 0,
 	class: "acu-v2-ws-materials__error"
     };
-    const _hoisted_66 = { class: "acu-v2-ws-materials__actions" };
+    const _hoisted_51 = { class: "acu-v2-ws-materials__actions" };
     function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$n, [
 		createBaseVNode("div", _hoisted_2$l, [(openBlock(), createElementBlock(
@@ -196161,142 +195485,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					1
 					/* TEXT */
 				)) : (openBlock(), createElementBlock("p", _hoisted_9$9, "当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。")),
-				createBaseVNode("details", _hoisted_10$9, [createBaseVNode(
-					"summary",
-					null,
-					"资料完成状态 · " + toDisplayString($setup.materialStatusCards.length) + " 项",
-					1
-					/* TEXT */
-				), createBaseVNode("div", _hoisted_11$9, [(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.materialStatusCards, (card) => {
-						return openBlock(), createElementBlock(
-							"article",
-							{
-								key: card.module,
-								class: normalizeClass(["acu-v2-ws-materials__card", { "acu-v2-ws-materials__card--failed": card.state === "pending" || card.state === "load_failed" }])
-							},
-							[createBaseVNode("p", _hoisted_12$9, [createBaseVNode(
-								"strong",
-								null,
-								toDisplayString($setup.materialStatusTitle(card.module)),
-								1
-								/* TEXT */
-							), createBaseVNode(
-								"span",
-								_hoisted_13$7,
-								toDisplayString(card.label),
-								1
-								/* TEXT */
-							)]), createBaseVNode(
-								"p",
-								_hoisted_14$7,
-								toDisplayString(card.detail),
-								1
-								/* TEXT */
-							)],
-							2
-							/* CLASS */
-						);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))])]),
-				$setup.repairableModules.length ? (openBlock(), createElementBlock("section", _hoisted_15$7, [
-					_cache[12] || (_cache[12] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-ws-materials__card-head" },
-						[createBaseVNode("strong", null, "定向补足")],
-						-1
-						/* CACHED */
-					)),
-					_cache[13] || (_cache[13] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-ws-materials__card-body" },
-						"只会开放所选待补模块的程序级写集；已完成模块不会被重写。历史状态未知的模块必须在此显式选择。",
-						-1
-						/* CACHED */
-					)),
-					createBaseVNode("div", _hoisted_16$7, [(openBlock(true), createElementBlock(
-						Fragment,
-						null,
-						renderList($setup.repairableModules, (module) => {
-							return openBlock(), createElementBlock("label", { key: module }, [createBaseVNode("input", {
-								type: "checkbox",
-								checked: $setup.selectedRepairModules.includes(module),
-								disabled: $props.busy,
-								onChange: ($event) => $setup.toggleRepairModule(module)
-							}, null, 40, _hoisted_17$6), createTextVNode(
-								" " + toDisplayString($setup.MODULE_LABELS[module] ?? module),
-								1
-								/* TEXT */
-							)]);
-						}),
-						128
-						/* KEYED_FRAGMENT */
-					))]),
-					createBaseVNode("div", _hoisted_18$6, [createVNode($setup["AcuButton"], {
-						variant: "primary",
-						loading: $props.busy,
-						disabled: !$setup.selectedRepairModules.length,
-						onClick: $setup.requestRepair
-					}, {
-						default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
-							"补足所选模块",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["loading", "disabled"])])
-				])) : createCommentVNode("v-if", true),
-				$setup.pendingFixCards.length ? (openBlock(), createElementBlock("details", _hoisted_19$6, [createBaseVNode(
-					"summary",
-					null,
-					"待修复 · " + toDisplayString($setup.pendingFixCards.length) + " 项",
-					1
-					/* TEXT */
-				), createBaseVNode("div", _hoisted_20$5, [(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.pendingFixCards, (item) => {
-						return openBlock(), createElementBlock("article", {
-							key: item.module,
-							class: "acu-v2-ws-materials__card acu-v2-ws-materials__card--failed"
-						}, [
-							createBaseVNode("p", _hoisted_21$5, [createBaseVNode(
-								"strong",
-								null,
-								toDisplayString(item.title),
-								1
-								/* TEXT */
-							), createBaseVNode(
-								"span",
-								_hoisted_22$4,
-								"第 " + toDisplayString(item.attempts) + " 次",
-								1
-								/* TEXT */
-							)]),
-							createBaseVNode(
-								"p",
-								_hoisted_23$3,
-								toDisplayString(item.detail),
-								1
-								/* TEXT */
-							),
-							createBaseVNode(
-								"p",
-								_hoisted_24$3,
-								toDisplayString(item.meta),
-								1
-								/* TEXT */
-							)
-						]);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))])])) : createCommentVNode("v-if", true),
-				!$props.ledger || !$setup.ledgerGroups.some((group) => group.items.length) ? (openBlock(), createElementBlock("p", _hoisted_25$3, "世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。")) : createCommentVNode("v-if", true),
+				!$props.ledger || !$setup.ledgerGroups.some((group) => group.items.length) ? (openBlock(), createElementBlock("p", _hoisted_10$9, "世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。")) : createCommentVNode("v-if", true),
 				(openBlock(true), createElementBlock(
 					Fragment,
 					null,
@@ -196311,7 +195500,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							toDisplayString(group.label) + " · " + toDisplayString(group.items.length) + " 条",
 							1
 							/* TEXT */
-						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_26$3, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_27$3, [(openBlock(true), createElementBlock(
+						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_11$9, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_12$9, [(openBlock(true), createElementBlock(
 							Fragment,
 							null,
 							renderList(group.items, (item) => {
@@ -196319,7 +195508,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									key: item.id,
 									class: "acu-v2-ws-materials__card"
 								}, [
-									createBaseVNode("p", _hoisted_28$2, [createBaseVNode(
+									createBaseVNode("p", _hoisted_13$7, [createBaseVNode(
 										"strong",
 										null,
 										toDisplayString(item.title),
@@ -196327,21 +195516,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										/* TEXT */
 									), item.badge ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_29$2,
+										_hoisted_14$7,
 										toDisplayString(item.badge),
 										1
 										/* TEXT */
 									)) : createCommentVNode("v-if", true)]),
 									createBaseVNode(
 										"p",
-										_hoisted_30$2,
+										_hoisted_15$7,
 										toDisplayString(item.detail),
 										1
 										/* TEXT */
 									),
 									item.meta ? (openBlock(), createElementBlock(
 										"p",
-										_hoisted_31$2,
+										_hoisted_16$7,
 										toDisplayString(item.meta),
 										1
 										/* TEXT */
@@ -196361,7 +195550,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "candidates" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 2 },
-			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_32$2, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_33$2, [(openBlock(true), createElementBlock(
+			[createCommentVNode(" 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 "), !$setup.candidateEntries.length ? (openBlock(), createElementBlock("p", _hoisted_17$6, "暂无候选、派工或终审记录。")) : (openBlock(), createElementBlock("div", _hoisted_18$6, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.candidateEntries, (item) => {
@@ -196371,7 +195560,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							key: item.id,
 							class: normalizeClass(["acu-v2-ws-materials__card", { "acu-v2-ws-materials__card--failed": item.status === "failed" }])
 						},
-						[createBaseVNode("p", _hoisted_34$1, [createBaseVNode(
+						[createBaseVNode("p", _hoisted_19$6, [createBaseVNode(
 							"strong",
 							null,
 							toDisplayString(item.title),
@@ -196385,7 +195574,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						)]), createBaseVNode(
 							"p",
-							_hoisted_35$1,
+							_hoisted_20$5,
 							toDisplayString(item.detail),
 							1
 							/* TEXT */
@@ -196404,20 +195593,20 @@ Expected function or array of functions, received type ${typeof value}.`
 			{ key: 3 },
 			[
 				createCommentVNode(" 投影预览：将写入正文的〈与此同时〉段与可感知信号 "),
-				_cache[14] || (_cache[14] = createBaseVNode(
+				_cache[11] || (_cache[11] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-ws-materials__meta" },
 					"Projection preview：按当前账本渲染的〈与此同时〉投影，提交时会写进冻结 assistant 楼层的正文；只呈现角色可通过合理渠道感知的世界信号。",
 					-1
 					/* CACHED */
 				)),
-				createBaseVNode("details", _hoisted_36$1, [createBaseVNode(
+				createBaseVNode("details", _hoisted_21$5, [createBaseVNode(
 					"summary",
 					null,
 					"可感知信号 · " + toDisplayString($props.ledger?.guidance.signals.length ?? 0) + " 条",
 					1
 					/* TEXT */
-				), !$props.ledger?.guidance.signals.length ? (openBlock(), createElementBlock("p", _hoisted_37$1, "当前没有可投影信号。")) : (openBlock(), createElementBlock("ul", _hoisted_38$1, [(openBlock(true), createElementBlock(
+				), !$props.ledger?.guidance.signals.length ? (openBlock(), createElementBlock("p", _hoisted_22$4, "当前没有可投影信号。")) : (openBlock(), createElementBlock("ul", _hoisted_23$3, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($props.ledger.guidance.signals, (signal, index) => {
@@ -196434,7 +195623,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				))]))]),
 				createBaseVNode(
 					"pre",
-					_hoisted_39$1,
+					_hoisted_24$3,
 					toDisplayString($props.projectionPreview || "当前没有系统投影。"),
 					1
 					/* TEXT */
@@ -196445,7 +195634,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "chronicle" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 4 },
-			[!$setup.chronicleRows.length ? (openBlock(), createElementBlock("p", _hoisted_40$1, "编年还是空的。提交后会按发生日与玩家得知日对照。")) : (openBlock(), createElementBlock("div", _hoisted_41, [(openBlock(true), createElementBlock(
+			[!$setup.chronicleRows.length ? (openBlock(), createElementBlock("p", _hoisted_25$3, "编年还是空的。提交后会按发生日与玩家得知日对照。")) : (openBlock(), createElementBlock("div", _hoisted_26$3, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.chronicleRows, (row) => {
@@ -196453,7 +195642,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: row.id,
 						class: "acu-v2-ws-materials__card"
 					}, [
-						createBaseVNode("p", _hoisted_42, [createBaseVNode(
+						createBaseVNode("p", _hoisted_27$3, [createBaseVNode(
 							"strong",
 							null,
 							toDisplayString(row.summary),
@@ -196462,14 +195651,14 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						createBaseVNode(
 							"p",
-							_hoisted_43,
+							_hoisted_28$2,
 							toDisplayString(row.at),
 							1
 							/* TEXT */
 						),
 						createBaseVNode(
 							"p",
-							_hoisted_44,
+							_hoisted_29$2,
 							toDisplayString($setup.chronicleMeta(row)),
 							1
 							/* TEXT */
@@ -196484,7 +195673,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "missed" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 5 },
-			[!$setup.missedItems.length ? (openBlock(), createElementBlock("p", _hoisted_45, "当前没有错过的暗流或过期清扫记录。")) : (openBlock(), createElementBlock("div", _hoisted_46, [(openBlock(true), createElementBlock(
+			[!$setup.missedItems.length ? (openBlock(), createElementBlock("p", _hoisted_30$2, "当前没有错过的暗流或过期清扫记录。")) : (openBlock(), createElementBlock("div", _hoisted_31$2, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.missedItems, (item) => {
@@ -196492,7 +195681,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: `${item.source}:${item.id}`,
 						class: "acu-v2-ws-materials__card"
 					}, [
-						createBaseVNode("p", _hoisted_47, [createBaseVNode(
+						createBaseVNode("p", _hoisted_32$2, [createBaseVNode(
 							"strong",
 							null,
 							toDisplayString(item.title),
@@ -196500,21 +195689,21 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						), createBaseVNode(
 							"span",
-							_hoisted_48,
+							_hoisted_33$2,
 							toDisplayString(item.source === "timeline" ? "清扫" : "错过"),
 							1
 							/* TEXT */
 						)]),
 						createBaseVNode(
 							"p",
-							_hoisted_49,
+							_hoisted_34$1,
 							toDisplayString(item.detail || "暂无摘要"),
 							1
 							/* TEXT */
 						),
 						createBaseVNode(
 							"p",
-							_hoisted_50,
+							_hoisted_35$1,
 							toDisplayString($setup.missedMeta(item)),
 							1
 							/* TEXT */
@@ -196529,12 +195718,12 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "rumors" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 6 },
-			[!$setup.rumorQueue ? (openBlock(), createElementBlock("p", _hoisted_51, "当前没有可展示的传闻队列。")) : (openBlock(), createElementBlock(
+			[!$setup.rumorQueue ? (openBlock(), createElementBlock("p", _hoisted_36$1, "当前没有可展示的传闻队列。")) : (openBlock(), createElementBlock(
 				Fragment,
 				{ key: 1 },
 				[createBaseVNode(
 					"p",
-					_hoisted_52,
+					_hoisted_37$1,
 					"接触状态：" + toDisplayString($setup.CONTACT_LABELS[$setup.rumorQueue.contact] ?? $setup.rumorQueue.contact) + " · 当前位置：" + toDisplayString($setup.rumorQueue.playerRegion || "未知"),
 					1
 					/* TEXT */
@@ -196552,14 +195741,14 @@ Expected function or array of functions, received type ${typeof value}.`
 							toDisplayString(group.label) + " · " + toDisplayString(group.items.length) + " 条",
 							1
 							/* TEXT */
-						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_53, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_54, [(openBlock(true), createElementBlock(
+						), !group.items.length ? (openBlock(), createElementBlock("p", _hoisted_38$1, "暂无记录。")) : (openBlock(), createElementBlock("div", _hoisted_39$1, [(openBlock(true), createElementBlock(
 							Fragment,
 							null,
 							renderList(group.items, (item) => {
 								return openBlock(), createElementBlock("article", {
 									key: item.id,
 									class: "acu-v2-ws-materials__card"
-								}, [createBaseVNode("p", _hoisted_55, [createBaseVNode(
+								}, [createBaseVNode("p", _hoisted_40$1, [createBaseVNode(
 									"strong",
 									null,
 									toDisplayString(item.fact),
@@ -196567,13 +195756,13 @@ Expected function or array of functions, received type ${typeof value}.`
 									/* TEXT */
 								), createBaseVNode(
 									"span",
-									_hoisted_56,
+									_hoisted_41,
 									toDisplayString($setup.RUMOR_STATUS_LABELS[item.status] ?? item.status),
 									1
 									/* TEXT */
 								)]), createBaseVNode(
 									"p",
-									_hoisted_57,
+									_hoisted_42,
 									toDisplayString($setup.rumorMeta(item)),
 									1
 									/* TEXT */
@@ -196594,7 +195783,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : $setup.activeTab === "diagnostics" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 7 },
-			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_58, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_59, [(openBlock(true), createElementBlock(
+			[createCommentVNode(" 读取诊断 "), !$setup.diagnostics.length ? (openBlock(), createElementBlock("p", _hoisted_43, "当前没有读取诊断。")) : (openBlock(), createElementBlock("ul", _hoisted_44, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.diagnostics, (item) => {
@@ -196615,7 +195804,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			Fragment,
 			{ key: 8 },
 			[
-				_cache[19] || (_cache[19] = createBaseVNode(
+				_cache[16] || (_cache[16] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-ws-materials__meta" },
 					" 用户要求在资料库里手动维护。创建任务时会把初始要求机械写成首条。 保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。 ",
@@ -196624,19 +195813,19 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$props.userRequirements.snapshot ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_60,
+					_hoisted_45,
 					" 条目 " + toDisplayString($props.userRequirements.snapshot.requirements.length) + " 条 ",
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$props.userRequirements.diagnostics.length ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_61,
+					_hoisted_46,
 					toDisplayString($props.userRequirements.diagnostics.join("；")),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				!$props.userRequirements.snapshot?.requirements.length ? (openBlock(), createElementBlock("p", _hoisted_62, " 还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后请在这里手动增删改。 ")) : (openBlock(), createElementBlock("ol", _hoisted_63, [(openBlock(true), createElementBlock(
+				!$props.userRequirements.snapshot?.requirements.length ? (openBlock(), createElementBlock("p", _hoisted_47, " 还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后请在这里手动增删改。 ")) : (openBlock(), createElementBlock("ol", _hoisted_48, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($props.userRequirements.snapshot.requirements, (line, index) => {
@@ -196651,15 +195840,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])),
-				createBaseVNode("details", _hoisted_64, [
-					_cache[17] || (_cache[17] = createBaseVNode(
+				createBaseVNode("details", _hoisted_49, [
+					_cache[14] || (_cache[14] = createBaseVNode(
 						"summary",
 						null,
 						"编辑原始 JSON",
 						-1
 						/* CACHED */
 					)),
-					_cache[18] || (_cache[18] = createBaseVNode(
+					_cache[15] || (_cache[15] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-ws-materials__card-meta" },
 						"必须是字符串数组，例如 [\"不要提前揭底牌\",\"继续用第一人称\"]。空数组表示清空；空串条目会被拒绝。",
@@ -196673,16 +195862,16 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.requirementsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_65,
+						_hoisted_50,
 						toDisplayString($setup.requirementsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_66, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_51, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.requirementsDirty,
 						onClick: $setup.discardRequirementsDraft
 					}, {
-						default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
+						default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
 							"放弃修改",
 							-1
 							/* CACHED */
@@ -196694,7 +195883,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: !$setup.requirementsDirty,
 						onClick: $setup.saveRequirementsDraft
 					}, {
-						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+						default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
 							"保存用户要求",
 							-1
 							/* CACHED */
@@ -196708,7 +195897,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-c4550ecc"]]);
+    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-c659f642"]]);
 
     const TASK_STATUS_LABELS_ACU = {
         drafting: '运行中',
@@ -196916,17 +196105,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 return Promise.resolve(false);
             return run_ACU(async () => reportSendOutcome_ACU(await runtime.sendAgentMessage(text)));
         }
-        /** 显式补足所选资料模块。模块列表作为程序级写集下传，不依赖自然语言提示约束。 */
-        function repairPendingMaterials(modules) {
-            if (!modules.length)
-                return Promise.resolve(false);
-            return run_ACU(async () => {
-                const accepted = reportSendOutcome_ACU(await runtime.repairPendingMaterials(modules));
-                if (accepted)
-                    toast.success('已完成所选世界资料模块的定向补足。');
-                return accepted;
-            });
-        }
         /**
          * 停止在途运行。刻意不经 busy 闸：busy 恰好在运行期间为 true，走闸会把停止吞掉。
          * 先在会话流留痕并清掉 running 标记（按钮立刻切回发送），再等待编排器把任务落为 paused/manual。
@@ -197082,7 +196260,6 @@ Expected function or array of functions, received type ${typeof value}.`
             revisionText,
             refresh,
             send,
-            repairPendingMaterials,
             stop,
             resume,
             saveSettings,
@@ -197522,8 +196699,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-d8266f05] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-d8266f05] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-d8266f05] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-d8266f05] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-d8266f05] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-d8266f05] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-d8266f05] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-d8266f05] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-d8266f05] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-d8266f05] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-d8266f05] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-d8266f05] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-d8266f05] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-d8266f05] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-d8266f05] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-d8266f05] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-d8266f05] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-d8266f05]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-d8266f05] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-d8266f05] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-d8266f05] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-d8266f05] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-d8266f05] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-d8266f05");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_d8266f05_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-8e658ff0] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-8e658ff0] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-8e658ff0] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-8e658ff0] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-8e658ff0] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-8e658ff0] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-8e658ff0] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-8e658ff0] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-8e658ff0] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-8e658ff0] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-8e658ff0] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-8e658ff0] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-8e658ff0] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-8e658ff0] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-8e658ff0] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-8e658ff0] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-8e658ff0] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-8e658ff0]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-8e658ff0] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-8e658ff0] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-8e658ff0] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-8e658ff0] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-8e658ff0] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-8e658ff0");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_8e658ff0_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$k = {
@@ -197640,7 +196817,6 @@ Expected function or array of functions, received type ${typeof value}.`
 					timeline: $setup.runtime.envelope.value?.timeline ?? [],
 					onRefresh: $setup.refreshAll,
 					onClear: $setup.clearData,
-					onRepair: $setup.runtime.repairPendingMaterials,
 					onSaveUserRequirements: $setup.saveUserRequirements
 				}, null, 8, [
 					"conversation",
@@ -197651,8 +196827,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"anchor",
 					"projection-preview",
 					"busy",
-					"timeline",
-					"onRepair"
+					"timeline"
 				])) : (openBlock(), createElementBlock("p", _hoisted_4$e, "当前没有可显示的世界推演资料。"))]),
 				_: 1
 			}), $setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
@@ -198211,7 +197386,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-d8266f05"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-8e658ff0"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

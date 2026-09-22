@@ -68,7 +68,6 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
       }
       return { identity: {}, instruction: { instruction: '发送文本', attempts: 1 } };
     }),
-    repairMaterials: vi.fn(),
   };
   // 会话记录默认走桩：楼层锚定存储属于 agent-conversation-store 的测试范围，
   // 这里只关心「编排器有没有在正确的时机记下用户消息」。
@@ -846,87 +845,6 @@ describe('ContinuationOrchestrator_ACU', () => {
     const withoutCursor = { ...saved.outline, nodes: [{ ...saved.outline.nodes[0], turns: saved.outline.nodes[0].turns.filter(turn => turn.id !== 'turn-2') }] };
     await expectCode(() => orchestrator.replaceActiveOutline({ outline: withoutCursor as any }), 'CONTINUATION_AGENT_WRITE_REJECTED');
     expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(2);
-  });
-
-  it('定向资料补足在暂停租约内提交目标模块，且不生成宿主正文指令', async () => {
-    const chat: any[] = [{ message_id: 1, mes: '正文锚点', swipe_id: 0 }];
-    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
-    const { orchestrator, store, executionEngine } = createOrchestrator();
-    await orchestrator.createTask({ originInstruction: '推进剧情' });
-    const base = buildEmptyAgentModuleSnapshot_ACU();
-    base.pendingFixes = [pendingFix_ACU('hooks', '伏笔截断')];
-    base.materialCompletion = { state: 'partial', rangeStartIndex: 0, rangeEndIndex: 0, modules: { hooks: 'failed', storyArc: 'complete_no_change' }, updatedAt: 1 };
-    await writeAgentModuleSnapshot_ACU(chat, 0, base);
-    executionEngine.repairMaterials.mockImplementation(async (snapshot: any, targets: string[]) => {
-      expect(targets).toEqual(['hooks']);
-      const candidate = JSON.parse(JSON.stringify(snapshot));
-      candidate.hooks = [{ id: 'H1', summary: '封印裂痕', status: 'planted', importance: 'mid', plantedIndex: 0, lastTouchedIndex: 0, plannedPayoff: '后文回收', evidenceRefs: [], retired: false }];
-      candidate.revisions.hooks += 1;
-      candidate.pendingFixes = candidate.pendingFixes.filter((item: any) => item.module !== 'hooks');
-      candidate.materialCompletion = { ...candidate.materialCompletion, state: 'complete_changed', modules: { ...candidate.materialCompletion.modules, hooks: 'complete_changed' }, updatedAt: 2 };
-      return { snapshot: candidate, repairedModules: ['hooks'], failedModules: [], steps: [] };
-    });
-
-    const result = await orchestrator.repairPendingMaterials({ modules: ['hooks'] });
-
-    expect(result).toMatchObject({ repairedModules: ['hooks'], failedModules: [] });
-    expect(readAgentModuleSnapshot_ACU(chat)).toMatchObject({
-      hooks: [{ id: 'H1' }], pendingFixes: [], revisions: { hooks: 1 },
-    });
-    expect(executionEngine.prepareCurrentTurnInstruction).not.toHaveBeenCalled();
-    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', taskId: result.task.taskId });
-  });
-
-  it('定向资料补足拒绝非目标写集，保留原快照', async () => {
-    const chat: any[] = [{ message_id: 1, mes: '正文锚点', swipe_id: 0 }];
-    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
-    const { orchestrator, executionEngine } = createOrchestrator();
-    await orchestrator.createTask({ originInstruction: '推进剧情' });
-    const base = buildEmptyAgentModuleSnapshot_ACU();
-    base.pendingFixes = [pendingFix_ACU('hooks', '伏笔截断')];
-    base.materialCompletion = { state: 'partial', rangeStartIndex: 0, rangeEndIndex: 0, modules: { hooks: 'failed', storyArc: 'complete_no_change' }, updatedAt: 1 };
-    await writeAgentModuleSnapshot_ACU(chat, 0, base);
-    executionEngine.repairMaterials.mockImplementation(async (snapshot: any) => {
-      const candidate = JSON.parse(JSON.stringify(snapshot));
-      candidate.storyArc = [{ id: 'ARC-X', scope: 'volume', title: '越权', direction: '拒绝', escalation: '', withheld: '', status: 'planned', stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', evidenceRefs: [], retired: false }];
-      candidate.revisions.storyArc += 1;
-      return { snapshot: candidate, repairedModules: ['hooks'], failedModules: [], steps: [] };
-    });
-
-    await expect(orchestrator.repairPendingMaterials({ modules: ['hooks'] })).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
-    expect(readAgentModuleSnapshot_ACU(chat).storyArc).toEqual([]);
-    expect(readAgentModuleSnapshot_ACU(chat).pendingFixes.map(item => item.module)).toEqual(['hooks']);
-  });
-
-  it('资料补足结果迟到时按冻结楼层与资料权威指纹 fail-closed', async () => {
-    const chat: any[] = [{ message_id: 1, mes: '正文锚点', swipe_id: 0 }];
-    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any);
-    const { orchestrator, executionEngine } = createOrchestrator();
-    await orchestrator.createTask({ originInstruction: '推进剧情' });
-    const base = buildEmptyAgentModuleSnapshot_ACU();
-    base.pendingFixes = [pendingFix_ACU('hooks', '伏笔截断')];
-    base.materialCompletion = { state: 'partial', rangeStartIndex: 0, rangeEndIndex: 0, modules: { hooks: 'failed' }, updatedAt: 1 };
-    await writeAgentModuleSnapshot_ACU(chat, 0, base);
-    let release!: (value: any) => void;
-    executionEngine.repairMaterials.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
-    const pending = orchestrator.repairPendingMaterials({ modules: ['hooks'] });
-    await vi.waitFor(() => expect(executionEngine.repairMaterials).toHaveBeenCalledOnce());
-    chat[0].mes = '锚点正文已变化';
-    release({ snapshot: base, repairedModules: [], failedModules: ['hooks'], steps: [] });
-
-    await expect(pending).rejects.toMatchObject({ error: { code: 'CONTINUATION_INTERNAL_REQUEST_STALE' } });
-
-    chat[0].mes = '正文锚点';
-    executionEngine.repairMaterials.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
-    const drifted = orchestrator.repairPendingMaterials({ modules: ['hooks'] });
-    await vi.waitFor(() => expect(executionEngine.repairMaterials).toHaveBeenCalledTimes(2));
-    const competing = readAgentModuleSnapshot_ACU(chat);
-    competing.materialCompletion = { ...competing.materialCompletion, updatedAt: competing.materialCompletion.updatedAt + 1 };
-    competing.updatedAt = Math.max(competing.updatedAt, competing.materialCompletion.updatedAt);
-    await writeAgentModuleSnapshot_ACU(chat, 0, competing);
-    release({ snapshot: base, repairedModules: [], failedModules: ['hooks'], steps: [] });
-
-    await expect(drifted).rejects.toMatchObject({ error: { code: 'CONTINUATION_INTERNAL_REQUEST_STALE' } });
   });
 
   it('clearContinuationData 丢任务、资料与会话记录，但不碰正文楼层', async () => {

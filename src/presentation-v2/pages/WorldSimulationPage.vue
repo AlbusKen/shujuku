@@ -40,7 +40,6 @@
           :timeline="runtime.envelope.value?.timeline ?? []"
           @refresh="refreshAll"
           @clear="clearData"
-          @repair="runtime.repairPendingMaterials"
           @save-user-requirements="saveUserRequirements"
         />
         <p v-else class="acu-v2-world-simulation-page__meta">当前没有可显示的世界推演资料。</p>

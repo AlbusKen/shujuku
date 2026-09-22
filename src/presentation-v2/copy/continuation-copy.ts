@@ -24,8 +24,4 @@ export const continuationCopy = {
     title: "写作指令编排子代理（instruction-composer）提示词",
     note: "固定工作流在策划与审查之后调用，是唯一产出本轮写作指令的角色。不进入主 Agent 可派工目录。契约 JSON 为 {instruction, summary, constraints}。",
   },
-  pendingFix: {
-    title: "待修复模块",
-    empty: "",
-  },
 };

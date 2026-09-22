@@ -134,37 +134,4 @@ describe('StageExecutionEngine_ACU', () => {
     expect(planner.plan).not.toHaveBeenCalled();
   });
 
-  it('资料补足走专用规划入口，不铸造宿主正文身份', async () => {
-    const paused = envelope() as any;
-    paused.activeTask.status = 'paused';
-    paused.activeTask.runStartedAt = null;
-    const candidate = { marker: 'candidate' } as any;
-    const repairMaterials = vi.fn(async (request: any) => {
-      expect(request.snapshot).toEqual({ marker: 'base' });
-      expect(request.targetModules).toEqual(['hooks']);
-      expect(request.readContext().task.status).toBe('paused');
-      const identity = request.createInternalRequestIdentity(0);
-      expect(identity).toMatchObject({
-        source: 'turn_instruction', chatIdentity: 'chat-a', taskId: 'task-a',
-        stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-1',
-      });
-      expect(request.isInternalRequestCurrent(identity)).toBe(true);
-      return { snapshot: candidate, repairedModules: ['hooks'], failedModules: [], steps: [] };
-    });
-    const planner = { plan: vi.fn(), repairMaterials };
-    const engine = new StageExecutionEngine_ACU({
-      readEnvelope: () => paused,
-      getChatIdentity: () => 'chat-a',
-      allocateId: prefix => `${prefix}-a`,
-      planner: planner as any,
-    });
-
-    const result = await engine.repairMaterials({ marker: 'base' } as any, ['hooks']);
-
-    expect(result).toEqual({ snapshot: candidate, repairedModules: ['hooks'], failedModules: [], steps: [] });
-    expect(repairMaterials).toHaveBeenCalledOnce();
-    expect(planner.plan).not.toHaveBeenCalled();
-    expect(result).not.toHaveProperty('identity');
-    expect(result).not.toHaveProperty('instruction');
-  });
 });
