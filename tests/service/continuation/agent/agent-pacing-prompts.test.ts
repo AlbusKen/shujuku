@@ -13,7 +13,7 @@ import {
 import { renderAgentTurnGuidance_ACU, renderAgentTurnPacingGuidance_ACU } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
 import {
   buildDefaultContinuationSettings_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU,
   V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU,
 } from '../../../../src/service/continuation/defaults';
 
@@ -25,7 +25,7 @@ describe('continuation P0 pacing prompt contracts', () => {
   it('assembles the V24 outline contract under the current default version', () => {
     const settings = buildDefaultContinuationSettings_ACU();
 
-    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU);
+    expect(settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU);
     expect(settings.outlinePrompt.some(segment => segment.content === V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU)).toBe(true);
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('setup 与 cooldown 允许主线保持不动');
     expect(V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU).toContain('隔夜、数日后还是更久');
@@ -51,6 +51,27 @@ describe('continuation P0 pacing prompt contracts', () => {
 
     expect(finalReviewer).toContain('【节奏、日常与时间审查】');
     expect(finalReviewer).toContain('只有“气氛放松”也判为 revise');
+  });
+
+  it('固化 readerKnown、characterKnowledge 与角色知识渠道纪律', () => {
+    const maintainer = promptText_ACU(buildDefaultAgentMaintainerPrompt_ACU());
+    const mainline = promptText_ACU(buildDefaultAgentMainlinePlannerPrompt_ACU());
+    const beat = promptText_ACU(buildDefaultAgentBeatPlannerPrompt_ACU());
+    const finalReviewer = promptText_ACU(buildDefaultAgentFinalReviewerPrompt_ACU());
+
+    expect(maintainer).toContain('objectiveFact、readerKnown 与 characterKnowledge');
+    expect(maintainer).toContain('亲历、目击、听闻、阅读、转述或可验证推断');
+    expect(mainline).toContain('不得让角色使用只对读者可见');
+    expect(mainline).toContain('获得渠道');
+    expect(beat).toContain('不得把 readerKnown 当作 characterKnowledge');
+    expect(beat).toContain('渠道不足时不安排揭示');
+    expect(finalReviewer).toContain('每名登场角色');
+    expect(finalReviewer).toContain('不得把 objectiveFact 或读者知识直接赋给角色');
+
+    const settings = buildDefaultContinuationSettings_ACU();
+    const composer = promptText_ACU(settings.agentPrompts.instructionComposer);
+    expect(composer).toContain('明确区分 objectiveFact、readerKnown 与逐角色 characterKnowledge');
+    expect(composer).toContain('禁止把读者知识直接赋给角色');
   });
 
   it('enforces the V26 chronology contract across maintainer, main agent, and final reviewer defaults', () => {

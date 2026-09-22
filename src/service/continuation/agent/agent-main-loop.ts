@@ -57,7 +57,7 @@ import {
 import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
-import { applyAgentConstraintRegistration_ACU, applyAgentModuleDelta_ACU, applyAgentWebRefsDelta_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
+import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
 import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU } from './agent-protocol';
 import {
   buildAgentWorldbookScanText_ACU,
@@ -807,7 +807,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             // 最后一轮例外：此时回灌已无修正机会，登记降级为警告并照常交付，绝不让约束问题烧掉唯一的交付机会。
             let constraintsApplied = true;
             try {
-              snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.add, action.constraints.retire, chat.length - 1).snapshot;
+              snapshot = (await applyAgentConstraintRegistrationViaSql_ACU(snapshot, action.constraints.add, action.constraints.retire, chat.length - 1)).snapshot;
             } catch (error) {
               if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED') throw error;
               constraintsApplied = false;
@@ -1356,13 +1356,13 @@ export class ContinuationAgentTurnPlanner_ACU {
           failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', '固定工作流的总纲维护没有返回可用写集');
         }
         const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
-        const applied = applyAgentModuleDelta_ACU(
+        const applied = (await applyAgentModuleDeltaViaSql_ACU(
           context.moduleSnapshot,
           delta,
           result.writes,
           Math.max(0, chat.length - 1),
           completedStageNumbers,
-        ).snapshot;
+        )).snapshot;
         context.moduleSnapshot = applied;
         await this.persistSnapshot_ACU(chat, applied);
         updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc.summary || '总纲已更新', ok: true });
@@ -1577,7 +1577,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         isCurrent: identity => request.isInternalRequestCurrent(identity),
         signal: request.signal,
       });
-      const settled = this.settleResearcherResult_ACU(result, snapshot);
+      const settled = await this.settleResearcherResult_ACU(result, snapshot);
       ledger.outcomes.push(settled.outcome);
       updateAgentSession_ACU(entryId, {
         title: `开场百科检索${settled.outcome.ok ? '完成' : '未采用'}${result.usage ? ` · ${formatAgentUsageLabel_ACU(result.usage)}` : ''}`,
@@ -1602,14 +1602,14 @@ export class ContinuationAgentTurnPlanner_ACU {
    * 把 web-researcher 的输出落到快照：pageRef 已由子代理运行时回填，这里只做事务校验与修订号并发校验。
    * 不推进结算水位。
    */
-  private settleResearcherResult_ACU(result: AgentSubagentRunResult_ACU, snapshot: AgentModuleSnapshot_ACU): { snapshot: AgentModuleSnapshot_ACU; outcome: AgentDelegationOutcome_ACU } {
+  private async settleResearcherResult_ACU(result: AgentSubagentRunResult_ACU, snapshot: AgentModuleSnapshot_ACU): Promise<{ snapshot: AgentModuleSnapshot_ACU; outcome: AgentDelegationOutcome_ACU }> {
     const researcher = result.researcher;
     if (!researcher) {
       return { snapshot, outcome: { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '网页检索子代理没有返回可用输出' } };
     }
     try {
       const expected = researcher.expectedRevision ?? result.readRevisions.webRefs;
-      const applied = applyAgentWebRefsDelta_ACU(snapshot, researcher, expected).snapshot;
+      const applied = (await applyAgentWebRefsDeltaViaSql_ACU(snapshot, researcher, expected)).snapshot;
       const upserts = researcher.items.filter(item => item.action === 'upsert');
       const retires = researcher.items.filter(item => item.action === 'retire');
       const catalog = upserts.map(item => `[${item.id || '新'}]「${item.title}」${item.brief}`).join('；');
@@ -1750,7 +1750,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (result.maintainer) {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-          const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1).snapshot;
+          const applied = (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1)).snapshot;
           // 结算派工成功交付契约即推进水位到当轮末楼：空 delta（这段楼层没有新增伏笔/信息差）
           // 同样代表已被处理过，不推水位会让同一区间每轮重复要求结算、白烧派工。
           const settledTarget = chat.length - 1;
@@ -1781,7 +1781,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           const completedStageNumbers = context.execution.task.stages
             .filter(stage => stage.status === 'completed')
             .map(stage => stage.stageNumber);
-          const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers).snapshot;
+          const applied = (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers)).snapshot;
           // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
           // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
           if (applied !== nextSnapshot) { nextSnapshot = applied; snapshotChanged = true; }
@@ -1822,7 +1822,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       if (result.researcher) {
         // 与总纲分支同理：只换快照，不推进结算水位——百科条目不是正文事实。
-        const settled = this.settleResearcherResult_ACU(result, nextSnapshot);
+        const settled = await this.settleResearcherResult_ACU(result, nextSnapshot);
         if (settled.snapshot !== nextSnapshot) { nextSnapshot = settled.snapshot; snapshotChanged = true; }
         settleOutcome(item.delegation, settled.outcome, result.usage);
         continue;

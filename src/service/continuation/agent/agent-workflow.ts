@@ -27,6 +27,9 @@ import {
   applyAgentConstraintRegistration_ACU,
   applyAgentModuleDelta_ACU,
   applyAgentWebRefsDelta_ACU,
+  applyAgentConstraintRegistrationViaSql_ACU,
+  applyAgentModuleDeltaViaSql_ACU,
+  applyAgentWebRefsDeltaViaSql_ACU,
   mergeAgentDeltaRevisions_ACU,
   type AgentModuleApplyOptions_ACU,
 } from './agent-transaction';
@@ -382,7 +385,7 @@ export async function runContinuationMaterialRepair_ACU(
     if (payload.ok) {
       try {
         if (call.targetModules.includes('webRefs') && payload.researcher) {
-          const applied = applyAgentWebRefsDelta_ACU(
+          const applied = await applyAgentWebRefsDeltaViaSql_ACU(
             snapshot,
             payload.researcher,
             payload.readRevisions?.webRefs,
@@ -397,7 +400,7 @@ export async function runContinuationMaterialRepair_ACU(
           const delta = payload.readRevisions
             ? mergeAgentDeltaRevisions_ACU(restricted.delta, payload.readRevisions)
             : restricted.delta;
-          const applied = applyAgentModuleDelta_ACU(
+          const applied = await applyAgentModuleDeltaViaSql_ACU(
             snapshot,
             delta,
             call.targetModules,
@@ -496,15 +499,15 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     }
   };
 
-  const applyMaintainerLike_ACU = (
+  const applyMaintainerLike_ACU = async (
     output: AgentMaintainerOutput_ACU | null | undefined,
     writes: readonly string[],
     readRevisions: AgentModuleRevisions_ACU | undefined,
     agentName: string,
-  ): AgentWritableModule_ACU[] => {
+  ): Promise<AgentWritableModule_ACU[]> => {
     if (!output || !deltaTouched_ACU(output.delta)) return [];
     const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
-    const applied = applyAgentModuleDelta_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
+    const applied = await applyAgentModuleDeltaViaSql_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
     snapshot = applied.snapshot;
     return applied.appliedModules;
   };
@@ -518,7 +521,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     });
     steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
     if (web.ok && web.researcher && web.researcher.items.length) {
-      const applied = applyAgentWebRefsDelta_ACU(
+      const applied = await applyAgentWebRefsDeltaViaSql_ACU(
         snapshot,
         web.researcher,
         web.readRevisions?.webRefs,
@@ -547,7 +550,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       ?? (!maintainer.ok ? 'failed' : maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta) ? 'complete_no_change' : 'complete_changed');
     let modules = completionModules_ACU(maintainer, writes, completion);
     const appliedModules = maintainer.ok
-      ? applyMaintainerLike_ACU(maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
+      ? await applyMaintainerLike_ACU(maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
       : [];
     const issues = [...(maintainer.unresolvedIssues ?? [])];
     if (!maintainer.ok && !issues.length) {
@@ -668,10 +671,10 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     if (!repair.ok) continue;
     const targetModules = repairCalls[index]?.targetModules ?? [];
     if (repair.researcher && targetModules.includes('webRefs')) {
-      snapshot = applyAgentWebRefsDelta_ACU(snapshot, repair.researcher, repair.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(agentName)).snapshot;
+      snapshot = (await applyAgentWebRefsDeltaViaSql_ACU(snapshot, repair.researcher, repair.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(agentName))).snapshot;
     }
     const restricted = restrictMaintainerOutput_ACU(repair.maintainer ?? repair.arc, targetModules);
-    applyMaintainerLike_ACU(restricted, targetModules, repair.readRevisions, agentName);
+    await applyMaintainerLike_ACU(restricted, targetModules, repair.readRevisions, agentName);
   }
   steps.push({
     agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
@@ -679,13 +682,13 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     summary: composer.summary || (composer.instruction.trim() ? '已产出写作指令' : 'instruction 为空'),
   });
   if (composer.constraints) {
-    snapshot = applyAgentConstraintRegistration_ACU(
+    snapshot = (await applyAgentConstraintRegistrationViaSql_ACU(
       snapshot,
       composer.constraints.add,
       composer.constraints.retire,
       input.settledIndex,
       tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU),
-    ).snapshot;
+    )).snapshot;
   }
 
   if (escalateBeforeRepair || needsPendingEscalation_ACU(snapshot, input.settings)) {
@@ -758,13 +761,13 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       }
       instruction = revised.instruction.trim();
       if (revised.constraints) {
-        snapshot = applyAgentConstraintRegistration_ACU(
+        snapshot = (await applyAgentConstraintRegistrationViaSql_ACU(
           snapshot,
           revised.constraints.add,
           revised.constraints.retire,
           input.settledIndex,
           tolerantOptions_ACU(AGENT_INSTRUCTION_COMPOSER_NAME_ACU),
-        ).snapshot;
+       )).snapshot;
       }
       steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'ok', summary: '已按反馈增量修订' });
     }

@@ -1,5 +1,5 @@
 import type { WorldSimulationCandidate_ACU } from './agent/agent-model';
-import type { WorldChronicleArchiveDetail_ACU } from './agent/agent-model';
+import type { WorldChronicleArchiveDetail_ACU, WorldChronicleArchiveSnapshot_ACU } from './agent/agent-model';
 import { findWorldSimulationAgentDefinition_ACU } from './agent/agent-catalog';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, WORLD_CHRONICLE_OVERVIEW_CAP_ACU, type WorldChronicleOverviewRow_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerModule_ACU, type WorldSimulationPendingFix_ACU, type WorldSimulationSettings_ACU } from './model';
@@ -17,6 +17,7 @@ import {
 import { eventFingerprint_ACU } from './event-similarity';
 import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 import { validateWorldSimulationGuidanceComposerSignals_ACU } from './agent/agent-protocol';
+import { WorldSimulationSqlViewError_ACU, materializeWorldSimulationLedgerSqlView_ACU, type WorldSimulationSqlArrayModule_ACU, type WorldSimulationSqlSingleton_ACU } from './simulation-ledger-sql-view';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 type Module_ACU = typeof MODULES_ACU[number];
@@ -492,15 +493,23 @@ function clearPendingModule_ACU(pending: WorldSimulationPendingFix_ACU[], module
   }
 }
 
+export interface WorldSimulationSqlDiagnostic_ACU {
+  code: 'WORLD_SIMULATION_SQL_VIEW_FAILED';
+  message: string;
+  module?: string;
+}
+
 export interface WorldSimulationApplyResult_ACU {
   ledger: WorldSimulationLedger_ACU;
   chronicleArchiveWrites: WorldChronicleArchiveDetail_ACU[];
   pendingFixes: WorldSimulationPendingFix_ACU[];
   appliedModules: WorldSimulationLedgerModule_ACU[];
+  sqlDiagnostics: WorldSimulationSqlDiagnostic_ACU[];
 }
 
 export interface WorldSimulationApplyContext_ACU {
   anchorMessage?: string;
+  chronicleArchive?: WorldChronicleArchiveSnapshot_ACU;
 }
 
 export function applyWorldSimulationCandidatesDetailed_ACU(
@@ -635,7 +644,7 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
   next.pendingFixes = pendingFixes;
   next.revision = validatedBase.revision + 1;
   const ledger = validateWorldSimulationLedger_ACU(next, 'agent_persist');
-  return { ledger, chronicleArchiveWrites, pendingFixes: ledger.pendingFixes, appliedModules: [...appliedModules] };
+  return { ledger, chronicleArchiveWrites, pendingFixes: ledger.pendingFixes, appliedModules: [...appliedModules], sqlDiagnostics: [] };
 }
 
 export function applyWorldSimulationCandidates_ACU(
@@ -646,6 +655,120 @@ export function applyWorldSimulationCandidates_ACU(
   context?: WorldSimulationApplyContext_ACU,
 ): WorldSimulationLedger_ACU {
   return applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings, context).ledger;
+}
+
+/* ===================== SQL 易失视图校验变体 =====================
+ * 计划 D3/D4：候选应用结果在既有 JSON 事务链产出后，再经 SQL 易失视图行级复算：
+ * 物化应用前账本 → 逐模块 diff 出 upsert/remove 行 → SQL 层 revision 乐观锁链式推进 →
+ * 读回比对。物化或执行失败 fail-closed 回退既有 JSON 链结果，不产生空资料。
+ * 注意：账本 revision 语义是「每次 commit +1」而非每模块 +1，因此复算只比对行内容，
+ * revision 期望值按视图内写入次数链式推进，不与账本 revision 直接比对。
+ */
+
+const SQL_VERIFY_ARRAY_MODULES_ACU = [
+  ['dimensions', 'id'],
+  ['seeds', 'id'],
+  ['actors', 'id'],
+  ['chronicle', 'id'],
+  ['rumors', 'id'],
+  ['chronicleOverview', 'fingerprint'],
+] as const;
+
+const SQL_VERIFY_SINGLETONS_ACU = ['clock', 'player', 'guidance'] as const;
+
+function diffLedgerRows_ACU(
+  before: readonly Record_ACU[],
+  after: readonly Record_ACU[],
+  idKey: string,
+): { upserts: Record_ACU[]; removedIds: string[] } {
+  const keyOf = (item: Record_ACU): string => (typeof item[idKey] === 'string' ? item[idKey] as string : '');
+  const previousById = new Map(before.map(item => [keyOf(item), item]));
+  const nextIds = new Set(after.map(item => keyOf(item)));
+  const upserts = after.filter(item => {
+    const prior = previousById.get(keyOf(item));
+    return !prior || JSON.stringify(prior) !== JSON.stringify(item);
+  });
+  const removedIds = before.map(item => keyOf(item)).filter(id =>id && !nextIds.has(id));
+  return { upserts, removedIds };
+}
+
+async function verifyWorldSimulationRowsViaSql_ACU(
+  base: WorldSimulationLedger_ACU,
+  after: WorldSimulationLedger_ACU,
+  archiveWrites: readonly WorldChronicleArchiveDetail_ACU[],
+  archive?: WorldChronicleArchiveSnapshot_ACU,
+): Promise<void> {
+  const view = await materializeWorldSimulationLedgerSqlView_ACU(base, archive);
+  try {
+    let expected = base.revision;
+    for (const [module, idKey] of SQL_VERIFY_ARRAY_MODULES_ACU) {
+      const diff = diffLedgerRows_ACU(
+        base[module] as unknown as readonly Record_ACU[],
+        after[module] as unknown as readonly Record_ACU[],
+        idKey,
+      );
+      if (!diff.upserts.length && !diff.removedIds.length) continue;
+      expected = view.applyArrayWrite({ module: module as WorldSimulationSqlArrayModule_ACU, upserts: diff.upserts, removedIds: diff.removedIds, expectedRevision: expected });
+    }
+    for (const module of SQL_VERIFY_SINGLETONS_ACU) {
+      if (JSON.stringify(base[module]) === JSON.stringify(after[module])) continue;
+      expected = view.applySingletonWrite({ module: module as WorldSimulationSqlSingleton_ACU, value: after[module], expectedRevision: expected });
+    }
+    if (archiveWrites.length) {
+      view.applyArchiveWrite({ upserts: archiveWrites });
+    }
+    const verified = view.readLedger();
+    for (const [module] of SQL_VERIFY_ARRAY_MODULES_ACU) {
+      if (JSON.stringify(after[module]) !== JSON.stringify(verified[module])) {
+        throw new WorldSimulationSqlViewError_ACU(`模块 ${module} SQL 复算结果与事务结果不一致`, { module });
+      }
+    }
+    for (const module of SQL_VERIFY_SINGLETONS_ACU) {
+      if (JSON.stringify(after[module]) !== JSON.stringify(verified[module])) {
+        throw new WorldSimulationSqlViewError_ACU(`模块 ${module} SQL 复算结果与事务结果不一致`, { module });
+      }
+    }
+    if (archiveWrites.length) {
+      const exported = view.exportArchiveRecords();
+      const expectedArchive = Object.fromEntries(archiveWrites.map(item => [item.archiveRef, item]));
+      if (JSON.stringify(exported) !== JSON.stringify(expectedArchive)) {
+        throw new WorldSimulationSqlViewError_ACU('模块 chronicleArchive SQL 复算结果与事务结果不一致', {
+          module: 'chronicleArchive',
+        });
+      }
+    }
+  } finally {
+    view.dispose();
+  }
+}
+
+/**
+ * applyWorldSimulationCandidatesDetailed_ACU 的 SQL 视图变体。
+ * 业务合并仍由既有 JSON 事务链完成（保留全部领域校验与 pendingFixes 语义），
+ * 结果账本再经 SQL 易失视图按元素行级复算校验；SQL 物化或执行失败时
+ * fail-closed 回退 JSON 链结果。chronicleArchiveWrites 与 commit 链输入形态不变。
+ */
+export async function applyWorldSimulationCandidatesDetailedViaSql_ACU(
+  base: WorldSimulationLedger_ACU,
+  candidates: readonly WorldSimulationCandidate_ACU[],
+  authorizedEvidenceRefs: ReadonlySet<string>,
+  settings?: WorldSimulationSettings_ACU,
+  context?: WorldSimulationApplyContext_ACU,
+): Promise<WorldSimulationApplyResult_ACU> {
+  const applied = applyWorldSimulationCandidatesDetailed_ACU(base, candidates, authorizedEvidenceRefs, settings, context);
+  try {
+    await verifyWorldSimulationRowsViaSql_ACU(base, applied.ledger, applied.chronicleArchiveWrites, context?.chronicleArchive);
+  } catch (error) {
+    const diagnostic: WorldSimulationSqlDiagnostic_ACU = {
+      code: 'WORLD_SIMULATION_SQL_VIEW_FAILED',
+      message: error instanceof Error ? error.message : String(error),
+      ...(error instanceof WorldSimulationSqlViewError_ACU && error.module
+        ? { module: error.module }
+        : {}),
+    };
+    return { ...applied, sqlDiagnostics: [diagnostic] };
+  }
+  return applied;
 }
 
 export interface WorldSimulationCandidateViolation_ACU {

@@ -215,6 +215,11 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU = 'spv3.8-continu
  * 不再直接派工 arc-architect、outline-architect 或 instruction-composer。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU = 'spv3.9-continuation-structure-bootstrap-v31';
+/**
+ * V32 固化信息边界纪律：续写链路分别维护 objectiveFact、readerKnown 与 characterKnowledge，
+ * 角色新增知识必须能追溯到亲历、目击、听闻、阅读、转述或可验证推断渠道。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU = 'spv4.0-continuation-information-boundary-v32';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -307,7 +312,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU,
   };
 }
 

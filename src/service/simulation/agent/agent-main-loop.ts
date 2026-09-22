@@ -1,6 +1,6 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldCollisionReport_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerModule_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
-import { applyWorldSimulationCandidatesDetailed_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
+import { applyWorldSimulationCandidatesDetailedViaSql_ACU, preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
@@ -686,7 +686,7 @@ export class WorldSimulationMainLoop_ACU {
       const anchorMessage = typeof input.promptContext.anchorMessage === 'string' ? input.promptContext.anchorMessage : '';
       const baseLedger = input.promptContext.worldState as WorldSimulationLedger_ACU;
       let finalCandidates = acceptedCandidates;
-      const preview = applyWorldSimulationCandidatesDetailed_ACU(baseLedger, acceptedCandidates, new Set(causalEvidenceRefs), input.settings, { anchorMessage });
+      const preview = await applyWorldSimulationCandidatesDetailedViaSql_ACU(baseLedger, acceptedCandidates, new Set(causalEvidenceRefs), input.settings, { anchorMessage });
       if (!preview.appliedModules.length) {
         const message = preview.pendingFixes.map(item => item.lastError).join('；') || '没有模块入库';
         persist(iteration + 1, message);
@@ -701,7 +701,7 @@ export class WorldSimulationMainLoop_ACU {
       finalCandidates = acceptedCandidates;
       try {
         const commitEvidenceRefs = [...new Set([...causalEvidenceRefs, ...finalCandidates.flatMap(item => item.evidenceRefs)])];
-        applyWorldSimulationCandidatesDetailed_ACU(baseLedger, finalCandidates, new Set(commitEvidenceRefs), input.settings, { anchorMessage });
+        await applyWorldSimulationCandidatesDetailedViaSql_ACU(baseLedger, finalCandidates, new Set(commitEvidenceRefs), input.settings, { anchorMessage });
         await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
         const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: commitEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions as WorldCollisionReport_ACU };
         const completedId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'run_completed', title: `候选通过审核（${acceptedCandidates.length}/${available.length}）`, detail: action.summary, agentName: director });

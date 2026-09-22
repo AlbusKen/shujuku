@@ -11,7 +11,7 @@ import {
   type WorldSimulationRunIdentity_ACU,
   type WorldSimulationSettings_ACU,
 } from '../model';
-import { applyWorldSimulationCandidatesDetailed_ACU } from '../simulation-transaction';
+import { applyWorldSimulationCandidatesDetailedViaSql_ACU } from '../simulation-transaction';
 import { snapshotWorldSimulationEvidenceRegistry_ACU, type WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import type { WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
@@ -339,23 +339,23 @@ function seedsClosedThisRound_ACU(before: WorldSimulationLedger_ACU, after: Worl
   return after.seeds.some(seed => (seed.status === 'resolved' || seed.status === 'retired') && previous.get(seed.id) !== seed.status);
 }
 
-function applySafely_ACU(
+async function applySafely_ACU(
   ledger: WorldSimulationLedger_ACU,
   candidates: readonly WorldSimulationCandidate_ACU[],
   authorized: ReadonlySet<string>,
   settings: WorldSimulationSettings_ACU,
   anchorMessage: string,
-): { ledger: WorldSimulationLedger_ACU; accepted: WorldSimulationCandidate_ACU[]; rejected: WorldSimulationSubagentOutcome_ACU[] } {
+): Promise<{ ledger: WorldSimulationLedger_ACU; accepted: WorldSimulationCandidate_ACU[]; rejected: WorldSimulationSubagentOutcome_ACU[] }> {
   if (!candidates.length) return { ledger, accepted: [], rejected: [] };
   const rejected: WorldSimulationSubagentOutcome_ACU[] = [];
-  const tryApply = (base: WorldSimulationLedger_ACU, batch: readonly WorldSimulationCandidate_ACU[]): { ledger: WorldSimulationLedger_ACU } | { error: unknown } => {
+  const tryApply = async (base: WorldSimulationLedger_ACU, batch: readonly WorldSimulationCandidate_ACU[]): Promise<{ ledger: WorldSimulationLedger_ACU } | { error: unknown }> => {
     try {
-      return { ledger: applyWorldSimulationCandidatesDetailed_ACU(base, batch, authorized, settings, { anchorMessage }).ledger };
+      return { ledger: (await applyWorldSimulationCandidatesDetailedViaSql_ACU(base, batch, authorized, settings, { anchorMessage })).ledger };
     } catch (error) {
       return { error };
     }
   };
-  const whole = tryApply(ledger, candidates);
+  const whole = await tryApply(ledger, candidates);
   if ('ledger' in whole) return { ledger: whole.ledger, accepted: [...candidates], rejected };
   if (candidates.length === 1) {
     rejected.push(failedOutcome_ACU(candidates[0].agentName, whole.error, 'transaction_rejected', candidateModules_ACU(candidates[0])));
@@ -363,17 +363,17 @@ function applySafely_ACU(
   }
   const accepted: WorldSimulationCandidate_ACU[] = [];
   for (const candidate of candidates) {
-    const single = tryApply(ledger, [candidate]);
+    const single = await tryApply(ledger, [candidate]);
     if ('ledger' in single) accepted.push(candidate);
     else rejected.push(failedOutcome_ACU(candidate.agentName, single.error, 'transaction_rejected', candidateModules_ACU(candidate)));
   }
   if (!accepted.length) return { ledger, accepted, rejected };
-  const combined = tryApply(ledger, accepted);
+  const combined = await tryApply(ledger, accepted);
   if ('ledger' in combined) return { ledger: combined.ledger, accepted, rejected };
   let rolling = ledger;
   const kept: WorldSimulationCandidate_ACU[] = [];
   for (const candidate of accepted) {
-    const single = tryApply(rolling, [candidate]);
+    const single = await tryApply(rolling, [candidate]);
     if ('ledger' in single) {
       rolling = single.ledger;
       kept.push(candidate);
@@ -485,7 +485,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
   let ledger = base;
   let accepted: WorldSimulationCandidate_ACU[] = [];
   const primaryCandidates = primaryOutcomes.flatMap(item => item.candidate ? [item.candidate] : []);
-  const primary = applySafely_ACU(ledger, primaryCandidates, authorized, input.settings, anchorMessage);
+  const primary = await applySafely_ACU(ledger, primaryCandidates, authorized, input.settings, anchorMessage);
   ledger = primary.ledger;
   accepted = primary.accepted;
   outcomes.push(...primary.rejected);
@@ -505,7 +505,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     const repairs = await Promise.all([...repairTargets].map(([name, targets]) => runAgent(name, true, ledger, targets)));
     outcomes.push(...repairs);
     ledger = clearCompletedPending_ACU(ledger, repairs);
-    const repaired = applySafely_ACU(ledger, repairs.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
+    const repaired = await applySafely_ACU(ledger, repairs.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
     ledger = repaired.ledger;
     accepted = [...accepted, ...repaired.accepted];
     outcomes.push(...repaired.rejected);
@@ -524,7 +524,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     outcomes.push(chronicler);
     ledger = clearCompletedPending_ACU(ledger, [chronicler]);
     if (chronicler.candidate) {
-      const archived = applySafely_ACU(ledger, [chronicler.candidate], authorized, input.settings, anchorMessage);
+      const archived = await applySafely_ACU(ledger, [chronicler.candidate], authorized, input.settings, anchorMessage);
       ledger = archived.ledger;
       accepted = [...accepted, ...archived.accepted];
       outcomes.push(...archived.rejected);
@@ -553,7 +553,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     outcomes.push(composer);
     ledger = clearCompletedPending_ACU(ledger, [composer]);
     if (composer.candidate) {
-      const projected = applySafely_ACU(ledger, [composer.candidate], authorized, input.settings, anchorMessage);
+      const projected = await applySafely_ACU(ledger, [composer.candidate], authorized, input.settings, anchorMessage);
       ledger = projected.ledger;
       accepted = [...accepted, ...projected.accepted];
       outcomes.push(...projected.rejected);

@@ -29,7 +29,7 @@ import { sweepWorldLifecycle_ACU } from './lifecycle-sweeper';
 import { progressionPlan_ACU } from './progression-plan';
 import { relevanceGate_ACU } from './relevance-gate';
 import { applyWorldSimulationProjection_ACU, buildWorldSimulationProjection_ACU, readWorldSimulationMessageContent_ACU, writeWorldSimulationActiveSwipeContent_ACU } from './simulation-projection';
-import { applyWorldSimulationCandidatesDetailed_ACU } from './simulation-transaction';
+import { applyWorldSimulationCandidatesDetailedViaSql_ACU } from './simulation-transaction';
 import { appendWorldSimulationCommitChain_ACU, foldWorldSimulationArchive_ACU, foldWorldSimulationLedger_ACU } from './simulation-ledger-fold';
 import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU } from './simulation-store';
 
@@ -223,12 +223,13 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
   const envelope = foldedBefore ? { ...validatedEnvelope, ledger: foldedBefore.ledger } : validatedEnvelope;
   assertRun_ACU(envelope, input);
   const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
-  const applied = applyWorldSimulationCandidatesDetailed_ACU(
+  const archiveBefore = foldWorldSimulationArchive_ACU(chat).snapshot;
+  const applied = await applyWorldSimulationCandidatesDetailedViaSql_ACU(
     envelope.ledger,
     input.commitCandidate.acceptedCandidates,
     new Set(input.commitCandidate.evidenceRefs),
     envelope.settings,
-    { anchorMessage: storyText },
+    { anchorMessage: storyText, chronicleArchive: archiveBefore },
   );
   let ledger = {
     ...applied.ledger,
@@ -312,7 +313,6 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     contentDigest: sha256HexSync_ACU(newContent),
   };
   const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline);
-  const archiveBefore = foldWorldSimulationArchive_ACU(chat).snapshot;
   const archiveSnapshot: WorldChronicleArchiveSnapshot_ACU = {
     schemaVersion: archiveBefore.schemaVersion,
     records: { ...archiveBefore.records },

@@ -30,6 +30,11 @@ import {
   type AgentWritableModule_ACU,
 } from './agent-model';
 import { normalizeEvidenceIndexes_ACU, normalizeStageNumbers_ACU } from './agent-module-store';
+import {
+  AgentModuleSqlViewError_ACU,
+  materializeAgentModuleSqlView_ACU,
+  type AgentModuleSqlRowWrite_ACU,
+} from './agent-module-sql-view';
 
 function reject_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -802,4 +807,125 @@ export function applyAgentConstraintRegistration_ACU(
     const next = { ...snapshot, pendingFixes: pending };
     return { snapshot: next, pendingFixes: pending, appliedModules: [] };
   }
+}
+
+/* ===================== SQL 易失视图校验变体 =====================
+ * 计划 D2：模块写集在既有 JSON 事务链产出结果后，再经 SQL 易失视图按元素行级复算：
+ * 物化应用前快照 → 逐模块 diff 出 upsert/remove 行 → SQL 层 revision 乐观锁 + 约束校验。
+ * SQL 物化或执行失败时 fail-closed 回退到既有 JSON 链结果，不静默产出空资料；
+ * revision 冲突在 SQL 层被拒绝并保留模块/期望/实际的结构化诊断。
+ */
+
+function diffModuleRows_ACU(before: readonly unknown[], after: readonly unknown[]): { upserts: unknown[]; removedIds: string[] } {
+  const idOf = (item: unknown): string =>
+    item !== null && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).id === 'string'
+      ? (item as Record<string, unknown>).id as string
+      : '';
+  const previousById = new Map(before.map(item => [idOf(item), item]));
+  const nextIds = new Set(after.map(item => idOf(item)));
+  const upserts = after.filter(item => {
+    const id = idOf(item);
+    const prior = previousById.get(id);
+    return !prior || JSON.stringify(prior) !== JSON.stringify(item);
+  });
+  const removedIds = before.map(item => idOf(item)).filter(id => id && !nextIds.has(id));
+  return { upserts, removedIds };
+}
+
+async function verifyAgentModuleRowsViaSql_ACU(
+  before: AgentModuleSnapshot_ACU,
+  after: AgentModuleSnapshot_ACU,
+  modules: readonly AgentWritableModule_ACU[],
+): Promise<void> {
+  const view = await materializeAgentModuleSqlView_ACU(before);
+  try {
+    for (const module of modules) {
+      const previous = before[module] as unknown as readonly unknown[];
+      const nextItems = after[module] as unknown as readonly unknown[];
+      const diff = diffModuleRows_ACU(previous, nextItems);
+      if (!diff.upserts.length && !diff.removedIds.length) continue;
+      const rowWrite: AgentModuleSqlRowWrite_ACU = {
+        module,
+        upserts: diff.upserts,
+        expectedRevision: before.revisions[module],
+      };
+      if (diff.removedIds.length) rowWrite.removedIds = diff.removedIds;
+      const nextRevision = view.applyRowWrite(rowWrite);
+      if (nextRevision !== after.revisions[module]) {
+        throw new AgentModuleSqlViewError_ACU(
+          `模块 ${module} SQL 复算 revision 不一致：视图 ${nextRevision}，事务结果 ${after.revisions[module]}`,
+          { module, expected: after.revisions[module], actual: nextRevision },
+        );
+      }
+    }
+    const verified = view.readSnapshot();
+    for (const module of modules) {
+      if (JSON.stringify(after[module]) !== JSON.stringify(verified[module])) {
+        throw new AgentModuleSqlViewError_ACU(`模块 ${module} SQL 复算结果与事务结果不一致`, { module });
+      }
+    }
+  } finally {
+    view.dispose();
+  }
+}
+
+/**
+ * applyAgentModuleDelta_ACU 的 SQL 视图变体。
+ * 业务合并仍由既有 JSON 事务链完成（保留全部领域校验与 pendingFixes 语义），
+ * 结果再经 SQL 易失视图按元素行级复算校验：物化应用前快照 → 逐模块 diff 出
+ * upsert/remove 行 → SQL 层 revision 乐观锁 + 写回比对。SQL 物化或执行失败时
+ * fail-closed 回退 JSON 链结果，CONTINUATION_AGENT_WRITE_REJECTED 语义不变。
+ */
+export async function applyAgentModuleDeltaViaSql_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  delta: AgentModuleDelta_ACU,
+  allowedWrites: readonly string[],
+  settledIndex: number,
+  completedStageNumbers: readonly number[] = [],
+  options?: AgentModuleApplyOptions_ACU,
+): Promise<AgentModuleApplyResult_ACU> {
+  const applied = applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers, options);
+  if (!applied.appliedModules.length) return applied;
+  try {
+    await verifyAgentModuleRowsViaSql_ACU(snapshot, applied.snapshot, applied.appliedModules);
+  } catch {
+    // fail-closed：SQL 易失视图不可用或复算不一致时回退既有 JSON 校验链结果
+  }
+  return applied;
+}
+
+/** applyAgentWebRefsDelta_ACU 的 SQL 视图变体；失败 fail-closed 回退 JSON 链。 */
+export async function applyAgentWebRefsDeltaViaSql_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  output: AgentResearcherOutput_ACU,
+  expectedRevision: number | undefined,
+  now: number = Date.now(),
+  options?: AgentModuleApplyOptions_ACU,
+): Promise<AgentModuleApplyResult_ACU> {
+  const applied = applyAgentWebRefsDelta_ACU(snapshot, output, expectedRevision, now, options);
+  if (!applied.appliedModules.length) return applied;
+  try {
+    await verifyAgentModuleRowsViaSql_ACU(snapshot, applied.snapshot, ['webRefs']);
+  } catch {
+    // fail-closed 回退 JSON 链
+  }
+  return applied;
+}
+
+/** applyAgentConstraintRegistration_ACU 的 SQL 视图变体；失败 fail-closed 回退 JSON 链。 */
+export async function applyAgentConstraintRegistrationViaSql_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  add: readonly string[],
+  retire: readonly string[],
+  settledIndex: number,
+  options?: AgentModuleApplyOptions_ACU,
+): Promise<AgentModuleApplyResult_ACU> {
+  const applied = applyAgentConstraintRegistration_ACU(snapshot, add, retire, settledIndex, options);
+  if (!applied.appliedModules.length) return applied;
+  try {
+    await verifyAgentModuleRowsViaSql_ACU(snapshot, applied.snapshot, ['constraints']);
+  } catch {
+    // fail-closed 回退 JSON 链
+  }
+  return applied;
 }
