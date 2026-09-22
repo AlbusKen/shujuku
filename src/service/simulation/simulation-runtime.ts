@@ -5,7 +5,7 @@ import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from './agent/agent-module-store';
-import { compactWorldSimulationConversationAndDispatchRequirements_ACU } from './agent/agent-requirements-dispatch';
+import { compactWorldSimulationConversation_ACU } from './agent/agent-requirements-dispatch';
 import { clearWorldSimulationRunState_ACU } from './agent/agent-run-cache';
 import { clearWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from './world-simulation-agent-tools';
@@ -207,16 +207,10 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
           envelope.task?.originInstruction ?? instruction,
         );
       }
-      await compactWorldSimulationConversationAndDispatchRequirements_ACU({
-        identity,
+      await compactWorldSimulationConversation_ACU({
         anchor: currentAnchor,
         settings: envelope.settings,
-        originInstruction: envelope.task?.originInstruction ?? instruction,
         promptContext,
-        subagents,
-        registry,
-        tools,
-        persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event),
         chat: getChatArray_ACU(),
       });
       return {

@@ -310,11 +310,15 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   if (!isRecord_ACU(raw.agentApiPresets) || !isRecord_ACU(raw.agentPrompts)) fail_ACU('settings 的 Agent 配置必须是对象', phase);
   const agentApiPresets: WorldSimulationEnvelope_ACU['settings']['agentApiPresets'] = {};
   for (const [key, value] of Object.entries(raw.agentApiPresets)) {
+    // requirements-maintainer 已退役。渠道表是自由 Record，不跳过的话加载结果会把该键原样留下，下次保存又写回信封。
+    if (key === 'requirements-maintainer') continue;
     stableId_ACU(key, `settings.agentApiPresets.${key}`, phase);
     if (!isRecord_ACU(value)) fail_ACU(`settings.agentApiPresets.${key} 必须是对象`, phase);
     exactKeys_ACU(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
     agentApiPresets[key] = { mode: enum_ACU(value.mode, ['current', 'fixed'] as const, `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
   }
+  // requirements-maintainer 已退役。存量提示词组里的该键在校验前就地丢弃，避免严格键校验以「未知角色」拒绝整包。
+  if (Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirements-maintainer')) delete raw.agentPrompts['requirements-maintainer'];
   const validatedPrompts = Object.keys(raw.agentPrompts).length === 0
     ? buildDefaultWorldSimulationAgentPrompts_ACU()
     : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);

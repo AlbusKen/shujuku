@@ -97,13 +97,11 @@ describe('Agent 目录渲染', () => {
     expect(findAgentSubagentDefinition_ACU('不存在的代理')).toBeNull();
   });
 
-  it('用户要求模块进资料目录与读集词汇表，维护子代理可按名查到但不进主 Agent 目录', () => {
+  it('用户要求模块进资料目录与读集词汇表，AI 维护子代理已退役、目录查无此人', () => {
     const moduleCatalog = renderAgentModuleCatalog_ACU();
     expect(moduleCatalog).toContain('$USER_REQUIREMENTS');
-    expect(moduleCatalog).toContain('requirements-maintainer');
     expect(renderAgentReadCatalog_ACU()).toContain('$USER_REQUIREMENTS');
-    expect(findAgentSubagentDefinition_ACU('requirements-maintainer')).toMatchObject({ kind: 'maintain', promptKey: 'requirementsMaintainer' });
-    expect(renderAgentSubagentCatalog_ACU()).not.toContain('name: requirements-maintainer');
+    expect(findAgentSubagentDefinition_ACU('requirements-maintainer')).toBeNull();
   });
 });
 

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  collectWorldSimulationSubstantialUserTexts_ACU,
   emptyWorldSimulationUserRequirementsSnapshot_ACU,
   isMechanicalWorldSimulationResumeText_ACU,
   normalizeWorldSimulationUserRequirementLines_ACU,
@@ -16,10 +15,6 @@ import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simula
 import { WorldSimulationValidationError_ACU } from '../../../../src/service/simulation/model';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 
-function userMessage_ACU(id: number, text: string) {
-  return { id, kind: 'user' as const, text, digest: text.slice(0, 24), turnKey: 't', at: id };
-}
-
 describe('世界推演用户要求资料区', () => {
   beforeEach(() => {
     _set_SillyTavern_API_ACU(undefined);
@@ -29,17 +24,6 @@ describe('世界推演用户要求资料区', () => {
     expect(isMechanicalWorldSimulationResumeText_ACU('开始')).toBe(true);
     expect(isMechanicalWorldSimulationResumeText_ACU('恢复任务')).toBe(true);
     expect(isMechanicalWorldSimulationResumeText_ACU('开始推演港口局势')).toBe(false);
-  });
-
-  it('压缩区间只收集实质用户发言', () => {
-    const messages = [
-      userMessage_ACU(1, '不要提前揭底牌'),
-      { id: 2, kind: 'agent' as const, text: '记下', digest: 'a', turnKey: 't', at: 2 },
-      userMessage_ACU(3, '继续'),
-      userMessage_ACU(4, '用第一人称'),
-    ];
-    expect(collectWorldSimulationSubstantialUserTexts_ACU(messages, 0, 3)).toEqual(['不要提前揭底牌']);
-    expect(collectWorldSimulationSubstantialUserTexts_ACU(messages, 0, 4)).toEqual(['不要提前揭底牌', '用第一人称']);
   });
 
   it('规范化拒绝超长行与空串，允许空数组', () => {

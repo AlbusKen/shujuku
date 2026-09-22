@@ -30,7 +30,6 @@ import {
 import { AGENT_PREFILLS_ACU, AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
 import {
   applyAgentUserRequirementsReplace_ACU,
-  collectSubstantialUserTexts_ACU,
   renderAgentUserRequirements_ACU,
 } from './agent-user-requirements';
 import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
@@ -97,7 +96,6 @@ import {
   AGENT_HISTORY_EMERGENCY_FACTOR_ACU,
   AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
   AGENT_OUTLINE_AGENT_NAME_ACU,
-  AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
   AGENT_WEB_RESEARCHER_NAME_ACU,
   DEFAULT_AGENT_RUN_BUDGET_ACU,
   type AgentConversationAppend_ACU,
@@ -1016,81 +1014,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
     // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
     logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: candidate.report });
-    await this.dispatchRequirementsMaintainerAfterCompaction_ACU(
-      chat,
-      snapshot,
-      previousThroughId,
-      candidate.compactedThroughId,
-      request,
-      context,
-      apiDependencies,
-    );
     return reread;
-  }
-
-  /**
-   * 压缩提交后的系统派工：被浓缩范围内仍有实质用户发言时，让 requirements-maintainer
-   * 全量替换 $USER_REQUIREMENTS。不计入主 Agent 派工预算；失败只记日志，不阻断压缩。
-   */
-  private async dispatchRequirementsMaintainerAfterCompaction_ACU(
-    chat: any[],
-    preCompactSnapshot: AgentConversationSnapshot_ACU,
-    previousThroughId: number,
-    compactedThroughId: number,
-    request: ContinuationAgentTurnPlanRequest_ACU,
-    context: AgentResolveContext_ACU,
-    apiDependencies?: ContinuationApiPresetDependencies_ACU,
-  ): Promise<void> {
-    const userTexts = collectSubstantialUserTexts_ACU(preCompactSnapshot.messages, previousThroughId, compactedThroughId);
-    if (!userTexts.length) return;
-    const entryId = logAgentSession_ACU({
-      kind: 'delegation',
-      agentName: AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
-      title: '用户要求维护执行中',
-      detail: `压缩范围内 ${userTexts.length} 条实质用户发言`,
-      status: 'running',
-    });
-    try {
-      const prompt = [
-        '会话历史刚被压缩。请根据被浓缩范围内的实质用户发言，全量替换整理 $USER_REQUIREMENTS。',
-        '被浓缩范围内的实质用户发言：',
-        ...userTexts.map((text, index) => `${index + 1}. ${text}`),
-      ].join('\n');
-      const preset = this.dependencies.resolveApiPreset(request.settings, 'requirementsMaintainer', 'agent_delegate', apiDependencies);
-      const result = await this.dependencies.subagentRuntime.run({
-        delegation: {
-          agentName: AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
-          prompt,
-          reads: ['$USER_REQUIREMENTS'],
-        },
-        settings: request.settings,
-        resolveContext: context,
-        budget: request.settings.agentRunBudget ?? DEFAULT_AGENT_RUN_BUDGET_ACU,
-        preset,
-        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
-        isCurrent: identity => request.isInternalRequestCurrent(identity),
-        signal: request.signal,
-      });
-      if (!result.requirements) {
-        updateAgentSession_ACU(entryId, { title: '用户要求维护未采用', detail: '子代理没有返回可用的 requirements 清单，已保留旧快照。', ok: false });
-        return;
-      }
-      const applied = applyAgentUserRequirementsReplace_ACU(context.moduleSnapshot, result.requirements);
-      await this.persistSnapshot_ACU(chat, applied);
-      context.moduleSnapshot = applied;
-      updateAgentSession_ACU(entryId, {
-        title: '用户要求维护完成',
-        detail: [result.requirements.length ? `现有 ${result.requirements.length} 条用户要求` : '清单为空', result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : ''].filter(Boolean).join('\n'),
-        ok: true,
-      });
-    } catch (error) {
-      if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
-      updateAgentSession_ACU(entryId, {
-        title: '用户要求维护失败',
-        detail: `${compactAgentProtocolError_ACU(error)}\n已保留旧快照，压缩交接不受影响。`,
-        ok: false,
-      });
-    }
   }
 
   private async callMainAgent(
@@ -1711,10 +1635,8 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     const accepted: AgentDelegation_ACU[] = [];
     for (const delegation of normalDelegations) {
-      if (delegation.agentName === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU || delegation.agentName === AGENT_INSTRUCTION_COMPOSER_NAME_ACU || delegation.agentName === 'final-reviewer') {
-        rejectImmediately(delegation.agentName, delegation.agentName === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU
-          ? 'requirements-maintainer 只能由会话压缩后的系统派工触发，主 Agent 不能直接派它。本次未消耗派工额度。'
-          : '该角色由固定工作流调用，主 Agent 不能 delegate。请输出 open_round。本次未消耗派工额度。');
+      if (delegation.agentName === AGENT_INSTRUCTION_COMPOSER_NAME_ACU || delegation.agentName === 'final-reviewer') {
+        rejectImmediately(delegation.agentName, '该角色由固定工作流调用，主 Agent 不能 delegate。请输出 open_round。本次未消耗派工额度。');
         continue;
       }
       if (outlineMaintenanceReserveAvailable) {
@@ -1880,10 +1802,6 @@ export class ContinuationAgentTurnPlanner_ACU {
         const settled = this.settleResearcherResult_ACU(result, nextSnapshot);
         if (settled.snapshot !== nextSnapshot) { nextSnapshot = settled.snapshot; snapshotChanged = true; }
         settleOutcome(item.delegation, settled.outcome, result.usage);
-        continue;
-      }
-      if (result.requirements) {
-        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: 'requirements-maintainer 只能由会话压缩后的系统派工触发' }, result.usage);
         continue;
       }
       settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' }, result.usage);

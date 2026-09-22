@@ -32,32 +32,6 @@ describe('世界推演 Agent runtime', () => {
     expect(result.candidate?.candidateId).toBe('specialist:timekeeper:1');
   });
 
-  it('run() 拒绝系统派工的 requirements-maintainer', async () => {
-    const { registry, promptContext, runId } = fixture('requirements-maintainer-run');
-    const invoke = vi.fn(async () => JSON.stringify({ summary: '不应执行', requirements: ['x'] }));
-    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
-    await expect(runtime.run({
-      delegation: { agentName: 'requirements-maintainer', instruction: '整理要求', reads: [] },
-      settings: settings(), promptContext, registry, tools, runId,
-    })).rejects.toThrow('WORLD_SIMULATION_DELEGATION_AGENT_INVALID');
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it('runRequirementsMaintainer 解析 summary+requirements 全量清单', async () => {
-    const { registry, promptContext, runId } = fixture('requirements-maintainer-ok');
-    const invoke = vi.fn(async () => JSON.stringify({ summary: '合并用户要求', requirements: ['不要提前揭底牌', '用第一人称'] }));
-    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
-    await expect(runtime.runRequirementsMaintainer({
-      instruction: '整理压缩范围内的用户发言',
-      settings: settings(),
-      promptContext,
-      registry,
-      tools,
-      runId,
-    })).resolves.toEqual({ summary: '合并用户要求', requirements: ['不要提前揭底牌', '用第一人称'] });
-    expect(invoke).toHaveBeenCalled();
-  });
-
   it('specialist 省略绑定身份时由运行时补齐 agentName', async () => {
     const { registry, promptContext, runId } = fixture('specialist-bound-identity');
     const invoke = vi.fn(async () => JSON.stringify({ status: 'no_change', summary: '无需修改', evidenceRefs: [], uncertainties: [] }));
@@ -879,31 +853,6 @@ describe('世界推演 Agent runtime', () => {
     expect(secondCall).toContain('并行派工预算已耗尽');
     expect(secondCall).toContain('lore-researcher');
     expect(readWorldSimulationSessionLog_ACU(identity.chatIdentity).filter(item => item.kind === 'delegation')).toHaveLength(1);
-  });
-
-  it('主 Agent 派工 requirements-maintainer 被角色门禁拒绝，不调用子代理', async () => {
-    const { registry, evidence, promptContext } = fixture('requirements-maintainer-delegate');
-    const subagents = {
-      run: vi.fn(async ({ delegation }: any) => ({ agentName: delegation.agentName, status: 'no_change' as const, summary: '无变化', evidenceRefs: [evidence], uncertainties: [] })),
-      runReviewer: vi.fn(),
-    };
-    const responses = [
-      JSON.stringify({ action: 'delegate', delegations: [
-        { agentName: 'timekeeper', instruction: '分析时间', reads: [] },
-        { agentName: 'requirements-maintainer', instruction: '整理要求', reads: [] },
-      ] }),
-      JSON.stringify({ action: 'block', reason: '不可派工后收敛', unresolved: ['requirements-maintainer 仅系统派工'] }),
-    ];
-    const invoke = vi.fn(async () => responses.shift()!);
-    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 });
-    const identity = { runId: 'run-req-maintainer', chatIdentity: 'chat-req-maintainer', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task-req-maintainer', stageId: 'stage-req-maintainer', stageRevision: 1 };
-    const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
-    expect(result).toMatchObject({ outcome: 'blocked', summary: '不可派工后收敛' });
-    expect(subagents.run).toHaveBeenCalledOnce();
-    expect(subagents.run.mock.calls[0][0].delegation.agentName).toBe('timekeeper');
-    const secondCall = JSON.stringify(invoke.mock.calls[1][1]);
-    expect(secondCall).toContain('requirements-maintainer');
-    expect(secondCall).toContain('不可派工');
   });
 
   it('同批同一 specialist 并发派工时按 agent 递增 candidateSeq 且 candidateId 不碰撞', async () => {

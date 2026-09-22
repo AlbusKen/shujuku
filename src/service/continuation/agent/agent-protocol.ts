@@ -9,7 +9,6 @@
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
-import { normalizeUserRequirementLines_ACU } from './agent-user-requirements';
 import {
   AGENT_CHRONOLOGY_PRECISIONS_ACU,
   AGENT_HOOK_IMPORTANCES_ACU,
@@ -1051,23 +1050,6 @@ export function parseAgentFinalReviewerOutput_ACU(payload: Record<string, unknow
     requiredFixes: readTextList_ACU(payload.requiredFixes),
     preserve: readTextList_ACU(payload.preserve),
   };
-}
-
-export interface AgentRequirementsMaintainerOutput_ACU {
-  summary: string;
-  requirements: string[];
-}
-
-/**
- * 解析用户要求维护子代理的全量替换契约。requirements 必须是字符串数组；
- * 任一条空串或非字符串则整份拒绝，由调用方 fail-closed 保留旧快照。
- */
-export function parseAgentRequirementsMaintainerOutput_ACU(payload: Record<string, unknown>): AgentRequirementsMaintainerOutput_ACU {
-  const summary = readText_ACU(payload.summary);
-  if (!summary) failProtocol_ACU('用户要求维护子代理必须给出非空 summary');
-  const requirements = normalizeUserRequirementLines_ACU(payload.requirements);
-  if (requirements === null) failProtocol_ACU('用户要求维护子代理的 requirements 必须是非空字符串数组（允许空数组，但不允许空串或非字符串条目）');
-  return { summary, requirements };
 }
 
 /** 把协议错误压成可回喂给模型的紧凑单行原因串。 */

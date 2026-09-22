@@ -39,7 +39,6 @@ import {
   parseAgentResearcherToolCalls_ACU,
   parseAgentResearcherWorkingNotes_ACU,
   parseAgentReviewerOutput_ACU,
-  parseAgentRequirementsMaintainerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
   renderAgentContractContinuationRequest_ACU,
   type AgentContractRejection_ACU,
@@ -72,7 +71,7 @@ import {
   type AgentReadGateConfig_ACU,
   type AgentReadGateState_ACU,
 } from './agent-read-gate';
-import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU } from './agent-model';
 import type {
   AgentComposerOutput_ACU,
   AgentDelegation_ACU,
@@ -203,7 +202,6 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
   beatPlanner: AGENT_PREFILLS_ACU.planner,
   reviewer: AGENT_PREFILLS_ACU.reviewer,
   webResearcher: AGENT_PREFILLS_ACU.researcher,
-  requirementsMaintainer: AGENT_PREFILLS_ACU.requirements,
   instructionComposer: AGENT_PREFILLS_ACU.composer,
 };
 
@@ -369,8 +367,7 @@ export class AgentSubagentRuntime_ACU {
     if (!definition) {
       rejectDelegation_ACU(`目录里没有名为 ${input.delegation.agentName} 的子代理`, { agentName: input.delegation.agentName });
     }
-    const isRequirementsMaintainer = definition.name === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU;
-    const writes = isRequirementsMaintainer ? (['userRequirements'] as AgentWritableModule_ACU[]) : [...KIND_FIXED_WRITES_ACU[definition.kind]];
+    const writes = [...KIND_FIXED_WRITES_ACU[definition.kind]];
     const gate: SubagentGate_ACU = {
       state: createAgentReadGateState_ACU(),
       config: {
@@ -496,7 +493,7 @@ export class AgentSubagentRuntime_ACU {
       },
     };
     // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮 + 契约续写/修补轮。到界仍未交付即失败。
-    const contractKind = !isRequirementsMaintainer && (definition.kind === 'arc' || definition.kind === 'maintain');
+    const contractKind = definition.kind === 'arc' || definition.kind === 'maintain';
     const maxContinuations = contractKind ? AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU : 0;
     const maxCalls = 1 + maxToolRounds + retries + 1 + maxContinuations;
     // 契约草稿累积：截断或单条非法时不整份重来，先收下合法条目，再只向模型索要剩余/修正条目。
@@ -593,26 +590,6 @@ export class AgentSubagentRuntime_ACU {
       }
 
       try {
-        if (isRequirementsMaintainer) {
-          const payload = parseAgentJsonPayload_ACU(raw, prefill, ['requirements', 'summary']);
-          const parsed = parseAgentRequirementsMaintainerOutput_ACU(payload);
-          return {
-            agentName: definition.name,
-            kind: definition.kind,
-            writes,
-            arc: null,
-            maintainer: null,
-            planner: null,
-            reviewer: null,
-            researcher: null,
-            requirements: parsed.requirements,
-            iterations: 1 + toolRoundsUsed,
-            attempts: attempt,
-            expandedReads: [...expandedReads],
-            readRevisions,
-            usage: usageTotal,
-          };
-        }
         if (isResearch) {
           const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU.research);
           const draft = parseAgentResearcherOutput_ACU(payload);

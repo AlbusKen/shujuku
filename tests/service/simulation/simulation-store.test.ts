@@ -27,6 +27,19 @@ describe('world simulation envelope store', () => {
     expect(() => validateWorldSimulationEnvelope_ACU({ ...envelope, unexpected: true })).toThrow(WorldSimulationValidationError_ACU);
   });
 
+  it('存量信封里的 requirements-maintainer 提示词与渠道在加载时丢弃，不拒绝整包', () => {
+    const legacy: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
+    const preserved = { mode: 'fixed' as const, presetName: 'kept' };
+    legacy.settings.agentPrompts['requirements-maintainer'] = legacy.settings.agentPrompts['world-director'];
+    legacy.settings.agentApiPresets['requirements-maintainer'] = { mode: 'fixed', presetName: 'old' };
+    legacy.settings.agentApiPresets['world-director'] = preserved;
+    const loaded = validateWorldSimulationEnvelope_ACU(legacy);
+    expect(Object.keys(loaded.settings.agentPrompts)).toEqual(Object.keys(buildDefaultWorldSimulationSettings_ACU().agentPrompts));
+    expect(loaded.settings.agentPrompts).not.toHaveProperty('requirements-maintainer');
+    expect(loaded.settings.agentApiPresets).not.toHaveProperty('requirements-maintainer');
+    expect(loaded.settings.agentApiPresets['world-director']).toEqual(preserved);
+  });
+
   it('只为完全缺失的 webResearch 补默认配置', () => {
     const legacy: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
     delete legacy.settings.webResearch;

@@ -331,15 +331,15 @@
     <!-- 用户要求：Agent 会话里用户累计提出的任务要求 -->
     <template v-else-if="activeTab === 'userRequirements'">
       <p class="acu-v2-continuation-materials__meta">
-        用户要求由 requirements-maintainer 在会话历史压缩后整理，创建任务时会把初始要求机械写成首条。
-        也可以在这里手动修正；保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
+        用户要求在资料库里手动维护。创建任务时会把初始要求机械写成首条。
+        保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
       </p>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         条目 {{ materials.snapshot.value.userRequirements.length }} 条 · 修订号 {{ materials.snapshot.value.revisions.userRequirements }}
       </p>
       <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
       <p v-if="!materials.snapshot.value?.userRequirements.length" class="acu-v2-continuation-materials__empty">
-        还没有用户要求条目。创建任务后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。
+        还没有用户要求条目。创建任务后会写入初始要求；之后请在这里手动增删改。
       </p>
       <ol v-else class="acu-v2-continuation-materials__list">
         <li v-for="(line, index) in materials.snapshot.value.userRequirements" :key="`${index}-${line}`">{{ line }}</li>

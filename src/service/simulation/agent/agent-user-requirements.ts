@@ -2,7 +2,7 @@
  * service/simulation/agent/agent-user-requirements.ts — 世界推演用户要求资料区
  *
  * 独立持久化字段 `_qrf_world_user_requirements`，与材料快照 / 账本分桶隔离。
- * 压缩后的语义合并由 requirements-maintainer 完成；本文件负责机械过滤、空快照回退、
+ * AI 维护子代理已退役：清单由用户在资料面板手动维护；本文件负责空快照回退、
  * 楼层锚定读写与用户编辑的 fail-closed 校验。
  */
 
@@ -40,22 +40,6 @@ function reject_ACU(message: string, details?: Record<string, unknown>, phase: '
 export function isMechanicalWorldSimulationResumeText_ACU(text: string): boolean {
   const trimmed = text.trim();
   return !trimmed || WORLD_SIMULATION_RESUME_KEYWORD_ACU.test(trimmed);
-}
-
-export function collectWorldSimulationSubstantialUserTexts_ACU(
-  messages: readonly WorldSimulationConversationMessage_ACU[],
-  fromIdExclusive: number,
-  toIdInclusive: number,
-): string[] {
-  const texts: string[] = [];
-  for (const message of messages) {
-    if (message.kind !== 'user') continue;
-    if (message.id <= fromIdExclusive || message.id > toIdInclusive) continue;
-    const trimmed = message.text.trim();
-    if (!trimmed || WORLD_SIMULATION_RESUME_KEYWORD_ACU.test(trimmed)) continue;
-    texts.push(trimmed);
-  }
-  return texts;
 }
 
 export function normalizeWorldSimulationUserRequirementLines_ACU(value: unknown): string[] | null {

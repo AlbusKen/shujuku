@@ -5,7 +5,7 @@ import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-ev
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU } from './agent-catalog';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
@@ -535,7 +535,6 @@ export class WorldSimulationMainLoop_ACU {
           const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === delegation.agentName);
           const used = perAgent.get(delegation.agentName) ?? 0;
           const allowedKind = definition
-            && definition.name !== WORLD_SIMULATION_REQUIREMENTS_MAINTAINER_NAME_ACU
             && (definition.kind === 'specialist' || definition.kind === 'researcher');
           const reason = !allowedKind ? `角色 ${delegation.agentName} 不可派工`
             : delegationsUsed + accepted.length >= input.settings.agentRunBudget.maxDelegations ? `总派工预算已耗尽（${delegationsUsed + accepted.length}/${input.settings.agentRunBudget.maxDelegations}）`

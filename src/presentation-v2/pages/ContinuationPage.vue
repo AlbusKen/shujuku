@@ -346,7 +346,7 @@
           <h4 class="acu-v2-continuation-page__subheading">主 Agent</h4>
           <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。正文三层注入：$STORY_OVERVIEW（事件概览：纪要表概览全量，召回 AM 码展开对应纪要）、$STORY_TAIL（尾部楼层全文）、$STORY_CATALOG（楼层纯索引：楼号、字数、开头摘录、读取地址）。目录与状态占位符：$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录，含 token 估算）、$WORLDBOOK_HITS（本轮语境命中的世界书条目提示）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_REQUIREMENTS（用户对任务累计提过的要求）、$USER_INTENT（创建任务时的初始要求原文，自定义提示词仍可用）、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$HISTORY_UNSETTLED（未结算正文全量，仅 AI 楼层）、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
           <h4 class="acu-v2-continuation-page__subheading">各子代理</h4>
-          <p class="acu-v2-continuation-page__meta">子代理可用占位符：$USER_REQUIREMENTS（用户累计要求）、$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC / $CHRONOLOGY / $WEB_REFS（本地资料；$WEB_REFS 只给名称 + 一句话简介的预览）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）；网页检索子代理另有 $WEB_TOOL_CATALOG（出网工具说明与本次配额）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查、终审与用户要求维护固定获得 $OUTLINE_WINDOW 或任务段中的 $USER_REQUIREMENTS；大纲代理默认使用 $USER_REQUIREMENTS，自定义段仍可使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不再注入初始要求原文，只接收累计用户要求清单。</p>
+          <p class="acu-v2-continuation-page__meta">子代理可用占位符：$USER_REQUIREMENTS（用户累计要求）、$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC / $CHRONOLOGY / $WEB_REFS（本地资料；$WEB_REFS 只给名称 + 一句话简介的预览）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）；网页检索子代理另有 $WEB_TOOL_CATALOG（出网工具说明与本次配额）。固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查、终审固定获得 $OUTLINE_WINDOW 或任务段中的 $USER_REQUIREMENTS；大纲代理默认使用 $USER_REQUIREMENTS，自定义段仍可使用 $ORIGIN_INSTRUCTION；伏笔与认知维护代理不再注入初始要求原文，只接收累计用户要求清单。</p>
         </AcuDisclosureGroup>
       </div>
       <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
@@ -451,7 +451,6 @@ const agentChannelRoles = [
   { role: 'reviewer', label: '连续性审查' },
   { role: 'finalReviewer', label: '发送前终审' },
   { role: 'webResearcher', label: '网页检索' },
-  { role: 'requirementsMaintainer', label: '用户要求维护' },
   { role: 'instructionComposer', label: '写作指令编排' },
 ] as const;
 
@@ -575,7 +574,6 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       reviewer: { ...settings.agentApiPresets.reviewer },
       finalReviewer: { ...settings.agentApiPresets.finalReviewer },
       webResearcher: { ...settings.agentApiPresets.webResearcher },
-      requirementsMaintainer: { ...settings.agentApiPresets.requirementsMaintainer },
       instructionComposer: { ...(settings.agentApiPresets.instructionComposer ?? { mode: 'inherit', presetName: '' }) },
     },
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
@@ -588,7 +586,6 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       reviewer: settings.agentPrompts.reviewer.map(segment => ({ ...segment })),
       finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
       webResearcher: settings.agentPrompts.webResearcher.map(segment => ({ ...segment })),
-      requirementsMaintainer: settings.agentPrompts.requirementsMaintainer.map(segment => ({ ...segment })),
       instructionComposer: (settings.agentPrompts.instructionComposer ?? []).map(segment => ({ ...segment })),
     },
   };
@@ -815,7 +812,7 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer' | 'webResearcher' | 'requirementsMaintainer' | 'instructionComposer';
+type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer' | 'webResearcher' | 'instructionComposer';
 
 interface PromptGroupDef {
   key: PromptKey;
@@ -837,7 +834,6 @@ const promptGroups: PromptGroupDef[] = [
   { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时，固定工作流会在 instruction-composer 之后调用它。' },
   { key: 'instructionComposer', kind: 'agent_instruction_composer', title: continuationCopy.composer.title, restoreLabel: '恢复写作指令编排默认值', note: continuationCopy.composer.note },
   { key: 'webResearcher', kind: 'agent_web_researcher', title: '网页检索子代理（web-researcher）提示词', restoreLabel: '恢复网页检索默认值', note: '仅在「启用开场百科检索」开启时才会被调用。专属占位符：$WEB_TOOL_CATALOG（出网工具说明与本次配额）、$WEB_REFS（百科资料库预览）。' },
-  { key: 'requirementsMaintainer', kind: 'agent_requirements_maintainer', title: '用户要求维护子代理（requirements-maintainer）提示词', restoreLabel: '恢复用户要求维护默认值', note: '由会话压缩后的系统派工触发，不进入主 Agent 可派工目录。契约 JSON 为 {requirements, summary} 全量替换。' },
 ];
 
 /** 折叠态摘要：启用段数 / 总段数。 */

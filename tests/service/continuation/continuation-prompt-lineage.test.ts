@@ -54,7 +54,6 @@ function historicalSettings_ACU(label: string): any {
   for (const [role, refs] of Object.entries(entry.agentPrompts)) agentPrompts[role] = materialize_ACU(refs);
   // finalReviewer 在 V23 才出现；更早的信封由校验层补默认，这里预先补齐以便逐段比对。
   if (!agentPrompts.finalReviewer) agentPrompts.finalReviewer = buildDefaultContinuationAgentPrompts_ACU().finalReviewer;
-  if (!agentPrompts.requirementsMaintainer) agentPrompts.requirementsMaintainer = buildDefaultContinuationAgentPrompts_ACU().requirementsMaintainer;
   settings.agentPrompts = agentPrompts;
   return settings;
 }
@@ -67,7 +66,6 @@ const REQUIRED_PLACEHOLDERS_ACU: Record<string, string[]> = {
   beatPlanner: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_TAIL', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
   reviewer: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$USER_REQUIREMENTS'],
   finalReviewer: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$USER_REQUIREMENTS', '$WORLDBOOK_HITS'],
-  requirementsMaintainer: ['$USER_REQUIREMENTS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE'],
   instructionComposer: ['$USER_REQUIREMENTS', '$AGENT_TASK', '$OUTLINE_WINDOW', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS'],
 };
 

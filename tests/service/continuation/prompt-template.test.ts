@@ -114,8 +114,6 @@ describe('continuation prompt templates', () => {
     expect(text(prompts.beatPlanner)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.maintainer)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.maintainer)).not.toContain('$OUTLINE_WINDOW');
-    expect(text(prompts.requirementsMaintainer)).toContain('$USER_REQUIREMENTS');
-    expect(text(prompts.requirementsMaintainer)).not.toContain('$OUTLINE_WINDOW');
   });
 
   it('restores only the selected prompt default', () => {
@@ -139,11 +137,6 @@ describe('continuation prompt templates', () => {
     const restoredFinalReviewer = restoreContinuationPromptDefault_ACU(restoredMain, 'agent_final_reviewer');
     expect(restoredFinalReviewer.agentPrompts.finalReviewer[0].content).toContain('发送前最终审查代理');
     expect(restoredFinalReviewer.agentPrompts.reviewer[0].content).toBe('custom reviewer');
-
-    settings.agentPrompts.requirementsMaintainer = [{ role: 'user', content: 'custom requirements', deletable: true }];
-    const restoredRequirements = restoreContinuationPromptDefault_ACU(settings, 'agent_requirements_maintainer');
-    expect(restoredRequirements.agentPrompts.requirementsMaintainer.map(item => item.content).join('\n')).toContain('$USER_REQUIREMENTS');
-    expect(restoredRequirements.agentPrompts.reviewer[0].content).toBe('custom reviewer');
   });
 });
 

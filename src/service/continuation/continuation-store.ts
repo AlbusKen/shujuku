@@ -115,7 +115,6 @@ function validateAgentPrompts_ACU(raw: unknown): ContinuationSettings_ACU['agent
     reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     finalReviewer: validateContinuationPromptSegments_ACU(raw.finalReviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     webResearcher: validateContinuationPromptSegments_ACU(raw.webResearcher, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
-    requirementsMaintainer: validateContinuationPromptSegments_ACU(raw.requirementsMaintainer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     instructionComposer: validateContinuationPromptSegments_ACU(raw.instructionComposer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
   };
 }
@@ -736,9 +735,9 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (isRecord_ACU(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'webResearcher')) {
     raw.agentPrompts.webResearcher = buildDefaultContinuationAgentPrompts_ACU().webResearcher;
   }
-  if (isRecord_ACU(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirementsMaintainer')) {
-    raw.agentPrompts.requirementsMaintainer = buildDefaultContinuationAgentPrompts_ACU().requirementsMaintainer;
-  }
+  // requirements-maintainer 子代理已退役：存量信封里的提示词组就地删除，
+  // 否则严格键校验会把它判成未知字段而拒绝整个信封。
+  if (isRecord_ACU(raw.agentPrompts) && Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirementsMaintainer')) delete raw.agentPrompts.requirementsMaintainer;
   if (isRecord_ACU(raw.agentPrompts) && !Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'instructionComposer')) {
     raw.agentPrompts.instructionComposer = buildDefaultContinuationAgentPrompts_ACU().instructionComposer;
   }
@@ -750,6 +749,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
       if (!Object.prototype.hasOwnProperty.call(raw.agentApiPresets, role)) raw.agentApiPresets[role] = defaults[role];
     }
+    if (Object.prototype.hasOwnProperty.call(raw.agentApiPresets, 'requirementsMaintainer')) delete raw.agentApiPresets.requirementsMaintainer;
   }
   // 主 Agent 会话改造之前的信封没有这两项；补默认即无感迁移，不必让用户重建配置。
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyWindowFloors')) raw.storyWindowFloors = AGENT_STORY_WINDOW_DEFAULT_ACU;

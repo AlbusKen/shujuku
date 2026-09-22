@@ -48,7 +48,6 @@ const CONTINUATION_ROLE_LABELS_ACU: Record<string, string> = {
   reviewer: '连续性审查子代理',
   finalReviewer: '发送前终审子代理',
   webResearcher: '网页检索子代理',
-  requirementsMaintainer: '用户要求维护子代理',
 };
 
 function clone<T>(value: T): T {

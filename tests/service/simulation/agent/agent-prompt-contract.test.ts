@@ -9,14 +9,14 @@ import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, ren
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
 describe('世界推演提示词装配契约', () => {
-  it('装配十角色、主 Agent 可见九角色，以及唯一有序固定 seam', () => {
+  it('装配九角色、主 Agent 可见全部角色，以及唯一有序固定 seam', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
-    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(10);
+    expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(9);
     expect(worldSimulationDirectorVisibleCatalog_ACU()).toHaveLength(9);
     expect(WORLD_SIMULATION_AGENT_NAMES_ACU).toEqual([
       'world-director', 'world-stage-planner', 'timekeeper', 'undercurrent-analyst',
-      'dramatis-keeper', 'chronicler', 'causality-reviewer', 'guidance-composer', 'lore-researcher', 'requirements-maintainer',
+      'dramatis-keeper', 'chronicler', 'causality-reviewer', 'guidance-composer', 'lore-researcher',
     ]);
     for (const segments of Object.values(prompts)) {
       const positions = WORLD_SIMULATION_ENGINE_SEAMS_ACU.map(seam => segments.findIndex(segment => segment.content.includes(worldSimulationSeamMarker_ACU(seam))));
@@ -248,14 +248,6 @@ describe('世界推演提示词装配契约', () => {
     expect(index).toBeGreaterThanOrEqual(0);
     segments[index].content = '用户 guidance：$WORLD_USER_GUIDANCE';
     expect(() => validateWorldSimulationPromptSegments_ACU(segments, 'world-director')).not.toThrow();
-  });
-
-  it('缺 requirements-maintainer 提示词时补当前默认，不因缺键判整包非法', () => {
-    const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const rest = { ...defaults };
-    delete (rest as Record<string, unknown>)['requirements-maintainer'];
-    const validated = validateWorldSimulationAgentPrompts_ACU(rest);
-    expect(validated['requirements-maintainer']).toEqual(defaults['requirements-maintainer']);
   });
 
 });

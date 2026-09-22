@@ -397,7 +397,7 @@ export interface AgentModuleSnapshot_ACU {
   storyArc: AgentStoryArcEntry_ACU[];
   chronology: AgentChronologyEntry_ACU[];
   webRefs: AgentWebRefEntry_ACU[];
-  /** 用户在 Agent 会话里提过的要求，由 requirements-maintainer 全量替换维护。 */
+  /** 用户在 Agent 会话里提过的要求。创建任务时机械写入初始要求作为首条，之后只由用户手动维护。 */
   userRequirements: string[];
   /** 最近一次容错提交没能入库的模块。旧快照缺该字段时读取为空数组。 */
   pendingFixes: AgentPendingFix_ACU[];
@@ -406,11 +406,10 @@ export interface AgentModuleSnapshot_ACU {
 export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'] as const;
 export type AgentWritableModule_ACU = typeof AGENT_WRITABLE_MODULES_ACU[number];
 
-export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'requirements-maintainer', 'instruction-composer'] as const;
+export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'instruction-composer'] as const;
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
 export const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';
-export const AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU = 'requirements-maintainer';
 export const AGENT_INSTRUCTION_COMPOSER_NAME_ACU = 'instruction-composer';
 
 export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review' | 'research' | 'compose';

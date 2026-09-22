@@ -1,8 +1,8 @@
 /**
  * service/continuation/agent/agent-user-requirements.ts — 用户要求资料区的过滤、渲染与机械写入
  *
- * 与伏笔账本等结构化模块分离：这里只处理 string[] 全量替换。压缩触发的语义合并由
- * requirements-maintainer 完成；本文件负责机械过滤、空快照回退与 fail-closed 种子写入。
+ * 与伏笔账本等结构化模块分离：这里只处理 string[] 全量替换。AI 维护子代理已退役，
+ * 清单由用户在资料面板手动维护；本文件负责空快照回退与 fail-closed 种子写入。
  */
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
@@ -18,47 +18,6 @@ export const AGENT_RESUME_KEYWORD_ACU = /^(继续|开始|恢复(?:任务)?|resum
 export function isMechanicalResumeUserText_ACU(text: string): boolean {
   const trimmed = text.trim();
   return !trimmed || AGENT_RESUME_KEYWORD_ACU.test(trimmed);
-}
-
-/**
- * 从压缩区间收集仍有实质内容的用户发言。
- * @param messages 压缩前的会话消息（含将被浓缩的部分）
- * @param fromIdExclusive 上一份 compaction mark 的 compactedThroughId，没有则为 0
- * @param toIdInclusive 本次压缩截止 id
- */
-export function collectSubstantialUserTexts_ACU(
-  messages: readonly AgentConversationMessage_ACU[],
-  fromIdExclusive: number,
-  toIdInclusive: number,
-): string[] {
-  const texts: string[] = [];
-  for (const message of messages) {
-    if (message.kind !== 'user') continue;
-    if (message.id <= fromIdExclusive || message.id > toIdInclusive) continue;
-    const trimmed = message.text.trim();
-    if (!trimmed || AGENT_RESUME_KEYWORD_ACU.test(trimmed)) continue;
-    texts.push(trimmed);
-  }
-  return texts;
-}
-
-/**
- * 规范化用户要求清单：trim、拒绝非字符串与空串、按首次出现去重。
- * 供子代理契约解析使用——任一条非法则整份返回 null，由调用方 fail-closed。
- */
-export function normalizeUserRequirementLines_ACU(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const lines: string[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    if (typeof item !== 'string') return null;
-    const text = item.trim();
-    if (!text) return null;
-    if (seen.has(text)) continue;
-    seen.add(text);
-    lines.push(text);
-  }
-  return lines;
 }
 
 /**

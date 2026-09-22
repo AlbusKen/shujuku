@@ -199,7 +199,6 @@ describe('FirstFloorContinuationStore_ACU', () => {
       reviewer: { mode: 'inherit', presetName: '' },
       finalReviewer: { mode: 'inherit', presetName: '' },
       webResearcher: { mode: 'inherit', presetName: '' },
-      requirementsMaintainer: { mode: 'inherit', presetName: '' },
       instructionComposer: { mode: 'inherit', presetName: '' },
     });
     expect(loaded.settings).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: 'p1' });

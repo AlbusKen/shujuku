@@ -53,7 +53,6 @@ export const AGENT_PREFILLS_ACU = {
   planner: '{\n  "summary": "',
   reviewer: '{\n  "verdict": "',
   researcher: '{\n  "summary": "',
-  requirements: '{\n  "summary": "',
   composer: '{\n  "instruction": "',
 } as const;
 
@@ -486,42 +485,6 @@ const WEB_RESEARCHER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
 ];
 
-const REQUIREMENTS_MAINTAINER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
-  {
-    role: 'system',
-    content: '你是用户要求维护子代理。你的唯一职责是整理用户在 Agent 会话里对任务提过的要求，写入 $USER_REQUIREMENTS。\n你不写正文，不排大纲，不碰伏笔、信息差、年代学、总纲或百科资料库。你整理的是用户对任务的指示，不是小说已发生的事实。',
-    enabled: true,
-    deletable: false,
-    pinned: true,
-  },
-  {
-    role: 'user',
-    content: '说清楚你的整理规则和输出契约。',
-    enabled: true,
-    deletable: true,
-  },
-  {
-    role: 'assistant',
-    content: '整理规则：\n1. 输入是被压缩范围内的实质用户发言，加上当前 $USER_REQUIREMENTS 快照。\n2. 我输出全量替换后的 requirements 数组，不是增量补丁。保留仍有效的旧条，并入新条，去掉被用户明确撤回或被更新条覆盖的旧条。\n3. 去重：语义相同只留一条，优先保留更具体、更晚近的表述。不设条数上限。\n4. 只收录对任务的要求、约束、偏好与方向；纯「继续/开始/resume」不含实质要求，不应单独成条。\n5. 没有依据时不得把清单清空：快照已有内容就必须在输出里保留或被明确替代。\n\n我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明合并了哪些要求、去掉了什么","requirements":["要求一","要求二"]}\n\n契约 JSON 之外我不输出任何文字。',
-    enabled: true,
-    deletable: true,
-  },
-  {
-    role: 'user',
-    content: '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：requirements 是全量清单；每条都是非空字符串；语义重复已合并；没有把小说剧情写成用户要求；没有在缺少撤回依据时清空旧清单。\n\n请开始整理并交付契约 JSON。',
-    enabled: true,
-    deletable: false,
-    pinned: true,
-  },
-  {
-    role: 'assistant',
-    content: AGENT_PREFILLS_ACU.requirements,
-    enabled: true,
-    deletable: false,
-    pinned: true,
-  },
-];
-
 /** 终审提示词的保真来源；section 为参考预设中的原段标题。 */
 export const FINAL_REVIEWER_PROMPT_SOURCE_MAP_ACU = [
   {
@@ -795,7 +758,6 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
   webResearcher: [
     { hash: '2d46cb2a', length: 606, slot: 'task', note: 'V28 网页检索任务段（【用户初始要求】/$USER_INTENT）' },
   ],
-  requirementsMaintainer: [],
   instructionComposer: [],
 };
 
@@ -831,10 +793,6 @@ export function buildDefaultAgentWebResearcherPrompt_ACU(): ContinuationPromptSe
   return cloneAgentPromptSegments_ACU(WEB_RESEARCHER_PROMPT_ACU);
 }
 
-export function buildDefaultAgentRequirementsMaintainerPrompt_ACU(): ContinuationPromptSegment_ACU[] {
-  return cloneAgentPromptSegments_ACU(REQUIREMENTS_MAINTAINER_PROMPT_ACU);
-}
-
 export function buildDefaultAgentInstructionComposerPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return cloneAgentPromptSegments_ACU(INSTRUCTION_COMPOSER_PROMPT_ACU);
 }
@@ -853,7 +811,6 @@ export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPro
     reviewer: buildDefaultAgentReviewerPrompt_ACU(),
     finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
     webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
-    requirementsMaintainer: buildDefaultAgentRequirementsMaintainerPrompt_ACU(),
     instructionComposer: buildDefaultAgentInstructionComposerPrompt_ACU(),
   };
 }

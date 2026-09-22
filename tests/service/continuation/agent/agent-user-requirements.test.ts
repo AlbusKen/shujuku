@@ -2,20 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyAgentUserRequirementsReplace_ACU,
-  collectSubstantialUserTexts_ACU,
   isMechanicalResumeUserText_ACU,
-  normalizeUserRequirementLines_ACU,
   renderAgentUserRequirements_ACU,
   seedAgentUserRequirementsIfEmpty_ACU,
 } from '../../../../src/service/continuation/agent/agent-user-requirements';
 import { buildEmptyAgentModuleSnapshot_ACU, readAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { AGENT_MODULE_FIELD_ACU } from '../../../../src/service/continuation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
-
-function userMessage_ACU(id: number, text: string) {
-  return { id, kind: 'user' as const, text, digest: text.slice(0, 24), turnKey: 't', at: id };
-}
-
 describe('续写用户要求资料区', () => {
   beforeEach(() => {
     _set_SillyTavern_API_ACU(null as any);
@@ -30,27 +23,6 @@ describe('续写用户要求资料区', () => {
     expect(isMechanicalResumeUserText_ACU('RESUME')).toBe(true);
     expect(isMechanicalResumeUserText_ACU('continue')).toBe(true);
     expect(isMechanicalResumeUserText_ACU('继续写主角隐瞒身份')).toBe(false);
-  });
-
-  it('压缩区间只收集 kind=user 的实质发言，按 id 开闭区间去重空白与继续类', () => {
-    const messages = [
-      userMessage_ACU(1, '不要提前揭底牌'),
-      { id: 2, kind: 'agent' as const, text: '已记下', digest: 'agent', turnKey: 't', at: 2 },
-      userMessage_ACU(3, '继续'),
-      userMessage_ACU(4, '  用第一人称  '),
-      userMessage_ACU(5, '恢复'),
-      userMessage_ACU(6, '保持慢热'),
-    ];
-    expect(collectSubstantialUserTexts_ACU(messages, 1, 5)).toEqual(['用第一人称']);
-    expect(collectSubstantialUserTexts_ACU(messages, 0, 6)).toEqual(['不要提前揭底牌', '用第一人称', '保持慢热']);
-  });
-
-  it('规范化拒绝非数组、非字符串与空串；按首次出现去重并 trim', () => {
-    expect(normalizeUserRequirementLines_ACU('nope')).toBeNull();
-    expect(normalizeUserRequirementLines_ACU(['合法', 1])).toBeNull();
-    expect(normalizeUserRequirementLines_ACU(['合法', '  '])).toBeNull();
-    expect(normalizeUserRequirementLines_ACU(['  第一人称  ', '第一人称', '不要揭底牌'])).toEqual(['第一人称', '不要揭底牌']);
-    expect(normalizeUserRequirementLines_ACU([])).toEqual([]);
   });
 
   it('渲染空清单时回退 originInstruction；两者都空时给占位句', () => {

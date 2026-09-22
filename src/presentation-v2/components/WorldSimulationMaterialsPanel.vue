@@ -129,15 +129,15 @@
 
     <template v-else-if="activeTab === 'userRequirements'">
       <p class="acu-v2-ws-materials__meta">
-        用户要求由 requirements-maintainer 在会话历史压缩后整理，创建任务时会把初始要求机械写成首条。
-        也可以在这里手动修正；保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
+        用户要求在资料库里手动维护。创建任务时会把初始要求机械写成首条。
+        保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
       </p>
       <p v-if="userRequirements.snapshot" class="acu-v2-ws-materials__meta">
         条目 {{ userRequirements.snapshot.requirements.length }} 条
       </p>
       <p v-if="userRequirements.diagnostics.length" class="acu-v2-ws-materials__error">{{ userRequirements.diagnostics.join('；') }}</p>
       <p v-if="!userRequirements.snapshot?.requirements.length" class="acu-v2-ws-materials__empty">
-        还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后在 Agent 会话里补充的实质要求会在历史压缩后合并进来。
+        还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后请在这里手动增删改。
       </p>
       <ol v-else class="acu-v2-ws-materials__list">
         <li v-for="(line, index) in userRequirements.snapshot.requirements" :key="`${index}-${line}`">{{ line }}</li>

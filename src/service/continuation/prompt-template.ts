@@ -15,7 +15,6 @@ import {
   buildDefaultAgentReviewerPrompt_ACU,
   buildDefaultAgentFinalReviewerPrompt_ACU,
   buildDefaultAgentWebResearcherPrompt_ACU,
-  buildDefaultAgentRequirementsMaintainerPrompt_ACU,
   buildDefaultAgentInstructionComposerPrompt_ACU,
 } from './agent/agent-defaults';
 
@@ -50,7 +49,7 @@ const PLACEHOLDER_ALTERNATION_ACU = [...CONTINUATION_PROMPT_PLACEHOLDERS_ACU]
   .sort((left, right) => right.length - left.length)
   .map(token => token.replace(/[$]/g, '\\$'))
   .join('|');
-export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer' | 'agent_final_reviewer' | 'agent_web_researcher' | 'agent_requirements_maintainer' | 'agent_instruction_composer';
+export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer' | 'agent_final_reviewer' | 'agent_web_researcher' | 'agent_instruction_composer';
 type PlaceholderResolver_ACU = () => string | Promise<string | null | undefined> | null | undefined;
 
 function failPrompt_ACU(code: 'CONTINUATION_ENVELOPE_INVALID' | 'CONTINUATION_PROMPT_INVALID' | 'CONTINUATION_PROMPT_EMPTY', phase: ContinuationErrorPhase_ACU, message: string, details?: Record<string, unknown>): never {
@@ -108,7 +107,6 @@ export function restoreContinuationPromptDefault_ACU(settings: ContinuationSetti
   if (kind === 'agent_reviewer') agentPrompts.reviewer = buildDefaultAgentReviewerPrompt_ACU();
   if (kind === 'agent_final_reviewer') agentPrompts.finalReviewer = buildDefaultAgentFinalReviewerPrompt_ACU();
   if (kind === 'agent_web_researcher') agentPrompts.webResearcher = buildDefaultAgentWebResearcherPrompt_ACU();
-  if (kind === 'agent_requirements_maintainer') agentPrompts.requirementsMaintainer = buildDefaultAgentRequirementsMaintainerPrompt_ACU();
   if (kind === 'agent_instruction_composer') agentPrompts.instructionComposer = buildDefaultAgentInstructionComposerPrompt_ACU();
   return { ...settings, agentPrompts };
 }

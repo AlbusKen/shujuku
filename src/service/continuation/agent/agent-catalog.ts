@@ -7,14 +7,14 @@
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_INSTRUCTION_COMPOSER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
+import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_INSTRUCTION_COMPOSER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher' | 'requirementsMaintainer' | 'instructionComposer';
+  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher' | 'instructionComposer';
 }
 
 /** 目录渲染的可选开关：网页检索关闭时，web-researcher 及其资料模块不进主 Agent 视野。 */
@@ -83,13 +83,6 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     promptKey: 'webResearcher',
   },
   {
-    name: AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU,
-    kind: 'maintain',
-    description: '整理 Agent 会话里用户提过的要求：去重合并后全量替换 $USER_REQUIREMENTS。由会话压缩后的系统派工触发，不写伏笔或正文事实',
-    triggers: ['主会话历史压缩后，被浓缩范围内仍有实质用户输入'],
-    promptKey: 'requirementsMaintainer',
-  },
-  {
     name: AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
     kind: 'compose',
     description: '通读结算后的资料、策划建议、审查结论、用户要求与活跃约束，产出本轮写作指令。由固定工作流调用，主 Agent 不能派工。',
@@ -137,9 +130,9 @@ export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] 
   },
   {
     token: '$USER_REQUIREMENTS',
-    description: '用户要求资料区：用户在 Agent 会话里对任务提过的要求，逐条分行。由 requirements-maintainer 在历史压缩后整理；创建任务时机械写入 originInstruction 作为首条',
+    description: '用户要求资料区：用户在 Agent 会话里对任务提过的要求，逐条分行。创建任务时机械写入 originInstruction 作为首条；之后由用户在资料面板手动维护，AI 不写',
     triggers: ['规划、审查或写作需要遵守用户累计提出的任务要求', '用户中途补充、修正或覆盖了此前的要求'],
-    writableBy: [AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU],
+    writableBy: [],
   },
 ];
 
@@ -164,7 +157,6 @@ const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
 };
 
 function isDefinitionVisible_ACU(name: AgentSubagentName_ACU, options?: AgentCatalogOptions_ACU): boolean {
-  if (name === AGENT_REQUIREMENTS_MAINTAINER_NAME_ACU) return false;
   if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU) return false;
   if (name === AGENT_WEB_RESEARCHER_NAME_ACU) return options?.webResearchEnabled === true;
   return true;

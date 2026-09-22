@@ -697,38 +697,3 @@ export function recordWorldSimulationProtocolFailure_ACU(state: WorldSimulationP
   return { retry: state.attempts <= state.maxAttempts && state.fingerprints[fingerprint] < 2, fingerprint, issue };
 }
 
-export interface WorldSimulationRequirementsMaintainerOutput_ACU {
-  summary: string;
-  requirements: string[];
-}
-
-export function parseWorldSimulationRequirementsMaintainerOutput_ACU(payload: Record<string, unknown>): WorldSimulationRequirementsMaintainerOutput_ACU {
-  const keys = Object.keys(payload);
-  if (keys.some(key => !['summary', 'requirements'].includes(key))) fail_ACU('UNEXPECTED_FIELD', '$', 'only summary and requirements', keys.join(','));
-  const summary = text_ACU(payload.summary);
-  if (!summary) fail_ACU('MISSING_FIELD', '$.summary', 'non-empty string', payload.summary);
-  if (!Array.isArray(payload.requirements)) fail_ACU('INVALID_TYPE', '$.requirements', 'string[]', payload.requirements);
-  const requirements: string[] = [];
-  const seen = new Set<string>();
-  for (const [index, item] of payload.requirements.entries()) {
-    if (typeof item !== 'string') fail_ACU('INVALID_TYPE', `$.requirements[${index}]`, 'non-empty string', item);
-    const text = item.trim();
-    if (!text) fail_ACU('EMPTY_TEXT', `$.requirements[${index}]`, 'non-empty string', item);
-    if (seen.has(text)) continue;
-    seen.add(text);
-    requirements.push(text);
-  }
-  return { summary, requirements };
-}
-
-export function renderWorldSimulationRequirementsMaintainerProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU): string {
-  return [
-    `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-    '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或其他字段。',
-    '顶层必须且只能包含 summary 与 requirements。',
-    'summary 必须是非空字符串。',
-    'requirements 必须是字符串数组（允许空数组），每条必须是非空字符串。',
-    '这是全量替换清单，不是增量补丁。没有撤回依据时不得把已有清单清空。',
-    '示例：{"summary":"合并了用户补充的节奏要求","requirements":["不要提前揭底牌","用第一人称"]}',
-  ].join('\n');
-}
