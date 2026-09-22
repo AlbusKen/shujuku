@@ -153355,6 +153355,18 @@ Expected function or array of functions, received type ${typeof value}.`
             return [...messages.slice(0, -1), extra, last];
         return [...messages, extra];
     }
+    /**
+     * 子代理读取预算状态文本。子代理提示词一次渲染即固定，预算这类随工具轮变化的实时状态
+     * 由运行时在首轮注入、并在每次工具批次后追加刷新；本侧门禁是单批次独立判定，额度不跨批累计。
+     */
+    function renderSubagentReadBudgetNote_ACU(params) {
+        const remaining = Math.max(0, params.maxToolRounds - params.toolRoundsUsed);
+        return [
+            `【读取预算状态】单批次读取上限约 ${params.maxReadTokens} tokens；临近总结阈值时只有不超过 ${params.fallbackTokens} tokens 的精读批次会被放行。`,
+            `工具轮次剩余 ${remaining} / ${params.maxToolRounds}（本次派工已累计放行读取约 ${params.grantedTokens} tokens，仅遥测、不扣减后续批次额度）。`,
+            '按预算分配调阅：先 search 定位，再用窄地址（楼层区间/表格行区间/模块 ID）精读；轮次见底就基于已有资料交付，缺口如实标注「信息不足」，不许硬编。',
+        ].join('\n');
+    }
     function researcherProtocolError_ACU(message) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', message, true));
     }
@@ -153446,6 +153458,16 @@ Expected function or array of functions, received type ${typeof value}.`
             const isResearch = definition.kind === 'research';
             const webSettings = input.settings.webResearch;
             const pageCache = { pages: new Map(), byUrl: new Map(), pagesUsed: 0 };
+            // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads。
+            const maxToolRounds = Math.max(0, isResearch ? webSettings.maxToolRounds : input.budget.maxExtraReads);
+            const readBudget = resolveAgentReadBudget_ACU(gate.config);
+            const renderReadBudgetNote = (roundsUsed) => renderSubagentReadBudgetNote_ACU({
+                maxReadTokens: readBudget.effectiveMaxReadTokens,
+                fallbackTokens: readBudget.effectiveFallbackTokens,
+                maxToolRounds,
+                toolRoundsUsed: roundsUsed,
+                grantedTokens: gate.state.grantedTokens,
+            });
             const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
                 $AGENT_READ_MATERIALS: () => materials,
                 $AGENT_TASK: () => input.delegation.prompt,
@@ -153479,12 +153501,12 @@ Expected function or array of functions, received type ${typeof value}.`
             const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
             // 总纲卷数计划是随设置变化的运行时指令，不进提示词模板；但它必须落在尾部预填充之前——
             // 追加在预填充之后会让对话以一条 user 消息收尾，预填充失效，模型会另起一段回复而不是续写 JSON。
-            const baseMessages = definition.promptKey === 'arcArchitect'
+            let baseMessages = definition.promptKey === 'arcArchitect'
                 ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
                 : rendered.messages;
+            // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
+            baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-            // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads。
-            const maxToolRounds = Math.max(0, isResearch ? webSettings.maxToolRounds : input.budget.maxExtraReads);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
             const transcript = [];
             /**
@@ -153593,17 +153615,18 @@ Expected function or array of functions, received type ${typeof value}.`
                     transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
                     if (toolRoundsUsed >= maxToolRounds) {
                         transcript.push({ role: 'user', content: isResearch
-                                ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。`
-                                : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
+                                ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
+                                : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
                         continue;
                     }
                     toolRoundsUsed += 1;
                     const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+                    const refreshedToolResult = `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
                     if (isResearch) {
-                        pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${toolResult}`;
+                        pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${refreshedToolResult}`;
                     }
                     else {
-                        transcript.push({ role: 'user', content: toolResult });
+                        transcript.push({ role: 'user', content: refreshedToolResult });
                     }
                     continue;
                 }
@@ -153757,6 +153780,16 @@ Expected function or array of functions, received type ${typeof value}.`
             const prefill = AGENT_PREFILLS_ACU.reviewer;
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
             const maxToolRounds = Math.max(0, input.settings.finalReview.maxExtraReads);
+            const readBudget = resolveAgentReadBudget_ACU(gate.config);
+            const renderReadBudgetNote = (roundsUsed) => renderSubagentReadBudgetNote_ACU({
+                maxReadTokens: readBudget.effectiveMaxReadTokens,
+                fallbackTokens: readBudget.effectiveFallbackTokens,
+                maxToolRounds,
+                toolRoundsUsed: roundsUsed,
+                grantedTokens: gate.state.grantedTokens,
+            });
+            // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
+            const baseMessages = insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderReadBudgetNote(0) });
             const transcript = [];
             const expandedReads = [];
             let toolRoundsUsed = 0;
@@ -153787,7 +153820,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!input.isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
                 }
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([...rendered.messages, ...transcript], preset, identity, input.signal, callOptions), {
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([...baseMessages, ...transcript], preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -153800,11 +153833,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (toolCalls) {
                     transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
                     if (toolRoundsUsed >= maxToolRounds) {
-                        transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。` });
+                        transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
                         continue;
                     }
                     toolRoundsUsed += 1;
-                    transcript.push({ role: 'user', content: await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads) });
+                    const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads);
+                    transcript.push({ role: 'user', content: `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
                     continue;
                 }
                 try {

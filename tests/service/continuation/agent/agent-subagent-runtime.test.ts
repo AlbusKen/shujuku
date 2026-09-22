@@ -167,11 +167,14 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const last = messages[messages.length - 1];
     expect(last.role).toBe('assistant');
     expect(last.content).toBe('{\n  "summary": "');
+    // 读取预算状态是运行时信息，紧贴预填充注入，是模型看到的最后一条 user 消息。
     expect(messages[messages.length - 2].role).toBe('user');
-    expect(messages[messages.length - 2].content).toContain('【总纲卷数计划】');
+    expect(messages[messages.length - 2].content).toContain('【读取预算状态】');
+    expect(messages[messages.length - 3].role).toBe('user');
+    expect(messages[messages.length - 3].content).toContain('【总纲卷数计划】');
     // 任务段（含全部固定资料注入）必须在卷数计划之前、预填充之前完整送达。
-    expect(messages[messages.length - 3].content).toContain('【本次任务】\n立总纲');
-    expect(messages[messages.length - 3].content).toContain('【故事总纲现状】');
+    expect(messages[messages.length - 4].content).toContain('【本次任务】\n立总纲');
+    expect(messages[messages.length - 4].content).toContain('【故事总纲现状】');
   });
 
   it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {
@@ -213,8 +216,40 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(result.toolRounds).toBe(1);
     expect(result.readTokens).toBeGreaterThan(0);
     expect(result.iterations).toBe(2);
-    expect(calls[0].map(message => message.content).join('\n')).toContain('晶屑不能带离铁门。');
-    expect(calls[1].map(message => message.content).join('\n')).toContain('角色表');
+    const firstCall = calls[0].map(message => message.content).join('\n');
+    const secondCall = calls[1].map(message => message.content).join('\n');
+    expect(firstCall).toContain('晶屑不能带离铁门。');
+    expect(firstCall).toContain('【读取预算状态】');
+    expect(firstCall).toContain('工具轮次剩余 1 / 1');
+    expect(secondCall).toContain('角色表');
+    expect(secondCall).toContain('工具轮次剩余 0 / 1');
+  });
+
+  it('首轮注入读取预算状态，并随工具批次刷新剩余轮次与遥测', async () => {
+    const input = input_ACU();
+    input.settings.agentReadTokenBudget = 300;
+    input.settings.agentReadFallbackTokens = 50;
+    const calls: Array<Array<{ role: string; content: string }>> = [];
+    const replies = [readReply_ACU, finalReply_ACU];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => {
+        calls.push(messages);
+        return replies.shift() ?? finalReply_ACU;
+      },
+    });
+
+    const result = await runtime.run(input);
+
+    expect(result.expandedReads).toEqual(['$TABLE:角色表']);
+    const firstCall = calls[0].map(message => message.content).join('\n');
+    expect(firstCall).toContain('【读取预算状态】单批次读取上限约 300 tokens');
+    expect(firstCall).toContain('不超过 50 tokens 的精读批次');
+    expect(firstCall).toContain('工具轮次剩余 1 / 1');
+    const secondCall = calls[1].map(message => message.content).join('\n');
+    expect(secondCall).toContain('【工具结果】');
+    expect(secondCall).toContain('工具轮次剩余 0 / 1');
+    expect(secondCall).toContain('仅遥测、不扣减后续批次额度');
   });
 
   it('所有调用均报告字段时逐字段求和，并保留明确 0', async () => {
