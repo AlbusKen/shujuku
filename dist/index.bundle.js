@@ -91006,7 +91006,10 @@ $CONTENT
         updateAtomically(mutator, guard) {
             return this.enqueue_ACU(async (context) => {
                 assertContext_ACU(context);
-                const current = readRaw_ACU(context.firstMessage);
+                const persisted = readRaw_ACU(context.firstMessage);
+                const current = persisted && ledgerOverlay_ACU
+                    ? ledgerOverlay_ACU(persisted, context.chat)
+                    : persisted;
                 assertGuard_ACU(current, guard);
                 await this.replaceWithinQueue_ACU(mutator(current), guard, context);
             }, guard);

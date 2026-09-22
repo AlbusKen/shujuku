@@ -17,6 +17,7 @@ import {
 import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import { WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
 
 describe('world simulation envelope store', () => {
   beforeEach(() => _set_SillyTavern_API_ACU(undefined));
@@ -71,6 +72,37 @@ describe('world simulation envelope store', () => {
     expect(chat[0]._qrf_world_simulation).toEqual(envelope);
     expect(chat[0]._qrf_continuation).toBeUndefined();
     expect(store.read()).toEqual(envelope);
+  });
+
+  it('原子更新使用楼层折叠后的权威 ledger，避免首楼缓存滞后误触发 revision stale', async () => {
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    const foldedLedger = { ...envelope.ledger, revision: 2 };
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    const chat: any[] = [{
+      is_user: false,
+      message_id: 1,
+      mes: 'anchor',
+      swipe_id: 0,
+      _qrf_world_simulation: envelope,
+    }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    await writeWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, anchor, {
+      schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+      checkpoint: foldedLedger,
+      deltas: [],
+    }, chat);
+    const store = new FirstFloorWorldSimulationStore_ACU();
+    let revisionSeenByMutator = -1;
+
+    await store.updateAtomically(current => {
+      revisionSeenByMutator = current!.ledger.revision;
+      return { ...current!, updatedAt: 9 };
+    });
+
+    expect(revisionSeenByMutator).toBe(2);
+    expect(chat[0]._qrf_world_simulation.ledger.revision).toBe(2);
+    expect(store.read()?.ledger.revision).toBe(2);
   });
 
   it('restores the previous field when host save fails', async () => {
