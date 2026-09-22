@@ -8,7 +8,7 @@ import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationRequirementsMaintai
 import type { WorldSimulationCandidate_ACU, WorldSimulationDelegation_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationRequirementsMaintainerOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationRequirementsMaintainerProtocolRejection_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
-import { createWorldSimulationReadGateState_ACU } from './agent-read-gate';
+import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
@@ -94,7 +94,15 @@ export class WorldSimulationSubagentRuntime_ACU {
 
     for (;;) {
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
-      const requestContext = { ...context, evidenceRegistry: requestSnapshot };
+      const readBudget = resolveWorldSimulationReadBudget_ACU({
+        historyTokenBudget: input.settings.agentHistoryTokenBudget,
+        readTokenBudget: input.settings.agentReadTokenBudget,
+        fallbackTokens: input.settings.agentReadFallbackTokens,
+      });
+      const remainingTokens = Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens);
+      const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
+      const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
+      const requestContext = { ...context, evidenceRegistry: requestSnapshot, readBudgetText };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, definition.writableModules) };
       const messages = [...rendered.messages, protocolGuard, ...transcript];

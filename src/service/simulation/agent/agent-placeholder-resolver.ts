@@ -23,6 +23,7 @@ export interface WorldSimulationPlaceholderContext_ACU {
   worldCollisions: unknown;
   evidenceRegistry: WorldSimulationEvidenceRegistrySnapshot_ACU;
   projectionPreview: unknown;
+  readBudgetText?: string;
   candidateView?: 'full' | 'summary';
   writableModules?: readonly string[];
 }
@@ -113,5 +114,6 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     },
     '$CURRENT_EVIDENCE_REGISTRY': () => serialize_ACU(context.evidenceRegistry),
     '$PROJECTION_PREVIEW': () => serialize_ACU(context.projectionPreview),
+    '$READ_BUDGET': () => context.readBudgetText ?? '（实时阅读预算不可用）',
   };
 }

@@ -5,6 +5,7 @@ import { WORLD_CHRONICLE_HOT_WINDOW_ACU, type WorldSimulationLedger_ACU } from '
 import {
   WORLD_CATALOG_READ_HINT_ACU,
   WORLD_SUBAGENT_DEDUP_HINT_ACU,
+  WORLD_RELATED_READONLY_HINT_ACU,
   buildInUseWorldCatalog_ACU,
   catalogArchiveHints_ACU,
   sliceModuleCatalog_ACU,
@@ -80,6 +81,8 @@ describe('world catalog injection', () => {
     const slice = sliceModuleCatalog_ACU(catalog, ledger.chronicleOverview, ['chronicle', 'seeds']);
     expect(slice.seeds).toEqual(catalog.seeds);
     expect(slice.actors).toBeUndefined();
+    expect(slice.relatedReadonly).toMatchObject({ actors: catalog.actors, rumors: catalog.rumors });
+    expect(slice.relatedHint).toBe(WORLD_RELATED_READONLY_HINT_ACU);
     expect(slice.dedupHint).toBe(WORLD_SUBAGENT_DEDUP_HINT_ACU);
     expect(slice.chronicleOverview).toEqual([expect.objectContaining({
       archiveRef: 'arc-mine',

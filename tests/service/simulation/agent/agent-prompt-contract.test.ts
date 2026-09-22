@@ -91,31 +91,33 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v12 含开局决策、固定工作流、纯审核与投影决定，并把 v9/v10/v11 默认指纹保留为历史版本', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v12');
+  it('提示词 v13 含开局决策、固定工作流、纯审核与投影决定，并把 v9~v12 默认指纹保留为历史版本', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v13');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13']);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
     const v9 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v9');
     const v10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v10');
     const v11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v11');
-    const v12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const v12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v12');
+    const v13 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(v8?.fingerprint).toBe('4767:87f876e3');
     expect(v9?.fingerprint).toBe('4777:cd4e92ac');
     expect(v9?.fingerprint).not.toBe(v8?.fingerprint);
     expect(v10?.fingerprint).toBe('4486:cf7dd826');
     expect(v11?.fingerprint).toBe('4486:cf7dd826');
-    expect(v12).toBeDefined();
-    expect(v12?.fingerprint).not.toBe(v11?.fingerprint);
+    expect(v12?.fingerprint).toBe('4563:97559198');
+    expect(v13).toBeDefined();
+    expect(v13?.fingerprint).not.toBe(v12?.fingerprint);
     const composerV10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v10');
     const composerV11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v11');
-    const composerV12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const composerV12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v12');
+    const composerV13 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(composerV10?.fingerprint).toBe('3363:eb46ac19');
     expect(composerV11?.fingerprint).toBe('4082:ac59da90');
-    expect(composerV12?.fingerprint).not.toBe(composerV11?.fingerprint);
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const directorPrompt = prompts['world-director'].map(item => item.content).join('\n');
     const plannerPrompt = prompts['world-stage-planner'].map(item => item.content).join('\n');

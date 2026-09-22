@@ -89889,13 +89889,14 @@ $CONTENT
     const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
     const WORLD_SIMULATION_PROMPT_VERSION_V10_ACU = 'world-simulation-v10';
     const WORLD_SIMULATION_PROMPT_VERSION_V11_ACU = 'world-simulation-v11';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v12';
+    const WORLD_SIMULATION_PROMPT_VERSION_V12_ACU = 'world-simulation-v12';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v13';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
         '$WORLD_TOOL_CATALOG', '$WORLD_EVIDENCE', '$WORLD_USER_GUIDANCE', '$WORLD_USER_REQUIREMENTS',
         '$WORLD_STATE', '$ANCHOR_MESSAGE', '$ANCHOR_IDENTITY', '$WORLD_STAGE_PLAN',
-        '$WORLD_CHRONICLE', '$WORLD_CANDIDATES', '$WORLD_COLLISIONS', '$CURRENT_EVIDENCE_REGISTRY', '$PROJECTION_PREVIEW',
+        '$WORLD_CHRONICLE', '$WORLD_CANDIDATES', '$WORLD_COLLISIONS', '$CURRENT_EVIDENCE_REGISTRY', '$PROJECTION_PREVIEW', '$READ_BUDGET',
     ];
     const WORLD_SIMULATION_AGENT_PREFILLS_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(definition => [definition.name, '{']));
     const seamRoles_ACU = {
@@ -90007,7 +90008,7 @@ $CONTENT
         const roleRules = definition.kind === 'director'
             ? `${definition.description}。你没有直接 ledger patch 权限；这不是故障。常规推演取证后输出 open_round，固定工作流负责写入。用户要求维护资料时才 delegate。账本为空或 revision=0 同样先 open_round。不得扩大权限或杜撰证据。`
             : `${definition.description}。写入范围：${definition.writableModules.join(', ') || '无直接写入权限'}。不得扩大权限或杜撰证据。`;
-        let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。';
+        let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。阅读纪律：先核对世界状态里的关联模块只读目录（relatedReadonly）与已有证据；引用其他模块条目（actorIds、relatedIds、位置对齐等）之前，必须先用 read 工具按 readAddress 调阅确认其存在与现状，禁止凭名称臆造引用。信息不足时优先用 read 补齐再产出；实时阅读预算见 $READ_BUDGET，按它分配读取，预算见底就停止扩展阅读，把缺口写进 uncertainties。';
         if (definition.kind === 'planner')
             workflow += '兼容展示：单轮焦点已由主会话 open_round 吸收。若仍被调用，计划必须优先覆盖 $WORLD_COLLISIONS；若有 seed 距过期 ≤ 2 天，列入临界暗流。不要再计划 world-analyst。';
         if (definition.kind === 'director')
@@ -90034,7 +90035,7 @@ $CONTENT
             seam('PROTOCOL', protocolFor_ACU(definition.kind, name, definition.writableModules)),
             seam('WORKFLOW', workflow),
             seam('HISTORY', '历史锚点与会话：\n$WORLD_HISTORY'),
-            seam('RUNTIME_CONTEXT', '任务：$WORLD_TASK\n运行快照：$WORLD_RUNTIME_CONTEXT\n世界状态：$WORLD_STATE\n锚点正文：$ANCHOR_MESSAGE\n锚点身份：$ANCHOR_IDENTITY\n阶段计划：$WORLD_STAGE_PLAN\n编年：$WORLD_CHRONICLE\n候选：$WORLD_CANDIDATES\n碰撞：$WORLD_COLLISIONS\n证据注册表：$CURRENT_EVIDENCE_REGISTRY\n投影预览：$PROJECTION_PREVIEW\n角色目录：$WORLD_AGENT_CATALOG\n工具目录：$WORLD_TOOL_CATALOG\n证据：$WORLD_EVIDENCE'),
+            seam('RUNTIME_CONTEXT', '任务：$WORLD_TASK\n运行快照：$WORLD_RUNTIME_CONTEXT\n世界状态：$WORLD_STATE\n锚点正文：$ANCHOR_MESSAGE\n锚点身份：$ANCHOR_IDENTITY\n阶段计划：$WORLD_STAGE_PLAN\n编年：$WORLD_CHRONICLE\n候选：$WORLD_CANDIDATES\n碰撞：$WORLD_COLLISIONS\n证据注册表：$CURRENT_EVIDENCE_REGISTRY\n投影预览：$PROJECTION_PREVIEW\n实时阅读预算：$READ_BUDGET\n角色目录：$WORLD_AGENT_CATALOG\n工具目录：$WORLD_TOOL_CATALOG\n证据：$WORLD_EVIDENCE'),
             seam('ACKNOWLEDGEMENT', '已理解职责、权限、证据边界与输出协议。'),
             seam('EXECUTION_BOUNDARY', '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。'),
         ];
@@ -90149,6 +90150,18 @@ $CONTENT
         'lore-researcher': '2278:bc497f63',
         'requirements-maintainer': '2092:987773c2',
     };
+    const WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU = {
+        'world-director': '4563:97559198',
+        'world-stage-planner': '2791:84ce41fc',
+        timekeeper: '3800:b16e52fa',
+        'undercurrent-analyst': '4003:5f425c73',
+        'dramatis-keeper': '4249:1ce1fb58',
+        chronicler: '4153:c1309c9c',
+        'causality-reviewer': '3317:115fcef1',
+        'guidance-composer': '4267:945ab146',
+        'lore-researcher': '2278:bc497f63',
+        'requirements-maintainer': '2092:987773c2',
+    };
     const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
             ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v4', fingerprint: WORLD_SIMULATION_PROMPT_V4_FINGERPRINTS_ACU[name] }] : []),
@@ -90159,6 +90172,7 @@ $CONTENT
             ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V10_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V11_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] }] : []),
+            ...(WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V12_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] }] : []),
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults) {
@@ -160287,6 +160301,14 @@ Expected function or array of functions, received type ${typeof value}.`
             readHint: WORLD_CATALOG_READ_HINT_ACU,
         };
     }
+    const WORLD_RELATED_READONLY_MODULES_ACU = {
+        dimensions: ['actors'],
+        seeds: ['actors', 'rumors'],
+        actors: ['seeds', 'dimensions'],
+        rumors: ['seeds'],
+        chronicle: ['seeds', 'actors', 'rumors'],
+    };
+    const WORLD_RELATED_READONLY_HINT_ACU = '关联模块只读目录：仅供对齐引用与一致性核对，禁止写入；目录行含 readAddress，可用 read 工具调阅详情。';
     function sliceModuleCatalog_ACU(catalog, overview, writableModules) {
         const writable = new Set(writableModules);
         const slice = { readHint: catalog.readHint, clock: catalog.clock, player: catalog.player };
@@ -160307,6 +160329,18 @@ Expected function or array of functions, received type ${typeof value}.`
                 readAddress: `chronicle-archive:${row.archiveRef}`,
             }));
             slice.dedupHint = WORLD_SUBAGENT_DEDUP_HINT_ACU;
+        }
+        const readonlyModules = {};
+        for (const module of writableModules) {
+            for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? []) {
+                if (writable.has(related) || readonlyModules[related])
+                    continue;
+                readonlyModules[related] = catalog[related];
+            }
+        }
+        if (Object.keys(readonlyModules).length) {
+            slice.relatedReadonly = readonlyModules;
+            slice.relatedHint = WORLD_RELATED_READONLY_HINT_ACU;
         }
         return slice;
     }
@@ -160426,6 +160460,7 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             '$CURRENT_EVIDENCE_REGISTRY': () => serialize_ACU(context.evidenceRegistry),
             '$PROJECTION_PREVIEW': () => serialize_ACU(context.projectionPreview),
+            '$READ_BUDGET': () => context.readBudgetText ?? '（实时阅读预算不可用）',
         };
     }
 
@@ -161670,7 +161705,15 @@ Expected function or array of functions, received type ${typeof value}.`
             let toolRounds = 0;
             for (;;) {
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
-                const requestContext = { ...context, evidenceRegistry: requestSnapshot };
+                const readBudget = resolveWorldSimulationReadBudget_ACU({
+                    historyTokenBudget: input.settings.agentHistoryTokenBudget,
+                    readTokenBudget: input.settings.agentReadTokenBudget,
+                    fallbackTokens: input.settings.agentReadFallbackTokens,
+                });
+                const remainingTokens = Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens);
+                const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
+                const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
+                const requestContext = { ...context, evidenceRegistry: requestSnapshot, readBudgetText };
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
                 const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, definition.writableModules) };
                 const messages = [...rendered.messages, protocolGuard, ...transcript];

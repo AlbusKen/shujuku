@@ -6,7 +6,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
 export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
 export const WORLD_SIMULATION_PROMPT_VERSION_V10_ACU = 'world-simulation-v10';
 export const WORLD_SIMULATION_PROMPT_VERSION_V11_ACU = 'world-simulation-v11';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v12';
+export const WORLD_SIMULATION_PROMPT_VERSION_V12_ACU = 'world-simulation-v12';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v13';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -15,7 +16,7 @@ export const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
   '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
   '$WORLD_TOOL_CATALOG', '$WORLD_EVIDENCE', '$WORLD_USER_GUIDANCE', '$WORLD_USER_REQUIREMENTS',
   '$WORLD_STATE', '$ANCHOR_MESSAGE', '$ANCHOR_IDENTITY', '$WORLD_STAGE_PLAN',
-  '$WORLD_CHRONICLE', '$WORLD_CANDIDATES', '$WORLD_COLLISIONS', '$CURRENT_EVIDENCE_REGISTRY', '$PROJECTION_PREVIEW',
+  '$WORLD_CHRONICLE', '$WORLD_CANDIDATES', '$WORLD_COLLISIONS', '$CURRENT_EVIDENCE_REGISTRY', '$PROJECTION_PREVIEW', '$READ_BUDGET',
 ] as const;
 export type WorldSimulationPromptPlaceholder_ACU = typeof WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU[number];
 
@@ -134,7 +135,7 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
   const roleRules = definition.kind === 'director'
     ? `${definition.description}。你没有直接 ledger patch 权限；这不是故障。常规推演取证后输出 open_round，固定工作流负责写入。用户要求维护资料时才 delegate。账本为空或 revision=0 同样先 open_round。不得扩大权限或杜撰证据。`
     : `${definition.description}。写入范围：${definition.writableModules.join(', ') || '无直接写入权限'}。不得扩大权限或杜撰证据。`;
-  let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。';
+  let workflow = '每轮推演聚焦短周期幕后演变：正文对话只是观察素材；你的产出是正文之外的幕后世界动态——暗流发酵、行动者动向、信息边界变化。禁止把复述/记录正文已发生事件当作主要产出。先对照世界时钟、维度压力、暗流种子生命周期（建立→酝酿→活跃→收束→退役）与行动者信息边界，推算台前看不见的地方正在发生什么。先核对任务与证据，再执行最小必要读取或产出；证据不足时明确阻塞，不把推断写成事实；幕后结论只能来自证据，不得改写台前正文。阅读纪律：先核对世界状态里的关联模块只读目录（relatedReadonly）与已有证据；引用其他模块条目（actorIds、relatedIds、位置对齐等）之前，必须先用 read 工具按 readAddress 调阅确认其存在与现状，禁止凭名称臆造引用。信息不足时优先用 read 补齐再产出；实时阅读预算见 $READ_BUDGET，按它分配读取，预算见底就停止扩展阅读，把缺口写进 uncertainties。';
   if (definition.kind === 'planner') workflow += '兼容展示：单轮焦点已由主会话 open_round 吸收。若仍被调用，计划必须优先覆盖 $WORLD_COLLISIONS；若有 seed 距过期 ≤ 2 天，列入临界暗流。不要再计划 world-analyst。';
   if (definition.kind === 'director') workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。focus 写法：点名本轮幕后焦点的模块、具体对象与预期变化方向（如「推进九江水寨监视网扩张、藏剑山庄财务危机发酵」），禁止「更新世界动态」这类空泛套话。';
   if (name === 'timekeeper') workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。时间判定细则：days 按正文明确经过的昼夜与旬月推算，正文无时间流逝证据时 days=0；storyTime 沿用世界既有历法句式（如「九月初十·午后」），不发明新历法；slot 用粗粒度时段词（清晨/午后/入夜等）；precision 按证据强度取 exact/approximate/unknown，正文有明确日期才用 exact。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
@@ -153,7 +154,7 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
     seam('PROTOCOL', protocolFor_ACU(definition.kind, name, definition.writableModules)),
     seam('WORKFLOW', workflow),
     seam('HISTORY', '历史锚点与会话：\n$WORLD_HISTORY'),
-    seam('RUNTIME_CONTEXT', '任务：$WORLD_TASK\n运行快照：$WORLD_RUNTIME_CONTEXT\n世界状态：$WORLD_STATE\n锚点正文：$ANCHOR_MESSAGE\n锚点身份：$ANCHOR_IDENTITY\n阶段计划：$WORLD_STAGE_PLAN\n编年：$WORLD_CHRONICLE\n候选：$WORLD_CANDIDATES\n碰撞：$WORLD_COLLISIONS\n证据注册表：$CURRENT_EVIDENCE_REGISTRY\n投影预览：$PROJECTION_PREVIEW\n角色目录：$WORLD_AGENT_CATALOG\n工具目录：$WORLD_TOOL_CATALOG\n证据：$WORLD_EVIDENCE'),
+    seam('RUNTIME_CONTEXT', '任务：$WORLD_TASK\n运行快照：$WORLD_RUNTIME_CONTEXT\n世界状态：$WORLD_STATE\n锚点正文：$ANCHOR_MESSAGE\n锚点身份：$ANCHOR_IDENTITY\n阶段计划：$WORLD_STAGE_PLAN\n编年：$WORLD_CHRONICLE\n候选：$WORLD_CANDIDATES\n碰撞：$WORLD_COLLISIONS\n证据注册表：$CURRENT_EVIDENCE_REGISTRY\n投影预览：$PROJECTION_PREVIEW\n实时阅读预算：$READ_BUDGET\n角色目录：$WORLD_AGENT_CATALOG\n工具目录：$WORLD_TOOL_CATALOG\n证据：$WORLD_EVIDENCE'),
     seam('ACKNOWLEDGEMENT', '已理解职责、权限、证据边界与输出协议。'),
     seam('EXECUTION_BOUNDARY', '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。'),
   ];
@@ -282,6 +283,19 @@ const WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU: Partial<Record<WorldSimulati
   'requirements-maintainer': '2092:987773c2',
 };
 
+const WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
+  'world-director': '4563:97559198',
+  'world-stage-planner': '2791:84ce41fc',
+  timekeeper: '3800:b16e52fa',
+  'undercurrent-analyst': '4003:5f425c73',
+  'dramatis-keeper': '4249:1ce1fb58',
+  chronicler: '4153:c1309c9c',
+  'causality-reviewer': '3317:115fcef1',
+  'guidance-composer': '4267:945ab146',
+  'lore-researcher': '2278:bc497f63',
+  'requirements-maintainer': '2092:987773c2',
+};
+
 export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
   WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
     ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
@@ -293,6 +307,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V9_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V9_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V10_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V10_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V11_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] }] : []),
+    ...(WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V12_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] }] : []),
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;

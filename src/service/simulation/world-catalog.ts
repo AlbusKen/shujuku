@@ -52,6 +52,15 @@ export function buildInUseWorldCatalog_ACU(ledger: WorldSimulationLedger_ACU): W
   };
 }
 
+export const WORLD_RELATED_READONLY_MODULES_ACU: Record<string, readonly string[]> = {
+  dimensions: ['actors'],
+  seeds: ['actors', 'rumors'],
+  actors: ['seeds', 'dimensions'],
+  rumors: ['seeds'],
+  chronicle: ['seeds', 'actors', 'rumors'],
+};
+export const WORLD_RELATED_READONLY_HINT_ACU = '关联模块只读目录：仅供对齐引用与一致性核对，禁止写入；目录行含 readAddress，可用 read 工具调阅详情。';
+
 export function sliceModuleCatalog_ACU(
   catalog: WorldInUseCatalog_ACU,
   overview: readonly WorldChronicleOverviewRow_ACU[],
@@ -72,6 +81,17 @@ export function sliceModuleCatalog_ACU(
       readAddress: `chronicle-archive:${row.archiveRef}`,
     }));
     slice.dedupHint = WORLD_SUBAGENT_DEDUP_HINT_ACU;
+  }
+  const readonlyModules: Record<string, unknown> = {};
+  for (const module of writableModules) {
+    for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? []) {
+      if (writable.has(related) || readonlyModules[related]) continue;
+      readonlyModules[related] = (catalog as unknown as Record<string, unknown>)[related];
+    }
+  }
+  if (Object.keys(readonlyModules).length) {
+    slice.relatedReadonly = readonlyModules;
+    slice.relatedHint = WORLD_RELATED_READONLY_HINT_ACU;
   }
   return slice;
 }
