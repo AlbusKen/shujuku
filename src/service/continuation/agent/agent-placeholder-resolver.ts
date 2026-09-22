@@ -482,10 +482,10 @@ function renderTurnSemanticMeta_ACU(turn: StageTurn_ACU): string {
 export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): string {
   const { execution } = context;
   if (!execution.stage) {
-    return '当前任务还没有阶段大纲。必须先派工 outline-architect 创建首个阶段大纲，才能规划本轮；在大纲创建前 finalize 会被拒绝。';
+    return '当前任务还没有阶段大纲。输出 open_round 后，固定工作流会先准备可执行阶段大纲，再进入资料工作流与写作指令编排；主 Agent 不直接派工 outline-architect。';
   }
   if (execution.stage.status === 'completed') {
-    return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。下一阶段大纲尚未创建，需要派工 outline-architect 继续大纲；在此之前 finalize 会被拒绝。`;
+    return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。输出 open_round 后，固定工作流会继续下一阶段大纲，再进入资料工作流与写作指令编排。`;
   }
   if (!execution.revision || !execution.node || !execution.turn) {
     return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;

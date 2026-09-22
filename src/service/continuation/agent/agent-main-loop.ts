@@ -727,7 +727,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             await session.flush();
             return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
           }
-          session.record([{ kind: 'tool', text: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞，或在用户要求维护资料时 delegate arc-architect / web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
+          session.record([{ kind: 'tool', text: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
           await session.flush();
           iteration += 1;
           continue;
@@ -1313,6 +1313,84 @@ export class ContinuationAgentTurnPlanner_ACU {
     await session.flush();
   }
 
+  /**
+   * 固定工作流的结构前置阶段：程序先维护总纲，再确保存在可执行的阶段大纲。
+   * 主 Agent 只负责给出 open_round 的焦点，不再直接派工 arc/outline 角色。
+   */
+  private async prepareFixedWorkflowStructure_ACU(
+    action: AgentOpenRoundAction_ACU,
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
+    budget: AgentRunBudget_ACU,
+    chat: any[],
+    apiDependencies?: ContinuationApiPresetDependencies_ACU,
+  ): Promise<void> {
+    const completedStageNumbers = context.execution.task.stages
+      .filter(stage => stage.status === 'completed')
+      .map(stage => stage.stageNumber);
+    const needsArcMaintenance = !hasActiveStoryArc_ACU(context.moduleSnapshot)
+      || !hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
+      || findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length > 0;
+
+    if (needsArcMaintenance) {
+      const entryId = logAgentSession_ACU({
+        kind: 'delegation',
+        agentName: 'arc-architect',
+        title: '固定工作流维护故事总纲',
+        detail: action.focus,
+        status: 'running',
+      });
+      try {
+        const preset = this.dependencies.resolveApiPreset(request.settings, 'arcArchitect', 'agent_delegate', apiDependencies);
+        const result = await this.dependencies.subagentRuntime.run({
+          delegation: { agentName: 'arc-architect', prompt: `固定工作流维护故事总纲。焦点：${action.focus}`, reads: [] },
+          settings: request.settings,
+          resolveContext: context,
+          budget,
+          preset,
+          createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+          isCurrent: identity => request.isInternalRequestCurrent(identity),
+          signal: request.signal,
+        });
+        if (!result.arc) {
+          failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', '固定工作流的总纲维护没有返回可用写集');
+        }
+        const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
+        const applied = applyAgentModuleDelta_ACU(
+          context.moduleSnapshot,
+          delta,
+          result.writes,
+          Math.max(0, chat.length - 1),
+          completedStageNumbers,
+        ).snapshot;
+        context.moduleSnapshot = applied;
+        await this.persistSnapshot_ACU(chat, applied);
+        updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc.summary || '总纲已更新', ok: true });
+      } catch (error) {
+        const reason = compactAgentProtocolError_ACU(error);
+        updateAgentSession_ACU(entryId, { title: '固定工作流维护故事总纲失败', detail: reason, ok: false });
+        throw error;
+      }
+    }
+
+    context.execution = request.readContext();
+    if (context.execution.turn) return;
+    if (!request.applyOutline) {
+      failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', '当前没有可执行的阶段大纲，且本轮不允许创建或继续大纲');
+    }
+    const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: AGENT_OUTLINE_AGENT_NAME_ACU, title: '固定工作流准备阶段大纲', detail: action.focus, status: 'running' });
+    const result = await request.applyOutline(`固定工作流根据当前 active 卷准备阶段大纲。焦点：${action.focus}`);
+    updateAgentSession_ACU(entryId, {
+      title: result.op === 'create' ? '固定工作流已创建阶段大纲' : result.op === 'continue' ? '固定工作流已继续阶段大纲' : '固定工作流已维护阶段大纲',
+      detail: result.summary,
+      ok: result.stopped === null,
+    });
+    if (result.stopped) failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', result.summary, { stopped: result.stopped });
+    if (result.requiresReview) failLoop_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', '固定工作流已产出新大纲，等待你在界面上确认后再继续', { op: result.op, requiresReview: true });
+    context.execution = request.readContext();
+    if (!context.execution.turn) failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', '阶段大纲操作完成后仍没有可执行轮次');
+  }
+
   private async runFixedWorkflow_ACU(
     action: AgentOpenRoundAction_ACU,
     request: ContinuationAgentTurnPlanRequest_ACU,
@@ -1322,6 +1400,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     chat: any[],
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<ContinuationWorkflowResult_ACU> {
+    await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, apiDependencies);
     const unsettled = renderAgentUnsettledHistory_ACU(context);
     const mapPayload = (result: AgentSubagentRunResult_ACU): ContinuationWorkflowAgentPayload_ACU => ({
       ok: true,
@@ -1345,7 +1424,6 @@ export class ContinuationAgentTurnPlanner_ACU {
       opening: {
         focus: action.focus,
         summary: action.summary,
-        dispatchArcArchitect: action.dispatchArcArchitect,
         dispatchWebResearcher: action.dispatchWebResearcher && request.settings.webResearch.enabled,
       },
       hasUnsettledHistory: !unsettled.startsWith('没有尚未结算的真实历史'),
@@ -1434,13 +1512,13 @@ export class ContinuationAgentTurnPlanner_ACU {
    */
   private renderStoryArcState_ACU(context: AgentResolveContext_ACU): string {
     if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
-      return '故事总纲：尚未建立。本轮必须先派工 arc-architect 立总纲（一条全书方向 + 若干卷台阶），总纲为空时派工 outline-architect 会被直接拒绝。';
+      return '故事总纲：尚未建立。输出 open_round 后，固定工作流会先调用 arc-architect 建立一条全书方向与若干卷台阶，再准备可执行阶段大纲；主 Agent 不直接 delegate 这些内部角色。';
     }
     const completed = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
     const unregistered = findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed);
     const head = `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}），完整内容用 read $STORY_ARC 调阅。`;
-    if (!unregistered.length) return `${head}已完成阶段的进度均已登记，本轮不需要派工 arc-architect；只有剧情越出台阶、底牌被提前翻开或当前卷可判定收束时才派，并写明依据楼层。`;
-    return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。请派工 arc-architect 仅向当前 active 卷回写这些阶段；只有真实正文达到 escalation 的可判定收束状态时，才以完成阶段编号和卷末状态把该卷 patch 成 done 并激活下一卷。所有既有卷都完成而用户继续写时，先根据最后一卷的后果追加带续卷依据的 active 新卷。`;
+    if (!unregistered.length) return `${head}已完成阶段的进度均已登记；如剧情越出台阶、底牌被提前翻开或当前卷可判定收束，把依据写进 open_round.focus，由固定工作流判断并维护总纲。`;
+    return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。输出 open_round 后，固定工作流会调用 arc-architect 向当前 active 卷回写这些阶段；只有真实正文达到 escalation 的可判定收束状态时，才以完成阶段编号和卷末状态把该卷 patch 成 done 并激活下一卷。所有既有卷都完成而用户继续写时，固定工作流会先根据最后一卷的后果追加带续卷依据的 active 新卷。`;
   }
 
   private spliceHistory_ACU(
@@ -1566,8 +1644,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     outlineMaintenanceReserveAvailable = false,
   ): Promise<{ snapshot: AgentModuleSnapshot_ACU; usedOutlineMaintenanceReserve: boolean }> {
     const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
-    const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
-    const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU);
+    const internalWorkflowDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU || item.agentName === 'arc-architect');
+    const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU && item.agentName !== 'arc-architect');
     let usedOutlineMaintenanceReserve = false;
     // 未通过预算/波次校验的派工立即记失败条目：这些拒绝是即时判定，没有 running 阶段。
     const rejectImmediately = (agentName: string, reason: string): void => {
@@ -1581,60 +1659,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       });
     };
 
-    // 大纲操作先于同波次其他派工串行执行：它改变游标，后续派工与下一次迭代都要看到新大纲。
-    for (const delegation of outlineDelegations) {
-      const used = ledger.perAgent.get(delegation.agentName) ?? 0;
-      const useReserve = outlineMaintenanceReserveAvailable && !usedOutlineMaintenanceReserve;
-      if (ledger.delegationsUsed >= budget.maxDelegations && !useReserve) {
-        rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
-        continue;
-      }
-      if (used >= budget.maxSameAgent && !useReserve) {
-        rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
-        continue;
-      }
-      if (!request.applyOutline) {
-        rejectImmediately(delegation.agentName, '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断');
-        continue;
-      }
-      // 总纲门禁：没有全书方向时排出来的阶段大纲只能各自为政，会把该留到后面的底牌提前打光。
-      // 与预算校验同级前置，且不消耗派工额度——主 Agent 在同一轮里改派 arc-architect 立总纲即可。
-      if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
-        rejectImmediately(delegation.agentName, '故事总纲还是空的，阶段大纲没有可依据的方向与卷台阶。请先派工 arc-architect 立总纲（全书方向一条 + 卷台阶若干），拿到总纲后再派工排阶段大纲。本次未消耗派工额度。');
-        continue;
-      }
-      if (!hasActiveStoryArcVolume_ACU(context.moduleSnapshot)) {
-        rejectImmediately(delegation.agentName, '故事总纲的既有卷已全部完成，当前没有可承载下一阶段的 active 卷。请先派工 arc-architect 根据最后一卷的结果、代价、关系变化或未解决问题追加后续卷并设为 active，再派工 outline-architect。本次未消耗派工额度。');
-        continue;
-      }
-      if (useReserve) {
-        usedOutlineMaintenanceReserve = true;
-      } else {
-        ledger.delegationsUsed += 1;
-        ledger.perAgent.set(delegation.agentName, used + 1);
-      }
-      const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: '大纲操作执行中', detail: delegation.prompt, status: 'running' });
-      let result: AgentOutlineOpResult_ACU;
-      try {
-        result = await request.applyOutline(delegation.prompt);
-      } catch (error) {
-        const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
-        updateAgentSession_ACU(entryId, { title: '大纲操作失败', detail: message, ok: false });
-        throw error;
-      }
-      updateAgentSession_ACU(entryId, {
-        title: result.op === 'create' ? '创建阶段大纲' : result.op === 'continue' ? '继续下一阶段大纲' : '改写当前阶段大纲',
-        detail: result.summary,
-        ok: result.stopped === null,
-      });
-      if (result.stopped) {
-        failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', result.summary, { stopped: result.stopped });
-      }
-      if (result.requiresReview) {
-        failLoop_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', '大纲子代理已产出新大纲，等待你在界面上确认后再继续', { op: result.op, requiresReview: true });
-      }
-      ledger.outcomes.push({ agentName: delegation.agentName, ok: true, summary: result.summary, detail: result.summary, rejectedReason: '' });
-      context.execution = request.readContext();
+    for (const delegation of internalWorkflowDelegations) {
+      rejectImmediately(delegation.agentName, `${delegation.agentName} 已由固定工作流内部调度，主 Agent 不能直接 delegate。请输出 open_round，本次未消耗派工额度。`);
     }
 
     const accepted: AgentDelegation_ACU[] = [];
@@ -1663,13 +1689,6 @@ export class ContinuationAgentTurnPlanner_ACU {
           : `同一波次并发上限为 ${waveLimit} 个`;
         rejectImmediately(delegation.agentName, `${why}，本次未执行，可在下一次迭代重派`);
         continue;
-      }
-      if (delegation.agentName === 'arc-architect') {
-        const gate = evaluateArcArchitectDispatch_ACU(context, delegation.prompt);
-        if (!gate.allowed) {
-          rejectImmediately(delegation.agentName, gate.reason);
-          continue;
-        }
       }
       if (delegation.agentName === AGENT_WEB_RESEARCHER_NAME_ACU && !request.settings.webResearch.enabled) {
         rejectImmediately(delegation.agentName, '网页检索功能未启用（续写设置 → 启用开场百科检索），web-researcher 不可派工。请基于世界书与已有资料继续。');

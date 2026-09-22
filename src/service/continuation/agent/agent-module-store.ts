@@ -815,12 +815,12 @@ export function renderAgentActiveVolumePlanningContext_ACU(snapshot: AgentModule
  * 渲染故事总纲的热上下文。
  * @param snapshot 当前快照
  * @param completedStageNumbers 已真实完成的阶段编号
- * @returns 自然语言文本；总纲为空时明确指出必须先派工 arc-architect
+ * @returns 自然语言文本；总纲为空时明确指出由 open_round 固定工作流建立
  */
 export function renderAgentStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU, completedStageNumbers: readonly number[] = []): string {
   const head = `当前修订号=${snapshot.revisions.storyArc}`;
   const active = snapshot.storyArc.filter(entry => !entry.retired);
-  if (!active.length) return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步，必须先派工 arc-architect 立总纲。`;
+  if (!active.length) return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步；输出 open_round 后，固定工作流会先调用 arc-architect 建立总纲，主 Agent 不直接派工。`;
   const sorted = [...active].sort(compareStoryArc_ACU);
   return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`);
 }

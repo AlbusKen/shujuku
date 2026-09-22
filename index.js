@@ -86890,16 +86890,27 @@ $CONTENT
     ]);
     /**
      * V18 非根 system 段在 V19 时的默认正文。V20 改写了历史导语并删除了运行时段，
-     * 因此不能再拿当前 MAIN_AGENT_PROMPT_ACU 做全文比对。
+     * 因此不能只拿当前原始 MAIN_AGENT_PROMPT_ACU 做全文比对。设置副本可能带着旧版本标记，
+     * 但正文已经是当前 V31 未改写默认值；这类完整默认段也应迁为 user，用户自定义正文仍不会命中。
      */
     function v19DefaultMainAgentNonRootSystemContents_ACU() {
-        return [
-            ...MAIN_AGENT_PROMPT_ACU
-                .filter(segment => segment.role === 'user' && [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU].some(heading => heading !== '【本回合运行时数据】' && heading !== '【以下是你自己的会话记录】' && segment.content.startsWith(heading)))
-                .map(segment => segment.content),
-            V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU,
-            V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU,
-        ];
+        const headings = [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU]
+            .filter(heading => heading !== '【本回合运行时数据】' && heading !== '【以下是你自己的会话记录】');
+        const historical = MAIN_AGENT_PROMPT_ACU
+            .filter(segment => segment.role === 'user' && headings.some(heading => segment.content.startsWith(heading)))
+            .map(segment => segment.content);
+        const current = buildDefaultAgentMainPrompt_ACU()
+            .filter(segment => segment.role === 'user' && headings.some(heading => segment.content.startsWith(heading)))
+            .map(segment => segment.content);
+        return [...new Set([
+                ...historical,
+                ...current,
+                ...MAIN_AGENT_PROMPT_ACU
+                    .filter(segment => segment.content === AGENT_HISTORY_ANCHOR_TOKEN_ACU)
+                    .map(segment => segment.content),
+                V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU,
+                V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU,
+            ])];
     }
     /**
      * V18 → V19 定向迁移只转换内容未被用户改写的默认 system 段。
@@ -86957,6 +86968,41 @@ $CONTENT
     function findAgentPromptSlot_ACU(segments, slot) {
         return segments.find(AGENT_PROMPT_SLOT_LOCATORS_ACU[slot]);
     }
+    /** V30 主 Agent 默认段原文。V31 迁移只接受这些完整正文，用户改写过一个字也不会被覆盖。 */
+    const V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'capabilityAnswer').content;
+    const V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'actionRules').content;
+    const V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'textProtocol').content;
+    const V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'subagentRules').content;
+    /**
+     * 把仍为 V30 默认值的主 Agent 槽位升级为 V31 固定工作流语义。
+     * 调用方必须传入完整段正文；非 V30 默认值原样返回，避免覆盖用户自定义内容。
+     */
+    function migrateV30DefaultMainAgentContentToV31_ACU(content) {
+        if (content === V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU) {
+            return content
+                .replace('用 open_round 把本轮交给固定工作流、按需派工 arc-architect / web-researcher / outline-architect', '用 open_round 把本轮焦点交给固定工作流、按需派工 web-researcher')
+                .replace('大纲只能由 outline-architect 产出并经运行时校验；卷级台阶由 arc-architect 维护', '总纲与阶段大纲由 open_round 固定工作流维护并经运行时校验');
+        }
+        if (content === V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU) {
+            return content
+                .replace('我每轮用 open_round 写明焦点，并决定是否派 arc-architect 或 web-researcher。', '我每轮用 open_round 写明焦点；总纲与阶段大纲由程序按状态自动维护，我只按需派工 web-researcher。')
+                .replace('我派工 arc-architect 维护总纲（patch 卷状态、改写后续台阶）', '程序在 open_round 固定工作流中维护总纲（patch 卷状态、改写后续台阶）');
+        }
+        if (content === V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU) {
+            return content
+                .replace('大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\n\n\n', '')
+                .replace('可选 summary、dispatchArcArchitect、dispatchWebResearcher', '可选 summary、dispatchWebResearcher')
+                .replace('运行时按固定顺序执行结算、策划、条件审查、容错提交、自动修复和 instruction-composer。', '运行时按固定顺序维护总纲、准备可执行阶段大纲、执行结算、策划、条件审查、容错提交、自动修复和 instruction-composer。')
+                .replace('没有大纲或阶段已完成时会被拒绝，必须先派工 outline-architect。', '没有大纲或阶段已完成时由 open_round 固定工作流先自动准备。');
+        }
+        if (content === V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU) {
+            return content
+                .replace(/0\. 总纲先行与总纲维护：[^\n]+\n1\. 大纲优先：[^\n]+\n2\. 偏差处理：[^\n]+\n/, '0. 总纲与阶段大纲由程序固定工作流维护：你只输出 open_round 的焦点，不直接 delegate arc-architect 或 outline-architect；程序会先维护总纲，再创建、继续或维护可执行阶段大纲。\n1. 偏差处理：把真实剧情与总纲或阶段大纲的偏差写进 open_round.focus，程序据此维护结构；禁止在大纲已明显失效时绕过 open_round 硬交付。\n')
+                .replace('「结算什么」「策划什么」或「大纲要怎么改」', '公开子代理要完成什么')
+                .replace('9. 一个代理最多派 2 次。', '9. arc-architect、outline-architect 与 instruction-composer 是固定工作流内部角色，不出现在可派工目录；公开代理仍遵守单代理派工上限。');
+        }
+        return content;
+    }
     /**
      * 历史默认段谱系：V17–V26 各版默认提示词里、经现有迁移链之后仍与当前默认不同的那些段。
      * 用户从未改写过的默认段会精确命中这里的哈希，被换成当前默认；用户改写过的段不会命中，原样保留。
@@ -86971,6 +87017,10 @@ $CONTENT
             { hash: 'b5eaeca2', length: 960, slot: 'actionRules', note: 'V17–V22 行动规则（无第 9 条节奏规则）' },
             { hash: 'be6e00a6', length: 2646, slot: 'textProtocol', note: 'V17–V22 文本协议规范（旧 finalize 骨架；V17/V18 为 system 角色）' },
             { hash: '0b9166c2', length: 1703, slot: 'subagentRules', note: 'V17–V22 子代理使用规则（无 pacing 派工约束；V17/V18 为 system 角色）' },
+            { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU), length: V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU.length, slot: 'capabilityAnswer', note: 'V30 模式边界答（仍允许主 Agent 直派总纲与大纲角色）' },
+            { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU), length: V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU.length, slot: 'actionRules', note: 'V30 行动规则（仍要求主 Agent 判断并派工总纲角色）' },
+            { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU), length: V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU.length, slot: 'textProtocol', note: 'V30 文本协议（仍暴露 dispatchArcArchitect 与大纲直派）' },
+            { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU), length: V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU.length, slot: 'subagentRules', note: 'V30 子代理规则（仍由主 Agent 维护总纲与阶段大纲）' },
             { hash: '8e7599ac', length: 279, slot: 'capabilityAnswer', note: 'V29 模式边界答（主 Agent 自己派工并交付指导）' },
             { hash: '211429e3', length: 956, slot: 'actionRules', note: 'V29 行动规则（未结算时先派结算维护）' },
             { hash: '71a5cc97', length: 2047, slot: 'textProtocol', note: 'V29 文本协议（finalize 自写 instruction，无 open_round）' },
@@ -87012,7 +87062,10 @@ $CONTENT
         instructionComposer: [],
     };
     function buildDefaultAgentMainPrompt_ACU() {
-        return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
+        return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU).map(segment => ({
+            ...segment,
+            content: migrateV30DefaultMainAgentContentToV31_ACU(segment.content),
+        }));
     }
     function buildDefaultAgentArcArchitectPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(ARC_ARCHITECT_PROMPT_ACU);
@@ -87246,6 +87299,11 @@ $CONTENT
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU = 'spv3.8-continuation-fixed-workflow-v30';
     /**
+     * V31 将总纲和阶段大纲生命周期也纳入 open_round 固定工作流；主 Agent 只给焦点，
+     * 不再直接派工 arc-architect、outline-architect 或 instruction-composer。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU = 'spv3.9-continuation-structure-bootstrap-v31';
+    /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
      */
@@ -87327,7 +87385,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -88658,6 +88716,21 @@ $CONTENT
         const lineage = replaceAgentPromptsByLineage_ACU(raw);
         return lineage.changed ? lineage.next : raw;
     }
+    function migrateV30AgentPromptsToV31_ACU(raw) {
+        if (!isRecord_ACU$i(raw) || !Array.isArray(raw.main))
+            return raw;
+        let changed = false;
+        const main = raw.main.map(segment => {
+            if (!isRecord_ACU$i(segment) || typeof segment.content !== 'string')
+                return segment;
+            const content = migrateV30DefaultMainAgentContentToV31_ACU(segment.content);
+            if (content === segment.content)
+                return segment;
+            changed = true;
+            return { ...segment, content };
+        });
+        return changed ? { ...raw, main } : raw;
+    }
     function migrateV27AgentPromptsToV28_ACU(raw) {
         if (!isRecord_ACU$i(raw))
             return raw;
@@ -88971,7 +89044,8 @@ $CONTENT
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU
-            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU) {
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -89009,6 +89083,10 @@ $CONTENT
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU) {
             agentPrompts = migrateV29AgentPromptsToV30_ACU(agentPrompts);
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU;
+        }
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU) {
+            agentPrompts = migrateV30AgentPromptsToV31_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -126806,13 +126884,13 @@ $CONTENT
      * 渲染故事总纲的热上下文。
      * @param snapshot 当前快照
      * @param completedStageNumbers 已真实完成的阶段编号
-     * @returns 自然语言文本；总纲为空时明确指出必须先派工 arc-architect
+     * @returns 自然语言文本；总纲为空时明确指出由 open_round 固定工作流建立
      */
     function renderAgentStoryArc_ACU(snapshot, completedStageNumbers = []) {
         const head = `当前修订号=${snapshot.revisions.storyArc}`;
         const active = snapshot.storyArc.filter(entry => !entry.retired);
         if (!active.length)
-            return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步，必须先派工 arc-architect 立总纲。`;
+            return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步；输出 open_round 后，固定工作流会先调用 arc-architect 建立总纲，主 Agent 不直接派工。`;
         const sorted = [...active].sort(compareStoryArc_ACU);
         return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`);
     }
@@ -149135,26 +149213,13 @@ Expected function or array of functions, received type ${typeof value}.`
         compose: '无（只产出写作指令；constraints 增量由运行时容错登记）',
     };
     function isDefinitionVisible_ACU(name, options) {
-        if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU)
+        // 总纲与写作指令都由 open_round 固定工作流内部调度，不向主 Agent 暴露直接派工入口。
+        if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU || name === 'arc-architect')
             return false;
         if (name === AGENT_WEB_RESEARCHER_NAME_ACU)
             return options?.webResearchEnabled === true;
         return true;
     }
-    /**
-     * 大纲子代理的目录块。它不走通用子代理运行时：运行时会按任务状态自动推断
-     * 创建 / 维护 / 继续三种操作，并用独立的大纲提示词与既有资料完成生成与校验，
-     * 因此这里手写描述而不进入 AGENT_SUBAGENT_DEFINITIONS_ACU。
-     */
-    const OUTLINE_AGENT_CATALOG_BLOCK_ACU = [
-        `- name: ${AGENT_OUTLINE_AGENT_NAME_ACU}`,
-        '  类型: 大纲',
-        '  职责: 管理阶段大纲的完整生命周期——创建（当前没有任何大纲时）、维护（大纲与真实剧情脱节、需要改写剩余部分时）、继续（当前阶段已全部完成、需要下一阶段时）。具体做哪种操作由运行时按任务状态自动判断，你只需给出要求。',
-        '  适用时机: 大纲状态显示「还没有阶段大纲」时必须先派它；真实剧情已经明显偏离大纲计划时派它改写；大纲状态显示「阶段已全部完成」时派它继续。',
-        '  读取: 无需指定读集（运行时自动注入故事背景、事件概览、尾部正文、阶段历史与故事总纲）',
-        '  写入: 阶段大纲（产出经严格 schema 校验后落盘；改写时已完成的轮次受保护，不会被改掉）',
-        '  执行方式: 串行执行且先于同波次其他派工；计入派工预算；prompt 写清你对大纲的要求（走向、节奏、要保留或回收什么）。',
-    ].join('\n');
     /**
      * 渲染子代理能力目录。
      * @returns 主 Agent 可见的摘要文本，不含子代理内部提示词
@@ -149172,7 +149237,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 : '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
             `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
         ].join('\n'));
-        return [OUTLINE_AGENT_CATALOG_BLOCK_ACU, ...blocks].join('\n');
+        return blocks.join('\n');
     }
     /**
      * 渲染资料模块目录。
@@ -149837,16 +149902,15 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
     /**
-     * 用「子代理读到资料的那一刻」的修订号补齐未声明的模块。
+     * 用「子代理读到资料的那一刻」的运行时修订号覆盖模型自报版本。
      * @param delta 子代理返回的写集
      * @param readRevisions 渲染读集材料时捕获的快照修订号
-     * @returns 新的 delta；子代理已显式声明的模块保持原值，仍按显式断言校验
+     * @returns 新的 delta；仅覆盖实际触碰模块，未触碰模块的声明保持不参与提交
      */
     function mergeAgentDeltaRevisions_ACU(delta, readRevisions) {
         const merged = { ...delta.expectedRevisions };
         for (const module of collectTouchedModules_ACU(delta)) {
-            if (merged[module] === undefined)
-                merged[module] = readRevisions[module];
+            merged[module] = readRevisions[module];
         }
         return { ...delta, expectedRevisions: merged };
     }
@@ -151042,7 +151106,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 thought,
                 focus,
                 summary: readText_ACU(payload.summary),
-                dispatchArcArchitect: payload.dispatchArcArchitect === true,
                 dispatchWebResearcher: payload.dispatchWebResearcher === true,
             };
         }
@@ -151070,7 +151133,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (action === 'read' || action === 'search') {
             return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
         }
-        failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+        failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；总纲与阶段大纲由 open_round 固定工作流维护，实际收到：${action || '(空)'}`);
     }
     function parseAgentComposerOutput_ACU(payload) {
         const instruction = readText_ACU(payload.instruction).trim();
@@ -152270,10 +152333,10 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderAgentOutlineWindow_ACU(context) {
         const { execution } = context;
         if (!execution.stage) {
-            return '当前任务还没有阶段大纲。必须先派工 outline-architect 创建首个阶段大纲，才能规划本轮；在大纲创建前 finalize 会被拒绝。';
+            return '当前任务还没有阶段大纲。输出 open_round 后，固定工作流会先准备可执行阶段大纲，再进入资料工作流与写作指令编排；主 Agent 不直接派工 outline-architect。';
         }
         if (execution.stage.status === 'completed') {
-            return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。下一阶段大纲尚未创建，需要派工 outline-architect 继续大纲；在此之前 finalize 会被拒绝。`;
+            return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。输出 open_round 后，固定工作流会继续下一阶段大纲，再进入资料工作流与写作指令编排。`;
         }
         if (!execution.revision || !execution.node || !execution.turn) {
             return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
@@ -154451,17 +154514,6 @@ Expected function or array of functions, received type ${typeof value}.`
             snapshot = applied.snapshot;
             return applied.appliedModules;
         };
-        if (input.opening.dispatchArcArchitect) {
-            const arc = await runSafe_ACU({
-                agentName: ARC_NAME_ACU,
-                billing: 'opening',
-                repair: false,
-                prompt: `开局要求维护总纲。焦点：${input.opening.focus}`,
-            });
-            steps.push({ agentName: ARC_NAME_ACU, status: arc.ok ? 'ok' : 'failed', summary: arc.summary });
-            if (arc.ok)
-                applyMaintainerLike_ACU(arc.arc, arc.writes ?? ['storyArc'], arc.readRevisions, ARC_NAME_ACU);
-        }
         if (input.opening.dispatchWebResearcher) {
             const web = await runSafe_ACU({
                 agentName: WEB_NAME_ACU,
@@ -155400,7 +155452,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             await session.flush();
                             return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
                         }
-                        session.record([{ kind: 'tool', text: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞，或在用户要求维护资料时 delegate arc-architect / web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
+                        session.record([{ kind: 'tool', text: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
                         await session.flush();
                         iteration += 1;
                         continue;
@@ -155894,7 +155946,75 @@ Expected function or array of functions, received type ${typeof value}.`
             session.record(appends);
             await session.flush();
         }
+        /**
+         * 固定工作流的结构前置阶段：程序先维护总纲，再确保存在可执行的阶段大纲。
+         * 主 Agent 只负责给出 open_round 的焦点，不再直接派工 arc/outline 角色。
+         */
+        async prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, apiDependencies) {
+            const completedStageNumbers = context.execution.task.stages
+                .filter(stage => stage.status === 'completed')
+                .map(stage => stage.stageNumber);
+            const needsArcMaintenance = !hasActiveStoryArc_ACU(context.moduleSnapshot)
+                || !hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
+                || findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length > 0;
+            if (needsArcMaintenance) {
+                const entryId = logAgentSession_ACU({
+                    kind: 'delegation',
+                    agentName: 'arc-architect',
+                    title: '固定工作流维护故事总纲',
+                    detail: action.focus,
+                    status: 'running',
+                });
+                try {
+                    const preset = this.dependencies.resolveApiPreset(request.settings, 'arcArchitect', 'agent_delegate', apiDependencies);
+                    const result = await this.dependencies.subagentRuntime.run({
+                        delegation: { agentName: 'arc-architect', prompt: `固定工作流维护故事总纲。焦点：${action.focus}`, reads: [] },
+                        settings: request.settings,
+                        resolveContext: context,
+                        budget,
+                        preset,
+                        createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
+                        isCurrent: identity => request.isInternalRequestCurrent(identity),
+                        signal: request.signal,
+                    });
+                    if (!result.arc) {
+                        failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', '固定工作流的总纲维护没有返回可用写集');
+                    }
+                    const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
+                    const applied = applyAgentModuleDelta_ACU(context.moduleSnapshot, delta, result.writes, Math.max(0, chat.length - 1), completedStageNumbers).snapshot;
+                    context.moduleSnapshot = applied;
+                    await this.persistSnapshot_ACU(chat, applied);
+                    updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc.summary || '总纲已更新', ok: true });
+                }
+                catch (error) {
+                    const reason = compactAgentProtocolError_ACU(error);
+                    updateAgentSession_ACU(entryId, { title: '固定工作流维护故事总纲失败', detail: reason, ok: false });
+                    throw error;
+                }
+            }
+            context.execution = request.readContext();
+            if (context.execution.turn)
+                return;
+            if (!request.applyOutline) {
+                failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', '当前没有可执行的阶段大纲，且本轮不允许创建或继续大纲');
+            }
+            const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: AGENT_OUTLINE_AGENT_NAME_ACU, title: '固定工作流准备阶段大纲', detail: action.focus, status: 'running' });
+            const result = await request.applyOutline(`固定工作流根据当前 active 卷准备阶段大纲。焦点：${action.focus}`);
+            updateAgentSession_ACU(entryId, {
+                title: result.op === 'create' ? '固定工作流已创建阶段大纲' : result.op === 'continue' ? '固定工作流已继续阶段大纲' : '固定工作流已维护阶段大纲',
+                detail: result.summary,
+                ok: result.stopped === null,
+            });
+            if (result.stopped)
+                failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', result.summary, { stopped: result.stopped });
+            if (result.requiresReview)
+                failLoop_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', '固定工作流已产出新大纲，等待你在界面上确认后再继续', { op: result.op, requiresReview: true });
+            context.execution = request.readContext();
+            if (!context.execution.turn)
+                failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', '阶段大纲操作完成后仍没有可执行轮次');
+        }
         async runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, apiDependencies) {
+            await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, apiDependencies);
             const unsettled = renderAgentUnsettledHistory_ACU(context);
             const mapPayload = (result) => ({
                 ok: true,
@@ -155918,7 +156038,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 opening: {
                     focus: action.focus,
                     summary: action.summary,
-                    dispatchArcArchitect: action.dispatchArcArchitect,
                     dispatchWebResearcher: action.dispatchWebResearcher && request.settings.webResearch.enabled,
                 },
                 hasUnsettledHistory: !unsettled.startsWith('没有尚未结算的真实历史'),
@@ -156006,14 +156125,14 @@ Expected function or array of functions, received type ${typeof value}.`
          */
         renderStoryArcState_ACU(context) {
             if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
-                return '故事总纲：尚未建立。本轮必须先派工 arc-architect 立总纲（一条全书方向 + 若干卷台阶），总纲为空时派工 outline-architect 会被直接拒绝。';
+                return '故事总纲：尚未建立。输出 open_round 后，固定工作流会先调用 arc-architect 建立一条全书方向与若干卷台阶，再准备可执行阶段大纲；主 Agent 不直接 delegate 这些内部角色。';
             }
             const completed = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
             const unregistered = findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed);
             const head = `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}），完整内容用 read $STORY_ARC 调阅。`;
             if (!unregistered.length)
-                return `${head}已完成阶段的进度均已登记，本轮不需要派工 arc-architect；只有剧情越出台阶、底牌被提前翻开或当前卷可判定收束时才派，并写明依据楼层。`;
-            return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。请派工 arc-architect 仅向当前 active 卷回写这些阶段；只有真实正文达到 escalation 的可判定收束状态时，才以完成阶段编号和卷末状态把该卷 patch 成 done 并激活下一卷。所有既有卷都完成而用户继续写时，先根据最后一卷的后果追加带续卷依据的 active 新卷。`;
+                return `${head}已完成阶段的进度均已登记；如剧情越出台阶、底牌被提前翻开或当前卷可判定收束，把依据写进 open_round.focus，由固定工作流判断并维护总纲。`;
+            return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。输出 open_round 后，固定工作流会调用 arc-architect 向当前 active 卷回写这些阶段；只有真实正文达到 escalation 的可判定收束状态时，才以完成阶段编号和卷末状态把该卷 patch 成 done 并激活下一卷。所有既有卷都完成而用户继续写时，固定工作流会先根据最后一卷的后果追加带续卷依据的 active 新卷。`;
         }
         spliceHistory_ACU(messages, history) {
             const result = [];
@@ -156119,8 +156238,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         async runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies, outlineMaintenanceReserveAvailable = false) {
             const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
-            const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
-            const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU);
+            const internalWorkflowDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU || item.agentName === 'arc-architect');
+            const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU && item.agentName !== 'arc-architect');
             let usedOutlineMaintenanceReserve = false;
             // 未通过预算/波次校验的派工立即记失败条目：这些拒绝是即时判定，没有 running 阶段。
             const rejectImmediately = (agentName, reason) => {
@@ -156133,62 +156252,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     ok: false,
                 });
             };
-            // 大纲操作先于同波次其他派工串行执行：它改变游标，后续派工与下一次迭代都要看到新大纲。
-            for (const delegation of outlineDelegations) {
-                const used = ledger.perAgent.get(delegation.agentName) ?? 0;
-                const useReserve = outlineMaintenanceReserveAvailable && !usedOutlineMaintenanceReserve;
-                if (ledger.delegationsUsed >= budget.maxDelegations && !useReserve) {
-                    rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
-                    continue;
-                }
-                if (used >= budget.maxSameAgent && !useReserve) {
-                    rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
-                    continue;
-                }
-                if (!request.applyOutline) {
-                    rejectImmediately(delegation.agentName, '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断');
-                    continue;
-                }
-                // 总纲门禁：没有全书方向时排出来的阶段大纲只能各自为政，会把该留到后面的底牌提前打光。
-                // 与预算校验同级前置，且不消耗派工额度——主 Agent 在同一轮里改派 arc-architect 立总纲即可。
-                if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
-                    rejectImmediately(delegation.agentName, '故事总纲还是空的，阶段大纲没有可依据的方向与卷台阶。请先派工 arc-architect 立总纲（全书方向一条 + 卷台阶若干），拿到总纲后再派工排阶段大纲。本次未消耗派工额度。');
-                    continue;
-                }
-                if (!hasActiveStoryArcVolume_ACU(context.moduleSnapshot)) {
-                    rejectImmediately(delegation.agentName, '故事总纲的既有卷已全部完成，当前没有可承载下一阶段的 active 卷。请先派工 arc-architect 根据最后一卷的结果、代价、关系变化或未解决问题追加后续卷并设为 active，再派工 outline-architect。本次未消耗派工额度。');
-                    continue;
-                }
-                if (useReserve) {
-                    usedOutlineMaintenanceReserve = true;
-                }
-                else {
-                    ledger.delegationsUsed += 1;
-                    ledger.perAgent.set(delegation.agentName, used + 1);
-                }
-                const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: '大纲操作执行中', detail: delegation.prompt, status: 'running' });
-                let result;
-                try {
-                    result = await request.applyOutline(delegation.prompt);
-                }
-                catch (error) {
-                    const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
-                    updateAgentSession_ACU(entryId, { title: '大纲操作失败', detail: message, ok: false });
-                    throw error;
-                }
-                updateAgentSession_ACU(entryId, {
-                    title: result.op === 'create' ? '创建阶段大纲' : result.op === 'continue' ? '继续下一阶段大纲' : '改写当前阶段大纲',
-                    detail: result.summary,
-                    ok: result.stopped === null,
-                });
-                if (result.stopped) {
-                    failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', result.summary, { stopped: result.stopped });
-                }
-                if (result.requiresReview) {
-                    failLoop_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', '大纲子代理已产出新大纲，等待你在界面上确认后再继续', { op: result.op, requiresReview: true });
-                }
-                ledger.outcomes.push({ agentName: delegation.agentName, ok: true, summary: result.summary, detail: result.summary, rejectedReason: '' });
-                context.execution = request.readContext();
+            for (const delegation of internalWorkflowDelegations) {
+                rejectImmediately(delegation.agentName, `${delegation.agentName} 已由固定工作流内部调度，主 Agent 不能直接 delegate。请输出 open_round，本次未消耗派工额度。`);
             }
             const accepted = [];
             for (const delegation of normalDelegations) {
@@ -156216,13 +156281,6 @@ Expected function or array of functions, received type ${typeof value}.`
                         : `同一波次并发上限为 ${waveLimit} 个`;
                     rejectImmediately(delegation.agentName, `${why}，本次未执行，可在下一次迭代重派`);
                     continue;
-                }
-                if (delegation.agentName === 'arc-architect') {
-                    const gate = evaluateArcArchitectDispatch_ACU(context, delegation.prompt);
-                    if (!gate.allowed) {
-                        rejectImmediately(delegation.agentName, gate.reason);
-                        continue;
-                    }
                 }
                 if (delegation.agentName === AGENT_WEB_RESEARCHER_NAME_ACU && !request.settings.webResearch.enabled) {
                     rejectImmediately(delegation.agentName, '网页检索功能未启用（续写设置 → 启用开场百科检索），web-researcher 不可派工。请基于世界书与已有资料继续。');

@@ -56,15 +56,15 @@ function assertWritePermission_ACU(delta: AgentModuleDelta_ACU, allowedWrites: r
 }
 
 /**
- * 用「子代理读到资料的那一刻」的修订号补齐未声明的模块。
+ * 用「子代理读到资料的那一刻」的运行时修订号覆盖模型自报版本。
  * @param delta 子代理返回的写集
  * @param readRevisions 渲染读集材料时捕获的快照修订号
- * @returns 新的 delta；子代理已显式声明的模块保持原值，仍按显式断言校验
+ * @returns 新的 delta；仅覆盖实际触碰模块，未触碰模块的声明保持不参与提交
  */
 export function mergeAgentDeltaRevisions_ACU(delta: AgentModuleDelta_ACU, readRevisions: AgentModuleRevisions_ACU): AgentModuleDelta_ACU {
   const merged: AgentModuleDelta_ACU['expectedRevisions'] = { ...delta.expectedRevisions };
   for (const module of collectTouchedModules_ACU(delta)) {
-    if (merged[module] === undefined) merged[module] = readRevisions[module];
+    merged[module] = readRevisions[module];
   }
   return { ...delta, expectedRevisions: merged };
 }

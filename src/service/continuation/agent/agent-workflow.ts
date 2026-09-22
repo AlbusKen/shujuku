@@ -34,7 +34,6 @@ import {
 export interface ContinuationWorkflowOpening_ACU {
   focus: string;
   summary: string;
-  dispatchArcArchitect: boolean;
   dispatchWebResearcher: boolean;
 }
 
@@ -510,16 +509,6 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     return applied.appliedModules;
   };
 
-  if (input.opening.dispatchArcArchitect) {
-    const arc = await runSafe_ACU({
-      agentName: ARC_NAME_ACU,
-      billing: 'opening',
-      repair: false,
-      prompt: `开局要求维护总纲。焦点：${input.opening.focus}`,
-    });
-    steps.push({ agentName: ARC_NAME_ACU, status: arc.ok ? 'ok' : 'failed', summary: arc.summary });
-    if (arc.ok) applyMaintainerLike_ACU(arc.arc, arc.writes ?? ['storyArc'], arc.readRevisions, ARC_NAME_ACU);
-  }
   if (input.opening.dispatchWebResearcher) {
     const web = await runSafe_ACU({
       agentName: WEB_NAME_ACU,

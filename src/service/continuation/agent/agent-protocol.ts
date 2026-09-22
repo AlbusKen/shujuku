@@ -510,7 +510,6 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
       thought,
       focus,
       summary: readText_ACU(payload.summary),
-      dispatchArcArchitect: payload.dispatchArcArchitect === true,
       dispatchWebResearcher: payload.dispatchWebResearcher === true,
     };
   }
@@ -535,7 +534,7 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'read' || action === 'search') {
     return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
   }
-  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；大纲调整请派工 outline-architect，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；总纲与阶段大纲由 open_round 固定工作流维护，实际收到：${action || '(空)'}`);
 }
 
 export function parseAgentComposerOutput_ACU(payload: Record<string, unknown>): AgentComposerOutput_ACU {

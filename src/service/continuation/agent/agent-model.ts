@@ -573,7 +573,6 @@ export interface AgentOpenRoundAction_ACU {
   thought: string;
   focus: string;
   summary: string;
-  dispatchArcArchitect: boolean;
   dispatchWebResearcher: boolean;
 }
 

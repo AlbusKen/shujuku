@@ -34,7 +34,7 @@ function harness_ACU(patch: Partial<ContinuationWorkflowInput_ACU> = {}) {
   const input: ContinuationWorkflowInput_ACU = {
     settings: buildDefaultContinuationSettings_ACU(),
     snapshot: snapshot_ACU(),
-    opening: { focus: '守门人的回避', summary: '试探', dispatchArcArchitect: false, dispatchWebResearcher: false },
+    opening: { focus: '守门人的回避', summary: '试探', dispatchWebResearcher: false },
     hasUnsettledHistory: true,
     beatObligation: false,
     majorTurn: false,

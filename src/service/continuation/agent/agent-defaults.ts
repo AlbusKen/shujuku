@@ -602,16 +602,27 @@ const V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU = new Set([
 
 /**
  * V18 非根 system 段在 V19 时的默认正文。V20 改写了历史导语并删除了运行时段，
- * 因此不能再拿当前 MAIN_AGENT_PROMPT_ACU 做全文比对。
+ * 因此不能只拿当前原始 MAIN_AGENT_PROMPT_ACU 做全文比对。设置副本可能带着旧版本标记，
+ * 但正文已经是当前 V31 未改写默认值；这类完整默认段也应迁为 user，用户自定义正文仍不会命中。
  */
 function v19DefaultMainAgentNonRootSystemContents_ACU(): string[] {
-  return [
+  const headings = [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU]
+    .filter(heading => heading !== '【本回合运行时数据】' && heading !== '【以下是你自己的会话记录】');
+  const historical = MAIN_AGENT_PROMPT_ACU
+    .filter(segment => segment.role === 'user' && headings.some(heading => segment.content.startsWith(heading)))
+    .map(segment => segment.content);
+  const current = buildDefaultAgentMainPrompt_ACU()
+    .filter(segment => segment.role === 'user' && headings.some(heading => segment.content.startsWith(heading)))
+    .map(segment => segment.content);
+  return [...new Set([
+    ...historical,
+    ...current,
     ...MAIN_AGENT_PROMPT_ACU
-      .filter(segment => segment.role === 'user' && [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU].some(heading => heading !== '【本回合运行时数据】' && heading !== '【以下是你自己的会话记录】' && segment.content.startsWith(heading)))
+      .filter(segment => segment.content === AGENT_HISTORY_ANCHOR_TOKEN_ACU)
       .map(segment => segment.content),
     V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU,
     V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU,
-  ];
+  ])];
 }
 
 /**
@@ -695,6 +706,43 @@ export function findAgentPromptSlot_ACU(segments: readonly ContinuationPromptSeg
   return segments.find(AGENT_PROMPT_SLOT_LOCATORS_ACU[slot]);
 }
 
+/** V30 主 Agent 默认段原文。V31 迁移只接受这些完整正文，用户改写过一个字也不会被覆盖。 */
+export const V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'capabilityAnswer')!.content;
+export const V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'actionRules')!.content;
+export const V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'textProtocol')!.content;
+export const V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU = findAgentPromptSlot_ACU(MAIN_AGENT_PROMPT_ACU, 'subagentRules')!.content;
+
+/**
+ * 把仍为 V30 默认值的主 Agent 槽位升级为 V31 固定工作流语义。
+ * 调用方必须传入完整段正文；非 V30 默认值原样返回，避免覆盖用户自定义内容。
+ */
+export function migrateV30DefaultMainAgentContentToV31_ACU(content: string): string {
+  if (content === V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU) {
+    return content
+      .replace('用 open_round 把本轮交给固定工作流、按需派工 arc-architect / web-researcher / outline-architect', '用 open_round 把本轮焦点交给固定工作流、按需派工 web-researcher')
+      .replace('大纲只能由 outline-architect 产出并经运行时校验；卷级台阶由 arc-architect 维护', '总纲与阶段大纲由 open_round 固定工作流维护并经运行时校验');
+  }
+  if (content === V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU) {
+    return content
+      .replace('我每轮用 open_round 写明焦点，并决定是否派 arc-architect 或 web-researcher。', '我每轮用 open_round 写明焦点；总纲与阶段大纲由程序按状态自动维护，我只按需派工 web-researcher。')
+      .replace('我派工 arc-architect 维护总纲（patch 卷状态、改写后续台阶）', '程序在 open_round 固定工作流中维护总纲（patch 卷状态、改写后续台阶）');
+  }
+  if (content === V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU) {
+    return content
+      .replace('大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\n\n\n', '')
+      .replace('可选 summary、dispatchArcArchitect、dispatchWebResearcher', '可选 summary、dispatchWebResearcher')
+      .replace('运行时按固定顺序执行结算、策划、条件审查、容错提交、自动修复和 instruction-composer。', '运行时按固定顺序维护总纲、准备可执行阶段大纲、执行结算、策划、条件审查、容错提交、自动修复和 instruction-composer。')
+      .replace('没有大纲或阶段已完成时会被拒绝，必须先派工 outline-architect。', '没有大纲或阶段已完成时由 open_round 固定工作流先自动准备。');
+  }
+  if (content === V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU) {
+    return content
+      .replace(/0\. 总纲先行与总纲维护：[^\n]+\n1\. 大纲优先：[^\n]+\n2\. 偏差处理：[^\n]+\n/, '0. 总纲与阶段大纲由程序固定工作流维护：你只输出 open_round 的焦点，不直接 delegate arc-architect 或 outline-architect；程序会先维护总纲，再创建、继续或维护可执行阶段大纲。\n1. 偏差处理：把真实剧情与总纲或阶段大纲的偏差写进 open_round.focus，程序据此维护结构；禁止在大纲已明显失效时绕过 open_round 硬交付。\n')
+      .replace('「结算什么」「策划什么」或「大纲要怎么改」', '公开子代理要完成什么')
+      .replace('9. 一个代理最多派 2 次。', '9. arc-architect、outline-architect 与 instruction-composer 是固定工作流内部角色，不出现在可派工目录；公开代理仍遵守单代理派工上限。');
+  }
+  return content;
+}
+
 export interface AgentPromptLineageEntry_ACU {
   /** 历史默认段正文的 hashAgentPromptContent_ACU 值。 */
   hash: string;
@@ -720,6 +768,10 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
     { hash: 'b5eaeca2', length: 960, slot: 'actionRules', note: 'V17–V22 行动规则（无第 9 条节奏规则）' },
     { hash: 'be6e00a6', length: 2646, slot: 'textProtocol', note: 'V17–V22 文本协议规范（旧 finalize 骨架；V17/V18 为 system 角色）' },
     { hash: '0b9166c2', length: 1703, slot: 'subagentRules', note: 'V17–V22 子代理使用规则（无 pacing 派工约束；V17/V18 为 system 角色）' },
+    { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU), length: V30_DEFAULT_MAIN_AGENT_CAPABILITY_ANSWER_ACU.length, slot: 'capabilityAnswer', note: 'V30 模式边界答（仍允许主 Agent 直派总纲与大纲角色）' },
+    { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU), length: V30_DEFAULT_MAIN_AGENT_ACTION_RULES_ACU.length, slot: 'actionRules', note: 'V30 行动规则（仍要求主 Agent 判断并派工总纲角色）' },
+    { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU), length: V30_DEFAULT_MAIN_AGENT_TEXT_PROTOCOL_ACU.length, slot: 'textProtocol', note: 'V30 文本协议（仍暴露 dispatchArcArchitect 与大纲直派）' },
+    { hash: hashAgentPromptContent_ACU(V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU), length: V30_DEFAULT_MAIN_AGENT_SUBAGENT_RULES_ACU.length, slot: 'subagentRules', note: 'V30 子代理规则（仍由主 Agent 维护总纲与阶段大纲）' },
     { hash: '8e7599ac', length: 279, slot: 'capabilityAnswer', note: 'V29 模式边界答（主 Agent 自己派工并交付指导）' },
     { hash: '211429e3', length: 956, slot: 'actionRules', note: 'V29 行动规则（未结算时先派结算维护）' },
     { hash: '71a5cc97', length: 2047, slot: 'textProtocol', note: 'V29 文本协议（finalize 自写 instruction，无 open_round）' },
@@ -762,7 +814,10 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
 };
 
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {
-  return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
+  return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU).map(segment => ({
+    ...segment,
+    content: migrateV30DefaultMainAgentContentToV31_ACU(segment.content),
+  }));
 }
 
 export function buildDefaultAgentArcArchitectPrompt_ACU(): ContinuationPromptSegment_ACU[] {

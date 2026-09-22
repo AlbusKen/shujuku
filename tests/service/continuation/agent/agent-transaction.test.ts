@@ -277,10 +277,10 @@ describe('Agent 写集事务', () => {
     expect(() => appliedDelta_ACU(baseSnapshot_ACU(), merged, ['hooks'], 6)).toThrowError(/revision 已变化/);
   });
 
-  it('补齐不会覆盖子代理已显式声明的版本号，也不给未触碰模块补值', () => {
-    const declared = delta_ACU({ expectedRevisions: { hooks: 2 }, hooks: [hookItem_ACU()] });
-    const merged = mergeAgentDeltaRevisions_ACU(declared, { hooks: 9, infoGap: 9, constraints: 9 });
-    expect(merged.expectedRevisions).toEqual({ hooks: 2 });
+  it('运行时读版本覆盖模型自报旧版本，且不给未触碰模块补值', () => {
+    const declared = delta_ACU({ expectedRevisions: { hooks: 1, infoGap: 9 }, hooks: [hookItem_ACU()] });
+    const merged = mergeAgentDeltaRevisions_ACU(declared, { hooks: 2, infoGap: 3, constraints: 1 });
+    expect(merged.expectedRevisions).toEqual({ hooks: 2, infoGap: 9 });
     expect(appliedDelta_ACU(baseSnapshot_ACU(), merged, ['hooks'], 6).revisions.hooks).toBe(3);
   });
 
