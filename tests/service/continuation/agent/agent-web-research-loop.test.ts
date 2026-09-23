@@ -124,7 +124,11 @@ const RESEARCH_REPLIES_ACU = [
 
 describe('开场百科检索', () => {
   it('功能开启且新任务资料库为空时，先跑 web-researcher 写入资料库，主 Agent 第一次调用就能在运行时快照里看到预览', async () => {
-    const h = harness_ACU({ enabled: true, mainReplies: ['{"action":"block","reason":"测试到此为止"}'], subReplies: RESEARCH_REPLIES_ACU });
+    const sqlReply = JSON.stringify({
+      summary: '入库 1 条',
+      sql: "INSERT INTO web_refs (page_ref, name, brief, tags, detail, expected_revision) VALUES ('P1', '鲁迪乌斯·格雷拉特', '《无职转生》主角，转生的前尼特魔术师。', '[\"人物\"]', '身份：布耶纳村贵族长男。能力：帝级土系魔术。', 0);",
+    });
+    const h = harness_ACU({ enabled: true, mainReplies: ['{"action":"block","reason":"测试到此为止"}'], subReplies: [...RESEARCH_REPLIES_ACU.slice(0, 2), sqlReply] });
     await expect(h.planner.plan(h.request)).rejects.toBeInstanceOf(Error);
 
     // 子代理三次调用：搜 → 读 → 契约；出网工具走假客户端。
@@ -134,6 +138,7 @@ describe('开场百科检索', () => {
     // 首轮提示词带出网工具说明与开场任务；第二轮工具结果带候选与精读指令；第三轮带页面句柄。
     const first = h.subCalls[0].map(message => message.content).join('\n');
     expect(first).toContain('encyclopedia_search');
+    expect(first).toContain('INSERT INTO web_refs');
     expect(first).toContain('开场检索');
     expect(first).toContain('本次派工最多 3 页');
     const second = h.subCalls[1].map(message => message.content).join('\n');
@@ -209,6 +214,49 @@ describe('开场百科检索', () => {
     const second = h.mainCalls[1].map(message => message.content).join('\n');
     expect(second).toContain('百科资料库：新增/更新 1 条');
     expect(second).toContain('派工：已用 1 / 6');
+  });
+
+  it('web-researcher 的 SQL DELETE 经派工和领域事务退役已有百科条目', async () => {
+    const seeded: AgentModuleSnapshot_ACU = {
+      ...buildEmptyAgentModuleSnapshot_ACU(),
+      settledThroughIndex: 0,
+      webRefs: [{
+        id: 'WR-001', title: '旧资料', source: 'web', url: 'https://example.com/entry',
+        query: '', tags: [], brief: '旧资料', summary: '需要退役', sourceStatus: 'ok',
+        fetchedAt: 1, retired: false, retiredReason: '',
+      }],
+    };
+    const h = harness_ACU({
+      enabled: true,
+      context: runningContext_ACU,
+      snapshot: seeded,
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"退役失效资料","reads":[]}]}',
+        '{"action":"finalize","instruction":"继续推进","summary":"ok"}',
+      ],
+      subReplies: [JSON.stringify({ summary: '退役失效资料', sql: "DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 0;" })],
+    });
+    await h.planner.plan(h.request);
+    expect(h.written).toHaveLength(1);
+    expect(h.snapshot().webRefs[0]).toMatchObject({ id: 'WR-001', retired: true, retiredReason: '来源失效' });
+    expect(h.snapshot().revisions.webRefs).toBe(1);
+  });
+
+  it('SQL DELETE 声明的 revision 与派工读取快照不符时不退役资料', async () => {
+    const seeded: AgentModuleSnapshot_ACU = {
+      ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 0,
+      webRefs: [{ id: 'WR-001', title: '旧资料', source: 'web', url: 'https://example.com/entry', query: '', tags: [], brief: '旧资料', summary: '待核验', sourceStatus: 'ok', fetchedAt: 1, retired: false, retiredReason: '' }],
+    };
+    const h = harness_ACU({
+      enabled: true, context: runningContext_ACU, snapshot: seeded,
+      mainReplies: ['{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"退役失效资料","reads":[]}]}', '{"action":"finalize","instruction":"继续推进","summary":"ok"}'],
+      subReplies: [JSON.stringify({ summary: '退役失效资料', sql: "DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 1;" })],
+    });
+    await h.planner.plan(h.request);
+    expect(h.subCalls).toHaveLength(2);
+    expect(h.subCalls[1].map(message => message.content).join('\n')).toContain('web_refs SQL expected_revision 与派工读集 revision 不一致');
+    expect(h.written).toHaveLength(0);
+    expect(h.snapshot().webRefs[0]).toMatchObject({ id: 'WR-001', retired: false });
   });
 
   it('契约引用了不存在的页面句柄时回灌可用句柄清单让子代理修正', async () => {

@@ -111,8 +111,8 @@ function acceptedPatchKeys_ACU(patch: Record<string, unknown>): string[] {
     if (!module) continue;
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const record = value as Record<string, unknown>;
-      const items = Array.isArray(record.upsert) ? record.upsert : Array.isArray(record.append) ? record.append : null;
-      if (items) {
+      const items = [...(Array.isArray(record.upsert) ? record.upsert : []), ...(Array.isArray(record.append) ? record.append : []), ...(Array.isArray(record.remove) ? record.remove : [])];
+      if (items.length) {
         items.forEach((item, index) => {
           const id = item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).id === 'string'
             ? String((item as Record<string, unknown>).id).trim()
@@ -192,21 +192,26 @@ function salvageCandidateOutcome_ACU(
       continue;
     }
     const base = { ...payload, patch: { [rawModule]: rawPatch } };
-    if (ITEM_PATCH_MODULES_ACU.has(module) && rawPatch && typeof rawPatch === 'object' && !Array.isArray(rawPatch) && Array.isArray((rawPatch as Record<string, unknown>).upsert)) {
+    if (ITEM_PATCH_MODULES_ACU.has(module) && rawPatch && typeof rawPatch === 'object' && !Array.isArray(rawPatch) && (Array.isArray((rawPatch as Record<string, unknown>).upsert) || Array.isArray((rawPatch as Record<string, unknown>).remove))) {
       const record = rawPatch as Record<string, unknown>;
-      const acceptedItems: unknown[] = [];
-      (record.upsert as unknown[]).forEach((item, index) => {
-        const id = item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).id === 'string' ? String((item as Record<string, unknown>).id).trim() : '';
-        try {
-          parseWorldSimulationSpecialistResult_ACU({ ...payload, patch: { [rawModule]: { upsert: [item] } } }, snapshot);
-          acceptedItems.push(item);
-        } catch (error) {
-          issues.push(issue_ACU(module, 'contract_rejected', error, `$.patch.${rawModule}.upsert[${index}]`, id));
-        }
-      });
-      const extra = Object.keys(record).filter(key => key !== 'upsert');
+      const acceptedItems: Record<string, unknown[]> = {};
+      for (const kind of ['upsert', 'remove'] as const) {
+        if (!Array.isArray(record[kind])) continue;
+        const accepted: unknown[] = [];
+        (record[kind] as unknown[]).forEach((item, index) => {
+          const id = item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).id === 'string' ? String((item as Record<string, unknown>).id).trim() : '';
+          try {
+            parseWorldSimulationSpecialistResult_ACU({ ...payload, patch: { [rawModule]: { [kind]: [item] } } }, snapshot);
+            accepted.push(item);
+          } catch (error) {
+            issues.push(issue_ACU(module, 'contract_rejected', error, `$.patch.${rawModule}.${kind}[${index}]`, id));
+          }
+        });
+        if (accepted.length) acceptedItems[kind] = accepted;
+      }
+      const extra = Object.keys(record).filter(key => key !== 'upsert' && key !== 'remove');
       if (extra.length) issues.push({ module, source: 'contract_rejected', path: `$.patch.${rawModule}.${extra[0]}`, message: `模块 patch 含未授权字段：${extra.join(',')}` });
-      if (acceptedItems.length) acceptedPatch[rawModule] = { upsert: acceptedItems };
+      if (Object.keys(acceptedItems).length) acceptedPatch[rawModule] = acceptedItems;
       continue;
     }
     try {

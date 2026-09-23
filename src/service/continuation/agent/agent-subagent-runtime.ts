@@ -650,6 +650,9 @@ export class AgentSubagentRuntime_ACU {
         if (isResearch) {
           const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU.research);
           const draft = parseAgentResearcherOutput_ACU(payload);
+          if (payload.sql !== undefined && draft.expectedRevision !== undefined && draft.expectedRevision !== readRevisions.webRefs) {
+            throw new Error(`web_refs SQL expected_revision 与派工读集 revision 不一致：声明 ${draft.expectedRevision}，读集 ${readRevisions.webRefs}`);
+          }
           const researcher = resolveResearcherDraft_ACU(draft, pageCache);
           return {
             agentName: definition.name,
@@ -671,6 +674,14 @@ export class AgentSubagentRuntime_ACU {
         if (contractKind) {
           const draft = parseAgentJsonPayloadDraft_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
+          if (draft.payload.sql !== undefined) {
+            for (const [module, revision] of Object.entries(parsed.output.delta.expectedRevisions)) {
+              const readRevision = readRevisions[module as keyof AgentModuleRevisions_ACU];
+              if (revision !== readRevision) {
+                throw new Error(`${module} SQL expected_revision 与派工读集 revision 不一致：声明 ${revision}，读集 ${readRevision}`);
+              }
+            }
+          }
           accumulated = accumulated ? mergeAgentMaintainerOutputs_ACU(accumulated, parsed.output) : parsed.output;
           // 上一轮被拒的条目：本轮重发了合法版本即清偿；没有 id 的条目无法匹配，本轮过后不再追讨。
           const nowAccepted = acceptedKeys(parsed.output);

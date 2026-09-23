@@ -121,14 +121,17 @@ describe('世界推演 Agent 协议', () => {
     });
   });
 
-  it('specialist 协议拒绝回灌包含角色、枚举、写入范围与合法模板', () => {
+  it('specialist 协议拒绝回灌包含角色、受限 SQL 写入范围与合法模板', () => {
     const message = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'INVALID_SPECIALIST_STATUS', path: '$.status', expected: 'candidate | no_change | failed | blocked', actual: 'success' }, 'timekeeper', ['clock']);
     expect(message).toContain('status 必须精确为 candidate、no_change、failed、blocked');
     expect(message).toContain('agentName 必须精确为 timekeeper');
-    expect(message).toContain('patch 顶层只能使用：clock');
+    expect(message).toContain('sql 只允许写：clock');
     expect(message).toContain('"status":"candidate"');
-    expect(message).toContain('expectedRevision 可省略');
-    expect(message).toContain('新建 0');
+    expect(message).toContain('expected_revision');
+    expect(message).toContain('UPDATE clock');
+    const chroniclerMessage = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'SQL_WHERE_FORBIDDEN', path: '$.sql.where.expected_revision', expected: 'only supported WHERE conditions', actual: 'expected_revision' }, 'chronicler', ['chronicle']);
+    expect(chroniclerMessage).toContain('chronicle 仅允许 INSERT 或 DELETE，DELETE WHERE 只带 id、reason，不带 expected_revision');
+    expect(chroniclerMessage).toContain('数组模块 UPDATE/DELETE 的 WHERE 必须带 id、expected_revision');
   });
 
   it('reviewer 协议拒绝回灌明确 verdict、finding 结构与三种合法模板', () => {
@@ -188,12 +191,12 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('evidenceRefs 只允许出现在 finalize 顶层');
   });
 
-  it('初始提示词即声明 specialist upsert/expectedRevision 契约与 director 动作字段白名单', () => {
+  it('初始提示词声明受限 SQL DML 与 director 动作字段白名单', () => {
     const specialist = worldSimulationSpecialistProtocolInstruction_ACU('chronicler', ['chronicle']);
-    expect(specialist).toContain('"upsert"');
-    expect(specialist).toContain('expectedRevision 可省略');
+    expect(specialist).toContain('INSERT');
+    expect(specialist).toContain('expected_revision 可省略');
     expect(specialist).toContain('新建默认 0');
-    expect(specialist).toContain('当前 revision');
+    expect(specialist).toContain('账本 revision');
     expect(specialist).toContain('可只提交变更字段');
     expect(specialist).toContain('字段纪律：dimensions 必须给 id,name');
     const noWrite = worldSimulationSpecialistProtocolInstruction_ACU('lore-researcher', []);
@@ -205,13 +208,14 @@ describe('世界推演 Agent 协议', () => {
     expect(director).toContain('block 只能包含 action、reason、unresolved');
   });
 
-  it('默认提示词模板已接线 specialist upsert 契约与 director 字段白名单', () => {
+  it('默认提示词模板已接线 specialist SQL 契约与 director 字段白名单', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const specialist = prompts['undercurrent-analyst'].map(segment => segment.content).join('\n');
-    expect(specialist).toContain('expectedRevision 可省略');
+    expect(specialist).toContain('expected_revision 可省略');
     expect(specialist).toContain('新建默认 0');
     expect(specialist).toContain('字段纪律：dimensions 必须给 id,name');
     expect(specialist).toContain('可只提交变更字段');
+    expect(specialist).toContain('INSERT INTO');
     const director = prompts['world-director'].map(segment => segment.content).join('\n');
     expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');
     expect(director).toContain('block 只能包含 action、reason、unresolved');
@@ -269,5 +273,36 @@ describe('世界推演 Agent 协议', () => {
       patch: { chronicleArchive: { archiveEntries: [{ archiveRef: 'arc-1' }], overviewRows: [] } },
       summary: '空目录', evidenceRefs: [ref], uncertainties: [],
     }, snapshot)).toThrowError(/INVALID_SPECIALIST_PATCH/);
+  });
+
+  it('SQL 写集进入既有 specialist 契约，保留数组、单例、编年及归档字段', () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('sql-protocol');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
+    const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    const parse = (agentName: string, sql: string, evidenceRefs = [ref]) => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName, sql, summary: '写入', evidenceRefs, uncertainties: [] }, snapshot);
+    expect(parse('undercurrent-analyst', "INSERT INTO dimensions (id, name, evidence_refs) VALUES ('d1', '压力', '[\"" + ref + "\"]'); UPDATE dimensions SET value = 3 WHERE id = 'd2' AND expected_revision = 1; DELETE FROM dimensions WHERE id = 'd3' AND reason = '过期' AND expected_revision = 2;")).toMatchObject({ patch: { dimensions: { upsert: [{ id: 'd1', name: '压力', evidenceRefs: [ref] }, { id: 'd2', value: 3, expectedRevision: 1 }], remove: [{ id: 'd3', reason: '过期', expectedRevision: 2 }] } } });
+    expect(parse('timekeeper', "UPDATE clock SET days = 1, story_time = '次日' WHERE expected_revision = 0;")).toMatchObject({ patch: { clock: { days: 1, storyTime: '次日', expectedRevision: 0 } } });
+    expect(parse('chronicler', "INSERT INTO chronicle (summary) VALUES ('一件事'); DELETE FROM chronicle WHERE id = 'ch1' AND reason = '重复'; INSERT INTO chronicle_archive (archive_ref, day, summary) VALUES ('arc1', 1, '归档'); INSERT INTO chronicle_overview (archive_ref, day, one_line) VALUES ('arc1', 1, '摘要');")).toMatchObject({ patch: { chronicle: { append: [{ summary: '一件事' }], remove: [{ id: 'ch1', reason: '重复' }] }, chronicleArchive: { archiveEntries: [{ archiveRef: 'arc1', day: 1, summary: '归档' }], overviewRows: [{ archiveRef: 'arc1', day: 1, oneLine: '摘要' }] } } });
+    expect(() => parse('timekeeper', "UPDATE clock SET days = 1 WHERE expected_revision = 0;", ['forged'])).toThrowError(/EVIDENCE_REF_UNAUTHORIZED/);
+  });
+
+  it('SQL 写入拒绝未知表列、丢弃条件、错误 revision 与混合写集，并提供结构化诊断', () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('sql-rejection');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'ledger:current', status: 'ok', summary: '当前账本', exact: true }).evidenceRef!;
+    const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
+    const parse = (sql: string, extras = {}) => parseWorldSimulationSpecialistResult_ACU({ status: 'candidate', agentName: 'timekeeper', sql, summary: '候选', evidenceRefs: [ref], uncertainties: [], ...extras }, snapshot);
+    for (const [sql, reasonCode] of [
+      ["INSERT INTO secrets (id) VALUES ('x')", 'SQL_TABLE_FORBIDDEN'],
+      ["DELETE FROM constructor WHERE id = 'x' AND reason = '不可写' AND expected_revision = 0", 'SQL_TABLE_FORBIDDEN'],
+      ["UPDATE clock SET arbitrary = 1 WHERE expected_revision = 0", 'SQL_COLUMN_FORBIDDEN'],
+      ["UPDATE clock SET days = 1 WHERE expected_revision = 0 AND id = 'x'", 'SQL_WHERE_FORBIDDEN'],
+      ["UPDATE clock SET days = 1 WHERE expected_revision = NULL", 'SQL_REVISION_INVALID'],
+      ['DROP TABLE clock', 'SQL_INVALID'],
+    ] as const) {
+      let error: unknown;
+      try { parse(sql); } catch (caught) { error = caught; }
+      expect(compactWorldSimulationProtocolError_ACU(error).reasonCode, sql).toBe(reasonCode);
+    }
+    expect(() => parse("UPDATE clock SET days = 1 WHERE expected_revision = 0", { patch: { clock: { days: 1 } } })).toThrowError(/SQL_PATCH_AMBIGUOUS/);
   });
 });

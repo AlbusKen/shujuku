@@ -44,6 +44,17 @@ function resolveDynamics_ACU(settings?: WorldSimulationSettings_ACU): WorldSimul
   return settings?.dynamics ?? buildDefaultWorldSimulationSettings_ACU().dynamics;
 }
 
+function singletonPatch_ACU(raw: unknown, revision: number, module: string): unknown {
+  if (!isRecord_ACU(raw) || !Object.prototype.hasOwnProperty.call(raw, 'expectedRevision')) return raw;
+  const expected = raw.expectedRevision;
+  if (typeof expected !== 'number' || !Number.isInteger(expected) || expected < 0) {
+    fail_ACU(`patch.${module}.expectedRevision 必须是非负整数`, { path: `patch.${module}.expectedRevision` });
+  }
+  if (expected !== revision) revisionFail_ACU(`patch.${module} 账本 revision 冲突`, { expectedRevision: expected, actualRevision: revision, revisionConflict: true });
+  const { expectedRevision: _expectedRevision, ...patch } = raw;
+  return patch;
+}
+
 function applyUpserts_ACU<T extends { id: string; revision: number }>(
   current: readonly T[],
   raw: unknown,
@@ -65,17 +76,48 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(
     return current.map(item => clone_ACU(item));
   }
   if (onViolation) {
-    for (const key of Object.keys(raw)) if (key !== 'upsert') reject(`${path} 存在未知字段`, { path: `${path}.${key}`, severity: 'blocking' });
+    for (const key of Object.keys(raw)) if (key !== 'upsert' && key !== 'remove') reject(`${path} 存在未知字段`, { path: `${path}.${key}`, severity: 'blocking' });
   } else {
-    exactKeys_ACU(raw, ['upsert'], path);
+    exactKeys_ACU(raw, ['upsert', 'remove'], path);
   }
-  if (!Array.isArray(raw.upsert) || raw.upsert.length === 0) {
-    reject(`${path}.upsert 必须是非空数组`);
+  const upserts = raw.upsert === undefined ? [] : raw.upsert;
+  const removals = raw.remove === undefined ? [] : raw.remove;
+  if (!Array.isArray(upserts) || !Array.isArray(removals) || (!upserts.length && !removals.length)) {
+    reject(`${path} 必须包含非空 upsert 或 remove 数组`);
     return current.map(item => clone_ACU(item));
   }
   const result = current.map(item => clone_ACU(item));
   const seen = new Set<string>();
-  for (const [index, item] of raw.upsert.entries()) {
+  for (const [index, removal] of removals.entries()) {
+    const itemPath = `${path}.remove[${index}]`;
+    if (!isRecord_ACU(removal)) {
+      reject(`${itemPath} 必须是对象`, { path: itemPath, severity: 'blocking' });
+      continue;
+    }
+    const id = typeof removal.id === 'string' ? removal.id.trim() : '';
+    const reason = typeof removal.reason === 'string' ? removal.reason.trim() : '';
+    const expected = coerceWorldSimulationInteger_ACU(removal.expectedRevision);
+    const existingIndex = id ? result.findIndex(entry => entry.id === id) : -1;
+    if (!id || !reason || !expected.ok || expected.value < 0) {
+      reject(`${itemPath} 必须包含非空 id/reason 与非负整数 expectedRevision`, { path: itemPath, severity: 'blocking' });
+      continue;
+    }
+    if (seen.has(id)) {
+      reject(`${path} 对同一 ID 重复写入`, { id, path: itemPath, severity: 'blocking' });
+      continue;
+    }
+    if (existingIndex < 0) {
+      reject(`${itemPath}.id 不存在`, { id, path: `${itemPath}.id`, severity: 'blocking' });
+      continue;
+    }
+    if (result[existingIndex].revision !== expected.value) {
+      reject(`${itemPath} 条目 revision 冲突`, { id, expectedRevision: expected.value, actualRevision: result[existingIndex].revision, revisionConflict: true, path: itemPath, severity: 'blocking' });
+      continue;
+    }
+    seen.add(id);
+    result.splice(existingIndex, 1);
+  }
+  for (const [index, item] of upserts.entries()) {
     const itemPath = `${path}.upsert[${index}]`;
     const existingIndex = isRecord_ACU(item) && typeof item.id === 'string' && item.id.trim() ? result.findIndex(entry => entry.id === item.id) : -1;
     const existing = existingIndex < 0 ? null : result[existingIndex] as unknown as Record_ACU;
@@ -98,7 +140,7 @@ function applyUpserts_ACU<T extends { id: string; revision: number }>(
     if (blocked || !normalized.item) continue;
     const id = String(normalized.item.id);
     if (seen.has(id)) {
-      if (reject(`${path}.upsert 存在重复 ID`, { id, severity: 'blocking' })) continue;
+      if (reject(`${path} 对同一 ID 重复写入`, { id, path: itemPath, severity: 'blocking' })) continue;
     }
     seen.add(id);
     if (existingIndex < 0) result.push(normalized.item as T);
@@ -226,10 +268,25 @@ function applyChronicle_ACU(
   clock: WorldSimulationLedger_ACU['clock'],
 ): WorldSimulationLedger_ACU['chronicle'] {
   if (!isRecord_ACU(raw)) fail_ACU('patch.chronicle 必须是对象');
-  exactKeys_ACU(raw, ['append'], 'patch.chronicle');
-  if (!Array.isArray(raw.append) || raw.append.length === 0) fail_ACU('patch.chronicle.append 必须是非空数组');
-  const taken = new Set(current.map(item => item.id));
-  const appended = raw.append.map((item, index) => {
+  exactKeys_ACU(raw, ['append', 'remove'], 'patch.chronicle');
+  const append = raw.append === undefined ? [] : raw.append;
+  const remove = raw.remove === undefined ? [] : raw.remove;
+  if (!Array.isArray(append) || !Array.isArray(remove) || (!append.length && !remove.length)) fail_ACU('patch.chronicle 必须包含非空 append 或 remove 数组');
+  const removedIds = new Set<string>();
+  for (const [index, item] of remove.entries()) {
+    const path = `patch.chronicle.remove[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`);
+    exactKeys_ACU(item, ['id', 'reason'], path);
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const reason = typeof item.reason === 'string' ? item.reason.trim() : '';
+    if (!id || !reason) fail_ACU(`${path} 必须包含非空 id 与 reason`);
+    if (removedIds.has(id)) fail_ACU(`${path}.id 重复`, { id });
+    if (!current.some(entry => entry.id === id)) fail_ACU(`${path}.id 不存在`, { id });
+    removedIds.add(id);
+  }
+  const retained = current.filter(item => !removedIds.has(item.id));
+  const taken = new Set(retained.map(item => item.id));
+  const appended = append.map((item, index) => {
     const path = `patch.chronicle.append[${index}]`;
     if (!isRecord_ACU(item)) fail_ACU(`${path} 必须是对象`);
     const summary = typeof item.summary === 'string' ? item.summary.trim() : '';
@@ -249,7 +306,7 @@ function applyChronicle_ACU(
     if (!evidence.ok) fail_ACU(`${path}.evidenceRefs 必须是字符串数组`);
     return { id, at, summary, relatedIds: related.value, evidenceRefs: evidence.value };
   });
-  return [...clone_ACU(current), ...appended];
+  return [...clone_ACU(retained), ...appended];
 }
 
 const ARCHIVE_REF_RE_ACU = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -561,14 +618,14 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
       };
       try {
         switch (module) {
-          case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
+          case 'clock': next.clock = applyClock_ACU(next.clock, singletonPatch_ACU(patch, validatedBase.revision, module), dynamics); break;
           case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collect); break;
           case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collect); break;
           case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collect); break;
           case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
-          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch, next, context?.anchorMessage ?? ''); break;
+          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, singletonPatch_ACU(patch, validatedBase.revision, module), next, context?.anchorMessage ?? ''); break;
           case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collect); break;
-          case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
+          case 'player': next.player = applyPlayer_ACU(next.player, singletonPatch_ACU(patch, validatedBase.revision, module)); break;
           case 'chronicleArchive': {
             const archived = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day);
             next.chronicleOverview = archived.overview;
@@ -850,14 +907,14 @@ export function preflightWorldSimulationCandidates_ACU(
       };
       try {
         switch (module) {
-          case 'clock': next.clock = applyClock_ACU(next.clock, patch, dynamics); break;
+          case 'clock': next.clock = applyClock_ACU(next.clock, singletonPatch_ACU(patch, validatedBase.revision, module), dynamics); break;
           case 'dimensions': next.dimensions = applyUpserts_ACU(next.dimensions, patch, 'patch.dimensions', 'dimensions', next.clock.day, collectUpsert); break;
           case 'seeds': next.seeds = applyUpserts_ACU(next.seeds, patch, 'patch.seeds', 'seeds', next.clock.day, collectUpsert); break;
           case 'actors': next.actors = applyUpserts_ACU(next.actors, patch, 'patch.actors', 'actors', next.clock.day, collectUpsert); break;
           case 'chronicle': next.chronicle = applyChronicle_ACU(next.chronicle, patch, next.clock); break;
-          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, patch, next); break;
+          case 'guidance': next.guidance = applyGuidance_ACU(next.guidance, singletonPatch_ACU(patch, validatedBase.revision, module), next); break;
           case 'rumors': next.rumors = applyUpserts_ACU(next.rumors, patch, 'patch.rumors', 'rumors', next.clock.day, collectUpsert); break;
-          case 'player': next.player = applyPlayer_ACU(next.player, patch); break;
+          case 'player': next.player = applyPlayer_ACU(next.player, singletonPatch_ACU(patch, validatedBase.revision, module)); break;
           case 'chronicleArchive': next.chronicleOverview = applyChronicleArchive_ACU(next.chronicleOverview, patch, next.clock.day).overview; break;
         }
       } catch (error) {

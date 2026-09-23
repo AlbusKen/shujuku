@@ -785,10 +785,12 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
     { hash: 'fcf65a8c', length: 688, slot: 'task', note: 'V22 总纲任务段（无用户初始要求与完整阶段大纲注入）' },
     { hash: 'bddf4a96', length: 828, slot: 'task', note: 'V23 总纲任务段（自检清单未含卷级容量项）' },
     { hash: '87e7fe96', length: 934, slot: 'task', note: 'V28 总纲任务段（【用户初始要求】/$USER_INTENT）' },
+    { hash: '0802fec7', length: 2273, slot: 'outputContract', note: 'V32 总纲 JSON 写集协议' },
   ],
   maintainer: [
     { hash: '1a711ac0', length: 516, slot: 'task', note: 'V28 结算任务段（尚未固定注入累计用户要求）' },
     { hash: '159b622e', length: 553, slot: 'task', note: 'V31 结算任务段（尚未固化 readerKnown / characterKnowledge 知识渠道纪律）' },
+    { hash: '5a04f739', length: 1141, slot: 'outputContract', note: 'V32 结算 JSON 写集协议' },
   ],
   mainlinePlanner: [
     { hash: '11188ac7', length: 559, slot: 'task', note: 'V17–V22 主线策划任务段（无完整阶段大纲注入，看不到本轮 pacing）' },
@@ -814,6 +816,7 @@ export const AGENT_PROMPT_DEFAULT_LINEAGE_ACU: Record<keyof ContinuationAgentPro
   ],
   webResearcher: [
     { hash: '2d46cb2a', length: 606, slot: 'task', note: 'V28 网页检索任务段（【用户初始要求】/$USER_INTENT）' },
+    { hash: '668cfc48', length: 983, slot: 'outputContract', note: 'V32 网页资料 JSON 写集协议' },
   ],
   instructionComposer: [
     { hash: '30330e60', length: 309, slot: 'task', note: 'V31 指令编排任务段（尚未把知识边界写入正文模型指令）' },
@@ -841,6 +844,26 @@ function appendContinuationInformationBoundaryRule_ACU(
   ));
 }
 
+/** SQL 响应协议改变写集语法，不得连带抹掉旧版总纲的叙事/卷级业务纪律。 */
+const CONTINUATION_SQL_ARC_RULES_ACU = [
+  '结构规则：scope=story 全局只能有一条活跃条目；修改方向使用 UPDATE，不要另建。开局立总纲或全量重构时，卷数必须遵守【总纲卷数计划】：短线 7–8 卷、中线 10–14 卷、长线 20 卷，或自定义精确卷数。资料不足可将远期卷标记为待定方向，不得缩减卷数。',
+  'volume 的 direction 须交代本卷主目标、主角的选择或行动、服务主线的副线和压力来源；escalation 须承接前卷、描述中段风险或反转、高潮兑现和不可逆的卷末局面。stageNumbers 只记录真实完成的阶段，单个阶段完成不能直接把卷设为 done。',
+  '仅在正文到达可判定收束状态时，UPDATE 卷状态为 done，且给出 completionStageNumber、completionState；容量偏离 targetStageRange 时给出 completionRationale。每次 INSERT volume 必须给 narrativeRole、targetStageRange、targetTimeSpan、progressCeiling、sustainingThreads、payoffTargets；续卷给 continuationRationale，说明由上一卷的后果推出。',
+  '只更新变化的字段；漏写不等于删除。DELETE 必须有理由，并由事务检查是否破坏唯一 active 卷、卷序及已发生正文。',
+].join('\n');
+
+const CONTINUATION_SQL_OUTPUT_CONTRACTS_ACU = {
+  arcArchitect: '我的最终交付是一个 JSON 对象：{"summary":"本次总纲变更","sql":"INSERT INTO story_arc (id, scope, title, direction, escalation, status, expected_revision) VALUES (\'VOL-01\', \'volume\', \'标题\', \'方向\', \'台阶\', \'active\', 0);"}。只在 sql 字段用受限原生 SQL INSERT/UPDATE/DELETE 表达资料写集；不输出 delta。UPDATE story_arc SET stage_numbers = \'[1,2]\' WHERE id = \'VOL-01\' AND expected_revision = 0；DELETE FROM story_arc WHERE id = \'VOL-01\' AND reason = \'废依据\' AND expected_revision = 0。新增卷仍须具备卷级容量、兑现目标等完整字段。',
+  maintainer: '我的最终交付是一个 JSON 对象：{"summary":"本次结算与轮目标达成度","sql":"INSERT INTO hooks (id, summary, status, importance, planted_index, expected_revision) VALUES (\'H1\', \'伏笔\', \'planted\', \'mid\', 1, 0);"}。资料写集只能放 sql，不输出 delta。允许表 hooks、info_gap、chronology、story_arc、constraint_proposals；UPDATE 仅改已有条目实际变化字段，WHERE 必须有 id 与 expected_revision；DELETE 必须有 id、非空 reason 与 expected_revision，服务端按 retire 校验。chronology 的 UPDATE 必须提交完整 anchor、elapsed、precision、transition、evidence_indexes。info_gap 分清 objective_fact、reader_known、character_knowledge 与逐角色真实知识渠道。',
+  webResearcher: '我的最终交付是一个 JSON 对象：{"summary":"本次检索结果","sql":"INSERT INTO web_refs (page_ref, name, brief, detail, expected_revision) VALUES (\'P1\', \'实体名\', \'一句简介\', \'页面证据摘要\', 0);"}。资料写集只能放 sql，不输出 delta；只允许 web_refs 表。UPDATE 已有条目时需在 SET 提交完整 page_ref、name、brief，WHERE 指定 id 与 expected_revision；DELETE FROM web_refs WHERE id = \'WR-001\' AND reason = \'过时依据\' AND expected_revision = 0。page_ref 必须来自本轮工具结果；原文不入库。',
+} as const;
+
+function withContinuationSqlContract_ACU<T extends keyof typeof CONTINUATION_SQL_OUTPUT_CONTRACTS_ACU>(role: T, segments: ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  return segments.map(segment => findAgentPromptSlot_ACU([segment], 'outputContract')
+    ? { ...segment, content: `${CONTINUATION_SQL_OUTPUT_CONTRACTS_ACU[role]}${role === 'arcArchitect' ? `\n\n${CONTINUATION_SQL_ARC_RULES_ACU}` : ''}\n\nSQL 仅允许单引号字符串（内部单引号写为两个单引号）、有限数字和 NULL；数组与对象用单引号包裹 JSON 文本。字段使用 snake_case，不允许 SELECT、DDL、函数或子查询。只写授权表和字段，expected_revision 不符、证据不足或越权均会被领域事务拒绝。资料不足先 read/search，再交最终 JSON；JSON 之外不输出解释。` }
+    : segment);
+}
+
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU).map(segment => ({
     ...segment,
@@ -849,11 +872,11 @@ export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU
 }
 
 export function buildDefaultAgentArcArchitectPrompt_ACU(): ContinuationPromptSegment_ACU[] {
-  return cloneAgentPromptSegments_ACU(ARC_ARCHITECT_PROMPT_ACU);
+  return withContinuationSqlContract_ACU('arcArchitect', cloneAgentPromptSegments_ACU(ARC_ARCHITECT_PROMPT_ACU));
 }
 
 export function buildDefaultAgentMaintainerPrompt_ACU(): ContinuationPromptSegment_ACU[] {
-  return appendContinuationInformationBoundaryRule_ACU('maintainer', MAINTAINER_PROMPT_ACU);
+  return withContinuationSqlContract_ACU('maintainer', appendContinuationInformationBoundaryRule_ACU('maintainer', MAINTAINER_PROMPT_ACU));
 }
 
 export function buildDefaultAgentMainlinePlannerPrompt_ACU(): ContinuationPromptSegment_ACU[] {
@@ -873,7 +896,7 @@ export function buildDefaultAgentFinalReviewerPrompt_ACU(): ContinuationPromptSe
 }
 
 export function buildDefaultAgentWebResearcherPrompt_ACU(): ContinuationPromptSegment_ACU[] {
-  return cloneAgentPromptSegments_ACU(WEB_RESEARCHER_PROMPT_ACU);
+  return withContinuationSqlContract_ACU('webResearcher', cloneAgentPromptSegments_ACU(WEB_RESEARCHER_PROMPT_ACU));
 }
 
 export function buildDefaultAgentInstructionComposerPrompt_ACU(): ContinuationPromptSegment_ACU[] {

@@ -7,6 +7,7 @@ import {
   parseAgentMainAction_ACU,
   parseAgentMainOutput_ACU,
   parseAgentMaintainerOutput_ACU,
+  parseAgentResearcherOutput_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
   parseAgentComposerOutput_ACU,
@@ -249,6 +250,50 @@ describe('子代理输出解析', () => {
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, transition: '' }] } })).toThrowError(/transition 不能为空/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, id: '' }] } })).toThrowError(/需要非空 id/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: '不是数组' } })).toThrowError(/delta\.chronology 必须是数组/);
+  });
+
+  it('受限 SQL 写集映射为维护事务，保留修订号、信息边界与显式退役', () => {
+    const parsed = parseAgentMaintainerOutput_ACU({
+      summary: '结算',
+      sql: "INSERT INTO info_gap (id, topic, objective_fact, reader_known, character_knowledge, expected_revision) VALUES ('E2', '密信', '藏于木匣', '只见木匣', '[{\"name\":\"阿锦\",\"knows\":\"亲眼见到木匣\"}]', 2); UPDATE hooks SET summary = '新证据' WHERE id = 'H1' AND expected_revision = 3; DELETE FROM hooks WHERE id = 'H2' AND reason = '已被推翻' AND expected_revision = 3;",
+    });
+    expect(parsed.delta.expectedRevisions).toMatchObject({ infoGap: 2, hooks: 3 });
+    expect(parsed.delta.infoGap[0]).toMatchObject({ objectiveFact: '藏于木匣', readerKnown: '只见木匣', characterKnowledge: [{ name: '阿锦', knows: '亲眼见到木匣' }] });
+    expect(parsed.delta.hookPatches).toEqual([{ id: 'H1', summary: '新证据' }]);
+    expect(parsed.delta.hooks).toEqual([expect.objectContaining({ action: 'retire', id: 'H2', reason: '已被推翻' })]);
+  });
+
+  it('SQL 拒绝越权、未知字段、额外 WHERE、混用 JSON 写集和非法修订号', () => {
+    const parse = (sql: string) => parseAgentMaintainerOutput_ACU({ summary: '测试', sql });
+    expect(() => parse("INSERT INTO web_refs (name) VALUES ('越权')")).toThrow(/无权/);
+    expect(() => parse("INSERT INTO hooks (arbitrary) VALUES ('值')")).toThrow(/白名单/);
+    expect(() => parse("UPDATE hooks SET summary = '假' WHERE id = 'H1' AND reason = '忽略' AND expected_revision = 0")).toThrow(/WHERE 不允许/);
+    expect(() => parse("DELETE FROM hooks WHERE id = 'H1' AND reason = '删' AND expected_revision = -1")).toThrow(/非负整数/);
+    expect(() => parseAgentMaintainerOutput_ACU({ sql: "DELETE FROM hooks WHERE id = 'H1' AND reason = '删'", delta: {} })).toThrow(/不能同时包含/);
+    expect(() => parse(' ; ; ')).toThrow(/空写集/);
+    expect(() => parseAgentResearcherOutput_ACU({ sql: ' ; ; ' })).toThrow(/空写集/);
+    expect(() => parseAgentMaintainerOutput_ACU({ sql: "INSERT INTO hooks (id, summary) VALUES ('H1', '正常');", volumes: [{ id: 'V1', action: 'upsert', title: '夹带' }] })).toThrow(/不能同时包含 sql 与 JSON 写集字段 volumes/);
+    expect(() => parseAgentMaintainerOutput_ACU({ sql: "INSERT INTO hooks (id, summary) VALUES ('H1', '正常');", expectedRevisions: { hooks: 999 } })).toThrow(/不能同时包含 sql 与 JSON 写集字段 expectedRevisions/);
+  });
+
+
+  it('SQL 更新及删除必须携带模块 revision，网页资料退役不需要 pageRef', () => {
+    const retired = parseAgentResearcherOutput_ACU({ summary: '退役旧资料', sql: "DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 4;" });
+    expect(retired).toMatchObject({ expectedRevision: 4, items: [{ action: 'retire', id: 'WR-001', reason: '来源失效' }] });
+    expect(() => parseAgentResearcherOutput_ACU({ sql: "DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效';" })).toThrow(/expected_revision/);
+    expect(() => parseAgentMaintainerOutput_ACU({ sql: "UPDATE hooks SET summary = '修正' WHERE id = 'H1';" })).toThrow(/expected_revision/);
+    expect(() => parseAgentMaintainerOutput_ACU({ sql: "DELETE FROM hooks WHERE id = 'H1' AND reason = '过期';" })).toThrow(/expected_revision/);
+  });
+
+
+  it('网页资料与年代学 SQL UPDATE 经完整领域写集映射，不丢失 id 和 revision', () => {
+    const web = parseAgentResearcherOutput_ACU({ summary: '更新百科', sql: "UPDATE web_refs SET page_ref = 'P1', name = '阿锦', brief = '人物', detail = '见网页' WHERE id = 'WR-001' AND expected_revision = 2;" });
+    expect(web).toMatchObject({ expectedRevision: 2, items: [{ action: 'upsert', id: 'WR-001', pageRef: 'P1', title: '阿锦', brief: '人物' }] });
+    const chronology = parseAgentMaintainerOutput_ACU({ summary: '修正时间', sql: "UPDATE chronology SET anchor = '隔日', elapsed = '两日', precision = 'exact', transition = '经过一夜', evidence_indexes = '[2]' WHERE id = 'T1' AND expected_revision = 4;" });
+    expect(chronology.delta.expectedRevisions).toMatchObject({ chronology: 4 });
+    expect(chronology.delta.chronology).toEqual([expect.objectContaining({ action: 'upsert', id: 'T1', anchor: '隔日', evidenceIndexes: [2] })]);
+    expect(() => parseAgentResearcherOutput_ACU({ sql: "UPDATE hooks SET summary = '越权' WHERE id = 'H1';" })).toThrow(/只允许写入 web_refs/);
+    expect(() => parseAgentResearcherOutput_ACU({ sql: "UPDATE web_refs SET brief = '不完整' WHERE id = 'WR-001' AND expected_revision = 0;" })).toThrow(/完整字段/);
   });
 
   it('策划类必须给出 recommendation，资料不足应改走工具调用', () => {

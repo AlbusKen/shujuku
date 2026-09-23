@@ -354,4 +354,33 @@ describe('world simulation transaction', () => {
       archiveRef: 'archive-3-1', day: 3, fingerprints: [fingerprint], relatedIds: ['seed-1'], sourceChronicleIds: ['ch-1'],
     })]);
   });
+
+  it('DELETE 写集经领域事务删除既有行；失效 revision 保留原行并形成待修复项', () => {
+    const base = buildEmptyWorldSimulationLedger_ACU();
+    base.dimensions.push({ id: 'pressure', name: '压力', kind: 'pressure', value: 1, trend: 'stable', rationale: '事实', evidenceRefs: [], revision: 2 });
+    base.chronicle.push({ id: 'ch-1', at: '第一日', summary: '旧事', relatedIds: [], evidenceRefs: [] });
+    const removing = candidate({ dimensions: { remove: [{ id: 'pressure', expectedRevision: 2, reason: '证据失效' }] } });
+    expect(preflightWorldSimulationCandidates_ACU(base, [removing], new Set(['e1'])).blocking).toEqual([]);
+    const applied = applyWorldSimulationCandidatesDetailed_ACU(base, [removing], new Set(['e1']));
+    expect(applied.ledger.dimensions).toEqual([]);
+    expect(applied.appliedModules).toContain('dimensions');
+    expect(base.dimensions).toHaveLength(1);
+    const stale = candidate({ dimensions: { remove: [{ id: 'pressure', expectedRevision: 1, reason: '证据失效' }] } });
+    expect(preflightWorldSimulationCandidates_ACU(base, [stale], new Set(['e1'])).blocking.some(item => item.message.includes('revision 冲突'))).toBe(true);
+    const rejected = applyWorldSimulationCandidatesDetailed_ACU(base, [stale], new Set(['e1']));
+    expect(rejected.ledger.dimensions).toEqual(base.dimensions);
+    expect(rejected.pendingFixes[0].lastError).toContain('revision 冲突');
+    const chronicle = applyWorldSimulationCandidatesDetailed_ACU(base, [candidate({ chronicle: { remove: [{ id: 'ch-1', reason: '重复事件' }] } })], new Set(['e1']));
+    expect(chronicle.ledger.chronicle).toEqual([]);
+    expect(chronicle.ledger.revision).toBe(base.revision + 1);
+  });
+
+  it('单例 SQL 修订号在事务入口比较账本版本，不把冲突降级为成功', () => {
+    const base = buildEmptyWorldSimulationLedger_ACU();
+    const stale = candidate({ clock: { days: 1, expectedRevision: base.revision + 1 } });
+    expect(preflightWorldSimulationCandidates_ACU(base, [stale], new Set(['e1'])).blocking.some(item => item.message.includes('revision 冲突'))).toBe(true);
+    const applied = applyWorldSimulationCandidatesDetailed_ACU(base, [stale], new Set(['e1']));
+    expect(applied.ledger.clock).toEqual(base.clock);
+    expect(applied.pendingFixes[0].lastError).toContain('revision 冲突');
+  });
 });

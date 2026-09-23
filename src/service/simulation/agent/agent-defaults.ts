@@ -8,7 +8,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V10_ACU = 'world-simulation-v10';
 export const WORLD_SIMULATION_PROMPT_VERSION_V11_ACU = 'world-simulation-v11';
 export const WORLD_SIMULATION_PROMPT_VERSION_V12_ACU = 'world-simulation-v12';
 export const WORLD_SIMULATION_PROMPT_VERSION_V13_ACU = 'world-simulation-v13';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v14';
+export const WORLD_SIMULATION_PROMPT_VERSION_V14_ACU = 'world-simulation-v14';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v15';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -67,24 +68,25 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
     `agentName 必须精确为 ${name}。`,
   ];
   if (writableModules.length) {
-    lines.push(`candidate 必须包含非空 patch、summary、evidenceRefs、uncertainties；patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
+    lines.push(`candidate 必须包含非空 sql、summary、evidenceRefs、uncertainties；仅允许修改写入模块：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicle_archive | chronicle_overview' : ''}。不得输出 patch。`);
     lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
-    lines.push('dimensions、seeds、actors、rumors 必须使用 {"upsert":[...]}；新建可省略 id（由系统按模块前缀编号），更新已有条目必须给 id；新建还需 name（seeds 用 title，rumors 用 fact）。');
+    lines.push('sql 只允许 INSERT INTO 表 (字段) VALUES (字面量)、UPDATE 表 SET 字段 = 字面量 WHERE id = 字符串 AND expected_revision = 整数、DELETE FROM 数组模块表 WHERE id = 字符串 AND reason = 字符串 AND expected_revision = 整数；chronicle DELETE 只用 WHERE id = 字符串 AND reason = 字符串；禁止 SELECT、DDL、函数、子查询及任意表达式。字符串必须用单引号，单引号写成两个单引号；数组/对象作为单引号包裹的 JSON 文本，字段用 snake_case。');
+    lines.push('dimensions、seeds、actors、rumors：INSERT 新增（id 可省略，需 name；seeds 用 title，rumors 用 fact）、UPDATE 修改已有行、DELETE 删除已有行；DELETE 必须带 reason 与当前条目 expected_revision。');
     lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
-    lines.push('expectedRevision 可省略：新建默认 0，更新默认当前 revision。');
-    lines.push('chronicle 的 id/at、chronicleArchive 的 archiveRef/fingerprint、以及 candidateId 均可省略，由系统编号；不要为这些机器字段编造格式。');
+    lines.push('INSERT 的 expected_revision 可省略（新建默认 0）；数组模块 UPDATE/DELETE 的 WHERE 必须明确给出当前条目 revision；chronicle DELETE 不使用 expected_revision；clock、player、guidance 单例 UPDATE 使用账本 revision。SQL 仅归一化为领域事务，不是直接数据库执行。');
+    lines.push('chronicle 的 id/at、chronicle_archive 的 archive_ref、chronicle_overview 的 fingerprint 均可在 INSERT 时省略，由系统编号；不要编造机器字段。');
     lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
     if (writableModules.includes('chronicle')) {
-      lines.push('chronicle 必须使用 {"append":[...]}；append 条目可省略 id/at，必须含非空 summary。');
-      lines.push('当热层 chronicle 过长或某段事件已完结时，可提交 chronicleArchive：{"archiveEntries":[{day,summary,relatedIds,sourceChronicleIds,archiveRef?,fingerprints?}],"overviewRows":[{day,oneLine,archiveRef?,fingerprint?}],"collapseRefs"?}。oneLine 句式示例：「第3日 · 北岭矿洞塌方，三人受伤」。目录追加后超过 512 行必须自带 collapseRefs 合并旧行，否则该候选会被拒绝。');
+      lines.push('chronicle 仅 INSERT 新事件或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；不能 UPDATE。归档须成对 INSERT chronicle_archive 与 chronicle_overview，archive_ref 配对；禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。');
     }
-    if (writableModules.includes('clock')) lines.push('clock 必须以 clockAdvance 语义提交 {days, storyTime?, slot?, evidenceRefs?}；days 必须是非负整数，禁止直接写 day。');
+    if (writableModules.includes('clock')) lines.push('clock 只允许 UPDATE clock SET days = 非负整数、story_time、slot、evidence_refs WHERE expected_revision = 当前账本 revision；days 是推进量，禁止直接写 day。');
     if (writableModules.includes('player')) {
-      lines.push('player 是单例补丁，只允许 location、contact、evidenceRefs；禁止写 locationUpdatedAtDay 与 regionVisits。');
+      lines.push('player 是单例 UPDATE，只允许 location、contact、evidence_refs；WHERE expected_revision = 当前账本 revision；禁止写 location_updated_at_day 与 region_visits。');
       lines.push('contact 维护纪律：正文出现闭关/昏迷/囚禁/荒野独行等无社交渠道信号置 secluded，城镇/客栈/人群置 open，无明确信号保守维持原值。');
     }
-    if (writableModules.includes('rumors')) lines.push('rumors 使用 {"upsert":[...]}；earliestRevealDay >= originDay。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors.upsert。');
-    if (writableModules.includes('guidance')) lines.push('guidance 必须是非空对象。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
+    if (writableModules.includes('rumors')) lines.push('rumors 的 earliest_reveal_day >= origin_day。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors INSERT。');
+    if (writableModules.includes('guidance')) lines.push('guidance 使用 UPDATE guidance SET signals = 单引号包裹的 JSON 数组 WHERE expected_revision = 当前账本 revision。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
+    lines.push('示例：{"status":"candidate","agentName":"timekeeper","sql":"UPDATE clock SET days = 1, story_time = \'次日\' WHERE expected_revision = 0;","summary":"时间推进","evidenceRefs":["evidence:已颁发引用"],"uncertainties":[]}');
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
   }
@@ -288,6 +290,18 @@ const WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU: Partial<Record<WorldSimulati
   'lore-researcher': '2509:afd0ac6f',
 };
 
+const WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
+  'world-director': '4794:f45a80de',
+  'world-stage-planner': '3022:cc244fac',
+  timekeeper: '4031:37788a54',
+  'undercurrent-analyst': '4234:1d5394af',
+  'dramatis-keeper': '4654:f2cc4486',
+  chronicler: '4384:aecf2ab6',
+  'causality-reviewer': '3676:1e88d40',
+  'guidance-composer': '4498:a3457f28',
+  'lore-researcher': '2509:afd0ac6f',
+};
+
 export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
   WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, [
     ...(WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] ? [{ version: 'world-simulation-v3', fingerprint: WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU[name] }] : []),
@@ -301,6 +315,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V11_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V11_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V12_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V13_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] }] : []),
+    ...(WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V14_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] }] : []),
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;

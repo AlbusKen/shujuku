@@ -103,7 +103,8 @@ describe('世界推演 Agent runtime', () => {
     const rejection = retryMessages.find(message => message.role === 'user' && message.content.includes('INVALID_SPECIALIST_STATUS'))?.content ?? '';
     expect(rejection).toContain('status 必须精确为 candidate、no_change、failed、blocked');
     expect(rejection).toContain('agentName 必须精确为 timekeeper');
-    expect(rejection).toContain('patch 顶层只能使用：clock');
+    expect(rejection).toContain('sql 只允许写：clock');
+    expect(rejection).toContain('UPDATE clock SET days');
     expect(rejection).toContain('"status":"candidate"');
   });
 

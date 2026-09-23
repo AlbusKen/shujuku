@@ -1,6 +1,7 @@
 import { WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationStagePlan_ACU } from '../model';
 import { applyWorldSimulationProjection_ACU } from '../simulation-projection';
 import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerceWorldSimulationStringArray_ACU } from '../simulation-patch-normalize';
+import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
@@ -306,6 +307,164 @@ function normalizeSpecialistStatus_ACU(value: Record<string, unknown>): Record<s
   return value;
 }
 
+const WORLD_SIMULATION_SQL_TABLE_MODULE_ACU = {
+  dimensions: 'dimensions',
+  seeds: 'seeds',
+  actors: 'actors',
+  rumors: 'rumors',
+  chronicle: 'chronicle',
+  clock: 'clock',
+  player: 'player',
+  guidance: 'guidance',
+  chronicle_archive: 'chronicleArchive',
+  chronicle_overview: 'chronicleArchive',
+} as const;
+
+const WORLD_SIMULATION_SQL_COLUMNS_ACU: Readonly<Record<string, ReadonlySet<string>>> = {
+  dimensions: new Set(['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidence_refs', 'expected_revision']),
+  seeds: new Set(['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actor_ids', 'location', 'expires_at_day', 'missed_outcome', 'expose_policy', 'evidence_refs', 'retired_reason', 'expected_revision']),
+  actors: new Set(['id', 'name', 'interests', 'location', 'location_ref', 'life', 'died_at_day', 'death_summary', 'resources', 'goals', 'constraints', 'information_sources', 'known_facts', 'visibility', 'evidence_refs', 'expected_revision']),
+  rumors: new Set(['id', 'fact', 'origin_day', 'earliest_reveal_day', 'channels', 'related_actor_ids', 'status', 'revealed_at_day', 'evidence_refs', 'expected_revision']),
+  chronicle: new Set(['id', 'at', 'summary', 'related_ids', 'evidence_refs']),
+  clock: new Set(['days', 'story_time', 'slot', 'evidence_refs', 'expected_revision']),
+  player: new Set(['location', 'contact', 'evidence_refs', 'expected_revision']),
+  guidance: new Set(['signals', 'excluded_facts', 'evidence_refs', 'expected_revision']),
+  chronicle_archive: new Set(['archive_ref', 'day', 'summary', 'fingerprints', 'related_ids', 'source_chronicle_ids']),
+  chronicle_overview: new Set(['fingerprint', 'day', 'one_line', 'archive_ref']),
+};
+
+function simulationSqlColumnName_ACU(value: string): string {
+  return value.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+}
+
+function simulationSqlValue_ACU(value: RestrictedSqlValue_ACU): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try { return JSON.parse(trimmed); } catch { /* ordinary text remains a string */ }
+  }
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  return value;
+}
+
+function simulationSqlText_ACU(value: RestrictedSqlValue_ACU | undefined, path: string): string {
+  const result = typeof value === 'string' ? value.trim() : '';
+  if (!result) fail_ACU('SQL_REQUIRED_TEXT', path, 'non-empty string', value);
+  return result;
+}
+
+function simulationSqlRecord_ACU(table: string, values: Record<string, RestrictedSqlValue_ACU>, omitted: readonly string[] = []): Record<string, unknown> {
+  const allowed = WORLD_SIMULATION_SQL_COLUMNS_ACU[table];
+  if (!allowed) fail_ACU('SQL_TABLE_FORBIDDEN', '$.sql', 'whitelisted table', table);
+  const result: Record<string, unknown> = {};
+  for (const [column, value] of Object.entries(values)) {
+    if (!allowed.has(column)) fail_ACU('SQL_COLUMN_FORBIDDEN', `$.sql.${table}.${column}`, 'whitelisted column', column);
+    if (!omitted.includes(column)) result[simulationSqlColumnName_ACU(column)] = simulationSqlValue_ACU(value);
+  }
+  return result;
+}
+
+function simulationSqlWhere_ACU(statement: RestrictedSqlStatement_ACU): Record<string, RestrictedSqlValue_ACU> {
+  if (statement.kind === 'insert') return {};
+  const allowed = new Set(['id', 'archive_ref', 'expected_revision', 'reason']);
+  for (const key of Object.keys(statement.where)) {
+    if (!allowed.has(key)) fail_ACU('SQL_WHERE_FORBIDDEN', `$.sql.where.${key}`, 'id/archive_ref plus expected_revision/reason', key);
+  }
+  return statement.where;
+}
+
+function simulationSqlExactWhere_ACU(where: Record<string, RestrictedSqlValue_ACU>, required: readonly string[], optional: readonly string[] = []): void {
+  for (const column of required) {
+    if (!Object.prototype.hasOwnProperty.call(where, column)) fail_ACU('SQL_WHERE_REQUIRED', `$.sql.where.${column}`, 'required WHERE condition', undefined);
+  }
+  for (const column of Object.keys(where)) {
+    if (!required.includes(column) && !optional.includes(column)) fail_ACU('SQL_WHERE_FORBIDDEN', `$.sql.where.${column}`, 'only supported WHERE conditions', column);
+  }
+}
+
+function worldSimulationSqlPatch_ACU(statements: readonly RestrictedSqlStatement_ACU[]): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  for (const statement of statements) {
+    if (!Object.prototype.hasOwnProperty.call(WORLD_SIMULATION_SQL_TABLE_MODULE_ACU, statement.table)) {
+      fail_ACU('SQL_TABLE_FORBIDDEN', '$.sql', Object.keys(WORLD_SIMULATION_SQL_TABLE_MODULE_ACU).join(' | '), statement.table);
+    }
+    const module = WORLD_SIMULATION_SQL_TABLE_MODULE_ACU[statement.table as keyof typeof WORLD_SIMULATION_SQL_TABLE_MODULE_ACU];
+    const where = simulationSqlWhere_ACU(statement);
+    if (statement.kind !== 'delete') {
+      simulationSqlRecord_ACU(statement.table, statement.values);
+      if ('expected_revision' in statement.values && statement.kind === 'update') fail_ACU('SQL_REVISION_LOCATION', `$.sql.${statement.table}.expected_revision`, 'revision in WHERE only', statement.values.expected_revision);
+    }
+    if (module === 'clock' || module === 'player' || module === 'guidance') {
+      if (statement.kind !== 'update') fail_ACU('SQL_SINGLETON_OPERATION', `$.sql.${statement.table}`, 'UPDATE', statement.kind);
+      simulationSqlExactWhere_ACU(where, ['expected_revision']);
+      const revision = where.expected_revision;
+      if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) fail_ACU('SQL_REVISION_INVALID', `$.sql.${statement.table}.expected_revision`, 'non-negative integer', revision);
+      if (isRecord_ACU(patch[module]) && patch[module].expectedRevision !== revision) fail_ACU('SQL_REVISION_CONFLICT', `$.sql.${statement.table}.expected_revision`, 'consistent revision', revision);
+      patch[module] = { ...(isRecord_ACU(patch[module]) ? patch[module] : {}), ...simulationSqlRecord_ACU(statement.table, statement.values, ['expected_revision']), expectedRevision: revision };
+      continue;
+    }
+    if (statement.table === 'chronicle_archive' || statement.table === 'chronicle_overview') {
+      if (statement.kind === 'delete') {
+        fail_ACU('SQL_ARCHIVE_DELETE_FORBIDDEN', `$.sql.${statement.table}`, 'archive removal requires a paired replacement through domain transaction', statement.kind);
+      }
+      if (statement.kind !== 'insert') fail_ACU('SQL_ARCHIVE_OPERATION', `$.sql.${statement.table}`, 'INSERT', statement.kind);
+      const archivePatch = (patch.chronicleArchive ??= { archiveEntries: [], overviewRows: [], collapseRefs: [] }) as Record<string, unknown>;
+      const target = statement.table === 'chronicle_archive' ? archivePatch.archiveEntries : archivePatch.overviewRows;
+      (target as unknown[]).push(simulationSqlRecord_ACU(statement.table, statement.values));
+      continue;
+    }
+    if (module === 'chronicle') {
+      if (statement.kind === 'insert') {
+        const chroniclePatch = (patch.chronicle ??= { append: [], remove: [] }) as Record<string, unknown>;
+        (chroniclePatch.append as unknown[]).push(simulationSqlRecord_ACU(statement.table, statement.values));
+      } else if (statement.kind === 'delete') {
+        simulationSqlExactWhere_ACU(where, ['id', 'reason']);
+        const chroniclePatch = (patch.chronicle ??= { append: [], remove: [] }) as Record<string, unknown>;
+        (chroniclePatch.remove as unknown[]).push({ id: simulationSqlText_ACU(where.id, '$.sql.chronicle.WHERE id'), reason: simulationSqlText_ACU(where.reason, '$.sql.chronicle.WHERE reason') });
+      } else {
+        fail_ACU('SQL_CHRONICLE_OPERATION', '$.sql.chronicle', 'INSERT or DELETE', statement.kind);
+      }
+      continue;
+    }
+    const collection = (patch[module] ??= { upsert: [], remove: [] }) as Record<string, unknown>;
+    if (statement.kind === 'delete') {
+      simulationSqlExactWhere_ACU(where, ['id', 'reason', 'expected_revision']);
+      (collection.remove as unknown[]).push({
+        id: simulationSqlText_ACU(where.id, `$.sql.${statement.table}.WHERE id`),
+        expectedRevision: where.expected_revision,
+        reason: simulationSqlText_ACU(where.reason, `$.sql.${statement.table}.WHERE reason`),
+      });
+    } else {
+      const row = simulationSqlRecord_ACU(statement.table, statement.values, ['expected_revision']);
+      if (statement.kind === 'update') simulationSqlExactWhere_ACU(where, ['id', 'expected_revision']);
+      if (statement.kind === 'update') row.id = simulationSqlText_ACU(where.id, `$.sql.${statement.table}.WHERE id`);
+      const expectedRevision = statement.kind === 'insert' ? statement.values.expected_revision : where.expected_revision;
+      if (expectedRevision !== undefined) {
+        if (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 0) fail_ACU('SQL_REVISION_INVALID', `$.sql.${statement.table}.expected_revision`, 'non-negative integer', expectedRevision);
+        row.expectedRevision = expectedRevision;
+      }
+      (collection.upsert as unknown[]).push(row);
+    }
+  }
+  return patch;
+}
+
+function normalizeSpecialistSql_ACU(value: Record<string, unknown>): Record<string, unknown> {
+  if (value.sql === undefined) return value;
+  if (typeof value.sql !== 'string') fail_ACU('SQL_TEXT_REQUIRED', '$.sql', 'string', value.sql);
+  if (value.patch !== undefined) fail_ACU('SQL_PATCH_AMBIGUOUS', '$', 'exactly one of sql or patch', value);
+  const { sql, ...rest } = value;
+  try {
+    const statements = parseRestrictedSqlDml_ACU(sql);
+    if (!statements.length) fail_ACU('SQL_EMPTY', '$.sql', 'non-empty DML write set', sql);
+    return { ...rest, patch: worldSimulationSqlPatch_ACU(statements) };
+  } catch (error) {
+    if (error instanceof WorldSimulationValidationError_ACU) throw error;
+    fail_ACU('SQL_INVALID', '$.sql', 'restricted INSERT/UPDATE/DELETE statements', error instanceof Error ? error.message : String(error));
+  }
+}
+
 function invalidSpecialistPatch_ACU(path: string, expected: string, actual: unknown): never {
   fail_ACU('INVALID_SPECIALIST_PATCH', path, expected, actual);
 }
@@ -347,14 +506,18 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
     if (module === 'chronicleArchive') {
       if (!isRecord_ACU(patch)) invalidSpecialistPatch_ACU(path, 'object', patch);
       const raw = specialistPatchRecord_ACU(patch, path, ['archiveEntries', 'overviewRows', 'collapseRefs']);
-      if (!Array.isArray(raw.archiveEntries) || !raw.archiveEntries.length) invalidSpecialistPatch_ACU(`${path}.archiveEntries`, 'non-empty array', raw.archiveEntries);
-      if (!Array.isArray(raw.overviewRows) || !raw.overviewRows.length) invalidSpecialistPatch_ACU(`${path}.overviewRows`, 'non-empty array', raw.overviewRows);
+      if (raw.archiveEntries !== undefined && !Array.isArray(raw.archiveEntries)) invalidSpecialistPatch_ACU(`${path}.archiveEntries`, 'array', raw.archiveEntries);
+      if (raw.overviewRows !== undefined && !Array.isArray(raw.overviewRows)) invalidSpecialistPatch_ACU(`${path}.overviewRows`, 'array', raw.overviewRows);
+      if (raw.collapseRefs !== undefined && (!Array.isArray(raw.collapseRefs) || raw.collapseRefs.some(ref => !text_ACU(ref)))) invalidSpecialistPatch_ACU(`${path}.collapseRefs`, 'non-empty string array', raw.collapseRefs);
+      if (!Array.isArray(raw.archiveEntries) || !Array.isArray(raw.overviewRows) || !raw.archiveEntries.length || !raw.overviewRows.length) invalidSpecialistPatch_ACU(path, 'paired non-empty archiveEntries and overviewRows', patch);
       continue;
     }
     if (module === 'dimensions' || module === 'seeds' || module === 'actors' || module === 'rumors') {
-      const raw = specialistPatchRecord_ACU(patch, path, ['upsert']);
-      if (!Array.isArray(raw.upsert) || !raw.upsert.length) invalidSpecialistPatch_ACU(`${path}.upsert`, 'non-empty array', raw.upsert);
-      raw.upsert.forEach((item, index) => {
+      const raw = specialistPatchRecord_ACU(patch, path, ['upsert', 'remove']);
+      const upserts = raw.upsert === undefined ? [] : raw.upsert;
+      const removals = raw.remove === undefined ? [] : raw.remove;
+      if (!Array.isArray(upserts) || !Array.isArray(removals) || (!upserts.length && !removals.length)) invalidSpecialistPatch_ACU(path, 'non-empty upsert or remove array', patch);
+      upserts.forEach((item, index) => {
         if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}]`, 'object', item);
         if (item.id !== undefined && !text_ACU(item.id)) invalidSpecialistPatch_ACU(`${path}.upsert[${index}].id`, 'non-empty string', item.id);
         const labelField = module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name';
@@ -368,15 +531,33 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
           }
         }
       });
+      removals.forEach((item, index) => {
+        const itemPath = `${path}.remove[${index}]`;
+        if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(itemPath, 'object', item);
+        specialistPatchRecord_ACU(item, itemPath, ['id', 'expectedRevision', 'reason']);
+        if (!text_ACU(item.id)) invalidSpecialistPatch_ACU(`${itemPath}.id`, 'non-empty string', item.id);
+        if (!text_ACU(item.reason)) invalidSpecialistPatch_ACU(`${itemPath}.reason`, 'non-empty string', item.reason);
+        const revision = coerceWorldSimulationInteger_ACU(item.expectedRevision);
+        if (!revision.ok || revision.value < 0) invalidSpecialistPatch_ACU(`${itemPath}.expectedRevision`, 'non-negative integer', item.expectedRevision);
+      });
       continue;
     }
     if (module === 'chronicle') {
-      const raw = specialistPatchRecord_ACU(patch, path, ['append']);
-      if (!Array.isArray(raw.append) || !raw.append.length) invalidSpecialistPatch_ACU(`${path}.append`, 'non-empty array', raw.append);
+      const raw = specialistPatchRecord_ACU(patch, path, ['append', 'remove']);
+      const append = raw.append === undefined ? [] : raw.append;
+      const remove = raw.remove === undefined ? [] : raw.remove;
+      if (!Array.isArray(append) || !Array.isArray(remove) || (!append.length && !remove.length)) invalidSpecialistPatch_ACU(path, 'non-empty append or remove array', patch);
+      remove.forEach((item, index) => {
+        const itemPath = `${path}.remove[${index}]`;
+        if (!isRecord_ACU(item)) invalidSpecialistPatch_ACU(itemPath, 'object', item);
+        specialistPatchRecord_ACU(item, itemPath, ['id', 'reason']);
+        if (!text_ACU(item.id) || !text_ACU(item.reason)) invalidSpecialistPatch_ACU(itemPath, 'non-empty id and reason', item);
+      });
       continue;
     }
     if (module === 'clock') {
-      const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs']);
+      const raw = specialistPatchRecord_ACU(patch, path, ['days', 'storyTime', 'slot', 'evidenceRefs', 'expectedRevision']);
+      if (raw.expectedRevision !== undefined && (!Number.isInteger(raw.expectedRevision) || Number(raw.expectedRevision) < 0)) invalidSpecialistPatch_ACU(`${path}.expectedRevision`, 'non-negative integer', raw.expectedRevision);
       if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
       if (raw.days !== undefined) {
         const days = coerceWorldSimulationInteger_ACU(raw.days);
@@ -388,7 +569,8 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
       continue;
     }
     if (module === 'player') {
-      const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs']);
+      const raw = specialistPatchRecord_ACU(patch, path, ['location', 'contact', 'evidenceRefs', 'expectedRevision']);
+      if (raw.expectedRevision !== undefined && (!Number.isInteger(raw.expectedRevision) || Number(raw.expectedRevision) < 0)) invalidSpecialistPatch_ACU(`${path}.expectedRevision`, 'non-negative integer', raw.expectedRevision);
       if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
       if (raw.contact !== undefined && !coerceWorldSimulationEnum_ACU(raw.contact, WORLD_PLAYER_CONTACTS_ACU).ok) {
         invalidSpecialistPatch_ACU(`${path}.contact`, WORLD_PLAYER_CONTACTS_ACU.join(' | '), raw.contact);
@@ -403,7 +585,8 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
       continue;
     }
     if (module !== 'guidance') invalidSpecialistPatch_ACU(path, WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | '), patch);
-    const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs']);
+    const raw = specialistPatchRecord_ACU(patch, path, ['signals', 'excludedFacts', 'evidenceRefs', 'expectedRevision']);
+    if (raw.expectedRevision !== undefined && (!Number.isInteger(raw.expectedRevision) || Number(raw.expectedRevision) < 0)) invalidSpecialistPatch_ACU(`${path}.expectedRevision`, 'non-negative integer', raw.expectedRevision);
     if (!Object.keys(raw).length) invalidSpecialistPatch_ACU(path, 'non-empty object', patch);
     if (raw.signals !== undefined) specialistGuidanceSignals_ACU(raw.signals, `${path}.signals`);
     if (raw.excludedFacts !== undefined) specialistStringList_ACU(raw.excludedFacts, `${path}.excludedFacts`);
@@ -414,7 +597,7 @@ function validateWorldSimulationSpecialistPatch_ACU(value: unknown): Record<stri
 
 export function parseWorldSimulationSpecialistResult_ACU(value: unknown, evidenceRegistry?: WorldSimulationEvidenceRegistrySnapshot_ACU): WorldSimulationSpecialistResult_ACU {
   if (!isRecord_ACU(value)) fail_ACU('OBJECT_REQUIRED', '$', 'specialist result object', value);
-  const normalized = normalizeSpecialistStatus_ACU(value);
+  const normalized = normalizeSpecialistStatus_ACU(normalizeSpecialistSql_ACU(value));
   const status = text_ACU(normalized.status);
   const agentName = requiredText_ACU(normalized.agentName, '$.agentName');
   if (status === 'candidate') {
@@ -574,28 +757,16 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
     `agentName 必须精确为 ${agentName}。`,
   ];
   if (writableModules.length) {
-    lines.push(`candidate 的 patch 顶层只能使用：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicleArchive' : ''}。`);
-    lines.push('dimensions、seeds、actors、rumors 必须使用 upsert 对象；新建可省略 id，更新已有条目必须给非空 id；新建还需 name（seeds 用 title，rumors 用 fact）。expectedRevision 可省略，由服务端按新建 0 / 更新当前 revision 补齐。chronicle 必须使用 {"append":[...]}，id/at 可省略；clock 只允许 days/storyTime/slot/evidenceRefs；player 只允许 location/contact/evidenceRefs；guidance.signals 必须是 {text,voice,sourceId} 对象数组，sourceId 必填。');
+    lines.push(`candidate 的 sql 只允许写：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicle_archive | chronicle_overview' : ''}；不得输出 patch。`);
+    lines.push('使用受限 INSERT/UPDATE/DELETE；数组模块 UPDATE/DELETE 的 WHERE 必须带 id、expected_revision，DELETE 还须带 reason；chronicle 仅允许 INSERT 或 DELETE，DELETE WHERE 只带 id、reason，不带 expected_revision；单例 UPDATE 只带 expected_revision。字符串用单引号，数组与对象用单引号包裹 JSON 文本；禁止 SELECT、DDL、函数及子查询。');
     const firstModule = writableModules[0];
-    const patchExample = firstModule === 'dimensions'
-      ? { upsert: [{ id: '条目ID', name: '维度名称', expectedRevision: 0 }] }
-      : firstModule === 'seeds'
-        ? { upsert: [{ id: '条目ID', title: '种子标题', expectedRevision: 0 }] }
-        : firstModule === 'actors'
-          ? { upsert: [{ id: '条目ID', name: '角色名称', expectedRevision: 0 }] }
-      : firstModule === 'chronicle'
-        ? { append: [{}] }
-        : firstModule === 'guidance'
-          ? { signals: [{ text: '角色可感知信号', voice: 'ambient', sourceId: 'clock' }] }
-          : firstModule === 'player'
-            ? { contact: 'open' }
-            : firstModule === 'rumors'
-              ? { upsert: [{ id: '条目ID', fact: '传闻事实', expectedRevision: 0 }] }
-              : { days: 1 };
+    const sqlExample = ['clock', 'player', 'guidance'].includes(firstModule)
+      ? `UPDATE ${firstModule} SET ${firstModule === 'clock' ? 'days = 1' : firstModule === 'player' ? "contact = 'open'" : "signals = '[]'"} WHERE expected_revision = 0;`
+      : `INSERT INTO ${firstModule} (${firstModule === 'chronicle' ? 'summary' : firstModule === 'seeds' ? 'title' : firstModule === 'rumors' ? 'fact' : 'name'}) VALUES ('示例');`;
     lines.push(JSON.stringify({
       status: 'candidate',
       agentName,
-      patch: { [firstModule]: patchExample },
+      sql: sqlExample,
       summary: '基于已颁发证据形成候选',
       evidenceRefs: ['evidence:已颁发引用'],
       uncertainties: [],
@@ -696,4 +867,3 @@ export function recordWorldSimulationProtocolFailure_ACU(state: WorldSimulationP
   state.fingerprints[fingerprint] = (state.fingerprints[fingerprint] ?? 0) + 1;
   return { retry: state.attempts <= state.maxAttempts && state.fingerprints[fingerprint] < 2, fingerprint, issue };
 }
-

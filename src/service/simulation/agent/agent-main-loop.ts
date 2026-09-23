@@ -154,13 +154,20 @@ function candidateResourceKeys_ACU(candidate: WorldSimulationCandidate_ACU): Set
   for (const [module, patch] of Object.entries(candidate.patch)) {
     const collection = record_ACU(patch);
     const upsert = collection?.upsert;
+    const remove = collection?.remove;
     if (Array.isArray(upsert)) {
       for (const item of upsert) {
         const entry = record_ACU(item);
         if (typeof entry?.id === 'string' && entry.id.trim()) keys.add(`${module}:${entry.id.trim()}`);
       }
-      continue;
     }
+    if (Array.isArray(remove)) {
+      for (const item of remove) {
+        const entry = record_ACU(item);
+        if (typeof entry?.id === 'string' && entry.id.trim()) keys.add(`${module}:${entry.id.trim()}`);
+      }
+    }
+    if (Array.isArray(upsert) || Array.isArray(remove)) continue;
     keys.add(module);
   }
   return keys;
@@ -172,12 +179,19 @@ function withoutCandidateResources_ACU(candidate: WorldSimulationCandidate_ACU, 
   for (const [module, value] of Object.entries(candidate.patch)) {
     const collection = record_ACU(value);
     const upsert = collection?.upsert;
-    if (Array.isArray(upsert)) {
-      const remaining = upsert.filter(item => {
+    const remove = collection?.remove;
+    if (Array.isArray(upsert) || Array.isArray(remove)) {
+      const remainingUpserts = Array.isArray(upsert) ? upsert.filter(item => {
         const entry = record_ACU(item);
         return typeof entry?.id !== 'string' || !resources.has(`${module}:${entry.id.trim()}`);
-      });
-      if (remaining.length) patch[module] = { ...collection, upsert: remaining };
+      }) : [];
+      const remainingRemovals = Array.isArray(remove) ? remove.filter(item => {
+        const entry = record_ACU(item);
+        return typeof entry?.id !== 'string' || !resources.has(`${module}:${entry.id.trim()}`);
+      }) : [];
+      if (remainingUpserts.length || remainingRemovals.length) {
+        patch[module] = { ...collection, upsert: remainingUpserts, remove: remainingRemovals };
+      }
       continue;
     }
     if (!resources.has(module)) patch[module] = value;
