@@ -904,10 +904,9 @@ export function buildDefaultAgentInstructionComposerPrompt_ACU(): ContinuationPr
 }
 
 /**
- * 构造全部 Agent 默认提示词。
- * @returns 各组提示词的深拷贝，可安全写入 settings
+ * V33 默认组保持原文作为迁移来源；当前版本只修改仍是这些完整默认段的内容。
  */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+export function buildV33ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   return {
     main: buildDefaultAgentMainPrompt_ACU(),
     arcArchitect: buildDefaultAgentArcArchitectPrompt_ACU(),
@@ -919,4 +918,46 @@ export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPro
     webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
     instructionComposer: buildDefaultAgentInstructionComposerPrompt_ACU(),
   };
+}
+
+function v34Content_ACU(role: keyof ContinuationAgentPrompts_ACU, content: string): string {
+  if (role === 'main' && content.startsWith('我的行动规则：')) return content.replace('（patch 卷状态、改写后续台阶）', '（UPDATE 卷状态、改写后续台阶）');
+  if (role === 'main' && content.startsWith('【子代理使用规则】')) return content.replace(/ patch /g, ' UPDATE ').replace(/用 patch/g, '用 UPDATE');
+  if (role === 'arcArchitect') {
+    if (content.startsWith('我的边界有六条：')) return content.replace('显式 retire 并给出理由', '通过 DELETE 明确给出条目 id、当前 expected_revision 与理由');
+    if (content.startsWith('【卷级容量、时间与长期经营契约】')) return content.replace('显式 retire 的去向', '通过 DELETE 明确终止的去向').replace('patch 只写要改的字段', 'UPDATE 只写要改的字段');
+    if (content.includes('$AGENT_TASK')) return content.replace('retire 都有理由；expectedRevisions 若存在则与当前修订号一致', 'DELETE 都有理由及当前 expected_revision；UPDATE 的 WHERE 带 id 与当前 expected_revision');
+  }
+  if (role === 'maintainer') {
+    if (content.startsWith('我的边界有五条：')) return content.replace('显式 retire 并给出理由', '使用 DELETE 明确给出条目 id、当前 expected_revision 与理由');
+    if (content === V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU) return '【故事年代学账本现状】\n$CHRONOLOGY\n\n【故事时间结算契约】\n除伏笔与信息差外，还负责把已发生正文的时间事实用 sql 字段中的受限 SQL DML 结算到 chronology。时间事实只来自真实正文；大纲的 timeAdvance / timeAnchor 是计划，任务时间线不是小说内部时间。新增用 INSERT INTO chronology (anchor, elapsed, precision, transition, evidence_indexes) VALUES (...)；修改已有条目用 UPDATE chronology SET anchor = ..., elapsed = ..., precision = ..., transition = ..., evidence_indexes = ... WHERE id = ... AND expected_revision = 当前条目修订号；作废用 DELETE FROM chronology WHERE id = ... AND reason = ... AND expected_revision = 当前条目修订号。字符串用单引号，evidence_indexes 用单引号包裹的 JSON 数组。证据楼层号必须来自真实已结算正文，不能为空或未来楼层。正文只有「数日后」用 approximate，无法判断用 unknown，不伪造日期。没有可证实的变化时不写 chronology SQL；漏写不等于删除，DELETE 必须给出理由。';
+    if (content.includes('$AGENT_TASK')) return content.replace('retire 都带了理由；未揭示', 'DELETE 都带了理由及当前 expected_revision；未揭示').replace('若填了 expectedRevisions，它与注入资料里的「当前修订号」一致；', 'UPDATE/DELETE 的 WHERE 使用当前条目 expected_revision；');
+  }
+  if (role === 'webResearcher') {
+    if (content.startsWith('方法论：')) return content.replace('用 retire 并写理由', '用 DELETE 并写明 id、当前 expected_revision 和理由');
+    if (content.includes('$AGENT_TASK')) return content.replace('每条 upsert 的 pageRef', '每条 INSERT/UPDATE 的 page_ref').replace('retire 都带理由', 'DELETE 都带理由及当前 expected_revision');
+  }
+  return content;
+}
+
+/** 冻结 V33 已装配默认组，供 V34 逐段按完整正文、角色和长度迁移；自定义段不匹配。 */
+const V33_AGENT_PROMPTS_ACU = buildV33ContinuationAgentPrompts_ACU();
+export const CONTINUATION_V33_DEFAULT_LINEAGE_ACU = Object.fromEntries(
+  (Object.keys(V33_AGENT_PROMPTS_ACU) as Array<keyof ContinuationAgentPrompts_ACU>).map(role => {
+    const segments = V33_AGENT_PROMPTS_ACU[role];
+    return [role,
+    segments.map((segment, index) => ({
+      index, role: segment.role, hash: hashAgentPromptContent_ACU(segment.content), length: segment.content.length,
+    })).filter(({ index }) => v34Content_ACU(role, segments[index].content) !== segments[index].content)];
+  }),
+) as Record<keyof ContinuationAgentPrompts_ACU, Array<{ index: number; role: string; hash: string; length: number }>>;
+
+/** 构造全部当前 Agent 默认提示词；SQL 只改变资料写集，其他 JSON 动作保持原协议。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const previous = buildV33ContinuationAgentPrompts_ACU();
+  const current = { ...previous };
+  for (const role of Object.keys(previous) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    current[role] = previous[role].map(segment => ({ ...segment, content: v34Content_ACU(role, segment.content) }));
+  }
+  return current;
 }

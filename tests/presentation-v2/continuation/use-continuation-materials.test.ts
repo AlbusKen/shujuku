@@ -48,4 +48,25 @@ describe('useContinuationMaterials', () => {
     expect(materials.modules.hooks.dirty).toBe(false);
     expect(materials.modules.hooks.draft).toContain('"H3"');
   });
+
+  it('用户要求按字符串数组提交，保存失败时不覆盖编辑中的 JSON 草稿', async () => {
+    const chat: any[] = [{ mes: '正文', is_user: false, [AGENT_MODULE_FIELD_ACU]: snapshotWithHooks_ACU(0) }];
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('写入失败')).mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const { useContinuationMaterials } = await import('../../../src/presentation-v2/composables/useContinuationMaterials');
+    const materials = useContinuationMaterials();
+    materials.reload();
+    materials.updateDraft('userRequirements', JSON.stringify(['已有要求', '新增要求'], null, 2));
+
+    expect(await materials.save('userRequirements')).toBe(false);
+    expect(materials.modules.userRequirements.dirty).toBe(true);
+    expect(JSON.parse(materials.modules.userRequirements.draft)).toEqual(['已有要求', '新增要求']);
+    expect(materials.modules.userRequirements.error).toContain('资料快照写盘失败，已还原楼层字段');
+
+    expect(await materials.save('userRequirements')).toBe(true);
+    expect(materials.snapshot.value?.userRequirements).toEqual(['已有要求', '新增要求']);
+    expect(materials.modules.userRequirements.dirty).toBe(false);
+    expect(JSON.parse(materials.modules.userRequirements.draft)).toEqual(['已有要求', '新增要求']);
+    expect(saveChat).toHaveBeenCalled();
+  });
 });

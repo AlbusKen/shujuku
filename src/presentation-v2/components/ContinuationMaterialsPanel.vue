@@ -323,29 +323,26 @@
     <!-- 用户要求：Agent 会话里用户累计提出的任务要求 -->
     <template v-else-if="activeTab === 'userRequirements'">
       <p class="acu-v2-continuation-materials__meta">
-        用户要求在资料库里手动维护。创建任务时会把初始要求机械写成首条。
-        保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
+        用户要求在资料库里手动维护。创建任务时会把初始要求写成首条；每个标签是一条要求，保存时自动转换为字符串数组。
       </p>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         条目 {{ materials.snapshot.value.userRequirements.length }} 条 · 修订号 {{ materials.snapshot.value.revisions.userRequirements }}
       </p>
       <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
-      <p v-if="!materials.snapshot.value?.userRequirements.length" class="acu-v2-continuation-materials__empty">
-        还没有用户要求条目。创建任务后会写入初始要求；之后请在这里手动增删改。
+      <p v-if="materials.snapshot.value && !materials.snapshot.value.userRequirements.length" class="acu-v2-continuation-materials__empty">
+        还没有用户要求条目。可点击新增标签手动添加。
       </p>
-      <ol v-else class="acu-v2-continuation-materials__list">
-        <li v-for="(line, index) in materials.snapshot.value.userRequirements" :key="`${index}-${line}`">{{ line }}</li>
-      </ol>
-      <details class="acu-v2-continuation-materials__json">
-        <summary>编辑原始 JSON</summary>
-        <p class="acu-v2-continuation-materials__card-meta">必须是字符串数组，例如 ["不要提前揭底牌","继续用第一人称"]。空数组表示清空；空串条目会被拒绝。</p>
-        <AcuTextarea :model-value="materials.modules.userRequirements.draft" :rows="10" @update:model-value="value => materials.updateDraft('userRequirements', value)" />
-        <p v-if="materials.modules.userRequirements.error" class="acu-v2-continuation-materials__error">{{ materials.modules.userRequirements.error }}</p>
-        <div class="acu-v2-continuation-materials__actions">
-          <AcuButton :disabled="!materials.modules.userRequirements.dirty" @click="materials.discard('userRequirements')">放弃修改</AcuButton>
-          <AcuButton variant="primary" :loading="materials.modules.userRequirements.saving" :disabled="!materials.modules.userRequirements.dirty" @click="materials.save('userRequirements')">保存用户要求</AcuButton>
-        </div>
-      </details>
+      <UserRequirementsEditor
+        editor-id="continuation"
+        :items="requirementItems"
+        :dirty="materials.modules.userRequirements.dirty"
+        :error="materials.modules.userRequirements.error"
+        :saving="materials.modules.userRequirements.saving"
+        :disabled="!materials.snapshot.value || busy"
+        @update:items="updateRequirementItems"
+        @discard="materials.discard('userRequirements')"
+        @save="materials.save('userRequirements')"
+      />
     </template>
 
     <!-- 故事总纲：结构化展示 + JSON 编辑 -->
@@ -399,6 +396,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import AcuTextarea from './_lib/AcuTextarea.vue';
+import UserRequirementsEditor from './UserRequirementsEditor.vue';
 import { useContinuationMaterials } from '../composables/useContinuationMaterials';
 
 import type { ContinuationStage_ACU, ContinuationTask_ACU, StageOutline_ACU, StageRevision_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
@@ -446,6 +444,20 @@ const INFERRED_FIELD_LABELS: Record<string, string> = { function: '功能', main
 
 const activeTab = ref<TabId>('outline');
 const materials = useContinuationMaterials();
+
+const requirementItems = computed<string[]>(() => {
+  try {
+    const parsed: unknown = JSON.parse(materials.modules.userRequirements.draft);
+    return Array.isArray(parsed) && parsed.every(item => typeof item === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
+});
+
+function updateRequirementItems(items: string[]): void {
+  materials.updateDraft('userRequirements', JSON.stringify(items, null, 2));
+  materials.modules.userRequirements.error = '';
+}
 
 const MATERIAL_STATUS_LABELS_ACU: Record<string, string> = {
   hooks: '伏笔账本', infoGap: '认知与信息差', constraints: '长期约束', storyArc: '故事总纲',

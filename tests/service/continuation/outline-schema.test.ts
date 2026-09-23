@@ -463,7 +463,7 @@ describe('Continuation defaults', () => {
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
     expect(first.apiPresetMode).toBe('current');
-    expect(first.promptForceDefaultVersion).toBe('spv4.1-continuation-sql-dml-v33');
+    expect(first.promptForceDefaultVersion).toBe('spv4.2-continuation-sql-prompts-v34');
     expect(first.outlinePrompt[0].content).toContain('<stage_title>');
     expect(first.maxConsecutivePressureTurns).toBe(8);
     expect(first.agentPrompts.main[0].content).toContain('主控 Agent');

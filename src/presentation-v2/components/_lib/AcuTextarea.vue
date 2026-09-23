@@ -1,6 +1,7 @@
 <template>
   <textarea
     ref="textareaRef"
+    :id="id"
     class="acu-textarea"
     :class="{ 'acu-textarea--auto-resize': autoResize }"
     :value="modelValue"
@@ -25,6 +26,7 @@ import {
 } from '../../bootstrap/host-env';
 
 const props = withDefaults(defineProps<{
+  id?: string;
   modelValue: string;
   placeholder?: string;
   rows?: number;
@@ -32,6 +34,7 @@ const props = withDefaults(defineProps<{
   autoResize?: boolean;
   disabled?: boolean;
 }>(), {
+  id: undefined,
   placeholder: undefined,
   rows: 4,
   maxRows: undefined,

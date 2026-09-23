@@ -247,7 +247,6 @@
     </AcuPanelGrid>
 
     <AcuPanelGrid
-      v-if="devOptions.vectorIndexAdvanced.value"
       class="acu-v2-vector-index-page__advanced-grid"
     >
       <AcuPanel
@@ -487,7 +486,7 @@ import AcuToggle from "../components/_lib/AcuToggle.vue";
 import VectorIndexPromptDrawer from "../components/VectorIndexPromptDrawer.vue";
 import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOptions";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
-import { useDevOptions } from "../composables/useDevOptions";
+
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
 import { RERANK_BATCH_SIZE_LIMITS, useVectorApiConfig } from "../composables/useVectorApiConfig";
 import { useVectorIndexConfig } from "../composables/useVectorIndexConfig";
@@ -509,7 +508,7 @@ const SHOW_LEGACY_VECTOR_MAINTENANCE_UI = false;
 const dialogStore = useDialogStore();
 const vector = useVectorIndexConfig();
 const vectorApiConfig = useVectorApiConfig();
-const devOptions = useDevOptions();
+
 const {
   apiStore,
   followActiveApiLabel,
@@ -521,15 +520,8 @@ const panelNavItems = computed(() => [
   { id: "vector-index-keyword-panel", label: vectorIndexCopy.nav.keyword },
   { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api },
   { id: "vector-index-prompt-panel", label: vectorIndexCopy.nav.prompt },
-  ...(devOptions.vectorIndexAdvanced.value
-    ? [
-        { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall },
-        {
-          id: "vector-index-archive-panel",
-          label: vectorIndexCopy.nav.archive,
-        },
-      ]
-    : []),
+  { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall },
+  { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive },
 ]);
 
 const ROLE_OPTIONS: AcuSelectOption[] = [

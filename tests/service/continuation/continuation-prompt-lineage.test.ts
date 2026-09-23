@@ -11,9 +11,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU } from '../../../src/service/continuation/defaults';
 import {
   AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
+  buildV33ContinuationAgentPrompts_ACU,
   buildDefaultContinuationAgentPrompts_ACU,
   findAgentPromptSlot_ACU,
   hashAgentPromptContent_ACU,
@@ -79,7 +80,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
@@ -110,6 +111,7 @@ describe('默认提示词谱系迁移', () => {
   it('真实 V20 形态（任务段在容量段位置、无容量段）迁移后总纲任务段完整保留', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = 'spv2.8-continuation-runtime-snapshot-v20';
+    settings.agentPrompts = buildV33ContinuationAgentPrompts_ACU();
     const arc = settings.agentPrompts.arcArchitect.filter((segment: ContinuationPromptSegment_ACU) => segment.content !== V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU);
     arc[0].content = V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU;
     arc[2].content = V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU;
@@ -126,17 +128,19 @@ describe('默认提示词谱系迁移', () => {
   it('已被误迁的 V27 信封（总纲任务段被覆盖成容量契约）会被修复回默认任务段', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
+    settings.agentPrompts = buildV33ContinuationAgentPrompts_ACU();
+    const previous = settings.agentPrompts as ReturnType<typeof buildV33ContinuationAgentPrompts_ACU>;
     const defaults = buildDefaultContinuationAgentPrompts_ACU();
-    const taskIndex = defaults.arcArchitect.findIndex(segment => segment.content.includes('$AGENT_TASK'));
+    const taskIndex = previous.arcArchitect.findIndex(segment => segment.content.includes('$AGENT_TASK'));
     // 复现旧迁移的产物：容量段消失、pinned 任务槽位被写成容量契约正文。
-    settings.agentPrompts.arcArchitect = defaults.arcArchitect
+    settings.agentPrompts.arcArchitect = previous.arcArchitect
       .filter(segment => segment.content !== V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU)
-      .map(segment => (segment.content === defaults.arcArchitect[taskIndex].content ? { ...segment, content: V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU } : segment));
+      .map(segment => (segment.content === previous.arcArchitect[taskIndex].content ? { ...segment, content: V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU } : segment));
     expect(settings.agentPrompts.arcArchitect.some((segment: ContinuationPromptSegment_ACU) => segment.content.includes('$AGENT_TASK'))).toBe(false);
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 

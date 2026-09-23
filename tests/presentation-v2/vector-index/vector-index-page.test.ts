@@ -247,8 +247,8 @@ describe('VectorIndexPage', () => {
     expect(text).toContain('模型名');
     expect(text).not.toContain(`服务${'地址'}`);
     expect(text).not.toContain(`模型${'名称'}`);
-    expect(text).not.toContain('召回参数');
-    expect(text).not.toContain('归档与分块');
+    expect(text).toContain('召回参数');
+    expect(text).toContain('归档与分块');
     expect(text).toContain('关键词生成');
     expect(text).toContain('关键词生成提示词');
     expect(text).toContain('使用默认提示词');
@@ -285,6 +285,8 @@ describe('VectorIndexPage', () => {
       ['索引状态', '关键词生成'],
       ['Embedding / Rerank', '关键词生成提示词'],
     ]);
+    expect(Array.from(page!.querySelectorAll<HTMLElement>('.acu-v2-vector-index-page__advanced-grid .acu-panel__title'))
+      .map(title => title.textContent?.trim())).toEqual(['召回参数', '归档与分块']);
 
     const promptPanel = Array.from(page!.querySelectorAll<HTMLElement>('.acu-panel'))
       .find(panel => panel.querySelector('.acu-panel__title')?.textContent?.includes('关键词生成提示词'))!;
@@ -292,7 +294,7 @@ describe('VectorIndexPage', () => {
     expect(promptPanel.querySelector('.acu-v2-vector-index-page__prompt-overview')).toBeNull();
     const mobileNavItems = Array.from(page!.querySelectorAll('.acu-mobile-panel-nav__item'))
       .map(item => item.textContent?.trim());
-    expect(mobileNavItems).toEqual(['索引状态', '关键词', '向量服务', '提示词']);
+    expect(mobileNavItems).toEqual(['索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -321,8 +323,8 @@ describe('VectorIndexPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('开发者选项开启后显示交火高级索引参数面板', async () => {
-    const { mount } = await mountVectorIndexPage({ devOptions: { vectorIndexAdvanced: true } });
+  it('无需开发者选项也显示交火召回与归档参数面板', async () => {
+    const { mount } = await mountVectorIndexPage();
 
     const text = document.querySelector('.acu-v2-vector-index-page')?.textContent || '';
     expect(text).toContain('召回参数');
@@ -545,7 +547,7 @@ describe('VectorIndexPage', () => {
   });
 
   it('最近固定注入条数输入非正整数时显示 toast 并重置为默认值', async () => {
-    const { mount, config, saveSettings } = await mountVectorIndexPage({ devOptions: { vectorIndexAdvanced: true } });
+    const { mount, config, saveSettings } = await mountVectorIndexPage();
     const alertSpy = vi.spyOn(window, 'alert');
 
     const row = Array.from(document.querySelectorAll('.acu-v2-vector-index-page .acu-form-row'))
@@ -571,7 +573,7 @@ describe('VectorIndexPage', () => {
   });
 
   it('批处理上限写入交火索引实际读取的三个字段', async () => {
-    const { mount, config, saveSettings } = await mountVectorIndexPage({ devOptions: { vectorIndexAdvanced: true } });
+    const { mount, config, saveSettings } = await mountVectorIndexPage();
 
     const row = Array.from(document.querySelectorAll('.acu-v2-vector-index-page .acu-form-row'))
       .find(el => /单请求最多行数/.test(el.textContent || ''));
@@ -608,7 +610,7 @@ describe('VectorIndexPage', () => {
   });
 
   it('高级面板不再暴露 V2 writer kill switch 与 scope allowlist', async () => {
-    const { mount } = await mountVectorIndexPage({ devOptions: { vectorIndexAdvanced: true } });
+    const { mount } = await mountVectorIndexPage();
     expect(document.querySelector('.acu-v2-vector-index-page__scope-allowlist')).toBeNull();
     expect(document.body.textContent || '').not.toContain('V2 写入闸门');
     mount.__resetAcuV2MountForTests();

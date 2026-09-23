@@ -29,6 +29,7 @@
       <AcuPanel title="已有资料" description="当前分支的用户要求、世界账本、编年对照、错过清单、传闻队列、候选轨迹、投影预览与读取诊断；用户要求可在资料区手动修正，账本只由 Agent 经审核后写入。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
         <WorldSimulationMaterialsPanel
           v-if="runtime.ready.value && runtime.snapshot.value"
+          :save-requirements="runtime.saveUserRequirements"
           :conversation="runtime.snapshot.value.conversation"
           :materials="runtime.snapshot.value.materials"
           :user-requirements="runtime.snapshot.value.userRequirements"
@@ -40,7 +41,6 @@
           :timeline="runtime.envelope.value?.timeline ?? []"
           @refresh="refreshAll"
           @clear="clearData"
-          @save-user-requirements="saveUserRequirements"
         />
         <p v-else class="acu-v2-world-simulation-page__meta">当前没有可显示的世界推演资料。</p>
       </AcuPanel>
@@ -427,10 +427,6 @@ async function sendMessage(text: string): Promise<void> {
 
 async function clearData(): Promise<void> {
   await runtime.clearData();
-}
-
-async function saveUserRequirements(requirements: unknown): Promise<void> {
-  await runtime.saveUserRequirements(requirements);
 }
 
 function requiredRangeInteger(value: unknown, label: string, minimum: number, maximum: number): number {

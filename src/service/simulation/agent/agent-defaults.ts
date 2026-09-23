@@ -9,7 +9,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V11_ACU = 'world-simulation-v11';
 export const WORLD_SIMULATION_PROMPT_VERSION_V12_ACU = 'world-simulation-v12';
 export const WORLD_SIMULATION_PROMPT_VERSION_V13_ACU = 'world-simulation-v13';
 export const WORLD_SIMULATION_PROMPT_VERSION_V14_ACU = 'world-simulation-v14';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v15';
+export const WORLD_SIMULATION_PROMPT_VERSION_V15_ACU = 'world-simulation-v15';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v16';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -147,7 +148,21 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
 }
 
 export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  return buildRolePrompt_ACU(name).map(segment => ({ ...segment }));
+  return buildRolePrompt_ACU(name).map(segment => {
+    if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))) {
+      return { ...segment, content: segment.content.replace('没有直接 ledger patch 权限', '没有直接 ledger 写入权限') };
+    }
+    if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return { ...segment };
+    if (name === 'dramatis-keeper') {
+      return {
+        ...segment,
+        content: segment.content.replace('玩家位置按正文地标 upsert player', '玩家位置按正文地标 UPDATE player')
+          + '【幕后人物范围】以与当前剧情人物、地点、组织、暗流直接相关的世界书重要角色为候选：尚未在已发生正文登场的角色，可依据世界书条目与当前证据推演其幕后现状；已在已发生正文登场、但现已离开当前剧情场景的重要角色，也应继续推演其此刻的位置、目标、行动及信息边界。当前场景仍在场的角色不作为幕后角色重复推演。先核对锚点正文、已读历史与 actors/相关 seeds 目录；需要时用 worldbook scope 搜索并 read worldbook:entry:书名:uid 精读，或按证据定位并调阅旧记录。目录、世界书设定不能单独证明角色曾登场或已离场；无法核实时把缺口列入 uncertainties，不能虚构在场状态、行动或角色知识。候选须与当前剧情有可说明的关联，不能扩展为世界书全部人物。',
+      };
+    }
+    if (name === 'chronicler') return { ...segment, content: segment.content.replace('append 条目', 'INSERT 条目').replace('提交 chronicleArchive', '成对 INSERT chronicle_archive 与 chronicle_overview').replace('目录追加后超过 512 行必须自带 collapseRefs', '目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入') };
+    return { ...segment };
+  });
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -316,7 +331,8 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V12_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V13_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V14_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] }] : []),
-    { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
 
@@ -334,7 +350,15 @@ export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, W
     const lineage = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU[name] ?? [];
     const matchesPrevious = !!previous && fingerprint === promptFingerprint_ACU(previous);
     const matchesHistoricalDefault = lineage.some(entry => entry.fingerprint === fingerprint && entry.version !== WORLD_SIMULATION_PROMPT_VERSION_ACU);
-    migrated[name] = matchesPrevious || matchesHistoricalDefault ? defaults[name] : value.map(segment => ({ ...segment }));
+    if (matchesPrevious || matchesHistoricalDefault) {
+      migrated[name] = defaults[name];
+      continue;
+    }
+    const v15 = buildRolePrompt_ACU(name);
+    migrated[name] = value.map(segment => {
+      const oldIndex = v15.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      return oldIndex < 0 ? { ...segment } : { ...defaults[name][oldIndex] };
+    });
   }
   return migrated;
 }

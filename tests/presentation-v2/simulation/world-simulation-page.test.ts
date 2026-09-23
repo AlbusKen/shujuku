@@ -439,4 +439,58 @@ describe('WorldSimulationPage', () => {
     button(host, '重新读取')!.click();
     expect(refresh).toHaveBeenCalledTimes(2);
   });
+
+  it('逐条编辑用户要求：空标签拒绝保存，失败保留草稿，成功使用数组且不回退到旧快照', async () => {
+    snapshot.value = baseSnapshot({
+      userRequirements: { snapshot: { requirements: ['旧要求'], updatedAt: 1 }, diagnostics: [], adoptedIndex: 0 },
+    });
+    const { host } = await mountPage();
+    button(host, '用户要求')!.click();
+    await nextTick();
+    const input = () => host.querySelector<HTMLTextAreaElement>('.acu-requirements-editor textarea')!;
+    expect(input().value).toBe('旧要求');
+    button(host, '新增标签')!.click();
+    await nextTick();
+    button(host, '保存用户要求')!.click();
+    await nextTick();
+    expect(saveUserRequirements).not.toHaveBeenCalled();
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('不能为空');
+
+    const added = host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!;
+    typeInto(added, '  新要求  ');
+    await nextTick();
+    saveUserRequirements.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('写入失败')).mockResolvedValueOnce(true);
+    for (const message of ['保存失败，修改已保留', '写入失败']) {
+      button(host, '保存用户要求')!.click();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      await nextTick();
+      expect(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!.value).toBe('  新要求  ');
+      expect(host.querySelector('[role="alert"]')?.textContent).toContain(message);
+      expect(button(host, '保存用户要求')?.disabled).toBe(false);
+    }
+    button(host, '保存用户要求')!.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await nextTick();
+    expect(saveUserRequirements).toHaveBeenCalledTimes(3);
+    expect(saveUserRequirements).toHaveBeenLastCalledWith(['旧要求', '新要求']);
+    expect(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!.value).toBe('新要求');
+    expect(button(host, '保存用户要求')?.disabled).toBe(true);
+    // 保存结果已经返回，但页面收到的仍可能是上一版快照；不应让迟到快照撤销本地成功值。
+    snapshot.value = baseSnapshot({
+      userRequirements: { snapshot: { requirements: ['旧要求'], updatedAt: 1 }, diagnostics: [], adoptedIndex: 0 },
+    });
+    await nextTick();
+    expect(Array.from(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')).map(item => item.value)).toEqual(['旧要求', '新要求']);
+    expect(button(host, '保存用户要求')?.disabled).toBe(true);
+    // 新版已送达后，乱序到达的旧快照仍不可回滚已确认的保存结果。
+    snapshot.value = baseSnapshot({
+      userRequirements: { snapshot: { requirements: ['旧要求', '新要求'], updatedAt: 2 }, diagnostics: [], adoptedIndex: 0 },
+    });
+    await nextTick();
+    snapshot.value = baseSnapshot({
+      userRequirements: { snapshot: { requirements: ['旧要求'], updatedAt: 1 }, diagnostics: [], adoptedIndex: 0 },
+    });
+    await nextTick();
+    expect(Array.from(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')).map(item => item.value)).toEqual(['旧要求', '新要求']);
+  });
 });

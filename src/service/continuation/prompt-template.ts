@@ -7,15 +7,7 @@ import {
 } from './model';
 import { buildDefaultContinuationOutlinePrompt_ACU } from './defaults';
 import {
-  buildDefaultAgentArcArchitectPrompt_ACU,
-  buildDefaultAgentBeatPlannerPrompt_ACU,
-  buildDefaultAgentMainPrompt_ACU,
-  buildDefaultAgentMainlinePlannerPrompt_ACU,
-  buildDefaultAgentMaintainerPrompt_ACU,
-  buildDefaultAgentReviewerPrompt_ACU,
-  buildDefaultAgentFinalReviewerPrompt_ACU,
-  buildDefaultAgentWebResearcherPrompt_ACU,
-  buildDefaultAgentInstructionComposerPrompt_ACU,
+  buildDefaultContinuationAgentPrompts_ACU,
 } from './agent/agent-defaults';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
@@ -99,14 +91,12 @@ export async function renderContinuationPrompt_ACU(segments: unknown, resolvers:
 export function restoreContinuationPromptDefault_ACU(settings: ContinuationSettings_ACU, kind: ContinuationPromptKind_ACU): ContinuationSettings_ACU {
   if (kind === 'outline') return { ...settings, outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU() };
   const agentPrompts = { ...settings.agentPrompts };
-  if (kind === 'agent_main') agentPrompts.main = buildDefaultAgentMainPrompt_ACU();
-  if (kind === 'agent_arc') agentPrompts.arcArchitect = buildDefaultAgentArcArchitectPrompt_ACU();
-  if (kind === 'agent_maintainer') agentPrompts.maintainer = buildDefaultAgentMaintainerPrompt_ACU();
-  if (kind === 'agent_mainline') agentPrompts.mainlinePlanner = buildDefaultAgentMainlinePlannerPrompt_ACU();
-  if (kind === 'agent_beat') agentPrompts.beatPlanner = buildDefaultAgentBeatPlannerPrompt_ACU();
-  if (kind === 'agent_reviewer') agentPrompts.reviewer = buildDefaultAgentReviewerPrompt_ACU();
-  if (kind === 'agent_final_reviewer') agentPrompts.finalReviewer = buildDefaultAgentFinalReviewerPrompt_ACU();
-  if (kind === 'agent_web_researcher') agentPrompts.webResearcher = buildDefaultAgentWebResearcherPrompt_ACU();
-  if (kind === 'agent_instruction_composer') agentPrompts.instructionComposer = buildDefaultAgentInstructionComposerPrompt_ACU();
+  const key: Record<Exclude<ContinuationPromptKind_ACU, 'outline'>, keyof typeof agentPrompts> = {
+    agent_main: 'main', agent_arc: 'arcArchitect', agent_maintainer: 'maintainer',
+    agent_mainline: 'mainlinePlanner', agent_beat: 'beatPlanner', agent_reviewer: 'reviewer',
+    agent_final_reviewer: 'finalReviewer', agent_web_researcher: 'webResearcher',
+    agent_instruction_composer: 'instructionComposer',
+  };
+  agentPrompts[key[kind]] = buildDefaultContinuationAgentPrompts_ACU()[key[kind]];
   return { ...settings, agentPrompts };
 }

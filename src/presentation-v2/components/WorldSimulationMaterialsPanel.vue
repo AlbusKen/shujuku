@@ -120,29 +120,26 @@
 
     <template v-else-if="activeTab === 'userRequirements'">
       <p class="acu-v2-ws-materials__meta">
-        用户要求在资料库里手动维护。创建任务时会把初始要求机械写成首条。
-        保存走严格校验：必须是字符串数组，空串或非字符串条目会整份拒绝。
+        用户要求在资料库里手动维护。创建任务时会把初始要求写成首条；每个标签是一条要求，保存时自动转换为字符串数组。
       </p>
       <p v-if="userRequirements.snapshot" class="acu-v2-ws-materials__meta">
         条目 {{ userRequirements.snapshot.requirements.length }} 条
       </p>
       <p v-if="userRequirements.diagnostics.length" class="acu-v2-ws-materials__error">{{ userRequirements.diagnostics.join('；') }}</p>
-      <p v-if="!userRequirements.snapshot?.requirements.length" class="acu-v2-ws-materials__empty">
-        还没有用户要求条目。发送第一条实质指令后会写入初始要求；之后请在这里手动增删改。
+      <p v-if="userRequirements.snapshot && !userRequirements.snapshot.requirements.length" class="acu-v2-ws-materials__empty">
+        还没有用户要求条目。可点击新增标签手动添加。
       </p>
-      <ol v-else class="acu-v2-ws-materials__list">
-        <li v-for="(line, index) in userRequirements.snapshot.requirements" :key="`${index}-${line}`">{{ line }}</li>
-      </ol>
-      <details class="acu-v2-ws-materials__json">
-        <summary>编辑原始 JSON</summary>
-        <p class="acu-v2-ws-materials__card-meta">必须是字符串数组，例如 ["不要提前揭底牌","继续用第一人称"]。空数组表示清空；空串条目会被拒绝。</p>
-        <AcuTextarea :model-value="requirementsDraft" :rows="10" @update:model-value="updateRequirementsDraft" />
-        <p v-if="requirementsError" class="acu-v2-ws-materials__error">{{ requirementsError }}</p>
-        <div class="acu-v2-ws-materials__actions">
-          <AcuButton :disabled="!requirementsDirty" @click="discardRequirementsDraft">放弃修改</AcuButton>
-          <AcuButton variant="primary" :loading="busy" :disabled="!requirementsDirty" @click="saveRequirementsDraft">保存用户要求</AcuButton>
-        </div>
-      </details>
+      <UserRequirementsEditor
+        editor-id="simulation"
+        :items="requirementsDraft"
+        :dirty="requirementsDirty"
+        :error="requirementsError"
+        :saving="requirementsSaving"
+        :disabled="busy || !userRequirements.snapshot || !!userRequirements.diagnostics.length"
+        @update:items="updateRequirementsDraft"
+        @discard="discardRequirementsDraft"
+        @save="saveRequirementsDraft"
+      />
     </template>
   </div>
 </template>
@@ -150,7 +147,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
-import AcuTextarea from './_lib/AcuTextarea.vue';
+import UserRequirementsEditor from './UserRequirementsEditor.vue';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationLedger_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
@@ -162,6 +159,7 @@ const props = withDefaults(defineProps<{
   conversation: WorldSimulationConversationView_ACU;
   materials: WorldSimulationMaterialsReadResult_ACU;
   userRequirements: WorldSimulationUserRequirementsReadResult_ACU;
+  saveRequirements: (requirements: string[]) => Promise<boolean>;
   session: WorldSimulationSessionEntry_ACU[];
   ledger: WorldSimulationLedger_ACU | null;
   anchor: WorldSimulationAnchorIdentity_ACU | null;
@@ -171,7 +169,6 @@ const props = withDefaults(defineProps<{
 }>(), { busy: false, timeline: () => [] });
 const emit = defineEmits<{
   (event: 'refresh' | 'clear'): void;
-  (event: 'saveUserRequirements', requirements: unknown): void;
 }>();
 
 const TABS = [
@@ -188,44 +185,75 @@ const TABS = [
 type TabId = typeof TABS[number]['id'];
 const activeTab = ref<TabId>('state');
 const clearPending = ref(false);
-const requirementsDraft = ref('[]');
+const requirementsDraft = ref<string[]>([]);
 const requirementsDirty = ref(false);
 const requirementsError = ref('');
+const requirementsSaving = ref(false);
+const awaitingRequirementsSnapshot = ref<string | null>(null);
+let requirementsChatIdentity: string | null = null;
+let latestRequirementsUpdatedAt = -1;
 
-function snapshotRequirementsJson(): string {
-  return JSON.stringify(props.userRequirements.snapshot?.requirements ?? [], null, 2);
-}
-
-watch(() => props.userRequirements.snapshot, () => {
+watch(() => [props.anchor?.chatIdentity, props.userRequirements.snapshot] as const, () => {
+  const chatIdentity = props.anchor?.chatIdentity ?? null;
+  if (chatIdentity !== requirementsChatIdentity) {
+    requirementsChatIdentity = chatIdentity;
+    latestRequirementsUpdatedAt = -1;
+    awaitingRequirementsSnapshot.value = null;
+    requirementsDirty.value = false;
+  }
   if (requirementsDirty.value) return;
-  requirementsDraft.value = snapshotRequirementsJson();
+  const snapshot = props.userRequirements.snapshot;
+  if (snapshot && snapshot.updatedAt < latestRequirementsUpdatedAt) return;
+  const incoming = snapshot?.requirements ?? [];
+  if (awaitingRequirementsSnapshot.value !== null) {
+    if (JSON.stringify(incoming) === awaitingRequirementsSnapshot.value) return;
+    awaitingRequirementsSnapshot.value = null;
+  }
+  if (snapshot) latestRequirementsUpdatedAt = snapshot.updatedAt;
+  requirementsDraft.value = [...incoming];
   requirementsError.value = '';
 }, { immediate: true });
 
-function updateRequirementsDraft(value: string): void {
+function updateRequirementsDraft(value: string[]): void {
   requirementsDraft.value = value;
-  requirementsDirty.value = value !== snapshotRequirementsJson();
+  requirementsDirty.value = JSON.stringify(value) !== JSON.stringify(props.userRequirements.snapshot?.requirements ?? []);
   requirementsError.value = '';
 }
 
 function discardRequirementsDraft(): void {
-  requirementsDraft.value = snapshotRequirementsJson();
+  requirementsDraft.value = [...(props.userRequirements.snapshot?.requirements ?? [])];
   requirementsDirty.value = false;
   requirementsError.value = '';
 }
 
-function saveRequirementsDraft(): void {
+async function saveRequirementsDraft(): Promise<void> {
+  if (!requirementsDirty.value || requirementsSaving.value || props.busy || !props.userRequirements.snapshot) return;
+  const payload = requirementsDraft.value.map(item => item.trim());
+  if (payload.some(item => !item || item.length > 8000)) {
+    requirementsError.value = '每条要求不能为空或超过 8000 字；请修改或删除空标签。';
+    return;
+  }
+  requirementsSaving.value = true;
   try {
-    const parsed: unknown = JSON.parse(requirementsDraft.value);
-    if (!Array.isArray(parsed) || parsed.some(item => typeof item !== 'string')) {
-      requirementsError.value = '必须是字符串数组';
-      return;
+    const saved = await props.saveRequirements(payload);
+    if (saved) {
+      const observed = props.userRequirements.snapshot;
+      if (observed && JSON.stringify(observed.requirements) === JSON.stringify(payload)) {
+        latestRequirementsUpdatedAt = Math.max(latestRequirementsUpdatedAt, observed.updatedAt);
+        awaitingRequirementsSnapshot.value = null;
+      } else {
+        awaitingRequirementsSnapshot.value = JSON.stringify(observed?.requirements ?? []);
+      }
+      requirementsDirty.value = false;
+      requirementsDraft.value = [...payload];
+      requirementsError.value = '';
+    } else {
+      requirementsError.value = '保存失败，修改已保留。请检查提示后重试。';
     }
-    emit('saveUserRequirements', parsed);
-    requirementsDirty.value = false;
-    requirementsError.value = '';
-  } catch {
-    requirementsError.value = 'JSON 无法解析';
+  } catch (error) {
+    requirementsError.value = error instanceof Error ? `保存失败，修改已保留：${error.message}` : '保存失败，修改已保留。';
+  } finally {
+    requirementsSaving.value = false;
   }
 }
 

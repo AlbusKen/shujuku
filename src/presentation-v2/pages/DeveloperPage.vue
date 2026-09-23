@@ -77,12 +77,6 @@ const toggles = computed<DeveloperFieldItem[]>(() => [
     value: devOptions.plotAdvanced.value,
   },
   {
-    key: "vectorIndexAdvanced",
-    label: "交火模式",
-    description: "显示召回参数与归档分块面板。需要调整向量相关参数时开启。",
-    value: devOptions.vectorIndexAdvanced.value,
-  },
-  {
     key: "legacyUiMenuVisible",
     label: "旧 UI 入口",
     description: "在 SillyTavern 扩展菜单中显示旧 UI 入口。默认隐藏；新 UI 出问题时可临时开启。",
@@ -105,9 +99,6 @@ const maxConcurrentGroups = computed(
 function handleToggleChange(key: string, value: boolean): void {
   if (key === "plotAdvanced") {
     devOptions.setPlotAdvanced(value);
-  }
-  if (key === "vectorIndexAdvanced") {
-    devOptions.setVectorIndexAdvanced(value);
   }
   if (key === "legacyUiMenuVisible") {
     devOptions.setLegacyUiMenuVisible(value);

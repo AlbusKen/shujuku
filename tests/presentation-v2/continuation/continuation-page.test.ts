@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { createApp, nextTick, ref } from 'vue';
+import { createApp, nextTick, reactive, ref } from 'vue';
 import { useDialogStore } from '../../../src/presentation-v2/stores/dialog-store';
 
 const mountedApps = new Set<{ unmount: () => void }>();
@@ -35,6 +35,17 @@ const acceptOutline = vi.fn(async () => true);
 const saveSettings = vi.fn(async () => 'saved' as const);
 const restorePromptDefault = vi.fn((draft: any) => draft);
 const materialsReload = vi.fn();
+const requirementModule = reactive({ draft: '[]', dirty: false, error: '', saving: false });
+const materialsUpdateDraft = vi.fn((module: string, value: string) => {
+  if (module !== 'userRequirements') return;
+  requirementModule.draft = value;
+  requirementModule.dirty = true;
+});
+const materialsSave = vi.fn(async (module: string) => {
+  if (module === 'userRequirements') requirementModule.error = '资料快照写盘失败，已还原楼层字段';
+  return false;
+});
+const materialsDiscard = vi.fn();
 
 vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () => ({
   useContinuationRuntime: () => ({
@@ -50,11 +61,11 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationMaterials', () 
   useContinuationMaterials: () => ({
     snapshot: materialsSnapshot,
     loadError: ref(''),
-    modules: {},
+    modules: { userRequirements: requirementModule },
     reload: materialsReload,
-    save: vi.fn(),
-    discard: vi.fn(),
-    updateDraft: vi.fn(),
+    save: materialsSave,
+    discard: materialsDiscard,
+    updateDraft: materialsUpdateDraft,
   }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
@@ -170,6 +181,7 @@ beforeEach(() => {
   statusText.value = '尚未创建任务';
   chatTick.value = 0;
   chatMutationTick.value = 0;
+  Object.assign(requirementModule, { draft: '[]', dirty: false, error: '', saving: false });
   vi.clearAllMocks();
   sendAgentMessage.mockResolvedValue(true);
 });
@@ -702,5 +714,28 @@ describe('ContinuationPage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('续写用户要求逐条输入后转换为既有 JSON 字符串数组草稿，保存失败时仍保留标签', async () => {
+    setTask();
+    materialsSnapshot.value = { ...materialsSnapshot.value, userRequirements: ['旧要求'], revisions: { ...materialsSnapshot.value.revisions, userRequirements: 0 } };
+    requirementModule.draft = JSON.stringify(['旧要求']);
+    const { el } = await mountPage();
+    const tab = Array.from(el.querySelectorAll<HTMLButtonElement>('.acu-v2-continuation-materials__tab'))
+      .find(item => item.textContent?.trim() === '用户要求')!;
+    tab.click();
+    await nextTick();
+    expect(el.querySelector<HTMLTextAreaElement>('.acu-requirements-editor textarea')?.value).toBe('旧要求');
+    buttonByText(el, '新增标签')!.click();
+    await nextTick();
+    const second = el.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!;
+    typeInto(second, '第二条要求');
+    await nextTick();
+    expect(materialsUpdateDraft).toHaveBeenLastCalledWith('userRequirements', JSON.stringify(['旧要求', '第二条要求'], null, 2));
+    buttonByText(el, '保存用户要求')!.click();
+    await nextTick();
+    expect(materialsSave).toHaveBeenCalledWith('userRequirements');
+    expect(el.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]?.value).toBe('第二条要求');
+    expect(requirementModule.dirty).toBe(true);
   });
 });

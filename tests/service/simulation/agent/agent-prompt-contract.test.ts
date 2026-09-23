@@ -63,7 +63,7 @@ describe('世界推演提示词装配契约', () => {
     expect(instruction).toContain('输出 open_round');
     expect(instruction).toContain('历史会话中的 MISSING_FIELD、REQUIRED_TEXT_LIST、INVALID_SPECIALIST_STATUS');
     expect(instruction).toContain('"reads":["ledger:current","summary:current"]');
-    expect(directorPrompt).toContain('你没有直接 ledger patch 权限');
+    expect(directorPrompt).toContain('你没有直接 ledger 写入权限');
     expect(directorPrompt).toContain('常规推演取证后输出 open_round');
   });
 
@@ -91,13 +91,13 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v15 使用受限 SQL，同时保留历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v15');
+  it('提示词 v16 使用受限 SQL，同时保留历史默认指纹与信息渠道纪律', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v16');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16']);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
     const v9 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v9');
     const v10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v10');
@@ -105,7 +105,8 @@ describe('世界推演提示词装配契约', () => {
     const v12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v12');
     const v13 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v13');
     const v14 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v14');
-    const v15 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    const v15 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v15');
+    const v16 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === WORLD_SIMULATION_PROMPT_VERSION_ACU);
     expect(v8?.fingerprint).toBe('4767:87f876e3');
     expect(v9?.fingerprint).toBe('4777:cd4e92ac');
     expect(v9?.fingerprint).not.toBe(v8?.fingerprint);
@@ -116,6 +117,7 @@ describe('世界推演提示词装配契约', () => {
     expect(v14).toBeDefined();
     expect(v14?.fingerprint).toBe(v13?.fingerprint);
     expect(v15?.fingerprint).toBe(v14?.fingerprint);
+    expect(v16?.fingerprint).not.toBe(v15?.fingerprint);
     const composerV10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v10');
     const composerV11 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v11');
     const composerV12 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['guidance-composer'].find(item => item.version === 'world-simulation-v12');
@@ -237,6 +239,65 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewer).toContain('不得输出 guidance');
     expect(reviewerPrompt).toContain(reviewer);
     expect(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.reviewer).not.toHaveProperty('guidance');
+  });
+
+  it('幕后人物规则进入 dramatis-keeper 的最终渲染消息且不要求 JSON patch 写集', async () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('dramatis-prompt');
+    const context = {
+      task: { instruction: '核对幕后角色' }, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [],
+      evidence: [], userGuidance: '', worldState: {}, anchorMessage: '主角正在客栈，旧识已经离开',
+      anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [], worldCollisions: {},
+      evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {},
+    };
+    const rendered = await renderWorldSimulationPrompt_ACU(
+      buildDefaultWorldSimulationAgentPrompts_ACU()['dramatis-keeper'],
+      'dramatis-keeper', createWorldSimulationPlaceholderResolvers_ACU(context),
+    );
+    const sent = [...rendered.messages, {
+      role: 'system',
+      content: worldSimulationSpecialistProtocolInstruction_ACU('dramatis-keeper', ['actors', 'player', 'rumors']),
+    }].map(message => message.content).join('\n');
+    expect(sent).toContain('主角正在客栈，旧识已经离开');
+    expect(sent).toContain('尚未在已发生正文登场');
+    expect(sent).toContain('已在已发生正文登场、但现已离开当前剧情场景');
+    expect(sent).toContain('当前场景仍在场的角色不作为幕后角色重复推演');
+    expect(sent).toContain('worldbook:entry:');
+    expect(sent).toContain('无法核实时把缺口列入 uncertainties');
+    expect(sent).toContain('UPDATE player');
+    expect(sent).toContain('"sql"');
+    expect(sent).not.toMatch(/"patch"\s*:|玩家位置按正文地标 upsert player/);
+  });
+
+  it('v15 存量角色默认词升级到 v16，用户改写的角色段保持原样', () => {
+    const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const legacy = structuredClone(defaults);
+    legacy['world-director'] = legacy['world-director'].map(segment => ({
+      ...segment,
+      content: segment.content.replace('没有直接 ledger 写入权限', '没有直接 ledger patch 权限'),
+    }));
+    legacy['dramatis-keeper'] = legacy['dramatis-keeper'].map(segment => ({
+      ...segment,
+      content: segment.content.startsWith('<WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW>')
+        ? segment.content.split('【幕后人物范围】')[0]
+          .replace('玩家位置按正文地标 UPDATE player', '玩家位置按正文地标 upsert player')
+        : segment.content,
+    }));
+    legacy.chronicler = legacy.chronicler.map(segment => ({
+      ...segment,
+      content: segment.content.startsWith('<WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW>')
+        ? segment.content.replace('INSERT 条目', 'append 条目')
+          .replace('成对 INSERT chronicle_archive 与 chronicle_overview', '提交 chronicleArchive')
+          .replace('目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入', '目录追加后超过 512 行必须自带 collapseRefs')
+        : segment.content,
+    }));
+    const custom = structuredClone(legacy);
+    custom['dramatis-keeper'][2].content += '\n用户定制：仅核对北境人物';
+    const migrated = migrateWorldSimulationAgentPrompts_ACU(custom, {});
+    expect(migrated['world-director']).toEqual(defaults['world-director']);
+    expect(migrated.chronicler).toEqual(defaults.chronicler);
+    expect(migrated['dramatis-keeper'][2]).toEqual(custom['dramatis-keeper'][2]);
+    expect(migrated['dramatis-keeper'].filter((_segment, index) => index !== 2)).toEqual(defaults['dramatis-keeper'].filter((_segment, index) => index !== 2));
+    expect(migrateWorldSimulationAgentPrompts_ACU(legacy, {})['dramatis-keeper']).toEqual(defaults['dramatis-keeper']);
   });
 
   it('指纹迁移：旧默认替换为当前默认，自定义提示词保留', () => {
