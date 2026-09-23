@@ -4,7 +4,9 @@ import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/si
 import { WORLD_SIMULATION_STATE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import {
   appendWorldSimulationCommitChain_ACU,
+  appendWorldSimulationFieldDeltaChain_ACU,
   foldWorldSimulationLedger_ACU,
+  readWorldSimulationLedgerFieldSnapshot_ACU,
 } from '../../../src/service/simulation/simulation-ledger-fold';
 import { buildWorldSimulationBucketKey_ACU, resolveWorldSimulationAnchor_ACU } from '../../../src/service/simulation/simulation-store';
 import type { WorldSimulationLedger_ACU } from '../../../src/service/simulation/model';
@@ -75,5 +77,94 @@ describe('世界推演账本折叠', () => {
     };
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.revision).toBe(ledger.revision);
     expect(chat[0][WORLD_SIMULATION_STATE_FIELD_ACU].entries[buildWorldSimulationBucketKey_ACU(anchor)].value.schemaVersion).toBe(ledger.schemaVersion);
+  });
+});
+
+describe('世界推演逐栏写入与分栏视图', () => {
+  function committedChat(): { chat: ReturnType<typeof assistant>[]; ledger: WorldSimulationLedger_ACU } {
+    const chat = [{}, assistant('第一楼')];
+    const before = buildDefaultWorldSimulationEnvelope_ACU().ledger;
+    appendWorldSimulationCommitChain_ACU({
+      chat,
+      messageIndex: 1,
+      anchor: resolveWorldSimulationAnchor_ACU(1, chat),
+      beforeLedger: before,
+      nextLedger: before,
+      evidenceRefs: [],
+      updatedAt: 1,
+      checkpointIndex: null,
+      beforeArchive: { schemaVersion: 1, records: {} },
+      nextArchive: { schemaVersion: 1, records: {} },
+    });
+    return { chat, ledger: before };
+  }
+
+  it('同一人物分两次写不同栏目合并为一条 partial 记录，不进入账本数组', () => {
+    const { chat } = committedChat();
+    chat.push(assistant('第二楼'));
+    const anchor = resolveWorldSimulationAnchor_ACU(2, chat);
+    expect(appendWorldSimulationFieldDeltaChain_ACU({
+      chat, messageIndex: 2, anchor, updatedAt: 20,
+      fieldUpserts: { actors: { 张三: { name: { value: '张三' }, life: { value: 'alive' } } } },
+    })).toBe(true);
+    expect(appendWorldSimulationFieldDeltaChain_ACU({
+      chat, messageIndex: 2, anchor, updatedAt: 21,
+      fieldUpserts: { actors: { 张三: { interests: { value: ['打铁'] } } } },
+    })).toBe(true);
+
+    const record = readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['张三'];
+    expect(record?.status).toBe('partial');
+    expect(record?.fields.name.value).toBe('张三');
+    expect(record?.fields.life.value).toBe('alive');
+    expect(record?.fields.interests.value).toEqual(['打铁']);
+    expect(record?.missingFields).toContain('goals');
+    // 中间态不并入完整账本
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.actors).toEqual([]);
+  });
+
+  it('整条提交覆盖同名 partial 记录并并入账本', () => {
+    const { chat, ledger } = committedChat();
+    chat.push(assistant('第二楼'));
+    const anchor = resolveWorldSimulationAnchor_ACU(2, chat);
+    appendWorldSimulationFieldDeltaChain_ACU({
+      chat, messageIndex: 2, anchor, updatedAt: 30,
+      fieldUpserts: { actors: { 'actor-a1': { name: { value: '张三' } } } },
+    });
+    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['actor-a1']?.status).toBe('partial');
+
+    const actor = { id: 'actor-a1', name: '张三', interests: [], location: '北岭', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: ['活下去'], constraints: [], informationSources: [], knownFacts: [], visibility: 'public', revision: 1 } as never;
+    const next: WorldSimulationLedger_ACU = { ...ledger, revision: ledger.revision + 1, actors: [actor] };
+    appendWorldSimulationCommitChain_ACU({
+      chat, messageIndex: 2, anchor, beforeLedger: foldWorldSimulationLedger_ACU(chat)!.ledger, nextLedger: next,
+      evidenceRefs: [], updatedAt: 31, checkpointIndex: 1,
+      beforeArchive: { schemaVersion: 1, records: {} }, nextArchive: { schemaVersion: 1, records: {} },
+    });
+    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['actor-a1']?.status).toBe('legacy_unknown');
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.actors.map(item => item.id)).toEqual(['actor-a1']);
+  });
+
+  it('没有账本基线时逐栏写入 fail-closed，不伪称已写入', () => {
+    const chat = [assistant('空楼')];
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    expect(appendWorldSimulationFieldDeltaChain_ACU({
+      chat, messageIndex: 0, anchor, updatedAt: 40,
+      fieldUpserts: { actors: { 张三: { name: { value: '张三' } } } },
+    })).toBe(false);
+    expect(chat[0][WORLD_SIMULATION_STATE_FIELD_ACU]).toBeUndefined();
+  });
+
+  it('swipe 切走后逐栏 delta 不进入折叠，切回后恢复', () => {
+    const { chat } = committedChat();
+    chat.push(assistant('第二楼', 0));
+    const anchor = resolveWorldSimulationAnchor_ACU(2, chat);
+    appendWorldSimulationFieldDeltaChain_ACU({
+      chat, messageIndex: 2, anchor, updatedAt: 50,
+      fieldUpserts: { actors: { 张三: { name: { value: '张三' } } } },
+    });
+    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['张三']?.status).toBe('partial');
+    chat[2].swipe_id = 1;
+    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors ?? {}).toEqual({});
+    chat[2].swipe_id = 0;
+    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['张三']?.fields.name.value).toBe('张三');
   });
 });

@@ -142,6 +142,63 @@ export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
   rumors: ['id', 'fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'],
 } as const;
 
+/** 推演单例模块（clock/player/guidance）在分栏视图中的固定 ID。 */
+export const WORLD_SIMULATION_SINGLETON_ID_ACU = '_' as const;
+
+/** 推演逐栏写入值。unset 为 true 表示撤销该栏；否则 value 必须是该模块栏目矩阵允许的 JSON 值。 */
+export interface WorldSimulationLedgerFieldWrite_ACU {
+  value?: unknown;
+  unset?: boolean;
+}
+
+/** 推演逐栏写集：模块 → ID → 栏目 → 写入值。单例模块使用固定 ID '_'；只点名本次提交的栏目。 */
+export type WorldSimulationLedgerFieldUpserts_ACU = Partial<Record<WorldSimulationLedgerModule_ACU, Record<string, Record<string, WorldSimulationLedgerFieldWrite_ACU>>>>;
+
+/** 推演分栏条目状态：complete 可并入完整账本投影；partial 仅在受控分栏视图可见；legacy_unknown 来自旧整条快照。 */
+export const WORLD_SIMULATION_LEDGER_FIELD_STATUSES_ACU = ['complete', 'partial', 'legacy_unknown'] as const;
+export type WorldSimulationLedgerFieldStatus_ACU = typeof WORLD_SIMULATION_LEDGER_FIELD_STATUSES_ACU[number];
+
+/** 单条已接受的推演分栏栏目值及其修订身份。 */
+export interface WorldSimulationLedgerFieldValue_ACU {
+  value: unknown;
+  revision: number;
+  updatedAt: number;
+}
+
+/** 一个 (module, ID) 的推演分栏记录。 */
+export interface WorldSimulationLedgerFieldRecord_ACU {
+  module: WorldSimulationLedgerModule_ACU;
+  id: string;
+  status: WorldSimulationLedgerFieldStatus_ACU;
+  fields: Record<string, WorldSimulationLedgerFieldValue_ACU>;
+  missingFields: string[];
+  updatedAt: number;
+}
+
+/** 折叠派生的推演分栏视图：只读，绝不写回持久帧。 */
+export interface WorldSimulationLedgerFieldSnapshot_ACU {
+  records: Partial<Record<WorldSimulationLedgerModule_ACU, Record<string, WorldSimulationLedgerFieldRecord_ACU>>>;
+}
+
+/** 推演模块的栏目矩阵：可逐栏写入的栏目白名单与提升为完整条目的必填栏目。 */
+export interface WorldSimulationLedgerFieldMatrixEntry_ACU {
+  fields: readonly string[];
+  required: readonly string[];
+}
+
+/** 各推演模块的栏目矩阵。必填栏目与 WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU 对齐（去掉 ID 键）。 */
+export const WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU: Record<WorldSimulationLedgerModule_ACU, WorldSimulationLedgerFieldMatrixEntry_ACU> = {
+  clock: { fields: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], required: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'] },
+  dimensions: { fields: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], required: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'] },
+  seeds: { fields: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'], required: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'] },
+  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'], required: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'] },
+  chronicle: { fields: ['at', 'summary', 'relatedIds', 'evidenceRefs'], required: ['at', 'summary', 'relatedIds', 'evidenceRefs'] },
+  guidance: { fields: ['signals', 'excludedFacts', 'evidenceRefs'], required: ['signals', 'excludedFacts', 'evidenceRefs'] },
+  rumors: { fields: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'], required: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'] },
+  player: { fields: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'], required: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'] },
+};
+
+
 export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
   return '字段纪律：dimensions 必须给 id,name,kind,value,trend,rationale,evidenceRefs；seeds 必须给 id,title,status,level,catalyst,visibility,location,evidenceRefs；actors 必须给 id,name,interests,location,goals,informationSources,knownFacts,evidenceRefs；rumors 必须给 id,fact,originDay,channels,evidenceRefs。rationale（依据摘要）、catalyst（催化条件）、interests/goals/knownFacts 等说明性字段必须给出有内容的非空值，禁止留空或写"暂无/未知"凑数；证据不足时不要新建该条目，把缺口写进 uncertainties。仅机器字段可省略：revision 由入库层接管，expiresAtDay/missedOutcome/locationRef 等可空项按缺省补齐；更新已有条目可只提交变更字段';
 }

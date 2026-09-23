@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AGENT_MODULE_FIELD_ACU, AGENT_MODULE_FRAME_SCHEMA_VERSION_ACU, type AgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-model';
 import {
   buildEmptyAgentModuleSnapshot_ACU,
+  readAgentModuleFieldSnapshot_ACU,
   readAgentModuleSnapshot_ACU,
+  writeAgentModuleFields_ACU,
   writeAgentModuleSnapshot_ACU,
 } from '../../../../src/service/continuation/agent/agent-module-store';
 import { notifyMaterialCheckpointFloor_ACU } from '../../../../src/service/chat/material-checkpoint-sync';
@@ -94,5 +96,72 @@ describe('续写资料楼层增量折叠', () => {
     expect(readAgentModuleSnapshot_ACU(chat).hooks.map(item => item.id)).toEqual(['LATE']);
     expect(readTableCheckpointCadence_ACU().bufferLayers).toBe(20);
     expect(readTableCheckpointCadence_ACU().periodicStepLayers).toBe(20);
+  });
+});
+
+describe('续写资料逐栏写入与分栏视图', () => {
+  it('同一 ID 分两次写不同栏目合并为一条分栏记录，中间态不进入领域数组', async () => {
+    const chat: any[] = [{ mes: 'a', is_user: false }];
+    _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    await writeAgentModuleSnapshot_ACU(chat, 0, snapshotAt(0));
+
+    chat.push({ mes: 'b', is_user: false });
+    await writeAgentModuleFields_ACU(chat, 1, { hooks: { P1: { summary: { value: '伏笔 P1' }, status: { value: 'planted' } } } });
+    await writeAgentModuleFields_ACU(chat, 1, { hooks: { P1: { importance: { value: 'high' } } } });
+
+    const record = readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1;
+    expect(record?.status).toBe('partial');
+    expect(record?.fields.summary.value).toBe('伏笔 P1');
+    expect(record?.fields.status.value).toBe('planted');
+    expect(record?.fields.importance.value).toBe('high');
+    expect(record?.missingFields).toContain('plantedIndex');
+    // 中间态不进入完整领域数组
+    expect(readAgentModuleSnapshot_ACU(chat).hooks).toEqual([]);
+    // 新写只产生新帧 delta，基线楼不被改写
+    expect(chat[1][AGENT_MODULE_FIELD_ACU].deltas).toHaveLength(2);
+    expect(chat[0][AGENT_MODULE_FIELD_ACU].deltas).toEqual([]);
+    expect(chat[0][AGENT_MODULE_FIELD_ACU].checkpoint.snapshot.hooks).toEqual([]);
+  });
+
+  it('整条写入覆盖同名 partial 记录并提升为完整条目', async () => {
+    const chat: any[] = [{ mes: 'a', is_user: false }];
+    _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    await writeAgentModuleSnapshot_ACU(chat, 0, snapshotAt(0));
+    chat.push({ mes: 'b', is_user: false });
+    await writeAgentModuleFields_ACU(chat, 1, { hooks: { P1: { summary: { value: '伏笔 P1' } } } });
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.status).toBe('partial');
+
+    await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt(1, { hooks: [hook('P1') as any] }));
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.status).toBe('legacy_unknown');
+    expect(readAgentModuleSnapshot_ACU(chat).hooks.map(item => item.id)).toEqual(['P1']);
+  });
+
+  it('领域条目被整条写入删除后，partial 记录仍保留在分栏视图', async () => {
+    const chat: any[] = [{ mes: 'a', is_user: false }];
+    _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    await writeAgentModuleSnapshot_ACU(chat, 0, snapshotAt(0, { hooks: [hook('H1') as any] }));
+    chat.push({ mes: 'b', is_user: false });
+    await writeAgentModuleFields_ACU(chat, 1, { hooks: { P1: { summary: { value: '伏笔 P1' } } } });
+
+    await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt(1, { hooks: [] }));
+    expect(readAgentModuleSnapshot_ACU(chat).hooks).toEqual([]);
+    const records = readAgentModuleFieldSnapshot_ACU(chat).records.hooks ?? {};
+    expect(records.H1).toBeUndefined();
+    expect(records.P1?.status).toBe('partial');
+  });
+
+  it('swipe 切走后逐栏 delta 不进入折叠，切回后恢复', async () => {
+    const chat: any[] = [{ mes: 'a', is_user: false, swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    await writeAgentModuleSnapshot_ACU(chat, 0, snapshotAt(0));
+    chat.push({ mes: 'b', is_user: false, swipe_id: 0 });
+    await writeAgentModuleFields_ACU(chat, 1, { hooks: { P1: { summary: { value: '伏笔 P1' } } } });
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.status).toBe('partial');
+
+    chat[1].swipe_id = 1;
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks ?? {}).toEqual({});
+
+    chat[1].swipe_id = 0;
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.fields.summary.value).toBe('伏笔 P1');
   });
 });

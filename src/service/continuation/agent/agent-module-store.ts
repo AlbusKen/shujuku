@@ -11,6 +11,7 @@ import { findLatestTableFullCheckpointIndex_ACU } from '../../chat/material-chec
 import {
   foldAgentModuleSnapshot_ACU,
   planAgentModuleSnapshotWrite_ACU,
+  planAgentModuleFieldWrite_ACU,
   type AgentModuleFrameDeps_ACU,
 } from './agent-module-frame';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
@@ -39,6 +40,8 @@ import {
   type AgentInfoGapEntry_ACU,
   type AgentMaterialCompletionRecord_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentModuleFieldSnapshot_ACU,
+  type AgentModuleFieldUpserts_ACU,
   type AgentPendingFix_ACU,
   type AgentStoryArcEntry_ACU,
   type AgentWebRefEntry_ACU,
@@ -537,6 +540,23 @@ export function readAgentModuleSnapshot_ACU(chat?: any[]): AgentModuleSnapshot_A
 }
 
 /**
+ * 读取当前生效资料的分栏视图（模块 → ID → 栏目）。
+ * 与 readAgentModuleSnapshot_ACU 同一次折叠：完整领域数组仍只来自整条 writes；
+ * 逐栏 delta 提交的 partial 记录只出现在本视图，不进入领域数组。
+ */
+export function readAgentModuleFieldSnapshot_ACU(chat?: any[]): AgentModuleFieldSnapshot_ACU {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  const folded = foldAgentModuleSnapshot_ACU(messages, agentModuleFrameDeps_ACU());
+  lastReadDiagnostics_ACU = {
+    candidates: folded.candidates,
+    adoptedIndex: folded.adoptedIndex,
+    salvaged: folded.salvaged,
+    checkpointIndex: folded.checkpointIndex,
+    foldedDeltaCount: folded.foldedDeltaCount,
+  };
+  return folded.fields;
+}
+/**
  * 把快照写入指定楼层并真实提交到宿主。
  *
  * 结算水位以快照自带的 settledThroughIndex 为准，只做合法性钳制（0 ≤ 水位 ≤ 承载楼层）：
@@ -573,6 +593,36 @@ export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: num
       else delete container[AGENT_MODULE_FIELD_ACU];
     }
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+/**
+ * 把逐栏写集作为一条 fieldUpserts delta 写入目标楼层并真实提交到宿主。
+ * 不触碰领域数组：缺栏记录只进入受控分栏视图（readAgentModuleFieldSnapshot_ACU），
+ * 完整条目仍由整条 writes 路径投影。宿主保存失败时逐楼还原，不报“已写入”。
+ */
+export async function writeAgentModuleFields_ACU(chat: any[], targetIndex: number, fieldUpserts: AgentModuleFieldUpserts_ACU): Promise<boolean> {
+  const message = Array.isArray(chat) ? chat[targetIndex] : null;
+  if (!message || typeof message !== 'object') {
+    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 逐栏写入的目标楼层不可用', false, { targetIndex }));
+  }
+  const plan = planAgentModuleFieldWrite_ACU(chat, targetIndex, fieldUpserts, agentModuleFrameDeps_ACU());
+  if (!plan.changed) return false;
+  try {
+    for (const assignment of plan.assignments) {
+      const container = chat[assignment.index] as Record<string, unknown>;
+      if (assignment.value === undefined) delete container[AGENT_MODULE_FIELD_ACU];
+      else container[AGENT_MODULE_FIELD_ACU] = assignment.value;
+    }
+    await saveChatToHostStrict_ACU();
+    return true;
+  } catch (error) {
+    for (const assignment of plan.assignments) {
+      const container = chat[assignment.index] as Record<string, unknown>;
+      if (assignment.existed) container[AGENT_MODULE_FIELD_ACU] = assignment.previous;
+      else delete container[AGENT_MODULE_FIELD_ACU];
+    }
+    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 逐栏写入写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
   }
 }
 
