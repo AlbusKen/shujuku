@@ -166414,14 +166414,15 @@ Expected function or array of functions, received type ${typeof value}.`
                         // 只在确证 dryRun/quiet/自动触发生成，或世界推演内部调用仍在途（本次上下文可能已被内部事件错配消费）时放弃。
                         const simulationInternalInFlight = hasWorldSimulationInternalAiInflight_ACU();
                         const simulationContextBlocked = !!generationContext && (generationContext.dryRun || quietLike || automaticTrigger);
-                        if (!simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
+                        // 仪表盘开关同时门控后台自动触发；缺失配置按关闭处理，不影响其他正文完成管线。
+                        if (settings_ACU.worldSimulationPageEnabled === true && !simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
                             const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(eventMessageId, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU(), generationContext?.seq);
                             void getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent).catch(error => {
                                 logWarn_ACU(`世界推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
                             });
                         }
                         else {
-                            logDebug_ACU(`世界推演自动触发跳过：${eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
+                            logDebug_ACU(`世界推演自动触发跳过：${settings_ACU.worldSimulationPageEnabled !== true ? 'feature_disabled' : eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
                         }
                         if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                             handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);
@@ -185589,7 +185590,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     key: "worldSimulationPageEnabled",
                     label: dashboardCopy.toggles.worldSimulation.label,
                     description: dashboardCopy.toggles.worldSimulation.description,
-                    value: settings_ACU.worldSimulationPageEnabled !== false,
+                    value: settings_ACU.worldSimulationPageEnabled === true,
                 },
                 {
                     key: "externalImportPageEnabled",
@@ -207482,7 +207483,7 @@ Expected function or array of functions, received type ${typeof value}.`
             [FEATURE_GATE_CONTENT_REPLACE]: syncContentReplaceAvailability(),
             [FEATURE_GATE_PLOT]: settings_ACU?.plotSettings?.enabled === true,
             [FEATURE_GATE_CONTINUATION]: settings_ACU?.continuationPageEnabled !== false,
-            [FEATURE_GATE_WORLD_SIMULATION]: settings_ACU?.worldSimulationPageEnabled !== false,
+            [FEATURE_GATE_WORLD_SIMULATION]: settings_ACU?.worldSimulationPageEnabled === true,
             [FEATURE_GATE_IMPORT]: settings_ACU?.externalImportPageEnabled !== false,
             [FEATURE_GATE_VECTOR_INDEX]: settings_ACU?.summaryVectorIndexModeDefault === true,
         };

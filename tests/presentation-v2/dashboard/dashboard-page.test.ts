@@ -4,7 +4,7 @@
  * @vitest-environment jsdom
  */
 import { readFileSync } from "node:fs";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const STORAGE_KEY = "acu_v2_ui_state";
 
@@ -117,6 +117,8 @@ function createSqlTableData() {
   };
 }
 
+let lastMountedApp: { __resetAcuV2MountForTests: () => void } | null = null;
+
 async function mountDashboardPage(
   settings = createSettings(),
   tableData = createTableData(),
@@ -153,17 +155,6 @@ async function mountDashboardPage(
       parseTableTemplateJson_ACU: m.parseTableTemplateJson_ACU,
     };
   });
-
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify({
-      router: { activePageId: "dashboard" },
-      devOptions: {
-        developerOptionsEnabled: options.developerOptionsEnabled === true,
-        warnLogEnabled: options.warnLogEnabled === true,
-      },
-    }),
-  );
 
   const saveSettings = vi.fn(() => ({ saved: true, storageType: "memory" }));
   const enableFlightMode = vi.fn(async () => ({ ok: true, visibleChronicleRowCount: 2 }));
@@ -265,8 +256,20 @@ async function mountDashboardPage(
   vi.spyOn(window, "confirm").mockReturnValue(false);
 
   const mount = await import("../../../src/presentation-v2/bootstrap/mount");
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      router: { activePageId: "dashboard" },
+      devOptions: {
+        developerOptionsEnabled: options.developerOptionsEnabled === true,
+        warnLogEnabled: options.warnLogEnabled === true,
+      },
+    }),
+  );
+  lastMountedApp = mount;
   await mount.openAcuV2App();
   await new Promise((r) => setTimeout(r, 0));
+  expect(document.querySelector('.acu-v2-dashboard-page')).not.toBeNull();
   const { useDashboardPage } = await import("../../../src/presentation-v2/composables/useDashboardPage");
   const dashboard = useDashboardPage();
   return { mount, settings, saveSettings, enableFlightMode, disableFlightMode, dashboard };
@@ -276,6 +279,11 @@ beforeEach(() => {
   localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+afterEach(() => {
+  lastMountedApp?.__resetAcuV2MountForTests();
+  lastMountedApp = null;
 });
 
 describe("DashboardPage", () => {
@@ -918,8 +926,8 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("高级设置承载功能页开关，并控制对应一级页可见性", async () => {
-    const { mount, settings } = await mountDashboardPage();
+  it("高级设置承载功能页开关，世界推演默认关闭并随切换控制一级页可见性", async () => {
+    const { mount, settings, saveSettings } = await mountDashboardPage();
 
     const segmentedButtons = Array.from(
       document.querySelectorAll('button[role="radio"]'),
@@ -948,7 +956,7 @@ describe("DashboardPage", () => {
     ).toContain("智能续写");
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
-    ).toContain("世界推演");
+    ).not.toContain("世界推演");
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
     ).toContain("外部导入");
@@ -976,6 +984,7 @@ describe("DashboardPage", () => {
     expect(worldSimulationToggle).not.toBeNull();
     expect(importToggle).not.toBeNull();
     expect(vectorToggle).not.toBeNull();
+    expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("false");
 
     continuationToggle.click();
     worldSimulationToggle.click();
@@ -983,13 +992,24 @@ describe("DashboardPage", () => {
     await Promise.resolve();
 
     expect(settings.continuationPageEnabled).toBe(false);
-    expect(settings.worldSimulationPageEnabled).toBe(false);
+    expect(settings.worldSimulationPageEnabled).toBe(true);
     expect(settings.externalImportPageEnabled).toBe(false);
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
-    expect(text).not.toContain("功能");
     expect(text).not.toContain("智能续写");
-    expect(text).not.toContain("世界推演");
+    expect(text).toContain("世界推演");
     expect(text).not.toContain("外部导入");
+    expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("true");
+    expect(saveSettings).toHaveBeenCalled();
+
+    const savesBeforeDisablingWorldSimulation = saveSettings.mock.calls.length;
+    worldSimulationToggle.click();
+    await Promise.resolve();
+    expect(settings.worldSimulationPageEnabled).toBe(false);
+    expect(saveSettings).toHaveBeenCalledTimes(savesBeforeDisablingWorldSimulation + 1);
+    expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("false");
+    text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
+    expect(text).not.toContain("功能");
+    expect(text).not.toContain("世界推演");
 
     plotToggle.click();
     vectorToggle.click();

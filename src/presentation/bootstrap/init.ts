@@ -513,7 +513,8 @@ export   function mainInitialize_ACU() {
                 // 只在确证 dryRun/quiet/自动触发生成，或世界推演内部调用仍在途（本次上下文可能已被内部事件错配消费）时放弃。
                 const simulationInternalInFlight = hasWorldSimulationInternalAiInflight_ACU();
                 const simulationContextBlocked = !!generationContext && (generationContext.dryRun || quietLike || automaticTrigger);
-                if (!simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
+                // 仪表盘开关同时门控后台自动触发；缺失配置按关闭处理，不影响其他正文完成管线。
+                if (settings_ACU.worldSimulationPageEnabled === true && !simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
                   const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(
                     eventMessageId,
                     currentChatFileIdentifier_ACU,
@@ -524,7 +525,7 @@ export   function mainInitialize_ACU() {
                     logWarn_ACU(`世界推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
                   });
                 } else {
-                  logDebug_ACU(`世界推演自动触发跳过：${eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
+                  logDebug_ACU(`世界推演自动触发跳过：${settings_ACU.worldSimulationPageEnabled !== true ? 'feature_disabled' : eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
                 }
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);

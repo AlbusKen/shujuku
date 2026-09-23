@@ -65,7 +65,7 @@ function readInitialFeatureGates(): Record<string, boolean> {
     [FEATURE_GATE_CONTENT_REPLACE]: syncContentReplaceAvailability(),
     [FEATURE_GATE_PLOT]: settings_ACU?.plotSettings?.enabled === true,
     [FEATURE_GATE_CONTINUATION]: settings_ACU?.continuationPageEnabled !== false,
-    [FEATURE_GATE_WORLD_SIMULATION]: settings_ACU?.worldSimulationPageEnabled !== false,
+    [FEATURE_GATE_WORLD_SIMULATION]: settings_ACU?.worldSimulationPageEnabled === true,
     [FEATURE_GATE_IMPORT]: settings_ACU?.externalImportPageEnabled !== false,
     [FEATURE_GATE_VECTOR_INDEX]: settings_ACU?.summaryVectorIndexModeDefault === true,
   };

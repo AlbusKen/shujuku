@@ -969,7 +969,7 @@ export function useDashboardPage(): DashboardPageState {
         key: "worldSimulationPageEnabled",
         label: dashboardCopy.toggles.worldSimulation.label,
         description: dashboardCopy.toggles.worldSimulation.description,
-        value: settings_ACU.worldSimulationPageEnabled !== false,
+        value: settings_ACU.worldSimulationPageEnabled === true,
       },
       {
         key: "externalImportPageEnabled",

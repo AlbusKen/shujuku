@@ -8,6 +8,7 @@ const m = vi.hoisted(() => ({
   generationStarted: undefined as undefined | ((type: any, params: any, dryRun: any) => void),
   generationEnded: undefined as undefined | ((messageId: any) => void),
   currentChatKey: '',
+  settings: { plotSettings: {} } as { plotSettings: Record<string, unknown>; worldSimulationPageEnabled?: boolean },
   api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
   gate: { lastUserMessageId: 7 as any, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } as any, generationSeq: 0, activeGenerations: [] as any[] },
   resetTakeover: vi.fn(), dispose: vi.fn(), setData: vi.fn(), setTables: vi.fn(), setMessages: vi.fn(), setTotal: vi.fn(), setChat: vi.fn(),
@@ -45,7 +46,7 @@ vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: vi.fn(), handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, _set_wasStoppedByUser_ACU: vi.fn(), generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -107,6 +108,7 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete m.settings.worldSimulationPageEnabled;
   m.api.chat = [];
   m.currentChatKey = '';
   m.preload.mockResolvedValue({ success: true, skipped: true, reason: 'no_manifest', chunkCount: 0 });
@@ -246,7 +248,32 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
+  it('缺失开关默认不派发；开启后派发，关闭后停止且不影响自动填表', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: false, mes: 'assistant', message_id: 42 }];
+
+    m.generationStarted!('normal', {}, false);
+    m.generationEnded!(42);
+    expect(m.createSimulationIntent).not.toHaveBeenCalled();
+    expect(m.getSimulationRuntime).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).toHaveBeenCalledTimes(1);
+
+    m.settings.worldSimulationPageEnabled = true;
+    m.generationStarted!('normal', {}, false);
+    m.generationEnded!(42);
+    await Promise.resolve();
+    expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
+
+    m.settings.worldSimulationPageEnabled = false;
+    m.generationStarted!('normal', {}, false);
+    m.generationEnded!(42);
+    expect(m.createSimulationIntent).toHaveBeenCalledTimes(1);
+    expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
+    expect(m.handleNewMessage).toHaveBeenCalledTimes(3);
+  });
+
   it('普通最终 assistant 正文构造冻结意图并派发一次世界推演', async () => {
+    m.settings.worldSimulationPageEnabled = true;
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: 'user' }, { is_user: false, mes: 'assistant', message_id: 42 }];
 
@@ -260,6 +287,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
   });
 
   it('quiet、dryRun 与 automatic_trigger 不派发世界推演', async () => {
+    m.settings.worldSimulationPageEnabled = true;
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: 'assistant', message_id: 42 }];
 

@@ -64,7 +64,7 @@ export interface Settings_ACU {
   hasImportTableSelection: boolean;
   /** presentation-v2 智能续写页可见性；缺失按开启处理。 */
   continuationPageEnabled?: boolean;
-  /** presentation-v2 世界推演页可见性；缺失按开启处理。 */
+  /** 世界推演总开关（含自动后台触发）；缺失按关闭处理。 */
   worldSimulationPageEnabled?: boolean;
   /** 存储模式：'native' 原生 JSON 模式 | 'sqlite' SQLite 运行时数据库模式 */
   storageMode: 'native' | 'sqlite';

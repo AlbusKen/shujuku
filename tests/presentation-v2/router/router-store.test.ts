@@ -213,16 +213,33 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('visiblePagesByGroup 在高手模式默认状态下：overview=1 / config=5 / feature=3 / tool=2 / developer=0', async () => {
+  it('高手模式世界推演默认隐藏：overview=1 / config=5 / feature=2 / tool=2 / developer=0', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.visiblePagesByGroup.overview.length).toBe(1);
     expect(r.visiblePagesByGroup.config.length).toBe(5);
-    expect(r.visiblePagesByGroup.feature.length).toBe(3);
+    expect(r.visiblePagesByGroup.feature.length).toBe(2);
+    expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePagesByGroup.tool.length).toBe(2); // 数据管理 + 高级工具
     expect(r.visiblePagesByGroup.developer.length).toBe(0); // 默认 developerOptionsEnabled=false
+  });
+
+  it('已有配置显式开启世界推演时初始化显示页面，关闭门禁后隐藏', async () => {
+    persistAdvancedMode();
+    const m = await freshImport();
+    const state = await import('../../../src/service/runtime/state-manager');
+    state._set_settings_ACU({ ...state.settings_ACU, worldSimulationPageEnabled: true });
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+
+    expect(r.visiblePages.map(p => p.id)).toContain('world-simulation');
+    r.setActivePage('world-simulation');
+    expect(r.activePageId).toBe('world-simulation');
+    r.setFeatureGate(m.registry.FEATURE_GATE_WORLD_SIMULATION, false);
+    expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
+    expect(r.activePageId).toBe('dashboard');
   });
 
   it('智能续写、世界推演、外部导入、交火模式都关闭时功能分组为空', async () => {
@@ -344,6 +361,8 @@ describe('router-store · 切页 + 持久化', () => {
 
     expect(r.visiblePagesByGroup.config.map(p => p.id)).toContain('plot');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)[0]).toBe('continuation');
+    expect(r.visiblePagesByGroup.feature.map(p => p.id)).not.toContain('world-simulation');
+    r.setFeatureGate(m.registry.FEATURE_GATE_WORLD_SIMULATION, true);
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('world-simulation');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('import');
     expect(r.visiblePages.map(p => p.id)).not.toContain('vector-index');
