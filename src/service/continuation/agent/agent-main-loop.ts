@@ -61,7 +61,7 @@ import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
-import { commitAgentModuleFieldWrites_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, type AgentFieldPage_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU } from './agent-protocol';
 import {
@@ -113,6 +113,7 @@ import {
   type AgentOpenRoundAction_ACU,
   type AgentOutlineOpResult_ACU,
   type AgentRunBudget_ACU,
+  type AgentSubagentName_ACU,
   type AgentToolCall_ACU,
   type ContinuationAgentTurnPlanRequest_ACU,
   type ContinuationAgentTurnPlanResult_ACU,
@@ -1455,6 +1456,17 @@ export class ContinuationAgentTurnPlanner_ACU {
     await session.flush();
   }
 
+  /** 可写子代理共用的逐栏保存口。目标楼在派工时绑定，缺栏留下，已有栏目先入库。 */
+  private moduleFieldWrite_ACU(chat: any[], context: AgentResolveContext_ACU) {
+    const targetIndex = chat.length - 1;
+    const message = chat[targetIndex];
+    const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message), content: message?.mes };
+    const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
+    return ({ role, sql, resolvePage, isCurrent }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean }) => commitAgentModuleFieldWrites_ACU({
+      chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages,
+    });
+  }
+
   /**
    * 固定工作流的结构前置阶段：程序先维护总纲，再确保存在可执行的阶段大纲。
    * 主 Agent 只负责给出 open_round 的焦点，不再直接派工 arc/outline 角色。
@@ -1493,21 +1505,31 @@ export class ContinuationAgentTurnPlanner_ACU {
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
+          writeSql: this.moduleFieldWrite_ACU(chat, context),
         });
-        if (!result.arc) {
-          failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', '固定工作流的总纲维护没有返回可用写集');
+        if (result.usedFieldWrites) context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+        if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
+          const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
+          const applied = await applyAgentModuleDeltaViaSql_ACU(
+            context.moduleSnapshot,
+            delta,
+            result.writes,
+            Math.max(0, chat.length - 1),
+            completedStageNumbers,
+            { onViolation: () => undefined, agentName: 'arc-architect' },
+          );
+          context.moduleSnapshot = applied.snapshot;
+          await this.persistSnapshot_ACU(chat, applied.snapshot);
         }
-        const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
-        const applied = (await applyAgentModuleDeltaViaSql_ACU(
-          context.moduleSnapshot,
-          delta,
-          result.writes,
-          Math.max(0, chat.length - 1),
-          completedStageNumbers,
-        )).snapshot;
-        context.moduleSnapshot = applied;
-        await this.persistSnapshot_ACU(chat, applied);
-        updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc.summary || '总纲已更新', ok: true });
+        const arcReady = hasActiveStoryArc_ACU(context.moduleSnapshot) && hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
+          && findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length === 0;
+        if (!arcReady) {
+          const missing = (result.unresolvedIssues ?? []).map(issue => `${issue.path}：${issue.message}`).join('；');
+          failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', missing
+            ? `固定工作流的总纲还缺栏目，已写入的栏目已保留。${missing}`
+            : '固定工作流的总纲维护没有形成可执行的活跃总纲和活动卷');
+        }
+        updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc?.summary || '总纲已按栏目写入', ok: true });
       } catch (error) {
         const reason = compactAgentProtocolError_ACU(error);
         updateAgentSession_ACU(entryId, { title: '固定工作流维护故事总纲失败', detail: reason, ok: false });
@@ -1585,8 +1607,6 @@ export class ContinuationAgentTurnPlanner_ACU {
         const definition = findAgentSubagentDefinition_ACU(call.agentName);
         const role = definition?.promptKey ?? 'main';
         const preset = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
-        const targetIndex = chat.length - 1;
-        const dispatchTarget = { message: chat[targetIndex], swipeId: readMessageSwipeId_ACU(chat[targetIndex]), content: chat[targetIndex]?.mes };
         const result = await this.dependencies.subagentRuntime.run({
           delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
           settings: request.settings,
@@ -1596,8 +1616,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
-          writeSql: ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent,
-            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber) }),
+          writeSql: this.moduleFieldWrite_ACU(chat, context),
         });
         if (call.billing === 'opening') {
           ledger.delegationsUsed += 1;
@@ -1723,8 +1742,11 @@ export class ContinuationAgentTurnPlanner_ACU {
         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
         isCurrent: identity => request.isInternalRequestCurrent(identity),
         signal: request.signal,
+        writeSql: this.moduleFieldWrite_ACU(chat, context),
       });
-      const settled = await this.settleResearcherResult_ACU(result, snapshot);
+      const settled = result.usedFieldWrites
+        ? { snapshot: readAgentModuleSnapshot_ACU(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
+        : await this.settleResearcherResult_ACU(result, snapshot);
       ledger.outcomes.push(settled.outcome);
       updateAgentSession_ACU(entryId, {
         title: `开场百科检索${settled.outcome.ok ? '完成' : '未采用'}${result.usage ? ` · ${formatAgentUsageLabel_ACU(result.usage)}` : ''}`,
@@ -1867,8 +1889,6 @@ export class ContinuationAgentTurnPlanner_ACU {
         // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
         const definition = findAgentSubagentDefinition_ACU(delegation.agentName);
         const delegationPreset = this.dependencies.resolveApiPreset(request.settings, definition?.promptKey ?? 'main', 'agent_delegate', apiDependencies);
-        const targetIndex = chat.length - 1;
-        const dispatchTarget = { message: chat[targetIndex], swipeId: readMessageSwipeId_ACU(chat[targetIndex]), content: chat[targetIndex]?.mes };
         const result = await this.dependencies.subagentRuntime.run({
           delegation,
           settings: request.settings,
@@ -1879,8 +1899,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
-          writeSql: ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent,
-            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber) }),
+          writeSql: this.moduleFieldWrite_ACU(chat, context),
         });
         return { delegation, result, error: null as unknown };
       } catch (error) {

@@ -1322,7 +1322,7 @@ export function renderAgentContractContinuationRequest_ACU(accepted: AgentMainta
     lines.push('需要修正的条目：');
     for (const item of rejected) lines.push(`- ${item.module}[${item.index}]${item.id ? `（id=${item.id}）` : ''}：${item.reason}`);
   }
-  lines.push('回复格式与原契约相同，只是 delta 里各数组只放剩余或修正的条目；summary 可省略；所有条目都写完时 delta 各数组为空即可。');
+  lines.push('回复仍是一个 JSON 对象，sql 必须是字符串。只提交上面点名的栏目：还没有写入的条目用 INSERT，只有出现在「已收下的条目」里的才用 UPDATE。不要重发未点名的栏目，也不要把整行重发成 patch。summary 可省略。');
   return lines.join('\n');
 }
 

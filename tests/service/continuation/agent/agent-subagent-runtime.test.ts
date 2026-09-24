@@ -518,4 +518,47 @@ describe('子代理逐栏工具会话', () => {
       expect(accepted).toContain('"field":"summary","revision":1');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
+
+  it('契约 SQL 先按栏目写入，缺栏只要求补写，不把新行收成 patch', async () => {
+    const input = input_ACU();
+    input.delegation = { agentName: 'arc-architect', prompt: '立总纲', reads: [] };
+    const seen: string[] = [];
+    input.writeSql = async ({ sql }) => {
+      seen.push(sql);
+      if (seen.length === 1) {
+        return {
+          status: 'committed',
+          accepted: [{ module: 'storyArc', id: 'VOL-01', field: 'title', revision: 1 }],
+          rejected: [{ path: 'storyArc#VOL-01.sustainingThreads', reason: '必须是非空字符串数组' }],
+          partials: [{ module: 'storyArc', id: 'VOL-01', missingFields: ['withheld'] }],
+          revisions: input.resolveContext.moduleSnapshot.revisions,
+          constraintProposals: [],
+        } as any;
+      }
+      return {
+        status: 'committed', accepted: [{ module: 'storyArc', id: 'VOL-01', field: 'withheld', revision: 2 }],
+        rejected: [], partials: [], revisions: input.resolveContext.moduleSnapshot.revisions, constraintProposals: [],
+      } as any;
+    };
+    const messages: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async value => {
+        messages.push(value);
+        return messages.length === 1
+          ? JSON.stringify({ summary: '立卷', sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, status, expected_revision, sustaining_threads) VALUES ('VOL-01', 'volume', '入府', '进入明府', '身份落下', 'active', 0, '一句经营线')" })
+          : JSON.stringify({ summary: '补栏', sql: "UPDATE story_arc SET withheld = '名器未激活' WHERE id = 'VOL-01' AND expected_revision = 0" });
+      },
+    });
+    const result = await runtime.run(input);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toContain('INSERT INTO story_arc');
+    expect(seen[1]).toContain('UPDATE story_arc');
+    const follow = messages[1].map(item => item.content).join('\n');
+    expect(follow).toContain('调用 write_sql');
+    expect(follow).toContain('sustainingThreads');
+    expect(follow).toContain('withheld');
+    expect(follow).not.toContain('delta 里各数组');
+    expect(result.usedFieldWrites).toBe(true);
+  });
 });

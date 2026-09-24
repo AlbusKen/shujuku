@@ -702,6 +702,22 @@ describe('buildCustomApiRequestBody_ACU', () => {
     }
   });
 
+  it('带原生工具时把会拆掉 tool 角色的后处理升成对应 tools 变体', () => {
+    const tools = [{ type: 'function' as const, function: { name: 'read', description: '读', parameters: { type: 'object', properties: {} } } }];
+    const messages = [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["$STORY_TAIL"]}' } }] },
+      { role: 'tool', tool_call_id: 'call_0_read', content: '【工具结果】已读' },
+    ];
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'merge' }, { tools }).custom_prompt_post_processing).toBe('merge_tools');
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'semi' }, { tools }).custom_prompt_post_processing).toBe('semi_tools');
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'single' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'strict_tools' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
+    const passthrough = buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: '' }, { tools });
+    expect(passthrough).not.toHaveProperty('custom_prompt_post_processing');
+    expect(passthrough.messages[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_0_read' });
+  });
+
   it('promptPostProcessing 非法值默认 strict', () => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],

@@ -93174,6 +93174,17 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
         const keys = trimmed.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
         return keys.map((key) => `- ${key}`).join('\n');
     }
+    function preserveNativeToolPostProcessing_ACU(value, hasNativeToolTraffic) {
+        if (!hasNativeToolTraffic)
+            return value;
+        if (value === 'merge')
+            return 'merge_tools';
+        if (value === 'semi')
+            return 'semi_tools';
+        if (value === 'strict' || value === 'single')
+            return 'strict_tools';
+        return value;
+    }
     /**
      * 原版 ST 原生协议源的 reverse_proxy 基址归一化（对齐 ST 自身的 URL 拼接语义）：
      * - claude 源 fetch(apiUrl + '/messages')：基址须含 /v1（ST 官方常量即 https://api.anthropic.com/v1）；
@@ -93261,7 +93272,11 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
         // 现在：默认 'strict'（与历史行为兼容）；预设选择具体值则透传；
         // 显式选择「未选择」（''）时不携带该字段，后端原样透传消息，
         // 完整保留用户配置的 system/user/assistant 结构。
-        const promptPostProcessing = normalizePromptPostProcessing_ACU(effectiveApiConfig?.promptPostProcessing);
+        // 带原生工具时必须改用 *_tools 变体。strict/merge/semi/single 会删除 tool_calls、
+        // tool_call_id，并把 role:tool 改成 user，模型看到的就不再是这条调用的工具结果。
+        const hasNativeToolTraffic = Boolean(opts.tools?.length)
+            || (Array.isArray(messages) && messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls)));
+        const promptPostProcessing = preserveNativeToolPostProcessing_ACU(normalizePromptPostProcessing_ACU(effectiveApiConfig?.promptPostProcessing), hasNativeToolTraffic);
         // 接口协议按宿主后端形态分流（同一预设字段 customApiFormat，两种落地方式）：
         // - TauriTavern（Rust 后端）：透传 custom_api_format 契约，按其分流上游端点与请求/响应变形
         //   （openai_compat→/chat/completions、openai_responses→/responses、claude_messages→/messages、
@@ -154875,7 +154890,7 @@ Expected function or array of functions, received type ${typeof value}.`
             for (const item of rejected)
                 lines.push(`- ${item.module}[${item.index}]${item.id ? `（id=${item.id}）` : ''}：${item.reason}`);
         }
-        lines.push('回复格式与原契约相同，只是 delta 里各数组只放剩余或修正的条目；summary 可省略；所有条目都写完时 delta 各数组为空即可。');
+        lines.push('回复仍是一个 JSON 对象，sql 必须是字符串。只提交上面点名的栏目：还没有写入的条目用 INSERT，只有出现在「已收下的条目」里的才用 UPDATE。不要重发未点名的栏目，也不要把整行重发成 patch。summary 可省略。');
         return lines.join('\n');
     }
     /**
@@ -157240,6 +157255,41 @@ Expected function or array of functions, received type ${typeof value}.`
             ...(resolved.status === 'failed' ? { status: 'failed' } : {}) };
     }
     /** 只有定位到合法模块和安全 ID 的领域拒绝路径才可转为权威读取地址。 */
+    function blankMaintainerOutput_ACU(summary) {
+        return {
+            summary,
+            delta: {
+                expectedRevisions: {},
+                hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [],
+                storyArc: [], storyArcPatches: [], chronology: [], chronologyPatches: [],
+                constraintProposals: [],
+            },
+        };
+    }
+    /** 契约 SQL 已经按栏目落库时，只追缺栏和被拒栏目，不再把整行收成会失败的 patch。 */
+    function renderIncompleteFieldWrite_ACU(receipt) {
+        const rejected = receipt.rejected.filter(item => item.path !== 'host');
+        const missing = (receipt.partials ?? []).filter(item => item.missingFields.length || item.promotionError);
+        if (!rejected.length && !missing.length && receipt.partials !== null)
+            return null;
+        const lines = [];
+        if (receipt.accepted.length)
+            lines.push(`已写入并保留 ${receipt.accepted.length} 个栏目。不要重发这些栏目。`);
+        if (rejected.length) {
+            lines.push('下列栏目没有写入：');
+            for (const item of rejected)
+                lines.push(`- ${item.path}：${item.reason}`);
+        }
+        if (missing.length) {
+            lines.push('下列条目还缺必填栏目，补齐后才会成为正式资料：');
+            for (const item of missing)
+                lines.push(`- ${item.module}#${item.id}：${item.missingFields.join('、') || '提升失败'}${item.promotionError ? `（${item.promotionError}）` : ''}`);
+        }
+        if (receipt.partials === null)
+            lines.push('保存状态不确定。先 read $FIELD:模块:ID 读取权威帧，再决定补写。');
+        lines.push('请调用 write_sql，只提交上面点名的栏目。分栏记录已经存在时用 UPDATE，WHERE 带 id 和当前 expected_revision；还没有记录时才用 INSERT。不要把尚未入库的新行写成 UPDATE。');
+        return lines.join('\n');
+    }
     function rejectedFieldReadAddresses_ACU$1(receipt) {
         if (receipt.partials === null || receipt.revisions === null)
             return [];
@@ -157688,9 +157738,55 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     continue;
                 }
+                const commitContractSql = async (sql) => {
+                    if (!input.writeSql)
+                        throw new Error('没有逐栏写入端口');
+                    if (!input.isCurrent(identity) || input.signal?.aborted) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入请求已失效', false));
+                    }
+                    writeAttempted = true;
+                    const receipt = await input.writeSql({
+                        role: definition.name, sql,
+                        isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
+                        resolvePage: handle => {
+                            const page = pageCache.pages.get(handle.trim().toUpperCase());
+                            return page?.status === 'ok' && page.text ? { title: page.title, source: page.source, url: page.url, query: page.query, sourceStatus: page.status } : null;
+                        },
+                    });
+                    if (!input.isCurrent(identity) || input.signal?.aborted) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
+                    }
+                    recordWriteReceipt(receipt);
+                    if (receipt.status === 'committed') {
+                        usedFieldWrites = true;
+                        input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(input.resolveContext.chat);
+                        for (const key of gate.granted)
+                            if (key.startsWith('$FIELD:') || key.startsWith('$HOOKS_LEDGER') || key.startsWith('$INFO_GAP') || key.startsWith('$CHRONOLOGY') || key.startsWith('$STORY_ARC') || key.startsWith('$WEB_REFS'))
+                                gate.granted.delete(key);
+                    }
+                    return receipt;
+                };
+                const continueIncompleteFieldWrite = (receipt) => {
+                    const follow = renderIncompleteFieldWrite_ACU(receipt);
+                    if (!follow || continuationsUsed >= maxContinuations)
+                        return false;
+                    continuationsUsed += 1;
+                    transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+                    transcript.push({ role: 'user', content: follow });
+                    return true;
+                };
                 try {
                     if (isResearch) {
                         const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU.research);
+                        if (input.writeSql && writes.length && typeof payload.sql === 'string' && payload.sql.trim()) {
+                            const receipt = await commitContractSql(payload.sql);
+                            if (continueIncompleteFieldWrite(receipt))
+                                continue;
+                            return {
+                                agentName: definition.name, kind: definition.kind, writes, arc: null, maintainer: null, planner: null, reviewer: null,
+                                researcher: null, requirements: null, iterations: attempt, usedFieldWrites, attempts: attempt, expandedReads: [...expandedReads], readRevisions, usage: usageTotal,
+                            };
+                        }
                         const draft = parseAgentResearcherOutput_ACU(payload);
                         if (payload.sql !== undefined && draft.expectedRevision !== undefined && draft.expectedRevision !== readRevisions.webRefs) {
                             throw new Error(`web_refs SQL expected_revision 与派工读集 revision 不一致：声明 ${draft.expectedRevision}，读集 ${readRevisions.webRefs}`);
@@ -157716,6 +157812,15 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     if (contractKind) {
                         const draft = parseAgentJsonPayloadDraft_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+                        if (input.writeSql && writes.length && typeof draft.payload.sql === 'string' && draft.payload.sql.trim()) {
+                            const receipt = await commitContractSql(draft.payload.sql);
+                            if (continueIncompleteFieldWrite(receipt))
+                                continue;
+                            const output = blankMaintainerOutput_ACU(typeof draft.payload.summary === 'string' ? draft.payload.summary : '');
+                            output.delta.constraintProposals = receipt.constraintProposals ?? [];
+                            const follow = renderIncompleteFieldWrite_ACU(receipt);
+                            return deliverContract(output, follow ? [{ module: writes[0], index: 0, id: '', reason: follow }] : []);
+                        }
                         const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
                         if (draft.payload.sql !== undefined) {
                             for (const [module, revision] of Object.entries(parsed.output.delta.expectedRevisions)) {
@@ -157775,7 +157880,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     };
                 }
                 catch (error) {
-                    if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_SUBAGENT_FAILED')
+                    if (error instanceof ContinuationValidationError_ACU && (error.error.code === 'CONTINUATION_AGENT_SUBAGENT_FAILED' || error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE'))
                         throw error;
                     lastReason = compactAgentProtocolError_ACU(error);
                     protocolRejections += 1;
@@ -159812,6 +159917,16 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             await session.flush();
         }
+        /** 可写子代理共用的逐栏保存口。目标楼在派工时绑定，缺栏留下，已有栏目先入库。 */
+        moduleFieldWrite_ACU(chat, context) {
+            const targetIndex = chat.length - 1;
+            const message = chat[targetIndex];
+            const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message), content: message?.mes };
+            const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
+            return ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({
+                chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages,
+            });
+        }
         /**
          * 固定工作流的结构前置阶段：程序先维护总纲，再确保存在可执行的阶段大纲。
          * 主 Agent 只负责给出 open_round 的焦点，不再直接派工 arc/outline 角色。
@@ -159842,15 +159957,25 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
+                        writeSql: this.moduleFieldWrite_ACU(chat, context),
                     });
-                    if (!result.arc) {
-                        failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', '固定工作流的总纲维护没有返回可用写集');
+                    if (result.usedFieldWrites)
+                        context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+                    if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
+                        const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
+                        const applied = await applyAgentModuleDeltaViaSql_ACU(context.moduleSnapshot, delta, result.writes, Math.max(0, chat.length - 1), completedStageNumbers, { onViolation: () => undefined, agentName: 'arc-architect' });
+                        context.moduleSnapshot = applied.snapshot;
+                        await this.persistSnapshot_ACU(chat, applied.snapshot);
                     }
-                    const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
-                    const applied = (await applyAgentModuleDeltaViaSql_ACU(context.moduleSnapshot, delta, result.writes, Math.max(0, chat.length - 1), completedStageNumbers)).snapshot;
-                    context.moduleSnapshot = applied;
-                    await this.persistSnapshot_ACU(chat, applied);
-                    updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc.summary || '总纲已更新', ok: true });
+                    const arcReady = hasActiveStoryArc_ACU(context.moduleSnapshot) && hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
+                        && findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length === 0;
+                    if (!arcReady) {
+                        const missing = (result.unresolvedIssues ?? []).map(issue => `${issue.path}：${issue.message}`).join('；');
+                        failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', missing
+                            ? `固定工作流的总纲还缺栏目，已写入的栏目已保留。${missing}`
+                            : '固定工作流的总纲维护没有形成可执行的活跃总纲和活动卷');
+                    }
+                    updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc?.summary || '总纲已按栏目写入', ok: true });
                 }
                 catch (error) {
                     const reason = compactAgentProtocolError_ACU(error);
@@ -159923,8 +160048,6 @@ Expected function or array of functions, received type ${typeof value}.`
                     const definition = findAgentSubagentDefinition_ACU(call.agentName);
                     const role = definition?.promptKey ?? 'main';
                     const preset = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
-                    const targetIndex = chat.length - 1;
-                    const dispatchTarget = { message: chat[targetIndex], swipeId: readMessageSwipeId_ACU(chat[targetIndex]), content: chat[targetIndex]?.mes };
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
                         settings: request.settings,
@@ -159934,8 +160057,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
-                        writeSql: ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent,
-                            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber) }),
+                        writeSql: this.moduleFieldWrite_ACU(chat, context),
                     });
                     if (call.billing === 'opening') {
                         ledger.delegationsUsed += 1;
@@ -160050,8 +160172,11 @@ Expected function or array of functions, received type ${typeof value}.`
                     createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                     isCurrent: identity => request.isInternalRequestCurrent(identity),
                     signal: request.signal,
+                    writeSql: this.moduleFieldWrite_ACU(chat, context),
                 });
-                const settled = await this.settleResearcherResult_ACU(result, snapshot);
+                const settled = result.usedFieldWrites
+                    ? { snapshot: readAgentModuleSnapshot_ACU(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
+                    : await this.settleResearcherResult_ACU(result, snapshot);
                 ledger.outcomes.push(settled.outcome);
                 updateAgentSession_ACU(entryId, {
                     title: `开场百科检索${settled.outcome.ok ? '完成' : '未采用'}${result.usage ? ` · ${formatAgentUsageLabel_ACU(result.usage)}` : ''}`,
@@ -160182,8 +160307,6 @@ Expected function or array of functions, received type ${typeof value}.`
                     // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
                     const definition = findAgentSubagentDefinition_ACU(delegation.agentName);
                     const delegationPreset = this.dependencies.resolveApiPreset(request.settings, definition?.promptKey ?? 'main', 'agent_delegate', apiDependencies);
-                    const targetIndex = chat.length - 1;
-                    const dispatchTarget = { message: chat[targetIndex], swipeId: readMessageSwipeId_ACU(chat[targetIndex]), content: chat[targetIndex]?.mes };
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation,
                         settings: request.settings,
@@ -160194,8 +160317,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
-                        writeSql: ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent,
-                            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber) }),
+                        writeSql: this.moduleFieldWrite_ACU(chat, context),
                     });
                     return { delegation, result, error: null };
                 }

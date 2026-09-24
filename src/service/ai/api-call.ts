@@ -147,6 +147,14 @@ function normalizeExcludeBodyParamsForSillyTavern_ACU(raw: any): string {
   return keys.map((key: string) => `- ${key}`).join('\n');
 }
 
+function preserveNativeToolPostProcessing_ACU(value: string, hasNativeToolTraffic: boolean): string {
+  if (!hasNativeToolTraffic) return value;
+  if (value === 'merge') return 'merge_tools';
+  if (value === 'semi') return 'semi_tools';
+  if (value === 'strict' || value === 'single') return 'strict_tools';
+  return value;
+}
+
 /**
  * 原版 ST 原生协议源的 reverse_proxy 基址归一化（对齐 ST 自身的 URL 拼接语义）：
  * - claude 源 fetch(apiUrl + '/messages')：基址须含 /v1（ST 官方常量即 https://api.anthropic.com/v1）；
@@ -245,7 +253,14 @@ export function buildCustomApiRequestBody_ACU(
   // 现在：默认 'strict'（与历史行为兼容）；预设选择具体值则透传；
   // 显式选择「未选择」（''）时不携带该字段，后端原样透传消息，
   // 完整保留用户配置的 system/user/assistant 结构。
-  const promptPostProcessing = normalizePromptPostProcessing_ACU(effectiveApiConfig?.promptPostProcessing);
+  // 带原生工具时必须改用 *_tools 变体。strict/merge/semi/single 会删除 tool_calls、
+  // tool_call_id，并把 role:tool 改成 user，模型看到的就不再是这条调用的工具结果。
+  const hasNativeToolTraffic = Boolean(opts.tools?.length)
+    || (Array.isArray(messages) && messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls)));
+  const promptPostProcessing = preserveNativeToolPostProcessing_ACU(
+    normalizePromptPostProcessing_ACU(effectiveApiConfig?.promptPostProcessing),
+    hasNativeToolTraffic,
+  );
 
   // 接口协议按宿主后端形态分流（同一预设字段 customApiFormat，两种落地方式）：
   // - TauriTavern（Rust 后端）：透传 custom_api_format 契约，按其分流上游端点与请求/响应变形

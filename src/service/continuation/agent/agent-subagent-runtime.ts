@@ -405,6 +405,38 @@ function resolveMaterial_ACU(token: string, context: AgentResolveContext_ACU): S
 }
 
 /** 只有定位到合法模块和安全 ID 的领域拒绝路径才可转为权威读取地址。 */
+function blankMaintainerOutput_ACU(summary: string): AgentMaintainerOutput_ACU {
+  return {
+    summary,
+    delta: {
+      expectedRevisions: {},
+      hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [],
+      storyArc: [], storyArcPatches: [], chronology: [], chronologyPatches: [],
+      constraintProposals: [],
+    },
+  };
+}
+
+/** 契约 SQL 已经按栏目落库时，只追缺栏和被拒栏目，不再把整行收成会失败的 patch。 */
+function renderIncompleteFieldWrite_ACU(receipt: AgentModuleFieldReceipt_ACU): string | null {
+  const rejected = receipt.rejected.filter(item => item.path !== 'host');
+  const missing = (receipt.partials ?? []).filter(item => item.missingFields.length || item.promotionError);
+  if (!rejected.length && !missing.length && receipt.partials !== null) return null;
+  const lines: string[] = [];
+  if (receipt.accepted.length) lines.push(`已写入并保留 ${receipt.accepted.length} 个栏目。不要重发这些栏目。`);
+  if (rejected.length) {
+    lines.push('下列栏目没有写入：');
+    for (const item of rejected) lines.push(`- ${item.path}：${item.reason}`);
+  }
+  if (missing.length) {
+    lines.push('下列条目还缺必填栏目，补齐后才会成为正式资料：');
+    for (const item of missing) lines.push(`- ${item.module}#${item.id}：${item.missingFields.join('、') || '提升失败'}${item.promotionError ? `（${item.promotionError}）` : ''}`);
+  }
+  if (receipt.partials === null) lines.push('保存状态不确定。先 read $FIELD:模块:ID 读取权威帧，再决定补写。');
+  lines.push('请调用 write_sql，只提交上面点名的栏目。分栏记录已经存在时用 UPDATE，WHERE 带 id 和当前 expected_revision；还没有记录时才用 INSERT。不要把尚未入库的新行写成 UPDATE。');
+  return lines.join('\n');
+}
+
 function rejectedFieldReadAddresses_ACU(receipt: AgentModuleFieldReceipt_ACU): string[] {
   if (receipt.partials === null || receipt.revisions === null) return [];
   return receipt.rejected.flatMap(({ path }) => {
@@ -847,9 +879,51 @@ export class AgentSubagentRuntime_ACU {
         continue;
       }
 
+      const commitContractSql = async (sql: string): Promise<AgentModuleFieldReceipt_ACU> => {
+        if (!input.writeSql) throw new Error('没有逐栏写入端口');
+        if (!input.isCurrent(identity) || input.signal?.aborted) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入请求已失效', false));
+        }
+        writeAttempted = true;
+        const receipt = await input.writeSql({
+          role: definition.name, sql,
+          isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
+          resolvePage: handle => {
+            const page = pageCache.pages.get(handle.trim().toUpperCase());
+            return page?.status === 'ok' && page.text ? { title: page.title, source: page.source, url: page.url, query: page.query, sourceStatus: page.status } : null;
+          },
+        });
+        if (!input.isCurrent(identity) || input.signal?.aborted) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
+        }
+        recordWriteReceipt(receipt);
+        if (receipt.status === 'committed') {
+          usedFieldWrites = true;
+          input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(input.resolveContext.chat);
+          for (const key of gate.granted) if (key.startsWith('$FIELD:') || key.startsWith('$HOOKS_LEDGER') || key.startsWith('$INFO_GAP') || key.startsWith('$CHRONOLOGY') || key.startsWith('$STORY_ARC') || key.startsWith('$WEB_REFS')) gate.granted.delete(key);
+        }
+        return receipt;
+      };
+      const continueIncompleteFieldWrite = (receipt: AgentModuleFieldReceipt_ACU): boolean => {
+        const follow = renderIncompleteFieldWrite_ACU(receipt);
+        if (!follow || continuationsUsed >= maxContinuations) return false;
+        continuationsUsed += 1;
+        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+        transcript.push({ role: 'user', content: follow });
+        return true;
+      };
+
       try {
         if (isResearch) {
           const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU.research);
+          if (input.writeSql && writes.length && typeof payload.sql === 'string' && payload.sql.trim()) {
+            const receipt = await commitContractSql(payload.sql);
+            if (continueIncompleteFieldWrite(receipt)) continue;
+            return {
+              agentName: definition.name, kind: definition.kind, writes, arc: null, maintainer: null, planner: null, reviewer: null,
+              researcher: null, requirements: null, iterations: attempt, usedFieldWrites, attempts: attempt, expandedReads: [...expandedReads], readRevisions, usage: usageTotal,
+            };
+          }
           const draft = parseAgentResearcherOutput_ACU(payload);
           if (payload.sql !== undefined && draft.expectedRevision !== undefined && draft.expectedRevision !== readRevisions.webRefs) {
             throw new Error(`web_refs SQL expected_revision 与派工读集 revision 不一致：声明 ${draft.expectedRevision}，读集 ${readRevisions.webRefs}`);
@@ -875,6 +949,14 @@ export class AgentSubagentRuntime_ACU {
         }
         if (contractKind) {
           const draft = parseAgentJsonPayloadDraft_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+          if (input.writeSql && writes.length && typeof draft.payload.sql === 'string' && draft.payload.sql.trim()) {
+            const receipt = await commitContractSql(draft.payload.sql);
+            if (continueIncompleteFieldWrite(receipt)) continue;
+            const output = blankMaintainerOutput_ACU(typeof draft.payload.summary === 'string' ? draft.payload.summary : '');
+            output.delta.constraintProposals = receipt.constraintProposals ?? [];
+            const follow = renderIncompleteFieldWrite_ACU(receipt);
+            return deliverContract(output, follow ? [{ module: writes[0] as AgentContractRejection_ACU['module'], index: 0, id: '', reason: follow }] : []);
+          }
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
           if (draft.payload.sql !== undefined) {
             for (const [module, revision] of Object.entries(parsed.output.delta.expectedRevisions)) {
@@ -932,7 +1014,7 @@ export class AgentSubagentRuntime_ACU {
           usage: usageTotal,
         };
       } catch (error) {
-        if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_SUBAGENT_FAILED') throw error;
+        if (error instanceof ContinuationValidationError_ACU && (error.error.code === 'CONTINUATION_AGENT_SUBAGENT_FAILED' || error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE')) throw error;
         lastReason = compactAgentProtocolError_ACU(error);
         protocolRejections += 1;
         if (protocolRejections > retries) {
