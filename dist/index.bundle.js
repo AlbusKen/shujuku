@@ -87667,12 +87667,41 @@ $CONTENT
         }
         return current;
     }
-    /** 构造全部当前 Agent 默认提示词；SQL 只改变资料写集，其他 JSON 动作保持原协议。 */
-    function buildDefaultContinuationAgentPrompts_ACU() {
+    /** 冻结 V35 默认组，供 V36 只替换仍与默认段完全一致的正文。 */
+    function buildV35ContinuationAgentPrompts_ACU() {
         const previous = buildV34ContinuationAgentPrompts_ACU();
         const current = { ...previous };
         for (const role of Object.keys(previous)) {
             current[role] = previous[role].map(segment => ({ ...segment, content: v35Content_ACU(role, segment.content) }));
+        }
+        return current;
+    }
+    const NATIVE_TOOL_BATCH_RE_ACU = /先输出工具批次补充调阅——\{"action":"read","reads":\["地址"\]\} 或 \{"action":"search","query":"关键词","scope":\[[^\]]+\]\}，一次输出可含多个工具对象/g;
+    function v36Content_ACU(content) {
+        return content
+            .replace(NATIVE_TOOL_BATCH_RE_ACU, '先调用 read 或 search 函数补充调阅：read 的参数 reads 是地址数组，search 的参数 query 必填、scope 是范围数组，一次可以并行调用多个函数')
+            .replace('用 {"action":"write_sql","sql":"受限 DML"}', '调用 write_sql 函数，参数 sql 为受限 DML，不要写成 JSON')
+            .replace('资料不足时我先输出工具批次（可混用本地 read/search 与出网工具，一次多个对象）', '资料不足时我先调阅：本地 read/search 用函数调用，出网工具仍输出 JSON 对象，两者不要放在同一次输出')
+            .replace('能一次批量取的资料就在同一次输出里发多个 read/search 对象', '能一次批量取的资料就在同一次回复里并发调用多个 read/search 函数')
+            .replace('我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。', 'read、search、write_sql 使用函数调用；决策动作以完整的协议 JSON 对象表达。JSON 之外最多留少量思路梳理，绝不把决策内容散落在 JSON 外面。')
+            .replace('用 write_sql 即时提交', '调用 write_sql 函数即时提交')
+            .replace('本轮我的动作以一个完整的 JSON 对象收尾。', '调阅资料时调用 read 或 search 函数；决策时本轮以一个完整的 JSON 对象收尾。')
+            .replace('你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|open_round|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。', 'read 与 search 使用函数调用，不要写成 JSON。决策动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"open_round|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但决策动作本身必须完整出现在 JSON 对象里。')
+            .replace('【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。', '【工具：read / search，使用函数调用，可并发】\n调用 read：参数 reads 是地址数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\n调用 search：参数 query 必填（关键词或正则）；scope 是 ["story","tables","modules","outline","worldbook"] 的子集，省略为全域；可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n需要多份资料时在同一次回复里并发调用这些函数，不要一轮只读一份。本轮如果调用了 read 或 search，就不要再输出决策 JSON；工具结果回来后再决定下一步。');
+    }
+    const V35_AGENT_PROMPTS_ACU = buildV35ContinuationAgentPrompts_ACU();
+    const CONTINUATION_V35_DEFAULT_LINEAGE_ACU = Object.fromEntries(Object.keys(V35_AGENT_PROMPTS_ACU).map(role => {
+        const segments = V35_AGENT_PROMPTS_ACU[role];
+        return [role, segments.map((segment, index) => ({
+                index, role: segment.role, hash: hashAgentPromptContent_ACU(segment.content), length: segment.content.length,
+            })).filter(({ index }) => v36Content_ACU(segments[index].content) !== segments[index].content)];
+    }));
+    /** 当前默认组：read、search、write_sql 使用函数调用，决策与契约仍是 JSON。 */
+    function buildDefaultContinuationAgentPrompts_ACU() {
+        const previous = buildV35ContinuationAgentPrompts_ACU();
+        const current = { ...previous };
+        for (const role of Object.keys(previous)) {
+            current[role] = previous[role].map(segment => ({ ...segment, content: v36Content_ACU(segment.content) }));
         }
         return current;
     }
@@ -87882,6 +87911,8 @@ $CONTENT
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU = 'spv4.2-continuation-sql-prompts-v34';
     /** 固定工作流与逐栏工具回执的提示词版本。 */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU = 'spv4.3-continuation-session-field-prompts-v35';
+    /** read、search、write_sql 改为原生函数调用；决策与契约 JSON 保持原协议。 */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU = 'spv4.4-continuation-native-tool-prompts-v36';
     /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
@@ -87964,7 +87995,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -89340,7 +89371,7 @@ $CONTENT
         if (!isRecord_ACU$m(raw))
             return raw;
         const previous = buildV34ContinuationAgentPrompts_ACU();
-        const current = buildDefaultContinuationAgentPrompts_ACU();
+        const current = buildV35ContinuationAgentPrompts_ACU();
         let changed = false;
         const next = { ...raw };
         for (const role of Object.keys(CONTINUATION_V34_DEFAULT_LINEAGE_ACU)) {
@@ -89351,6 +89382,31 @@ $CONTENT
                     return segment;
                 const content = segment.content;
                 const entry = CONTINUATION_V34_DEFAULT_LINEAGE_ACU[role].find(item => item.role === segment.role
+                    && item.length === content.length && item.hash === hashAgentPromptContent_ACU(content)
+                    && content === previous[role][item.index].content);
+                if (!entry)
+                    return segment;
+                changed = true;
+                return { ...segment, content: current[role][entry.index].content };
+            });
+        }
+        return changed ? next : raw;
+    }
+    function migrateV35AgentPromptsToV36_ACU(raw) {
+        if (!isRecord_ACU$m(raw))
+            return raw;
+        const previous = buildV35ContinuationAgentPrompts_ACU();
+        const current = buildDefaultContinuationAgentPrompts_ACU();
+        let changed = false;
+        const next = { ...raw };
+        for (const role of Object.keys(CONTINUATION_V35_DEFAULT_LINEAGE_ACU)) {
+            if (!Array.isArray(raw[role]))
+                continue;
+            next[role] = raw[role].map(segment => {
+                if (!isRecord_ACU$m(segment) || typeof segment.content !== 'string')
+                    return segment;
+                const content = segment.content;
+                const entry = CONTINUATION_V35_DEFAULT_LINEAGE_ACU[role].find(item => item.role === segment.role
                     && item.length === content.length && item.hash === hashAgentPromptContent_ACU(content)
                     && content === previous[role][item.index].content);
                 if (!entry)
@@ -89671,7 +89727,8 @@ $CONTENT
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU
-            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU) {
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -89729,6 +89786,10 @@ $CONTENT
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU) {
             agentPrompts = migrateV34AgentPromptsToV35_ACU(agentPrompts);
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU;
+        }
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU) {
+            agentPrompts = migrateV35AgentPromptsToV36_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -90667,7 +90728,8 @@ $CONTENT
     const WORLD_SIMULATION_PROMPT_VERSION_V15_ACU = 'world-simulation-v15';
     const WORLD_SIMULATION_PROMPT_VERSION_V16_ACU = 'world-simulation-v16';
     const WORLD_SIMULATION_PROMPT_VERSION_V17_ACU = 'world-simulation-v17';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v18';
+    const WORLD_SIMULATION_PROMPT_VERSION_V18_ACU = 'world-simulation-v18';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v19';
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -90744,6 +90806,30 @@ $CONTENT
         lines.push('no_change 必须包含 summary、evidenceRefs、uncertainties。');
         lines.push('failed 必须包含 reasonCode、message。blocked 必须包含非空 unresolved 数组。');
         return lines.join('\n');
+    }
+    function applyWorldSimulationNativeToolPrompt_ACU(name, content) {
+        const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
+        let next = content
+            .replace('仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block。', 'read 与 search 使用函数调用，不要写成 JSON。决策只输出一个主动作 JSON：open_round、delegate、finalize 或 block。')
+            .replace('read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query、scope、maxResults、isRegex。', '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要把 read 或 search 写成 JSON。')
+            .replace('合法示例：{"action":"read","reads":["ledger:current","summary:current"]}', '调阅示例：调用 read 函数，参数 {"reads":["ledger:current","summary:current"]}。')
+            .replace('可先用 {"action":"write_sql","sql":"受限 DML","evidenceRefs":["已颁发引用"]} 即时提交职责模块。', '可先调用 write_sql 函数即时提交职责模块，参数 sql 为受限 DML，可选 evidenceRefs 为已颁发引用。')
+            .replace('经 write_sql 提交缺栏', '调用 write_sql 函数提交缺栏')
+            .replace('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。', '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。')
+            .replace('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。', '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。');
+        const boundary = '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。';
+        if (definition && definition.kind !== 'planner' && next.includes(boundary)) {
+            const tools = definition.kind !== 'director' && definition.writableModules.length ? 'read、search、write_sql' : 'read、search';
+            const delivery = definition.kind === 'director' ? '决策输出' : '最终交付';
+            next = next.replace(boundary, `现在只执行当前任务。${tools} 使用函数调用；${delivery}必须是协议要求的单个 JSON 对象，不附加 Markdown。`);
+        }
+        return next;
+    }
+    function worldSimulationDirectorRuntimeProtocolInstruction_ACU() {
+        return applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU());
+    }
+    function worldSimulationSpecialistRuntimeProtocolInstruction_ACU(name, writableModules) {
+        return applyWorldSimulationNativeToolPrompt_ACU(name, worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules));
     }
     function worldSimulationReviewerProtocolInstruction_ACU() {
         return [
@@ -90845,13 +90931,16 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
     function buildV17WorldSimulationAgentPrompt_ACU(name) {
         return buildV16WorldSimulationAgentPrompt_ACU(name).map(segment => v17WorldSimulationContent_ACU(name, segment));
     }
-    function buildDefaultWorldSimulationAgentPrompt_ACU(name) {
+    function buildV18WorldSimulationAgentPrompt_ACU(name) {
         const segments = buildV17WorldSimulationAgentPrompt_ACU(name);
         // Keep the editable user requirements, but put them after the stable protocol and workflow.
         // Otherwise each new instruction invalidates the provider prefix before those static rules.
         const [requirements] = segments.splice(2, 1);
         segments.splice(4, 0, requirements);
         return segments;
+    }
+    function buildDefaultWorldSimulationAgentPrompt_ACU(name) {
+        return buildV18WorldSimulationAgentPrompt_ACU(name).map(segment => ({ ...segment, content: applyWorldSimulationNativeToolPrompt_ACU(name, segment.content) }));
     }
     function buildDefaultWorldSimulationAgentPrompts_ACU() {
         return Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildDefaultWorldSimulationAgentPrompt_ACU(name)]));
@@ -90884,6 +90973,7 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
     const WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, promptFingerprint_ACU(buildV16WorldSimulationAgentPrompt_ACU(name))]));
     const WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV16WorldSimulationAgentPrompt_ACU(name)]));
     const WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV17WorldSimulationAgentPrompt_ACU(name)]));
+    const WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV18WorldSimulationAgentPrompt_ACU(name)]));
     const WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU = {
         'world-director': '3591:f9e4f3ad',
         'world-stage-planner': '2511:f4f30e8c',
@@ -91009,6 +91099,7 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
             { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V16_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU[name] },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V17_ACU, fingerprint: promptFingerprint_ACU(buildV17WorldSimulationAgentPrompt_ACU(name)) },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_V18_ACU, fingerprint: promptFingerprint_ACU(buildV18WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults) {
@@ -91032,15 +91123,24 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
             const v15 = buildRolePrompt_ACU(name);
             const v16 = WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU[name];
             const v17 = WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU[name];
+            const v18 = WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU[name];
+            const latest = defaults[name];
+            const promote_ACU = (segment) => {
+                const v18Index = v18.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+                return v18Index < 0 ? segment : { ...latest[v18Index] };
+            };
             migrated[name] = value.map(segment => {
+                const currentIndex = v18.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+                if (currentIndex >= 0)
+                    return { ...latest[currentIndex] };
                 const oldIndex = v16.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
                 if (oldIndex >= 0)
-                    return { ...v17[oldIndex] };
+                    return promote_ACU({ ...v17[oldIndex] });
                 const v17Index = v17.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
                 if (v17Index >= 0)
-                    return { ...v17[v17Index] };
+                    return promote_ACU({ ...v17[v17Index] });
                 const v15Index = v15.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
-                return v15Index < 0 ? { ...segment } : { ...v17[v15Index] };
+                return v15Index < 0 ? { ...segment } : promote_ACU({ ...v17[v15Index] });
             });
             // Reordering a customized prompt is unsafe: it can change the user's precedence semantics.
             // Only untouched, enabled static defaults may move across the editable guidance segment.
@@ -91048,9 +91148,11 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
             const requirementsIndex = next.findIndex(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));
             const protocol = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
             const workflow = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
+            const latestProtocol = defaults[name].find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
+            const latestWorkflow = defaults[name].find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
             if (requirementsIndex >= 0 && requirementsIndex < protocol && protocol < workflow
-                && JSON.stringify(next[protocol]) === JSON.stringify(v17[3])
-                && JSON.stringify(next[workflow]) === JSON.stringify(v17[4])) {
+                && (JSON.stringify(next[protocol]) === JSON.stringify(v17[3]) || JSON.stringify(next[protocol]) === JSON.stringify(latestProtocol))
+                && (JSON.stringify(next[workflow]) === JSON.stringify(v17[4]) || JSON.stringify(next[workflow]) === JSON.stringify(latestWorkflow))) {
                 const [requirements] = next.splice(requirementsIndex, 1);
                 const afterWorkflow = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
                 next.splice(afterWorkflow + 1, 0, requirements);
@@ -151040,7 +151142,7 @@ Expected function or array of functions, received type ${typeof value}.`
      */
     function renderAgentReadCatalog_ACU() {
         return [
-            'read 工具的地址体系（reads 数组里可混用多种地址，一次批量取数）：',
+            'read 函数的地址体系（参数 reads 可混用多种地址，一次批量取数）：',
             '- $STORY_RANGE:起始楼-结束楼：可读窗口内的 AI 正文楼层区间，逐楼全文。可用楼层与窗口范围见正文目录。',
             '- $TABLE:表名 / $TABLE:表名:起始行-结束行：整表或行区间。可用表名与行数见表格目录。',
             '- $STORY_ARC / $STORY_ARC:ID,ID：故事总纲全部活跃条目（全书方向与卷台阶），或按 ID 精读（含已废止条目）。',
@@ -151053,7 +151155,7 @@ Expected function or array of functions, received type ${typeof value}.`
             '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
             '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
             '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
-            'search 工具：{"action":"search","query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
+            'search 使用函数调用。参数示例：{"query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
             '命中行会带上可直接复制进 read 的地址；先 search 定位、再用窄地址精读，比整读省预算。',
         ].join('\n');
     }
@@ -151072,7 +151174,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderAgentWebToolCatalog_ACU(input) {
         const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
         return [
-            '出网工具（与本地 read/search 一样以 JSON 对象表达，可同批并发；结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
+            '出网工具（encyclopedia_search、encyclopedia_read、web_search、web_read 仍以 JSON 对象表达，可同批并发；本地 read/search 用函数调用，不要和出网 JSON 放在同一次输出。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
             `- {"action":"encyclopedia_search","query":"角色名 或 作品名","sources":["moegirl","wikipedia_zh"]}：在百科里找候选词条。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
             '- {"action":"encyclopedia_read","source":"moegirl","title":"候选里的准确标题"}：精读词条正文，返回带句柄的页面。',
             `- {"action":"web_search","query":"关键词"}：通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
@@ -157246,7 +157348,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
             baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
             if (input.writeSql && writes.length)
-                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '可调用 {\"action\":\"write_sql\",\"sql\":\"受限 INSERT/UPDATE/DELETE SQL\"} 逐栏即时提交。只写职责模块，用回执中的实际 revision 与 $FIELD:模块:ID[:栏目] 补缺栏；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧，不得按旧 revision 补写。一次工具轮优先一个写动作；最终契约不得重复提交已写栏目。' });
+                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数逐栏即时提交，参数 sql 为受限 INSERT/UPDATE/DELETE SQL。不要把它写成 JSON。只写职责模块，用回执中的实际 revision 与 $FIELD:模块:ID[:栏目] 补缺栏；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧，不得按旧 revision 补写。一次工具轮优先一个写动作；最终契约不得重复提交已写栏目。' });
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
             const transcript = [];
@@ -158599,13 +158701,13 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderMainProtocolRejection_ACU(reason, execution, allowDelegate) {
         const lines = [
             `你上一次的输出没有被采纳。原因：${reason}`,
-            '只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
+            'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
         ];
         const hasTurn = !!execution.turn;
         if (!hasTurn && allowDelegate) {
             lines.push('{"thought":"先建立大纲","action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按总纲当前 active 卷规划本阶段","reads":[]}]}');
         }
-        lines.push('{"thought":"需要核对正文","action":"read","reads":["$STORY_TAIL","$HOOKS_LEDGER"]}');
+        lines.push('核对资料时调用 read 函数，参数 {"reads":["$STORY_TAIL","$HOOKS_LEDGER"]}。');
         if (allowDelegate) {
             lines.push('{"thought":"先结算再策划","action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算未结算正文，对照上一轮目标评估达成度","reads":[]},{"agentName":"mainline-planner","prompt":"本轮 pacing=setup，允许主线 hold","reads":[]}]}');
         }
@@ -163391,13 +163493,13 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderWorldSimulationDirectorProtocolRejection_ACU(issue, allowDelegate) {
         const lines = [
             `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
-            'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+            'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+            '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
             'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
             'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
-            '动作格式必须是下面之一：',
-            '{"action":"read","reads":["ledger:current","summary:current"]}',
-            '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
+            '调阅时调用函数，决策动作格式必须是下面之一：',
+            '调用 read，参数 {"reads":["ledger:current","summary:current"]}',
+            '调用 search，参数 {"query":"关键词","scope":["worldbook"],"maxResults":10}',
         ];
         if (allowDelegate)
             lines.push('{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":[]}]}');
@@ -165647,7 +165749,7 @@ Expected function or array of functions, received type ${typeof value}.`
             '$WORLD_AGENT_CATALOG': () => serialize_ACU(context.agentCatalog),
             '$WORLD_TOOL_CATALOG': () => serialize_ACU({
                 addresses: context.toolCatalog,
-                hint: '目录中任一条目可通过 read 工具按地址调阅详细信息。',
+                hint: '目录中任一条目可通过调用 read 函数按地址调阅详细信息。参数 reads 是地址数组。',
             }),
             '$WORLD_EVIDENCE': () => serialize_ACU(context.evidence),
             '$WORLD_USER_GUIDANCE': () => serialize_ACU(context.userGuidance),
@@ -166956,7 +167058,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 let sent;
                 try {
                     const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[director], director, createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }));
-                    const fixed = [{ role: 'system', content: worldSimulationDirectorProtocolInstruction_ACU() }, ...rendered.messages];
+                    const fixed = [{ role: 'system', content: worldSimulationDirectorRuntimeProtocolInstruction_ACU() }, ...rendered.messages];
                     const tail = [...(input.anchor && handoffHint ? [handoffHint] : []),
                         ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }])];
                     const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
@@ -167725,7 +167827,7 @@ ${rejectionText}` : delegationFeedback,
                 const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
                 const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
-                const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, writableModules) };
+                const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
                 const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
                 const messages = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(drafted) : drafted;
                 const sent = await executeWorldSimulationFinalRequest_ACU({

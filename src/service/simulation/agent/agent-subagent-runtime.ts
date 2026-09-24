@@ -11,7 +11,7 @@ import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationFieldCommitReceipt_ACU } from '../simulation-field-commit-adapter';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type {
   WorldSimulationCandidate_ACU,
   WorldSimulationDelegation_ACU,
@@ -358,7 +358,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
       const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
-      const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, writableModules) };
+      const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
       const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const messages = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(drafted) : drafted;
       const sent = await executeWorldSimulationFinalRequest_ACU({

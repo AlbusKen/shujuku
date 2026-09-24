@@ -266,7 +266,7 @@ describe('世界推演 Agent runtime', () => {
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '已读北境正文', summary: '正文' })), search: tools.search } });
     expect(sent).toHaveLength(2);
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
-    expect(sent[0][0].content).toContain('仅输出一个主动作 JSON');
+    expect(sent[0][0].content).toContain('read 与 search 使用函数调用');
     expect(sent[0][5].content).toContain('只推演北境');
     expect(sent[1].slice(5, -1).some(item => item.content === read)).toBe(true);
     expect(sent[1].at(-2)).toMatchObject({ role: 'tool', content: expect.stringContaining('已读北境正文') });

@@ -746,13 +746,13 @@ export function parseWorldSimulationSubagentToolCalls_ACU(raw: string | null | u
 export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU, allowDelegate: boolean): string {
   const lines = [
     `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-    '只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
-    'read 只能包含 action、reads；search 只能包含 action、query、scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+    'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+    '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
     'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
     'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
-    '动作格式必须是下面之一：',
-    '{"action":"read","reads":["ledger:current","summary:current"]}',
-    '{"action":"search","query":"关键词","scope":["worldbook"],"maxResults":10}',
+    '调阅时调用函数，决策动作格式必须是下面之一：',
+    '调用 read，参数 {"reads":["ledger:current","summary:current"]}',
+    '调用 search，参数 {"query":"关键词","scope":["worldbook"],"maxResults":10}',
   ];
   if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":[]}]}');
   lines.push('{"action":"open_round","summary":"锁定本轮幕后焦点并启动固定工作流","focus":"时间推进与暗流压力","dispatchChronicler":false}');

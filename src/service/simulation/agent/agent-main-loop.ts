@@ -7,7 +7,7 @@ import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulati
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorProtocolInstruction_ACU } from './agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
 import { summarizeWorldSimulationHandoff_ACU } from './agent-handoff-summarizer';
@@ -450,7 +450,7 @@ export class WorldSimulationMainLoop_ACU {
           input.settings.agentPrompts[director], director,
           createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }),
         );
-        const fixed = [{ role: 'system', content: worldSimulationDirectorProtocolInstruction_ACU() }, ...rendered.messages];
+        const fixed = [{ role: 'system', content: worldSimulationDirectorRuntimeProtocolInstruction_ACU() }, ...rendered.messages];
         const tail = [...(input.anchor && handoffHint ? [handoffHint] : []),
           ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }])];
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;

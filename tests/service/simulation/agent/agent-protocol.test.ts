@@ -179,7 +179,7 @@ describe('世界推演 Agent 协议', () => {
 
   it('协议拒绝回灌明确 read/search 字段与服务端 evidenceRef 语义', () => {
     const message = renderWorldSimulationDirectorProtocolRejection_ACU({ reasonCode: 'UNKNOWN_FIELD', path: '$.evidenceRef', expected: 'no additional fields', actual: 'evidence:run:2' }, true);
-    expect(message).toContain('read 只能包含 action、reads');
+    expect(message).toContain('调用 read 时参数 reads');
     expect(message).toContain('不要添加 evidenceRef、purpose');
     expect(message).toContain('由服务端在读取成功后随工具结果颁发');
     expect(message).toContain('finalize 顶层只能包含 action、outcome、summary、evidenceRefs');

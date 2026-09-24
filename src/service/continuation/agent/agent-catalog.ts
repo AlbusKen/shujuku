@@ -208,7 +208,7 @@ export function renderAgentModuleCatalog_ACU(options?: AgentCatalogOptions_ACU &
  */
 export function renderAgentReadCatalog_ACU(): string {
   return [
-    'read 工具的地址体系（reads 数组里可混用多种地址，一次批量取数）：',
+    'read 函数的地址体系（参数 reads 可混用多种地址，一次批量取数）：',
     '- $STORY_RANGE:起始楼-结束楼：可读窗口内的 AI 正文楼层区间，逐楼全文。可用楼层与窗口范围见正文目录。',
     '- $TABLE:表名 / $TABLE:表名:起始行-结束行：整表或行区间。可用表名与行数见表格目录。',
     '- $STORY_ARC / $STORY_ARC:ID,ID：故事总纲全部活跃条目（全书方向与卷台阶），或按 ID 精读（含已废止条目）。',
@@ -221,7 +221,7 @@ export function renderAgentReadCatalog_ACU(): string {
     '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
     '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
     '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
-    'search 工具：{"action":"search","query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
+    'search 使用函数调用。参数示例：{"query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
     '命中行会带上可直接复制进 read 的地址；先 search 定位、再用窄地址精读，比整读省预算。',
   ].join('\n');
 }
@@ -242,7 +242,7 @@ export function findAgentSubagentDefinition_ACU(name: string): AgentSubagentDefi
 export function renderAgentWebToolCatalog_ACU(input: { sources: string[]; provider: string; maxPages: number; pageCharLimit: number; pagesUsed: number }): string {
   const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
   return [
-    '出网工具（与本地 read/search 一样以 JSON 对象表达，可同批并发；结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
+    '出网工具（encyclopedia_search、encyclopedia_read、web_search、web_read 仍以 JSON 对象表达，可同批并发；本地 read/search 用函数调用，不要和出网 JSON 放在同一次输出。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
     `- {"action":"encyclopedia_search","query":"角色名 或 作品名","sources":["moegirl","wikipedia_zh"]}：在百科里找候选词条。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
     '- {"action":"encyclopedia_read","source":"moegirl","title":"候选里的准确标题"}：精读词条正文，返回带句柄的页面。',
     `- {"action":"web_search","query":"关键词"}：通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,

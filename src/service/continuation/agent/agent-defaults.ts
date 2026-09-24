@@ -997,12 +997,53 @@ export function buildV34ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts
   return current;
 }
 
-/** 构造全部当前 Agent 默认提示词；SQL 只改变资料写集，其他 JSON 动作保持原协议。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** 冻结 V35 默认组，供 V36 只替换仍与默认段完全一致的正文。 */
+export function buildV35ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const previous = buildV34ContinuationAgentPrompts_ACU();
   const current = { ...previous };
   for (const role of Object.keys(previous) as Array<keyof ContinuationAgentPrompts_ACU>) {
     current[role] = previous[role].map(segment => ({ ...segment, content: v35Content_ACU(role, segment.content) }));
+  }
+  return current;
+}
+
+const NATIVE_TOOL_BATCH_RE_ACU = /先输出工具批次补充调阅——\{"action":"read","reads":\["地址"\]\} 或 \{"action":"search","query":"关键词","scope":\[[^\]]+\]\}，一次输出可含多个工具对象/g;
+
+function v36Content_ACU(content: string): string {
+  return content
+    .replace(NATIVE_TOOL_BATCH_RE_ACU, '先调用 read 或 search 函数补充调阅：read 的参数 reads 是地址数组，search 的参数 query 必填、scope 是范围数组，一次可以并行调用多个函数')
+    .replace('用 {"action":"write_sql","sql":"受限 DML"}', '调用 write_sql 函数，参数 sql 为受限 DML，不要写成 JSON')
+    .replace('资料不足时我先输出工具批次（可混用本地 read/search 与出网工具，一次多个对象）', '资料不足时我先调阅：本地 read/search 用函数调用，出网工具仍输出 JSON 对象，两者不要放在同一次输出')
+    .replace('能一次批量取的资料就在同一次输出里发多个 read/search 对象', '能一次批量取的资料就在同一次回复里并发调用多个 read/search 函数')
+    .replace('我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。', 'read、search、write_sql 使用函数调用；决策动作以完整的协议 JSON 对象表达。JSON 之外最多留少量思路梳理，绝不把决策内容散落在 JSON 外面。')
+    .replace('用 write_sql 即时提交', '调用 write_sql 函数即时提交')
+    .replace('本轮我的动作以一个完整的 JSON 对象收尾。', '调阅资料时调用 read 或 search 函数；决策时本轮以一个完整的 JSON 对象收尾。')
+    .replace(
+      '你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|open_round|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。',
+      'read 与 search 使用函数调用，不要写成 JSON。决策动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"open_round|delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但决策动作本身必须完整出现在 JSON 对象里。',
+    )
+    .replace(
+      '【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。',
+      '【工具：read / search，使用函数调用，可并发】\n调用 read：参数 reads 是地址数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\n调用 search：参数 query 必填（关键词或正则）；scope 是 ["story","tables","modules","outline","worldbook"] 的子集，省略为全域；可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n需要多份资料时在同一次回复里并发调用这些函数，不要一轮只读一份。本轮如果调用了 read 或 search，就不要再输出决策 JSON；工具结果回来后再决定下一步。',
+    );
+}
+
+const V35_AGENT_PROMPTS_ACU = buildV35ContinuationAgentPrompts_ACU();
+export const CONTINUATION_V35_DEFAULT_LINEAGE_ACU = Object.fromEntries(
+  (Object.keys(V35_AGENT_PROMPTS_ACU) as Array<keyof ContinuationAgentPrompts_ACU>).map(role => {
+    const segments = V35_AGENT_PROMPTS_ACU[role];
+    return [role, segments.map((segment, index) => ({
+      index, role: segment.role, hash: hashAgentPromptContent_ACU(segment.content), length: segment.content.length,
+    })).filter(({ index }) => v36Content_ACU(segments[index].content) !== segments[index].content)];
+  }),
+) as Record<keyof ContinuationAgentPrompts_ACU, Array<{ index: number; role: string; hash: string; length: number }>>;
+
+/** 当前默认组：read、search、write_sql 使用函数调用，决策与契约仍是 JSON。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const previous = buildV35ContinuationAgentPrompts_ACU();
+  const current = { ...previous };
+  for (const role of Object.keys(previous) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    current[role] = previous[role].map(segment => ({ ...segment, content: v36Content_ACU(segment.content) }));
   }
   return current;
 }

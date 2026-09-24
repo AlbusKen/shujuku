@@ -242,13 +242,13 @@ export function evaluateArcArchitectDispatch_ACU(context: AgentResolveContext_AC
 export function renderMainProtocolRejection_ACU(reason: string, execution: ContinuationAgentExecutionContext_ACU, allowDelegate: boolean): string {
   const lines = [
     `你上一次的输出没有被采纳。原因：${reason}`,
-    '只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
+    'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
   ];
   const hasTurn = !!execution.turn;
   if (!hasTurn && allowDelegate) {
     lines.push('{"thought":"先建立大纲","action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按总纲当前 active 卷规划本阶段","reads":[]}]}');
   }
-  lines.push('{"thought":"需要核对正文","action":"read","reads":["$STORY_TAIL","$HOOKS_LEDGER"]}');
+  lines.push('核对资料时调用 read 函数，参数 {"reads":["$STORY_TAIL","$HOOKS_LEDGER"]}。');
   if (allowDelegate) {
     lines.push('{"thought":"先结算再策划","action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算未结算正文，对照上一轮目标评估达成度","reads":[]},{"agentName":"mainline-planner","prompt":"本轮 pacing=setup，允许主线 hold","reads":[]}]}');
   }

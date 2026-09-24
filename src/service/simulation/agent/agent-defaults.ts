@@ -12,7 +12,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V14_ACU = 'world-simulation-v14';
 export const WORLD_SIMULATION_PROMPT_VERSION_V15_ACU = 'world-simulation-v15';
 export const WORLD_SIMULATION_PROMPT_VERSION_V16_ACU = 'world-simulation-v16';
 export const WORLD_SIMULATION_PROMPT_VERSION_V17_ACU = 'world-simulation-v17';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v18';
+export const WORLD_SIMULATION_PROMPT_VERSION_V18_ACU = 'world-simulation-v18';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v19';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -100,6 +101,54 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
   lines.push('no_change 必须包含 summary、evidenceRefs、uncertainties。');
   lines.push('failed 必须包含 reasonCode、message。blocked 必须包含非空 unresolved 数组。');
   return lines.join('\n');
+}
+
+export function applyWorldSimulationNativeToolPrompt_ACU(name: WorldSimulationAgentName_ACU, content: string): string {
+  const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
+  let next = content
+    .replace(
+      '仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block。',
+      'read 与 search 使用函数调用，不要写成 JSON。决策只输出一个主动作 JSON：open_round、delegate、finalize 或 block。',
+    )
+    .replace(
+      'read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query、scope、maxResults、isRegex。',
+      '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要把 read 或 search 写成 JSON。',
+    )
+    .replace(
+      '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
+      '调阅示例：调用 read 函数，参数 {"reads":["ledger:current","summary:current"]}。',
+    )
+    .replace(
+      '可先用 {"action":"write_sql","sql":"受限 DML","evidenceRefs":["已颁发引用"]} 即时提交职责模块。',
+      '可先调用 write_sql 函数即时提交职责模块，参数 sql 为受限 DML，可选 evidenceRefs 为已颁发引用。',
+    )
+    .replace('经 write_sql 提交缺栏', '调用 write_sql 函数提交缺栏')
+    .replace(
+      '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。',
+      '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。',
+    )
+    .replace(
+      '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。',
+      '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。',
+    );
+  const boundary = '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。';
+  if (definition && definition.kind !== 'planner' && next.includes(boundary)) {
+    const tools = definition.kind !== 'director' && definition.writableModules.length ? 'read、search、write_sql' : 'read、search';
+    const delivery = definition.kind === 'director' ? '决策输出' : '最终交付';
+    next = next.replace(boundary, `现在只执行当前任务。${tools} 使用函数调用；${delivery}必须是协议要求的单个 JSON 对象，不附加 Markdown。`);
+  }
+  return next;
+}
+
+export function worldSimulationDirectorRuntimeProtocolInstruction_ACU(): string {
+  return applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU());
+}
+
+export function worldSimulationSpecialistRuntimeProtocolInstruction_ACU(
+  name: WorldSimulationAgentName_ACU,
+  writableModules: readonly string[],
+): string {
+  return applyWorldSimulationNativeToolPrompt_ACU(name, worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules));
 }
 
 export function worldSimulationReviewerProtocolInstruction_ACU(): string {
@@ -194,13 +243,17 @@ export function buildV17WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
   return buildV16WorldSimulationAgentPrompt_ACU(name).map(segment => v17WorldSimulationContent_ACU(name, segment));
 }
 
-export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+export function buildV18WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
   const segments = buildV17WorldSimulationAgentPrompt_ACU(name);
   // Keep the editable user requirements, but put them after the stable protocol and workflow.
   // Otherwise each new instruction invalidates the provider prefix before those static rules.
   const [requirements] = segments.splice(2, 1);
   segments.splice(4, 0, requirements);
   return segments;
+}
+
+export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return buildV18WorldSimulationAgentPrompt_ACU(name).map(segment => ({ ...segment, content: applyWorldSimulationNativeToolPrompt_ACU(name, segment.content) }));
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -242,6 +295,9 @@ const WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU = Object.fromEntries(
 ) as WorldSimulationAgentPrompts_ACU;
 const WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU = Object.fromEntries(
   WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV17WorldSimulationAgentPrompt_ACU(name)]),
+) as WorldSimulationAgentPrompts_ACU;
+const WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU = Object.fromEntries(
+  WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV18WorldSimulationAgentPrompt_ACU(name)]),
 ) as WorldSimulationAgentPrompts_ACU;
 
 const WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
@@ -382,6 +438,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V16_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU[name]! },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V17_ACU, fingerprint: promptFingerprint_ACU(buildV17WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V18_ACU, fingerprint: promptFingerprint_ACU(buildV18WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -407,13 +464,21 @@ export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, W
     const v15 = buildRolePrompt_ACU(name);
     const v16 = WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU[name];
     const v17 = WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU[name];
+    const v18 = WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU[name];
+    const latest = defaults[name];
+    const promote_ACU = (segment: WorldSimulationPromptSegment_ACU): WorldSimulationPromptSegment_ACU => {
+      const v18Index = v18.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      return v18Index < 0 ? segment : { ...latest[v18Index] };
+    };
     migrated[name] = value.map(segment => {
+      const currentIndex = v18.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      if (currentIndex >= 0) return { ...latest[currentIndex] };
       const oldIndex = v16.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
-      if (oldIndex >= 0) return { ...v17[oldIndex] };
+      if (oldIndex >= 0) return promote_ACU({ ...v17[oldIndex] });
       const v17Index = v17.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
-      if (v17Index >= 0) return { ...v17[v17Index] };
+      if (v17Index >= 0) return promote_ACU({ ...v17[v17Index] });
       const v15Index = v15.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
-      return v15Index < 0 ? { ...segment } : { ...v17[v15Index] };
+      return v15Index < 0 ? { ...segment } : promote_ACU({ ...v17[v15Index] });
     });
     // Reordering a customized prompt is unsafe: it can change the user's precedence semantics.
     // Only untouched, enabled static defaults may move across the editable guidance segment.
@@ -421,9 +486,11 @@ export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, W
     const requirementsIndex = next.findIndex(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));
     const protocol = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
     const workflow = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
+    const latestProtocol = defaults[name].find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
+    const latestWorkflow = defaults[name].find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
     if (requirementsIndex >= 0 && requirementsIndex < protocol && protocol < workflow
-      && JSON.stringify(next[protocol]) === JSON.stringify(v17[3])
-      && JSON.stringify(next[workflow]) === JSON.stringify(v17[4])) {
+      && (JSON.stringify(next[protocol]) === JSON.stringify(v17[3]) || JSON.stringify(next[protocol]) === JSON.stringify(latestProtocol))
+      && (JSON.stringify(next[workflow]) === JSON.stringify(v17[4]) || JSON.stringify(next[workflow]) === JSON.stringify(latestWorkflow))) {
       const [requirements] = next.splice(requirementsIndex, 1);
       const afterWorkflow = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
       next.splice(afterWorkflow + 1, 0, requirements);

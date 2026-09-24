@@ -96,12 +96,12 @@ describe('世界推演提示词装配契约', () => {
   });
 
   it('提示词 v16 使用受限 SQL，同时保留历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v18');
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v19');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19']);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
     const v9 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v9');
     const v10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v10');
@@ -164,7 +164,8 @@ describe('世界推演提示词装配契约', () => {
     );
     expect(timekeeper).toContain('UPDATE clock');
     expect(timekeeper).toContain('禁止直接写 day');
-    expect(timekeeperPrompt).toContain(timekeeper);
+    expect(timekeeperPrompt).toContain('调用 write_sql 函数');
+    expect(timekeeperPrompt).toContain('UPDATE clock');
     expect(timekeeperPrompt).toContain('只写入 clock');
 
     const undercurrent = worldSimulationSpecialistProtocolInstruction_ACU(
@@ -172,7 +173,8 @@ describe('世界推演提示词装配契约', () => {
       WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'undercurrent-analyst')!.writableModules,
     );
     expect(undercurrent).toContain('exposePolicy');
-    expect(undercurrentPrompt).toContain(undercurrent);
+    expect(undercurrentPrompt).toContain('调用 write_sql 函数');
+    expect(undercurrentPrompt).toContain('exposePolicy');
     expect(undercurrentPrompt).toContain('只写入 dimensions 与 seeds');
 
     const dramatis = worldSimulationSpecialistProtocolInstruction_ACU(
@@ -195,7 +197,8 @@ describe('世界推演提示词装配契约', () => {
     expect(chronicler).toContain('数组模块 UPDATE/DELETE 的 WHERE 必须明确给出当前条目 revision');
     expect(chronicler).toContain('目录中任一条目都可通过 read 工具按地址调阅详细信息');
     expect(chronicler).toContain('chronicle 的 id/at');
-    expect(chroniclerPrompt).toContain(chronicler);
+    expect(chroniclerPrompt).toContain('调用 read 函数');
+    expect(chroniclerPrompt).toContain('chronicle 的 id/at');
     expect(chroniclerPrompt).toContain('归档职责');
     expect(chroniclerPrompt).toContain('不是每轮常规角色');
     expect(reviewerPrompt).toContain('不得输出 guidance');
