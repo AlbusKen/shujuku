@@ -141,8 +141,8 @@ describe('压缩时机', () => {
     expect(await resolveAgentCompactionTiming_ACU(buildEmptyAgentConversation_ACU(), 10, true, countByChar)).toMatchObject({ action: 'skip' });
   });
 
-  it('轮次边界上超预算立即压缩', async () => {
-    expect(await resolveAgentCompactionTiming_ACU(threeTurns(), 120, false, countByChar)).toMatchObject({ action: 'compact', emergency: false });
+  it('没到两倍时不总结，无论是不是新一轮', async () => {
+    expect(await resolveAgentCompactionTiming_ACU(threeTurns(), 120, false, countByChar)).toMatchObject({ action: 'defer', emergency: false });
   });
 
   it('同一轮内超预算只登记，等本轮结束再压', async () => {
@@ -175,7 +175,7 @@ describe('上下文开销计入', () => {
     const budget = conversationTokens + 50;
     expect(await resolveAgentCompactionTiming_ACU(snapshot, budget, false, countByChar, 0)).toMatchObject({ action: 'skip' });
     const triggered = await resolveAgentCompactionTiming_ACU(snapshot, budget, false, countByChar, 100);
-    expect(triggered).toMatchObject({ action: 'compact', emergency: false });
+    expect(triggered).toMatchObject({ action: 'defer', emergency: false });
     expect(triggered.totalTokens).toBe(conversationTokens + 100);
     // 会话为空时无可压缩：开销再大也只能 skip，压缩改变不了任何东西。
     expect(await resolveAgentCompactionTiming_ACU(buildEmptyAgentConversation_ACU(), 10, false, countByChar, 999)).toMatchObject({ action: 'skip' });

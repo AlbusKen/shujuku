@@ -120,7 +120,8 @@ export interface AgentCompactionTiming_ACU {
  * 判定压缩时机。
  *
  * 压缩会重塑模型看到的历史形状，落在一轮规划进行中就等于中途换掉它的上下文。因此到达阈值
- * 只是「登记」，真正执行要等这一轮结束、下一轮开始——也就是游标变化的那一刻。
+ * 只是「登记」，真正执行要等本轮主会话安排的工作流成功完成。新一轮开始时不提前压缩。
+ * 只有超出越界线才立刻压缩，避免这次请求因超长必然失败。
  * @param snapshot 会话快照
  * @param budgetTokens 预算上限；<= 0 视为不限
  * @param continuingSameTurn 本次运行是否仍在会话里最后通告的那一轮内（中断恢复即为 true）
@@ -135,14 +136,15 @@ export async function resolveAgentCompactionTiming_ACU(
   count: TokenCounter_ACU = countAgentTokens_ACU,
   overheadTokens = 0,
 ): Promise<AgentCompactionTiming_ACU> {
+  void continuingSameTurn;
   if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return { action: 'skip', totalTokens: 0, emergency: false };
   // 会话为空时无可压缩：即使开销本身超阈值，压缩也改变不了任何东西。
   if (!snapshot.messages.length) return { action: 'skip', totalTokens: overheadTokens, emergency: false };
   const totalTokens = overheadTokens + await measureAgentConversationTokens_ACU(snapshot, count);
   if (totalTokens <= budgetTokens) return { action: 'skip', totalTokens, emergency: false };
-  if (!continuingSameTurn) return { action: 'compact', totalTokens, emergency: false };
   const emergency = totalTokens > budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
-  return { action: emergency ? 'compact' : 'defer', totalTokens, emergency };
+  if (!emergency) return { action: 'defer', totalTokens, emergency: false };
+  return { action: 'compact', totalTokens, emergency: true };
 }
 
 /** 按 turnKey 的连续段分组。连续段而非全局分组，保证时间顺序不被打乱。 */

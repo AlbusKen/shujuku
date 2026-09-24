@@ -171,10 +171,14 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(messages[messages.length - 2].role).toBe('user');
     expect(messages[messages.length - 2].content).toContain('【读取预算状态】');
     expect(messages[messages.length - 3].role).toBe('user');
-    expect(messages[messages.length - 3].content).toContain('【总纲卷数计划】');
-    // 任务段（含全部固定资料注入）必须在卷数计划之前、预填充之前完整送达。
-    expect(messages[messages.length - 4].content).toContain('【本次任务】\n立总纲');
-    expect(messages[messages.length - 4].content).toContain('【故事总纲现状】');
+    expect(messages[messages.length - 3].content).toContain('【本回合运行时数据】');
+    expect(messages[messages.length - 4].role).toBe('user');
+    expect(messages[messages.length - 4].content).toContain('【总纲卷数计划】');
+    // 任务段保留自己维护的总纲全文，共享目录改由末尾快照提供。
+    expect(messages[messages.length - 5].content).toContain('【本次任务】\n立总纲');
+    expect(messages[messages.length - 5].content).toContain('【故事总纲现状】');
+    expect(messages[messages.length - 5].content).not.toContain('$WORLDBOOK_CATALOG');
+    expect(messages[messages.length - 5].content).not.toContain('【已启用世界书目录】');
   });
 
   it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {
@@ -218,7 +222,8 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(result.iterations).toBe(2);
     const firstCall = calls[0].map(message => message.content).join('\n');
     const secondCall = calls[1].map(message => message.content).join('\n');
-    expect(firstCall).toContain('晶屑不能带离铁门。');
+    expect(firstCall).toContain('【本回合运行时数据】');
+    expect(firstCall).toContain('主角拿起晶屑走出铁门。');
     expect(firstCall).toContain('【读取预算状态】');
     expect(firstCall).toContain('工具轮次剩余 1 / 1');
     expect(secondCall).toContain('角色表');

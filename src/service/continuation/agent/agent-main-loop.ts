@@ -179,6 +179,8 @@ interface AgentConversationHandle_ACU {
    * @returns 是否真的压缩并提交了
    */
   compact: (emergency: boolean, preparedMessages?: readonly { role: string; content: string }[]) => Promise<boolean>;
+  /** 新一轮开始时丢掉上一轮的会话、工具调用和快照，不调用总结。 */
+  discardPreviousRound: () => Promise<boolean>;
   /** 本次运行是否已经向用户通告过「上下文超过阈值但本轮内继续」，避免每次迭代重复刷屏。 */
   overBudgetNotified: boolean;
   continuingSameTurn: boolean;
@@ -301,11 +303,13 @@ function renderWorkflowReceipt_ACU(workflow: ContinuationWorkflowResult_ACU): st
  * @param context 解析上下文
  * @returns 通告正文
  */
-export function buildAgentTurnAnnouncement_ACU(context: AgentResolveContext_ACU): string {
+export function buildAgentTurnAnnouncement_ACU(context: AgentResolveContext_ACU, previousRoundDiscarded = false): string {
   return [
     `开始新的一轮规划：${describeRunLabel_ACU(context)}`,
     `本轮目标：${context.execution.turn?.goal || '（尚无可执行的大纲轮次，需先创建或继续大纲）'}`,
-    '请按协议输出一个动作。上文中我们此前的对话仍然有效，不要重复已经完成的工作。',
+    previousRoundDiscarded
+      ? '请按协议输出一个动作。上一轮已在工作流结束时收束，不要确认或续接上一轮对话。'
+      : '请按协议输出一个动作。上文中我们此前的对话仍然有效，不要重复已经完成的工作。',
   ].join('\n');
 }
 
@@ -644,7 +648,9 @@ export class ContinuationAgentTurnPlanner_ACU {
       (await measureOverhead()) + await measureAgentPromptTokens_ACU(session.history(), counter);
     // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
     if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
-      session.record([{ kind: 'turn', text: buildAgentTurnAnnouncement_ACU(context), digest: describeRunLabel_ACU(context), turnKey: session.turnKey }]);
+      const visible = session.snapshot().messages;
+      const previousRoundDiscarded = visible.length === 1 && visible[0].kind === 'handoff' && visible[0].text.includes('已整段丢弃');
+      session.record([{ kind: 'turn', text: buildAgentTurnAnnouncement_ACU(context, previousRoundDiscarded), digest: describeRunLabel_ACU(context), turnKey: session.turnKey }]);
       await session.flush();
     }
 
@@ -677,11 +683,12 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
 
     try {
+      await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iterationStart, toolUsage, gateConfig);
       // 开场检索：新任务第一次规划、资料库为空时，先把原作设定查进百科资料库再让主 Agent 开跑。
       // 受控入口，不消耗主 Agent 的派工额度；失败只记结果不掐断规划。
       if (this.shouldRunOpeningResearch_ACU(request, context, resumedState !== null)) {
         const outcomesBefore = ledger.outcomes.length;
-        snapshot = await this.runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, apiDependencies);
+        snapshot = await this.runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, session, apiDependencies);
         await commitOutcomes(outcomesBefore);
       }
       // 工具批次（read/search）不消耗决策迭代：读资料是正常成本，不该挤压派工与交付的空间。
@@ -753,7 +760,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           const workflowEntry = logAgentSession_ACU({ kind: 'delegation', title: '固定工作流正在执行', detail: action.focus, status: 'running' });
           let workflow: ContinuationWorkflowResult_ACU;
           try {
-            workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, apiDependencies);
+            workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, apiDependencies);
           } catch (error) {
             updateAgentSession_ACU(workflowEntry, { title: '固定工作流失败', detail: error instanceof Error ? error.message : String(error), ok: false });
             throw error;
@@ -767,6 +774,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           session.record([{ kind: 'tool', text: renderWorkflowReceipt_ACU(workflow), digest: '工作流状态回执', turnKey: session.turnKey }]);
           await session.flush();
           if (workflow.outcome === 'deliver') {
+            await session.discardPreviousRound();
             try {
               await request.updateTurnLabel?.(action.focus.trim());
             } catch (error) {
@@ -796,6 +804,7 @@ export class ContinuationAgentTurnPlanner_ACU {
               const review = await this.dependencies.subagentRuntime.runFinalReview({
                 settings: request.settings,
                 resolveContext: context,
+                mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
                 candidateInstruction: action.instruction,
                 currentUserInput: context.originInstruction,
                 planningSummary: action.summary,
@@ -895,7 +904,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
         }
 
-        const delegationResult = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies, outlineMaintenanceReserveAvailable);
+        const delegationResult = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, session, apiDependencies, outlineMaintenanceReserveAvailable);
         snapshot = delegationResult.snapshot;
         if (delegationResult.usedOutlineMaintenanceReserve) {
           outlineMaintenanceReserveUsed = true;
@@ -977,6 +986,76 @@ export class ContinuationAgentTurnPlanner_ACU {
       return true;
     };
 
+    const discardPreviousRound = async (): Promise<boolean> => {
+      await flush();
+      if (!snapshot.messages.length) return false;
+      const ids = snapshot.messages.map(message => message.id);
+      const throughId = Math.max(...ids);
+      const fromId = Math.min(...ids);
+      if (throughId <= 0 || fromId <= 0) return false;
+      const report = '上一轮主会话已整段丢弃，没有做总结。会话记录、工具调用和运行时快照不带入下一轮。';
+      const at = Date.now();
+      const turns = new Set(snapshot.messages.map(message => message.turnKey).filter(Boolean));
+      const mark: AgentConversationCompactionMarkV2_ACU = {
+        schemaVersion: 2,
+        compactedThroughId: throughId,
+        report,
+        summaryState: {
+          currentGoal: '', effectiveConstraints: [], decisions: [], completedItems: [], pendingItems: [],
+          blockers: [], continuityFacts: [], readKeys: [], recentTurns: [],
+        },
+        at,
+        metrics: {
+          sourceFromId: fromId,
+          sourceThroughId: throughId,
+          beforeTokens: 0,
+          afterTokens: 0,
+          fixedPromptTokens: 0,
+          reportTokens: 0,
+          targetTokens: 0,
+          triggerTokens: 0,
+          droppedMessages: snapshot.messages.length,
+          droppedTurns: turns.size,
+          degraded: false,
+        },
+      };
+      const expectedMark = this.dependencies.readCompactionMark(chat);
+      const source = this.dependencies.readConversation(chat);
+      if (fingerprintAgentConversationSource_ACU(source, expectedMark) !== fingerprintAgentConversationSource_ACU(snapshot, expectedMark)) return false;
+      const anchor = chat[chat.length - 1];
+      if (!anchor || this.dependencies.readChat() !== chat) return false;
+      const swipeId = readMessageSwipeId_ACU(anchor);
+      const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
+      if (!chatIdentity) return false;
+      const sourceFingerprint = readAgentConversationCompactionSource_ACU(chat).fingerprint;
+      const planCursor = readCurrentStageCursor_ACU(request);
+      if (!planCursor) return false;
+      if (!request.isInternalRequestCurrent(request.createInternalRequestIdentity(0)) || request.signal?.aborted) return false;
+      try {
+        if (this.dependencies.readChat() !== chat || getActiveChatStorageIdentity_ACU(chat) !== chatIdentity
+          || chat[chat.length - 1] !== anchor || readMessageSwipeId_ACU(anchor) !== swipeId
+          || readAgentConversationCompactionSource_ACU(chat).fingerprint !== sourceFingerprint) return false;
+        if (!await this.dependencies.writeCompactionMark(chat, mark, { fingerprint: sourceFingerprint, anchor, swipeId, chatIdentity })) return false;
+        const persisted = this.dependencies.readCompactionMark(chat);
+        if (!persisted || !('summaryState' in persisted) || persisted.compactedThroughId !== throughId || persisted.report !== report) return false;
+        const authoritative = this.dependencies.readConversation(chat);
+        const discarded = authoritative.messages.length === 1
+          && authoritative.messages[0].kind === 'handoff'
+          && authoritative.messages[0].text === report;
+        if (!discarded) return false;
+        snapshot = authoritative;
+        logAgentSession_ACU({
+          kind: 'handoff',
+          title: '上一轮会话已丢弃（此前的会话记录、工具调用和快照对当前 AI 不可见）',
+          detail: report,
+        });
+        return true;
+      } catch (error) {
+        logAgentSession_ACU({ kind: 'thought', title: '上一轮会话丢弃未提交', detail: error instanceof Error ? error.message : String(error) });
+        return false;
+      }
+    };
+
     // 开场只保存轮次边界。正常与紧急压缩均在主请求完整渲染后判定，
     // 不再用首次骨架估算替代最终准备发送的消息。
     const continuingSameTurn = !!turnKey && lastAnnouncedTurnKey_ACU(snapshot) === turnKey;
@@ -990,6 +1069,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       },
       flush,
       compact,
+      discardPreviousRound,
       overBudgetNotified: false,
       continuingSameTurn,
       turnKey,
@@ -1120,16 +1200,14 @@ export class ContinuationAgentTurnPlanner_ACU {
       let messages = this.dependencies.nativeTools
         ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
         : this.spliceHistory_ACU(rendered, session.history());
-      // 发送前预检与压缩时机规则同一口径：阈值只是压缩触发线，一轮进行中允许超出到越界线
-      // （阈值 × AGENT_HISTORY_EMERGENCY_FACTOR_ACU）。轮内追加的工具结果、派工报告、迭代输出
-      // 把上下文顶过越界线时先做一次轮内压缩，压不下去才拒绝——否则同一轮里会陷入
-      // 「登记等下一轮 → 预检拒绝 → 永远到不了下一轮」的死锁。
+      // 发送前只在越过两倍越界线时压缩，避免这次请求因超长失败。
+      // 没到两倍不总结；下一轮开始时直接丢弃上一轮的会话、工具调用和快照。
       const budgetTokens = request.settings.agentHistoryTokenBudget;
       if (budgetTokens > 0) {
         const ceilingTokens = budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
         let promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
-        if (promptTokens > budgetTokens && (!session.continuingSameTurn || promptTokens > ceilingTokens)) {
-          if (await session.compact(promptTokens > ceilingTokens, messages)) {
+        if (promptTokens > ceilingTokens) {
+          if (await session.compact(true, messages)) {
             messages = this.dependencies.nativeTools
               ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
               : this.spliceHistory_ACU(rendered, session.history());
@@ -1144,12 +1222,12 @@ export class ContinuationAgentTurnPlanner_ACU {
             false,
           ));
         }
-        if (promptTokens > budgetTokens && session.continuingSameTurn && !session.overBudgetNotified) {
+        if (promptTokens > budgetTokens && !session.overBudgetNotified) {
           session.overBudgetNotified = true;
           logAgentSession_ACU({
             kind: 'thought',
             title: `上下文已超过 token 阈值（约 ${promptTokens} tokens）`,
-            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。本轮规划进行中不重塑历史，请求照常发送；总结留到本轮完成、下一轮开始前再做，超过越界线才会提前压缩。`,
+            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。还没到两倍，本轮结束不总结。工作流成功交付时会直接丢弃本轮会话记录、工具调用和运行时快照，下一轮不再确认上一轮。`,
           });
         }
       }
@@ -1477,6 +1555,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     context: AgentResolveContext_ACU,
     budget: AgentRunBudget_ACU,
     chat: any[],
+    session: AgentConversationHandle_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<void> {
     const completedStageNumbers = context.execution.task.stages
@@ -1506,6 +1585,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
+          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
         });
         if (result.usedFieldWrites) context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
         if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
@@ -1562,9 +1642,10 @@ export class ContinuationAgentTurnPlanner_ACU {
     ledger: AgentRunLedger_ACU,
     budget: AgentRunBudget_ACU,
     chat: any[],
+    session: AgentConversationHandle_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<ContinuationWorkflowResult_ACU> {
-    await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, apiDependencies);
+    await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, session, apiDependencies);
     const unsettled = renderAgentUnsettledHistory_ACU(context);
     const mapPayload = (result: AgentSubagentRunResult_ACU): ContinuationWorkflowAgentPayload_ACU => ({
       ok: result.completion !== 'failed' && result.completion !== 'partial',
@@ -1617,6 +1698,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
+          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
         });
         if (call.billing === 'opening') {
           ledger.delegationsUsed += 1;
@@ -1636,6 +1718,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
+          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
         });
         if (!result.composer?.instruction.trim()) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', 'instruction-composer 必须提供非空 instruction', false));
@@ -1649,6 +1732,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           candidateInstruction: instruction,
           currentUserInput: context.originInstruction,
           planningSummary: summary,
+          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
@@ -1727,6 +1811,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     budget: AgentRunBudget_ACU,
     chat: any[],
     snapshot: AgentModuleSnapshot_ACU,
+    session: AgentConversationHandle_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<AgentModuleSnapshot_ACU> {
     const delegation: AgentDelegation_ACU = { agentName: AGENT_WEB_RESEARCHER_NAME_ACU, prompt: buildOpeningResearchPrompt_ACU(context.originInstruction), reads: [] };
@@ -1743,6 +1828,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         isCurrent: identity => request.isInternalRequestCurrent(identity),
         signal: request.signal,
         writeSql: this.moduleFieldWrite_ACU(chat, context),
+        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
       });
       const settled = result.usedFieldWrites
         ? { snapshot: readAgentModuleSnapshot_ACU(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
@@ -1810,6 +1896,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     budget: AgentRunBudget_ACU,
     chat: any[],
     snapshot: AgentModuleSnapshot_ACU,
+    session: AgentConversationHandle_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
     outlineMaintenanceReserveAvailable = false,
   ): Promise<{ snapshot: AgentModuleSnapshot_ACU; usedOutlineMaintenanceReserve: boolean }> {
@@ -1900,6 +1987,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
+          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
         });
         return { delegation, result, error: null as unknown };
       } catch (error) {

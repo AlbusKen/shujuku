@@ -35,11 +35,12 @@ export async function measureWorldSimulationPrompt_ACU(messages: ReadonlyArray<{
 }
 
 export async function resolveWorldSimulationCompactionTiming_ACU(view: Pick<WorldSimulationConversationView_ACU, 'messages'>, budgetTokens: number, continuingSameTurn: boolean, count: WorldSimulationTokenCounter_ACU = countWorldSimulationTokens_ACU, overheadTokens = 0): Promise<{ action: 'compact' | 'defer' | 'skip'; totalTokens: number; emergency: boolean }> {
+  void continuingSameTurn;
   if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return { action: 'skip', totalTokens: 0, emergency: false };
   if (!view.messages.length) return { action: 'skip', totalTokens: overheadTokens, emergency: false };
   const totalTokens = overheadTokens + await measureWorldSimulationMessages_ACU(view.messages, count);
   if (totalTokens <= budgetTokens) return { action: 'skip', totalTokens, emergency: false };
-  if (!continuingSameTurn) return { action: 'compact', totalTokens, emergency: false };
   const emergency = totalTokens > budgetTokens * WORLD_SIMULATION_HISTORY_EMERGENCY_FACTOR_ACU;
-  return { action: emergency ? 'compact' : 'defer', totalTokens, emergency };
+  if (!emergency) return { action: 'defer', totalTokens, emergency: false };
+  return { action: 'compact', totalTokens, emergency: true };
 }

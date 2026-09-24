@@ -311,12 +311,12 @@ describe('主 Agent 会话记录', () => {
     expect(userIndex).toBeLessThan(findIndex_ACU(first, '开始新的一轮规划'));
   });
 
-  it('新一轮开始时把超出预算的早期轮次浓缩成交接报告', async () => {
+  it('只换到下一轮还没结束工作流时，不丢弃也不总结上一轮', async () => {
     const filler = '守门人'.repeat(400);
     // 会话最后通告的是 turn-2，本次运行的游标是 turn-3：上一轮已结束，正处在轮次边界。
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU(filler),
-      historyTokenBudget: 200,
+      historyTokenBudget: 600,
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
       context: nextTurnContext_ACU,
@@ -325,22 +325,45 @@ describe('主 Agent 会话记录', () => {
     expect(h.mainCalls).toHaveLength(1);
 
     const messages = h.conversation().messages;
-    expect(messages[0].kind).toBe('handoff');
-    expect(h.handoffCalls).toHaveLength(2);
-    expect(messages[0].text).toContain('stage-1#0#turn-1');
-    expect(messages[0].text).toContain('交付写作指导');
-    expect(messages.some(message => message.text === filler)).toBe(false);
-    // 刚结束的那一轮完整保留，主 Agent 不会忘记自己从哪儿接上。
+    expect(h.handoffCalls).toHaveLength(0);
+    expect(messages.some(message => message.kind === 'handoff')).toBe(false);
+    expect(messages.some(message => message.text === filler)).toBe(true);
     expect(messages.some(message => message.kind === 'turn' && message.turnKey === 'stage-1#0#turn-2')).toBe(true);
-    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(true);
-    // 交接报告正文作为独立条目插进会话流，用户在界面上直接看到 AI 可见性边界。
-    const handoffEntry = readAgentSessionLog_ACU().find(entry => entry.kind === 'handoff');
-    expect(handoffEntry?.title).toContain('此前内容对当前 AI 不可见');
-    expect(handoffEntry?.detail).toBe(messages[0].text);
-    expect(h.handoffCalls).toHaveLength(2);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('上一轮会话已丢弃'))).toBe(false);
   });
 
-  it('同一轮内到达阈值只登记不压缩，请求照常发送，留到下一轮开始时再做', async () => {
+  it('工作流成功交付时丢掉本轮会话，下一轮不再确认上一轮', async () => {
+    const filler = '守门人'.repeat(40);
+    const h = harness_ACU({
+      conversation: overBudgetConversation_ACU(filler),
+      snapshot: snapshotWithArc_ACU(),
+      mainReplies: ['{"action":"open_round","focus":"接着写"}'],
+      subReplies: [
+        JSON.stringify({ summary: '没有新增资料', delta: { hooks: [], infoGap: [], chronology: [] } }),
+        JSON.stringify({ summary: '主线建议', recommendation: '先观察', mustPreserve: [], risks: [] }),
+        JSON.stringify({ instruction: '按阶段大纲写。', summary: '完成本轮指令', constraints: { add: [], retire: [] } }),
+      ],
+    });
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '按阶段大纲写。' });
+    expect(h.handoffCalls).toHaveLength(0);
+    expect(h.conversation().messages).toHaveLength(1);
+    expect(h.conversation().messages[0].text).toContain('已整段丢弃');
+    expect(h.conversation().messages.some(message => message.text === filler)).toBe(false);
+
+    const next = harness_ACU({
+      conversation: h.conversation(),
+      snapshot: snapshotWithArc_ACU(),
+      mainReplies: ['{"action":"finalize","instruction":"下一轮"}'],
+      context: nextTurnContext_ACU,
+    });
+    await next.planner.plan(next.request);
+    const announcement = next.conversation().messages.find(message => message.kind === 'turn');
+    expect(announcement?.text).toContain('不要确认或续接上一轮对话');
+    expect(announcement?.text).not.toContain('此前的对话仍然有效');
+  });
+
+  it('同一轮内没到两倍只登记，下一轮开始时丢弃上一轮而不是总结', async () => {
     const filler = '守门人'.repeat(400);
     // 最后通告的就是本次运行的游标 turn-2：这一轮还没走完（中断恢复或同游标重跑）。
     // 填充词计数下总量约 800 tokens（加上正文里的零星出现），预算取 600：超出但没到两倍，
@@ -363,9 +386,9 @@ describe('主 Agent 会话记录', () => {
     // 阈值到了要如实告诉用户，只是执行时机推迟；同一次运行只通告一次。
     const deferred = readAgentSessionLog_ACU().filter(entry => entry.title.includes('token 阈值'));
     expect(deferred).toHaveLength(1);
-    expect(deferred[0].detail).toContain('下一轮开始前');
+    expect(deferred[0].detail).toContain('不总结');
 
-    // 同一份会话在游标推进到 turn-3 后再跑，这时才真正压缩。
+    // 只是进入下一轮、工作流还没成功交付时，上一轮会话仍留着。
     const next = harness_ACU({
       conversation: h.conversation(),
       historyTokenBudget: 600,
@@ -374,9 +397,10 @@ describe('主 Agent 会话记录', () => {
       context: nextTurnContext_ACU,
     });
     await next.planner.plan(next.request);
-    expect(next.conversation().messages[0].kind).toBe('handoff');
-    expect(next.conversation().messages.some(message => message.text === filler)).toBe(false);
-    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(true);
+    expect(next.handoffCalls).toHaveLength(0);
+    expect(next.conversation().messages.some(message => message.kind === 'handoff')).toBe(false);
+    expect(next.conversation().messages.some(message => message.text === filler)).toBe(true);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
   });
 
   it('同一轮内历史涨到预算两倍时提前压缩，避免请求因超长必然失败', async () => {
@@ -457,7 +481,6 @@ describe('主 Agent 会话记录', () => {
       historyTokenBudget: 200,
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"不应发送"}'],
-      context: nextTurnContext_ACU,
       ...overrides,
     });
 
@@ -480,7 +503,7 @@ describe('主 Agent 真实楼层会话压缩', () => {
     { kind: 'user', text: '最近要求：不要揭穿守门人', digest: '最近要求', turnKey: 'stage-1#0#turn-2' },
   ]);
   const options = () => ({ productionConversation: true, conversation: original(), historyTokenBudget: 200,
-    countTokens: fillerTokens_ACU, context: nextTurnContext_ACU, mainReplies: ['{"action":"finalize","instruction":"接着写"}'] });
+    countTokens: fillerTokens_ACU, mainReplies: ['{"action":"finalize","instruction":"接着写"}'] });
 
   it('双楼真实保存与回读：报告只替换旧完整动作/回执，删标记楼恢复原文', async () => {
     const h = harness_ACU(options());
@@ -1032,11 +1055,9 @@ describe('open_round 固定结构工作流', () => {
     expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
     expect(h.mainCalls).toHaveLength(1);
     expect(updateTurnLabel).toHaveBeenCalledWith('改为暗中试探守门人');
-    const receipt = h.conversation().messages.find(message => message.digest === '工作流状态回执');
-    expect(receipt).toBeDefined();
-    expect(JSON.parse(receipt!.text)).toMatchObject({ outcome: 'deliver', pending: [], revisions: expect.any(Object) });
-    expect(receipt!.text).not.toContain('按阶段大纲先观察守门人的回避');
-    expect(receipt!.text).not.toContain('没有新增资料');
+    expect(h.conversation().messages).toHaveLength(1);
+    expect(h.conversation().messages[0].text).toContain('已整段丢弃');
+    expect(h.conversation().messages[0].text).not.toContain('按阶段大纲先观察守门人的回避');
   });
 
   it('固定工作流逐栏端口绑定派工时末楼，模型等待期间新增楼层不会改写新末楼', async () => {
@@ -1696,7 +1717,7 @@ describe('S11 双模式双楼全链集成', () => {
       const second = await planner.plan(request);
       expect(second.instruction).toBe('主角假装离开，当夜折返，查探晶屑来源。');
 
-      // 第二次运行的首个请求：新换轮通告与宿主新正文都进了上下文，旧资料仍可回读。
+      // 第二次运行的首个请求：新换轮通告与宿主新正文都进了上下文，上一轮会话已被丢弃。
       const resumed = mainCalls[3].map(message => message.content).join('\n');
       expect(resumed).toContain('第 3/6 轮');
       expect(resumed).toContain('低语');

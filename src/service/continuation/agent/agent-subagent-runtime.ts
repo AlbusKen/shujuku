@@ -19,9 +19,11 @@ import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
   type ContinuationInternalAiRequestIdentity_ACU,
+  type ContinuationPromptSegment_ACU,
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
+import { keptSubagentMaterialTokens_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
 import { agentNativeTools_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
@@ -173,6 +175,10 @@ export interface AgentSubagentRunInput_ACU {
   isCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   signal?: AbortSignal | null;
   writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean }) => Promise<AgentModuleFieldReceipt_ACU>;
+  /** 主会话为本轮备好的世界书全文和已有检索。传入后子代理不能再读这些范围。 */
+  sharedMaterials?: string;
+  /** 主会话当前运行时快照。附在子代理末尾，与主会话看到的是同一份。 */
+  mainSnapshot?: string;
 }
 
 /** 终审由 finalize 前的受控状态机调用，不接受普通 delegation。 */
@@ -185,6 +191,8 @@ export interface AgentFinalReviewRunInput_ACU {
   createIdentity: (agentName: string, attempt: number) => ContinuationInternalAiRequestIdentity_ACU;
   isCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   signal?: AbortSignal | null;
+  sharedMaterials?: string;
+  mainSnapshot?: string;
 }
 
 export interface AgentFinalReviewRunResult_ACU {
@@ -259,6 +267,23 @@ interface ResearcherPageCache_ACU {
 export const AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU = 2;
 
 /** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
+function ownReadPrefixes_ACU(writes: readonly AgentWritableModule_ACU[]): string[] {
+  const prefixes: Record<AgentWritableModule_ACU, readonly string[]> = {
+    storyArc: ['$STORY_ARC', '$FIELD:storyArc'],
+    hooks: ['$HOOKS_LEDGER', '$FIELD:hooks'],
+    infoGap: ['$INFO_GAP', '$FIELD:infoGap'],
+    chronology: ['$CHRONOLOGY', '$FIELD:chronology'],
+    constraints: ['$ACTIVE_CONSTRAINTS', '$FIELD:constraints'],
+    webRefs: ['$WEB_REFS', '$FIELD:webRefs'],
+    userRequirements: ['$USER_REQUIREMENTS'],
+  };
+  return writes.flatMap(module => [...prefixes[module]]);
+}
+
+function readStaysWithOwner_ACU(key: string, prefixes: readonly string[]): boolean {
+  return prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}:`));
+}
+
 const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritableModule_ACU[]> = {
   arc: ['storyArc'],
   maintain: ['hooks', 'infoGap', 'chronology'],
@@ -577,7 +602,11 @@ export class AgentSubagentRuntime_ACU {
       toolRoundsUsed: roundsUsed,
       grantedTokens: gate.state.grantedTokens,
     });
-    const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
+    const promptSegments = stripUnownedSubagentPrompt_ACU(
+      selectPromptSegments_ACU(input.settings, definition) as readonly ContinuationPromptSegment_ACU[],
+      keptSubagentMaterialTokens_ACU(definition.kind, writes),
+    );
+    const rendered = await renderContinuationPrompt_ACU(promptSegments, {
       $AGENT_READ_MATERIALS: () => materials,
       $AGENT_TASK: () => input.delegation.prompt,
       $AGENT_WRITE_SCOPE: () => describeWriteScope_ACU(writes),
@@ -614,9 +643,14 @@ export class AgentSubagentRuntime_ACU {
     let baseMessages = definition.promptKey === 'arcArchitect'
       ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
       : rendered.messages;
+    const snapshotText = input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+    if (snapshotText) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
     // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
-    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用。不要写成 JSON、delta、Markdown 或顶层 storyArc 数组。id 和 expected_revision 可以不写：新行按 STORY-01、VOL-01、H001、E001、T001 顺序补号，修订号由系统按当前模块补上。volume 没写 status 时，第一条补 active，其余补 planned。只写职责模块；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧。最终契约不得重复提交已写栏目。story_arc 的每条 INSERT 必须带 withheld，缺了就还只是草稿。已有行缺 withheld 时，下一次把这些 UPDATE 放进同一条 sql 一次补完，不要新开卷。sustaining_threads 与 payoff_targets 写成 \'["条目"]\'，target_stage_range 写成 \'{"min":6,"max":10}\'。volume 同时只能有一条 status 为 active，其余 planned。scope=story 不要写卷级栏目。' });
+    if (input.sharedMaterials !== undefined) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: input.sharedMaterials });
+    const ownReads = input.sharedMaterials !== undefined ? ownReadPrefixes_ACU(writes) : null;
+    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用。不要写成 JSON、delta、Markdown 或顶层 storyArc 数组。id 和 expected_revision 可以不写：新行按 STORY-01、VOL-01、H001、E001、T001 顺序补号，修订号由系统按当前模块补上。volume 没写 status 时，第一条补 active，其余补 planned。只写职责模块；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧。最终契约不得重复提交已写栏目。story_arc 的每条 INSERT 必须带 withheld，缺了就还只是草稿。已有行缺 withheld 时，下一次把这些 UPDATE 放进同一条 sql 一次补完。还没有卷时可以继续 INSERT 新卷。sustaining_threads 与 payoff_targets 写成 \'["条目"]\'，target_stage_range 写成 \'{"min":6,"max":10}\'。volume 同时只能有一条 status 为 active，其余 planned。scope=story 不要写卷级栏目。' });
+    if (ownReads) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `世界书全文和各资料库已在【本轮已备资料】。不要再读世界书、正文、大纲或做跨库搜索。你只能 read 自己维护的详细资料：${ownReads.join('、')}。` : '世界书全文和各资料库已在【本轮已备资料】。你没有调阅工具，直接根据这些资料交付。' });
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
     const transcript: Array<{ role: string; content: string; tool_calls?: NonNullable<ReturnType<typeof nativeToolExchange_ACU>[number]['tool_calls']>; tool_call_id?: string }> = [];
@@ -695,7 +729,7 @@ export class AgentSubagentRuntime_ACU {
       // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
       cacheScope: `sub-${definition.name}`,
       cacheTools: ['read', 'search', ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search']) } : {}),
+      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(ownReads ? [...(ownReads.length ? ['read' as const] : []), ...(input.writeSql && writes.length ? ['write_sql' as const] : [])] : (input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search'])) } : {}),
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
       onUsage: usage => {
         usageTotal = usageTotal
@@ -930,7 +964,7 @@ export class AgentSubagentRuntime_ACU {
                 remainingToolRounds: 0, remainingWriteRounds: maxWriteRounds - writeRoundsUsed }));
               continue;
             }
-            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads,
+            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads,
               isResearch ? { settings: input.settings, cache: pageCache } : undefined);
             if (['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.kind)) temporaryWebSections.push(result);
             else toolResultSections.push(result);
@@ -1154,7 +1188,7 @@ export class AgentSubagentRuntime_ACU {
     gate.state.grantedTokens += fixedDecision.batchTokens;
     for (const key of evidence.fixedReadKeys) gate.granted.add(key);
 
-    const rendered = await renderContinuationPrompt_ACU(input.settings.agentPrompts.finalReviewer, {
+    const rendered = await renderContinuationPrompt_ACU(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, keptSubagentMaterialTokens_ACU('review', [])), {
       $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
       $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(input.resolveContext.moduleSnapshot, input.resolveContext.originInstruction),
       $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
@@ -1180,7 +1214,14 @@ export class AgentSubagentRuntime_ACU {
       grantedTokens: gate.state.grantedTokens,
     });
     // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
-    const baseMessages = insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderReadBudgetNote(0) });
+    const reviewSnapshot = input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+    let baseMessages = rendered.messages;
+    if (reviewSnapshot) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: reviewSnapshot });
+    baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
+    if (input.sharedMaterials !== undefined) {
+      baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: input.sharedMaterials });
+      baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '世界书全文和各资料库已在【本轮已备资料】。终审没有调阅工具，直接根据这些资料给出判词。' });
+    }
     const transcript: Array<{ role: string; content: string }> = [];
     const trailingPrefill = this.dependencies.nativeTools ? undefined : (baseMessages[baseMessages.length - 1]?.role === 'assistant' ? baseMessages.pop() : undefined);
     const expandedReads: string[] = [];
@@ -1196,7 +1237,7 @@ export class AgentSubagentRuntime_ACU {
       promptCacheEnabled: true,
       cacheScope: 'final-reviewer',
       cacheTools: ['read', 'search', 'review'],
-      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(['read', 'search']) } : {}),
+      ...(this.dependencies.nativeTools && input.sharedMaterials === undefined ? { tools: agentNativeTools_ACU(['read', 'search']) } : {}),
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
       onUsage: usage => {
         usageTotal = usageTotal
@@ -1251,7 +1292,7 @@ export class AgentSubagentRuntime_ACU {
           continue;
         }
         toolRoundsUsed += 1;
-        const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads);
+        const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null);
         if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
         else transcript.push({ role: 'user', content: `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
         continue;
@@ -1291,11 +1332,13 @@ export class AgentSubagentRuntime_ACU {
     context: AgentResolveContext_ACU,
     gate: SubagentGate_ACU,
     expandedReads: string[],
+    ownReads: readonly string[] | null,
     research?: { settings: ContinuationSettings_ACU; cache: ResearcherPageCache_ACU },
   ): Promise<string> {
     const fresh: SubagentMaterial_ACU[] = [];
     const duplicated: string[] = [];
     const failed: SubagentMaterial_ACU[] = [];
+    const refused: string[] = [];
     const seenInBatch = new Set<string>();
     // 出网工具不过读取门禁：它们的成本由页数与字数上限约束，结果直接回灌。
     const webSections: string[] = [];
@@ -1308,11 +1351,19 @@ export class AgentSubagentRuntime_ACU {
         webSections.push(await this.executeWebToolCall_ACU(call, research.settings, research.cache, expandedReads));
         continue;
       }
+      if (call.kind === 'search' && ownReads) {
+        refused.push('子代理不能做跨域搜索。请直接使用【本轮已备资料】。');
+        continue;
+      }
       if (call.kind === 'read') {
         for (const raw of call.reads) {
           const key = String(raw ?? '').trim();
           if (!key || seenInBatch.has(key)) continue;
           seenInBatch.add(key);
+          if (ownReads && !readStaysWithOwner_ACU(key, ownReads)) {
+            refused.push(`${key} 不在你的维护范围。世界书、正文和其它模块已在【本轮已备资料】，不要再读。`);
+            continue;
+          }
           if (gate.granted.has(key)) { duplicated.push(key); continue; }
           const material = resolveMaterial_ACU(key, context);
           if (material.status === 'failed') failed.push(material);
@@ -1328,7 +1379,7 @@ export class AgentSubagentRuntime_ACU {
       fresh.push({ key, label, text: `### 搜索「${call.query}」\n${runAgentSearch_ACU(call, context)}` });
     }
 
-    const sections: string[] = [...webSections, ...failed.map(material => JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }))];
+    const sections: string[] = [...refused, ...webSections, ...failed.map(material => JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }))];
     if (duplicated.length) {
       sections.push(`以下调阅本次派工已放行，完整内容见上文，不再重注：${duplicated.join('、')}。`);
     }

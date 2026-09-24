@@ -172,6 +172,22 @@ export function renderAgentWorldbookHits_ACU(snapshot: AgentWorldbookSnapshot_AC
  * @param uids 条目 uid 列表
  * @returns 条目全文；未知书名/uid 或条目未启用时回灌可修正的错误文本
  */
+/** 本轮命中的世界书条目全文。主会话备好后交给所有子代理，子代理不再各自精读。 */
+export function renderAgentWorldbookHitBodies_ACU(snapshot: AgentWorldbookSnapshot_ACU, scanText: string): string {
+  if (!snapshot.available) return '本轮世界书不可用。';
+  if (!snapshot.entries.length) return '当前没有已启用的世界书条目。';
+  const haystack = String(scanText ?? '').toLowerCase();
+  const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+  if (!hits.length) return '本轮没有命中世界书条目。';
+  const byBook = new Map<string, string[]>();
+  for (const hit of hits) {
+    const list = byBook.get(hit.bookName) ?? [];
+    list.push(hit.uid);
+    byBook.set(hit.bookName, list);
+  }
+  return [...byBook].map(([book, uids]) => renderAgentWorldbookEntries_ACU(snapshot, book, uids)).join('\n\n');
+}
+
 export function renderAgentWorldbookEntries_ACU(snapshot: AgentWorldbookSnapshot_ACU, bookName: string, uids: readonly string[]): string {
   if (!snapshot.available) return '本轮世界书读取失败，无法精读条目。';
   const book = String(bookName ?? '').trim();
