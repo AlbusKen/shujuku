@@ -53,9 +53,10 @@ function canonical_ACU(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical_ACU).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const row = value as Record<string, unknown>;
-    return `{${Object.keys(row).sort().map(key => `${JSON.stringify(key)}:${canonical_ACU(row[key])}`).join(',')}}`;
+    // JSON 落盘会丢掉 undefined。规划对象里的空可选栏目不能因此把整批更新判成不一致。
+    return `{${Object.keys(row).filter(key => row[key] !== undefined).sort().map(key => `${JSON.stringify(key)}:${canonical_ACU(row[key])}`).join(',')}}`;
   }
-  return JSON.stringify(value);
+  return JSON.stringify(value) ?? 'null';
 }
 function errorText_ACU(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function text_ACU(value: unknown): value is string { return typeof value === 'string'; }
@@ -206,12 +207,15 @@ export function planAgentModuleFieldCommit_ACU(
       reject(path, '角色无权写入该模块'); continue;
     }
     if (!id || id.includes('#') || ['__proto__', 'prototype', 'constructor'].includes(id) || id.length > 128) { reject(path, '条目 ID 无效'); continue; }
-    if (intent.expectedRevision !== snapshot.revisions[module]) {
-      reject(path, `revision_conflict: expected=${intent.expectedRevision}, actual=${snapshot.revisions[module]}`); continue;
-    }
     const key = `${module}#${id}`;
     const existing = domainRow_ACU(working, module, id);
     const record = fields.records[module]?.[id];
+    // 新行用 0。模块修订号只约束 UPDATE/DELETE，避免每写成一条就把同批后面的新卷打成 revision_conflict。
+    const newInsert = intent.kind === 'insert' && !existing && !record && !drafts.has(key) && !reserved.has(id);
+    const revisionOk = intent.expectedRevision === snapshot.revisions[module] || (newInsert && intent.expectedRevision === 0);
+    if (!revisionOk) {
+      reject(path, `revision_conflict: expected=${intent.expectedRevision}, actual=${snapshot.revisions[module]}`); continue;
+    }
     if (intent.kind === 'insert' && (existing || record || drafts.has(key) || reserved.has(id))) { reject(path, 'id_exists'); continue; }
     if (intent.kind !== 'insert' && !existing && !record && !drafts.has(key)) { reject(path, 'not_found'); continue; }
     if (existing?.retired && intent.kind !== 'delete') { reject(path, 'retired: 已退役条目不可修改'); continue; }

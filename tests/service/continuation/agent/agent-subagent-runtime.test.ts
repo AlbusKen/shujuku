@@ -591,7 +591,7 @@ describe('子代理逐栏工具会话', () => {
     const follow = messages[1].map(item => item.content).join('\n');
     expect(follow).toContain('调用 write_sql');
     expect(follow).toContain('["经营线"]');
-    expect(follow).toContain('expected_revision 必须等于 0');
+    expect(follow).toContain('新行 INSERT 的 expected_revision 固定写 0');
     expect(follow).not.toContain('delta.storyArc');
     expect(seen).toEqual(["INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)"]);
     expect(result.usedFieldWrites).toBe(true);

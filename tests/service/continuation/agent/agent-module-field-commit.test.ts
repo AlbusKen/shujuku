@@ -18,6 +18,28 @@ function setup() {
 }
 beforeEach(() => _set_SillyTavern_API_ACU(null as any));
 describe('续写逐栏真实提交', () => {
+  it('同一条 SQL 一次写入多条新卷，再用同一修订号一次补齐 withheld', async () => {
+    const { chat } = setup();
+    const insert = [
+      "INSERT INTO story_arc (id, scope, title, direction, escalation, status, expected_revision) VALUES ('STORY-01', 'story', '全书', '方向', '台阶', 'active', 0)",
+      "INSERT INTO story_arc (id, scope, title, direction, escalation, narrative_role, target_stage_range, target_time_span, progress_ceiling, sustaining_threads, payoff_targets, status, expected_revision) VALUES ('VOL-01', 'volume', '卷一', '方向', '台阶', 'setup', '{\"min\":6,\"max\":10}', '十日', '到婚礼', '[\"线\"]', '[\"兑现\"]', 'active', 0)",
+      "INSERT INTO story_arc (id, scope, title, direction, escalation, narrative_role, target_stage_range, target_time_span, progress_ceiling, sustaining_threads, payoff_targets, status, expected_revision) VALUES ('VOL-02', 'volume', '卷二', '方向', '台阶', 'development', '{\"min\":6,\"max\":10}', '十日', '到后宅', '[\"线\"]', '[\"兑现\"]', 'planned', 0)",
+    ].join('; ');
+    const inserted = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: insert, role: 'arc-architect' });
+    expect(inserted.status).toBe('committed');
+    expect(inserted.rejected.filter(item => item.reason.includes('revision_conflict'))).toEqual([]);
+    expect(inserted.partials?.map(item => item.id).sort()).toEqual(['STORY-01', 'VOL-01', 'VOL-02']);
+    const revision = inserted.revisions?.storyArc;
+    const update = ['STORY-01', 'VOL-01', 'VOL-02']
+      .map(id => `UPDATE story_arc SET withheld = '底牌' WHERE id = '${id}' AND expected_revision = ${revision}`)
+      .join('; ');
+    const filled = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: update, role: 'arc-architect' });
+    expect(filled.rejected.map(item => `${item.path}:${item.reason}`)).toEqual([]);
+    expect(filled.status).toBe('committed');
+    expect(filled.rejected).toEqual([]);
+    expect(readAgentModuleSnapshot_ACU(chat).storyArc.map(item => item.id).sort()).toEqual(['STORY-01', 'VOL-01', 'VOL-02']);
+  });
+
   it('两次写入先保留草稿再提升完整领域行', async () => {
     const { chat, saveChat } = setup();
     const first = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: INSERT_PARTIAL, role: 'hook-cognition-maintainer' });
