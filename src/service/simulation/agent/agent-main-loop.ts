@@ -25,7 +25,7 @@ import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
 import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
-import { dropTerminalJsonPrefill_ACU, isModelExchangeSequence_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
+import { dropTerminalJsonPrefill_ACU, isModelExchangeSequence_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
@@ -612,8 +612,10 @@ export class WorldSimulationMainLoop_ACU {
           await persistEntry(toolEntryId, `tool-${iteration}-failed`);
           throw error;
         }
-        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, [toolResultText_ACU(results)]));
-        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
+        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(calls);
+        const receipt = toolResultText_ACU(results);
+        if (boundCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content || raw, boundCalls, boundCalls.map(() => receipt)));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: receipt });
         pendingReview = null;
         await persist(iteration + 1);
         continue;

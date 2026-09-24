@@ -1482,7 +1482,7 @@ describe('子代理运行时', () => {
     // 第二次调用能看到自己上一次的工具请求（assistant）与回灌的工具结果（user）。
     const second = calls[1];
     expect(second.some(message => message.role === 'assistant' && message.content.includes('$TABLE:角色表'))).toBe(true);
-    expect(second.some(message => message.role === 'user' && message.content.includes('林瑶'))).toBe(true);
+    expect(second.some(message => message.role === 'tool' && message.content.includes('林瑶'))).toBe(true);
     expect(result.expandedReads).toEqual(['$TABLE:角色表']);
     expect(result.iterations).toBe(2);
   });

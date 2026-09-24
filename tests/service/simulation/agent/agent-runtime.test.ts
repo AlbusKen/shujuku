@@ -52,7 +52,8 @@ describe('世界推演 Agent runtime', () => {
     expect(sent[1].filter(item => item.content === read)).toHaveLength(1);
     expect(sent[1].filter(item => item.content.includes('已读完整正文'))).toHaveLength(1);
     expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
-      { role: 'assistant', content: read }, { role: 'user', content: expect.stringContaining('已读完整正文') },
+      { role: 'assistant', content: read, tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
+      { role: 'tool', tool_call_id: 'call_0_read', content: expect.stringContaining('已读完整正文') },
       { role: 'assistant', content: blocked }, { role: 'user', content: expect.stringContaining('\"outcome\":\"blocked\"') },
     ]);
     expect(readWorldSimulationConversation_ACU(chat).messages.filter(item => item.kind === 'model_agent')).toHaveLength(2);
@@ -268,7 +269,7 @@ describe('世界推演 Agent runtime', () => {
     expect(sent[0][0].content).toContain('仅输出一个主动作 JSON');
     expect(sent[0][5].content).toContain('只推演北境');
     expect(sent[1].slice(5, -1).some(item => item.content === read)).toBe(true);
-    expect(sent[1].at(-2)).toMatchObject({ role: 'user', content: expect.stringContaining('已读北境正文') });
+    expect(sent[1].at(-2)).toMatchObject({ role: 'tool', content: expect.stringContaining('已读北境正文') });
     expect(sent[1].at(-1)).toEqual({ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-director'] });
   });
 
@@ -366,7 +367,8 @@ describe('世界推演 Agent runtime', () => {
     expect(invoke).toHaveBeenCalledOnce();
     expect(chat[0]._qrf_world_simulation_agent_run).toBeUndefined();
     expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
-      { role: 'assistant', content: read }, { role: 'user', content: expect.stringContaining('read reply') },
+      { role: 'assistant', content: read, tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
+      { role: 'tool', tool_call_id: 'call_0_read', content: expect.stringContaining('read reply') },
     ]);
     resetWorldSimulationRunCacheForTests_ACU();
     saveChat.mockResolvedValue(undefined);
@@ -462,7 +464,7 @@ describe('世界推演 Agent runtime', () => {
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
     expect(sent[0][0].content).toContain('只输出一个 specialist JSON');
     expect(sent[1][5].content).toContain('以下是用户对任务曾经提过的要求');
-    expect(sent[1].at(-2)?.role).toBe('user');
+    expect(sent[1].at(-2)?.role).toBe('tool');
     expect(saveChat).toHaveBeenCalledTimes(2);
     expect(sent[1].at(-2)?.content).toContain('"status":"committed"');
     expect(sent[1].at(-2)?.content).toContain('"missingFields"');

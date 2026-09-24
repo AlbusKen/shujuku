@@ -22,7 +22,7 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
-import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
@@ -763,14 +763,14 @@ export class AgentSubagentRuntime_ACU {
           }
           pendingResearchEvidence = '';
         }
-        if (!nativeCalls.length) transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
         const readsAllowed = toolRoundsUsed < maxToolRounds;
         if (!readsAllowed && toolCalls.every(item => item.kind !== 'write_sql')) {
           const exhausted = isResearch
             ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
             : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-          if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
-          else transcript.push({ role: 'user', content: exhausted });
+          const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(toolCalls);
+          if (boundCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content || rawText, boundCalls, boundCalls.map(() => exhausted)));
+          else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: exhausted });
           continue;
         }
         if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql')) toolRoundsUsed += 1;
@@ -830,11 +830,17 @@ export class AgentSubagentRuntime_ACU {
           }
         }
         if (maxWriteRounds) toolResultSections.push(`write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。`);
+        const roundNote = maxWriteRounds ? `write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。` : '';
         const stableResult = toolResultSections.join('\n\n');
-        if (nativeCalls.length) {
-          const results = nativeCalls.map((_, index) => toolResultSections[index] || stableResult || temporaryWebSections.join('\n\n') || '工具没有返回内容');
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
-        } else if (stableResult || !temporaryWebSections.length) transcript.push({ role: 'user', content: `${stableResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(toolCalls);
+        if (boundCalls.length) {
+          const note = renderReadBudgetNote(toolRoundsUsed);
+          const results = boundCalls.map((_, index) => [toolResultSections[index] || stableResult || temporaryWebSections.join('\n\n') || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
+          transcript.push(...nativeToolExchange_ACU(turn.content || rawText, boundCalls, results));
+        } else {
+          transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+          if (stableResult || !temporaryWebSections.length) transcript.push({ role: 'user', content: `${stableResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+        }
         if (temporaryWebSections.length) {
           pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${temporaryWebSections.join('\n\n')}\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
         }

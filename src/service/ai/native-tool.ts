@@ -104,6 +104,29 @@ export function normalizeStoredToolCall_ACU(raw: unknown): AiNativeToolCall_ACU[
   return [{ id, name, arguments: args }];
 }
 
+/** 文本协议里的 read/search/write_sql 也要落成工具记录；混有其它动作时返回空，交给原路径。 */
+export function synthesizeProtocolToolCalls_ACU(calls: readonly {
+  kind: string;
+  reads?: readonly string[];
+  query?: string;
+  scope?: readonly string[];
+  isRegex?: boolean;
+  maxResults?: number;
+  sql?: string;
+  evidenceRefs?: readonly string[];
+}[]): AiNativeToolCall_ACU[] {
+  if (!calls.length || calls.some(call => call.kind !== 'read' && call.kind !== 'search' && call.kind !== 'write_sql')) return [];
+  return calls.map((call, index) => ({
+    id: `call_${index}_${call.kind}`,
+    name: call.kind,
+    arguments: JSON.stringify(call.kind === 'read'
+      ? { reads: [...(call.reads ?? [])] }
+      : call.kind === 'search'
+        ? { query: call.query ?? '', ...(call.scope ? { scope: [...call.scope] } : {}), ...(call.maxResults !== undefined ? { maxResults: call.maxResults } : {}), ...(call.isRegex ? { isRegex: true } : {}) }
+        : { sql: call.sql ?? '', ...(call.evidenceRefs?.length ? { evidenceRefs: [...call.evidenceRefs] } : {}) }),
+  }));
+}
+
 export function nativeToolCallsToProtocolJson_ACU(calls: readonly AiNativeToolCall_ACU[]): string {
   return calls.map(call => JSON.stringify(protocolRecord_ACU(call))).join('\n');
 }

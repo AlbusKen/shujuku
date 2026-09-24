@@ -19,7 +19,7 @@ import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
-import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, normalizeAgentModelReply_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
@@ -1191,15 +1191,16 @@ export class ContinuationAgentTurnPlanner_ACU {
         if (action.kind === 'finalize' && !request.readContext().turn) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '当前没有可执行的大纲轮次，不能 finalize；请先派工 outline-architect 创建或继续大纲', false));
         }
+        const boundCalls = nativeCalls.length || action.kind !== 'tools' ? nativeCalls : synthesizeProtocolToolCalls_ACU(action.calls);
         session.record([{
           kind: 'agent',
           text: turn.content.trim() || rawText || '(空输出)',
           digest: describeAgentActionLabel_ACU(action),
           turnKey: session.turnKey,
-          ...(nativeCalls.length ? { toolCalls: nativeCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
+          ...(boundCalls.length ? { toolCalls: boundCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
         }]);
         await session.flush();
-        return { action, nativeCalls, attempts: attempt + 1, usage: callUsage };
+        return { action, nativeCalls: boundCalls, attempts: attempt + 1, usage: callUsage };
       } catch (error) {
         lastReason = compactAgentProtocolError_ACU(error);
         // 被拒绝的原文也要留在会话里：模型必须看到自己上一次到底写了什么才能真正修正。
@@ -1434,13 +1435,19 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     if (nativeCalls.length) {
       const grouped = nativeCalls.map(() => [] as string[]);
-      appends.forEach((item, index) => grouped[owners[index] ?? 0]?.push(item.text));
+      const readKeys = nativeCalls.map(() => [] as string[]);
+      appends.forEach((item, index) => {
+        const owner = owners[index] ?? 0;
+        grouped[owner]?.push(item.text);
+        if (item.readKey) readKeys[owner]?.push(item.readKey);
+      });
       session.record(nativeCalls.map((call, index) => ({
         kind: 'tool' as const,
         text: grouped[index]?.join('\n\n') || '工具没有返回内容',
         digest: call.name,
         turnKey: session.turnKey,
         toolCallId: call.id,
+        ...(readKeys[index]?.length === 1 ? { readKey: readKeys[index][0] } : {}),
       })));
     } else {
       session.record(appends);

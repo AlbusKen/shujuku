@@ -321,7 +321,7 @@ describe('子代理逐栏工具会话', () => {
       expect(result.usedFieldWrites).toBe(true);
       expect(result.iterations).toBe(4);
       expect(messages.slice(0, 4).every(request => request.at(-1)?.role === 'assistant' && request.at(-1)?.content.startsWith('{'))).toBe(true);
-      expect(messages[1].at(-2)?.role).toBe('user');
+      expect(messages[1].at(-2)?.role).toBe('tool');
       expect(saveChat).toHaveBeenCalledTimes(2);
       expect(messages[1].map(item => item.content).join('\n')).toContain('"status":"committed"');
       expect(messages[1].map(item => item.content).join('\n')).toContain('"field":"summary","revision":1');

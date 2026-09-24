@@ -86190,6 +86190,20 @@ $CONTENT
         const args = typeof value.arguments === 'string' ? value.arguments : JSON.stringify(value.arguments ?? {});
         return [{ id, name, arguments: args }];
     }
+    /** 文本协议里的 read/search/write_sql 也要落成工具记录；混有其它动作时返回空，交给原路径。 */
+    function synthesizeProtocolToolCalls_ACU(calls) {
+        if (!calls.length || calls.some(call => call.kind !== 'read' && call.kind !== 'search' && call.kind !== 'write_sql'))
+            return [];
+        return calls.map((call, index) => ({
+            id: `call_${index}_${call.kind}`,
+            name: call.kind,
+            arguments: JSON.stringify(call.kind === 'read'
+                ? { reads: [...(call.reads ?? [])] }
+                : call.kind === 'search'
+                    ? { query: call.query ?? '', ...(call.scope ? { scope: [...call.scope] } : {}), ...(call.maxResults !== undefined ? { maxResults: call.maxResults } : {}), ...(call.isRegex ? { isRegex: true } : {}) }
+                    : { sql: call.sql ?? '', ...(call.evidenceRefs?.length ? { evidenceRefs: [...call.evidenceRefs] } : {}) }),
+        }));
+    }
     function nativeToolCallsToProtocolJson_ACU(calls) {
         return calls.map(call => JSON.stringify(protocolRecord_ACU(call))).join('\n');
     }
@@ -157476,17 +157490,16 @@ Expected function or array of functions, received type ${typeof value}.`
                         }
                         pendingResearchEvidence = '';
                     }
-                    if (!nativeCalls.length)
-                        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
                     const readsAllowed = toolRoundsUsed < maxToolRounds;
                     if (!readsAllowed && toolCalls.every(item => item.kind !== 'write_sql')) {
                         const exhausted = isResearch
                             ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
                             : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-                        if (nativeCalls.length)
-                            transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
+                        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(toolCalls);
+                        if (boundCalls.length)
+                            transcript.push(...nativeToolExchange_ACU(turn.content || rawText, boundCalls, boundCalls.map(() => exhausted)));
                         else
-                            transcript.push({ role: 'user', content: exhausted });
+                            transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: exhausted });
                         continue;
                     }
                     if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql'))
@@ -157555,13 +157568,19 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     if (maxWriteRounds)
                         toolResultSections.push(`write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。`);
+                    const roundNote = maxWriteRounds ? `write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。` : '';
                     const stableResult = toolResultSections.join('\n\n');
-                    if (nativeCalls.length) {
-                        const results = nativeCalls.map((_, index) => toolResultSections[index] || stableResult || temporaryWebSections.join('\n\n') || '工具没有返回内容');
-                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
+                    const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(toolCalls);
+                    if (boundCalls.length) {
+                        const note = renderReadBudgetNote(toolRoundsUsed);
+                        const results = boundCalls.map((_, index) => [toolResultSections[index] || stableResult || temporaryWebSections.join('\n\n') || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
+                        transcript.push(...nativeToolExchange_ACU(turn.content || rawText, boundCalls, results));
                     }
-                    else if (stableResult || !temporaryWebSections.length)
-                        transcript.push({ role: 'user', content: `${stableResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+                    else {
+                        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+                        if (stableResult || !temporaryWebSections.length)
+                            transcript.push({ role: 'user', content: `${stableResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+                    }
                     if (temporaryWebSections.length) {
                         pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${temporaryWebSections.join('\n\n')}\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
                     }
@@ -159468,15 +159487,16 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (action.kind === 'finalize' && !request.readContext().turn) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '当前没有可执行的大纲轮次，不能 finalize；请先派工 outline-architect 创建或继续大纲', false));
                     }
+                    const boundCalls = nativeCalls.length || action.kind !== 'tools' ? nativeCalls : synthesizeProtocolToolCalls_ACU(action.calls);
                     session.record([{
                             kind: 'agent',
                             text: turn.content.trim() || rawText || '(空输出)',
                             digest: describeAgentActionLabel_ACU(action),
                             turnKey: session.turnKey,
-                            ...(nativeCalls.length ? { toolCalls: nativeCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
+                            ...(boundCalls.length ? { toolCalls: boundCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
                         }]);
                     await session.flush();
-                    return { action, nativeCalls, attempts: attempt + 1, usage: callUsage };
+                    return { action, nativeCalls: boundCalls, attempts: attempt + 1, usage: callUsage };
                 }
                 catch (error) {
                     lastReason = compactAgentProtocolError_ACU(error);
@@ -159669,13 +159689,20 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             if (nativeCalls.length) {
                 const grouped = nativeCalls.map(() => []);
-                appends.forEach((item, index) => grouped[owners[index] ?? 0]?.push(item.text));
+                const readKeys = nativeCalls.map(() => []);
+                appends.forEach((item, index) => {
+                    const owner = owners[index] ?? 0;
+                    grouped[owner]?.push(item.text);
+                    if (item.readKey)
+                        readKeys[owner]?.push(item.readKey);
+                });
                 session.record(nativeCalls.map((call, index) => ({
                     kind: 'tool',
                     text: grouped[index]?.join('\n\n') || '工具没有返回内容',
                     digest: call.name,
                     turnKey: session.turnKey,
                     toolCallId: call.id,
+                    ...(readKeys[index]?.length === 1 ? { readKey: readKeys[index][0] } : {}),
                 })));
             }
             else {
@@ -165858,8 +165885,8 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!Array.isArray(raw.transcript))
                 reject_ACU$2(`${path}.transcript 必须是数组`, { path: `${path}.transcript` });
             raw.transcript.forEach((item, index) => {
-                if (!record_ACU$1(item) || (item.role !== 'assistant' && item.role !== 'user') || typeof item.content !== 'string') {
-                    reject_ACU$2(`${path}.transcript[${index}] 必须是 { role: 'assistant'|'user', content: string }`, { path: `${path}.transcript[${index}]` });
+                if (!record_ACU$1(item) || (item.role !== 'assistant' && item.role !== 'user' && item.role !== 'tool') || typeof item.content !== 'string') {
+                    reject_ACU$2(`${path}.transcript[${index}] 必须是 { role: 'assistant'|'user'|'tool', content: string }`, { path: `${path}.transcript[${index}]` });
                 }
             });
         }
@@ -167091,10 +167118,12 @@ Expected function or array of functions, received type ${typeof value}.`
                         await persistEntry(toolEntryId, `tool-${iteration}-failed`);
                         throw error;
                     }
-                    if (nativeCalls.length)
-                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, [toolResultText_ACU(results)]));
+                    const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(calls);
+                    const receipt = toolResultText_ACU(results);
+                    if (boundCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content || raw, boundCalls, boundCalls.map(() => receipt)));
                     else
-                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: receipt });
                     pendingReview = null;
                     await persist(iteration + 1);
                     continue;
@@ -167743,8 +167772,6 @@ ${rejectionText}` : delegationFeedback,
                     continue;
                 }
                 if (calls) {
-                    if (!nativeCalls.length)
-                        transcript.push({ role: 'assistant', content: raw || '(empty)' });
                     const perCall = [];
                     for (const call of calls) {
                         const bucket = [];
@@ -167799,10 +167826,11 @@ ${rejectionText}` : delegationFeedback,
                         }
                     }
                     const summary = { remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds };
-                    if (nativeCalls.length)
-                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
+                    const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(calls);
+                    if (boundCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content || raw, boundCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
                     else
-                        transcript.push({ role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
                     continue;
                 }
                 try {
@@ -167887,14 +167915,13 @@ ${rejectionText}` : delegationFeedback,
                 }
                 const calls = toolCalls_ACU(raw, reviewerNative.length ? '' : WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
                 if (calls) {
-                    if (!reviewerNative.length)
-                        transcript.push({ role: 'assistant', content: raw || '(empty)' });
                     if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
                         const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
-                        if (reviewerNative.length)
-                            transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
+                        const exhaustedBound = reviewerNative.length ? reviewerNative : synthesizeProtocolToolCalls_ACU(calls);
+                        if (exhaustedBound.length)
+                            transcript.push(...nativeToolExchange_ACU(reviewerTurn.content || raw, exhaustedBound, exhaustedBound.map(() => exhausted)));
                         else
-                            transcript.push({ role: 'user', content: exhausted });
+                            transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: exhausted });
                         continue;
                     }
                     toolRounds += 1;
@@ -167910,10 +167937,12 @@ ${rejectionText}` : delegationFeedback,
                     });
                     if (input.isCurrent?.() === false)
                         throw new Error('WORLD_SIMULATION_RUN_STALE');
-                    if (reviewerNative.length)
-                        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => toolText_ACU(results))));
+                    const reviewerBound = reviewerNative.length ? reviewerNative : synthesizeProtocolToolCalls_ACU(calls);
+                    const reviewerReceipt = toolText_ACU(results);
+                    if (reviewerBound.length)
+                        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content || raw, reviewerBound, reviewerBound.map(() => reviewerReceipt)));
                     else
-                        transcript.push({ role: 'user', content: toolText_ACU(results) });
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: reviewerReceipt });
                     continue;
                 }
                 try {

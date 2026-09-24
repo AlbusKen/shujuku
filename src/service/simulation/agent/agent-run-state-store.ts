@@ -184,8 +184,8 @@ function state_ACU(raw: unknown, path: string): WorldSimulationRunResumeState_AC
   if (raw.transcript !== undefined) {
     if (!Array.isArray(raw.transcript)) reject_ACU(`${path}.transcript 必须是数组`, { path: `${path}.transcript` });
     raw.transcript.forEach((item, index) => {
-      if (!record_ACU(item) || (item.role !== 'assistant' && item.role !== 'user') || typeof item.content !== 'string') {
-        reject_ACU(`${path}.transcript[${index}] 必须是 { role: 'assistant'|'user', content: string }`, { path: `${path}.transcript[${index}]` });
+      if (!record_ACU(item) || (item.role !== 'assistant' && item.role !== 'user' && item.role !== 'tool') || typeof item.content !== 'string') {
+        reject_ACU(`${path}.transcript[${index}] 必须是 { role: 'assistant'|'user'|'tool', content: string }`, { path: `${path}.transcript[${index}]` });
       }
     });
   }

@@ -26,7 +26,7 @@ import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudge
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
-import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string | AiChatTurn_ACU>; }
 export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; nativeTools?: boolean; }
@@ -396,7 +396,6 @@ export class WorldSimulationSubagentRuntime_ACU {
         continue;
       }
       if (calls) {
-        if (!nativeCalls.length) transcript.push({ role: 'assistant', content: raw || '(empty)' });
         const perCall: unknown[][] = [];
         for (const call of calls) {
           const bucket: unknown[] = [];
@@ -445,8 +444,9 @@ export class WorldSimulationSubagentRuntime_ACU {
           }
         }
         const summary = { remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds };
-        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
-        else transcript.push({ role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
+        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(calls);
+        if (boundCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content || raw, boundCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
         continue;
       }
       try {
@@ -535,11 +535,11 @@ export class WorldSimulationSubagentRuntime_ACU {
       }
       const calls = toolCalls_ACU(raw, reviewerNative.length ? '' : WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
       if (calls) {
-        if (!reviewerNative.length) transcript.push({ role: 'assistant', content: raw || '(empty)' });
         if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
           const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
-          if (reviewerNative.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
-          else transcript.push({ role: 'user', content: exhausted });
+          const exhaustedBound = reviewerNative.length ? reviewerNative : synthesizeProtocolToolCalls_ACU(calls);
+          if (exhaustedBound.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content || raw, exhaustedBound, exhaustedBound.map(() => exhausted)));
+          else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: exhausted });
           continue;
         }
         toolRounds += 1;
@@ -554,8 +554,10 @@ export class WorldSimulationSubagentRuntime_ACU {
           },
         });
         if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
-        if (reviewerNative.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => toolText_ACU(results))));
-        else transcript.push({ role: 'user', content: toolText_ACU(results) });
+        const reviewerBound = reviewerNative.length ? reviewerNative : synthesizeProtocolToolCalls_ACU(calls);
+        const reviewerReceipt = toolText_ACU(results);
+        if (reviewerBound.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content || raw, reviewerBound, reviewerBound.map(() => reviewerReceipt)));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: reviewerReceipt });
         continue;
       }
       try {
