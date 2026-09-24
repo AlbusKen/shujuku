@@ -20,7 +20,7 @@ import {
 } from './agent/agent-placeholder-resolver';
 import { readAgentModuleSnapshot_ACU, renderAgentChronology_ACU, renderAgentConstraints_ACU, renderAgentHooksByIds_ACU, renderAgentInfoGapByIds_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
 import { renderAgentUserRequirements_ACU } from './agent/agent-user-requirements';
-import { ContinuationWorldbookContext_ACU } from './worldbook-context';
+import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookBrowseCatalog_ACU } from './agent/agent-worldbook-read';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
 import { registerContinuationHostGenerationBridge_ACU } from './host-generation-bridge-registry';
 import { settings_ACU } from '../runtime/state-manager';
@@ -110,16 +110,15 @@ function completedPrefix_ACU(stage: ContinuationStage_ACU | null, revision: Stag
   return parts.join('\n\n');
 }
 
-function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, worldbook: ContinuationWorldbookContext_ACU, settings: ContinuationSettings_ACU, current?: ContinuationExecutionSnapshot_ACU): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {
+function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, settings: ContinuationSettings_ACU, current?: ContinuationExecutionSnapshot_ACU): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {
   // 大纲侧与主会话共用同一套正文渲染器与参数（尾楼数、可读窗口、提取/排除规则），不再有独立的"最近剧情"概念。
   const contextRules: AgentContextRules_ACU = { extractRules: settings.contextExtractRules, excludeRules: settings.contextExcludeRules };
   const storySource = () => ({ chat: getChatArray_ACU(), storyWindowFloors: settings.storyWindowFloors, storyTailFloors: settings.storyTailFloors, contextRules });
   const storyTail = () => renderAgentStoryTail_ACU(storySource());
-  const background = () => worldbook.readRelevantBackground(`${task.originInstruction}\n${storyTail()}`);
   return {
     $ORIGIN_INSTRUCTION: () => task.originInstruction,
     $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU()), task.originInstruction),
-    $1: background,
+    $1: async () => `${renderAgentWorldbookBrowseCatalog_ACU(await loadAgentWorldbookSnapshot_ACU())}\n写阶段标签之前，如需查阅，先输出 JSON：{"action":"read","reads":["$WORLDBOOK:书名:uid"]} 或 {"action":"search","query":"关键词","scope":["worldbook"]}。不要把设定全文写进标签。`,
     $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(getChatArray_ACU()) }),
     $STORY_TAIL: storyTail,
     $STAGE_HISTORY: () => serializeStageHistory_ACU(task),
@@ -227,7 +226,6 @@ async function migrateLegacySettings_ACU(store: FirstFloorContinuationStore_ACU)
 
 function createRuntime_ACU(): ContinuationRuntime_ACU {
   const store = new FirstFloorContinuationStore_ACU();
-  const worldbook = new ContinuationWorldbookContext_ACU();
   const planner = new ContinuationOutlinePlanner_ACU();
   const agentPlanner = new ContinuationAgentTurnPlanner_ACU({ nativeTools: true });
   // 桥在 orchestrator 之后创建，orchestrator 依赖用闭包延迟取活认领状态。
@@ -248,7 +246,7 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
     createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => {
       const stage = context.stage;
       const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
-      return buildResolvers_ACU(context.task, stage, revision, worldbook, context.envelope.settings);
+      return buildResolvers_ACU(context.task, stage, revision, context.envelope.settings);
     },
     hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
     buildFallbackSettings: buildInitialContinuationSettings_ACU,

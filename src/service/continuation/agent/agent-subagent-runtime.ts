@@ -64,7 +64,7 @@ import {
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
-import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU } from './agent-worldbook-read';
+import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookBrowseCatalog_ACU, renderAgentWorldbookTriggeredInjection_ACU, WORLDBOOK_READ_REFUSAL_ACU } from './agent-worldbook-read';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { runAgentSearch_ACU } from './agent-search';
 import {
@@ -618,8 +618,12 @@ export class AgentSubagentRuntime_ACU {
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
       $STORY_CATALOG: () => renderAgentStoryCatalog_ACU(input.resolveContext),
       $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(input.resolveContext.tableData),
-      $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false)),
-      $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false), buildAgentWorldbookScanText_ACU(input.resolveContext)),
+      $WORLDBOOK_CATALOG: () => renderAgentWorldbookBrowseCatalog_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false)),
+      $WORLDBOOK_HITS: () => {
+        const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+        if (definition.kind === 'arc') return '总纲不注入命中条目全文。请用已启用世界书目录自行选择 read，或用 search 的 worldbook 域按关键词检索。';
+        return renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+      },
       $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ tableData: input.resolveContext.tableData, recallCodes: input.resolveContext.recallCodes }, { maxRows: overviewMaxRows }),
       $STORY_TAIL: () => renderAgentStoryTail_ACU(input.resolveContext),
       $HISTORY_UNSETTLED: () => renderAgentUnsettledHistory_ACU(input.resolveContext),
@@ -645,7 +649,7 @@ export class AgentSubagentRuntime_ACU {
       ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
       : rendered.messages;
     const presentTokens = new Set(promptSegments.flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
-    const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens);
+    const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc' });
     if (snapshotText) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
     // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
@@ -966,7 +970,7 @@ export class AgentSubagentRuntime_ACU {
                 remainingToolRounds: 0, remainingWriteRounds: maxWriteRounds - writeRoundsUsed }));
               continue;
             }
-            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads,
+            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads, definition.kind === 'arc',
               isResearch ? { settings: input.settings, cache: pageCache } : undefined);
             if (['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.kind)) temporaryWebSections.push(result);
             else toolResultSections.push(result);
@@ -1296,7 +1300,7 @@ export class AgentSubagentRuntime_ACU {
           continue;
         }
         toolRoundsUsed += 1;
-        const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null);
+        const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null, false);
         if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
         else transcript.push({ role: 'user', content: `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
         continue;
@@ -1337,6 +1341,7 @@ export class AgentSubagentRuntime_ACU {
     gate: SubagentGate_ACU,
     expandedReads: string[],
     ownReads: readonly string[] | null,
+    allowWorldbookRead = false,
     research?: { settings: ContinuationSettings_ACU; cache: ResearcherPageCache_ACU },
   ): Promise<string> {
     const fresh: SubagentMaterial_ACU[] = [];
@@ -1366,6 +1371,10 @@ export class AgentSubagentRuntime_ACU {
           seenInBatch.add(key);
           if (ownReads && !readStaysWithOwner_ACU(key, ownReads)) {
             refused.push(`${key} 不在你的维护范围。世界书、正文和其它模块已在【本轮已备资料】，不要再读。`);
+            continue;
+          }
+          if (!allowWorldbookRead && key.startsWith('$WORLDBOOK:')) {
+            refused.push(`${WORLDBOOK_READ_REFUSAL_ACU}（${key}）`);
             continue;
           }
           if (gate.granted.has(key)) { duplicated.push(key); continue; }

@@ -54,7 +54,7 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     '$WORLD_AGENT_CATALOG': () => serialize_ACU(context.agentCatalog),
     '$WORLD_TOOL_CATALOG': () => serialize_ACU({
       addresses: context.toolCatalog,
-      hint: '目录中任一条目可通过调用 read 函数按地址调阅详细信息。参数 reads 是地址数组。',
+      hint: '非世界书地址仍可用 read 调阅。世界书条目全文已按关键词注入，不要 read worldbook:entry。如果注入内容不够，用 search，scope 包含 worldbook，在全部世界书内容里按关键词检索。参数 reads 是地址数组。',
     }),
     '$WORLD_EVIDENCE': () => serialize_ACU(context.evidence),
     '$WORLD_USER_GUIDANCE': () => serialize_ACU(context.userGuidance),

@@ -72,7 +72,7 @@ describe('world catalog injection', () => {
     expect(state).not.toContain('arc-mine');
     expect(chronicle).toContain('chronicle:');
     expect(chronicle).not.toContain('arc-mine');
-    expect(tools).toContain('目录中任一条目可通过调用 read 函数按地址调阅详细信息');
+    expect(tools).toContain('不要 read worldbook:entry');
   });
 
   it('子代理切片含模块在用目录、归档概览与 similar hints', () => {

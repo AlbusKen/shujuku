@@ -172,7 +172,36 @@ export function renderAgentWorldbookHits_ACU(snapshot: AgentWorldbookSnapshot_AC
  * @param uids 条目 uid 列表
  * @returns 条目全文；未知书名/uid 或条目未启用时回灌可修正的错误文本
  */
-/** 本轮命中的世界书条目全文。主会话备好后交给所有子代理，子代理不再各自精读。 */
+/** 主会话、伏笔等子代理与世界推演拒绝自行精读世界书时的说明。 */
+export const WORLDBOOK_READ_REFUSAL_ACU = '世界书条目全文已经按关键词触发注入。不要 read 世界书地址。如果触发内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
+
+/** 总纲与大纲看到的是目录，由它们自己决定读哪一条。 */
+export const WORLDBOOK_BROWSE_NOTE_ACU = '这是全部已启用世界书条目的目录，不是命中清单，没有注入条目全文。需要哪一条就按行尾地址 read。也可以用 search，scope 设为 ["worldbook"]，按关键词在世界书域里检索。';
+
+const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按关键词触发的世界书条目全文（常开条目，以及关键词出现在本轮语境里的条目；口径与剧情推进填表的关键词触发相同）。不要再对世界书条目调用 read。如果这些内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
+
+/** 总纲、大纲使用的已启用目录。不附带命中条目全文。 */
+export function renderAgentWorldbookBrowseCatalog_ACU(snapshot: AgentWorldbookSnapshot_ACU): string {
+  return `${WORLDBOOK_BROWSE_NOTE_ACU}\n${renderAgentWorldbookCatalog_ACU(snapshot)}`;
+}
+
+/**
+ * 本轮关键词已触发的世界书全文。
+ * 常开条目始终纳入；关键词条目与剧情推进填表一样，按扫描文本做包含匹配。
+ */
+export function renderAgentWorldbookTriggeredInjection_ACU(snapshot: AgentWorldbookSnapshot_ACU, scanText: string): string {
+  if (!snapshot.available) return `本轮世界书不可用。不要臆测设定。\n${WORLDBOOK_TRIGGERED_NOTE_ACU}`;
+  return `${WORLDBOOK_TRIGGERED_NOTE_ACU}\n${renderAgentWorldbookHitBodies_ACU(snapshot, scanText)}`;
+}
+
+/** 世界推演整轮共用的触发注入。世界书不可用或没有已启用条目时不追加空段。 */
+export async function loadTriggeredWorldbookInjection_ACU(scanText: string): Promise<string> {
+  const snapshot = await loadAgentWorldbookSnapshot_ACU();
+  if (!snapshot.available || !snapshot.entries.length) return '';
+  return renderAgentWorldbookTriggeredInjection_ACU(snapshot, scanText);
+}
+
+/** 本轮命中的世界书条目全文。 */
 export function renderAgentWorldbookHitBodies_ACU(snapshot: AgentWorldbookSnapshot_ACU, scanText: string): string {
   if (!snapshot.available) return '本轮世界书不可用。';
   if (!snapshot.entries.length) return '当前没有已启用的世界书条目。';

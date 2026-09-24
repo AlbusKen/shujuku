@@ -37,13 +37,18 @@ describe('世界推演宿主工具适配器', () => {
     gateway.entries.mockResolvedValue([]);
   });
 
-  it('strict 世界书读取区分依赖不可用、缺失与精确成功', async () => {
+  it('世界书条目不再精读，关键词搜索带回正文片段', async () => {
     const { dependencies } = fixture();
-    expect(await dependencies.read('worldbook:entry:book:1')).toMatchObject({ status: 'dependency_unavailable' });
+    const refused = await dependencies.read('worldbook:entry:book:1');
+    expect(refused).toMatchObject({ status: 'failed' });
+    expect(refused.summary).toContain('worldbook');
     gateway.available.mockReturnValue(true);
-    expect(await dependencies.read('worldbook:entry:book:1')).toMatchObject({ status: 'empty' });
-    gateway.entries.mockResolvedValue([{ uid: 1, name: '条目', content: '正文' }]);
-    expect(await dependencies.read('worldbook:entry:book:1')).toMatchObject({ status: 'ok', exact: true, content: '条目\n正文' });
+    gateway.list.mockResolvedValue(['book']);
+    gateway.entries.mockResolvedValue([{ uid: 1, comment: '标题', content: '城里的黑色晶屑会发光' }]);
+    const result = await dependencies.search('晶屑', ['worldbook'], 5, false);
+    expect(result.status).toBe('ok');
+    expect(result.hits[0]?.summary).toContain('黑色晶屑');
+    expect(result.hits[0]?.address).toContain('worldbook:entry:');
   });
 
   it('百科精读遵守单源开关且不会调用被禁用来源', async () => {

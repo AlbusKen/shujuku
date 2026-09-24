@@ -46,8 +46,10 @@ export interface WorldSimulationSubagentRunInput_ACU {
   isCurrent?: () => boolean;
   /** 主会话快照里未单独注入的部分，以及主会话已经读到的全文。 */
   directorMaterials?: string;
+  /** 本轮关键词已触发的世界书全文。导演与各子代理共用，不再自行精读条目。 */
+  triggeredWorldbook?: string;
 }
-export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; directorMaterials?: string; }
+export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; directorMaterials?: string; triggeredWorldbook?: string; }
 
 
 function candidate_ACU(
@@ -364,7 +366,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
       const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
-      const appendix = [snapshotText, input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
+      const appendix = [snapshotText, input.triggeredWorldbook?.trim() ?? '', input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
       const drafted = [protocolGuard, ...rendered.messages, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const messages = this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(drafted) : drafted;
@@ -522,7 +524,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
       const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
-      const appendix = [snapshotText, input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
+      const appendix = [snapshotText, input.triggeredWorldbook?.trim() ?? '', input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
       const reviewerDraft = [protocolGuard, ...rendered.messages, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const sent = await executeWorldSimulationFinalRequest_ACU({

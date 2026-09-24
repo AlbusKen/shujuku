@@ -1,5 +1,5 @@
 import { renderAgentOutlineWindow_ACU, renderAgentStoryTail_ACU, resolveAgentReadToken_ACU, type AgentResolveContext_ACU } from './agent-placeholder-resolver';
-import { renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU } from './agent-worldbook-read';
+import { renderAgentWorldbookTriggeredInjection_ACU } from './agent-worldbook-read';
 import type { AgentGateItem_ACU } from './agent-read-gate';
 
 export interface AgentFinalReviewEvidenceInput_ACU {
@@ -44,15 +44,14 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
   const seedSource = [context.originInstruction, input.currentUserInput, input.candidateInstruction, outline, tail].join('\n');
   const worldbookSeeds = extractAgentFinalReviewWorldbookSeeds_ACU(seedSource);
   const worldbookEvidence = context.worldbook?.available
-    ? renderAgentWorldbookHits_ACU(context.worldbook, seedSource)
-    : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证，并可用 worldbook scope 的 search 补查。';
+    ? renderAgentWorldbookTriggeredInjection_ACU(context.worldbook, seedSource)
+    : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证。需要时用 search，scope 设为 ["worldbook"]。';
   const supplementalMaterials = [
     `### 本轮用户输入\n${input.currentUserInput || '（本轮没有额外用户输入）'}`,
     `### 长期约束\n${constraints}`,
     `### 故事年代学账本（已发生正文结算出的时间事实；大纲时间字段只是计划）\n${chronology}`,
     `### 本轮策划结果摘要\n${input.planningSummary || '（未提供策划结果摘要）'}`,
     `### 世界书检索种子\n${worldbookSeeds.length ? worldbookSeeds.join('、') : '（未提取到有效检索种子）'}`,
-    `### 已启用世界书目录\n${renderAgentWorldbookCatalog_ACU(context.worldbook ?? { available: false, entries: [] })}`,
   ].join('\n\n');
   return {
     supplementalMaterials,

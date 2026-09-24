@@ -48,6 +48,7 @@ export interface WorldSimulationWorkflowInput_ACU {
   targetModules?: readonly WorldSimulationLedgerModule_ACU[];
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run'>;
   directorMaterials?: string;
+  triggeredWorldbook?: string;
 }
 
 export interface WorldSimulationWorkflowResult_ACU {
@@ -393,6 +394,7 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
   isCurrent?: () => boolean;
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run'>;
   directorMaterials?: string;
+  triggeredWorldbook?: string;
   ledger: WorldSimulationLedger_ACU;
   focus: string;
   candidateSeq: number;
@@ -416,6 +418,7 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
       runId: input.identity.runId,
       candidateSeq: input.candidateSeq,
       directorMaterials: input.directorMaterials,
+      triggeredWorldbook: input.triggeredWorldbook,
     });
   } catch (error) {
     return failedOutcome_ACU(agentName, error, 'invoke_failed', ['guidance']);
@@ -481,6 +484,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
         runId: input.identity.runId,
         candidateSeq: nextSeq(agentName),
         directorMaterials: input.directorMaterials,
+        triggeredWorldbook: input.triggeredWorldbook,
       });
       return restrictOutcome_ACU(outcome, targetModules);
     } catch (error) {
@@ -568,6 +572,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       focus: input.opening.focus,
       candidateSeq: nextSeq('guidance-composer'),
       directorMaterials: input.directorMaterials,
+      triggeredWorldbook: input.triggeredWorldbook,
     });
     outcomes.push(composer);
     ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [composer]);

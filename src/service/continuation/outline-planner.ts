@@ -16,6 +16,12 @@ import {
 } from './outline-schema';
 import { applyOutlineFixes_ACU, buildStageOutlineFromTags_ACU, parseOutlineFixes_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
+import { parseAgentSubagentToolCalls_ACU } from './agent/agent-protocol';
+import type { AgentResolveContext_ACU } from './agent/agent-placeholder-resolver';
+import { resolveAgentReadToken_ACU } from './agent/agent-placeholder-resolver';
+import { runAgentSearch_ACU } from './agent/agent-search';
+import type { AgentToolCall_ACU } from './agent/agent-model';
+import { loadAgentWorldbookSnapshot_ACU } from './agent/agent-worldbook-read';
 import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
@@ -61,6 +67,37 @@ export interface ContinuationOutlinePlannerDependencies_ACU {
   callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU, signal?: AbortSignal | null, options?: ContinuationInternalAiCallOptions_ACU) => Promise<string | { content: string } | null>;
   /** 传输错误重试前的延时实现。缺省 setTimeout；测试注入假计时器。 */
   wait?: (ms: number) => Promise<void>;
+  /** 大纲在写标签前自行查阅世界书。缺省按已启用快照执行 read / worldbook 域 search。 */
+  runWorldbookTools?: (calls: readonly AgentToolCall_ACU[]) => Promise<string>;
+}
+
+/** 大纲写阶段标签之前，最多先查阅这么多轮世界书。 */
+const OUTLINE_WORLDBOOK_TOOL_ROUNDS_ACU = 4;
+
+/** 大纲只能读已启用目录里的世界书地址，或在世界书域里按关键词搜索。 */
+export async function runOutlineWorldbookTools_ACU(calls: readonly AgentToolCall_ACU[]): Promise<string> {
+  const snapshot = await loadAgentWorldbookSnapshot_ACU();
+  const context = { worldbook: snapshot } as AgentResolveContext_ACU;
+  const sections: string[] = [];
+  for (const call of calls) {
+    if (call.kind === 'read') {
+      for (const raw of call.reads) {
+        const key = String(raw ?? '').trim();
+        if (!key.startsWith('$WORLDBOOK:')) {
+          sections.push(`${key || '(空地址)'} 不能读。大纲只从已启用目录选择 $WORLDBOOK:书名:uid，或用 search 的 worldbook 域检索。`);
+          continue;
+        }
+        sections.push(`### ${key}\n${resolveAgentReadToken_ACU(key, context).text}`);
+      }
+      continue;
+    }
+    if (!call.scope.includes('worldbook')) {
+      sections.push('大纲的 search 只能使用 scope ["worldbook"]。');
+      continue;
+    }
+    sections.push(runAgentSearch_ACU({ ...call, scope: ['worldbook'] }, context));
+  }
+  return sections.join('\n\n') || '没有可执行的世界书查阅。';
 }
 
 const defaultDependencies_ACU: ContinuationOutlinePlannerDependencies_ACU = {
@@ -311,6 +348,16 @@ export class ContinuationOutlinePlanner_ACU {
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
         lastRaw = await callModel(attempt, [...rendered.messages, ...transcript]);
+        const runWorldbookTools = this.dependencies.runWorldbookTools ?? runOutlineWorldbookTools_ACU;
+        for (let toolRound = 0; toolRound < OUTLINE_WORLDBOOK_TOOL_ROUNDS_ACU && !/<stage_title[\s>]/i.test(lastRaw); toolRound += 1) {
+          const calls = parseAgentSubagentToolCalls_ACU(lastRaw, '');
+          if (!calls?.length) break;
+          transcript.push(
+            { role: 'assistant', content: lastRaw.trim() || '(空输出)' },
+            { role: 'user', content: await runWorldbookTools(calls) },
+          );
+          lastRaw = await callModel(attempt, [...rendered.messages, ...transcript]);
+        }
         let planned = buildFromRaw(lastRaw);
         let { validation, prefixNodeCount } = validateDraft(planned);
         // 增量修补：结构已经合法、只差标记时，不整份重来，只向模型索要缺项。

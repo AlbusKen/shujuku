@@ -187,14 +187,16 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(messages[messages.length - 3].content).toContain('【本回合运行时数据】');
     expect(messages[messages.length - 4].role).toBe('user');
     expect(messages[messages.length - 4].content).toContain('【总纲卷数计划】');
-    // 总纲子代理保留正文、总纲和世界书命中；目录仍在快照里，命中列表不重复。
+    // 总纲保留正文、总纲和全部已启用世界书目录，自行查阅；快照不再重复目录，也不注入命中全文。
     expect(messages[messages.length - 5].content).toContain('【本次任务】\n立总纲');
     expect(messages[messages.length - 5].content).toContain('【故事总纲现状】');
     expect(messages[messages.length - 5].content).toContain('【事件概览】');
     expect(messages[messages.length - 5].content).toContain('【最近正文】');
-    expect(messages[messages.length - 5].content).toContain('【本轮语境命中的世界书条目】');
-    expect(messages[messages.length - 5].content).not.toContain('【已启用世界书目录】');
-    expect(messages[messages.length - 3].content).toContain('【已启用世界书目录】');
+    expect(messages[messages.length - 5].content).toContain('【已启用世界书目录】');
+    expect(messages[messages.length - 5].content).toContain('不是命中清单');
+    expect(messages[messages.length - 5].content).not.toContain('【本轮语境命中的世界书条目】');
+    expect(messages[messages.length - 5].content).not.toContain('不要再对这些条目调用 read');
+    expect(messages[messages.length - 3].content).not.toContain('【已启用世界书目录】');
     expect(messages[messages.length - 3].content).not.toContain('【故事总纲状态】');
     expect(messages[messages.length - 3].content).not.toContain('【本轮语境命中的世界书条目】');
   });

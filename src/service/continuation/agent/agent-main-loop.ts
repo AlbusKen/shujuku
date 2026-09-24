@@ -79,7 +79,7 @@ import {
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
-import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
+import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, WORLDBOOK_READ_REFUSAL_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
 import { runAgentSearch_ACU } from './agent-search';
 import {
   createAgentReadGateState_ACU,
@@ -1317,9 +1317,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       $STORY_TAIL: () => renderAgentStoryTail_ACU(context),
       $STORY_CATALOG: () => renderAgentStoryCatalog_ACU(context),
       $OUTLINE_STATE: () => renderAgentOutlineState_ACU(context),
-      $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false)),
-      // 本轮语境命中的世界书条目：常开条目全列 + 关键词命中（扫描本轮目标/未结算正文/尾楼/初始要求）。
-      $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false), buildAgentWorldbookScanText_ACU(context)),
+      $WORLDBOOK_CATALOG: () => '主会话不浏览世界书目录。本轮已触发的条目全文见命中区。不够时用 search，scope 设为 ["worldbook"]。不要 read $WORLDBOOK。',
+      $WORLDBOOK_HITS: () => renderAgentWorldbookTriggeredInjection_ACU(context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false), buildAgentWorldbookScanText_ACU(context)),
       $HISTORY_UNSETTLED: () => renderAgentUnsettledHistory_ACU(context),
       $USER_INTENT: () => context.originInstruction || '（用户未提供初始要求）',
       $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction),
@@ -1459,6 +1458,10 @@ export class ContinuationAgentTurnPlanner_ACU {
           const key = String(raw ?? '').trim();
           if (!key || seenInBatch.has(key)) continue;
           seenInBatch.add(key);
+          if (key.startsWith('$WORLDBOOK:')) {
+            failed.push({ key, label: key, title: '世界书条目', text: WORLDBOOK_READ_REFUSAL_ACU });
+            continue;
+          }
           if (toolUsage.granted.has(key)) { duplicated.push(key); continue; }
           const resolved = resolveAgentReadToken_ACU(key, context);
           const material = { key, label: key, title: resolved.title, text: resolved.text };
