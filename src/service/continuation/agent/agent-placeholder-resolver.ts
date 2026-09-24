@@ -497,21 +497,22 @@ export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): 
   if (!execution.revision || !execution.node || !execution.turn) {
     return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
   }
-  // 轮次与节点都带 [ID] 前缀：便于主 Agent 在委派 outline-architect 时精确引用待维护目标。
-  const turns = execution.node.turns
-    .map((turn, index) => `${index + 1}. [${turn.id}]（${renderTurnSemanticMeta_ACU(turn)}）${turn.goal}${turn.id === execution.turn!.id ? '  ← 本轮' : ''}`)
-    .join('\n');
+  const nodes = execution.revision.outline.nodes?.length ? execution.revision.outline.nodes : [execution.node];
+  const nodeBlocks = nodes.map(node => {
+    const turns = node.turns
+      .map((turn, index) => `${index + 1}. [${turn.id}]（${renderTurnSemanticMeta_ACU(turn)}）${turn.goal}${turn.id === execution.turn!.id ? '  ← 本轮' : ''}`)
+      .join('\n');
+    return [`节点：[${node.id}] ${node.title}`, `节点目标：${node.goal}`, turns].join('\n');
+  });
   return [
     `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
     `阶段目标：${execution.revision.outline.goal}`,
     `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
     `阶段结构职责：${execution.revision.outline.role ?? '旧快照未标注'}`,
     `阶段时间目标：${execution.revision.outline.timeSpanGoal ?? '未设定'}`,
-    `当前节点：[${execution.node.id}] ${execution.node.title}`,
-    `节点目标：${execution.node.goal}`,
     `阶段内轮次进度：第 ${execution.turnNumber} / ${execution.revision.outline.totalTurns} 轮`,
-    '本节点逐轮目标（括号内依次给出 pacing、function、mainline、time 与可选 anchor）：',
-    turns,
+    '当前启用的阶段大纲（全部节点与轮次；括号内依次给出 pacing、function、mainline、time 与可选 anchor）：',
+    nodeBlocks.join('\n\n'),
     renderAgentTurnPacingGuidance_ACU(execution.turn.pacing),
     '注意：大纲是计划，不是已经发生的事实。',
   ].join('\n');

@@ -305,6 +305,13 @@ export class ContinuationOutlinePlanner_ACU {
     resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
     // 校验错误不再写回骨架占位符：重试只追加 transcript，前缀保持字节级稳定以便命中缓存。
     const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
+    const renderedBlob = rendered.messages.map(message => message.content).join('\n');
+    const injected: string[] = [];
+    const storyArc = resolvers.$STORY_ARC ? String(await resolvers.$STORY_ARC() ?? '').trim() : '';
+    const enabledOutline = resolvers.$OUTLINE_WINDOW ? String(await resolvers.$OUTLINE_WINDOW() ?? '').trim() : '';
+    if (storyArc && !renderedBlob.includes(storyArc.slice(0, Math.min(80, storyArc.length)))) injected.push(`【当前故事总纲】\n${storyArc}`);
+    if (enabledOutline && !renderedBlob.includes(enabledOutline.slice(0, Math.min(80, enabledOutline.length)))) injected.push(`【当前启用的阶段大纲】\n${enabledOutline}`);
+    if (injected.length) rendered.messages.push({ role: 'user', content: injected.join('\n\n') });
     const transcript: Array<{ role: string; content: string }> = [];
     let lastRaw = '';
 

@@ -143,7 +143,7 @@ describe('开场百科检索', () => {
     expect(first).toContain('本次派工最多 3 页');
     const second = h.subCalls[1].map(message => message.content).join('\n');
     expect(second).toContain('百科检索「鲁迪乌斯·格雷拉特」');
-    expect(second).toContain('"action":"encyclopedia_read"');
+    expect(second).toContain('调用 encyclopedia_read');
     const third = h.subCalls[2].map(message => message.content).join('\n');
     expect(third).toContain('[页面句柄 P1]');
     expect(third).toContain('泥沼：土系魔术');

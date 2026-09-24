@@ -242,11 +242,11 @@ export function findAgentSubagentDefinition_ACU(name: string): AgentSubagentDefi
 export function renderAgentWebToolCatalog_ACU(input: { sources: string[]; provider: string; maxPages: number; pageCharLimit: number; pagesUsed: number }): string {
   const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
   return [
-    '出网工具（encyclopedia_search、encyclopedia_read、web_search、web_read 仍以 JSON 对象表达，可同批并发；本地 read/search 用函数调用，不要和出网 JSON 放在同一次输出。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
-    `- {"action":"encyclopedia_search","query":"角色名 或 作品名","sources":["moegirl","wikipedia_zh"]}：在百科里找候选词条。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
-    '- {"action":"encyclopedia_read","source":"moegirl","title":"候选里的准确标题"}：精读词条正文，返回带句柄的页面。',
-    `- {"action":"web_search","query":"关键词"}：通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
-    '- {"action":"web_read","url":"https://…"}：抓取任意网页正文。内网、酒馆自身与黑名单域名会被拒绝。',
+    '出网工具 encyclopedia_search、encyclopedia_read、web_search、web_read 都是函数调用，和本地 read/search 一样，可以在同一次回复里并发调用，不要写成 JSON。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们。继续调用工具时，把上一批页面要留下的事实放进 notes 参数。',
+    `- 调用 encyclopedia_search，参数 query 为「角色名 或 作品名」，sources 例如 ["moegirl","wikipedia_zh"]。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
+    '- 调用 encyclopedia_read，参数 source 为 moegirl，title 为候选里的准确标题。精读词条正文，返回带句柄的页面。',
+    `- 调用 web_search，参数 query 为关键词。通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
+    '- 调用 web_read，参数 url 为完整网址。抓取任意网页正文。内网、酒馆自身与黑名单域名会被拒绝。',
     `每次精读/抓取算一页，本次派工最多 ${input.maxPages} 页（已用 ${input.pagesUsed}），每页原文截断到 ${input.pageCharLimit} 字。同一页面不要重复抓取。`,
   ].join('\n');
 }

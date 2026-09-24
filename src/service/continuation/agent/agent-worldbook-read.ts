@@ -12,6 +12,7 @@ import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine-state';
 import { getLorebookEntriesByNames_ACU } from '../../worldbook/pipeline';
 import { getCurrentWorldbookConfig_ACU } from '../../settings/settings-readers';
 import { isEntryBlocked_ACU, logWarn_ACU } from '../../../shared/utils';
+import { getWorldbookEntryKeywords_ACU } from '../../worldbook/pipeline';
 import {
   isSummaryEntryComment_ACU,
   normalizeGeneratedComment_ACU,
@@ -26,6 +27,10 @@ export interface AgentWorldbookEntryView_ACU {
   title: string;
   keys: string[];
   constant: boolean;
+  /** 为真时，本条目正文不参与后续关键词迭代。对应世界书 prevent_recursion。 */
+  preventRecursion?: boolean;
+  /** 为真时，只对照最初扫描文本，不看后触发条目的正文。对应世界书 exclude_recursion。 */
+  excludeRecursion?: boolean;
   content: string;
   /** 条目全文的 token 估算，供 AI 判断读取预算。 */
   tokens: number;
@@ -47,8 +52,7 @@ function isRecord_ACU(value: unknown): value is Record<string, unknown> {
 }
 
 function readEntryKeys_ACU(entry: Record<string, unknown>): string[] {
-  const raw = Array.isArray(entry.keys) ? entry.keys : typeof entry.keys === 'string' ? entry.keys.split(/[,，]/) : [];
-  return raw.map(key => String(key ?? '').trim()).filter(Boolean);
+  return getWorldbookEntryKeywords_ACU(entry);
 }
 
 /** 与 pipeline 的 isSelected 语义一致：插件侧勾选表缺书/缺列表都视为全选。 */
@@ -111,6 +115,8 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
           title: title || `条目 ${uid}`,
           keys: readEntryKeys_ACU(raw),
           constant: raw.type === 'constant',
+          preventRecursion: raw.prevent_recursion === true,
+          excludeRecursion: raw.exclude_recursion === true,
           content,
           tokens: await countEntryTokens_ACU(bookName, uid, content),
         });
@@ -153,12 +159,58 @@ export function renderAgentWorldbookCatalog_ACU(snapshot: AgentWorldbookSnapshot
  * @param scanText 扫描文本（本轮目标 + 未结算正文 + 尾部楼层 + 用户初始要求）
  * @returns 命中提示文本；无命中/世界书不可用时如实说明
  */
+/**
+ * 与剧情推进、填表共用的触发规则。
+ * 常量条目直接纳入；关键词条目最多迭代 10 轮，已触发且允许递归的正文会继续触发别的条目。
+ * includeConstantContentInBaseScan 与剧情推进一致：常量正文也进入最初扫描文本，供排除递归的条目使用。
+ */
+export function selectTriggeredWorldbookEntries_ACU(
+  entries: readonly AgentWorldbookEntryView_ACU[],
+  scanText: string,
+  options?: { includeConstantContentInBaseScan?: boolean },
+): AgentWorldbookEntryView_ACU[] {
+  const includeConstantContent = options?.includeConstantContentInBaseScan !== false;
+  let baseScanText = String(scanText ?? '').toLowerCase();
+  const constantEntries = entries.filter(entry => entry.constant);
+  let keywordEntries = entries.filter(entry => !entry.constant);
+  if (includeConstantContent) {
+    const constantBaseText = constantEntries
+      .filter(entry => entry.preventRecursion !== true)
+      .map(entry => entry.content)
+      .join('\n')
+      .toLowerCase();
+    if (constantBaseText) baseScanText = [baseScanText, constantBaseText].filter(Boolean).join('\n');
+  }
+  const triggered = new Set<AgentWorldbookEntryView_ACU>(constantEntries);
+  for (let depth = 0; depth < 10; depth += 1) {
+    const recursionSource = [...triggered]
+      .filter(entry => entry.preventRecursion !== true)
+      .map(entry => entry.content)
+      .join('\n')
+      .toLowerCase();
+    const fullSearchText = `${baseScanText}\n${recursionSource}`;
+    let changed = false;
+    const remaining: AgentWorldbookEntryView_ACU[] = [];
+    for (const entry of keywordEntries) {
+      const keywords = entry.keys.map(key => key.toLowerCase()).filter(Boolean);
+      const haystack = entry.excludeRecursion === true ? baseScanText : fullSearchText;
+      if (keywords.length > 0 && keywords.some(keyword => haystack.includes(keyword))) {
+        triggered.add(entry);
+        changed = true;
+      } else {
+        remaining.push(entry);
+      }
+    }
+    keywordEntries = remaining;
+    if (!changed) break;
+  }
+  return entries.filter(entry => triggered.has(entry));
+}
+
 export function renderAgentWorldbookHits_ACU(snapshot: AgentWorldbookSnapshot_ACU, scanText: string): string {
   if (!snapshot.available) return '本轮世界书读取失败，无法给出命中提示；请勿臆测世界书内容。';
   if (!snapshot.entries.length) return '当前没有已启用的世界书条目，无命中提示。';
-  const haystack = String(scanText ?? '').toLowerCase();
-  const hits = snapshot.entries.filter(entry =>
-    entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+  const hits = selectTriggeredWorldbookEntries_ACU(snapshot.entries, scanText);
   if (!hits.length) return '本轮语境没有命中任何世界书条目的关键词，也没有常开条目。需要设定时从世界书目录挑选精读。';
   const lines = hits.map(entry =>
     `- ${entry.title}（${entry.constant ? '常开' : '关键词命中'}｜约 ${entry.tokens} token）→ $WORLDBOOK:${entry.bookName}:${entry.uid}`);
@@ -178,7 +230,7 @@ export const WORLDBOOK_READ_REFUSAL_ACU = '世界书条目全文已经按关键�
 /** 总纲与大纲看到的是目录，由它们自己决定读哪一条。 */
 export const WORLDBOOK_BROWSE_NOTE_ACU = '这是全部已启用世界书条目的目录，不是命中清单，没有注入条目全文。需要哪一条就按行尾地址 read。也可以用 search，scope 设为 ["worldbook"]，按关键词在世界书域里检索。';
 
-const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按关键词触发的世界书条目全文（常开条目，以及关键词出现在本轮语境里的条目；口径与剧情推进填表的关键词触发相同）。不要再对世界书条目调用 read。如果这些内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
+const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。不要再对世界书条目调用 read。如果这些内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
 
 /** 总纲、大纲使用的已启用目录。不附带命中条目全文。 */
 export function renderAgentWorldbookBrowseCatalog_ACU(snapshot: AgentWorldbookSnapshot_ACU): string {
@@ -187,7 +239,7 @@ export function renderAgentWorldbookBrowseCatalog_ACU(snapshot: AgentWorldbookSn
 
 /**
  * 本轮关键词已触发的世界书全文。
- * 常开条目始终纳入；关键词条目与剧情推进填表一样，按扫描文本做包含匹配。
+ * 常量条目直接纳入；关键词条目按已触发正文迭代，规则与剧情推进、填表相同。
  */
 export function renderAgentWorldbookTriggeredInjection_ACU(snapshot: AgentWorldbookSnapshot_ACU, scanText: string): string {
   if (!snapshot.available) return `本轮世界书不可用。不要臆测设定。\n${WORLDBOOK_TRIGGERED_NOTE_ACU}`;
@@ -205,8 +257,7 @@ export async function loadTriggeredWorldbookInjection_ACU(scanText: string): Pro
 export function renderAgentWorldbookHitBodies_ACU(snapshot: AgentWorldbookSnapshot_ACU, scanText: string): string {
   if (!snapshot.available) return '本轮世界书不可用。';
   if (!snapshot.entries.length) return '当前没有已启用的世界书条目。';
-  const haystack = String(scanText ?? '').toLowerCase();
-  const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+  const hits = selectTriggeredWorldbookEntries_ACU(snapshot.entries, scanText);
   if (!hits.length) return '本轮没有命中世界书条目。';
   const byBook = new Map<string, string[]>();
   for (const hit of hits) {

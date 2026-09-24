@@ -198,6 +198,9 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(messages[messages.length - 5].content).not.toContain('不要再对这些条目调用 read');
     expect(messages[messages.length - 3].content).not.toContain('【已启用世界书目录】');
     expect(messages[messages.length - 3].content).not.toContain('【故事总纲状态】');
+    expect(messages[messages.length - 3].content).toContain('【当前故事总纲】');
+    expect(messages[messages.length - 3].content).toContain('追查真相');
+    expect(messages[messages.length - 3].content).toContain('【当前启用的阶段大纲】');
     expect(messages[messages.length - 3].content).not.toContain('【本轮语境命中的世界书条目】');
   });
 

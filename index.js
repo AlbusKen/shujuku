@@ -86130,6 +86130,7 @@ $CONTENT
         required: [...required],
         additionalProperties: false,
     });
+    const notesSchema_ACU = { type: 'array', items: { type: 'string' }, description: '上一批页面里要留下的简短事实。继续调用工具时带上，网页正文不会进入历史。' };
     function agentNativeTools_ACU(names) {
         const catalog = {
             read: {
@@ -86164,6 +86165,52 @@ $CONTENT
                         sql: { type: 'string' },
                         evidenceRefs: { type: 'array', items: { type: 'string' } },
                     }, ['sql']),
+                },
+            },
+            encyclopedia_search: {
+                type: 'function',
+                function: {
+                    name: 'encyclopedia_search',
+                    description: '在百科里检索候选词条。query 必填。sources 可省略，省略即使用全部启用来源。',
+                    parameters: objectSchema_ACU({
+                        query: { type: 'string' },
+                        sources: { type: 'array', items: { type: 'string' } },
+                        notes: notesSchema_ACU,
+                    }, ['query']),
+                },
+            },
+            encyclopedia_read: {
+                type: 'function',
+                function: {
+                    name: 'encyclopedia_read',
+                    description: '按来源和准确标题精读百科词条。title 从 encyclopedia_search 的候选里复制。',
+                    parameters: objectSchema_ACU({
+                        source: { type: 'string' },
+                        title: { type: 'string' },
+                        notes: notesSchema_ACU,
+                    }, ['source', 'title']),
+                },
+            },
+            web_search: {
+                type: 'function',
+                function: {
+                    name: 'web_search',
+                    description: '通用网页搜索。百科查不到的冷门设定再用它。',
+                    parameters: objectSchema_ACU({
+                        query: { type: 'string' },
+                        notes: notesSchema_ACU,
+                    }, ['query']),
+                },
+            },
+            web_read: {
+                type: 'function',
+                function: {
+                    name: 'web_read',
+                    description: '抓取一个网页的正文。url 必须是完整地址。',
+                    parameters: objectSchema_ACU({
+                        url: { type: 'string' },
+                        notes: notesSchema_ACU,
+                    }, ['url']),
                 },
             },
         };
@@ -86228,6 +86275,9 @@ $CONTENT
                 sql: args.sql,
                 ...(args.evidenceRefs !== undefined ? { evidenceRefs: args.evidenceRefs } : {}),
             };
+        }
+        if (call.name === 'encyclopedia_search' || call.name === 'encyclopedia_read' || call.name === 'web_search' || call.name === 'web_read') {
+            return { action: call.name, ...args };
         }
         throw new Error(`未知工具 ${call.name}`);
     }
@@ -150593,8 +150643,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function readEntryKeys_ACU(entry) {
-        const raw = Array.isArray(entry.keys) ? entry.keys : typeof entry.keys === 'string' ? entry.keys.split(/[,，]/) : [];
-        return raw.map(key => String(key ?? '').trim()).filter(Boolean);
+        return getWorldbookEntryKeywords_ACU(entry);
     }
     /** 与 pipeline 的 isSelected 语义一致：插件侧勾选表缺书/缺列表都视为全选。 */
     function isEntrySelected_ACU(bookName, uid, enabledEntriesMap) {
@@ -150663,6 +150712,8 @@ Expected function or array of functions, received type ${typeof value}.`
                         title: title || `条目 ${uid}`,
                         keys: readEntryKeys_ACU(raw),
                         constant: raw.type === 'constant',
+                        preventRecursion: raw.prevent_recursion === true,
+                        excludeRecursion: raw.exclude_recursion === true,
                         content,
                         tokens: await countEntryTokens_ACU(bookName, uid, content),
                     });
@@ -150705,13 +150756,58 @@ Expected function or array of functions, received type ${typeof value}.`
      * @param scanText 扫描文本（本轮目标 + 未结算正文 + 尾部楼层 + 用户初始要求）
      * @returns 命中提示文本；无命中/世界书不可用时如实说明
      */
+    /**
+     * 与剧情推进、填表共用的触发规则。
+     * 常量条目直接纳入；关键词条目最多迭代 10 轮，已触发且允许递归的正文会继续触发别的条目。
+     * includeConstantContentInBaseScan 与剧情推进一致：常量正文也进入最初扫描文本，供排除递归的条目使用。
+     */
+    function selectTriggeredWorldbookEntries_ACU(entries, scanText, options) {
+        const includeConstantContent = options?.includeConstantContentInBaseScan !== false;
+        let baseScanText = String(scanText ?? '').toLowerCase();
+        const constantEntries = entries.filter(entry => entry.constant);
+        let keywordEntries = entries.filter(entry => !entry.constant);
+        if (includeConstantContent) {
+            const constantBaseText = constantEntries
+                .filter(entry => entry.preventRecursion !== true)
+                .map(entry => entry.content)
+                .join('\n')
+                .toLowerCase();
+            if (constantBaseText)
+                baseScanText = [baseScanText, constantBaseText].filter(Boolean).join('\n');
+        }
+        const triggered = new Set(constantEntries);
+        for (let depth = 0; depth < 10; depth += 1) {
+            const recursionSource = [...triggered]
+                .filter(entry => entry.preventRecursion !== true)
+                .map(entry => entry.content)
+                .join('\n')
+                .toLowerCase();
+            const fullSearchText = `${baseScanText}\n${recursionSource}`;
+            let changed = false;
+            const remaining = [];
+            for (const entry of keywordEntries) {
+                const keywords = entry.keys.map(key => key.toLowerCase()).filter(Boolean);
+                const haystack = entry.excludeRecursion === true ? baseScanText : fullSearchText;
+                if (keywords.length > 0 && keywords.some(keyword => haystack.includes(keyword))) {
+                    triggered.add(entry);
+                    changed = true;
+                }
+                else {
+                    remaining.push(entry);
+                }
+            }
+            keywordEntries = remaining;
+            if (!changed)
+                break;
+        }
+        return entries.filter(entry => triggered.has(entry));
+    }
     function renderAgentWorldbookHits_ACU(snapshot, scanText) {
         if (!snapshot.available)
             return '本轮世界书读取失败，无法给出命中提示；请勿臆测世界书内容。';
         if (!snapshot.entries.length)
             return '当前没有已启用的世界书条目，无命中提示。';
-        const haystack = String(scanText ?? '').toLowerCase();
-        const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+        const hits = selectTriggeredWorldbookEntries_ACU(snapshot.entries, scanText);
         if (!hits.length)
             return '本轮语境没有命中任何世界书条目的关键词，也没有常开条目。需要设定时从世界书目录挑选精读。';
         const lines = hits.map(entry => `- ${entry.title}（${entry.constant ? '常开' : '关键词命中'}｜约 ${entry.tokens} token）→ $WORLDBOOK:${entry.bookName}:${entry.uid}`);
@@ -150728,14 +150824,14 @@ Expected function or array of functions, received type ${typeof value}.`
     const WORLDBOOK_READ_REFUSAL_ACU = '世界书条目全文已经按关键词触发注入。不要 read 世界书地址。如果触发内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
     /** 总纲与大纲看到的是目录，由它们自己决定读哪一条。 */
     const WORLDBOOK_BROWSE_NOTE_ACU = '这是全部已启用世界书条目的目录，不是命中清单，没有注入条目全文。需要哪一条就按行尾地址 read。也可以用 search，scope 设为 ["worldbook"]，按关键词在世界书域里检索。';
-    const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按关键词触发的世界书条目全文（常开条目，以及关键词出现在本轮语境里的条目；口径与剧情推进填表的关键词触发相同）。不要再对世界书条目调用 read。如果这些内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
+    const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。不要再对世界书条目调用 read。如果这些内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
     /** 总纲、大纲使用的已启用目录。不附带命中条目全文。 */
     function renderAgentWorldbookBrowseCatalog_ACU(snapshot) {
         return `${WORLDBOOK_BROWSE_NOTE_ACU}\n${renderAgentWorldbookCatalog_ACU(snapshot)}`;
     }
     /**
      * 本轮关键词已触发的世界书全文。
-     * 常开条目始终纳入；关键词条目与剧情推进填表一样，按扫描文本做包含匹配。
+     * 常量条目直接纳入；关键词条目按已触发正文迭代，规则与剧情推进、填表相同。
      */
     function renderAgentWorldbookTriggeredInjection_ACU(snapshot, scanText) {
         if (!snapshot.available)
@@ -150755,8 +150851,7 @@ Expected function or array of functions, received type ${typeof value}.`
             return '本轮世界书不可用。';
         if (!snapshot.entries.length)
             return '当前没有已启用的世界书条目。';
-        const haystack = String(scanText ?? '').toLowerCase();
-        const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+        const hits = selectTriggeredWorldbookEntries_ACU(snapshot.entries, scanText);
         if (!hits.length)
             return '本轮没有命中世界书条目。';
         const byBook = new Map();
@@ -151241,21 +151336,22 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!execution.revision || !execution.node || !execution.turn) {
             return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
         }
-        // 轮次与节点都带 [ID] 前缀：便于主 Agent 在委派 outline-architect 时精确引用待维护目标。
-        const turns = execution.node.turns
-            .map((turn, index) => `${index + 1}. [${turn.id}]（${renderTurnSemanticMeta_ACU(turn)}）${turn.goal}${turn.id === execution.turn.id ? '  ← 本轮' : ''}`)
-            .join('\n');
+        const nodes = execution.revision.outline.nodes?.length ? execution.revision.outline.nodes : [execution.node];
+        const nodeBlocks = nodes.map(node => {
+            const turns = node.turns
+                .map((turn, index) => `${index + 1}. [${turn.id}]（${renderTurnSemanticMeta_ACU(turn)}）${turn.goal}${turn.id === execution.turn.id ? '  ← 本轮' : ''}`)
+                .join('\n');
+            return [`节点：[${node.id}] ${node.title}`, `节点目标：${node.goal}`, turns].join('\n');
+        });
         return [
             `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
             `阶段目标：${execution.revision.outline.goal}`,
             `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
             `阶段结构职责：${execution.revision.outline.role ?? '旧快照未标注'}`,
             `阶段时间目标：${execution.revision.outline.timeSpanGoal ?? '未设定'}`,
-            `当前节点：[${execution.node.id}] ${execution.node.title}`,
-            `节点目标：${execution.node.goal}`,
             `阶段内轮次进度：第 ${execution.turnNumber} / ${execution.revision.outline.totalTurns} 轮`,
-            '本节点逐轮目标（括号内依次给出 pacing、function、mainline、time 与可选 anchor）：',
-            turns,
+            '当前启用的阶段大纲（全部节点与轮次；括号内依次给出 pacing、function、mainline、time 与可选 anchor）：',
+            nodeBlocks.join('\n\n'),
             renderAgentTurnPacingGuidance_ACU(execution.turn.pacing),
             '注意：大纲是计划，不是已经发生的事实。',
         ].join('\n');
@@ -151894,6 +151990,16 @@ Expected function or array of functions, received type ${typeof value}.`
             resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
             // 校验错误不再写回骨架占位符：重试只追加 transcript，前缀保持字节级稳定以便命中缓存。
             const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
+            const renderedBlob = rendered.messages.map(message => message.content).join('\n');
+            const injected = [];
+            const storyArc = resolvers.$STORY_ARC ? String(await resolvers.$STORY_ARC() ?? '').trim() : '';
+            const enabledOutline = resolvers.$OUTLINE_WINDOW ? String(await resolvers.$OUTLINE_WINDOW() ?? '').trim() : '';
+            if (storyArc && !renderedBlob.includes(storyArc.slice(0, Math.min(80, storyArc.length))))
+                injected.push(`【当前故事总纲】\n${storyArc}`);
+            if (enabledOutline && !renderedBlob.includes(enabledOutline.slice(0, Math.min(80, enabledOutline.length))))
+                injected.push(`【当前启用的阶段大纲】\n${enabledOutline}`);
+            if (injected.length)
+                rendered.messages.push({ role: 'user', content: injected.join('\n\n') });
             const transcript = [];
             let lastRaw = '';
             let repairRounds = 0;
@@ -154352,11 +154458,11 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderAgentWebToolCatalog_ACU(input) {
         const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
         return [
-            '出网工具（encyclopedia_search、encyclopedia_read、web_search、web_read 仍以 JSON 对象表达，可同批并发；本地 read/search 用函数调用，不要和出网 JSON 放在同一次输出。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们）：',
-            `- {"action":"encyclopedia_search","query":"角色名 或 作品名","sources":["moegirl","wikipedia_zh"]}：在百科里找候选词条。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
-            '- {"action":"encyclopedia_read","source":"moegirl","title":"候选里的准确标题"}：精读词条正文，返回带句柄的页面。',
-            `- {"action":"web_search","query":"关键词"}：通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
-            '- {"action":"web_read","url":"https://…"}：抓取任意网页正文。内网、酒馆自身与黑名单域名会被拒绝。',
+            '出网工具 encyclopedia_search、encyclopedia_read、web_search、web_read 都是函数调用，和本地 read/search 一样，可以在同一次回复里并发调用，不要写成 JSON。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们。继续调用工具时，把上一批页面要留下的事实放进 notes 参数。',
+            `- 调用 encyclopedia_search，参数 query 为「角色名 或 作品名」，sources 例如 ["moegirl","wikipedia_zh"]。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
+            '- 调用 encyclopedia_read，参数 source 为 moegirl，title 为候选里的准确标题。精读词条正文，返回带句柄的页面。',
+            `- 调用 web_search，参数 query 为关键词。通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,
+            '- 调用 web_read，参数 url 为完整网址。抓取任意网页正文。内网、酒馆自身与黑名单域名会被拒绝。',
             `每次精读/抓取算一页，本次派工最多 ${input.maxPages} 页（已用 ${input.pagesUsed}），每页原文截断到 ${input.pageCharLimit} 字。同一页面不要重复抓取。`,
         ].join('\n');
     }
@@ -154403,7 +154509,7 @@ Expected function or array of functions, received type ${typeof value}.`
         ].join('\n\n');
     }
     const KIND_RELATED_TOKENS_ACU = {
-        arc: ['$STORY_ARC', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_CATALOG', '$USER_REQUIREMENTS'],
+        arc: ['$STORY_ARC', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_CATALOG', '$USER_REQUIREMENTS'],
         maintain: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
         plan: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
         review: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
@@ -157859,8 +157965,17 @@ Expected function or array of functions, received type ${typeof value}.`
                 : rendered.messages;
             const presentTokens = new Set(promptSegments.flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? []));
             const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc' });
-            if (snapshotText)
-                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
+            const arcMaterials = definition.kind === 'arc'
+                ? [
+                    '【当前故事总纲】（直接注入，这是你要维护的对象，不要再 read $STORY_ARC）',
+                    resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
+                    '【当前启用的阶段大纲】（直接注入）',
+                    renderAgentOutlineWindow_ACU(input.resolveContext),
+                ].join('\n')
+                : '';
+            const snapshotWithStructure = [snapshotText, arcMaterials].filter(Boolean).join('\n\n');
+            if (snapshotWithStructure)
+                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotWithStructure });
             // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
             baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
             if (input.sharedMaterials !== undefined)
@@ -157953,8 +158068,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 promptCacheEnabled: true,
                 // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
                 cacheScope: `sub-${definition.name}`,
-                cacheTools: ['read', 'search', ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-                ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(ownReads ? [...(ownReads.length ? ['read'] : []), ...(input.writeSql && writes.length ? ['write_sql'] : [])] : (input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search'])) } : {}),
+                cacheTools: ['read', 'search', ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []), ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
+                ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU([
+                        ...(ownReads ? [...(ownReads.length ? ['read'] : []), ...(input.writeSql && writes.length ? ['write_sql'] : [])] : (input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search'])),
+                        ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []),
+                    ]) } : {}),
                 minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
                 onUsage: usage => {
                     usageTotal = usageTotal
@@ -158696,7 +158814,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     lines.push(`- ${label}：`);
                     for (const candidate of result.candidates) {
-                        lines.push(`  · 「${candidate.title}」${candidate.snippet ? `：${candidate.snippet.slice(0, 120)}` : ''}｜精读：{"action":"encyclopedia_read","source":"${candidate.source}","title":"${candidate.title.replace(/"/g, '\\"')}"}`);
+                        lines.push(`  · 「${candidate.title}」${candidate.snippet ? `：${candidate.snippet.slice(0, 120)}` : ''}｜精读：调用 encyclopedia_read，source=${candidate.source}，title=${candidate.title}`);
                     }
                 }
                 if (disabled.length)
@@ -158721,7 +158839,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 expandedReads.push(`web_search "${call.query}"`);
                 if (!result.hits.length)
                     return `### 网页搜索「${call.query}」\n无结果${result.note ? `：${result.note}` : ''}。换更短的关键词、加上作品名，或改用 encyclopedia_search。`;
-                const lines = result.hits.map((hit, index) => `${index + 1}. 「${hit.title || '（无标题）'}」${hit.url ? `｜${hit.url}` : ''}${hit.snippet ? `\n   ${hit.snippet.slice(0, 200)}` : ''}${hit.url ? `\n   抓取：{"action":"web_read","url":"${hit.url}"}` : ''}`);
+                const lines = result.hits.map((hit, index) => `${index + 1}. 「${hit.title || '（无标题）'}」${hit.url ? `｜${hit.url}` : ''}${hit.snippet ? `\n   ${hit.snippet.slice(0, 200)}` : ''}${hit.url ? `\n   抓取：调用 web_read，url=${hit.url}` : ''}`);
                 return `### 网页搜索「${call.query}」（提供方：${webSettings.searchProvider}）\n${lines.join('\n')}`;
             }
             const exhausted = pagesExhausted();
@@ -161629,6 +161747,30 @@ Expected function or array of functions, received type ${typeof value}.`
         });
         return sections.join('\n\n');
     }
+    /** 当前正在启用的阶段大纲全文。新建阶段时还没有活动大纲。 */
+    function renderEnabledStageOutline_ACU(stage, revision) {
+        if (!stage || !revision)
+            return '当前没有正在启用的阶段大纲。';
+        const lines = [
+            `第 ${stage.stageNumber} 阶段（${stage.status}，活动 revision ${revision.revision}）`,
+            `标题：${revision.outline.title}`,
+            `目标：${revision.outline.goal}`,
+            `节奏形态：${revision.outline.tempo}`,
+            `结构职责：${revision.outline.role ?? '未标注'}`,
+            `时间目标：${revision.outline.timeSpanGoal ?? '未设定'}`,
+            `已完成轮数：${stage.completedTurns} / ${revision.outline.totalTurns}`,
+        ];
+        let turnNumber = 0;
+        for (const node of revision.outline.nodes) {
+            lines.push(`节点「${node.title}」：${node.goal}`);
+            for (const turn of node.turns) {
+                turnNumber += 1;
+                const done = turnNumber <= stage.completedTurns ? '已完成' : '未完成';
+                lines.push(`  ${turnNumber}. [${done}] [${serializeStageTurnMeta_ACU(turn)}] ${turn.goal}`);
+            }
+        }
+        return lines.join('\n');
+    }
     /** 已完成前缀渲染为可读文本（不用 JSON，避免诱导模型输出 JSON 而非大纲标签）。 */
     function completedPrefix_ACU(stage, revision) {
         if (!stage || !revision || stage.completedTurns <= 0)
@@ -161672,6 +161814,7 @@ Expected function or array of functions, received type ${typeof value}.`
             $CURRENT_TURN_GOAL: () => current?.turn.goal ?? '',
             // 总纲是大纲的方向约束：阶段目标必须落在当前 active 卷的台阶内，否则每个阶段都会各自为政。
             $STORY_ARC: () => renderAgentStoryArc_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU()), task.stages.filter(item => item.status === 'completed').map(item => item.stageNumber)),
+            $OUTLINE_WINDOW: () => renderEnabledStageOutline_ACU(stage, revision),
             // 大纲模型没有 read/search 工具：伏笔操作、揭示层级、时间锚与红线只能靠固定注入拿到事实依据。
             $HOOKS_LEDGER: () => renderAgentHooksByIds_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
             $INFO_GAP: () => renderAgentInfoGapByIds_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),

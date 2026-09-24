@@ -4,7 +4,9 @@ import {
   buildEmptyAgentWorldbookSnapshot_ACU,
   renderAgentWorldbookCatalog_ACU,
   renderAgentWorldbookEntries_ACU,
+  renderAgentWorldbookHitBodies_ACU,
   renderAgentWorldbookHits_ACU,
+  selectTriggeredWorldbookEntries_ACU,
   type AgentWorldbookSnapshot_ACU,
 } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 
@@ -56,6 +58,23 @@ describe('世界书命中提示', () => {
     };
     expect(renderAgentWorldbookHits_ACU(noConstant, '无关文本')).toContain('没有命中任何世界书条目');
     expect(renderAgentWorldbookHits_ACU(buildEmptyAgentWorldbookSnapshot_ACU(false), '晶屑')).toContain('无法给出命中提示');
+  });
+});
+
+describe('世界书迭代触发', () => {
+  it('常量正文可以继续触发关键词条目，排除递归的条目只看最初扫描文本', () => {
+    const entries = [
+      { bookName: '设定集', uid: '1', title: '常开', keys: [], constant: true, preventRecursion: false, content: '禁区入口有守门人。', tokens: 8 },
+      { bookName: '设定集', uid: '2', title: '守门人', keys: ['守门人'], constant: false, content: '守门人佩戴晶屑。', tokens: 8 },
+      { bookName: '设定集', uid: '3', title: '晶屑', keys: ['晶屑'], constant: false, content: '晶屑不能带离。', tokens: 6 },
+      { bookName: '设定集', uid: '4', title: '只看原文', keys: ['晶屑'], constant: false, excludeRecursion: true, content: '这条不该被常量正文带出。', tokens: 6 },
+    ];
+    const triggered = selectTriggeredWorldbookEntries_ACU(entries, '今天只是进城。');
+    expect(triggered.map(entry => entry.uid)).toEqual(['1', '2', '3']);
+    const bodies = renderAgentWorldbookHitBodies_ACU({ available: true, entries }, '今天只是进城。');
+    expect(bodies).toContain('守门人佩戴晶屑。');
+    expect(bodies).toContain('晶屑不能带离。');
+    expect(bodies).not.toContain('这条不该被常量正文带出。');
   });
 });
 

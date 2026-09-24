@@ -650,7 +650,16 @@ export class AgentSubagentRuntime_ACU {
       : rendered.messages;
     const presentTokens = new Set(promptSegments.flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc' });
-    if (snapshotText) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
+    const arcMaterials = definition.kind === 'arc'
+      ? [
+        '【当前故事总纲】（直接注入，这是你要维护的对象，不要再 read $STORY_ARC）',
+        resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
+        '【当前启用的阶段大纲】（直接注入）',
+        renderAgentOutlineWindow_ACU(input.resolveContext),
+      ].join('\n')
+      : '';
+    const snapshotWithStructure = [snapshotText, arcMaterials].filter(Boolean).join('\n\n');
+    if (snapshotWithStructure) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotWithStructure });
     // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
     if (input.sharedMaterials !== undefined) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: input.sharedMaterials });
@@ -734,8 +743,11 @@ export class AgentSubagentRuntime_ACU {
       promptCacheEnabled: true,
       // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
       cacheScope: `sub-${definition.name}`,
-      cacheTools: ['read', 'search', ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(ownReads ? [...(ownReads.length ? ['read' as const] : []), ...(input.writeSql && writes.length ? ['write_sql' as const] : [])] : (input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search'])) } : {}),
+      cacheTools: ['read', 'search', ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []), ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
+      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU([
+        ...(ownReads ? [...(ownReads.length ? ['read' as const] : []), ...(input.writeSql && writes.length ? ['write_sql' as const] : [])] : (input.writeSql && writes.length ? ['read' as const, 'search' as const, 'write_sql' as const] : ['read' as const, 'search' as const])),
+        ...(isResearch ? ['encyclopedia_search' as const, 'encyclopedia_read' as const, 'web_search' as const, 'web_read' as const] : []),
+      ]) } : {}),
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
       onUsage: usage => {
         usageTotal = usageTotal
@@ -1458,7 +1470,7 @@ export class AgentSubagentRuntime_ACU {
         if (!result.candidates.length) { lines.push(`- ${label}：无候选${result.note ? `（${result.note}）` : ''}`); continue; }
         lines.push(`- ${label}：`);
         for (const candidate of result.candidates) {
-          lines.push(`  · 「${candidate.title}」${candidate.snippet ? `：${candidate.snippet.slice(0, 120)}` : ''}｜精读：{"action":"encyclopedia_read","source":"${candidate.source}","title":"${candidate.title.replace(/"/g, '\\"')}"}`);
+          lines.push(`  · 「${candidate.title}」${candidate.snippet ? `：${candidate.snippet.slice(0, 120)}` : ''}｜精读：调用 encyclopedia_read，source=${candidate.source}，title=${candidate.title}`);
         }
       }
       if (disabled.length) lines.push(`- 以下来源在设置里已关闭，未检索：${disabled.map(source => AGENT_ENCYCLOPEDIA_SOURCE_LABELS_ACU[source]).join('、')}`);
@@ -1480,7 +1492,7 @@ export class AgentSubagentRuntime_ACU {
       const result = await client.webSearch(call.query, webSettings);
       expandedReads.push(`web_search "${call.query}"`);
       if (!result.hits.length) return `### 网页搜索「${call.query}」\n无结果${result.note ? `：${result.note}` : ''}。换更短的关键词、加上作品名，或改用 encyclopedia_search。`;
-      const lines = result.hits.map((hit, index) => `${index + 1}. 「${hit.title || '（无标题）'}」${hit.url ? `｜${hit.url}` : ''}${hit.snippet ? `\n   ${hit.snippet.slice(0, 200)}` : ''}${hit.url ? `\n   抓取：{"action":"web_read","url":"${hit.url}"}` : ''}`);
+      const lines = result.hits.map((hit, index) => `${index + 1}. 「${hit.title || '（无标题）'}」${hit.url ? `｜${hit.url}` : ''}${hit.snippet ? `\n   ${hit.snippet.slice(0, 200)}` : ''}${hit.url ? `\n   抓取：调用 web_read，url=${hit.url}` : ''}`);
       return `### 网页搜索「${call.query}」（提供方：${webSettings.searchProvider}）\n${lines.join('\n')}`;
     }
     const exhausted = pagesExhausted();

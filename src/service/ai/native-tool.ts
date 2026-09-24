@@ -44,8 +44,12 @@ const objectSchema_ACU = (properties: Record<string, unknown>, required: readonl
   additionalProperties: false,
 });
 
-export function agentNativeTools_ACU(names: readonly ('read' | 'search' | 'write_sql')[]): AiNativeToolDefinition_ACU[] {
-  const catalog: Record<'read' | 'search' | 'write_sql', AiNativeToolDefinition_ACU> = {
+export type AgentNativeToolName_ACU = 'read' | 'search' | 'write_sql' | 'encyclopedia_search' | 'encyclopedia_read' | 'web_search' | 'web_read';
+
+const notesSchema_ACU = { type: 'array', items: { type: 'string' }, description: '上一批页面里要留下的简短事实。继续调用工具时带上，网页正文不会进入历史。' };
+
+export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]): AiNativeToolDefinition_ACU[] {
+  const catalog: Record<AgentNativeToolName_ACU, AiNativeToolDefinition_ACU> = {
     read: {
       type: 'function',
       function: {
@@ -78,6 +82,52 @@ export function agentNativeTools_ACU(names: readonly ('read' | 'search' | 'write
           sql: { type: 'string' },
           evidenceRefs: { type: 'array', items: { type: 'string' } },
         }, ['sql']),
+      },
+    },
+    encyclopedia_search: {
+      type: 'function',
+      function: {
+        name: 'encyclopedia_search',
+        description: '在百科里检索候选词条。query 必填。sources 可省略，省略即使用全部启用来源。',
+        parameters: objectSchema_ACU({
+          query: { type: 'string' },
+          sources: { type: 'array', items: { type: 'string' } },
+          notes: notesSchema_ACU,
+        }, ['query']),
+      },
+    },
+    encyclopedia_read: {
+      type: 'function',
+      function: {
+        name: 'encyclopedia_read',
+        description: '按来源和准确标题精读百科词条。title 从 encyclopedia_search 的候选里复制。',
+        parameters: objectSchema_ACU({
+          source: { type: 'string' },
+          title: { type: 'string' },
+          notes: notesSchema_ACU,
+        }, ['source', 'title']),
+      },
+    },
+    web_search: {
+      type: 'function',
+      function: {
+        name: 'web_search',
+        description: '通用网页搜索。百科查不到的冷门设定再用它。',
+        parameters: objectSchema_ACU({
+          query: { type: 'string' },
+          notes: notesSchema_ACU,
+        }, ['query']),
+      },
+    },
+    web_read: {
+      type: 'function',
+      function: {
+        name: 'web_read',
+        description: '抓取一个网页的正文。url 必须是完整地址。',
+        parameters: objectSchema_ACU({
+          url: { type: 'string' },
+          notes: notesSchema_ACU,
+        }, ['url']),
       },
     },
   };
@@ -152,6 +202,9 @@ function protocolRecord_ACU(call: AiNativeToolCall_ACU): Record<string, unknown>
       sql: args.sql,
       ...(args.evidenceRefs !== undefined ? { evidenceRefs: args.evidenceRefs } : {}),
     };
+  }
+  if (call.name === 'encyclopedia_search' || call.name === 'encyclopedia_read' || call.name === 'web_search' || call.name === 'web_read') {
+    return { action: call.name, ...args };
   }
   throw new Error(`未知工具 ${call.name}`);
 }
