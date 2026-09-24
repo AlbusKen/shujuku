@@ -212,16 +212,57 @@ function isThinkPrefillStub_ACU(content: string): boolean {
   return content.trim() === '<think>';
 }
 
+type ToolAnchorMessage_ACU = {
+  role: string;
+  content: string;
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+};
+
+/**
+ * 酒馆会把连续的 assistant 并成前一条，后一条的 tool_calls 被丢掉。
+ * 先自己并成一条并保留全部编号，再给缺少编号的工具结果补上对应 tool_call，
+ * 否则 MiniMax 会报 tool result's tool id not found。
+ */
+export function anchorNativeToolCalls_ACU<T extends ToolAnchorMessage_ACU>(messages: readonly T[]): T[] {
+  const collapsed: T[] = [];
+  for (const message of messages) {
+    const previous = collapsed[collapsed.length - 1];
+    if (previous?.role === 'assistant' && message.role === 'assistant') {
+      const toolCalls = [...(previous.tool_calls ?? []), ...(message.tool_calls ?? [])];
+      collapsed[collapsed.length - 1] = {
+        ...previous,
+        content: [previous.content, message.content].filter(part => part?.trim()).join('\n\n'),
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      };
+      continue;
+    }
+    collapsed.push({ ...message });
+  }
+  let assistant: T | undefined;
+  for (const message of collapsed) {
+    if (message.role === 'assistant') assistant = message;
+    if (message.role !== 'tool' || !message.tool_call_id || !assistant) continue;
+    if ((assistant.tool_calls ?? []).some(call => call.id === message.tool_call_id)) continue;
+    assistant.tool_calls = [...(assistant.tool_calls ?? []), {
+      id: message.tool_call_id,
+      type: 'function',
+      function: { name: 'read', arguments: '{}' },
+    }];
+  }
+  return collapsed;
+}
+
 /**
  * 去掉 JSON 预填充，并在请求最末补上思维链开头。
  * 思维链只能是最后一条：若它留在带 tool_calls 的助手消息前面，
  * 酒馆会把连续 assistant 并掉，工具编号随之丢失。
  * 上一条已经是 assistant 时不再追加，避免再次并成一条。
  */
-export function withNativeToolThinkPrefill_ACU<T extends { role: string; content: string }>(messages: readonly T[]): T[] {
-  const stripped = dropTerminalJsonPrefill_ACU(messages).filter(
+export function withNativeToolThinkPrefill_ACU<T extends ToolAnchorMessage_ACU>(messages: readonly T[]): T[] {
+  const stripped = anchorNativeToolCalls_ACU(dropTerminalJsonPrefill_ACU(messages).filter(
     message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)),
-  );
+  ));
   const last = stripped[stripped.length - 1];
   if (!last || last.role === 'assistant') return stripped;
   return [...stripped, { role: 'assistant', content: NATIVE_TOOL_THINK_PREFILL_ACU } as T];

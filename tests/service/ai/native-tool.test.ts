@@ -4,6 +4,7 @@ import {
   absorbChatCompletionEvent_ACU,
   agentNativeTools_ACU,
   chatTurnFromJson_ACU,
+  anchorNativeToolCalls_ACU,
   dropTerminalJsonPrefill_ACU,
   NATIVE_TOOL_THINK_PREFILL_ACU,
   withNativeToolThinkPrefill_ACU,
@@ -60,6 +61,16 @@ describe('native tool calls', () => {
       { role: 'user', content: '任务' },
       { role: 'assistant', content: '{\n  "summary": "' },
     ]).map(message => message.content)).toEqual(['任务', NATIVE_TOOL_THINK_PREFILL_ACU]);
+    const anchored = anchorNativeToolCalls_ACU([
+      { role: 'assistant', content: '明白。' },
+      { role: 'assistant', content: '<think>先查</think>', tool_calls: [{ id: 'call_function_262nzwiknzi6_1', type: 'function' as const, function: { name: 'search', arguments: '{"query":"入府"}' } }] },
+      { role: 'tool', tool_call_id: 'call_function_262nzwiknzi6_1', content: '没有命中' },
+      { role: 'tool', tool_call_id: 'call_function_262nzwiknzi6_2', content: '已读' },
+    ]);
+    expect(anchored.map(message => message.role)).toEqual(['assistant', 'tool', 'tool']);
+    expect(anchored[0]?.tool_calls?.map(call => call.id)).toEqual(['call_function_262nzwiknzi6_1', 'call_function_262nzwiknzi6_2']);
+    expect(anchored[0]?.content).toContain('明白');
+    expect(anchored[0]?.content).toContain('先查');
     expect(isModelExchangeSequence_ACU([
       { role: 'assistant' },
       { role: 'tool' },
