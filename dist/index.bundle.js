@@ -153546,7 +153546,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (new Set(columns).size !== columns.length)
                     throw new Error('INSERT 字段不能重复');
                 if (columns.length !== values.length)
-                    throw new Error('INSERT 字段数与值数量不一致');
+                    throw new Error(`INSERT 字段数与值数量不一致（${columns.length} 个字段、${values.length} 个值）。不是缺 id，也不是表少了字段；字符串里的单引号把值拆开了，单引号要写成两个单引号。id 和 expected_revision 可以不写`);
                 return { kind: 'insert', table: unquoteIdentifier_ACU(match[1]), values: Object.fromEntries(columns.map((column, index) => [column, values[index]])) };
             }
             match = statement.match(/^UPDATE\s+([A-Za-z_][\w]*)\s+SET\s+([\s\S]+?)\s+WHERE\s+([\s\S]+)$/i);
@@ -157419,7 +157419,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const lines = [];
         const fatal = receipt.rejected.find(item => item.path === 'host' || item.path === 'sql');
         if (fatal?.reason.includes('字段数与值数量不一致')) {
-            lines.push('这条 SQL 没有解析，任何栏目都没写入。字段个数必须等于值的个数；字符串里的单引号写成两个单引号。多条语句用分号隔开，放在同一次调用里。');
+            lines.push('这条 SQL 没有解析，任何栏目都没写入。不是缺 id。正文里的单引号要写成两个单引号，否则一个值会被拆成好几段。id 和 expected_revision 可以不写。');
         }
         else if (fatal?.reason.includes('领域快照')) {
             lines.push('这条 SQL 被整句退回，没有写入。把要改的行放在同一次调用里再交。');
@@ -157444,9 +157444,12 @@ Expected function or array of functions, received type ${typeof value}.`
         if ((receipt.partials ?? []).some(item => item.promotionError?.includes('active') || item.promotionError?.includes('sustainingThreads'))) {
             lines.push('同一时刻只能有一条 volume 的 status 为 active，其余用 planned。scope=story 不要带卷级栏目。');
         }
-        const missingWithheld = (receipt.partials ?? []).filter(item => item.missingFields.includes('withheld'));
-        if (missingWithheld.length) {
-            lines.push(`这些条目还缺 withheld，现在只是草稿，不是正式总纲：${missingWithheld.map(item => item.id).join('、')}。下一次只补 withheld，不要新开卷。同一条 sql 可以写多条 UPDATE，expected_revision 都写 ${receipt.revisions?.storyArc ?? '回执 revisions.storyArc'}。`);
+        const drafts = (receipt.partials ?? []).filter(item => item.missingFields.length);
+        if (drafts.length) {
+            const ids = drafts.map(item => item.id).join('、');
+            const fields = [...new Set(drafts.flatMap(item => item.missingFields))].join('、');
+            const hasVolume = drafts.some(item => item.id.startsWith('VOL-'));
+            lines.push(`${ids} 的编号已经写上，不缺 id。还缺栏目：${fields}。用同一条 UPDATE 补这些栏目，id 和 expected_revision 可以不写。${hasVolume ? '不要再新开一条同样的卷。' : '还没有卷时，继续 INSERT 新卷，卷号会按 VOL-01 顺序补上。'}`);
         }
         return lines.join('\n');
     }

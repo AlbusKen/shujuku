@@ -125,7 +125,7 @@ export function parseRestrictedSqlDml_ACU(sql: string): RestrictedSqlStatement_A
       const columns = splitSqlList_ACU(match[2]).map(unquoteIdentifier_ACU);
       const values = splitSqlList_ACU(match[3]).map(parseValue_ACU);
       if (new Set(columns).size !== columns.length) throw new Error('INSERT 字段不能重复');
-      if (columns.length !== values.length) throw new Error('INSERT 字段数与值数量不一致');
+      if (columns.length !== values.length) throw new Error(`INSERT 字段数与值数量不一致（${columns.length} 个字段、${values.length} 个值）。不是缺 id，也不是表少了字段；字符串里的单引号把值拆开了，单引号要写成两个单引号。id 和 expected_revision 可以不写`);
       return { kind: 'insert', table: unquoteIdentifier_ACU(match[1]), values: Object.fromEntries(columns.map((column, index) => [column, values[index]])) };
     }
     match = statement.match(/^UPDATE\s+([A-Za-z_][\w]*)\s+SET\s+([\s\S]+?)\s+WHERE\s+([\s\S]+)$/i);
