@@ -3,6 +3,7 @@
 
 import { parse as parseYaml_ACU } from 'yaml';
 import { handleApiResponse_ACU, extractAiUsageMetadata_ACU, type AiUsageMetadata_ACU } from './prompt-builder';
+import { readFetchChatTurn_ACU, chatTurnFromJson_ACU, type AiChatTurn_ACU, type AiNativeToolDefinition_ACU } from './native-tool';
 export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
@@ -194,6 +195,8 @@ export function buildCustomApiRequestBody_ACU(
      * 后端不支持时用户可通过 excludeBodyParams 填 response_format 剔除。
      */
     responseFormat?: Record<string, any>;
+    /** OpenAI 兼容 tools。只在调用方明确传入时写入请求体。 */
+    tools?: readonly { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }[];
   }
 ): Record<string, any> {
   const opts = overrides || {};
@@ -313,6 +316,7 @@ export function buildCustomApiRequestBody_ACU(
     custom_include_headers: headers,
     custom_include_body: composedIncludeBody.value,
     custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
+    ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : {}),
   };
   if (promptPostProcessing) {
     // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。
@@ -569,6 +573,8 @@ export interface ResolvedPresetCallExtras_ACU {
      * 三条路径（tavern / 主 API / custom）都生效。用于总纲、大纲这类输出体量随任务增长的调用。
      */
     minOutputTokens?: number;
+    /** 传入后，自定义 chat-completions 请求体会带上 tools。 */
+    tools?: readonly AiNativeToolDefinition_ACU[];
 }
 
 /** tavern 模式请求的串行队列尾。/profile 是全局状态，并发切换会互相踩，必须串行「切换→发送→恢复」。 */
@@ -674,6 +680,63 @@ export async function callAIWithResolvedPreset_ACU(
     if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
     const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
     return typeof content === 'string' && content.trim() ? content.trim() : null;
+}
+
+/** 与 callAIWithResolvedPreset_ACU 同一条渠道，但保留原生 tool_calls。 */
+export async function callAIChatTurn_ACU(
+    messages: any[],
+    resolved: { apiMode: ApiPresetApiMode_ACU; apiConfig: ApiPresetApiConfig_ACU; tavernProfile: string },
+    signal?: AbortSignal | null,
+    lifecycle?: ResolvedPresetCallLifecycle_ACU,
+    extras?: ResolvedPresetCallExtras_ACU,
+): Promise<AiChatTurn_ACU> {
+    if (!Array.isArray(messages) || messages.length === 0) throw new Error('内部 AI 消息必须是非空数组。');
+    const reportUsage = (raw: unknown): void => {
+        if (!lifecycle?.onUsage) return;
+        const usage = extractAiUsageMetadata_ACU(raw);
+        if (!usage) return;
+        try { lifecycle.onUsage(usage); } catch { /* 用量回调异常不允许影响调用主流程。 */ }
+    };
+    const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
+    const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras!.minOutputTokens!)) : 0;
+    const maxTokens = Math.max(presetMaxTokens, floor);
+    if (resolved.apiMode === 'tavern') {
+        if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
+        const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
+        assertNotAborted_ACU(signal);
+        const parsed = chatTurnFromJson_ACU(response?.result ?? response);
+        reportUsage(parsed.usage ?? response?.result?.usage);
+        return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
+    }
+    if (resolved.apiConfig.useMainApi) {
+        lifecycle?.beforeMainApiCall?.();
+        let operation: Promise<string>;
+        try {
+            operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens, ...(extras?.tools?.length ? { tools: extras.tools, tool_choice: 'auto' } : {}) });
+        } finally {
+            lifecycle?.afterMainApiCall?.();
+        }
+        const response = await operation!;
+        assertNotAborted_ACU(signal);
+        return { content: typeof response === 'string' ? response.trim() : '', toolCalls: [] };
+    }
+    if (!resolved.apiConfig.url || !resolved.apiConfig.model) throw new Error('自定义 API 的 URL 或模型未配置。');
+    const response = await fetch('/api/backends/chat-completions/generate', {
+        method: 'POST',
+        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
+            maxTokens,
+            stripModelPrefix: false,
+            promptCacheKey: supportsExplicitOpenAiCacheKey_ACU(resolved) ? extras?.promptCacheKey : undefined,
+            includeStreamUsage: !!lifecycle?.onUsage,
+            tools: extras?.tools,
+        })),
+        signal: signal || undefined,
+    });
+    if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
+    const parsed = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, signal);
+    reportUsage(parsed.usage);
+    return parsed.turn;
 }
 
 /**

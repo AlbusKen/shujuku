@@ -25,12 +25,15 @@ import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
 import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
+import { dropTerminalJsonPrefill_ACU, isModelExchangeSequence_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run' | 'runReviewer'>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
+  /** 生产路径使用原生 tool_calls。测试缺省关闭。 */
+  nativeTools?: boolean;
 }
 export interface WorldSimulationMainLoopInput_ACU {
   identity: WorldSimulationRunIdentity_ACU;
@@ -262,8 +265,7 @@ export class WorldSimulationMainLoop_ACU {
     const legacyPairs = legacyTranscript[0]?.role === 'user'
       && legacyTranscript[0].content === resumedState?.handoffSummary
       ? legacyTranscript.slice(1) : legacyTranscript;
-    const isPairSequence = (messages: readonly { role: string; content: string }[]): boolean =>
-      messages.length % 2 === 0 && messages.every((item, index) => item.role === (index % 2 ? 'user' : 'assistant'));
+    const isPairSequence = (messages: readonly { role: string; content: string }[]): boolean => isModelExchangeSequence_ACU(messages);
     const matchingRunPrefix = runHistory.length <= legacyPairs.length && runHistory.every((item, index) =>
       item.role === legacyPairs[index].role && item.content === legacyPairs[index].content);
     // A confirmed compaction mark supersedes both older and newer run-state transcript copies.
@@ -278,7 +280,7 @@ export class WorldSimulationMainLoop_ACU {
     if (input.anchor && !activeMark && resumedState?.transcript?.length && !persistedHistory.length && !isPairSequence(legacyPairs)) {
       throw new Error('WORLD_SIMULATION_LEGACY_TRANSCRIPT_UNPAIRED');
     }
-    const transcript: Array<{ role: string; content: string }> = input.anchor
+    const transcript: AiWireMessage_ACU[] = input.anchor
       ? [...persistedHistory, ...missingLegacy]
       : [...legacyTranscript];
     const handoffHint = resumedState?.handoffSummary && !activeMark && !transcript.some(item => item.content === resumedState.handoffSummary)
@@ -295,7 +297,12 @@ export class WorldSimulationMainLoop_ACU {
         taskId: input.identity.taskId,
         stageId: input.identity.stageId,
         stageRevision: input.identity.stageRevision,
-        messages: pending.map(item => ({ role: item.role as 'assistant' | 'user', content: item.content })),
+        messages: pending.map(item => ({
+          role: item.role as 'assistant' | 'user' | 'tool',
+          content: item.content,
+          ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}),
+          ...(item.tool_call_id ? { tool_call_id: item.tool_call_id } : {}),
+        })),
       }, input.chat);
       persistedTranscriptLength = transcript.length;
     };
@@ -445,9 +452,9 @@ export class WorldSimulationMainLoop_ACU {
         );
         const fixed = [{ role: 'system', content: worldSimulationDirectorProtocolInstruction_ACU() }, ...rendered.messages];
         const tail = [...(input.anchor && handoffHint ? [handoffHint] : []),
-          { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }];
+          ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }])];
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
-        let prepared = [...fixed, ...transcript, ...tail];
+        let prepared = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU([...fixed, ...transcript, ...tail]) : [...fixed, ...transcript, ...tail];
         // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
         // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。
         if (!input.anchor) {
@@ -526,7 +533,18 @@ export class WorldSimulationMainLoop_ACU {
         await persistEntry(failedId, `run-failed-token-${iteration}`);
         throw new Error(sent.reason);
       }
-      const raw = String(sent.response ?? '');
+      const turn = normalizeAgentModelReply_ACU(sent.response);
+      const nativeCalls: AiNativeToolCall_ACU[] = this.dependencies.nativeTools ? turn.toolCalls : [];
+      let raw = typeof sent.response === 'string' ? sent.response : turn.content;
+      if (nativeCalls.length) {
+        try { raw = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+          await persist(iteration + 1, reason);
+          continue;
+        }
+      }
       const allowDelegate = delegationsUsed < input.settings.agentRunBudget.maxDelegations;
       let action;
       try {
@@ -553,7 +571,9 @@ export class WorldSimulationMainLoop_ACU {
           await persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
           throw error;
         }
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate) });
+        const rejection = renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate);
+        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => rejection)));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: rejection });
         const retryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
         await persistEntry(retryId, `main-${iteration}-protocol-retry`);
         continue;
@@ -592,7 +612,8 @@ export class WorldSimulationMainLoop_ACU {
           await persistEntry(toolEntryId, `tool-${iteration}-failed`);
           throw error;
         }
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
+        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, [toolResultText_ACU(results)]));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
         pendingReview = null;
         await persist(iteration + 1);
         continue;

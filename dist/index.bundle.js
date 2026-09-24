@@ -86120,6 +86120,321 @@ $CONTENT
     // AI 输入准备
 
     /**
+     * 续写与推演共用的原生函数调用。
+     * 请求走 /api/backends/chat-completions/generate 时，工具定义放在 body.tools，
+     * 回包里的 tool_calls / functionCall 原样收下，结果用 role=tool 回灌。
+     */
+    const objectSchema_ACU = (properties, required) => ({
+        type: 'object',
+        properties,
+        required: [...required],
+        additionalProperties: false,
+    });
+    function agentNativeTools_ACU(names) {
+        const catalog = {
+            read: {
+                type: 'function',
+                function: {
+                    name: 'read',
+                    description: '按地址调阅资料。reads 必须是非空字符串数组，地址来自当前提示词里的读取地址词汇表。',
+                    parameters: objectSchema_ACU({
+                        reads: { type: 'array', items: { type: 'string' }, minItems: 1 },
+                    }, ['reads']),
+                },
+            },
+            search: {
+                type: 'function',
+                function: {
+                    name: 'search',
+                    description: '跨域检索。query 必填。scope、maxResults、isRegex 可选。',
+                    parameters: objectSchema_ACU({
+                        query: { type: 'string' },
+                        scope: { type: 'array', items: { type: 'string' } },
+                        maxResults: { type: 'integer', minimum: 1, maximum: 50 },
+                        isRegex: { type: 'boolean' },
+                    }, ['query']),
+                },
+            },
+            write_sql: {
+                type: 'function',
+                function: {
+                    name: 'write_sql',
+                    description: '提交一条受限 INSERT、UPDATE 或 DELETE。只写当前职责允许的模块，并使用回执里的 revision。',
+                    parameters: objectSchema_ACU({
+                        sql: { type: 'string' },
+                        evidenceRefs: { type: 'array', items: { type: 'string' } },
+                    }, ['sql']),
+                },
+            },
+        };
+        return names.map(name => catalog[name]);
+    }
+    function normalizeAgentModelReply_ACU(raw) {
+        if (typeof raw === 'string' || raw == null)
+            return { content: String(raw ?? ''), toolCalls: [] };
+        if (typeof raw === 'object' && !Array.isArray(raw)) {
+            const value = raw;
+            const toolCalls = Array.isArray(value.toolCalls) ? value.toolCalls.flatMap(normalizeStoredToolCall_ACU) : [];
+            return { content: typeof value.content === 'string' ? value.content : '', toolCalls };
+        }
+        return { content: String(raw), toolCalls: [] };
+    }
+    function normalizeStoredToolCall_ACU(raw) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+            return [];
+        const value = raw;
+        const id = typeof value.id === 'string' ? value.id.trim() : '';
+        const name = typeof value.name === 'string' ? value.name.trim() : '';
+        if (!id || !name)
+            return [];
+        const args = typeof value.arguments === 'string' ? value.arguments : JSON.stringify(value.arguments ?? {});
+        return [{ id, name, arguments: args }];
+    }
+    function nativeToolCallsToProtocolJson_ACU(calls) {
+        return calls.map(call => JSON.stringify(protocolRecord_ACU(call))).join('\n');
+    }
+    function protocolRecord_ACU(call) {
+        const args = parseArguments_ACU(call.arguments);
+        if (call.name === 'read') {
+            const reads = Array.isArray(args.reads) ? args.reads : (typeof args.address === 'string' ? [args.address] : []);
+            return { action: 'read', reads };
+        }
+        if (call.name === 'search') {
+            return {
+                action: 'search',
+                query: args.query,
+                ...(args.scope !== undefined ? { scope: args.scope } : {}),
+                ...(args.maxResults !== undefined ? { maxResults: args.maxResults } : {}),
+                ...(args.isRegex !== undefined ? { isRegex: args.isRegex } : {}),
+            };
+        }
+        if (call.name === 'write_sql') {
+            return {
+                action: 'write_sql',
+                sql: args.sql,
+                ...(args.evidenceRefs !== undefined ? { evidenceRefs: args.evidenceRefs } : {}),
+            };
+        }
+        throw new Error(`未知工具 ${call.name}`);
+    }
+    function parseArguments_ACU(raw) {
+        const parsed = JSON.parse(raw || '{}');
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+            throw new Error('工具参数必须是 JSON 对象');
+        return parsed;
+    }
+    function nativeToolExchange_ACU(content, calls, results) {
+        return [
+            {
+                role: 'assistant',
+                content,
+                tool_calls: calls.map(call => ({
+                    id: call.id,
+                    type: 'function',
+                    function: { name: call.name, arguments: call.arguments },
+                })),
+            },
+            ...calls.map((call, index) => ({
+                role: 'tool',
+                tool_call_id: call.id,
+                content: results[index] ?? results[0] ?? '',
+            })),
+        ];
+    }
+    function toOpenAiToolCalls_ACU(calls) {
+        return calls.map(call => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } }));
+    }
+    /** 默认提示词尾部的未完成 JSON 预填充不能占住请求末尾，否则模型不会发起函数调用。 */
+    function dropTerminalJsonPrefill_ACU(messages) {
+        if (!messages.length)
+            return [...messages];
+        const last = messages[messages.length - 1];
+        if (last.role !== 'assistant')
+            return [...messages];
+        const trimmed = last.content.trim();
+        if (trimmed === '{' || trimmed.includes('<continue>') || trimmed.endsWith('{\n  "thought": "') || trimmed.endsWith('{\n  "summary": "') || trimmed.endsWith('{\n  "verdict": "') || trimmed.endsWith('{\n  "instruction": "')) {
+            return messages.slice(0, -1);
+        }
+        return [...messages];
+    }
+    /**
+     * assistant 之后必须有 user 或 tool 反馈。一个动作可以跟多条 tool 结果。
+     * 纯 assistant/user 交替仍然合法。
+     */
+    function isModelExchangeSequence_ACU(messages) {
+        if (!messages.length || messages[0]?.role !== 'assistant')
+            return false;
+        let feedback = 0;
+        for (const message of messages) {
+            if (message.role === 'assistant') {
+                if (feedback === 0 && message !== messages[0])
+                    return false;
+                feedback = 0;
+                continue;
+            }
+            if (message.role !== 'user' && message.role !== 'tool')
+                return false;
+            feedback += 1;
+        }
+        return feedback > 0;
+    }
+    function accumulator_ACU() {
+        return { content: '', calls: new Map(), usage: undefined };
+    }
+    function slot_ACU(state, index) {
+        const existing = state.calls.get(index);
+        if (existing)
+            return existing;
+        const created = { id: '', name: '', arguments: '' };
+        state.calls.set(index, created);
+        return created;
+    }
+    function rememberUsage_ACU(state, json) {
+        if (json.usage && typeof json.usage === 'object')
+            state.usage = json.usage;
+        if (json.usageMetadata && typeof json.usageMetadata === 'object')
+            state.usage = json.usageMetadata;
+    }
+    function absorbChatCompletionEvent_ACU(state, json) {
+        if (!json || typeof json !== 'object' || Array.isArray(json))
+            return;
+        const record = json;
+        rememberUsage_ACU(state, record);
+        const choice = Array.isArray(record.choices) ? record.choices[0] : undefined;
+        const delta = choice?.delta && typeof choice.delta === 'object' ? choice.delta : undefined;
+        const message = choice?.message && typeof choice.message === 'object' ? choice.message : undefined;
+        const packet = delta ?? message;
+        if (packet && typeof packet.content === 'string')
+            state.content += packet.content;
+        const listed = packet?.tool_calls;
+        if (Array.isArray(listed)) {
+            listed.forEach((raw, fallback) => absorbOpenAiToolCall_ACU(state, raw, fallback));
+        }
+        if (record.type === 'content_block_delta' && record.delta && typeof record.delta === 'object') {
+            const anthropic = record.delta;
+            const index = typeof record.index === 'number' ? record.index : 0;
+            if (anthropic.type === 'text_delta' && typeof anthropic.text === 'string')
+                state.content += anthropic.text;
+            if (anthropic.type === 'input_json_delta' && typeof anthropic.partial_json === 'string')
+                slot_ACU(state, index).arguments += anthropic.partial_json;
+        }
+        if (record.type === 'content_block_start' && record.content_block && typeof record.content_block === 'object') {
+            const block = record.content_block;
+            if (block.type === 'tool_use') {
+                const index = typeof record.index === 'number' ? record.index : state.calls.size;
+                const current = slot_ACU(state, index);
+                if (typeof block.id === 'string')
+                    current.id = block.id;
+                if (typeof block.name === 'string')
+                    current.name = block.name;
+            }
+        }
+        const candidates = Array.isArray(record.candidates) ? record.candidates[0] : undefined;
+        const parts = candidates?.content && typeof candidates.content === 'object'
+            ? candidates.content.parts : undefined;
+        if (Array.isArray(parts)) {
+            for (const part of parts)
+                absorbGeminiPart_ACU(state, part);
+        }
+    }
+    function absorbOpenAiToolCall_ACU(state, raw, fallback) {
+        if (!raw || typeof raw !== 'object')
+            return;
+        const call = raw;
+        const index = typeof call.index === 'number' ? call.index : fallback;
+        const current = slot_ACU(state, index);
+        if (typeof call.id === 'string' && call.id)
+            current.id = call.id;
+        const fn = call.function && typeof call.function === 'object' ? call.function : undefined;
+        if (typeof fn?.name === 'string' && fn.name)
+            current.name = current.name ? current.name : fn.name;
+        if (typeof fn?.arguments === 'string')
+            current.arguments += fn.arguments;
+        else if (fn?.arguments && typeof fn.arguments === 'object')
+            current.arguments = JSON.stringify(fn.arguments);
+    }
+    function absorbGeminiPart_ACU(state, raw) {
+        if (!raw || typeof raw !== 'object')
+            return;
+        const part = raw;
+        if (typeof part.text === 'string' && part.thought !== true)
+            state.content += part.text;
+        const call = part.functionCall;
+        if (!call || typeof call !== 'object')
+            return;
+        const fn = call;
+        const name = typeof fn.name === 'string' ? fn.name.slice(fn.name.lastIndexOf(':') + 1) : '';
+        const index = state.calls.size;
+        const current = name ? slot_ACU(state, index) : (state.calls.get(state.calls.size - 1) ?? slot_ACU(state, index));
+        if (name)
+            current.name = name;
+        if (typeof fn.id === 'string' && fn.id)
+            current.id = fn.id;
+        if (typeof fn.args === 'string')
+            current.arguments += fn.args;
+        else if (fn.args && typeof fn.args === 'object')
+            current.arguments = JSON.stringify(fn.args);
+    }
+    function finishChatTurn_ACU(state) {
+        const toolCalls = [...state.calls.entries()]
+            .sort((left, right) => left[0] - right[0])
+            .map(([, call], index) => ({
+            id: call.id || `call_${index}`,
+            name: call.name,
+            arguments: call.arguments || '{}',
+        }))
+            .filter(call => call.name);
+        return { content: state.content, toolCalls };
+    }
+    function chatTurnFromJson_ACU(data) {
+        const state = accumulator_ACU();
+        absorbChatCompletionEvent_ACU(state, data);
+        if (typeof data === 'string')
+            state.content = data;
+        else if (data && typeof data === 'object' && typeof data.content === 'string' && !state.content) {
+            state.content = data.content;
+        }
+        return { turn: finishChatTurn_ACU(state), usage: state.usage };
+    }
+    async function readFetchChatTurn_ACU(response, streaming, signal) {
+        const contentType = response.headers?.get('content-type') ?? '';
+        if (!streaming && !contentType.includes('text/event-stream')) {
+            return chatTurnFromJson_ACU(await response.json());
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        const state = accumulator_ACU();
+        let buffer = '';
+        try {
+            while (true) {
+                if (signal?.aborted)
+                    throw new Error('Request aborted');
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: '))
+                        continue;
+                    const data = line.slice(6);
+                    if (data === '[DONE]')
+                        continue;
+                    try {
+                        absorbChatCompletionEvent_ACU(state, JSON.parse(data));
+                    }
+                    catch { /* 半截 SSE 留给下一行。 */ }
+                }
+            }
+        }
+        finally {
+            reader.releaseLock();
+        }
+        return { turn: finishChatTurn_ACU(state), usage: state.usage };
+    }
+
+    /**
      * shared/host-detect.ts — 宿主后端形态检测
      *
      * 区分 TauriTavern（Rust 后端，支持 custom_api_format 契约）与原版 SillyTavern
@@ -92897,6 +93212,7 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
             custom_include_headers: headers,
             custom_include_body: composedIncludeBody.value,
             custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
+            ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : {}),
         };
         if (promptPostProcessing) {
             // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。
@@ -93203,6 +93519,66 @@ ${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModu
             throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
         const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
         return typeof content === 'string' && content.trim() ? content.trim() : null;
+    }
+    /** 与 callAIWithResolvedPreset_ACU 同一条渠道，但保留原生 tool_calls。 */
+    async function callAIChatTurn_ACU(messages, resolved, signal, lifecycle, extras) {
+        if (!Array.isArray(messages) || messages.length === 0)
+            throw new Error('内部 AI 消息必须是非空数组。');
+        const reportUsage = (raw) => {
+            if (!lifecycle?.onUsage)
+                return;
+            const usage = extractAiUsageMetadata_ACU(raw);
+            if (!usage)
+                return;
+            try {
+                lifecycle.onUsage(usage);
+            }
+            catch { /* 用量回调异常不允许影响调用主流程。 */ }
+        };
+        const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
+        const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras.minOutputTokens)) : 0;
+        const maxTokens = Math.max(presetMaxTokens, floor);
+        if (resolved.apiMode === 'tavern') {
+            if (!resolved.tavernProfile)
+                throw new Error('该预设为酒馆连接模式但未选择连接预设。');
+            const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
+            assertNotAborted_ACU(signal);
+            const parsed = chatTurnFromJson_ACU(response?.result ?? response);
+            reportUsage(parsed.usage ?? response?.result?.usage);
+            return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
+        }
+        if (resolved.apiConfig.useMainApi) {
+            lifecycle?.beforeMainApiCall?.();
+            let operation;
+            try {
+                operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens, ...(extras?.tools?.length ? { tools: extras.tools, tool_choice: 'auto' } : {}) });
+            }
+            finally {
+                lifecycle?.afterMainApiCall?.();
+            }
+            const response = await operation;
+            assertNotAborted_ACU(signal);
+            return { content: typeof response === 'string' ? response.trim() : '', toolCalls: [] };
+        }
+        if (!resolved.apiConfig.url || !resolved.apiConfig.model)
+            throw new Error('自定义 API 的 URL 或模型未配置。');
+        const response = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
+                maxTokens,
+                stripModelPrefix: false,
+                promptCacheKey: supportsExplicitOpenAiCacheKey_ACU(resolved) ? extras?.promptCacheKey : undefined,
+                includeStreamUsage: !!lifecycle?.onUsage,
+                tools: extras?.tools,
+            })),
+            signal: signal || undefined,
+        });
+        if (!response.ok)
+            throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
+        const parsed = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, signal);
+        reportUsage(parsed.usage);
+        return parsed.turn;
     }
     /**
      * 若 signal 已 abort 则抛出 AbortError，用于宿主 gateway 调用（无法强制中断）返回后立即检查。
@@ -147197,13 +147573,18 @@ Expected function or array of functions, received type ${typeof value}.`
                     tools: options?.cacheTools ?? [], boundary: options?.cacheBoundary, preset,
                 }) } : {}),
             ...(options?.minOutputTokens ? { minOutputTokens: options.minOutputTokens } : {}),
+            ...(options?.tools?.length ? { tools: options.tools } : {}),
         };
         try {
-            return await callAIWithResolvedPreset_ACU(messages, preset, signal, {
+            const lifecycle = {
                 beforeMainApiCall: () => beginContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
                 afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
                 ...(options?.onUsage ? { onUsage: options.onUsage } : {}),
-            }, Object.keys(extras).length ? extras : undefined);
+            };
+            const extra = Object.keys(extras).length ? extras : undefined;
+            if (options?.tools?.length)
+                return await callAIChatTurn_ACU(messages, preset, signal, lifecycle, extra);
+            return await callAIWithResolvedPreset_ACU(messages, preset, signal, lifecycle, extra);
         }
         finally {
             // A bound host lifecycle remains registered until its matching ended event.
@@ -148188,12 +148569,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
                 }
-                const raw = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
+                const rawValue = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
                     promptCacheEnabled: true,
                     cacheScope: 'outline',
                     cacheTools: [],
                     minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.outline,
                 });
+                const raw = typeof rawValue === 'string' || rawValue == null ? rawValue : rawValue.content;
                 if (!isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
                 }
@@ -148356,7 +148738,9 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!isKind_ACU(raw.kind))
             return null;
         const text = typeof raw.text === 'string' ? raw.text : '';
-        if (!text.trim())
+        const toolCalls = parseStoredToolCalls_ACU(raw.toolCalls);
+        const toolCallId = typeof raw.toolCallId === 'string' && raw.toolCallId.trim() ? raw.toolCallId.trim() : '';
+        if (!text.trim() && !toolCalls?.length && !toolCallId)
             return null;
         const id = typeof raw.id === 'number' && Number.isInteger(raw.id) && raw.id > 0 ? raw.id : 0;
         if (!id)
@@ -148371,7 +148755,28 @@ Expected function or array of functions, received type ${typeof value}.`
         };
         if (typeof raw.readKey === 'string' && raw.readKey.trim())
             message.readKey = raw.readKey.trim();
+        if (toolCalls?.length)
+            message.toolCalls = toolCalls;
+        if (toolCallId)
+            message.toolCallId = toolCallId;
         return message;
+    }
+    function parseStoredToolCalls_ACU(raw) {
+        if (raw === undefined)
+            return undefined;
+        if (!Array.isArray(raw) || !raw.length)
+            return undefined;
+        const calls = raw.flatMap(item => {
+            if (!item || typeof item !== 'object')
+                return [];
+            const value = item;
+            const id = typeof value.id === 'string' ? value.id.trim() : '';
+            const name = typeof value.name === 'string' ? value.name.trim() : '';
+            if (!id || !name)
+                return [];
+            return [{ id, name, arguments: typeof value.arguments === 'string' ? value.arguments : '{}' }];
+        });
+        return calls.length === raw.length ? calls : undefined;
     }
     /**
      * 校验一份 v1 全量快照（历史遗留格式）。结构或消息非法返回 null，不伪装成完整会话。
@@ -148797,7 +149202,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * @returns 新的会话视图；没有有效条目时原样返回，调用方据此跳过落盘
      */
     function appendAgentConversation_ACU(snapshot, appends) {
-        const usable = appends.filter(item => String(item.text ?? '').trim());
+        const usable = appends.filter(item => String(item.text ?? '').trim() || item.toolCalls?.length || item.toolCallId);
         if (!usable.length)
             return snapshot;
         let nextId = snapshot.nextId;
@@ -148807,13 +149212,17 @@ Expected function or array of functions, received type ${typeof value}.`
                 id: nextId++,
                 kind: item.kind,
                 text: item.kind === 'runtime' || item.kind === 'tool' || item.kind === 'agent' || item.kind === 'user'
-                    ? String(item.text) : truncateText_ACU$1(String(item.text)),
+                    ? String(item.text ?? '') : truncateText_ACU$1(String(item.text ?? '')),
                 digest: String(item.digest ?? ''),
                 turnKey: String(item.turnKey ?? ''),
                 at,
             };
             if (item.readKey)
                 message.readKey = item.readKey;
+            if (item.toolCalls?.length)
+                message.toolCalls = item.toolCalls.map(call => ({ ...call }));
+            if (item.toolCallId)
+                message.toolCallId = item.toolCallId;
             return message;
         });
         return { ...snapshot, nextId, messages: [...snapshot.messages, ...added] };
@@ -148850,15 +149259,19 @@ Expected function or array of functions, received type ${typeof value}.`
      *
      * 渲染严格使用每条消息自身的持久化文本；向尾部追加消息不得反向改写既有渲染前缀。
      * @param snapshot 当前会话视图
-     * @returns `{ role, content }` 数组；主 Agent 自己的输出是 assistant，其余一律 user
+     * @returns 主 Agent 输出是 assistant；带 toolCallId 的工具回执是 tool；其余是 user
      */
     function renderAgentConversationMessages_ACU(snapshot) {
         return snapshot.messages.map((message) => {
             const prefix = KIND_PREFIXES_ACU[message.kind];
-            return {
-                role: message.kind === 'agent' ? 'assistant' : 'user',
-                content: prefix ? `${prefix}\n${message.text}` : message.text,
-            };
+            const content = prefix ? `${prefix}\n${message.text}` : message.text;
+            if (message.kind === 'agent' && message.toolCalls?.length) {
+                return { role: 'assistant', content, tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) };
+            }
+            if (message.kind === 'tool' && message.toolCallId) {
+                return { role: 'tool', tool_call_id: message.toolCallId, content };
+            }
+            return { role: message.kind === 'agent' ? 'assistant' : 'user', content };
         });
     }
     /**
@@ -156721,8 +157134,8 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     /** 子代理运行时。一个实例可服务多次派工，自身不持有任何本轮状态。 */
     class AgentSubagentRuntime_ACU {
-        constructor(dependencies = defaultDependencies_ACU$1) {
-            this.dependencies = dependencies;
+        constructor(dependencies = {}) {
+            this.dependencies = { ...defaultDependencies_ACU$1, ...dependencies };
         }
         /**
          * 执行一次派工。
@@ -156821,9 +157234,9 @@ Expected function or array of functions, received type ${typeof value}.`
             if (input.writeSql && writes.length)
                 baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '可调用 {\"action\":\"write_sql\",\"sql\":\"受限 INSERT/UPDATE/DELETE SQL\"} 逐栏即时提交。只写职责模块，用回执中的实际 revision 与 $FIELD:模块:ID[:栏目] 补缺栏；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧，不得按旧 revision 补写。一次工具轮优先一个写动作；最终契约不得重复提交已写栏目。' });
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-            // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
+            // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
             const transcript = [];
-            const trailingPrefill = baseMessages[baseMessages.length - 1]?.role === 'assistant' ? baseMessages.pop() : undefined;
+            const trailingPrefill = this.dependencies.nativeTools ? undefined : (baseMessages[baseMessages.length - 1]?.role === 'assistant' ? baseMessages.pop() : undefined);
             /**
              * 待消费的网页正文：只临时附在下一次模型调用里，绝不能写入 transcript。
              * 模型借本次输出里的 notes 将有用事实压进历史后，这块正文即被释放。
@@ -156896,6 +157309,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
                 cacheScope: `sub-${definition.name}`,
                 cacheTools: ['read', 'search', ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
+                ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search']) } : {}),
                 minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
                 onUsage: usage => {
                     usageTotal = usageTotal
@@ -156993,8 +157407,10 @@ Expected function or array of functions, received type ${typeof value}.`
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
                 }
                 // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : []),
-                    ...(trailingPrefill ? [trailingPrefill] : [])], input.preset, identity, input.signal, callOptions), {
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(this.dependencies.nativeTools
+                    ? dropTerminalJsonPrefill_ACU([...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : [])])
+                    : [...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : []),
+                        ...(trailingPrefill ? [trailingPrefill] : [])], input.preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -157002,13 +157418,27 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!input.isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
                 }
-                const rawText = String(raw ?? '').trim();
+                const turn = normalizeAgentModelReply_ACU(raw);
+                const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
+                let protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
+                if (nativeCalls.length) {
+                    try {
+                        protocolText = nativeToolCallsToProtocolJson_ACU(nativeCalls);
+                    }
+                    catch (error) {
+                        const reason = error instanceof Error ? error.message : String(error);
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+                        continue;
+                    }
+                }
+                const rawText = protocolText.trim();
+                const parseRaw = protocolText;
                 // 普通可写角色独享即时写端口；主 Agent、终审和只读角色仍只解析 read/search。
                 let toolCalls;
                 try {
                     toolCalls = input.writeSql && writes.length
-                        ? parseAgentWritableToolCalls_ACU(raw, prefill, isResearch)
-                        : isResearch ? parseAgentResearcherToolCalls_ACU(raw, prefill) : parseAgentSubagentToolCalls_ACU(raw, prefill);
+                        ? parseAgentWritableToolCalls_ACU(parseRaw, nativeCalls.length ? '' : prefill, isResearch)
+                        : isResearch ? parseAgentResearcherToolCalls_ACU(parseRaw, nativeCalls.length ? '' : prefill) : parseAgentSubagentToolCalls_ACU(parseRaw, nativeCalls.length ? '' : prefill);
                 }
                 catch (error) {
                     protocolRejections += 1;
@@ -157021,13 +157451,17 @@ Expected function or array of functions, received type ${typeof value}.`
                             });
                         throw error;
                     }
-                    transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: `工具动作未执行：${compactAgentProtocolError_ACU(error)}。请修正 action / sql 后重试。` });
+                    const reason = `工具动作未执行：${compactAgentProtocolError_ACU(error)}。请修正 action / sql 后重试。`;
+                    if (nativeCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+                    else
+                        transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: reason });
                     continue;
                 }
                 if (toolCalls) {
                     // 当前输出正是对上一批临时网页正文的归纳机会。只持久保留模型显式给出的短笔记。
                     if (isResearch && pendingResearchEvidence) {
-                        const notes = parseAgentResearcherWorkingNotes_ACU(raw, prefill);
+                        const notes = parseAgentResearcherWorkingNotes_ACU(protocolText, nativeCalls.length ? '' : prefill);
                         if (notes.length) {
                             transcript.push({
                                 role: 'user',
@@ -157042,12 +157476,17 @@ Expected function or array of functions, received type ${typeof value}.`
                         }
                         pendingResearchEvidence = '';
                     }
-                    transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+                    if (!nativeCalls.length)
+                        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
                     const readsAllowed = toolRoundsUsed < maxToolRounds;
                     if (!readsAllowed && toolCalls.every(item => item.kind !== 'write_sql')) {
-                        transcript.push({ role: 'user', content: isResearch
-                                ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
-                                : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+                        const exhausted = isResearch
+                            ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
+                            : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
+                        if (nativeCalls.length)
+                            transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
+                        else
+                            transcript.push({ role: 'user', content: exhausted });
                         continue;
                     }
                     if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql'))
@@ -157117,7 +157556,11 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (maxWriteRounds)
                         toolResultSections.push(`write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。`);
                     const stableResult = toolResultSections.join('\n\n');
-                    if (stableResult || !temporaryWebSections.length)
+                    if (nativeCalls.length) {
+                        const results = nativeCalls.map((_, index) => toolResultSections[index] || stableResult || temporaryWebSections.join('\n\n') || '工具没有返回内容');
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
+                    }
+                    else if (stableResult || !temporaryWebSections.length)
                         transcript.push({ role: 'user', content: `${stableResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
                     if (temporaryWebSections.length) {
                         pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${temporaryWebSections.join('\n\n')}\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
@@ -157126,7 +157569,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 try {
                     if (isResearch) {
-                        const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU.research);
+                        const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU.research);
                         const draft = parseAgentResearcherOutput_ACU(payload);
                         if (payload.sql !== undefined && draft.expectedRevision !== undefined && draft.expectedRevision !== readRevisions.webRefs) {
                             throw new Error(`web_refs SQL expected_revision 与派工读集 revision 不一致：声明 ${draft.expectedRevision}，读集 ${readRevisions.webRefs}`);
@@ -157151,7 +157594,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         };
                     }
                     if (contractKind) {
-                        const draft = parseAgentJsonPayloadDraft_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+                        const draft = parseAgentJsonPayloadDraft_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
                         const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
                         if (draft.payload.sql !== undefined) {
                             for (const [module, revision] of Object.entries(parsed.output.delta.expectedRevisions)) {
@@ -157190,7 +157633,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         transcript.push({ role: 'user', content: renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated) });
                         continue;
                     }
-                    const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+                    const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
                     return {
                         agentName: definition.name,
                         kind: definition.kind,
@@ -157290,7 +157733,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
             const baseMessages = insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderReadBudgetNote(0) });
             const transcript = [];
-            const trailingPrefill = baseMessages[baseMessages.length - 1]?.role === 'assistant' ? baseMessages.pop() : undefined;
+            const trailingPrefill = this.dependencies.nativeTools ? undefined : (baseMessages[baseMessages.length - 1]?.role === 'assistant' ? baseMessages.pop() : undefined);
             const expandedReads = [];
             let toolRoundsUsed = 0;
             let protocolRejections = 0;
@@ -157302,6 +157745,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 promptCacheEnabled: true,
                 cacheScope: 'final-reviewer',
                 cacheTools: ['read', 'search', 'review'],
+                ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(['read', 'search']) } : {}),
                 minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
                 onUsage: usage => {
                     usageTotal = usageTotal
@@ -157321,7 +157765,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!input.isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
                 }
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi([...baseMessages, ...transcript, ...(trailingPrefill ? [trailingPrefill] : [])], preset, identity, input.signal, callOptions), {
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(this.dependencies.nativeTools
+                    ? dropTerminalJsonPrefill_ACU([...baseMessages, ...transcript])
+                    : [...baseMessages, ...transcript, ...(trailingPrefill ? [trailingPrefill] : [])], preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -157329,21 +157775,42 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!input.isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审结果已失效', false));
                 }
-                const rawText = String(raw ?? '').trim();
-                const toolCalls = parseAgentSubagentToolCalls_ACU(raw, prefill);
+                const turn = normalizeAgentModelReply_ACU(raw);
+                const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
+                let protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
+                if (nativeCalls.length) {
+                    try {
+                        protocolText = nativeToolCallsToProtocolJson_ACU(nativeCalls);
+                    }
+                    catch (error) {
+                        const reason = error instanceof Error ? error.message : String(error);
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+                        continue;
+                    }
+                }
+                const rawText = protocolText.trim();
+                const toolCalls = parseAgentSubagentToolCalls_ACU(protocolText, nativeCalls.length ? '' : prefill);
                 if (toolCalls) {
-                    transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+                    if (!nativeCalls.length)
+                        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
                     if (toolRoundsUsed >= maxToolRounds) {
-                        transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+                        const exhausted = `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
+                        if (nativeCalls.length)
+                            transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
+                        else
+                            transcript.push({ role: 'user', content: exhausted });
                         continue;
                     }
                     toolRoundsUsed += 1;
                     const toolResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads);
-                    transcript.push({ role: 'user', content: `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+                    if (nativeCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
+                    else
+                        transcript.push({ role: 'user', content: `${toolResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
                     continue;
                 }
                 try {
-                    const payload = parseAgentJsonPayload_ACU(raw, prefill, ['verdict', 'summary', 'emotionFindings', 'worldFindings', 'logicFindings', 'requiredFixes', 'preserve']);
+                    const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, ['verdict', 'summary', 'emotionFindings', 'worldFindings', 'logicFindings', 'requiredFixes', 'preserve']);
                     return {
                         output: parseAgentFinalReviewerOutput_ACU(payload),
                         evidence,
@@ -158346,8 +158813,16 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     /** 主 Agent 轮次规划器。替代 V7 的一次性指令生成器，对外只暴露 plan 一个入口。 */
     class ContinuationAgentTurnPlanner_ACU {
-        constructor(dependencies = defaultDependencies_ACU) {
-            this.dependencies = dependencies;
+        constructor(dependencies = {}) {
+            const nativeTools = dependencies.nativeTools === true;
+            this.dependencies = {
+                ...defaultDependencies_ACU,
+                ...dependencies,
+                nativeTools,
+                subagentRuntime: dependencies.subagentRuntime ?? (nativeTools
+                    ? new AgentSubagentRuntime_ACU({ nativeTools: true })
+                    : defaultDependencies_ACU.subagentRuntime),
+            };
         }
         /**
          * 跑完一轮 Agent 循环，产出最终写作指导。
@@ -158464,7 +158939,10 @@ Expected function or array of functions, received type ${typeof value}.`
                     requestId: `${base.requestId || base.attemptId || 'turn'}-handoff-summary`,
                     source: 'handoff_summary',
                 };
-                return this.dependencies.callInternalAi(messages, preset, identity, request.signal, { promptCacheEnabled: false, cacheScope: 'handoff-summary' });
+                const value = await this.dependencies.callInternalAi(messages, preset, identity, request.signal, { promptCacheEnabled: false, cacheScope: 'handoff-summary' });
+                if (typeof value === 'object' && value)
+                    return value.content;
+                return (value ?? null);
             });
             const session = await this.openConversation_ACU(chat, request, context, conversationTurnKeyOf(), counter, measureOverhead, handoffSemanticAdapter, apiDependencies);
             snapshot = context.moduleSnapshot;
@@ -158581,7 +159059,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     if (action.kind === 'tools') {
                         // 不推进 iteration：工具批次不占决策迭代额度。
-                        await this.runToolBatch_ACU(action.calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration);
+                        await this.runToolBatch_ACU(action.calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration, round.nativeCalls);
                         continue;
                     }
                     if (action.kind === 'open_round') {
@@ -158912,6 +159390,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 cacheTools: ['read', 'search', 'open_round', 'delegate', 'finalize', 'block'],
                 minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.main,
                 onUsage: usage => { callUsage = usage; },
+                ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(['read', 'search']) } : {}),
             };
             for (let attempt = 0; attempt <= retries; attempt += 1) {
                 const base = request.createInternalRequestIdentity(attempt);
@@ -158920,7 +159399,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 请求已失效', false));
                 }
                 const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
-                let messages = this.spliceHistory_ACU(rendered, session.history());
+                let messages = this.dependencies.nativeTools
+                    ? dropTerminalJsonPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
+                    : this.spliceHistory_ACU(rendered, session.history());
                 // 发送前预检与压缩时机规则同一口径：阈值只是压缩触发线，一轮进行中允许超出到越界线
                 // （阈值 × AGENT_HISTORY_EMERGENCY_FACTOR_ACU）。轮内追加的工具结果、派工报告、迭代输出
                 // 把上下文顶过越界线时先做一次轮内压缩，压不下去才拒绝——否则同一轮里会陷入
@@ -158931,7 +159412,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     let promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
                     if (promptTokens > budgetTokens && (!session.continuingSameTurn || promptTokens > ceilingTokens)) {
                         if (await session.compact(promptTokens > ceilingTokens, messages)) {
-                            messages = this.spliceHistory_ACU(rendered, session.history());
+                            messages = this.dependencies.nativeTools
+                                ? dropTerminalJsonPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
+                                : this.spliceHistory_ACU(rendered, session.history());
                             promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
                         }
                     }
@@ -158964,17 +159447,36 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!request.isInternalRequestCurrent(base)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
                 }
-                const rawText = String(raw ?? '').trim();
+                const turn = normalizeAgentModelReply_ACU(raw);
+                const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
+                let rawText = turn.content.trim();
+                if (nativeCalls.length) {
+                    try {
+                        rawText = nativeToolCallsToProtocolJson_ACU(nativeCalls);
+                    }
+                    catch (error) {
+                        lastReason = error instanceof Error ? error.message : String(error);
+                        this.recordNativeToolFailure_ACU(session, turn.content, nativeCalls, lastReason);
+                        await session.flush();
+                        continue;
+                    }
+                }
                 try {
                     // 统一入口：输出里出现任意 read/search 对象即视为工具并发批次，否则按单动作解析。
-                    const action = parseAgentMainOutput_ACU(raw, AGENT_PREFILLS_ACU.main, allowDelegate);
+                    const action = parseAgentMainOutput_ACU(rawText, nativeCalls.length ? '' : AGENT_PREFILLS_ACU.main, allowDelegate);
                     // 没有可执行的大纲轮次就不存在「本轮」，finalize 无从谈起；拒绝并回灌，让主 Agent 先走大纲子代理。
                     if (action.kind === 'finalize' && !request.readContext().turn) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '当前没有可执行的大纲轮次，不能 finalize；请先派工 outline-architect 创建或继续大纲', false));
                     }
-                    session.record([{ kind: 'agent', text: rawText || '(空输出)', digest: describeAgentActionLabel_ACU(action), turnKey: session.turnKey }]);
+                    session.record([{
+                            kind: 'agent',
+                            text: turn.content.trim() || rawText || '(空输出)',
+                            digest: describeAgentActionLabel_ACU(action),
+                            turnKey: session.turnKey,
+                            ...(nativeCalls.length ? { toolCalls: nativeCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
+                        }]);
                     await session.flush();
-                    return { action, attempts: attempt + 1, usage: callUsage };
+                    return { action, nativeCalls, attempts: attempt + 1, usage: callUsage };
                 }
                 catch (error) {
                     lastReason = compactAgentProtocolError_ACU(error);
@@ -159060,7 +159562,13 @@ Expected function or array of functions, received type ${typeof value}.`
          * （之后重读同址时，旧消息由渲染层按 readKey 投影成过期占位），打回则回灌结构化拒绝报告。
          * 任何一步都不中断循环——工具问题让模型看着报告自己纠正。
          */
-        async runToolBatch_ACU(calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration) {
+        recordNativeToolFailure_ACU(session, content, calls, reason) {
+            session.record([
+                { kind: 'agent', text: content || reason, digest: '工具调用未能执行', turnKey: session.turnKey, toolCalls: calls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) },
+                ...calls.map(call => ({ kind: 'tool', text: reason, digest: call.name, turnKey: session.turnKey, toolCallId: call.id })),
+            ]);
+        }
+        async runToolBatch_ACU(calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration, nativeCalls = []) {
             if (toolUsage.batchesUsed >= budget.maxReads) {
                 const text = `read/search 工具批次已用尽（上限 ${budget.maxReads} 个批次）。请基于已有资料输出决策动作（delegate / finalize / block）；大纲调整请委派 outline-architect 或 arc-architect。`;
                 session.record([{ kind: 'tool', text, digest: '工具批次已用尽', turnKey: session.turnKey }]);
@@ -159073,6 +159581,16 @@ Expected function or array of functions, received type ${typeof value}.`
             const failed = [];
             const duplicated = [];
             const seenInBatch = new Set();
+            const ownerByKey = new Map();
+            calls.forEach((call, index) => {
+                if (call.kind === 'read') {
+                    for (const raw of call.reads)
+                        ownerByKey.set(String(raw ?? '').trim(), index);
+                }
+                else {
+                    ownerByKey.set(`search|${call.isRegex ? 're' : 'kw'}|${[...call.scope].sort().join('+')}|${call.maxResults}|${call.query}`, index);
+                }
+            });
             for (const call of calls) {
                 if (call.kind === 'read') {
                     for (const raw of call.reads) {
@@ -159105,13 +159623,18 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 fresh.push({ key, label, title: `搜索「${call.query}」`, text: runAgentSearch_ACU(call, context) });
             }
-            const appends = failed.map(material => ({
-                kind: 'tool',
-                text: JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }),
-                digest: `调阅失败 ${material.label}`,
-                turnKey: session.turnKey,
-            }));
+            const owners = [];
+            const appends = failed.map(material => {
+                owners.push(ownerByKey.get(material.key) ?? 0);
+                return {
+                    kind: 'tool',
+                    text: JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }),
+                    digest: `调阅失败 ${material.label}`,
+                    turnKey: session.turnKey,
+                };
+            });
             if (duplicated.length) {
+                owners.push(0);
                 appends.push({ kind: 'tool', text: `以下调阅本轮已放行且内容未变，完整内容见上文，不再重注：${duplicated.join('、')}。`, digest: '重复调阅提示', turnKey: session.turnKey });
             }
             if (fresh.length) {
@@ -159125,6 +159648,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         const latestSnapshotNotice = isLatestSnapshot
                             ? '\n\n【最新快照】该地址的资料在上次调阅后可能已变化；本条是重新调阅所得的最新快照，较早结果仅代表产生时状态。'
                             : '';
+                        owners.push(ownerByKey.get(material.key) ?? 0);
                         appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}${latestSnapshotNotice}`, digest: `调阅 ${material.label}`, turnKey: session.turnKey, readKey: material.key });
                     }
                     logAgentSession_ACU({
@@ -159134,14 +159658,29 @@ Expected function or array of functions, received type ${typeof value}.`
                     });
                 }
                 else {
+                    owners.push(0);
                     appends.push({ kind: 'tool', text: decision.report, digest: '读取被门禁打回', turnKey: session.turnKey });
                     logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 读取批次被门禁打回（${decision.batchTokens} tokens）`, detail: decision.report, ok: false });
                 }
             }
             else if (!duplicated.length && !failed.length) {
+                owners.push(0);
                 appends.push({ kind: 'tool', text: '本次工具批次没有任何有效的读取地址或搜索请求。请检查 read 的 reads 数组与 search 的 query。', digest: '空工具批次', turnKey: session.turnKey });
             }
-            session.record(appends);
+            if (nativeCalls.length) {
+                const grouped = nativeCalls.map(() => []);
+                appends.forEach((item, index) => grouped[owners[index] ?? 0]?.push(item.text));
+                session.record(nativeCalls.map((call, index) => ({
+                    kind: 'tool',
+                    text: grouped[index]?.join('\n\n') || '工具没有返回内容',
+                    digest: call.name,
+                    turnKey: session.turnKey,
+                    toolCallId: call.id,
+                })));
+            }
+            else {
+                session.record(appends);
+            }
             await session.flush();
         }
         /**
@@ -160361,7 +160900,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const store = new FirstFloorContinuationStore_ACU();
         const worldbook = new ContinuationWorldbookContext_ACU();
         const planner = new ContinuationOutlinePlanner_ACU();
-        const agentPlanner = new ContinuationAgentTurnPlanner_ACU();
+        const agentPlanner = new ContinuationAgentTurnPlanner_ACU({ nativeTools: true });
         // 桥在 orchestrator 之后创建，orchestrator 依赖用闭包延迟取活认领状态。
         let bridgeRef = null;
         const executionEngine = new StageExecutionEngine_ACU({
@@ -160576,7 +161115,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function validateMessage_ACU(raw, path) {
         if (!isRecord_ACU$c(raw))
             reject_ACU$4(`${path} 必须是对象`, { path });
-        const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok']);
+        const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok', 'toolCalls', 'toolCallId']);
         for (const key of Object.keys(raw)) {
             if (!allowed.has(key))
                 reject_ACU$4(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
@@ -160585,10 +161124,12 @@ Expected function or array of functions, received type ${typeof value}.`
         if (typeof kind !== 'string' || !WORLD_SIMULATION_MESSAGE_KINDS_ACU.includes(kind)) {
             reject_ACU$4(`${path}.kind 非法`, { path: `${path}.kind` });
         }
+        const toolCalls = parseConversationToolCalls_ACU(raw.toolCalls, path);
+        const toolCallId = raw.toolCallId === undefined ? undefined : requiredText_ACU$1(raw.toolCallId, `${path}.toolCallId`);
         const message = {
             id: nonNegativeInteger_ACU$1(raw.id, `${path}.id`),
             kind: kind,
-            text: requiredText_ACU$1(raw.text, `${path}.text`),
+            text: typeof raw.text === 'string' && raw.text.trim() ? raw.text : (toolCalls?.length || toolCallId ? String(raw.text ?? '') : requiredText_ACU$1(raw.text, `${path}.text`)),
             digest: typeof raw.digest === 'string' ? raw.digest : '',
             turnKey: typeof raw.turnKey === 'string' ? raw.turnKey : '',
             at: nonNegativeInteger_ACU$1(raw.at, `${path}.at`),
@@ -160617,7 +161158,27 @@ Expected function or array of functions, received type ${typeof value}.`
                 reject_ACU$4(`${path}.ok 必须是布尔值`, { path: `${path}.ok` });
             message.ok = raw.ok;
         }
+        if (toolCalls?.length)
+            message.toolCalls = toolCalls;
+        if (toolCallId)
+            message.toolCallId = toolCallId;
         return message;
+    }
+    function parseConversationToolCalls_ACU(raw, path) {
+        if (raw === undefined)
+            return undefined;
+        if (!Array.isArray(raw) || !raw.length)
+            reject_ACU$4(`${path}.toolCalls 必须是非空数组`, { path: `${path}.toolCalls` });
+        return raw.map((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item))
+                reject_ACU$4(`${path}.toolCalls[${index}] 必须是对象`);
+            const value = item;
+            return {
+                id: requiredText_ACU$1(value.id, `${path}.toolCalls[${index}].id`),
+                name: requiredText_ACU$1(value.name, `${path}.toolCalls[${index}].name`),
+                arguments: typeof value.arguments === 'string' ? value.arguments : '{}',
+            };
+        });
     }
     function validateCompaction_ACU(raw, path) {
         if (!isRecord_ACU$c(raw))
@@ -160859,9 +161420,14 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     /** Only director requests use this projection; session cards and specialist output are never model turns. */
     function readWorldSimulationDirectorHistory_ACU(chat) {
-        return readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages.map(message => ({
-            role: message.kind === 'model_agent' ? 'assistant' : 'user', content: message.text,
-        }));
+        return readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages.map(message => {
+            if (message.kind === 'model_agent') {
+                return { role: 'assistant', content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) };
+            }
+            if (message.toolCallId)
+                return { role: 'tool', tool_call_id: message.toolCallId, content: message.text };
+            return { role: 'user', content: message.text };
+        });
     }
     /** Only the current run's model turns are used when migrating an old run-state transcript. */
     function readWorldSimulationDirectorRunHistory_ACU(runId, chat, afterId = 0) {
@@ -160870,7 +161436,9 @@ Expected function or array of functions, received type ${typeof value}.`
             reject_ACU$4('世界推演主会话历史楼层损坏', { diagnostics });
         return segments.filter(segment => segment.runId === runId).flatMap(segment => segment.messages.filter(message => message.id > afterId).flatMap((message) => {
             if (message.kind === 'model_agent')
-                return [{ role: 'assistant', content: message.text }];
+                return [{ role: 'assistant', content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) }];
+            if (message.toolCallId)
+                return [{ role: 'tool', tool_call_id: message.toolCallId, content: message.text }];
             if (message.kind === 'model_feedback')
                 return [{ role: 'user', content: message.text }];
             return [];
@@ -160880,8 +161448,7 @@ Expected function or array of functions, received type ${typeof value}.`
     async function appendWorldSimulationDirectorHistory_ACU(input, chat) {
         if (!input.messages.length)
             return false;
-        if (input.messages[0]?.role !== 'assistant' || input.messages[input.messages.length - 1]?.role !== 'user'
-            || input.messages.some((item, index) => item.role !== (index % 2 ? 'user' : 'assistant'))) {
+        if (!isModelExchangeSequence_ACU(input.messages)) {
             reject_ACU$4('主会话动作与反馈必须成对保存');
         }
         return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
@@ -160898,7 +161465,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 taskId: input.taskId,
                 stageId: input.stageId,
                 stageRevision: input.stageRevision,
-                appends: input.messages.map(item => ({ kind: item.role === 'assistant' ? 'model_agent' : 'model_feedback', text: item.content })),
+                appends: input.messages.map(item => ({
+                    kind: item.role === 'assistant' ? 'model_agent' : 'model_feedback',
+                    text: item.content || (item.tool_calls?.length || item.tool_call_id ? ' ' : item.content),
+                    ...(item.tool_call_id ? { toolCallId: item.tool_call_id } : {}),
+                    ...(item.tool_calls?.length ? { toolCalls: item.tool_calls.map(call => ({ id: call.id, name: call.function.name, arguments: call.function.arguments })) } : {}),
+                })),
             }, messages);
         });
     }
@@ -160951,7 +161523,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
     async function appendWorldSimulationConversationSegmentUnlocked_ACU(input, chat) {
-        const usable = input.appends.filter(item => String(item.text ?? '').trim() || item.kind === 'model_agent');
+        const usable = input.appends.filter(item => String(item.text ?? '').trim() || item.kind === 'model_agent' || item.toolCallId || item.toolCalls?.length);
         if (usable.length === 0)
             return false;
         const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
@@ -160981,6 +161553,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 message.agentName = item.agentName;
             if (item.ok !== undefined)
                 message.ok = item.ok;
+            if (item.toolCallId)
+                message.toolCallId = item.toolCallId;
+            if (item.toolCalls?.length)
+                message.toolCalls = item.toolCalls.map(call => ({ ...call }));
             return message;
         });
         const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, messages);
@@ -166173,7 +166749,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const legacyPairs = legacyTranscript[0]?.role === 'user'
                 && legacyTranscript[0].content === resumedState?.handoffSummary
                 ? legacyTranscript.slice(1) : legacyTranscript;
-            const isPairSequence = (messages) => messages.length % 2 === 0 && messages.every((item, index) => item.role === (index % 2 ? 'user' : 'assistant'));
+            const isPairSequence = (messages) => isModelExchangeSequence_ACU(messages);
             const matchingRunPrefix = runHistory.length <= legacyPairs.length && runHistory.every((item, index) => item.role === legacyPairs[index].role && item.content === legacyPairs[index].content);
             // A confirmed compaction mark supersedes both older and newer run-state transcript copies.
             // persist() flushes paired messages before saving run-state, so the floor projection owns
@@ -166207,7 +166783,12 @@ Expected function or array of functions, received type ${typeof value}.`
                     taskId: input.identity.taskId,
                     stageId: input.identity.stageId,
                     stageRevision: input.identity.stageRevision,
-                    messages: pending.map(item => ({ role: item.role, content: item.content })),
+                    messages: pending.map(item => ({
+                        role: item.role,
+                        content: item.content,
+                        ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}),
+                        ...(item.tool_call_id ? { tool_call_id: item.tool_call_id } : {}),
+                    })),
                 }, input.chat);
                 persistedTranscriptLength = transcript.length;
             };
@@ -166350,9 +166931,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[director], director, createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }));
                     const fixed = [{ role: 'system', content: worldSimulationDirectorProtocolInstruction_ACU() }, ...rendered.messages];
                     const tail = [...(input.anchor && handoffHint ? [handoffHint] : []),
-                        { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }];
+                        ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }])];
                     const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
-                    let prepared = [...fixed, ...transcript, ...tail];
+                    let prepared = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU([...fixed, ...transcript, ...tail]) : [...fixed, ...transcript, ...tail];
                     // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
                     // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。
                     if (!input.anchor) {
@@ -166433,7 +167014,20 @@ Expected function or array of functions, received type ${typeof value}.`
                     await persistEntry(failedId, `run-failed-token-${iteration}`);
                     throw new Error(sent.reason);
                 }
-                const raw = String(sent.response ?? '');
+                const turn = normalizeAgentModelReply_ACU(sent.response);
+                const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
+                let raw = typeof sent.response === 'string' ? sent.response : turn.content;
+                if (nativeCalls.length) {
+                    try {
+                        raw = nativeToolCallsToProtocolJson_ACU(nativeCalls);
+                    }
+                    catch (error) {
+                        const reason = error instanceof Error ? error.message : String(error);
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+                        await persist(iteration + 1, reason);
+                        continue;
+                    }
+                }
                 const allowDelegate = delegationsUsed < input.settings.agentRunBudget.maxDelegations;
                 let action;
                 try {
@@ -166454,7 +167048,11 @@ Expected function or array of functions, received type ${typeof value}.`
                         await persist(iteration, `${failure.issue.reasonCode}:${failure.issue.path}`);
                         throw error;
                     }
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate) });
+                    const rejection = renderWorldSimulationDirectorProtocolRejection_ACU(failure.issue, allowDelegate);
+                    if (nativeCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => rejection)));
+                    else
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: rejection });
                     const retryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'protocol_retry', title: '主 Agent 协议修正', detail: `${failure.issue.reasonCode} ${failure.issue.path}\n模型返回片段：${raw.slice(0, 300) || '(空)'}`, agentName: director, ok: false });
                     await persistEntry(retryId, `main-${iteration}-protocol-retry`);
                     continue;
@@ -166493,7 +167091,10 @@ Expected function or array of functions, received type ${typeof value}.`
                         await persistEntry(toolEntryId, `tool-${iteration}-failed`);
                         throw error;
                     }
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
+                    if (nativeCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, [toolResultText_ACU(results)]));
+                    else
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(results) });
                     pendingReview = null;
                     await persist(iteration + 1);
                     continue;
@@ -167096,7 +167697,8 @@ ${rejectionText}` : delegationFeedback,
                 const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
                 const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, writableModules) };
-                const messages = [protocolGuard, ...rendered.messages, ...transcript, { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }];
+                const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+                const messages = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(drafted) : drafted;
                 const sent = await executeWorldSimulationFinalRequest_ACU({
                     messages,
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
@@ -167107,7 +167709,19 @@ ${rejectionText}` : delegationFeedback,
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
                 if (sent.status === 'rejected')
                     throw new Error(sent.reason);
-                const raw = String(sent.response ?? '');
+                const turn = normalizeAgentModelReply_ACU(sent.response);
+                const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
+                let raw = typeof sent.response === 'string' ? sent.response : turn.content;
+                if (nativeCalls.length) {
+                    try {
+                        raw = nativeToolCallsToProtocolJson_ACU(nativeCalls);
+                    }
+                    catch (error) {
+                        const reason = error instanceof Error ? error.message : String(error);
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+                        continue;
+                    }
+                }
                 let calls;
                 try {
                     calls = parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0);
@@ -167121,16 +167735,23 @@ ${rejectionText}` : delegationFeedback,
                             acceptedKeys: [...confirmedFields] });
                     if (!failure.retry)
                         throw error;
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, writableModules) });
+                    const reason = renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, writableModules);
+                    if (nativeCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+                    else
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: reason });
                     continue;
                 }
                 if (calls) {
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' });
-                    const results = [];
+                    if (!nativeCalls.length)
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' });
+                    const perCall = [];
                     for (const call of calls) {
+                        const bucket = [];
+                        perCall.push(bucket);
                         if (call.kind === 'write_sql') {
                             if (writeRounds >= maxWriteRounds) {
-                                results.push({ action: 'write_sql', status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽', remainingWriteRounds: 0 });
+                                bucket.push({ action: 'write_sql', status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽', remainingWriteRounds: 0 });
                                 continue;
                             }
                             writeRounds += 1;
@@ -167144,7 +167765,7 @@ ${rejectionText}` : delegationFeedback,
                                 if (input.isCurrent && !input.isCurrent())
                                     throw new Error('WORLD_SIMULATION_RUN_STALE');
                                 recordWriteReceipt(receipt);
-                                results.push({ action: 'write_sql', ...receipt, readAddresses: [...new Set([
+                                bucket.push({ action: 'write_sql', ...receipt, readAddresses: [...new Set([
                                             ...receipt.accepted.map(item => `field:${item.module}:${item.id}:${item.field}`),
                                             ...(receipt.partials ?? []).map(item => `field:${item.module}:${item.id}`),
                                             ...rejectedFieldReadAddresses_ACU(receipt),
@@ -167157,18 +167778,18 @@ ${rejectionText}` : delegationFeedback,
                                 const reason = error instanceof Error ? error.message : String(error);
                                 writeStateUnknown = true;
                                 writeProblems.set('host', { module: writableModules[0], source: 'invoke_failed', path: 'host', message: reason });
-                                results.push({ action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
+                                bucket.push({ action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
                                     partials: null, ledgerRevision: null, readAddresses: [], reason,
                                     remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds),
                                     remainingWriteRounds: maxWriteRounds - writeRounds });
                             }
                         }
                         else if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-                            results.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
+                            bucket.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
                         }
                         else {
                             toolRounds += 1;
-                            results.push(...await runWorldSimulationToolBatch_ACU({
+                            bucket.push(...await runWorldSimulationToolBatch_ACU({
                                 calls: [call], registry: input.registry, dependencies: input.tools,
                                 gate: { state: readGateState,
                                     config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
@@ -167177,8 +167798,11 @@ ${rejectionText}` : delegationFeedback,
                             }));
                         }
                     }
-                    transcript.push({ role: 'user', content: JSON.stringify({ results,
-                            remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds }) });
+                    const summary = { remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds };
+                    if (nativeCalls.length)
+                        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
+                    else
+                        transcript.push({ role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
                     continue;
                 }
                 try {
@@ -167237,8 +167861,9 @@ ${rejectionText}` : delegationFeedback,
                 const requestContext = { ...context, evidenceRegistry: requestSnapshot };
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
                 const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
+                const reviewerDraft = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
                 const sent = await executeWorldSimulationFinalRequest_ACU({
-                    messages: [protocolGuard, ...rendered.messages, ...transcript, { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }],
+                    messages: this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(reviewerDraft) : reviewerDraft,
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
                     invoke: value => this.dependencies.invoke(agentName, value, preset),
@@ -167247,12 +167872,29 @@ ${rejectionText}` : delegationFeedback,
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
                 if (sent.status === 'rejected')
                     throw new Error(sent.reason);
-                const raw = String(sent.response ?? '');
-                const calls = toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
+                const reviewerTurn = normalizeAgentModelReply_ACU(sent.response);
+                const reviewerNative = this.dependencies.nativeTools ? reviewerTurn.toolCalls : [];
+                let raw = typeof sent.response === 'string' ? sent.response : reviewerTurn.content;
+                if (reviewerNative.length) {
+                    try {
+                        raw = nativeToolCallsToProtocolJson_ACU(reviewerNative);
+                    }
+                    catch (error) {
+                        const reason = error instanceof Error ? error.message : String(error);
+                        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => reason)));
+                        continue;
+                    }
+                }
+                const calls = toolCalls_ACU(raw, reviewerNative.length ? '' : WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
                 if (calls) {
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' });
+                    if (!reviewerNative.length)
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' });
                     if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-                        transcript.push({ role: 'user', content: 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。' });
+                        const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
+                        if (reviewerNative.length)
+                            transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
+                        else
+                            transcript.push({ role: 'user', content: exhausted });
                         continue;
                     }
                     toolRounds += 1;
@@ -167268,7 +167910,10 @@ ${rejectionText}` : delegationFeedback,
                     });
                     if (input.isCurrent?.() === false)
                         throw new Error('WORLD_SIMULATION_RUN_STALE');
-                    transcript.push({ role: 'user', content: toolText_ACU(results) });
+                    if (reviewerNative.length)
+                        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => toolText_ACU(results))));
+                    else
+                        transcript.push({ role: 'user', content: toolText_ACU(results) });
                     continue;
                 }
                 try {
@@ -169956,11 +170601,14 @@ ${rejectionText}` : delegationFeedback,
                 tools: ['read', 'search', ...(definition?.writableModules.length ? ['write_sql', ...definition.writableModules.map(module => `module:${module}`)] : [])],
                 boundary, preset,
             }) : undefined;
-            const response = await callAIWithResolvedPreset_ACU([...messages], preset, signal, {
+            const response = await callAIChatTurn_ACU([...messages], preset, signal, {
                 beforeMainApiCall: () => beginWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
                 afterMainApiCall: () => endWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
-            }, promptCacheKey ? { promptCacheKey } : undefined);
-            if (typeof response === 'string' && response.trim())
+            }, {
+                ...(promptCacheKey ? { promptCacheKey } : {}),
+                tools: agentNativeTools_ACU(definition?.writableModules.length ? ['read', 'search', 'write_sql'] : ['read', 'search']),
+            });
+            if (response.content.trim() || response.toolCalls.length)
                 return response;
             throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '世界推演 Agent 返回空响应', false, { role }));
         }
@@ -170116,7 +170764,7 @@ ${rejectionText}` : delegationFeedback,
                     webResearch: envelope.settings.webResearch,
                 });
                 const invoke = (role, messages, preset) => invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal);
-                const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
+                const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke, nativeTools: true });
                 const writeSql = (runIdentity) => async (write) => {
                     if (signal.aborted)
                         throw new Error('WORLD_SIMULATION_RUN_STALE');
@@ -170130,7 +170778,7 @@ ${rejectionText}` : delegationFeedback,
                         confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted),
                     });
                 };
-                const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents });
+                const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents, nativeTools: true });
                 if (identity.triggerKind === 'agent_chat_message') {
                     await seedWorldSimulationUserRequirementsIfEmpty_ACU(envelope.task?.originInstruction ?? instruction, currentAnchor, chat);
                     promptContext.userRequirements = renderWorldSimulationUserRequirements_ACU(readLatestWorldSimulationUserRequirements_ACU(getChatArray_ACU()).snapshot, envelope.task?.originInstruction ?? instruction);

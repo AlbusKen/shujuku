@@ -18,6 +18,7 @@
  */
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
+import { toOpenAiToolCalls_ACU } from '../../ai/native-tool';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
@@ -71,7 +72,9 @@ function validateMessage_ACU(raw: unknown): AgentConversationMessage_ACU | null 
   if (!isRecord_ACU(raw)) return null;
   if (!isKind_ACU(raw.kind)) return null;
   const text = typeof raw.text === 'string' ? raw.text : '';
-  if (!text.trim()) return null;
+  const toolCalls = parseStoredToolCalls_ACU(raw.toolCalls);
+  const toolCallId = typeof raw.toolCallId === 'string' && raw.toolCallId.trim() ? raw.toolCallId.trim() : '';
+  if (!text.trim() && !toolCalls?.length && !toolCallId) return null;
   const id = typeof raw.id === 'number' && Number.isInteger(raw.id) && raw.id > 0 ? raw.id : 0;
   if (!id) return null;
   const message: AgentConversationMessage_ACU = {
@@ -83,7 +86,23 @@ function validateMessage_ACU(raw: unknown): AgentConversationMessage_ACU | null 
     at: typeof raw.at === 'number' && raw.at >= 0 ? raw.at : 0,
   };
   if (typeof raw.readKey === 'string' && raw.readKey.trim()) message.readKey = raw.readKey.trim();
+  if (toolCalls?.length) message.toolCalls = toolCalls;
+  if (toolCallId) message.toolCallId = toolCallId;
   return message;
+}
+
+function parseStoredToolCalls_ACU(raw: unknown): Array<{ id: string; name: string; arguments: string }> | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  const calls = raw.flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as { id?: unknown; name?: unknown; arguments?: unknown };
+    const id = typeof value.id === 'string' ? value.id.trim() : '';
+    const name = typeof value.name === 'string' ? value.name.trim() : '';
+    if (!id || !name) return [];
+    return [{ id, name, arguments: typeof value.arguments === 'string' ? value.arguments : '{}' }];
+  });
+  return calls.length === raw.length ? calls : undefined;
 }
 
 /**
@@ -490,7 +509,7 @@ export async function writeAgentConversationCompactionMark_ACU(chat: any[], mark
  * @returns 新的会话视图；没有有效条目时原样返回，调用方据此跳过落盘
  */
 export function appendAgentConversation_ACU(snapshot: AgentConversationSnapshot_ACU, appends: readonly AgentConversationAppend_ACU[]): AgentConversationSnapshot_ACU {
-  const usable = appends.filter(item => String(item.text ?? '').trim());
+  const usable = appends.filter(item => String(item.text ?? '').trim() || item.toolCalls?.length || item.toolCallId);
   if (!usable.length) return snapshot;
   let nextId = snapshot.nextId;
   const at = Date.now();
@@ -499,12 +518,14 @@ export function appendAgentConversation_ACU(snapshot: AgentConversationSnapshot_
       id: nextId++,
       kind: item.kind,
       text: item.kind === 'runtime' || item.kind === 'tool' || item.kind === 'agent' || item.kind === 'user'
-        ? String(item.text) : truncateText_ACU(String(item.text)),
+        ? String(item.text ?? '') : truncateText_ACU(String(item.text ?? '')),
       digest: String(item.digest ?? ''),
       turnKey: String(item.turnKey ?? ''),
       at,
     };
     if (item.readKey) message.readKey = item.readKey;
+    if (item.toolCalls?.length) message.toolCalls = item.toolCalls.map(call => ({ ...call }));
+    if (item.toolCallId) message.toolCallId = item.toolCallId;
     return message;
   });
   return { ...snapshot, nextId, messages: [...snapshot.messages, ...added] };
@@ -540,15 +561,19 @@ export async function appendConfirmedAgentTurn_ACU(chat: any[], messageIndex: nu
  *
  * 渲染严格使用每条消息自身的持久化文本；向尾部追加消息不得反向改写既有渲染前缀。
  * @param snapshot 当前会话视图
- * @returns `{ role, content }` 数组；主 Agent 自己的输出是 assistant，其余一律 user
+ * @returns 主 Agent 输出是 assistant；带 toolCallId 的工具回执是 tool；其余是 user
  */
-export function renderAgentConversationMessages_ACU(snapshot: AgentConversationSnapshot_ACU): Array<{ role: string; content: string }> {
+export function renderAgentConversationMessages_ACU(snapshot: AgentConversationSnapshot_ACU): Array<{ role: string; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> {
   return snapshot.messages.map((message) => {
     const prefix = KIND_PREFIXES_ACU[message.kind];
-    return {
-      role: message.kind === 'agent' ? 'assistant' : 'user',
-      content: prefix ? `${prefix}\n${message.text}` : message.text,
-    };
+    const content = prefix ? `${prefix}\n${message.text}` : message.text;
+    if (message.kind === 'agent' && message.toolCalls?.length) {
+      return { role: 'assistant', content, tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) };
+    }
+    if (message.kind === 'tool' && message.toolCallId) {
+      return { role: 'tool', tool_call_id: message.toolCallId, content };
+    }
+    return { role: message.kind === 'agent' ? 'assistant' : 'user', content };
   });
 }
 

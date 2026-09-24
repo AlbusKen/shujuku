@@ -26,9 +26,10 @@ import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudge
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
+import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 
-export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string>; }
-export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; }
+export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string | AiChatTurn_ACU>; }
+export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; nativeTools?: boolean; }
 export interface WorldSimulationSubagentRunInput_ACU {
   delegation: WorldSimulationDelegation_ACU;
   settings: WorldSimulationSettings_ACU;
@@ -358,7 +359,8 @@ export class WorldSimulationSubagentRuntime_ACU {
       const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, writableModules) };
-      const messages = [protocolGuard, ...rendered.messages, ...transcript, { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }];
+      const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+      const messages = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(drafted) : drafted;
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
@@ -367,7 +369,17 @@ export class WorldSimulationSubagentRuntime_ACU {
       });
       if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
-      const raw = String(sent.response ?? '');
+      const turn = normalizeAgentModelReply_ACU(sent.response);
+      const nativeCalls: AiNativeToolCall_ACU[] = this.dependencies.nativeTools ? turn.toolCalls : [];
+      let raw = typeof sent.response === 'string' ? sent.response : turn.content;
+      if (nativeCalls.length) {
+        try { raw = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+          continue;
+        }
+      }
       let calls: ReturnType<typeof parseWorldSimulationSubagentToolCalls_ACU>;
       try {
         calls = parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0);
@@ -378,17 +390,20 @@ export class WorldSimulationSubagentRuntime_ACU {
           unresolvedIssues: [{ module: writableModules[0], source: 'protocol_failed', path: 'write_sql', message: `${failure.issue.reasonCode}: ${failure.issue.path}` }],
           acceptedKeys: [...confirmedFields] });
         if (!failure.retry) throw error;
-        transcript.push({ role: 'assistant', content: raw || '(empty)' },
-          { role: 'user', content: renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, writableModules) });
+        const reason = renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, writableModules);
+        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: reason });
         continue;
       }
       if (calls) {
-        transcript.push({ role: 'assistant', content: raw || '(empty)' });
-        const results: unknown[] = [];
+        if (!nativeCalls.length) transcript.push({ role: 'assistant', content: raw || '(empty)' });
+        const perCall: unknown[][] = [];
         for (const call of calls) {
+          const bucket: unknown[] = [];
+          perCall.push(bucket);
           if (call.kind === 'write_sql') {
             if (writeRounds >= maxWriteRounds) {
-              results.push({ action: 'write_sql', status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽', remainingWriteRounds: 0 });
+              bucket.push({ action: 'write_sql', status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽', remainingWriteRounds: 0 });
               continue;
             }
             writeRounds += 1;
@@ -400,7 +415,7 @@ export class WorldSimulationSubagentRuntime_ACU {
                 isCurrent: input.isCurrent });
               if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
               recordWriteReceipt(receipt);
-              results.push({ action: 'write_sql', ...receipt, readAddresses: [...new Set([
+              bucket.push({ action: 'write_sql', ...receipt, readAddresses: [...new Set([
                 ...receipt.accepted.map(item => `field:${item.module}:${item.id}:${item.field}`),
                 ...(receipt.partials ?? []).map(item => `field:${item.module}:${item.id}`),
                 ...rejectedFieldReadAddresses_ACU(receipt),
@@ -411,16 +426,16 @@ export class WorldSimulationSubagentRuntime_ACU {
               const reason = error instanceof Error ? error.message : String(error);
               writeStateUnknown = true;
               writeProblems.set('host', { module: writableModules[0], source: 'invoke_failed', path: 'host', message: reason });
-              results.push({ action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
+              bucket.push({ action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
                 partials: null, ledgerRevision: null, readAddresses: [], reason,
                 remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds),
                 remainingWriteRounds: maxWriteRounds - writeRounds });
             }
           } else if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-            results.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
+            bucket.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
           } else {
             toolRounds += 1;
-            results.push(...await runWorldSimulationToolBatch_ACU({
+            bucket.push(...await runWorldSimulationToolBatch_ACU({
               calls: [call], registry: input.registry, dependencies: input.tools,
               gate: { state: readGateState,
                 config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
@@ -429,8 +444,9 @@ export class WorldSimulationSubagentRuntime_ACU {
             }));
           }
         }
-        transcript.push({ role: 'user', content: JSON.stringify({ results,
-          remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds }) });
+        const summary = { remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds };
+        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
+        else transcript.push({ role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
         continue;
       }
       try {
@@ -497,20 +513,33 @@ export class WorldSimulationSubagentRuntime_ACU {
       const requestContext = { ...context, evidenceRegistry: requestSnapshot };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
       const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
+      const reviewerDraft = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const sent = await executeWorldSimulationFinalRequest_ACU({
-        messages: [protocolGuard, ...rendered.messages, ...transcript, { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }],
+        messages: this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(reviewerDraft) : reviewerDraft,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => this.dependencies.invoke(agentName, value, preset),
       });
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
-      const raw = String(sent.response ?? '');
-      const calls = toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
+      const reviewerTurn = normalizeAgentModelReply_ACU(sent.response);
+      const reviewerNative = this.dependencies.nativeTools ? reviewerTurn.toolCalls : [];
+      let raw = typeof sent.response === 'string' ? sent.response : reviewerTurn.content;
+      if (reviewerNative.length) {
+        try { raw = nativeToolCallsToProtocolJson_ACU(reviewerNative); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => reason)));
+          continue;
+        }
+      }
+      const calls = toolCalls_ACU(raw, reviewerNative.length ? '' : WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
       if (calls) {
-        transcript.push({ role: 'assistant', content: raw || '(empty)' });
+        if (!reviewerNative.length) transcript.push({ role: 'assistant', content: raw || '(empty)' });
         if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-          transcript.push({ role: 'user', content: 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。' });
+          const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
+          if (reviewerNative.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
+          else transcript.push({ role: 'user', content: exhausted });
           continue;
         }
         toolRounds += 1;
@@ -525,7 +554,8 @@ export class WorldSimulationSubagentRuntime_ACU {
           },
         });
         if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
-        transcript.push({ role: 'user', content: toolText_ACU(results) });
+        if (reviewerNative.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => toolText_ACU(results))));
+        else transcript.push({ role: 'user', content: toolText_ACU(results) });
         continue;
       }
       try {

@@ -58,7 +58,7 @@ export const CONTINUATION_OUTLINE_REPAIR_ROUNDS_ACU = 2;
 
 export interface ContinuationOutlinePlannerDependencies_ACU {
   resolveApiPreset: typeof resolveContinuationAgentApiPreset_ACU;
-  callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU, signal?: AbortSignal | null, options?: ContinuationInternalAiCallOptions_ACU) => Promise<string | null>;
+  callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU, signal?: AbortSignal | null, options?: ContinuationInternalAiCallOptions_ACU) => Promise<string | { content: string } | null>;
   /** 传输错误重试前的延时实现。缺省 setTimeout；测试注入假计时器。 */
   wait?: (ms: number) => Promise<void>;
 }
@@ -279,12 +279,13 @@ export class ContinuationOutlinePlanner_ACU {
       if (!isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
       }
-      const raw = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
+      const rawValue = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
         promptCacheEnabled: true,
         cacheScope: 'outline',
         cacheTools: [],
         minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.outline,
       });
+      const raw = typeof rawValue === 'string' || rawValue == null ? rawValue : rawValue.content;
       if (!isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
       }

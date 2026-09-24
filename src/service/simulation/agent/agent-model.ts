@@ -66,12 +66,16 @@ export interface WorldSimulationConversationEventMetadata_ACU {
 }
 export interface WorldSimulationConversationMessage_ACU extends WorldSimulationConversationEventMetadata_ACU {
   id: number; kind: WorldSimulationMessageKind_ACU; text: string; digest: string; turnKey: string; at: number; readKey?: string;
+  toolCalls?: readonly { id: string; name: string; arguments: string }[];
+  toolCallId?: string;
 }
 export interface WorldSimulationConversationCompaction_ACU { compactedThroughId: number; report: string; at: number; }
 export interface WorldSimulationConversationSegment_ACU { schemaVersion: typeof WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU; segmentId: string; runId: string; taskId: string; stageId: string; stageRevision: number; messages: WorldSimulationConversationMessage_ACU[]; compaction?: WorldSimulationConversationCompaction_ACU; updatedAt: number; }
 export interface WorldSimulationConversationFloorRecord_ACU { schemaVersion: typeof WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU; segments: WorldSimulationConversationSegment_ACU[]; updatedAt: number; }
 export interface WorldSimulationConversationAppend_ACU extends WorldSimulationConversationEventMetadata_ACU {
   kind: WorldSimulationMessageKind_ACU; text: string; digest?: string; turnKey?: string; readKey?: string;
+  toolCalls?: readonly { id: string; name: string; arguments: string }[];
+  toolCallId?: string;
 }
 
 export interface WorldSimulationMaterialsSnapshot_ACU { schemaVersion: typeof WORLD_SIMULATION_MATERIALS_SCHEMA_VERSION_ACU; ledgerRevision: number; ledger: WorldSimulationLedger_ACU; evidenceRefs: string[]; updatedAt: number; }

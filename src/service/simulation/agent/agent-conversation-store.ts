@@ -1,5 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
+import { isModelExchangeSequence_ACU, toOpenAiToolCalls_ACU } from '../../ai/native-tool';
 import {
   WorldSimulationValidationError_ACU,
   createWorldSimulationError_ACU,
@@ -54,7 +55,7 @@ function nonNegativeInteger_ACU(value: unknown, path: string): number {
 
 function validateMessage_ACU(raw: unknown, path: string): WorldSimulationConversationMessage_ACU {
   if (!isRecord_ACU(raw)) reject_ACU(`${path} 必须是对象`, { path });
-  const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok']);
+  const allowed = new Set(['id', 'kind', 'text', 'digest', 'turnKey', 'at', 'readKey', 'eventKind', 'title', 'status', 'agentName', 'ok', 'toolCalls', 'toolCallId']);
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) reject_ACU(`${path}.${key} 是未知字段`, { path: `${path}.${key}` });
   }
@@ -62,10 +63,12 @@ function validateMessage_ACU(raw: unknown, path: string): WorldSimulationConvers
   if (typeof kind !== 'string' || !(WORLD_SIMULATION_MESSAGE_KINDS_ACU as readonly string[]).includes(kind)) {
     reject_ACU(`${path}.kind 非法`, { path: `${path}.kind` });
   }
+  const toolCalls = parseConversationToolCalls_ACU(raw.toolCalls, path);
+  const toolCallId = raw.toolCallId === undefined ? undefined : requiredText_ACU(raw.toolCallId, `${path}.toolCallId`);
   const message: WorldSimulationConversationMessage_ACU = {
     id: nonNegativeInteger_ACU(raw.id, `${path}.id`),
     kind: kind as WorldSimulationConversationMessage_ACU['kind'],
-    text: requiredText_ACU(raw.text, `${path}.text`),
+    text: typeof raw.text === 'string' && raw.text.trim() ? raw.text : (toolCalls?.length || toolCallId ? String(raw.text ?? '') : requiredText_ACU(raw.text, `${path}.text`)),
     digest: typeof raw.digest === 'string' ? raw.digest : '',
     turnKey: typeof raw.turnKey === 'string' ? raw.turnKey : '',
     at: nonNegativeInteger_ACU(raw.at, `${path}.at`),
@@ -90,7 +93,23 @@ function validateMessage_ACU(raw: unknown, path: string): WorldSimulationConvers
     if (typeof raw.ok !== 'boolean') reject_ACU(`${path}.ok 必须是布尔值`, { path: `${path}.ok` });
     message.ok = raw.ok;
   }
+  if (toolCalls?.length) message.toolCalls = toolCalls;
+  if (toolCallId) message.toolCallId = toolCallId;
   return message;
+}
+
+function parseConversationToolCalls_ACU(raw: unknown, path: string): Array<{ id: string; name: string; arguments: string }> | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || !raw.length) reject_ACU(`${path}.toolCalls 必须是非空数组`, { path: `${path}.toolCalls` });
+  return (raw as unknown[]).map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) reject_ACU(`${path}.toolCalls[${index}] 必须是对象`);
+    const value = item as { id?: unknown; name?: unknown; arguments?: unknown };
+    return {
+      id: requiredText_ACU(value.id, `${path}.toolCalls[${index}].id`),
+      name: requiredText_ACU(value.name, `${path}.toolCalls[${index}].name`),
+      arguments: typeof value.arguments === 'string' ? value.arguments : '{}',
+    };
+  });
 }
 
 function validateCompaction_ACU(raw: unknown, path: string): WorldSimulationConversationCompaction_ACU {
@@ -344,18 +363,23 @@ export function readWorldSimulationDirectorCompactionSource_ACU(chat?: any[]): {
 }
 
 /** Only director requests use this projection; session cards and specialist output are never model turns. */
-export function readWorldSimulationDirectorHistory_ACU(chat?: any[]): Array<{ role: 'assistant' | 'user'; content: string }> {
-  return readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages.map(message => ({
-    role: message.kind === 'model_agent' ? 'assistant' : 'user', content: message.text,
-  }));
+export function readWorldSimulationDirectorHistory_ACU(chat?: any[]): Array<{ role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> {
+  return readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages.map(message => {
+    if (message.kind === 'model_agent') {
+      return { role: 'assistant' as const, content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) };
+    }
+    if (message.toolCallId) return { role: 'tool' as const, tool_call_id: message.toolCallId, content: message.text };
+    return { role: 'user' as const, content: message.text };
+  });
 }
 
 /** Only the current run's model turns are used when migrating an old run-state transcript. */
-export function readWorldSimulationDirectorRunHistory_ACU(runId: string, chat?: any[], afterId = 0): Array<{ role: 'assistant' | 'user'; content: string }> {
+export function readWorldSimulationDirectorRunHistory_ACU(runId: string, chat?: any[], afterId = 0): Array<{ role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> {
   const { segments, diagnostics } = collectSegments_ACU(chat);
   if (diagnostics.length) reject_ACU('世界推演主会话历史楼层损坏', { diagnostics });
-  return segments.filter(segment => segment.runId === runId).flatMap(segment => segment.messages.filter(message => message.id > afterId).flatMap((message): Array<{ role: 'assistant' | 'user'; content: string }> => {
-    if (message.kind === 'model_agent') return [{ role: 'assistant' as const, content: message.text }];
+  return segments.filter(segment => segment.runId === runId).flatMap(segment => segment.messages.filter(message => message.id > afterId).flatMap((message): Array<{ role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> => {
+    if (message.kind === 'model_agent') return [{ role: 'assistant' as const, content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) }];
+    if (message.toolCallId) return [{ role: 'tool' as const, tool_call_id: message.toolCallId, content: message.text }];
     if (message.kind === 'model_feedback') return [{ role: 'user' as const, content: message.text }];
     return [];
   }));
@@ -368,11 +392,10 @@ export async function appendWorldSimulationDirectorHistory_ACU(input: {
   taskId: string;
   stageId: string;
   stageRevision: number;
-  messages: readonly { role: 'assistant' | 'user'; content: string }[];
+  messages: readonly { role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }[];
 }, chat?: any[]): Promise<boolean> {
   if (!input.messages.length) return false;
-  if (input.messages[0]?.role !== 'assistant' || input.messages[input.messages.length - 1]?.role !== 'user'
-    || input.messages.some((item, index) => item.role !== (index % 2 ? 'user' : 'assistant'))) {
+  if (!isModelExchangeSequence_ACU(input.messages)) {
     reject_ACU('主会话动作与反馈必须成对保存');
   }
   return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
@@ -388,7 +411,12 @@ export async function appendWorldSimulationDirectorHistory_ACU(input: {
       taskId: input.taskId,
       stageId: input.stageId,
       stageRevision: input.stageRevision,
-      appends: input.messages.map(item => ({ kind: item.role === 'assistant' ? 'model_agent' : 'model_feedback', text: item.content })),
+      appends: input.messages.map(item => ({
+        kind: item.role === 'assistant' ? 'model_agent' as const : 'model_feedback' as const,
+        text: item.content || (item.tool_calls?.length || item.tool_call_id ? ' ' : item.content),
+        ...(item.tool_call_id ? { toolCallId: item.tool_call_id } : {}),
+        ...(item.tool_calls?.length ? { toolCalls: item.tool_calls.map(call => ({ id: call.id, name: call.function.name, arguments: call.function.arguments })) } : {}),
+      })),
     }, messages);
   });
 }
@@ -471,7 +499,7 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
   input: AppendWorldSimulationConversationInput_ACU,
   chat?: any[],
 ): Promise<boolean> {
-  const usable = input.appends.filter(item => String(item.text ?? '').trim() || item.kind === 'model_agent');
+  const usable = input.appends.filter(item => String(item.text ?? '').trim() || item.kind === 'model_agent' || item.toolCallId || item.toolCalls?.length);
   if (usable.length === 0) return false;
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const currentView = readWorldSimulationConversation_ACU(messages);
@@ -494,6 +522,8 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
     if (item.status) message.status = item.status;
     if (item.agentName) message.agentName = item.agentName;
     if (item.ok !== undefined) message.ok = item.ok;
+    if (item.toolCallId) message.toolCallId = item.toolCallId;
+    if (item.toolCalls?.length) message.toolCalls = item.toolCalls.map(call => ({ ...call }));
     return message;
   });
   const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, messages);

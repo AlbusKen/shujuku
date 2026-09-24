@@ -1921,6 +1921,28 @@ describe('世界推演 Agent runtime', () => {
     expect(liveTools.read).toHaveBeenCalledWith('ledger:current');
   });
 
+  it('原生 tool_calls 的回执以 role=tool 进入下一次请求', async () => {
+    const { registry, promptContext } = fixture('native-tool');
+    const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
+    const replies = [
+      { content: '', toolCalls: [{ id: 'call-rain', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] },
+      JSON.stringify({ action: 'block', reason: '已读锚点', unresolved: ['等待'] }),
+    ];
+    const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string; tool_call_id?: string }[]) => {
+      sent.push(messages);
+      return replies.shift()!;
+    });
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1, nativeTools: true });
+    const identity = { runId: 'native-tool', chatIdentity: 'chat', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1 };
+    const result = await loop.run({
+      identity, settings: settings(), promptContext, registry,
+      tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '山雨将至', summary: '正文' })), search: tools.search },
+    });
+    expect(result).toMatchObject({ outcome: 'blocked' });
+    expect(sent[0]?.at(-1)?.content).not.toBe('{');
+    expect(sent[1]?.some(message => message.role === 'tool' && message.tool_call_id === 'call-rain' && message.content.includes('山雨将至'))).toBe(true);
+  });
+
 });
 
 describe('S11 推演双楼全链集成', () => {

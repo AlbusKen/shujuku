@@ -229,7 +229,7 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
   const store = new FirstFloorContinuationStore_ACU();
   const worldbook = new ContinuationWorldbookContext_ACU();
   const planner = new ContinuationOutlinePlanner_ACU();
-  const agentPlanner = new ContinuationAgentTurnPlanner_ACU();
+  const agentPlanner = new ContinuationAgentTurnPlanner_ACU({ nativeTools: true });
   // 桥在 orchestrator 之后创建，orchestrator 依赖用闭包延迟取活认领状态。
   let bridgeRef: ContinuationHostGenerationBridge_ACU | null = null;
   const executionEngine = new StageExecutionEngine_ACU({

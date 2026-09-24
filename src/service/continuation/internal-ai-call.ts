@@ -1,4 +1,5 @@
-import { callAIWithResolvedPreset_ACU, type AiUsageMetadata_ACU } from '../ai/api-call';
+import { callAIChatTurn_ACU, callAIWithResolvedPreset_ACU, type AiUsageMetadata_ACU } from '../ai/api-call';
+import type { AiChatTurn_ACU, AiNativeToolDefinition_ACU } from '../ai/native-tool';
 import type { ContinuationResolvedApiPreset_ACU } from './api-preset';
 import { buildOpenAiPromptCacheKey_ACU, supportsExplicitOpenAiCacheKey_ACU } from '../ai/prompt-cache';
 import { ContinuationValidationError_ACU, type ContinuationAgentApiPresetRole_ACU, type ContinuationInternalAiRequestIdentity_ACU } from './model';
@@ -25,6 +26,8 @@ export interface ContinuationInternalAiCallOptions_ACU {
   onUsage?: (usage: AiUsageMetadata_ACU) => void;
   /** 本次调用的最大输出 token 下限；预设值更大时沿用预设。缺省不抬。 */
   minOutputTokens?: number;
+  /** 传入后，本次请求使用原生 tools，返回值改为带 toolCalls 的对象。 */
+  tools?: readonly AiNativeToolDefinition_ACU[];
 }
 
 /**
@@ -75,7 +78,7 @@ export async function callContinuationInternalAi_ACU(
   identity: ContinuationInternalAiRequestIdentity_ACU,
   signal?: AbortSignal | null,
   options?: ContinuationInternalAiCallOptions_ACU,
-): Promise<string | null> {
+): Promise<string | AiChatTurn_ACU | null> {
   beginContinuationInternalAiRequest_ACU(identity);
   const cacheEnabled = options?.promptCacheEnabled === true && supportsExplicitOpenAiCacheKey_ACU(preset);
   const extras = {
@@ -84,19 +87,17 @@ export async function callContinuationInternalAi_ACU(
       tools: options?.cacheTools ?? [], boundary: options?.cacheBoundary, preset,
     }) } : {}),
     ...(options?.minOutputTokens ? { minOutputTokens: options.minOutputTokens } : {}),
+    ...(options?.tools?.length ? { tools: options.tools } : {}),
   };
   try {
-    return await callAIWithResolvedPreset_ACU(
-      messages,
-      preset,
-      signal,
-      {
-        beforeMainApiCall: () => beginContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
-        afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
-        ...(options?.onUsage ? { onUsage: options.onUsage } : {}),
-      },
-      Object.keys(extras).length ? extras : undefined,
-    );
+    const lifecycle = {
+      beforeMainApiCall: () => beginContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
+      afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
+      ...(options?.onUsage ? { onUsage: options.onUsage } : {}),
+    };
+    const extra = Object.keys(extras).length ? extras : undefined;
+    if (options?.tools?.length) return await callAIChatTurn_ACU(messages, preset, signal, lifecycle, extra);
+    return await callAIWithResolvedPreset_ACU(messages, preset, signal, lifecycle, extra);
   } finally {
     // A bound host lifecycle remains registered until its matching ended event.
     // An unbound request is removed, so later unrelated events are never claimed.

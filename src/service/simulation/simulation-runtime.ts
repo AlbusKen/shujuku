@@ -1,7 +1,8 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
-import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
+import { callAIChatTurn_ACU, callAIWithResolvedPreset_ACU } from '../ai/api-call';
+import { agentNativeTools_ACU, type AiChatTurn_ACU } from '../ai/native-tool';
 import { buildOpenAiPromptCacheKey_ACU, supportsExplicitOpenAiCacheKey_ACU } from '../ai/prompt-cache';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
@@ -65,7 +66,7 @@ async function invokeWorldSimulationAgent_ACU(
   preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1],
   identity: WorldSimulationRunIdentity_ACU,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<string | AiChatTurn_ACU> {
   const requestId = `${identity.runId}:${role}:${++internalRequestSequence_ACU}`;
   beginWorldSimulationInternalAiRequest_ACU({ requestId, runId: identity.runId, role });
   try {
@@ -76,11 +77,14 @@ async function invokeWorldSimulationAgent_ACU(
       tools: ['read', 'search', ...(definition?.writableModules.length ? ['write_sql', ...definition.writableModules.map(module => `module:${module}`)] : [])],
       boundary, preset,
     }) : undefined;
-    const response = await callAIWithResolvedPreset_ACU([...messages], preset, signal, {
+    const response = await callAIChatTurn_ACU([...messages], preset, signal, {
       beforeMainApiCall: () => beginWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
       afterMainApiCall: () => endWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
-    }, promptCacheKey ? { promptCacheKey } : undefined);
-    if (typeof response === 'string' && response.trim()) return response;
+    }, {
+      ...(promptCacheKey ? { promptCacheKey } : {}),
+      tools: agentNativeTools_ACU(definition?.writableModules.length ? ['read', 'search', 'write_sql'] : ['read', 'search']),
+    });
+    if (response.content.trim() || response.toolCalls.length) return response;
     throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
       'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '世界推演 Agent 返回空响应', false, { role },
     ));
@@ -250,7 +254,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
       });
       const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1]) =>
         invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal);
-      const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
+      const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke, nativeTools: true });
       const writeSql = (runIdentity: WorldSimulationRunIdentity_ACU) => async (write: Parameters<NonNullable<import('./agent/agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql']>>[0]) => {
         if (signal.aborted) throw new Error('WORLD_SIMULATION_RUN_STALE');
         return commitWorldSimulationFieldWrites_ACU({ identity: runIdentity, anchor: currentAnchor, ...write,
@@ -263,7 +267,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
           confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted),
         });
       };
-      const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents });
+      const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents, nativeTools: true });
       if (identity.triggerKind === 'agent_chat_message') {
         await seedWorldSimulationUserRequirementsIfEmpty_ACU(envelope.task?.originInstruction ?? instruction, currentAnchor, chat);
         promptContext.userRequirements = renderWorldSimulationUserRequirements_ACU(

@@ -60,6 +60,9 @@ export interface AgentConversationMessage_ACU {
   at: number;
   /** 工具消息专用：本条承载的读取地址（如 $STORY_RANGE:12-15），用于本轮读取去重、重读识别与压缩元数据。 */
   readKey?: string;
+  /** 原生函数调用。agent 消息携带请求，tool 消息用 toolCallId 对应其中一条。 */
+  toolCalls?: readonly { id: string; name: string; arguments: string }[];
+  toolCallId?: string;
 }
 
 /**
@@ -141,6 +144,8 @@ export interface AgentConversationAppend_ACU {
   digest?: string;
   turnKey?: string;
   readKey?: string;
+  toolCalls?: readonly { id: string; name: string; arguments: string }[];
+  toolCallId?: string;
 }
 
 /** Agent 可读/可搜正文窗口的默认楼数。未结算楼层始终在窗口内，不受此值限制。 */
