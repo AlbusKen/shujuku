@@ -1,4 +1,6 @@
 import type {
+  WorldSimulationLedger_ACU,
+  WorldSimulationLedgerFieldSnapshot_ACU,
   WorldSimulationLedgerModule_ACU,
   WorldSimulationPendingFixSource_ACU,
   WorldSimulationSettings_ACU,
@@ -7,6 +9,7 @@ import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPreset
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
+import type { WorldSimulationFieldCommitReceipt_ACU } from '../simulation-field-commit-adapter';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from './agent-defaults';
 import type {
@@ -18,7 +21,7 @@ import type {
   WorldSimulationSubagentOutcome_ACU,
 } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -34,8 +37,13 @@ export interface WorldSimulationSubagentRunInput_ACU {
   tools: WorldSimulationToolDependencies_ACU;
   runId: string;
   candidateSeq?: number;
+  writableModules?: readonly WorldSimulationLedgerModule_ACU[];
+  writeSql?: (input: { role: string; sql: string; evidenceRegistry: WorldSimulationEvidenceRegistrySnapshot_ACU; declaredEvidenceRefs: readonly string[]; allowedModules: readonly WorldSimulationLedgerModule_ACU[]; isCurrent?: () => boolean }) => Promise<WorldSimulationFieldCommitReceipt_ACU>;
+  readCurrent?: () => WorldSimulationLedger_ACU;
+  readFieldSnapshot?: () => WorldSimulationLedgerFieldSnapshot_ACU;
+  isCurrent?: () => boolean;
 }
-export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; }
+export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; }
 
 
 function candidate_ACU(
@@ -246,6 +254,16 @@ function toolCalls_ACU(raw: string, prefill: string, snapshot: WorldSimulationEv
   return null;
 }
 
+/** 拒绝路径是诊断，不是任意可读地址；未知恢复状态不据此推导当前 ID。 */
+function rejectedFieldReadAddresses_ACU(receipt: WorldSimulationFieldCommitReceipt_ACU): string[] {
+  if (receipt.partials === null || receipt.ledgerRevision === null) return [];
+  return receipt.rejected.flatMap(({ path }) => {
+    const match = /^(clock|dimensions|seeds|actors|player|rumors|chronicle|guidance)#([A-Za-z0-9_-]{1,128})(?:\.[A-Za-z][A-Za-z0-9]*|$)$/.exec(path);
+    return match && (match[2] !== '_' || ['clock', 'player', 'guidance'].includes(match[1]))
+      ? [`field:${match[1]}:${match[2]}`] : [];
+  });
+}
+
 function toolText_ACU(results: Awaited<ReturnType<typeof runWorldSimulationToolBatch_ACU>>): string {
   return JSON.stringify(results.map(item => ({ kind: item.kind, address: item.address, status: item.status, summary: item.summary, evidenceRef: item.evidenceRef, content: item.content })));
 }
@@ -260,14 +278,74 @@ export class WorldSimulationSubagentRuntime_ACU {
     }
     const agentName = definition.name;
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
-    const context = withTask_ACU(input.promptContext, { instruction: input.delegation.instruction, reads: input.delegation.reads }, undefined, definition.writableModules);
+    const writableModules = definition.writableModules.filter(module => !input.writableModules || input.writableModules.includes(module));
+    const context = withTask_ACU(input.promptContext, { instruction: input.delegation.instruction, reads: input.delegation.reads }, undefined, writableModules);
     const transcript: Array<{ role: string; content: string }> = [];
     const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
     let toolRounds = 0;
+    let writeRounds = 0;
+    const confirmedFields = new Set<string>();
+    const writeProblems = new Map<string, WorldSimulationSubagentIssue_ACU>();
+    let writeAttempted = false;
+    let writeStateUnknown = false;
+    const recordWriteReceipt = (receipt: WorldSimulationFieldCommitReceipt_ACU): void => {
+      if (receipt.partials === null || receipt.ledgerRevision === null) writeStateUnknown = true;
+      if (receipt.status === 'committed') { writeProblems.delete('host'); for (const item of receipt.accepted) writeProblems.delete(`${item.module}#${item.id}`); }
+      for (const item of receipt.accepted) {
+        confirmedFields.add(`${item.module}:${item.id}:${item.field}`);
+        writeProblems.delete(`${item.module}#${item.id}.${item.field}`);
+      }
+      for (const item of receipt.rejected) {
+        const match = /^(clock|dimensions|seeds|actors|player|rumors|chronicle|guidance)#([^.#]+)\.([A-Za-z][A-Za-z0-9]*)$/.exec(item.path);
+        const module = match?.[1] as WorldSimulationLedgerModule_ACU | undefined;
+        writeProblems.set(item.path, { module: module && writableModules.includes(module) ? module : writableModules[0],
+          source: 'transaction_rejected', path: item.path, message: item.reason,
+          ...(match ? { id: match[2] } : {}) });
+      }
+    };
+    const terminalIssues = (): WorldSimulationSubagentIssue_ACU[] => {
+      if (!writeAttempted) return [];
+      const issues = new Map(writeProblems);
+      if (writeStateUnknown) issues.set('write_state', { module: writableModules[0], source: 'invoke_failed',
+        path: 'write_state', message: '逐栏保存或补偿状态未确认，必须重新读取权威账本' });
+      let fields: WorldSimulationLedgerFieldSnapshot_ACU | undefined;
+      try { fields = input.readFieldSnapshot?.(); }
+      catch (error) { issues.set('field_view', { module: writableModules[0], source: 'invoke_failed', path: 'field_view',
+        message: error instanceof Error ? error.message : String(error) }); }
+      if (!fields && !issues.has('field_view')) issues.set('field_view', { module: writableModules[0], source: 'invoke_failed', path: 'field_view',
+        message: '当前权威分栏视图不可用' });
+      if (fields) {
+        for (const module of writableModules) for (const record of Object.values(fields.records[module] ?? {})) {
+          if (record.status !== 'partial') continue;
+          for (const field of record.missingFields) issues.set(`${module}#${record.id}.${field}`, { module,
+            source: 'transaction_rejected', id: record.id, path: `${module}#${record.id}.${field}`, message: `必填栏目 ${field} 尚未提交` });
+        }
+        for (const key of confirmedFields) {
+          const [module, id, field] = key.split(':') as [WorldSimulationLedgerModule_ACU, string, string];
+          if (!fields.records[module]?.[id]?.fields[field]) issues.set(`${module}#${id}.${field}`, { module, id,
+            source: 'invoke_failed', path: `${module}#${id}.${field}`, message: '写入回执未在当前权威账本中得到确认' });
+        }
+      }
+      return [...issues.values()];
+    };
+    const checkedOutcome = (outcome: WorldSimulationSubagentOutcome_ACU): WorldSimulationSubagentOutcome_ACU => {
+      const issues = terminalIssues();
+      if (!issues.length) return confirmedFields.size && outcome.status === 'no_change'
+        ? { ...outcome, acceptedKeys: [...confirmedFields], completion: 'complete_changed',
+          moduleCompletion: Object.fromEntries(writableModules.map(module => [module, 'complete_changed'])) }
+        : outcome;
+      return { agentName, status: 'failed', summary: '逐栏维护尚未合格', reasonCode: 'WORLD_SIMULATION_FIELD_INCOMPLETE',
+        evidenceRefs: [], uncertainties: [], completion: 'failed',
+        moduleCompletion: Object.fromEntries(writableModules.map(module => [module, 'failed'])),
+        unresolvedIssues: [...issues, ...(outcome.unresolvedIssues ?? [])], acceptedKeys: [...confirmedFields] };
+    };
+    const maxWriteRounds = input.writeSql && writableModules.length ? Math.max(1, input.settings.agentRunBudget.maxIterations) : 0;
+    const maxCalls = 1 + input.settings.agentRunBudget.maxExtraReads + maxWriteRounds + repair.maxAttempts + 1;
 
-    for (;;) {
+    for (let attempt = 0; attempt < maxCalls; attempt += 1) {
+      if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const readBudget = resolveWorldSimulationReadBudget_ACU({
         historyTokenBudget: input.settings.agentHistoryTokenBudget,
@@ -277,37 +355,82 @@ export class WorldSimulationSubagentRuntime_ACU {
       const remainingTokens = Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens);
       const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
       const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
-      const requestContext = { ...context, evidenceRegistry: requestSnapshot, readBudgetText };
+      const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
-      const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, definition.writableModules) };
-      const messages = [...rendered.messages, protocolGuard, ...transcript];
+      const protocolGuard = { role: 'system', content: worldSimulationSpecialistProtocolInstruction_ACU(agentName, writableModules) };
+      const messages = [protocolGuard, ...rendered.messages, ...transcript, { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }];
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => this.dependencies.invoke(agentName, value, preset),
       });
+      if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
       const raw = String(sent.response ?? '');
-      const calls = toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
+      let calls: ReturnType<typeof parseWorldSimulationSubagentToolCalls_ACU>;
+      try {
+        calls = parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0);
+      } catch (error) {
+        const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+        if (!failure.retry && writeAttempted) return checkedOutcome({ agentName, status: 'failed', summary: '逐栏工具协议重试耗尽',
+          reasonCode: 'WORLD_SIMULATION_PROTOCOL_FAILED', evidenceRefs: [], uncertainties: [], completion: 'failed',
+          unresolvedIssues: [{ module: writableModules[0], source: 'protocol_failed', path: 'write_sql', message: `${failure.issue.reasonCode}: ${failure.issue.path}` }],
+          acceptedKeys: [...confirmedFields] });
+        if (!failure.retry) throw error;
+        transcript.push({ role: 'assistant', content: raw || '(empty)' },
+          { role: 'user', content: renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, writableModules) });
+        continue;
+      }
       if (calls) {
         transcript.push({ role: 'assistant', content: raw || '(empty)' });
-        if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-          transcript.push({ role: 'user', content: 'read/search 轮次已用尽，请依据现有证据输出最终 JSON。' });
-          continue;
+        const results: unknown[] = [];
+        for (const call of calls) {
+          if (call.kind === 'write_sql') {
+            if (writeRounds >= maxWriteRounds) {
+              results.push({ action: 'write_sql', status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽', remainingWriteRounds: 0 });
+              continue;
+            }
+            writeRounds += 1;
+            writeAttempted = true;
+            if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
+            try {
+              const receipt = await input.writeSql!({ role: agentName, sql: call.sql,
+                evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry), declaredEvidenceRefs: call.evidenceRefs, allowedModules: writableModules,
+                isCurrent: input.isCurrent });
+              if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
+              recordWriteReceipt(receipt);
+              results.push({ action: 'write_sql', ...receipt, readAddresses: [...new Set([
+                ...receipt.accepted.map(item => `field:${item.module}:${item.id}:${item.field}`),
+                ...(receipt.partials ?? []).map(item => `field:${item.module}:${item.id}`),
+                ...rejectedFieldReadAddresses_ACU(receipt),
+              ])],
+                remainingWriteRounds: maxWriteRounds - writeRounds });
+            } catch (error) {
+              if (error instanceof Error && error.message === 'WORLD_SIMULATION_RUN_STALE') throw error;
+              const reason = error instanceof Error ? error.message : String(error);
+              writeStateUnknown = true;
+              writeProblems.set('host', { module: writableModules[0], source: 'invoke_failed', path: 'host', message: reason });
+              results.push({ action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
+                partials: null, ledgerRevision: null, readAddresses: [], reason,
+                remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds),
+                remainingWriteRounds: maxWriteRounds - writeRounds });
+            }
+          } else if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
+            results.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
+          } else {
+            toolRounds += 1;
+            results.push(...await runWorldSimulationToolBatch_ACU({
+              calls: [call], registry: input.registry, dependencies: input.tools,
+              gate: { state: readGateState,
+                config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                usage: toolUsage, maxReads: input.settings.agentRunBudget.maxReads,
+                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU },
+            }));
+          }
         }
-        toolRounds += 1;
-        const results = await runWorldSimulationToolBatch_ACU({
-          calls, registry: input.registry, dependencies: input.tools,
-          gate: {
-            state: readGateState,
-            config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
-            usage: toolUsage,
-            maxReads: input.settings.agentRunBudget.maxReads,
-            count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-          },
-        });
-        transcript.push({ role: 'user', content: toolText_ACU(results) });
+        transcript.push({ role: 'user', content: JSON.stringify({ results,
+          remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds }) });
         continue;
       }
       try {
@@ -316,29 +439,33 @@ export class WorldSimulationSubagentRuntime_ACU {
         if (String(payload.agentName ?? '').trim() !== agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
         try {
           const result = parseWorldSimulationSpecialistResult_ACU(payload, requestSnapshot);
-          return outcomeFromSpecialistResult_ACU(
+          return checkedOutcome(outcomeFromSpecialistResult_ACU(
             result,
             definition.writableModules,
             input.runId,
             input.candidateSeq ?? 1,
             draft.truncated,
-          );
+          ));
         } catch (strictError) {
           try {
-            return salvageCandidateOutcome_ACU(
+            return checkedOutcome(salvageCandidateOutcome_ACU(
               payload,
               definition.writableModules,
               requestSnapshot,
               input.runId,
               input.candidateSeq ?? 1,
               draft.truncated,
-            );
+            ));
           } catch {
             throw strictError;
           }
         }
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
+        if (!failure.retry && writeAttempted) return checkedOutcome({ agentName, status: 'failed', summary: '逐栏契约协议重试耗尽',
+          reasonCode: 'WORLD_SIMULATION_PROTOCOL_FAILED', evidenceRefs: [], uncertainties: [], completion: 'failed',
+          unresolvedIssues: [{ module: writableModules[0], source: 'protocol_failed', path: 'contract', message: `${failure.issue.reasonCode}: ${failure.issue.path}` }],
+          acceptedKeys: [...confirmedFields] });
         if (!failure.retry) throw error;
         transcript.push(
           { role: 'assistant', content: raw || '(empty)' },
@@ -346,6 +473,11 @@ export class WorldSimulationSubagentRuntime_ACU {
         );
       }
     }
+    if (writeAttempted) return checkedOutcome({ agentName, status: 'failed', summary: '逐栏工具/模型预算耗尽',
+      reasonCode: 'WORLD_SIMULATION_SUBAGENT_CALL_LIMIT', evidenceRefs: [], uncertainties: [],
+      completion: 'failed', moduleCompletion: Object.fromEntries(writableModules.map(module => [module, 'failed'])),
+      unresolvedIssues: [], acceptedKeys: [...confirmedFields] });
+    throw new Error(`WORLD_SIMULATION_SUBAGENT_CALL_LIMIT:${agentName}:${maxCalls}`);
   }
 
   async runReviewer(input: WorldSimulationReviewInput_ACU): Promise<WorldSimulationReviewerResult_ACU> {
@@ -358,17 +490,20 @@ export class WorldSimulationSubagentRuntime_ACU {
     const readGateState = createWorldSimulationReadGateState_ACU();
     const toolUsage = { readsUsed: 0 };
     let toolRounds = 0;
-    for (;;) {
+    const maxCalls = 1 + input.settings.agentRunBudget.maxExtraReads + repair.maxAttempts + 1;
+    for (let attempt = 0; attempt < maxCalls; attempt += 1) {
+      if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const requestContext = { ...context, evidenceRegistry: requestSnapshot };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
       const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
       const sent = await executeWorldSimulationFinalRequest_ACU({
-        messages: [...rendered.messages, protocolGuard, ...transcript],
+        messages: [protocolGuard, ...rendered.messages, ...transcript, { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }],
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => this.dependencies.invoke(agentName, value, preset),
       });
+      if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
       const raw = String(sent.response ?? '');
       const calls = toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
@@ -389,6 +524,7 @@ export class WorldSimulationSubagentRuntime_ACU {
             count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
           },
         });
+        if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
         transcript.push({ role: 'user', content: toolText_ACU(results) });
         continue;
       }
@@ -407,6 +543,7 @@ export class WorldSimulationSubagentRuntime_ACU {
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: renderWorldSimulationReviewerProtocolRejection_ACU(failure.issue) });
       }
     }
+    throw new Error(`WORLD_SIMULATION_REVIEWER_CALL_LIMIT:${maxCalls}`);
   }
 
 }

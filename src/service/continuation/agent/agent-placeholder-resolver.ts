@@ -13,8 +13,10 @@ import {
   AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
   AGENT_STORY_WINDOW_DEFAULT_ACU,
   type AgentModuleSnapshot_ACU,
+  AGENT_MODULE_FIELD_MATRIX_ACU,
 } from './agent-model';
 import {
+  readAgentModuleFoldState_ACU,
   renderAgentChronology_ACU,
   renderAgentChronologyByIds_ACU,
   renderAgentConstraintsByIds_ACU,
@@ -115,6 +117,11 @@ function listAgentStoryFloors_ACU(source: AgentStoryFloorSource_ACU): AgentStory
   return chat
     .map((message, index) => ({ index, text: messageText_ACU(message, source.contextRules) }))
     .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
+}
+
+/** 与正文目录共用的 AI 正文楼层判断；证据校验不受读取窗口限制。 */
+export function agentStoryEvidenceFloorIndexes_ACU(chat: any[]): ReadonlySet<number> {
+  return new Set(listAgentStoryFloors_ACU({ chat }).map(floor => floor.index));
 }
 
 function agentStoryWindowSize_ACU(source: AgentStoryFloorSource_ACU): number {
@@ -578,7 +585,7 @@ function resolveWorldbookToken_ACU(token: string, context: AgentResolveContext_A
  * @param context 解析上下文
  * @returns { title, text } 分节标题与正文；未知 token 的 text 会明确说明不可读
  */
-export function resolveAgentReadToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string } {
+export function resolveAgentReadToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string; status?: 'failed' } {
   const normalized = String(token ?? '').trim();
   if (normalized.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) return resolveTableToken_ACU(normalized, context);
   if (normalized.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU)) return resolveWorldbookToken_ACU(normalized, context);
@@ -591,6 +598,22 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
         ? renderAgentStoryRange_ACU(context, matched[1], matched[2])
         : `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼。可用楼层见正文目录。`,
     };
+  }
+
+  if (normalized.startsWith('$FIELD:')) {
+    const match = /^\$FIELD:(storyArc|hooks|infoGap|chronology|webRefs|constraints):([^:]+)(?::([^:]+))?$/.exec(normalized);
+    if (!match) return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。' };
+    const [, moduleName, id, field] = match;
+    const module = moduleName as keyof typeof AGENT_MODULE_FIELD_MATRIX_ACU;
+    if (field && !AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field)) return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。` };
+    const folded = readAgentModuleFoldState_ACU(context.chat);
+    if (folded.salvaged || folded.candidates.some(item => !item.valid)) return { title: '资料栏目读取失败', text: '资料帧校验失败；不得将损坏数据解释为空状态。', status: 'failed' };
+    const record = folded.fields.records[module]?.[id];
+    return { title: `资料栏目 ${module}#${id}`, text: JSON.stringify(record
+      ? { module, id, status: record.status, missingFields: record.missingFields,
+        fields: field ? { [field]: record.fields[field] ?? null } : record.fields,
+        revisions: folded.snapshot.revisions[module] }
+      : { module, id, status: 'unwritten', missingFields: AGENT_MODULE_FIELD_MATRIX_ACU[module].required, revisions: folded.snapshot.revisions[module] }) };
   }
 
   const storyArcIds = splitIdSuffix_ACU(normalized, '$STORY_ARC');

@@ -141,10 +141,7 @@ export type ContinuationAgentApiPresets_ACU = Record<ContinuationAgentApiPresetR
 
 /** 固定工作流的配置级参数。提示词正文不在这里改。 */
 export interface ContinuationWorkflowSettings_ACU {
-  autoFixEnabled: boolean;
-  autoFixMaxAttempts: number;
   reviseLimit: number;
-  repairMaxExtraReads: number;
 }
 
 /** 发送前最终审查的独立资源与开关，不占用主 Agent 或普通子代理的读取额度。 */
@@ -331,7 +328,7 @@ export interface ContinuationSettings_ACU {
   agentReadFallbackTokens: number;
   /** 发送前人物情绪与合理性终审的独立设置。 */
   finalReview: ContinuationFinalReviewSettings_ACU;
-  /** 固定工作流：自动修复、打回上限与修复读取预算。 */
+  /** 固定工作流：终审打回上限。 */
   workflow: ContinuationWorkflowSettings_ACU;
   /** 开场百科/网页检索子代理的设置。 */
   webResearch: ContinuationWebResearchSettings_ACU;
@@ -385,6 +382,8 @@ export interface ContinuationStage_ACU {
   activeNodeIndex: number;
   activeTurnIndex: number;
   completedTurns: number;
+  /** 主 Agent 本次工作流对当前轮的可更新标注；不参与宿主轮次身份与进度计算。 */
+  agentTurnLabel?: { revision: number; turnId: string; text: string };
 }
 
 export interface StageRevision_ACU {

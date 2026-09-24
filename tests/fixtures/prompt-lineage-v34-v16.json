@@ -1,0 +1,840 @@
+{
+  "continuationV34": {
+    "main": [
+      {
+        "role": "system",
+        "length": 282,
+        "hash": "248e2e85"
+      },
+      {
+        "role": "user",
+        "length": 34,
+        "hash": "ccb26f51"
+      },
+      {
+        "role": "assistant",
+        "length": 360,
+        "hash": "2fbbfeea"
+      },
+      {
+        "role": "user",
+        "length": 35,
+        "hash": "351f7a17"
+      },
+      {
+        "role": "assistant",
+        "length": 228,
+        "hash": "3fd511f7"
+      },
+      {
+        "role": "user",
+        "length": 24,
+        "hash": "8ba0814c"
+      },
+      {
+        "role": "assistant",
+        "length": 346,
+        "hash": "e3140931"
+      },
+      {
+        "role": "user",
+        "length": 27,
+        "hash": "d54db0af"
+      },
+      {
+        "role": "assistant",
+        "length": 789,
+        "hash": "aca47d90"
+      },
+      {
+        "role": "user",
+        "length": 11,
+        "hash": "3c8f98c0"
+      },
+      {
+        "role": "assistant",
+        "length": 1081,
+        "hash": "6712efd3"
+      },
+      {
+        "role": "user",
+        "length": 2165,
+        "hash": "caadb532"
+      },
+      {
+        "role": "user",
+        "length": 1295,
+        "hash": "f0083ff2"
+      },
+      {
+        "role": "user",
+        "length": 432,
+        "hash": "07a60052"
+      },
+      {
+        "role": "user",
+        "length": 77,
+        "hash": "cd5e1dd5"
+      },
+      {
+        "role": "user",
+        "length": 275,
+        "hash": "483def10"
+      },
+      {
+        "role": "user",
+        "length": 199,
+        "hash": "3084b197"
+      },
+      {
+        "role": "user",
+        "length": 15,
+        "hash": "1b25e297"
+      },
+      {
+        "role": "assistant",
+        "length": 103,
+        "hash": "ada89b16"
+      }
+    ],
+    "arcArchitect": [
+      {
+        "role": "system",
+        "length": 258,
+        "hash": "f4c52f7e"
+      },
+      {
+        "role": "user",
+        "length": 22,
+        "hash": "fd4786a8"
+      },
+      {
+        "role": "assistant",
+        "length": 419,
+        "hash": "b2f243ee"
+      },
+      {
+        "role": "user",
+        "length": 24,
+        "hash": "60d01792"
+      },
+      {
+        "role": "assistant",
+        "length": 416,
+        "hash": "01cbb4ce"
+      },
+      {
+        "role": "user",
+        "length": 10,
+        "hash": "ef670981"
+      },
+      {
+        "role": "assistant",
+        "length": 1252,
+        "hash": "980a72a4"
+      },
+      {
+        "role": "user",
+        "length": 739,
+        "hash": "11076515"
+      },
+      {
+        "role": "user",
+        "length": 925,
+        "hash": "c2c98952"
+      },
+      {
+        "role": "assistant",
+        "length": 16,
+        "hash": "33783448"
+      }
+    ],
+    "maintainer": [
+      {
+        "role": "system",
+        "length": 83,
+        "hash": "d0095193"
+      },
+      {
+        "role": "user",
+        "length": 24,
+        "hash": "696021b1"
+      },
+      {
+        "role": "assistant",
+        "length": 275,
+        "hash": "73b6b361"
+      },
+      {
+        "role": "user",
+        "length": 10,
+        "hash": "ef670981"
+      },
+      {
+        "role": "assistant",
+        "length": 716,
+        "hash": "ff21c808"
+      },
+      {
+        "role": "user",
+        "length": 668,
+        "hash": "2a4f5f30"
+      },
+      {
+        "role": "user",
+        "length": 774,
+        "hash": "4d2c8b5e"
+      },
+      {
+        "role": "assistant",
+        "length": 16,
+        "hash": "33783448"
+      }
+    ],
+    "mainlinePlanner": [
+      {
+        "role": "system",
+        "length": 84,
+        "hash": "07fd65ce"
+      },
+      {
+        "role": "user",
+        "length": 17,
+        "hash": "ffec9cf5"
+      },
+      {
+        "role": "assistant",
+        "length": 534,
+        "hash": "aeb51b80"
+      },
+      {
+        "role": "user",
+        "length": 10,
+        "hash": "ef670981"
+      },
+      {
+        "role": "assistant",
+        "length": 520,
+        "hash": "c2179bf6"
+      },
+      {
+        "role": "user",
+        "length": 873,
+        "hash": "d65eef70"
+      },
+      {
+        "role": "assistant",
+        "length": 16,
+        "hash": "33783448"
+      }
+    ],
+    "beatPlanner": [
+      {
+        "role": "system",
+        "length": 64,
+        "hash": "a782c42c"
+      },
+      {
+        "role": "user",
+        "length": 15,
+        "hash": "c9483d49"
+      },
+      {
+        "role": "assistant",
+        "length": 458,
+        "hash": "88a0dd20"
+      },
+      {
+        "role": "user",
+        "length": 10,
+        "hash": "ef670981"
+      },
+      {
+        "role": "assistant",
+        "length": 446,
+        "hash": "b7aed2ba"
+      },
+      {
+        "role": "user",
+        "length": 737,
+        "hash": "64904088"
+      },
+      {
+        "role": "assistant",
+        "length": 16,
+        "hash": "33783448"
+      }
+    ],
+    "reviewer": [
+      {
+        "role": "system",
+        "length": 82,
+        "hash": "0b640999"
+      },
+      {
+        "role": "user",
+        "length": 16,
+        "hash": "25fe8ef9"
+      },
+      {
+        "role": "assistant",
+        "length": 219,
+        "hash": "4ccee4bd"
+      },
+      {
+        "role": "user",
+        "length": 10,
+        "hash": "ef670981"
+      },
+      {
+        "role": "assistant",
+        "length": 323,
+        "hash": "cf64826e"
+      },
+      {
+        "role": "user",
+        "length": 733,
+        "hash": "6b7a47e1"
+      },
+      {
+        "role": "assistant",
+        "length": 16,
+        "hash": "a40fb06d"
+      }
+    ],
+    "finalReviewer": [
+      {
+        "role": "system",
+        "length": 1451,
+        "hash": "170efa1a"
+      },
+      {
+        "role": "user",
+        "length": 342,
+        "hash": "057ab5a2"
+      },
+      {
+        "role": "user",
+        "length": 640,
+        "hash": "e6577ca8"
+      }
+    ],
+    "webResearcher": [
+      {
+        "role": "system",
+        "length": 210,
+        "hash": "722f0e43"
+      },
+      {
+        "role": "user",
+        "length": 17,
+        "hash": "15042cef"
+      },
+      {
+        "role": "assistant",
+        "length": 838,
+        "hash": "87c5c627"
+      },
+      {
+        "role": "user",
+        "length": 10,
+        "hash": "ef670981"
+      },
+      {
+        "role": "assistant",
+        "length": 575,
+        "hash": "fc4f4713"
+      },
+      {
+        "role": "user",
+        "length": 622,
+        "hash": "20dda3c1"
+      },
+      {
+        "role": "assistant",
+        "length": 16,
+        "hash": "33783448"
+      }
+    ],
+    "instructionComposer": [
+      {
+        "role": "system",
+        "length": 737,
+        "hash": "62495b80"
+      },
+      {
+        "role": "user",
+        "length": 463,
+        "hash": "d6183c7b"
+      },
+      {
+        "role": "assistant",
+        "length": 20,
+        "hash": "87c9d870"
+      }
+    ]
+  },
+  "simulationV16": {
+    "world-director": [
+      {
+        "role": "system",
+        "length": 111,
+        "hash": "1ec9b214"
+      },
+      {
+        "role": "system",
+        "length": 206,
+        "hash": "ad4a0b6d"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 2182,
+        "hash": "41a557f7"
+      },
+      {
+        "role": "system",
+        "length": 853,
+        "hash": "6330f728"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "world-stage-planner": [
+      {
+        "role": "system",
+        "length": 116,
+        "hash": "10f8ad49"
+      },
+      {
+        "role": "system",
+        "length": 101,
+        "hash": "24426155"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 811,
+        "hash": "40d27e10"
+      },
+      {
+        "role": "system",
+        "length": 564,
+        "hash": "17d6ef78"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "timekeeper": [
+      {
+        "role": "system",
+        "length": 107,
+        "hash": "1a15eb2c"
+      },
+      {
+        "role": "system",
+        "length": 96,
+        "hash": "1f268b7a"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 2733,
+        "hash": "3c64a09c"
+      },
+      {
+        "role": "system",
+        "length": 743,
+        "hash": "b4c8ba64"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "undercurrent-analyst": [
+      {
+        "role": "system",
+        "length": 117,
+        "hash": "d34bba2b"
+      },
+      {
+        "role": "system",
+        "length": 98,
+        "hash": "b580c516"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 2626,
+        "hash": "432d42b2"
+      },
+      {
+        "role": "system",
+        "length": 1005,
+        "hash": "85cdb8f9"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "dramatis-keeper": [
+      {
+        "role": "system",
+        "length": 112,
+        "hash": "398d050d"
+      },
+      {
+        "role": "system",
+        "length": 107,
+        "hash": "a8a43b87"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 2935,
+        "hash": "9f161f91"
+      },
+      {
+        "role": "system",
+        "length": 1488,
+        "hash": "2b31051e"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "chronicler": [
+      {
+        "role": "system",
+        "length": 107,
+        "hash": "e05236d6"
+      },
+      {
+        "role": "system",
+        "length": 104,
+        "hash": "d6608537"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 2859,
+        "hash": "b75b2db0"
+      },
+      {
+        "role": "system",
+        "length": 827,
+        "hash": "e30ea28a"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "causality-reviewer": [
+      {
+        "role": "system",
+        "length": 115,
+        "hash": "c58ac7ca"
+      },
+      {
+        "role": "system",
+        "length": 111,
+        "hash": "26212684"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 1054,
+        "hash": "45d80a4a"
+      },
+      {
+        "role": "system",
+        "length": 939,
+        "hash": "2a5bbeb2"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "guidance-composer": [
+      {
+        "role": "system",
+        "length": 114,
+        "hash": "b098d72c"
+      },
+      {
+        "role": "system",
+        "length": 104,
+        "hash": "49df4ed1"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 2868,
+        "hash": "8e32609b"
+      },
+      {
+        "role": "system",
+        "length": 1099,
+        "hash": "b71862d2"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ],
+    "lore-researcher": [
+      {
+        "role": "system",
+        "length": 112,
+        "hash": "e8f78e7e"
+      },
+      {
+        "role": "system",
+        "length": 92,
+        "hash": "97c78cbf"
+      },
+      {
+        "role": "system",
+        "length": 41,
+        "hash": "b52ee6b0"
+      },
+      {
+        "role": "system",
+        "length": 520,
+        "hash": "bb9ce682"
+      },
+      {
+        "role": "system",
+        "length": 457,
+        "hash": "ef6a43f6"
+      },
+      {
+        "role": "user",
+        "length": 62,
+        "hash": "a4017e60"
+      },
+      {
+        "role": "user",
+        "length": 383,
+        "hash": "29c432c7"
+      },
+      {
+        "role": "assistant",
+        "length": 66,
+        "hash": "91d96aa6"
+      },
+      {
+        "role": "user",
+        "length": 94,
+        "hash": "197a05fe"
+      }
+    ]
+  },
+  "simulationV16Groups": {
+    "world-director": {
+      "length": 4799,
+      "hash": "afdde7e2"
+    },
+    "world-stage-planner": {
+      "length": 3022,
+      "hash": "cc244fac"
+    },
+    "timekeeper": {
+      "length": 5100,
+      "hash": "f15aaaca"
+    },
+    "undercurrent-analyst": {
+      "length": 5266,
+      "hash": "67819256"
+    },
+    "dramatis-keeper": {
+      "length": 6065,
+      "hash": "e3650221"
+    },
+    "chronicler": {
+      "length": 5318,
+      "hash": "f691c537"
+    },
+    "causality-reviewer": {
+      "length": 3676,
+      "hash": "01e88d40"
+    },
+    "guidance-composer": {
+      "length": 5610,
+      "hash": "83e55d30"
+    },
+    "lore-researcher": {
+      "length": 2557,
+      "hash": "c1567e15"
+    }
+  }
+}

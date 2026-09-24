@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { readAgentConversation_ACU } from '../../../src/service/continuation/agent/agent-conversation-store';
+import { AGENT_CONVERSATION_FIELD_ACU } from '../../../src/service/continuation/agent/agent-model';
 import { FirstFloorContinuationStore_ACU } from '../../../src/service/continuation/continuation-store';
 import { ContinuationOrchestrator_ACU } from '../../../src/service/continuation/continuation-orchestrator';
 import { buildEmptyAgentModuleSnapshot_ACU, readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from '../../../src/service/continuation/agent/agent-module-store';
@@ -234,6 +236,58 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(afterConfirm.stages[0]).toMatchObject({ completedTurns: 1, activeNodeIndex: 0, activeTurnIndex: 1 });
     expect(afterConfirm.timeline.some(entry => entry.kind === 'turn_completed' && entry.messageIndex === 3)).toBe(true);
     await expectCode(() => orchestrator.confirmCurrentTurn(identity), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+  });
+
+  it('正文楼确认后追加下一轮通告；失败只影响通告，不倒退已确认游标', async () => {
+    const chat: any[] = [{ mes: '开场' }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: outline.nodes[0].id, turnId: outline.nodes[0].turns[0].id, attemptId: 'attempt-notice' };
+    await recordPendingHostTurn(orchestrator, identity);
+    expect(readAgentConversation_ACU(chat).messages).toHaveLength(0);
+    chat.push({ mes: '<ok>正文', is_user: false });
+    await orchestrator.confirmCurrentTurn(identity, 1);
+    expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(1);
+    const notice = readAgentConversation_ACU(chat).messages;
+    expect(notice).toHaveLength(1);
+    expect(notice[0]).toMatchObject({ kind: 'turn', turnKey: `${stage.stageId}#1#turn-2` });
+    expect(notice[0].text).toContain('第 2 楼正文已确认');
+    expect(chat[0][AGENT_CONVERSATION_FIELD_ACU]).toBeUndefined();
+    expect(chat[1][AGENT_CONVERSATION_FIELD_ACU].segment).toHaveLength(1);
+    await expectCode(() => orchestrator.confirmCurrentTurn(identity, 1), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    expect(readAgentConversation_ACU(chat).messages).toHaveLength(1);
+
+    await orchestrator.continueTask();
+    const secondIdentity = { ...identity, turnId: 'turn-2', attemptId: 'attempt-notice-2' };
+    await recordPendingHostTurn(orchestrator, secondIdentity);
+    chat.push({ mes: '<ok>第二轮正文', is_user: false });
+    saveChat.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('notice save refused'));
+    await expect(orchestrator.confirmCurrentTurn(secondIdentity, 2)).resolves.toBeDefined();
+    expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(2);
+    expect(chat[2][AGENT_CONVERSATION_FIELD_ACU]).toBeUndefined();
+  });
+
+  it('工作流标注可更新、重规划后自动隐藏；不改变确认所用的硬游标', async () => {
+    const { orchestrator, store, executionEngine } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    executionEngine.prepareCurrentTurnInstruction.mockImplementation(async (_lease: unknown, _attempt: unknown, applyOutline: (text: string) => Promise<unknown>, _signal: unknown, updateTurnLabel: (text: string) => Promise<void>) => {
+      if (!store.readPersisted()!.activeTask!.activeStageId) await applyOutline('建立大纲');
+      await updateTurnLabel('先观察');
+      await updateTurnLabel('改成试探');
+      return { identity: {}, instruction: { instruction: '写作指导', attempts: 1 } };
+    });
+    await orchestrator.continueTask();
+    const stage = store.readPersisted()!.activeTask!.stages[0];
+    expect(stage.agentTurnLabel).toEqual({ revision: 1, turnId: 'turn-1', text: '改成试探' });
+    expect(stage).toMatchObject({ completedTurns: 0, activeNodeIndex: 0, activeTurnIndex: 0 });
+    await orchestrator.replanRemaining({ instruction: '换个方向' });
+    expect(store.readPersisted()!.activeTask!.stages[0].agentTurnLabel?.revision).toBe(1);
+    expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(2);
   });
 
   it('continueTask 按仍存在的确认楼层回退硬游标，再把校正后的阶段交给 Agent', async () => {

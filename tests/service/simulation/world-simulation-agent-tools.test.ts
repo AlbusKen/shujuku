@@ -80,6 +80,24 @@ describe('世界推演工具与 EvidenceRegistry', () => {
     expect(results[1].content).toContain('rumor-1');
   });
 
+  it('逐栏归档读取实时折叠新提交，损坏读取保留 failed 而非 empty', async () => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU('live-archive-tools');
+    let archive: unknown = { records: {} };
+    const dependencies = createWorldSimulationToolDependencies_ACU({
+      anchorMessage: '', summary: '', ledger: {}, stagePlan: {}, candidates: [], chronicle: [], projectionPreview: {},
+      liveArchive: () => archive,
+    });
+    archive = { records: { 'arc-new': { archiveRef: 'arc-new', summary: '后续逐栏写入' } } };
+    const current = await runWorldSimulationToolBatch_ACU({ registry, dependencies,
+      calls: [{ kind: 'read', reads: ['chronicle-archive:arc-new'] }] });
+    expect(current[0]).toMatchObject({ status: 'ok', content: expect.stringContaining('后续逐栏写入') });
+    archive = { get records() { throw new Error('WORLD_SIMULATION_SNAPSHOT_INVALID'); } };
+    const corrupted = await runWorldSimulationToolBatch_ACU({ registry, dependencies,
+      calls: [{ kind: 'read', reads: ['chronicle-archive:arc-new'] }] });
+    expect(corrupted[0]).toMatchObject({ status: 'failed', summary: 'WORLD_SIMULATION_SNAPSHOT_INVALID' });
+    expect(corrupted[0].evidenceRef).toBeUndefined();
+  });
+
   it('条目级地址与 chronicle-archive 可调阅详情，未知 id 返回 empty', async () => {
     const registry = createWorldSimulationEvidenceRegistry_ACU('item-tools');
     const dependencies = createWorldSimulationToolDependencies_ACU({

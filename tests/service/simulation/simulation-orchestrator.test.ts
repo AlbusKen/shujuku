@@ -92,6 +92,23 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(f.getEnvelope().ledger).toBe(f.initialLedger);
   });
 
+  it('自动运行结算后重复完成事件不新建运行，同楼新正文和新楼允许新运行', async () => {
+    const f = fixture();
+    const first = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(first).toMatchObject({ status: 'completed' });
+    expect(f.getEnvelope().task?.completedAutoAnchor).toMatchObject({ messageKey: 'number:1', contentDigest: 'digest' });
+    expect(await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '重复' }))
+      .toEqual({ status: 'skipped', reason: 'duplicate' });
+    expect(f.prepare).toHaveBeenCalledOnce();
+    const edited = { ...anchor(), contentDigest: 'new-body' };
+    expect(await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: edited, instruction: '新正文' }))
+      .toMatchObject({ status: 'completed' });
+    const nextFloor = { ...anchor(), messageIndex: 2, messageId: 2, messageKey: 'number:2', contentDigest: 'next-body' };
+    expect(await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: nextFloor, instruction: '下一楼' }))
+      .toMatchObject({ status: 'completed' });
+    expect(f.prepare).toHaveBeenCalledTimes(3);
+  });
+
   it('在途运行期间同锚点触发返回 duplicate、其他触发返回 busy，释放后下一轮触发正常完成', async () => {
     let releasePrepare!: () => void;
     const preparing = new Promise<void>(resolve => { releasePrepare = resolve; });
@@ -120,8 +137,8 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     await expect(running).resolves.toMatchObject({ status: 'completed' });
     expect(f.getEnvelope().task).toMatchObject({ status: 'completed', activeRun: null });
     await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
-      .resolves.toMatchObject({ status: 'completed' });
-    expect(f.prepare).toHaveBeenCalledTimes(2);
+      .resolves.toEqual({ status: 'skipped', reason: 'duplicate' });
+    expect(f.prepare).toHaveBeenCalledTimes(1);
   });
 
   it('取消会传播 AbortSignal，任务落为可恢复的 paused/manual 且不修改 ledger', async () => {
@@ -315,5 +332,28 @@ describe('WorldSimulationOrchestrator_ACU', () => {
       .resolves.toMatchObject({ status: 'failed' });
     expect(f.getEnvelope().task).toMatchObject({ status: 'failed', activeRun: null });
     expect(isWorldSimulationSessionRunning_ACU('chat-a')).toBe(false);
+  });
+});
+
+describe('world simulation terminal run write proof', () => {
+  beforeEach(() => resetWorldSimulationOrchestratorStateForTests_ACU());
+
+  it('a no_change result with confirmed writes commits those writes instead of reporting no_change', async () => {
+    const f = fixture();
+    const { WorldSimulationRunWriteState_ACU } = await import('../../../src/service/simulation/simulation-run-write-state');
+    const proof = new WorldSimulationRunWriteState_ACU(() => ({ ledger: f.getEnvelope().ledger,
+      fields: undefined, archive: { schemaVersion: 1, records: {} } }), 0);
+    f.prepare.mockImplementation(async () => ({ revision: revision(), runWrites: proof, execute: async () => {
+      const next = f.getEnvelope();
+      const ledger = { ...next.ledger, revision: 1 };
+      proof.confirm({ ledger, fields: undefined, archive: { schemaVersion: 1, records: {} } }, []);
+      next.ledger = ledger;
+      return completed;
+    } }));
+    const result = await f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'commit' } });
+    expect(f.commitProjection).toHaveBeenCalledOnce();
+    expect(f.commitProjection.mock.calls[0][0]).toMatchObject({ runWrites: proof,
+      commitCandidate: { baseLedgerRevision: 0, acceptedCandidates: [] } });
   });
 });

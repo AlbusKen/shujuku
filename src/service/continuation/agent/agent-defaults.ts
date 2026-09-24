@@ -617,6 +617,9 @@ function v19DefaultMainAgentNonRootSystemContents_ACU(): string[] {
   return [...new Set([
     ...historical,
     ...current,
+    ...buildDefaultContinuationAgentPrompts_ACU().main
+      .filter(segment => segment.role === 'user' && headings.some(heading => segment.content.startsWith(heading)))
+      .map(segment => segment.content),
     ...MAIN_AGENT_PROMPT_ACU
       .filter(segment => segment.content === AGENT_HISTORY_ANCHOR_TOKEN_ACU)
       .map(segment => segment.content),
@@ -940,6 +943,28 @@ function v34Content_ACU(role: keyof ContinuationAgentPrompts_ACU, content: strin
   return content;
 }
 
+function v35Content_ACU(role: keyof ContinuationAgentPrompts_ACU, content: string): string {
+  if (role === 'main') {
+    if (content.startsWith('我是续写任务的主控 Agent。')) return content
+      .replace('先派工结算维护子代理，让伏笔账本与信息差时间线追上已经发生的真实剧情；再派工策划子代理，拿到本轮的主线推进与伏笔操作建议；最后把各方结果收敛成一段最终写作指导交给正文模型。', '先核对本轮用户要求与已发生剧情，确定轮次焦点并启动 open_round 固定工作流；工作流交付指导后本次主循环结束，待宿主确认新正文或用户中途唤醒后再继续。')
+      .replace('我读它们的能力摘要，决定派谁、给什么任务、附上哪些种子资料地址；它们各自在独立上下文里干活', '固定工作流按状态选择必要角色；用户中途指令可改变路线，我也可在预算内按需单独派工。子代理各自在本次派工的独立上下文里干活')
+      .replace('我审核报告，有问题就带着具体意见重派，而不是替它们执行。', '我只收到可核对的工作流状态或派工回执，不能把子代理未确认的原文当作已提交资料；有缺口时依据当前回执决定读取、调整焦点或如实说明。');
+    if (content.startsWith('我的行动规则：')) return content
+      .replace('形态不是 surge 却通篇高压时，我派工 outline-architect 维护阶段大纲。', '形态不是 surge 却通篇高压时，我在 open_round 的焦点中指出偏差，由固定工作流维护阶段大纲。')
+      + '\n10. 常规路径是核对用户要求与真实剧情、更新本轮焦点标注、open_round 等待工作流回执；合格指导交付后本次主循环结束，不在同一楼重复派工或直接生成正文。下一次真实正文被宿主确认，或用户中途唤醒时再根据新指令与已读证据决定动作；轮次标注不阻断 read 或按需单独派工。';
+    if (content.startsWith('【文本协议规范】')) return content
+      .replace('容错提交、自动修复和 instruction-composer', '容错提交和 instruction-composer')
+      .replace('运行时按固定顺序维护总纲', '工作流在本次运行内按固定顺序维护总纲');
+    if (content.startsWith('【子代理使用规则】')) return content
+      .replace('重复派同一个代理只会得到重复结论时，就该收敛了。', '重复派同一个代理只会得到重复结论时，就该收敛了。\n10. 维护类角色在本次派工内按 ID/栏目读取缺口，用 write_sql 即时提交，再看权威工具回执只补缺栏；跨工作流只有已保存资料可读，不继承它们的私有对话。预算耗尽仍不合格时按结构化缺口回执处理，不建议另派自动修复。用户中途要求可改换路线，在原有身份与预算内按需 read 或单独 delegate。');
+  }
+  if (role === 'arcArchitect' || role === 'maintainer' || role === 'webResearcher') {
+    if (content.startsWith('我的最终交付是一个 JSON 对象：')) return content
+      + '\n本次派工优先按 $FIELD:模块:ID[:栏目] 读取逐栏状态与 revision；用 {"action":"write_sql","sql":"受限 DML"} 只提交仍缺或需修正的栏目。每次写后依据工具回执 status=committed 的 accepted 和新 revision 决定下一条动作，不能凭模型自称成功，也不重复提交已保存的栏目；partials/revisions=null 时先重新读取权威帧。已提交栏目下次工作流可读，但本次私有对话不会继承。未用最终 sql 追加写集时，交 summary 即可；本次预算尽仍有缺栏则如实报错，不能当作 no_change 或另派自动修复。';
+  }
+  return content;
+}
+
 /** 冻结 V33 已装配默认组，供 V34 逐段按完整正文、角色和长度迁移；自定义段不匹配。 */
 const V33_AGENT_PROMPTS_ACU = buildV33ContinuationAgentPrompts_ACU();
 export const CONTINUATION_V33_DEFAULT_LINEAGE_ACU = Object.fromEntries(
@@ -952,12 +977,32 @@ export const CONTINUATION_V33_DEFAULT_LINEAGE_ACU = Object.fromEntries(
   }),
 ) as Record<keyof ContinuationAgentPrompts_ACU, Array<{ index: number; role: string; hash: string; length: number }>>;
 
-/** 构造全部当前 Agent 默认提示词；SQL 只改变资料写集，其他 JSON 动作保持原协议。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** 冻结 V34 已装配默认段；仅完整匹配角色、正文和长度的旧默认段可升级。 */
+const V34_AGENT_PROMPTS_ACU = buildV34ContinuationAgentPrompts_ACU();
+export const CONTINUATION_V34_DEFAULT_LINEAGE_ACU = Object.fromEntries(
+  (Object.keys(V34_AGENT_PROMPTS_ACU) as Array<keyof ContinuationAgentPrompts_ACU>).map(role => {
+    const segments = V34_AGENT_PROMPTS_ACU[role];
+    return [role, segments.map((segment, index) => ({
+      index, role: segment.role, hash: hashAgentPromptContent_ACU(segment.content), length: segment.content.length,
+    })).filter(({ index }) => v35Content_ACU(role, segments[index].content) !== segments[index].content)];
+  }),
+) as Record<keyof ContinuationAgentPrompts_ACU, Array<{ index: number; role: string; hash: string; length: number }>>;
+
+export function buildV34ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const previous = buildV33ContinuationAgentPrompts_ACU();
   const current = { ...previous };
   for (const role of Object.keys(previous) as Array<keyof ContinuationAgentPrompts_ACU>) {
     current[role] = previous[role].map(segment => ({ ...segment, content: v34Content_ACU(role, segment.content) }));
+  }
+  return current;
+}
+
+/** 构造全部当前 Agent 默认提示词；SQL 只改变资料写集，其他 JSON 动作保持原协议。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const previous = buildV34ContinuationAgentPrompts_ACU();
+  const current = { ...previous };
+  for (const role of Object.keys(previous) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    current[role] = previous[role].map(segment => ({ ...segment, content: v35Content_ACU(role, segment.content) }));
   }
   return current;
 }

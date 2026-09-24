@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedger_ACU } from '../../../../src/service/simulation/defaults';
 import { runWorldSimulationWorkflow_ACU } from '../../../../src/service/simulation/agent/agent-workflow';
+import { WorldSimulationRunWriteState_ACU } from '../../../../src/service/simulation/simulation-run-write-state';
 import { createWorldSimulationEvidenceRegistry_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 import type { WorldSimulationLedger_ACU, WorldSimulationPendingFix_ACU } from '../../../../src/service/simulation/model';
 import type { WorldSimulationSubagentOutcome_ACU } from '../../../../src/service/simulation/agent/agent-model';
@@ -71,6 +72,62 @@ describe('世界推演固定工作流', () => {
     expect(env.calls.slice(1).sort()).toEqual(['dramatis-keeper', 'undercurrent-analyst']);
     expect(env.calls).not.toContain('guidance-composer');
     expect(result.outcome).toBe('no_change');
+  });
+
+  it('timekeeper 即时保存后，后续派工读取新账本，独立候选在其上预演且不会重放已保存写入', async () => {
+    const initial = buildEmptyWorldSimulationLedger_ACU();
+    const env = harness(initial, {});
+    let current = initial;
+    const archive = { schemaVersion: 1, records: {} };
+    const runWrites = new WorldSimulationRunWriteState_ACU(() => ({ ledger: current, fields: undefined, archive }), initial.revision);
+    const dimension = {
+      candidateId: 'run-workflow:undercurrent-analyst:1', agentName: 'undercurrent-analyst',
+      patch: { dimensions: { upsert: [{ id: 'dimension-1', name: '边境压力', kind: 'pressure', value: 1,
+        trend: 'rising', rationale: '锚点证据', evidenceRefs: [], expectedRevision: 0 }] } },
+      summary: '补充维度', evidenceRefs: [], uncertainties: [], writableModules: ['dimensions', 'seeds'],
+    };
+    env.subagents.run.mockImplementation(async ({ delegation, promptContext }: any) => {
+      if (delegation.agentName === 'timekeeper') {
+        current = { ...current, revision: 1, clock: { ...current.clock, day: 2 } };
+        runWrites.confirm({ ledger: current, fields: undefined, archive }, [], [{ module: 'clock', id: 'singleton' }]);
+        return noChange('timekeeper');
+      }
+      expect(promptContext.worldState.clock.day).toBe(2);
+      return { agentName: dimension.agentName, status: 'candidate', summary: dimension.summary,
+        evidenceRefs: [], uncertainties: [], candidate: dimension };
+    });
+    const result = await runWorldSimulationWorkflow_ACU({
+      identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
+      opening: { summary: '开局', focus: '压力', dispatchChronicler: false, skipModules: [] },
+      targetModules: ['clock', 'dimensions'], subagents: env.subagents, readCurrent: () => current, runWrites,
+    });
+    expect(result.outcome).toBe('commit');
+    expect(result.ledger).toMatchObject({ revision: 2, clock: { day: 2 } });
+    expect(result.ledger.dimensions).toHaveLength(1);
+    expect(result.commitCandidate?.acceptedCandidates).toEqual([expect.objectContaining({ candidateId: dimension.candidateId, patch: dimension.patch })]);
+  });
+
+  it('已确认即时写入与终局候选重叠时拒绝，而不悄悄丢弃候选', async () => {
+    const initial = buildEmptyWorldSimulationLedger_ACU();
+    const env = harness(initial, {});
+    let current = initial;
+    const archive = { schemaVersion: 1, records: {} };
+    const runWrites = new WorldSimulationRunWriteState_ACU(() => ({ ledger: current, fields: undefined, archive }), initial.revision);
+    env.subagents.run.mockImplementation(async ({ delegation }: any) => {
+      if (delegation.agentName === 'timekeeper') {
+        current = { ...current, revision: 1, clock: { ...current.clock, day: 2 } };
+        runWrites.confirm({ ledger: current, fields: undefined, archive }, [], [{ module: 'clock', id: 'singleton' }]);
+        return { agentName: 'timekeeper', status: 'candidate', summary: '再次推进', evidenceRefs: [], uncertainties: [],
+          candidate: { candidateId: 'overlap', agentName: 'timekeeper', patch: { clock: { days: 1 } },
+            summary: '再次推进', evidenceRefs: [], uncertainties: [], writableModules: ['clock'] } };
+      }
+      return noChange(delegation.agentName);
+    });
+    await expect(runWorldSimulationWorkflow_ACU({
+      identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
+      opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
+      targetModules: ['clock'], subagents: env.subagents, readCurrent: () => current, runWrites,
+    })).rejects.toThrow('WORLD_SIMULATION_RUN_WRITE_OVERLAP');
   });
 
   it('正文指纹未变且预期模块均完成时不调用任何子代理', async () => {
@@ -146,69 +203,53 @@ describe('世界推演固定工作流', () => {
       subagents: env.subagents,
     });
     expect(env.calls).toContain('guidance-composer');
-    expect(result.outcome).toBe('commit');
+    expect(result.outcome).toBe('escalate');
     expect(result.ledger.clock.day).toBe(2);
     expect(result.ledger.guidance.signals).toEqual([]);
     expect(result.pendingFixes).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'guidance' })]));
   });
 
-  it('自动修复成功后清除对应 pendingFix，且修复派工发生在常规派工之后', async () => {
+  it('已有 pending 在正常派工内补齐，不另开自动修复派工', async () => {
     const ledger = buildEmptyWorldSimulationLedger_ACU();
-    ledger.pendingFixes = [pending('clock', 1)];
+    ledger.pendingFixes = [pending('clock', 3)];
     const fixed = {
-      agentName: 'timekeeper', status: 'candidate' as const, summary: '修复时钟', evidenceRefs: [] as string[], uncertainties: [] as string[],
+      agentName: 'timekeeper', status: 'candidate' as const, summary: '正常派工补齐时钟', evidenceRefs: [] as string[], uncertainties: [] as string[],
       candidate: {
-        candidateId: 'run-workflow:timekeeper:2', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '次日' } },
-        summary: '修复时钟', evidenceRefs: [], uncertainties: [], writableModules: ['clock'],
+        candidateId: 'run-workflow:timekeeper:1', agentName: 'timekeeper', patch: { clock: { days: 1, storyTime: '次日' } },
+        summary: '正常派工补齐时钟', evidenceRefs: [], uncertainties: [], writableModules: ['clock'],
       },
     };
     const env = harness(ledger, {
-      timekeeper: [noChange('timekeeper'), fixed],
+      timekeeper: [fixed],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
       'guidance-composer': [noChange('guidance-composer')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
-      opening: { summary: '开局', focus: '修复时钟', dispatchChronicler: false, skipModules: [] },
-      subagents: env.subagents,
+      opening: { summary: '开局', focus: '补齐时钟', dispatchChronicler: false, skipModules: [] }, subagents: env.subagents,
     });
-    expect(env.calls.filter(name => name === 'timekeeper')).toEqual(['timekeeper', 'timekeeper']);
+    expect(env.calls.filter(name => name === 'timekeeper')).toEqual(['timekeeper']);
     expect(result.ledger.clock.storyTime).toBe('次日');
     expect(result.pendingFixes.some(item => item.module === 'clock')).toBe(false);
   });
 
-  it('失败满 3 次或关闭自动修复时不派修复工，并升级主会话', async () => {
-    const exhausted = buildEmptyWorldSimulationLedger_ACU();
-    exhausted.pendingFixes = [pending('clock', 3)];
-    const first = harness(exhausted, {
-      timekeeper: [noChange('timekeeper')],
+  it('未补齐的 pending 直报主会话，不派独立修复', async () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    ledger.pendingFixes = [pending('clock', 1)];
+    const env = harness(ledger, {
+      timekeeper: [{ agentName: 'timekeeper', status: 'failed', completion: 'failed', summary: '仍缺字段', evidenceRefs: [], uncertainties: [],
+        unresolvedIssues: [{ module: 'clock', source: 'missing_field', path: 'clock#singleton.storyTime', message: '缺字段' }] }],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
     });
-    const escalated = await runWorldSimulationWorkflow_ACU({
-      identity: first.identity, settings: first.settings, promptContext: first.promptContext, registry: first.registry, tools: first.tools,
-      opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
-      subagents: first.subagents,
+    const result = await runWorldSimulationWorkflow_ACU({
+      identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
+      opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] }, subagents: env.subagents,
     });
-    expect(first.calls.filter(name => name === 'timekeeper')).toEqual(['timekeeper']);
-    expect(escalated).toMatchObject({ outcome: 'escalate', escalated: true });
-
-    const disabledLedger = buildEmptyWorldSimulationLedger_ACU();
-    disabledLedger.pendingFixes = [pending('clock', 1)];
-    const second = harness(disabledLedger, {
-      timekeeper: [noChange('timekeeper')],
-      'undercurrent-analyst': [noChange('undercurrent-analyst')],
-      'dramatis-keeper': [noChange('dramatis-keeper')],
-    });
-    second.settings.workflow.autoFixEnabled = false;
-    const disabled = await runWorldSimulationWorkflow_ACU({
-      identity: second.identity, settings: second.settings, promptContext: second.promptContext, registry: second.registry, tools: second.tools,
-      opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
-      anchorMaterialsCommitted: true,
-      subagents: second.subagents,
-    });
-    expect(second.calls.filter(name => name === 'timekeeper')).toEqual(['timekeeper']);
-    expect(disabled.outcome).toBe('escalate');
+    expect(env.calls.filter(name => name === 'timekeeper')).toEqual(['timekeeper']);
+    expect(result).toMatchObject({ outcome: 'escalate', escalated: true });
+    expect(result.pendingFixes[0].violations).toContainEqual({ path: 'clock#singleton.storyTime', message: '缺字段' });
   });
+
 });

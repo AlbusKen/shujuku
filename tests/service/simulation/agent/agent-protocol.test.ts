@@ -13,6 +13,7 @@ import {
   parseWorldSimulationPlannerOutput_ACU,
   parseWorldSimulationReviewerResult_ACU,
   parseWorldSimulationSpecialistResult_ACU,
+  parseWorldSimulationSqlFieldWrites_ACU,
   recordWorldSimulationProtocolFailure_ACU,
   renderWorldSimulationDirectorProtocolRejection_ACU,
   renderWorldSimulationPlannerProtocolRejection_ACU,
@@ -304,5 +305,24 @@ describe('世界推演 Agent 协议', () => {
       expect(compactWorldSimulationProtocolError_ACU(error).reasonCode, sql).toBe(reasonCode);
     }
     expect(() => parse("UPDATE clock SET days = 1 WHERE expected_revision = 0", { patch: { clock: { days: 1 } } })).toThrowError(/SQL_PATCH_AMBIGUOUS/);
+  });
+});
+
+describe('世界推演逐栏 SQL 意图', () => {
+  it('非法栏目逐栏拒绝且保留合法栏目，陈旧 revision 交给提交器校验', () => {
+    const result = parseWorldSimulationSqlFieldWrites_ACU("UPDATE actors SET goals = '[\"寻找线索\"]', made_up = 'x' WHERE id = 'actor-1' AND expected_revision = 2", 'dramatis-keeper');
+    expect(result.intents).toMatchObject([{ module: 'actors', id: 'actor-1', expectedRevision: 2, fields: { goals: ['寻找线索'] } }]);
+    expect(result.rejected).toEqual([expect.objectContaining({ path: 'sql[0].actors.made_up' })]);
+  });
+
+  it('角色权限、单例条件及归档操作 fail-closed', () => {
+    expect(parseWorldSimulationSqlFieldWrites_ACU("INSERT INTO actors (id, name, expected_revision) VALUES ('actor-1', 'A', 0)", 'timekeeper').intents).toEqual([]);
+    expect(parseWorldSimulationSqlFieldWrites_ACU("UPDATE clock SET story_time = '次日' WHERE id = 'fake' AND expected_revision = 0", 'timekeeper').rejected).toHaveLength(1);
+    expect(parseWorldSimulationSqlFieldWrites_ACU("DELETE FROM chronicle_archive WHERE archive_ref = 'a' AND reason = 'b'", 'chronicler').intents).toEqual([]);
+  });
+
+  it('语法损坏与无效 revision 不伪造写入', () => {
+    expect(() => parseWorldSimulationSqlFieldWrites_ACU('DROP TABLE actors', 'dramatis-keeper')).toThrow();
+    expect(parseWorldSimulationSqlFieldWrites_ACU("UPDATE actors SET name = 'A' WHERE id = 'actor-1' AND expected_revision = -1", 'dramatis-keeper').intents).toEqual([]);
   });
 });

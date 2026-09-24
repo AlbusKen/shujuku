@@ -287,3 +287,235 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(result.usage).toBeNull();
   });
 });
+
+describe('子代理逐栏工具会话', () => {
+  it('连续真实请求只补缺栏，保存回读后才发 accepted；下一次派工不继承 transcript', async () => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleFieldSnapshot_ACU, readAgentModuleSnapshot_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    const input = input_ACU();
+    input.budget.maxExtraReads = 1;
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    input.resolveContext.chat[0] = { mes: '既有正文', is_user: false, [AGENT_MODULE_FIELD_ACU]: { ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 1 } };
+    input.resolveContext.moduleSnapshot = { ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 1 };
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    input.writeSql = ({ role, sql, resolvePage }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, resolvePage });
+    const firstSql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0)";
+    const restSql = "UPDATE hooks SET status = 'planted', importance = 'mid', planted_index = 1, planned_payoff = '' WHERE id = 'H1' AND expected_revision = 1";
+    const replies = [
+      JSON.stringify({ action: 'write_sql', sql: firstSql }),
+      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
+      JSON.stringify({ action: 'write_sql', sql: restSql }),
+      finalReply_ACU,
+    ];
+    const messages: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async value => { messages.push(value); return replies.shift() ?? finalReply_ACU; },
+    });
+    try {
+      const result = await runtime.run(input);
+      expect(result.usedFieldWrites).toBe(true);
+      expect(result.iterations).toBe(4);
+      expect(messages.slice(0, 4).every(request => request.at(-1)?.role === 'assistant' && request.at(-1)?.content.startsWith('{'))).toBe(true);
+      expect(messages[1].at(-2)?.role).toBe('user');
+      expect(saveChat).toHaveBeenCalledTimes(2);
+      expect(messages[1].map(item => item.content).join('\n')).toContain('"status":"committed"');
+      expect(messages[1].map(item => item.content).join('\n')).toContain('"field":"summary","revision":1');
+      expect(messages[2].map(item => item.content).join('\n')).toContain('"missingFields"');
+      expect(messages[3].map(item => item.content).join('\n')).toContain('"field":"status"');
+      expect(messages[2].some(item => item.content.includes('write_sql 轮次剩余 3 / 4'))).toBe(true);
+      expect(messages[3].some(item => item.content.includes('"remainingToolRounds":0,"remainingWriteRounds":2'))).toBe(true);
+      expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.H1.status).toBe('complete');
+      expect(readAgentModuleSnapshot_ACU(chat).hooks).toHaveLength(1);
+      messages.length = 0;
+      await runtime.run({ ...input, budget: { ...input.budget, maxExtraReads: 0 } });
+      expect(messages[0].map(item => item.content).join('\n')).not.toContain('"action":"write_sql","status":"committed"');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it('逐栏提交仅有部分栏目时最终空写集不能宣称合格，回报精确缺栏', async () => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const input = input_ACU();
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
+    const replies = [JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async () => replies.shift() ?? finalReply_ACU });
+    input.writeSql = ({ role, sql: statement, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql: statement, isCurrent });
+    try {
+      const result = await runtime.run(input);
+      expect(saveChat).toHaveBeenCalledOnce();
+      expect(result.completion).toBe('failed');
+      expect(result.unresolvedIssues).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'hooks', id: 'H1', path: 'hooks#H1.status' })]));
+      expect(result.acceptedKeys).toContain('hooks:H1:summary');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it('无效 write_sql 动作只回灌协议拒绝，修正后才进入生产保存', async () => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const input = input_ACU();
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
+    const replies = [JSON.stringify({ action: 'write_sql', sql, extra: 'forbidden' }),
+      JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+    });
+    input.writeSql = ({ role, sql: statement, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql: statement, isCurrent });
+    try {
+      const result = await runtime.run(input);
+      expect(result.iterations).toBe(3);
+      expect(saveChat).toHaveBeenCalledOnce();
+      expect(sent[1].at(-2)?.content).toContain('工具动作未执行');
+      expect(sent[1].at(-2)?.content).not.toContain('"status":"committed"');
+      expect(sent[2].at(-2)?.content).toContain('"status":"committed"');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it('只有合法 ID 的栏目拒绝可给权威读取地址，不确定状态不提供旧地址', async () => {
+    const input = input_ACU();
+    const sql = "UPDATE hooks SET status = 'invalid' WHERE id = 'H1' AND expected_revision = 0";
+    const replies = [JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; } });
+    input.writeSql = async () => ({ status: 'rejected', accepted: [], rejected: [{ path: 'hooks#H1.status', reason: 'invalid status' },
+      { path: 'sql[0].hooks.unknown', reason: 'invalid column' }, { path: 'host', reason: 'not an ID' }],
+    partials: [], revisions: buildEmptyAgentModuleSnapshot_ACU().revisions, constraintProposals: [] });
+    await runtime.run(input);
+    expect(sent[1].at(-2)?.content).toContain('"readAddresses":["$FIELD:hooks:H1"]');
+    expect(sent[1].at(-2)?.content).not.toContain('$FIELD:hooks:host');
+
+    sent.length = 0;
+    replies.push(JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU);
+    input.writeSql = async () => ({ status: 'readback_failed', accepted: [], rejected: [{ path: 'hooks#H1.status', reason: 'readback' }],
+      partials: null, revisions: null, constraintProposals: [], recovery: 'unavailable' });
+    await runtime.run(input);
+    expect(sent[1].at(-2)?.content).toContain('"readAddresses":[]');
+  });
+
+  it('提交端口抛出上下文失效时回执标明状态未知与剩余额度，不伪造权威缺栏', async () => {
+    const input = input_ACU();
+    const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
+    input.writeSql = async () => { throw new Error('聊天锚点已变化'); };
+    const replies = [JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; } });
+    const result = await runtime.run(input);
+    const receipt = JSON.parse(sent[1].at(-2)?.content.match(/\{.*"action":"write_sql".*\}/)?.[0] ?? '{}');
+    expect(receipt).toMatchObject({ status: 'rejected', accepted: [], partials: null, revisions: null,
+      readAddresses: [], remainingToolRounds: 1, remainingWriteRounds: 3 });
+    expect(receipt.reason).toContain('聊天锚点已变化');
+    expect(result.usedFieldWrites).toBe(false);
+  });
+
+  it('损坏资料帧的字段读取显式失败且不缓存为已放行；修复后可重读', async () => {
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    const input = input_ACU();
+    input.budget.maxExtraReads = 2;
+    input.resolveContext.chat[1][AGENT_MODULE_FIELD_ACU] = { schemaVersion: 4, invalid: true };
+    const replies = [
+      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
+      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
+      finalReply_ACU,
+    ];
+    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => {
+        sent.push(messages);
+        if (sent.length === 2) delete input.resolveContext.chat[1][AGENT_MODULE_FIELD_ACU];
+        return replies.shift() ?? finalReply_ACU;
+      },
+    });
+    await runtime.run(input);
+    expect(sent[1].at(-2)?.content).toContain('"status":"failed"');
+    expect(sent[1].at(-2)?.content).toContain('资料帧校验失败');
+    expect(sent[2].at(-2)?.content).toContain('"status":"unwritten"');
+    expect(sent[2].at(-2)?.content).not.toContain('已放行');
+    expect(sent[2].at(-1)).toMatchObject({ role: 'assistant', content: '{\n  "summary": "' });
+  });
+
+  it('损坏资料帧的派工种子读取立即失败，不发送模型请求', async () => {
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    const input = input_ACU();
+    input.delegation.reads = ['$FIELD:hooks:H1'];
+    input.resolveContext.chat[1][AGENT_MODULE_FIELD_ACU] = { schemaVersion: 4, invalid: true };
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async () => { throw new Error('不得发送'); },
+    });
+    await expect(runtime.run(input)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SUBAGENT_FAILED' } });
+  });
+
+  it('补偿失败回执不提供过时缺栏，下次派工不继承失败历史', async () => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const input = input_ACU();
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockRejectedValueOnce(new Error('rollback failed'));
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    input.writeSql = ({ role, sql, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent });
+    const replies = [JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)" }), finalReply_ACU];
+    const messages: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async value => { messages.push(value); return replies.shift() ?? finalReply_ACU; } });
+    try {
+      await runtime.run(input);
+      const feedback = messages[1].at(-2)?.content ?? '';
+      expect(feedback).toContain('"recovery":"failed"');
+      expect(feedback).toContain('"partials":null');
+      expect(feedback).toContain('"revisions":null');
+      expect(feedback).toContain('"readAddresses":[]');
+      messages.length = 0;
+      await runtime.run({ ...input, writeSql: undefined });
+      expect(messages[0].some(message => message.content.includes('"recovery":"failed"'))).toBe(false);
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it('拒绝或保存失败不标记已提交，回执只留本次会话', async () => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const input = input_ACU();
+    input.budget.maxExtraReads = 2;
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('disk')).mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    input.writeSql = ({ role, sql }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql });
+    const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
+    const replies = [JSON.stringify({ action: 'write_sql', sql }), JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const messages: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async value => { messages.push(value); return replies.shift() ?? finalReply_ACU; },
+    });
+    try {
+      const result = await runtime.run(input);
+      expect(result.usedFieldWrites).toBe(true);
+      const failed = messages[1].map(item => item.content).join('\n');
+      expect(failed).toContain('"status":"persist_failed"');
+      expect(failed).toContain('"accepted":[]');
+      expect(failed).toContain('"recovery":"saved"');
+      const accepted = messages[2].map(item => item.content).join('\n');
+      expect(accepted).toContain('"status":"committed"');
+      expect(accepted).toContain('"field":"summary","revision":1');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+});

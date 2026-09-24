@@ -224,6 +224,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU = 'spv4.0-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU = 'spv4.1-continuation-sql-dml-v33';
 /** 清理活动默认段中的旧 JSON 写集指令，逐段迁移且保留用户自定义。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU = 'spv4.2-continuation-sql-prompts-v34';
+/** 固定工作流与逐栏工具回执的提示词版本。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU = 'spv4.3-continuation-session-field-prompts-v35';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -268,7 +270,7 @@ export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptS
 }
 
 export function buildDefaultContinuationWorkflowSettings_ACU(): ContinuationSettings_ACU['workflow'] {
-  return { autoFixEnabled: true, autoFixMaxAttempts: 3, reviseLimit: 3, repairMaxExtraReads: 2 };
+  return { reviseLimit: 3 };
 }
 
 /** 全部渠道角色默认沿用全局渠道配置，保证旧信封无感迁移。 */
@@ -316,7 +318,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU,
   };
 }
 

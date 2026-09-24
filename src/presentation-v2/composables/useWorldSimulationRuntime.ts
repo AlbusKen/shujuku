@@ -49,7 +49,7 @@ export function projectWorldSimulationSessionFromConversation_ACU(
   messages: WorldSimulationUiSnapshot_ACU['conversation']['messages'],
 ): WorldSimulationSessionInput_ACU[] {
   return messages
-    .filter(message => message.kind !== 'handoff')
+    .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent' && message.kind !== 'model_feedback')
     .map(message => {
       const persistedKind = typeof message.eventKind === 'string'
         && (WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU as readonly string[]).includes(message.eventKind)

@@ -132,7 +132,7 @@ describe('续写资料逐栏写入与分栏视图', () => {
     expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.status).toBe('partial');
 
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt(1, { hooks: [hook('P1') as any] }));
-    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.status).toBe('legacy_unknown');
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.P1?.status).toBe('complete');
     expect(readAgentModuleSnapshot_ACU(chat).hooks.map(item => item.id)).toEqual(['P1']);
   });
 

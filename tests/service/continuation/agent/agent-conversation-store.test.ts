@@ -4,6 +4,7 @@ import {
   AGENT_CONVERSATION_TEXT_LIMIT_ACU,
   appendAgentConversation_ACU,
   appendAgentConversationToChat_ACU,
+  appendConfirmedAgentTurn_ACU,
   appendPreparedAgentConversationMessages_ACU,
   buildEmptyAgentConversation_ACU,
   clearAgentConversationField_ACU,
@@ -11,6 +12,7 @@ import {
   lastRuntimeSnapshotText_ACU,
   readActiveAgentConversationCompactionMark_ACU,
   readAgentConversation_ACU,
+  readAgentConversationCompactionSource_ACU,
   readAgentConversationTimeline_ACU,
   renderAgentConversationMessages_ACU,
   validateAgentConversationSnapshot_ACU,
@@ -24,6 +26,7 @@ import {
 } from '../../../../src/service/continuation/agent/agent-model';
 import { ContinuationValidationError_ACU } from '../../../../src/service/continuation/model';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
+import { getActiveChatStorageIdentity_ACU } from '../../../../src/data/storage/chat-history';
 
 const saveChat = vi.fn(async () => undefined);
 
@@ -51,20 +54,20 @@ function v2Mark_ACU(compactedThroughId = 2): any {
 beforeEach(() => { saveChat.mockReset(); saveChat.mockResolvedValue(undefined); });
 
 describe('会话快照校验', () => {
-  it('结构非法整份作废，个别条目非法只丢该条', () => {
+  it('结构或条目非法整份作废，不把损坏的旧记录伪装成有效历史', () => {
     expect(validateAgentConversationSnapshot_ACU(null)).toBeNull();
     expect(validateAgentConversationSnapshot_ACU({ schemaVersion: 99, messages: [] })).toBeNull();
     expect(validateAgentConversationSnapshot_ACU(snapshotWith('not-an-array' as any))).toBeNull();
 
-    const snapshot = validateAgentConversationSnapshot_ACU(snapshotWith([
+    expect(validateAgentConversationSnapshot_ACU(snapshotWith([
       { id: 1, kind: 'user', text: '有效', digest: '你的消息', turnKey: 't1', at: 5 },
       { id: 2, kind: 'unknown-kind', text: '种类非法' },
       { id: 3, kind: 'agent', text: '   ' },
       { id: 0, kind: 'agent', text: 'id 非法' },
       { id: 7, kind: 'agent', text: '也有效' },
-    ]));
-    expect(snapshot!.messages.map(message => message.id)).toEqual([1, 7]);
-    // nextId 必须超过已有最大 id，否则追加会撞号。
+    ]))).toBeNull();
+    // 仍可兼容旧快照里过低的 nextId，但不得丢弃合法消息。
+    const snapshot = validateAgentConversationSnapshot_ACU(snapshotWith([{ id: 7, kind: 'agent', text: '有效' }]));
     expect(snapshot!.nextId).toBe(8);
   });
 });
@@ -230,6 +233,24 @@ describe('会话落盘', () => {
     expect(await appendPreparedAgentConversationMessages_ACU([], [message_ACU(2, 'user', '无处可放')])).toBe(false);
   });
 
+  it('首楼 read 原文跨正文楼仍在模型历史里；确认通告只写对应正文楼且去重', async () => {
+    const chat: any[] = [{ mes: '开场' }];
+    useChat(chat);
+    await appendAgentConversationToChat_ACU([{ kind: 'tool', text: '### 原文（$STORY_TAIL）\n首次读到的守门人手势', digest: '调阅 $STORY_TAIL', readKey: '$STORY_TAIL', turnKey: 's#1#t1' }], chat);
+    chat.push({ mes: '第一轮正文', is_user: false });
+    expect(await appendConfirmedAgentTurn_ACU(chat, 1, 's#1#t2', '正文已确认，继续第二轮')).toBe(true);
+    expect(await appendConfirmedAgentTurn_ACU(chat, 1, 's#1#t2', '重复的结束事件')).toBe(false);
+    const rendered = renderAgentConversationMessages_ACU(readAgentConversation_ACU(chat));
+    expect(rendered.map(item => item.content).join('\n')).toContain('首次读到的守门人手势');
+    expect(rendered.map(item => item.content).join('\n')).toContain('正文已确认，继续第二轮');
+    expect(chat[0][AGENT_CONVERSATION_FIELD_ACU].segment).toHaveLength(1);
+    expect(chat[1][AGENT_CONVERSATION_FIELD_ACU].segment).toHaveLength(1);
+    expect(readAgentConversation_ACU(chat.slice(0, 1)).messages.map(item => item.kind)).toEqual(['tool']);
+    chat.push({ mes: '用户新消息', is_user: true });
+    expect(await appendConfirmedAgentTurn_ACU(chat, 1, 's#1#t3', '迟到事件')).toBe(false);
+    expect(chat[2][AGENT_CONVERSATION_FIELD_ACU]).toBeUndefined();
+  });
+
   it('压缩标记写入末楼；已有更大的标记时保持不动', async () => {
     const chat: any[] = [{ mes: 'a' }];
     useChat(chat);
@@ -237,6 +258,48 @@ describe('会话落盘', () => {
     expect(chat[0][AGENT_CONVERSATION_FIELD_ACU].compaction.compactedThroughId).toBe(5);
     expect(await writeAgentConversationCompactionMark_ACU(chat, { compactedThroughId: 3, report: '更小的标记', at: 2 })).toBe(false);
     expect(chat[0][AGENT_CONVERSATION_FIELD_ACU].compaction.report).toBe('报告一');
+  });
+
+  it('并发追加、Swipe 和更换末楼时拒绝过期标记且不写盘', async () => {
+    const early = { mes: '正文 1', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'agent', '旧动作', { turnKey: 't1' })]) };
+    const anchor: any = { mes: '正文 2', swipe_id: 0, [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(2, 'tool', '旧回执', { turnKey: 't1' })]) };
+    const chat: any[] = [early, anchor];
+    useChat(chat);
+    const mark = v2Mark_ACU(2);
+    const expected = { fingerprint: readAgentConversationCompactionSource_ACU(chat).fingerprint, anchor, swipeId: '0', chatIdentity: getActiveChatStorageIdentity_ACU(chat) };
+    anchor[AGENT_CONVERSATION_FIELD_ACU] = floorRecordWith([message_ACU(2, 'tool', '旧回执', { turnKey: 't1' }), message_ACU(3, 'user', '中途新指令', { turnKey: 't2' })]);
+    expect(await writeAgentConversationCompactionMark_ACU(chat, mark, expected)).toBe(false);
+    expect(saveChat).not.toHaveBeenCalled();
+    anchor[AGENT_CONVERSATION_FIELD_ACU] = floorRecordWith([message_ACU(2, 'tool', '旧回执', { turnKey: 't1' })]);
+    anchor.swipe_id = 1;
+    expect(await writeAgentConversationCompactionMark_ACU(chat, mark, expected)).toBe(false);
+    anchor.swipe_id = 0;
+    chat.push({ mes: '新末楼' });
+    expect(await writeAgentConversationCompactionMark_ACU(chat, mark, expected)).toBe(false);
+    expect(readAgentConversation_ACU(chat).messages.map(item => item.text)).toEqual(['旧动作', '旧回执']);
+  });
+
+  it('标记保存失败仍保留原始消息与原楼层字段', async () => {
+    const chat: any[] = [{ mes: '正文 1', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'agent', '旧动作')]) }, { mes: '正文 2' }];
+    useChat(chat);
+    const anchor = chat[1];
+    const expected = { fingerprint: readAgentConversationCompactionSource_ACU(chat).fingerprint, anchor, swipeId: '0', chatIdentity: getActiveChatStorageIdentity_ACU(chat) };
+    saveChat.mockRejectedValueOnce(new Error('host refused'));
+    await expect(writeAgentConversationCompactionMark_ACU(chat, { compactedThroughId: 1, report: '摘要', at: 1 }, expected)).rejects.toBeInstanceOf(ContinuationValidationError_ACU);
+    expect(chat[1][AGENT_CONVERSATION_FIELD_ACU]).toBeUndefined();
+    expect(readAgentConversation_ACU(chat).messages.map(item => item.text)).toEqual(['旧动作']);
+  });
+
+  it('损坏楼层、损坏旧快照和冲突消息 ID 均在读取时明确失败', () => {
+    const brokenSegment = [{ mes: '正文', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'agent', '原文'), { id: 2, kind: 'invalid' }]) }];
+    expect(() => readAgentConversation_ACU(brokenSegment)).toThrow(ContinuationValidationError_ACU);
+    const brokenLegacy = [{ mes: '正文', [AGENT_CONVERSATION_FIELD_ACU]: snapshotWith([{ id: 1, kind: 'agent', text: '原文' }, { id: 0, kind: 'agent', text: '坏记录' }]) }];
+    expect(() => readAgentConversation_ACU(brokenLegacy)).toThrow(ContinuationValidationError_ACU);
+    const duplicates = [
+      { mes: '正文 1', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'agent', '原文')]) },
+      { mes: '正文 2', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'tool', '冲突')]) },
+    ];
+    expect(() => readAgentConversation_ACU(duplicates)).toThrow(ContinuationValidationError_ACU);
   });
 
   it('写盘失败时还原楼层字段，不留半成品', async () => {
@@ -290,11 +353,17 @@ describe('会话追加与渲染', () => {
     expect(next.nextId).toBe(3);
   });
 
-  it('超长文本被截断并如实标注', () => {
+  it('展示通告过长时截断标注，不截断模型动作、工具结果及用户要求', () => {
     const long = 'x'.repeat(AGENT_CONVERSATION_TEXT_LIMIT_ACU + 500);
-    const next = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [{ kind: 'tool', text: long, digest: '', turnKey: '' }]);
+    const next = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+      { kind: 'turn', text: long, digest: '', turnKey: '' },
+      { kind: 'agent', text: long, digest: '', turnKey: '' },
+      { kind: 'tool', text: long, digest: '', turnKey: '' },
+      { kind: 'user', text: long, digest: '', turnKey: '' },
+    ]);
     expect(next.messages[0].text.length).toBeLessThan(long.length);
     expect(next.messages[0].text).toContain('已截断');
+    expect(next.messages.slice(1).every(message => message.text === long)).toBe(true);
   });
 
   it('运行时快照不截断，目录正文必须完整到达模型', () => {

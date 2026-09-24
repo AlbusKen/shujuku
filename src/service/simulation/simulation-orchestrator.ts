@@ -11,7 +11,8 @@ import {
   type WorldSimulationStageRevision_ACU,
   type WorldSimulationTriggerKind_ACU,
 } from './model';
-import { endWorldSimulationSessionRun_ACU } from './agent/agent-session-log';
+import { endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU } from './agent/agent-session-log';
+import type { WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
 
 export interface WorldSimulationStorePort_ACU {
   read(): WorldSimulationEnvelope_ACU | null;
@@ -19,6 +20,7 @@ export interface WorldSimulationStorePort_ACU {
 }
 export interface WorldSimulationPreparedRun_ACU {
   revision: WorldSimulationStageRevision_ACU;
+  runWrites?: WorldSimulationRunWriteState_ACU;
   execute(identity: WorldSimulationRunIdentity_ACU): Promise<WorldSimulationMainLoopResult_ACU>;
 }
 export interface WorldSimulationOrchestratorDependencies_ACU {
@@ -27,8 +29,10 @@ export interface WorldSimulationOrchestratorDependencies_ACU {
   allocateId(kind: 'task' | 'stage' | 'run' | 'timeline'): string;
   prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationPreparedRun_ACU>;
   assertAnchorCurrent(anchor: WorldSimulationAnchorIdentity_ACU): void | Promise<void>;
+  readResumeLedgerRevision?(identity: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationAnchorIdentity_ACU): number | Promise<number>;
   appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string; idempotent?: boolean }): Promise<void>;
-  commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string }): Promise<void>;
+  commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string; runWrites?: WorldSimulationRunWriteState_ACU }): Promise<WorldSimulationAnchorIdentity_ACU | void>;
+  persistCompletion?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; outcome: 'commit' | 'no_change'; summary: string }): Promise<void>;
 }
 /**
  * skipped 的各原因：
@@ -106,11 +110,11 @@ function sameTrigger_ACU(run: WorldSimulationRunIdentity_ACU | null, input: Worl
     || run.triggerConversationMessageId === (input.triggerConversationMessageId ?? null);
 }
 
-function assertRunCurrent_ACU(envelope: WorldSimulationEnvelope_ACU | null, identity: WorldSimulationRunIdentity_ACU): void {
+function assertRunCurrent_ACU(envelope: WorldSimulationEnvelope_ACU | null, identity: WorldSimulationRunIdentity_ACU, expectedRevision = identity.baseLedgerRevision): void {
   const active = envelope?.task?.activeRun;
   if (!active || envelope?.task?.taskId !== identity.taskId || active.runId !== identity.runId) throw new Error('WORLD_SIMULATION_RUN_STALE');
   if (envelope.activeStageId !== identity.stageId || active.stageRevision !== identity.stageRevision) throw new Error('WORLD_SIMULATION_STAGE_STALE');
-  if (envelope.ledger.revision !== identity.baseLedgerRevision) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+  if (envelope.ledger.revision !== expectedRevision) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
 }
 
 function errorFromUnknown_ACU(error: unknown): WorldSimulationError_ACU {
@@ -174,6 +178,12 @@ export class WorldSimulationOrchestrator_ACU {
     const persisted = this.dependencies.store.read();
     if (input.triggerKind === 'assistant_completed' && persisted && !persisted.settings.autoTriggerEnabled) return { status: 'skipped', reason: 'disabled' };
     const chatIdentity = input.anchor.chatIdentity;
+    const settled = persisted?.task?.completedAutoAnchor;
+    if (input.triggerKind === 'assistant_completed' && persisted?.task?.status === 'completed' && settled
+      && settled.chatIdentity === input.anchor.chatIdentity && settled.messageKey === input.anchor.messageKey
+      && settled.swipeId === input.anchor.swipeId && settled.contentDigest === input.anchor.contentDigest) {
+      return { status: 'skipped', reason: 'duplicate' };
+    }
     if (this.isInFlight(chatIdentity)) {
       const active = persisted?.task?.activeRun ?? null;
       if (sameTrigger_ACU(active, input)) return { status: 'skipped', reason: 'duplicate' };
@@ -206,7 +216,8 @@ export class WorldSimulationOrchestrator_ACU {
     const completion = (async (): Promise<WorldSimulationOrchestratorResult_ACU> => {
       try {
         await this.dependencies.assertAnchorCurrent(input.anchor);
-        assertRunCurrent_ACU(envelope, identity);
+        const expectedRevision = await this.dependencies.readResumeLedgerRevision?.(identity, input.anchor) ?? identity.baseLedgerRevision;
+        assertRunCurrent_ACU(envelope, identity, expectedRevision);
         if (instruction && this.dependencies.appendUserMessage) {
           await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction, idempotent: true });
         }
@@ -312,6 +323,25 @@ export class WorldSimulationOrchestrator_ACU {
     void this.start({ triggerKind: 'assistant_completed', anchor: pending.anchor, instruction: pending.instruction }).catch((): void => undefined);
   }
 
+  private async reportCompletion_ACU(
+    identity: WorldSimulationRunIdentity_ACU,
+    anchor: WorldSimulationAnchorIdentity_ACU,
+    outcome: 'commit' | 'no_change',
+    summary: string,
+  ): Promise<void> {
+    logWorldSimulationSession_ACU(identity.chatIdentity, {
+      kind: 'run_completed', title: outcome === 'commit' ? '世界推演已提交' : '世界推演无变化', detail: summary, agentName: 'world-director',
+    });
+    try {
+      await this.dependencies.persistCompletion?.({ identity, anchor, outcome, summary });
+    } catch (error) {
+      // The authoritative commit is already saved. A separate receipt save cannot undo it.
+      logWorldSimulationSession_ACU(identity.chatIdentity, {
+        kind: 'thought', title: '完成通告保存失败', detail: error instanceof Error ? error.message : String(error), agentName: 'world-director', ok: false,
+      });
+    }
+  }
+
   private async persistPlanAndExecute_ACU(
     reservedIdentity: WorldSimulationRunIdentity_ACU,
     anchor: WorldSimulationAnchorIdentity_ACU,
@@ -320,13 +350,13 @@ export class WorldSimulationOrchestrator_ACU {
   ): Promise<WorldSimulationOrchestratorResult_ACU> {
     if (signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
     await this.dependencies.assertAnchorCurrent(anchor);
-    assertRunCurrent_ACU(this.dependencies.store.read(), reservedIdentity);
+    assertRunCurrent_ACU(this.dependencies.store.read(), reservedIdentity, prepared.runWrites?.currentLedgerRevision);
     const revision = prepared.revision.frozen ? prepared.revision : { ...prepared.revision, frozen: true };
     const identity = { ...reservedIdentity, stageRevision: revision.revision };
     const now = this.dependencies.now();
 
     await this.dependencies.store.updateAtomically(envelope => {
-      assertRunCurrent_ACU(envelope, reservedIdentity);
+      assertRunCurrent_ACU(envelope, reservedIdentity, prepared.runWrites?.currentLedgerRevision);
       const stage = envelope!.stages.find(item => item.stageId === reservedIdentity.stageId)!;
       return {
         ...envelope!,
@@ -345,28 +375,41 @@ export class WorldSimulationOrchestrator_ACU {
     if (signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
     const result = await prepared.execute(identity);
     await this.dependencies.assertAnchorCurrent(anchor);
+    prepared.runWrites?.assertCurrent();
     const completedAt = this.dependencies.now();
-    if (result.outcome === 'commit') {
-      await this.dependencies.commitProjection({
+    if (result.outcome === 'commit' || (result.outcome === 'no_change' && prepared.runWrites?.hasConfirmedWrites)) {
+      const commitCandidate: WorldSimulationCommitCandidate_ACU = result.outcome === 'commit' ? result.commitCandidate : {
+        runId: identity.runId, taskId: identity.taskId, stageId: identity.stageId,
+        stageRevision: identity.stageRevision, baseLedgerRevision: identity.baseLedgerRevision,
+        summary: result.summary, acceptedCandidates: [], evidenceRefs: prepared.runWrites!.evidenceRefs,
+      };
+      const committedAnchor = await this.dependencies.commitProjection({
         identity,
         anchor,
-        commitCandidate: result.commitCandidate,
+        commitCandidate,
+        runWrites: prepared.runWrites,
         completedAt,
         timelineId: this.dependencies.allocateId('timeline'),
       });
-      return { status: 'completed', identity, result };
+      await this.reportCompletion_ACU(identity, committedAnchor || anchor, 'commit', result.summary);
+      return { status: 'completed', identity, result: result.outcome === 'commit' ? result : { ...result, outcome: 'commit', commitCandidate } };
     }
     await this.dependencies.store.updateAtomically(envelope => {
-      assertRunCurrent_ACU(envelope, identity);
+      assertRunCurrent_ACU(envelope, identity, prepared.runWrites?.currentLedgerRevision);
       const blocked = result.outcome === 'blocked';
       return {
         ...envelope!,
-        task: { ...envelope!.task!, status: blocked ? 'paused' : 'completed', updatedAt: completedAt, activeRun: blocked ? envelope!.task!.activeRun : null, stopReason: blocked ? result.summary : null },
+        task: { ...envelope!.task!, status: blocked ? 'paused' : 'completed', updatedAt: completedAt, activeRun: blocked ? envelope!.task!.activeRun : null, stopReason: blocked ? result.summary : null,
+          ...(!blocked && identity.triggerKind === 'assistant_completed' ? { completedAutoAnchor: {
+            chatIdentity: anchor.chatIdentity, messageKey: anchor.messageKey, swipeId: anchor.swipeId, contentDigest: anchor.contentDigest,
+          } } : {}),
+        },
         stages: envelope!.stages.map(stage => stage.stageId === identity.stageId ? { ...stage, status: blocked ? 'failed' : 'completed' } : stage),
         timeline: [...envelope!.timeline, { id: this.dependencies.allocateId('timeline'), at: completedAt, kind: blocked ? 'blocked' : 'no_change', taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId, message: result.summary }],
         updatedAt: completedAt,
       };
     }, { chatIdentity: identity.chatIdentity, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision });
+    if (result.outcome === 'no_change') await this.reportCompletion_ACU(identity, anchor, 'no_change', result.summary);
     return { status: 'completed', identity, result };
   }
 

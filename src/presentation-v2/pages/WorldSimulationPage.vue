@@ -32,6 +32,7 @@
           :save-requirements="runtime.saveUserRequirements"
           :conversation="runtime.snapshot.value.conversation"
           :materials="runtime.snapshot.value.materials"
+          :field-snapshot="runtime.snapshot.value.fieldSnapshot"
           :user-requirements="runtime.snapshot.value.userRequirements"
           :session="runtime.entries.value"
           :ledger="runtime.snapshot.value.envelope?.ledger ?? null"
@@ -67,7 +68,6 @@
         </div>
         <div class="acu-v2-world-simulation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.autoTriggerEnabled" label="正文生成完成后自动推演（与自动填表同一时机）" />
-          <AcuCheckbox v-model="settingsDraft.workflow.autoFixEnabled" label="自动修复违规模块（连续失败 3 次后交给主 Agent）" />
           <AcuCheckbox v-model="settingsDraft.webResearch.enabled" label="启用设定研究（外部百科检索）" />
         </div>
 
@@ -165,7 +165,7 @@
             body-id="acu-world-simulation-group-workflow"
             @toggle="toggleGroup('workflow')"
           >
-            <p class="acu-v2-world-simulation-page__meta">固定工作流按时间、暗流、人物的顺序自治执行。这里只改配置：自动修复和编年热层阈值。提示词仍在下方各角色分组里改。</p>
+            <p class="acu-v2-world-simulation-page__meta">固定工作流按时间、暗流、人物的顺序自治执行。这里只改编年热层阈值。提示词仍在下方各角色分组里改。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
               <AcuFormRow label="编年热层阈值" hint="热层编年达到这个条数时，本轮会派出编年。范围 1–512。">
                 <AcuInput v-model="settingsDraft.workflow.chroniclerHotThreshold" type="number" :min="1" :max="512" />
@@ -391,7 +391,7 @@ const dynamicsGroupMeta = computed(() => {
 const workflowGroupMeta = computed(() => {
   const workflow = settingsDraft.value?.workflow;
   if (!workflow) return '';
-  return `${workflow.autoFixEnabled ? '自动修复开' : '自动修复关'} · 编年热层 ${workflow.chroniclerHotThreshold}`;
+  return `编年热层 ${workflow.chroniclerHotThreshold}`;
 });
 
 function cloneSettings(settings: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU {
@@ -485,7 +485,6 @@ function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
       missedSweepEnabled: typeof source.dynamics.missedSweepEnabled === 'boolean' ? source.dynamics.missedSweepEnabled : (() => { throw new Error('过期清扫开关无效'); })(),
     },
     workflow: {
-      autoFixEnabled: typeof source.workflow?.autoFixEnabled === 'boolean' ? source.workflow.autoFixEnabled : true,
       chroniclerHotThreshold: requiredRangeInteger(source.workflow?.chroniclerHotThreshold, '编年热层阈值', 1, 512),
     },
   };

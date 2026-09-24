@@ -154,6 +154,8 @@ describe('WorldSimulationPage', () => {
     expect(children[1].classList.contains('acu-panel-grid')).toBe(true);
     expect(children[1].textContent).toContain('已有资料');
     expect(children[1].textContent).toContain('推演设置');
+    expect(host.textContent).not.toContain('自动修复违规模块');
+    expect(host.textContent).not.toContain('自动修复开');
     expect(children[2].textContent).toContain('伪 Role 提示词');
     // 旧版把整个工作区塞进 2 列网格的单个格子里；现在会话面板直接是页面子级，内部不再嵌套第二层面板。
     expect(children[0].classList.contains('acu-panel')).toBe(true);

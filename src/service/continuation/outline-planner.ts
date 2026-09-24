@@ -280,8 +280,9 @@ export class ContinuationOutlinePlanner_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
       }
       const raw = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
-        promptCacheEnabled: false,
+        promptCacheEnabled: true,
         cacheScope: 'outline',
+        cacheTools: [],
         minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.outline,
       });
       if (!isCurrent(identity)) {

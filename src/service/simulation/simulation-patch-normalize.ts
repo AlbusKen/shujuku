@@ -432,3 +432,39 @@ export function coerceWorldSimulationContact_ACU(value: unknown): { ok: true; va
 export function coerceWorldSimulationGuidanceVoice_ACU(value: unknown): { ok: true; value: typeof WORLD_GUIDANCE_SIGNAL_VOICES_ACU[number]; autoFixed: boolean } | { ok: false } {
   return coerceWorldSimulationEnum_ACU(value, WORLD_GUIDANCE_SIGNAL_VOICES_ACU);
 }
+
+/** 草稿逐栏校验与完整条目归一化共用底层校验器，但绝不补齐缺失栏目。 */
+export function validateWorldSimulationUpsertField_ACU(
+  module: WorldSimulationUpsertModule_ACU, field: string, value: unknown, path: string,
+): { value?: unknown; problem?: string } {
+  const target: Record<string, unknown> = {};
+  const notes: WorldSimulationPatchNormalizationNote_ACU[] = [];
+  const apply = (): boolean => {
+    if (field === (module === 'seeds' ? 'title' : module === 'rumors' ? 'fact' : 'name')) return applyString_ACU(target, field, value, path, notes, false);
+    if (field === 'kind') return module === 'dimensions' && applyEnum_ACU(target, field, value, path, notes, DIMENSION_KIND_ACU);
+    if (field === 'trend') return module === 'dimensions' && applyEnum_ACU(target, field, value, path, notes, DIMENSION_TREND_ACU);
+    if (field === 'value' || field === 'level') return applyInteger_ACU(target, field, value, path, notes, 0, 100);
+    if (field === 'status') return module === 'seeds' ? applyEnum_ACU(target, field, value, path, notes, SEED_STATUS_ACU) : applyEnum_ACU(target, field, value, path, notes, WORLD_RUMOR_STATUSES_ACU);
+    if (field === 'visibility') return applyEnum_ACU(target, field, value, path, notes, VISIBILITY_ACU);
+    if (field === 'life') return applyEnum_ACU(target, field, value, path, notes, WORLD_ACTOR_LIFE_ACU);
+    if (field === 'exposePolicy') return applyEnum_ACU(target, field, value, path, notes, WORLD_SEED_EXPOSE_POLICIES_ACU);
+    if (['originDay', 'earliestRevealDay', 'revealedAtDay', 'diedAtDay', 'expiresAtDay'].includes(field))
+      return ['revealedAtDay', 'diedAtDay', 'expiresAtDay'].includes(field)
+        ? applyNullableInteger_ACU(target, field, value, path, notes, 1)
+        : applyInteger_ACU(target, field, value, path, notes, 1);
+    if (field === 'locationRef' && module === 'actors' || field === 'location' && module === 'seeds') return applyLocation_ACU(target, field, value, path, notes);
+    if (['interests', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'actorIds', 'channels', 'relatedActorIds', 'evidenceRefs'].includes(field)) {
+      const arrayModules: Record<string, readonly WorldSimulationUpsertModule_ACU[]> = {
+        interests: ['actors'], resources: ['actors'], goals: ['actors'], constraints: ['actors'], informationSources: ['actors'], knownFacts: ['actors'],
+        actorIds: ['seeds'], channels: ['rumors'], relatedActorIds: ['rumors'], evidenceRefs: ['dimensions', 'seeds'],
+      };
+      return arrayModules[field].includes(module) && applyStringArray_ACU(target, field, value, path, notes);
+    }
+    if (['missedOutcome', 'retiredReason', 'deathSummary'].includes(field)) return applyNullableString_ACU(target, field, value, path, notes);
+    if (['rationale', 'catalyst', 'location'].includes(field)) return (field === 'rationale' && module === 'dimensions'
+      || field === 'catalyst' && module === 'seeds' || field === 'location' && module === 'actors') && applyString_ACU(target, field, value, path, notes, true);
+    return false;
+  };
+  if (!apply()) return { problem: notes.find(note => note.severity === 'blocking')?.message ?? `${path}.${field} 不允许写入` };
+  return { value: target[field] };
+}

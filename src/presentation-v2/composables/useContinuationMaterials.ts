@@ -1,12 +1,13 @@
 import { reactive, ref } from 'vue';
 import {
+  readAgentModuleFieldSnapshot_ACU,
   readAgentModuleSnapshot_ACU,
   readAgentModuleSnapshotDiagnostics_ACU,
   replaceAgentModuleSnapshotByUser_ACU,
   type AgentModuleSnapshotReadDiagnostics_ACU,
 } from '../../service/continuation/agent/agent-module-store';
 import { ContinuationValidationError_ACU } from '../../service/continuation/model';
-import type { AgentModuleSnapshot_ACU } from '../../service/continuation/agent/agent-model';
+import type { AgentModuleFieldSnapshot_ACU, AgentModuleSnapshot_ACU } from '../../service/continuation/agent/agent-model';
 import { useToastStore } from '../stores/toast-store';
 
 /** 用户可分模块编辑的资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
@@ -65,6 +66,8 @@ export function useContinuationMaterials() {
     checkpointIndex: null,
     foldedDeltaCount: 0,
   });
+  /** 分栏视图：partial 记录只出现在这里，面板据此按模块/ID 展示已写字段与缺栏。 */
+  const fieldSnapshot = ref<AgentModuleFieldSnapshot_ACU>({ records: {} });
   const modules = reactive<Record<ContinuationMaterialModule_ACU, ModuleDraftState_ACU>>({
     hooks: emptyModuleState_ACU(),
     infoGap: emptyModuleState_ACU(),
@@ -89,6 +92,8 @@ export function useContinuationMaterials() {
       const current = readAgentModuleSnapshot_ACU();
       snapshot.value = current;
       diagnostics.value = readAgentModuleSnapshotDiagnostics_ACU();
+      // 与领域快照同一次折叠派生：partial 来自逐栏 delta，complete/legacy_unknown 来自领域数组。
+      fieldSnapshot.value = readAgentModuleFieldSnapshot_ACU();
       for (const module of CONTINUATION_MATERIAL_MODULES_ACU) {
         if (options.preserveDirty && modules[module].dirty) continue;
         resetModule(module, current);
@@ -96,6 +101,7 @@ export function useContinuationMaterials() {
       loadError.value = '';
     } catch (caught) {
       snapshot.value = null;
+      fieldSnapshot.value = { records: {} };
       for (const module of CONTINUATION_MATERIAL_MODULES_ACU) modules[module] = emptyModuleState_ACU();
       loadError.value = errorMessage_ACU(caught);
     }
@@ -141,5 +147,5 @@ export function useContinuationMaterials() {
     }
   }
 
-  return { snapshot, loadError, diagnostics, modules, reload, save, discard, updateDraft };
+  return { snapshot, loadError, diagnostics, fieldSnapshot, modules, reload, save, discard, updateDraft };
 }

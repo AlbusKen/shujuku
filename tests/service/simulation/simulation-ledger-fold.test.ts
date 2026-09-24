@@ -67,6 +67,33 @@ describe('世界推演账本折叠', () => {
     expect(foldWorldSimulationLedger_ACU(chat)).toBeNull();
   });
 
+  it('v1–v4 旧全量账本在楼层分桶折叠时只归一化，不改写原数据', () => {
+    for (const version of [1, 2, 3, 4]) {
+      const chat = [assistant(`旧楼 v${version}`)];
+      const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+      const old: any = { ...buildDefaultWorldSimulationEnvelope_ACU().ledger, schemaVersion: version };
+      if (version < 5) delete old.materialCompletion;
+      if (version < 4) delete old.pendingFixes;
+      if (version < 3) delete old.chronicleOverview;
+      if (version === 1) {
+        old.clock = { storyTime: '第三日黄昏', elapsed: '3日', precision: 'approximate', evidenceRefs: [] };
+        old.guidance = { signals: ['风声'], excludedFacts: [], evidenceRefs: [] };
+        delete old.rumors;
+        delete old.player;
+      }
+      const snapshot = structuredClone(old);
+      chat[0][WORLD_SIMULATION_STATE_FIELD_ACU] = {
+        schemaVersion: 1,
+        entries: { [buildWorldSimulationBucketKey_ACU(anchor)]: { anchor, value: old, updatedAt: 1 } },
+      };
+      const folded = foldWorldSimulationLedger_ACU(chat);
+      expect(folded?.ledger.schemaVersion).toBe(buildDefaultWorldSimulationEnvelope_ACU().ledger.schemaVersion);
+      expect(folded?.ledger.materialCompletion.state).toBe('legacy_unknown');
+      if (version === 1) expect(folded?.ledger.clock.day).toBe(3);
+      expect(old).toEqual(snapshot);
+    }
+  });
+
   it('旧的全量账本在读取时当成基线', () => {
     const chat = [assistant('旧楼')];
     const ledger = buildDefaultWorldSimulationEnvelope_ACU().ledger;
@@ -139,7 +166,7 @@ describe('世界推演逐栏写入与分栏视图', () => {
       evidenceRefs: [], updatedAt: 31, checkpointIndex: 1,
       beforeArchive: { schemaVersion: 1, records: {} }, nextArchive: { schemaVersion: 1, records: {} },
     });
-    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['actor-a1']?.status).toBe('legacy_unknown');
+    expect(readWorldSimulationLedgerFieldSnapshot_ACU(chat).records.actors?.['actor-a1']?.status).toBe('complete');
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.actors.map(item => item.id)).toEqual(['actor-a1']);
   });
 

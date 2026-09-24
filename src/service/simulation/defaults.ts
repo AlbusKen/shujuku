@@ -15,7 +15,7 @@ export function buildDefaultWorldSimulationSettings_ACU(): WorldSimulationSettin
     agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(),
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
     dynamics: { rumorTTLDays: 30, maxClockAdvanceDays: 14, collisionEnforcement: 'strict', missedSweepEnabled: true },
-    workflow: { autoFixEnabled: true, chroniclerHotThreshold: WORLD_CHRONICLE_HOT_WINDOW_ACU },
+    workflow: { chroniclerHotThreshold: WORLD_CHRONICLE_HOT_WINDOW_ACU },
   };
 }
 

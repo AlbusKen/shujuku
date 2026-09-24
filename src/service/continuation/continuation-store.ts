@@ -1,8 +1,8 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, buildDefaultContinuationWebResearchSettings_ACU, buildDefaultContinuationWorkflowSettings_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, buildDefaultContinuationWebResearchSettings_ACU, buildDefaultContinuationWorkflowSettings_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
-import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, AGENT_PROMPT_DEFAULT_LINEAGE_ACU, CONTINUATION_V33_DEFAULT_LINEAGE_ACU, buildV33ContinuationAgentPrompts_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, findAgentPromptSlot_ACU, hashAgentPromptContent_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, migrateV30DefaultMainAgentContentToV31_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU, type AgentPromptSlotKey_ACU } from './agent/agent-defaults';
+import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, AGENT_PROMPT_DEFAULT_LINEAGE_ACU, CONTINUATION_V33_DEFAULT_LINEAGE_ACU, CONTINUATION_V34_DEFAULT_LINEAGE_ACU, buildV33ContinuationAgentPrompts_ACU, buildV34ContinuationAgentPrompts_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, findAgentPromptSlot_ACU, hashAgentPromptContent_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, migrateV30DefaultMainAgentContentToV31_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU, type AgentPromptSlotKey_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -597,7 +597,7 @@ function migrateV32AgentPromptsToV33_ACU(raw: unknown): unknown {
 function migrateV33AgentPromptsToV34_ACU(raw: unknown): unknown {
   if (!isRecord_ACU(raw)) return raw;
   const previous = buildV33ContinuationAgentPrompts_ACU();
-  const current = buildDefaultContinuationAgentPrompts_ACU();
+  const current = buildV34ContinuationAgentPrompts_ACU();
   let changed = false;
   const next = { ...raw };
   for (const role of Object.keys(CONTINUATION_V33_DEFAULT_LINEAGE_ACU) as (keyof typeof previous)[]) {
@@ -606,6 +606,28 @@ function migrateV33AgentPromptsToV34_ACU(raw: unknown): unknown {
       if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
       const content = segment.content;
       const entry = CONTINUATION_V33_DEFAULT_LINEAGE_ACU[role].find(item => item.role === segment.role
+        && item.length === content.length && item.hash === hashAgentPromptContent_ACU(content)
+        && content === previous[role][item.index].content);
+      if (!entry) return segment;
+      changed = true;
+      return { ...segment, content: current[role][entry.index].content };
+    });
+  }
+  return changed ? next : raw;
+}
+
+function migrateV34AgentPromptsToV35_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const previous = buildV34ContinuationAgentPrompts_ACU();
+  const current = buildDefaultContinuationAgentPrompts_ACU();
+  let changed = false;
+  const next = { ...raw };
+  for (const role of Object.keys(CONTINUATION_V34_DEFAULT_LINEAGE_ACU) as (keyof typeof previous)[]) {
+    if (!Array.isArray(raw[role])) continue;
+    next[role] = raw[role].map(segment => {
+      if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
+      const content = segment.content;
+      const entry = CONTINUATION_V34_DEFAULT_LINEAGE_ACU[role].find(item => item.role === segment.role
         && item.length === content.length && item.hash === hashAgentPromptContent_ACU(content)
         && content === previous[role][item.index].content);
       if (!entry) return segment;
@@ -713,17 +735,10 @@ function validateWebResearchSettings_ACU(raw: unknown): ContinuationSettings_ACU
 
 function validateWorkflowSettings_ACU(raw: unknown): ContinuationSettings_ACU['workflow'] {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.workflow 必须是对象');
-  requireKeys_ACU(raw, ['autoFixEnabled', 'autoFixMaxAttempts', 'reviseLimit', 'repairMaxExtraReads'], 'settings.workflow');
-  const autoFixMaxAttempts = requireBoundedInteger_ACU(raw.autoFixMaxAttempts, 'settings.workflow.autoFixMaxAttempts', 10);
+  requireKeys_ACU(raw, ['reviseLimit'], 'settings.workflow', ['autoFixEnabled', 'autoFixMaxAttempts', 'repairMaxExtraReads']);
   const reviseLimit = requireBoundedInteger_ACU(raw.reviseLimit, 'settings.workflow.reviseLimit', 10);
-  if (autoFixMaxAttempts < 1) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.workflow.autoFixMaxAttempts 至少为 1');
   if (reviseLimit < 1) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.workflow.reviseLimit 至少为 1');
-  return {
-    autoFixEnabled: requireBoolean_ACU(raw.autoFixEnabled, 'settings.workflow.autoFixEnabled'),
-    autoFixMaxAttempts,
-    reviseLimit,
-    repairMaxExtraReads: requireBoundedInteger_ACU(raw.repairMaxExtraReads, 'settings.workflow.repairMaxExtraReads', 10),
-  };
+  return { reviseLimit };
 }
 
 function validateFinalReviewSettings_ACU(raw: unknown): ContinuationSettings_ACU['finalReview'] {
@@ -892,7 +907,8 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU) {
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -946,6 +962,10 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU) {
     agentPrompts = migrateV33AgentPromptsToV34_ACU(agentPrompts);
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU;
+  }
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU) {
+    agentPrompts = migrateV34AgentPromptsToV35_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU;
   }
 
   return {
@@ -1045,7 +1065,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
       if (Object.prototype.hasOwnProperty.call(stage, legacyKey)) delete stage[legacyKey];
     }
     const stageKeys = ['stageId', 'stageNumber', 'status', 'activeRevision', 'revisions', 'activeNodeIndex', 'activeTurnIndex', 'completedTurns'];
-    requireKeys_ACU(stage, stageKeys, path);
+    requireKeys_ACU(stage, stageKeys, path, ['agentTurnLabel']);
     const stageId = requireString_ACU(stage.stageId, `${path}.stageId`);
     if (stageIds.has(stageId)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段 ID 重复：${stageId}`);
     stageIds.add(stageId);
@@ -1063,7 +1083,17 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
     });
     const activeRevision = requireInteger_ACU(stage.activeRevision, `${path}.activeRevision`, 1);
     if (!revisionNumbers.has(activeRevision)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `activeRevision 未指向现有 revision：${path}`);
-    return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0) };
+    const agentTurnLabel = (() => {
+      if (!('agentTurnLabel' in stage)) return {};
+      if (!isRecord_ACU(stage.agentTurnLabel)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `轮次标注必须是对象：${path}.agentTurnLabel`);
+      requireKeys_ACU(stage.agentTurnLabel, ['revision', 'turnId', 'text'], `${path}.agentTurnLabel`);
+      return { agentTurnLabel: {
+        revision: requireInteger_ACU(stage.agentTurnLabel.revision, `${path}.agentTurnLabel.revision`, 1),
+        turnId: requireString_ACU(stage.agentTurnLabel.turnId, `${path}.agentTurnLabel.turnId`),
+        text: requireString_ACU(stage.agentTurnLabel.text, `${path}.agentTurnLabel.text`),
+      } };
+    })();
+    return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0), ...agentTurnLabel };
   });
   const activeStageId = raw.activeStageId === null ? null : requireString_ACU(raw.activeStageId, 'activeTask.activeStageId');
   if (activeStageId !== null && !stageIds.has(activeStageId)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');

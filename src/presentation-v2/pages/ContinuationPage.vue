@@ -84,7 +84,6 @@
         <div class="acu-v2-continuation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
           <AcuCheckbox v-model="settingsDraft.finalReview.enabled" label="启用发送前世界书终审" />
-          <AcuCheckbox v-model="settingsDraft.workflow.autoFixEnabled" :label="continuationCopy.workflow.autoFix" />
           <AcuCheckbox v-model="settingsDraft.webResearch.enabled" label="启用开场百科检索（同人推荐）" />
         </div>
 
@@ -99,14 +98,8 @@
           >
             <p class="acu-v2-continuation-page__meta">{{ continuationCopy.workflow.description }}</p>
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="自动修复次数上限" hint="同一模块连续失败达到该次数后停止修复，交给主会话。范围 1–10。">
-                <AcuInput v-model="settingsDraft.workflow.autoFixMaxAttempts" type="number" :min="1" :max="10" />
-              </AcuFormRow>
               <AcuFormRow label="终审打回上限" hint="instruction-composer 按反馈清单增量修订的次数。范围 1–10。">
                 <AcuInput v-model="settingsDraft.workflow.reviseLimit" type="number" :min="1" :max="10" />
-              </AcuFormRow>
-              <AcuFormRow label="修复额外读取轮数" hint="自动修复派工自己的 read/search 轮数，不占主会话同角色派工上限。范围 0–10。">
-                <AcuInput v-model="settingsDraft.workflow.repairMaxExtraReads" type="number" :min="0" :max="10" />
               </AcuFormRow>
             </div>
           </AcuDisclosureGroup>
@@ -396,7 +389,11 @@ let countdownTimer: ReturnType<typeof setInterval> | undefined;
 const stageText = computed(() => {
   const stage = runtime.activeStage.value;
   if (!runtime.task.value) return '尚未创建任务';
-  return stage ? `第 ${stage.stageNumber} 阶段` : '大纲待创建';
+  if (!stage) return '大纲待创建';
+  const turn = runtime.activeRevision.value?.outline.nodes[stage.activeNodeIndex]?.turns[stage.activeTurnIndex];
+  const label = stage.agentTurnLabel;
+  return label && label.revision === stage.activeRevision && label.turnId === turn?.id
+    ? `第 ${stage.stageNumber} 阶段 · ${label.text}` : `第 ${stage.stageNumber} 阶段`;
 });
 
 const deadlineText = computed(() => {
@@ -498,7 +495,7 @@ const finalReviewGroupMeta = computed(() => (settingsDraft.value?.finalReview.en
 const workflowGroupMeta = computed(() => {
   const workflow = settingsDraft.value?.workflow;
   if (!workflow) return '';
-  return `${workflow.autoFixEnabled ? '自动修复开' : '自动修复关'} · 修复 ${workflow.autoFixMaxAttempts} 次 · 打回 ${workflow.reviseLimit} 次`;
+  return `终审打回 ${workflow.reviseLimit} 次`;
 });
 
 const webResearchGroupMeta = computed(() => {
@@ -562,7 +559,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
     agentRunBudget: { ...settings.agentRunBudget },
     finalReview: { ...settings.finalReview },
-    workflow: { autoFixEnabled: true, autoFixMaxAttempts: 3, reviseLimit: 3, repairMaxExtraReads: 2, ...settings.workflow },
+    workflow: { reviseLimit: settings.workflow?.reviseLimit ?? 3 },
     webResearch: { ...settings.webResearch, sources: { ...settings.webResearch.sources } },
     agentApiPresets: {
       main: { ...settings.agentApiPresets.main },
@@ -722,10 +719,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
       maxExtraReads: requiredRangeInteger(source.finalReview.maxExtraReads, '终审额外读取轮数', 0, 10),
     },
     workflow: {
-      autoFixEnabled: source.workflow.autoFixEnabled,
-      autoFixMaxAttempts: requiredRangeInteger(source.workflow.autoFixMaxAttempts, '自动修复次数上限', 1, 10),
       reviseLimit: requiredRangeInteger(source.workflow.reviseLimit, '终审打回上限', 1, 10),
-      repairMaxExtraReads: requiredRangeInteger(source.workflow.repairMaxExtraReads, '修复额外读取轮数', 0, 10),
     },
     webResearch: {
       enabled: source.webResearch.enabled,

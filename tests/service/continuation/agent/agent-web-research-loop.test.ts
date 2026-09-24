@@ -242,6 +242,44 @@ describe('开场百科检索', () => {
     expect(h.snapshot().revisions.webRefs).toBe(1);
   });
 
+  it('SQL UPDATE 仅修订简介时不要求重抓页面，未提供的来源与名称保持原样', async () => {
+    const seeded: AgentModuleSnapshot_ACU = {
+      ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 0,
+      webRefs: [{ id: 'WR-001', title: '旧资料', source: 'web', url: 'https://example.com/entry', query: '旧', tags: [], brief: '旧简介', summary: '旧详情', sourceStatus: 'ok', fetchedAt: 1, retired: false, retiredReason: '' }],
+    };
+    const h = harness_ACU({
+      enabled: true, context: runningContext_ACU, snapshot: seeded,
+      mainReplies: ['{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"更新简介","reads":[]}] }', '{"action":"finalize","instruction":"继续推进","summary":"ok"}'],
+      subReplies: [JSON.stringify({ sql: "UPDATE web_refs SET brief = '更新后的简介' WHERE id = 'WR-001' AND expected_revision = 0;" })],
+    });
+    await h.planner.plan(h.request);
+    expect(h.subCalls).toHaveLength(1);
+    expect(h.webLog).toEqual([]);
+    expect(h.written).toHaveLength(1);
+    expect(h.snapshot().webRefs[0]).toMatchObject({ title: '旧资料', url: 'https://example.com/entry', brief: '更新后的简介', fetchedAt: 1 });
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('逐栏修订 1 条');
+  });
+
+  it('SQL UPDATE 换源只接受本次抓取成功的页面句柄', async () => {
+    const seeded: AgentModuleSnapshot_ACU = {
+      ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 0,
+      webRefs: [{ id: 'WR-001', title: '旧资料', source: 'web', url: 'https://example.com/entry', query: '旧', tags: [], brief: '旧简介', summary: '', sourceStatus: 'ok', fetchedAt: 1, retired: false, retiredReason: '' }],
+    };
+    const h = harness_ACU({
+      enabled: true, context: runningContext_ACU, snapshot: seeded,
+      mainReplies: ['{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"换来源","reads":[]}]}', '{"action":"finalize","instruction":"继续推进","summary":"ok"}'],
+      subReplies: [
+        '{"action":"encyclopedia_read","source":"moegirl","title":"洛琪希"}',
+        JSON.stringify({ sql: "UPDATE web_refs SET page_ref = 'P1', brief = '家庭教师' WHERE id = 'WR-001' AND expected_revision = 0;" }),
+      ],
+    });
+    await h.planner.plan(h.request);
+    expect(h.webLog).toEqual(['read:洛琪希']);
+    expect(h.written).toHaveLength(1);
+    expect(h.snapshot().webRefs[0]).toMatchObject({ title: '洛琪希', source: 'moegirl', brief: '家庭教师', fetchedAt: expect.any(Number) });
+    expect(h.snapshot().webRefs[0].url).toContain('zh.moegirl.org.cn');
+  });
+
   it('SQL DELETE 声明的 revision 与派工读取快照不符时不退役资料', async () => {
     const seeded: AgentModuleSnapshot_ACU = {
       ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 0,

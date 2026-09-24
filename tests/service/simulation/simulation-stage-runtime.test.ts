@@ -180,3 +180,35 @@ describe('世界推演阶段 runtime', () => {
     expect(runMainLoop).not.toHaveBeenCalled();
   });
 });
+
+describe('world simulation stage run write proof', () => {
+  it('accepts only the run-owned folded ledger after an in-flight write', async () => {
+    const { WorldSimulationRunWriteState_ACU } = await import('../../../src/service/simulation/simulation-run-write-state');
+    const identity = {
+      runId: 'run-owned', chatIdentity: 'chat-1', triggerKind: 'assistant_completed' as const,
+      triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1',
+      anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0,
+      taskId: 'task-1', stageId: 'stage-1', stageRevision: 1,
+    };
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    envelope.task = { taskId: identity.taskId, originInstruction: '推进', status: 'running', createdAt: 1, updatedAt: 1, activeRun: identity, stopReason: null };
+    envelope.activeStageId = identity.stageId;
+    envelope.stages = [{ stageId: identity.stageId, stageNumber: 1, status: 'running', activeRevision: 1,
+      revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan }] }];
+    const view = () => ({ ledger: envelope.ledger, fields: undefined, archive: { schemaVersion: 1 as const, records: {} } });
+    const proof = new WorldSimulationRunWriteState_ACU(view, 0);
+    const nextView = (ledger: typeof envelope.ledger) => ({ ...view(), ledger });
+    const runMainLoop = vi.fn(async () => {
+      const next = { ...envelope.ledger, revision: 1 };
+      proof.confirm(nextView(next), []);
+      envelope.ledger = next;
+      return { outcome: 'no_change' as const, summary: 'done', outcomes: [] };
+    });
+    const engine = new WorldSimulationStageExecutionEngine_ACU({ readEnvelope: () => envelope,
+      getChatIdentity: () => 'chat-1', assertAnchorCurrent: vi.fn(), runMainLoop, runWrites: proof });
+    await expect(engine.run({ identity })).resolves.toMatchObject({ outcome: 'no_change' });
+    envelope.ledger = { ...envelope.ledger, revision: 2 };
+    await expect(engine.run({ identity })).rejects.toThrow('WORLD_SIMULATION_LEDGER_STALE');
+    expect(runMainLoop).toHaveBeenCalledOnce();
+  });
+});

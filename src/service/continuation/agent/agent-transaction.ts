@@ -11,6 +11,7 @@ import {
   isAgentWritableModule_ACU,
   type AgentChronologyDeltaItem_ACU,
   type AgentChronologyEntry_ACU,
+  type AgentChronologyPatch_ACU,
   type AgentConstraintEntry_ACU,
   type AgentHookDeltaItem_ACU,
   type AgentHookEntry_ACU,
@@ -45,7 +46,7 @@ function collectTouchedModules_ACU(delta: AgentModuleDelta_ACU): AgentWritableMo
   if (delta.hooks.length || delta.hookPatches.length) touched.push('hooks');
   if (delta.infoGap.length || delta.infoGapPatches.length) touched.push('infoGap');
   if (delta.storyArc.length || delta.storyArcPatches.length) touched.push('storyArc');
-  if (delta.chronology.length) touched.push('chronology');
+  if (delta.chronology.length || delta.chronologyPatches.length) touched.push('chronology');
   return touched;
 }
 
@@ -380,6 +381,43 @@ function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: A
   return [...byId.values()];
 }
 
+function applyChronologyPatches_ACU(existing: AgentChronologyEntry_ACU[], patches: AgentChronologyPatch_ACU[], settledIndex: number): AgentChronologyEntry_ACU[] {
+  const byId = new Map(existing.map(entry => [entry.id, entry]));
+  for (const patch of patches) {
+    const current = byId.get(patch.id);
+    if (!current) reject_ACU(`patch 的年代学条目不存在：${patch.id}`, { id: patch.id });
+    if (current.retired) reject_ACU(`年代学条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+    let evidenceIndexes = current.evidenceIndexes;
+    if (patch.evidenceIndexes !== undefined) {
+      const normalized = normalizeEvidenceIndexes_ACU(patch.evidenceIndexes);
+      if (!normalized || !normalized.length) {
+        reject_ACU(`年代学条目 ${patch.id} 的 patch.evidenceIndexes 必须是非空的非负整数楼层数组`, { id: patch.id, evidenceIndexes: patch.evidenceIndexes });
+      }
+      const future = normalized.filter(index => index > settledIndex);
+      if (future.length) {
+        reject_ACU(`年代学条目 ${patch.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: patch.id, future, settledIndex });
+      }
+      evidenceIndexes = normalized;
+    }
+    const anchor = patch.anchor?.trim() || current.anchor;
+    const elapsed = patch.elapsed?.trim() || current.elapsed;
+    const transition = patch.transition?.trim() || current.transition;
+    if (!anchor || !elapsed || !transition) {
+      reject_ACU(`年代学条目 ${patch.id} 的 anchor / elapsed / transition 不能为空`, { id: patch.id });
+    }
+    byId.set(patch.id, {
+      ...current,
+      anchor,
+      elapsed,
+      precision: patch.precision ?? current.precision,
+      transition,
+      evidenceIndexes,
+      updatedIndex: settledIndex,
+    });
+  }
+  return [...byId.values()];
+}
+
 function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[]): AgentStoryArcEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
   for (const item of items) {
@@ -591,7 +629,7 @@ export function applyAgentModuleDelta_ACU(
   const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
   const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
   const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
-  const chronologyTouched = delta.chronology.length > 0;
+  const chronologyTouched = delta.chronology.length > 0 || delta.chronologyPatches.length > 0;
   const hooks = hooksTouched
     ? isolateModule_ACU('hooks', snapshot.hooks, () => {
       assertModuleRevision_ACU('hooks', delta, snapshot);
@@ -623,7 +661,9 @@ export function applyAgentModuleDelta_ACU(
   const chronology = chronologyTouched
     ? isolateModule_ACU('chronology', snapshot.chronology, () => {
       assertModuleRevision_ACU('chronology', delta, snapshot);
-      return applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex);
+      let next = delta.chronology.length ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;
+      if (delta.chronologyPatches.length) next = applyChronologyPatches_ACU(next, delta.chronologyPatches, settledIndex);
+      return next;
     }, pending, applied, options, settledIndex)
     : snapshot.chronology;
   const next: AgentModuleSnapshot_ACU = {
@@ -680,7 +720,8 @@ export function applyAgentWebRefsDelta_ACU(
   now: number = Date.now(),
   options?: AgentModuleApplyOptions_ACU,
 ): AgentModuleApplyResult_ACU {
-  if (!output.items.length) return unchangedApply_ACU(snapshot);
+  const patches = output.patches ?? [];
+  if (!output.items.length && !patches.length) return unchangedApply_ACU(snapshot);
   try {
   if (expectedRevision !== undefined && expectedRevision !== snapshot.revisions.webRefs) {
     reject_ACU('webRefs 的 revision 已变化，写入被拒绝', { module: 'webRefs', expected: expectedRevision, actual: snapshot.revisions.webRefs, path: 'webRefs' });
@@ -714,6 +755,30 @@ export function applyAgentWebRefsDelta_ACU(
       fetchedAt: previous?.fetchedAt || now,
       retired: false,
       retiredReason: '',
+    });
+  }
+  for (const patch of patches) {
+    const current = byId.get(patch.id);
+    if (!current) reject_ACU(`patch 的百科条目不存在：${patch.id}`, { id: patch.id });
+    if (current.retired) reject_ACU(`百科条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+    const title = patch.title?.trim() || current.title;
+    const brief = patch.brief?.trim() || current.brief;
+    if (!title) reject_ACU(`百科条目 ${patch.id} 的 title（名称）不能为空`, { id: patch.id });
+    if (!brief) reject_ACU(`百科条目「${title}」的 brief（一句话简介）不能为空`, { id: patch.id });
+    // 给了 pageRef 的 patch 已由运行时回填新来源：换源入库刷新 fetchedAt；未给的只改内容栏
+    const refreshed = patch.url !== undefined;
+    if (refreshed && !patch.url!.trim()) reject_ACU(`百科条目 ${patch.id} 缺少 url（pageRef 未能解析到已抓取页面）`, { id: patch.id });
+    byId.set(patch.id, {
+      ...current,
+      title,
+      tags: patch.tags ? [...new Set(patch.tags.map(tag => tag.trim()).filter(Boolean))] : current.tags,
+      brief,
+      summary: patch.summary !== undefined ? patch.summary.trim() : current.summary,
+      source: refreshed && patch.source ? patch.source : current.source,
+      url: refreshed ? patch.url!.trim() : current.url,
+      query: refreshed && patch.query !== undefined ? patch.query : current.query,
+      sourceStatus: refreshed && patch.sourceStatus ? patch.sourceStatus : current.sourceStatus,
+      fetchedAt: refreshed ? now : current.fetchedAt,
     });
   }
   const pending = clonePendingFixes_ACU(snapshot.pendingFixes);

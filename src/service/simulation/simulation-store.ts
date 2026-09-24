@@ -432,13 +432,12 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     if (!isRecord_ACU(raw.workflow)) {
       workflow = defaultWorkflow;
     } else {
-      const autoFixEnabled = typeof raw.workflow.autoFixEnabled === 'boolean' ? raw.workflow.autoFixEnabled : defaultWorkflow.autoFixEnabled;
       const chroniclerHotThreshold = Number.isInteger(raw.workflow.chroniclerHotThreshold)
         && (raw.workflow.chroniclerHotThreshold as number) >= 1
         && (raw.workflow.chroniclerHotThreshold as number) <= WORLD_CHRONICLE_OVERVIEW_CAP_ACU
         ? raw.workflow.chroniclerHotThreshold as number
         : defaultWorkflow.chroniclerHotThreshold;
-      workflow = { autoFixEnabled, chroniclerHotThreshold };
+      workflow = { chroniclerHotThreshold };
     }
   }
   return {
@@ -560,8 +559,19 @@ export function validateWorldSimulationEnvelope_ACU(raw: unknown, phase: WorldSi
   let task: WorldSimulationEnvelope_ACU['task'] = null;
   if (raw.task !== null) {
     if (!isRecord_ACU(raw.task)) fail_ACU('task 必须是对象或 null', phase);
-    exactKeys_ACU(raw.task, ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'activeRun', 'stopReason'], [], 'task', phase);
+    exactKeys_ACU(raw.task, ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'activeRun', 'stopReason'], ['completedAutoAnchor'], 'task', phase);
     task = { taskId: stableId_ACU(raw.task.taskId, 'task.taskId', phase), originInstruction: string_ACU(raw.task.originInstruction, 'task.originInstruction', phase), status: normalizeLegacyEnum_ACU(TASK_STATUSES_ACU, LEGACY_TASK_STATUSES_ACU, raw.task.status, 'task.status', phase), createdAt: integer_ACU(raw.task.createdAt, 'task.createdAt', phase), updatedAt: integer_ACU(raw.task.updatedAt, 'task.updatedAt', phase), activeRun: null, stopReason: raw.task.stopReason === null ? null : string_ACU(raw.task.stopReason, 'task.stopReason', phase) };
+    if (raw.task.completedAutoAnchor !== undefined) {
+      const completed = raw.task.completedAutoAnchor;
+      if (!isRecord_ACU(completed)) fail_ACU('task.completedAutoAnchor 必须是对象', phase);
+      exactKeys_ACU(completed, ['chatIdentity', 'messageKey', 'swipeId', 'contentDigest'], [], 'task.completedAutoAnchor', phase);
+      task.completedAutoAnchor = {
+        chatIdentity: string_ACU(completed.chatIdentity, 'task.completedAutoAnchor.chatIdentity', phase),
+        messageKey: string_ACU(completed.messageKey, 'task.completedAutoAnchor.messageKey', phase),
+        swipeId: string_ACU(completed.swipeId, 'task.completedAutoAnchor.swipeId', phase),
+        contentDigest: string_ACU(completed.contentDigest, 'task.completedAutoAnchor.contentDigest', phase),
+      };
+    }
     if (raw.task.activeRun !== null) {
       const run = raw.task.activeRun;
       if (!isRecord_ACU(run)) fail_ACU('task.activeRun 必须是对象或 null', phase);

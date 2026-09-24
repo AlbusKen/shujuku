@@ -17,6 +17,7 @@ import {
 import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import { buildV16WorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
 
 describe('world simulation envelope store', () => {
@@ -26,6 +27,20 @@ describe('world simulation envelope store', () => {
     const envelope = buildDefaultWorldSimulationEnvelope_ACU();
     expect(validateWorldSimulationEnvelope_ACU(envelope)).toEqual(envelope);
     expect(() => validateWorldSimulationEnvelope_ACU({ ...envelope, unexpected: true })).toThrow(WorldSimulationValidationError_ACU);
+  });
+
+  it('已完成自动锚点按独立可选字段回读，损坏的标记拒绝加载', () => {
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    envelope.task = { taskId: 'task', originInstruction: '推进', status: 'completed', createdAt: 1, updatedAt: 2,
+      activeRun: null, stopReason: null, completedAutoAnchor: {
+        chatIdentity: 'chat-a', messageKey: 'number:1', swipeId: '0', contentDigest: 'digest',
+      } };
+    expect(validateWorldSimulationEnvelope_ACU(envelope).task?.completedAutoAnchor).toEqual(envelope.task.completedAutoAnchor);
+    expect(() => validateWorldSimulationEnvelope_ACU({ ...envelope, task: { ...envelope.task, completedAutoAnchor: { messageKey: 'number:1' } } }))
+      .toThrow(WorldSimulationValidationError_ACU);
+    const oldTask = { ...envelope.task };
+    delete oldTask.completedAutoAnchor;
+    expect(validateWorldSimulationEnvelope_ACU({ ...envelope, task: oldTask }).task?.completedAutoAnchor).toBeUndefined();
   });
 
   it('存量信封里的 requirements-maintainer 提示词与渠道在加载时丢弃，不拒绝整包', () => {
@@ -59,6 +74,21 @@ describe('world simulation envelope store', () => {
     const outOfRange: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
     outOfRange.settings.webResearch.pageCharLimit = 499;
     expect(() => validateWorldSimulationEnvelope_ACU(outOfRange)).toThrow(WorldSimulationValidationError_ACU);
+  });
+
+  it('生产 settings 读取只迁移 V16 旧默认段并保留用户改写', () => {
+    const old = buildDefaultWorldSimulationEnvelope_ACU();
+    old.settings.agentPrompts.timekeeper = buildV16WorldSimulationAgentPrompt_ACU('timekeeper');
+    old.settings.agentPrompts['world-director'] = buildV16WorldSimulationAgentPrompt_ACU('world-director');
+    const customIndex = old.settings.agentPrompts.timekeeper.findIndex(segment => segment.content.startsWith('<WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW>'));
+    old.settings.agentPrompts.timekeeper[customIndex].content += '\n用户自定义尾句';
+    const expected = structuredClone(old.settings.agentPrompts.timekeeper[customIndex]);
+    const chat: any[] = [{ _qrf_world_simulation: old }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const loaded = new FirstFloorWorldSimulationStore_ACU().read()!;
+    expect(loaded.settings.agentPrompts.timekeeper[customIndex]).toEqual(expected);
+    expect(loaded.settings.agentPrompts['world-director']).toEqual(buildDefaultWorldSimulationAgentPrompts_ACU()['world-director']);
+    expect(chat[0]._qrf_world_simulation.settings.agentPrompts['world-director']).toEqual(old.settings.agentPrompts['world-director']);
   });
 
   it('persists only the independent first-floor field', async () => {
@@ -255,17 +285,15 @@ describe('world simulation envelope store', () => {
     });
   });
 
-  it('缺 workflow 时补默认自动修复配置，非法阈值回退', () => {
+  it('缺 workflow 时补默认编年阈值，旧自动修复开关读入后不再保留', () => {
     const missing: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
     delete missing.settings.workflow;
     expect(validateWorldSimulationEnvelope_ACU(missing).settings.workflow).toEqual({
-      autoFixEnabled: true,
       chroniclerHotThreshold: 32,
     });
     const invalid: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
-    invalid.settings.workflow = { autoFixEnabled: 'yes', chroniclerHotThreshold: 0 };
+    invalid.settings.workflow = { autoFixEnabled: false, chroniclerHotThreshold: 0 };
     expect(validateWorldSimulationEnvelope_ACU(invalid).settings.workflow).toEqual({
-      autoFixEnabled: true,
       chroniclerHotThreshold: 32,
     });
   });

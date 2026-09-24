@@ -831,7 +831,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
     expect(body.temperature).toBe(0);
   });
 
-  it('将合成缓存键、usage 订阅与用户 stream_options 合并后发送给宿主', async () => {
+  it('经验证的 OpenAI 官方路由合并键、usage 订阅和用户 stream_options', async () => {
     mockSettings.streamingEnabled = true;
     mockHandleApiResponse.mockResolvedValue('宿主边界回复');
     mockFetch.mockResolvedValue({ ok: true });
@@ -842,7 +842,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
       {
         apiMode: 'custom',
         apiConfig: {
-          url: 'https://resolved.example', apiKey: '', model: 'resolved-model', useMainApi: false,
+          url: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', useMainApi: false,
           max_tokens: 222, temperature: 0,
           bodyParams: '{"metadata":{"source":"synthetic"},"stream_options":{"trace":true}}',
           excludeBodyParams: '', requestHeaders: '',
@@ -851,7 +851,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
       },
       undefined,
       { onUsage },
-      { promptCacheKey: 'acu-cont-v2-12345678-abcdef01-deadbeef' },
+      { promptCacheKey: 'acu-v3-12345678-abcdef01-deadbeef' },
     )).resolves.toBe('宿主边界回复');
 
     expect(mockFetch).toHaveBeenCalledWith('/api/backends/chat-completions/generate', expect.objectContaining({
@@ -861,8 +861,57 @@ describe('callAIWithResolvedPreset_ACU', () => {
     expect(parse(body.custom_include_body)).toEqual({
       metadata: { source: 'synthetic' },
       stream_options: { trace: true, include_usage: true },
-      prompt_cache_key: 'acu-cont-v2-12345678-abcdef01-deadbeef',
+      prompt_cache_key: 'acu-v3-12345678-abcdef01-deadbeef',
     });
+  });
+
+  it('未知、原生协议和 TT 自定义路径照常发送，但不把插件缓存键放入宿主请求体', async () => {
+    mockHandleApiResponse.mockResolvedValue('回复');
+    mockFetch.mockResolvedValue({ ok: true });
+    const apiConfig = {
+      url: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', useMainApi: false,
+      max_tokens: 128, bodyParams: '', excludeBodyParams: '', requestHeaders: '',
+    };
+    const variants = [
+      { apiConfig: { ...apiConfig, url: 'https://gateway.example/v1' }, tt: false },
+      { apiConfig: { ...apiConfig, customApiFormat: 'claude_messages' }, tt: false },
+      { apiConfig: { ...apiConfig, excludeBodyParams: '- prompt_cache_key' }, tt: false },
+      { apiConfig, tt: true },
+    ];
+    try {
+      for (const variant of variants) {
+        vi.stubGlobal('__TAURITAVERN__', variant.tt);
+        await expect(callAIWithResolvedPreset_ACU(
+          [{ role: 'user', content: '无缓存键仍发送' }],
+          { apiMode: 'custom', apiConfig: variant.apiConfig, tavernProfile: '' },
+          undefined, undefined, { promptCacheKey: 'only-supported-route' },
+        )).resolves.toBe('回复');
+        const body = JSON.parse(mockFetch.mock.calls.at(-1)![1].body);
+        expect(parse(body.custom_include_body ?? '') ?? {}).not.toHaveProperty('prompt_cache_key');
+        expect(body.messages).toEqual([{ role: 'user', content: '无缓存键仍发送' }]);
+      }
+    } finally {
+      vi.stubGlobal('__TAURITAVERN__', false);
+    }
+    expect(mockFetch).toHaveBeenCalledTimes(variants.length);
+  });
+
+  it('托管的 Tavern 和 generateRaw 路径即使收到缓存 extras 也不增加专属字段', async () => {
+    mockGetProfiles.mockReturnValue([{ id: 'profile-id', name: 'profile', api: 'openai' }]);
+    mockTriggerSlash.mockResolvedValue('profile');
+    mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: 'profile reply' } }] } });
+    mockGenerateRaw.mockResolvedValue('main reply');
+    const messages = [{ role: 'user', content: '宿主代管' }];
+    const extras = { promptCacheKey: 'not-controllable' };
+    await expect(callAIWithResolvedPreset_ACU(messages, {
+      apiMode: 'tavern', apiConfig: { url: '', model: '' }, tavernProfile: 'profile-id',
+    }, undefined, undefined, extras)).resolves.toBe('profile reply');
+    await expect(callAIWithResolvedPreset_ACU(messages, {
+      apiMode: 'custom', apiConfig: { url: '', model: '', useMainApi: true }, tavernProfile: '',
+    }, undefined, undefined, extras)).resolves.toBe('main reply');
+    expect(mockSendConnectionManager).toHaveBeenCalledWith('profile-id', messages, expect.any(Number));
+    expect(mockGenerateRaw).toHaveBeenCalledWith(expect.objectContaining({ ordered_prompts: messages }));
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('uses the supplied Tavern profile rather than current global settings', async () => {

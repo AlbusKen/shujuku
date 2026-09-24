@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
+import { WorldSimulationOrchestrator_ACU, resetWorldSimulationOrchestratorStateForTests_ACU } from '../../../src/service/simulation/simulation-orchestrator';
+import { WorldSimulationRunWriteState_ACU, readWorldSimulationRunWriteProof_ACU, restoreWorldSimulationRunWrites_ACU } from '../../../src/service/simulation/simulation-run-write-state';
+import { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
+import { FirstFloorWorldSimulationStore_ACU } from '../../../src/service/simulation/simulation-store';
+import { commitWorldSimulationFieldWrites_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
 import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from '../../../src/service/simulation/agent/agent-module-store';
@@ -54,13 +59,14 @@ describe('world simulation commit adapter', () => {
   it('联合提交 envelope、账本、材料与 active swipe，且主保存只调用一次', async () => {
     const { chat, commitInput, saveChat, userBlock } = fixture();
 
-    await commitWorldSimulationProjection_ACU(commitInput);
+    const committedAnchor = await commitWorldSimulationProjection_ACU(commitInput);
 
     expect(saveChat).toHaveBeenCalledTimes(1);
     expect(chat[1].mes).toBe(chat[1].swipes[0]);
     expect(chat[1].mes).toContain(userBlock);
     expect(chat[1].mes).toContain('远处钟声响起');
     const persistedAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    expect(committedAnchor).toEqual(persistedAnchor);
     expect(persistedAnchor.contentDigest).not.toBe(commitInput.anchor.contentDigest);
     const ledger = readWorldSimulationLedgerAtAnchor_ACU(persistedAnchor, chat);
     expect(ledger).toMatchObject({ revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } });
@@ -208,6 +214,72 @@ describe('world simulation commit adapter', () => {
     });
     expect(saveChat).toHaveBeenCalledTimes(2);
     expect(chat).toEqual(before);
+  });
+
+  it('多楼旧 checkpoint 在终局保存失败后恢复，不留下重建基线', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockResolvedValueOnce(undefined);
+    const f = fixture(saveChat);
+    const previous: any = { message_id: 6, mes: '旧正文', swipe_id: 0, swipes: ['旧正文'] };
+    f.chat.splice(1, 0, previous);
+    const previousAnchor = resolveWorldSimulationAnchor_ACU(1, f.chat);
+    previous._qrf_world_simulation_state = { schemaVersion: 1, entries: {
+      [buildWorldSimulationBucketKey_ACU(previousAnchor)]: {
+        anchor: previousAnchor, updatedAt: 1,
+        value: { schemaVersion: 2, checkpoint: structuredClone(f.chat[0]._qrf_world_simulation.ledger), deltas: [] },
+      },
+    } };
+    const currentAnchor = resolveWorldSimulationAnchor_ACU(2, f.chat);
+    Object.assign(f.anchor, currentAnchor);
+    Object.assign(f.identity, { anchorMessageId: currentAnchor.messageId, anchorMessageKey: currentAnchor.messageKey,
+      anchorSwipeId: currentAnchor.swipeId, anchorContentDigest: currentAnchor.contentDigest });
+    const before = structuredClone(f.chat);
+
+    await expect(commitWorldSimulationProjection_ACU(f.commitInput)).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' },
+    });
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    expect(f.chat).toEqual(before);
+  });
+
+  it('补偿保存期间宿主改写字段时报告恢复不可确认，不覆盖宿主更新', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockImplementationOnce(async () => {
+      chat[1].mes = '宿主更新的正文';
+    });
+    const { chat, commitInput } = fixture(saveChat);
+    const before = structuredClone(chat);
+
+    await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'unavailable' } },
+    });
+    expect(chat[1].mes).toBe('宿主更新的正文');
+    expect(chat[0]).toEqual(before[0]);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('保存期换聊天时不补偿旧引用，也不写入新聊天', async () => {
+    const saveChat = vi.fn().mockImplementationOnce(async () => {
+      _set_SillyTavern_API_ACU({ chat: otherChat, chatId: 'chat-b', getCurrentChatId: () => 'chat-b', saveChat } as any);
+    });
+    const { chat, commitInput } = fixture(saveChat);
+    const otherChat = structuredClone(chat);
+
+    await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', details: { recovery: 'unavailable' } },
+    });
+    expect(otherChat[0]._qrf_world_simulation.task.status).toBe('running');
+    expect(chat[0]._qrf_world_simulation.task.status).toBe('completed');
+    expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('宿主保存期间重排楼层时不按旧位置补偿', async () => {
+    const saveChat = vi.fn().mockImplementationOnce(async () => { chat.splice(0, 0, {}); });
+    const { chat, commitInput } = fixture(saveChat);
+
+    await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', details: { recovery: 'unavailable' } },
+    });
+    expect(chat[1]._qrf_world_simulation.task.status).toBe('completed');
+    expect(saveChat).toHaveBeenCalledTimes(1);
   });
 
   it('提交失败补偿会同时恢复 conversation bucket，不留下新 digest entry', async () => {
@@ -407,4 +479,276 @@ describe('world simulation commit adapter', () => {
     expect(chat[0]._qrf_world_simulation.timeline.at(-1)).toMatchObject({ kind: 'committed', id: 'timeline-1' });
   });
 
+});
+
+describe('world simulation run-scoped field writes', () => {
+  beforeEach(() => { _set_SillyTavern_API_ACU(null as any); });
+
+  it('已保存的完整条目与 partial 在无候选终局保留，既不重复写入也不清除草稿', async () => {
+    const { chat, anchor, identity, commitCandidate, commitInput, saveChat } = fixture();
+    const { WorldSimulationRunWriteState_ACU } = await import('../../../src/service/simulation/simulation-run-write-state');
+    const { commitWorldSimulationFieldWrites_ACU } = await import('../../../src/service/simulation/simulation-commit-adapter');
+    const { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU } = await import('../../../src/service/simulation/simulation-ledger-fold');
+    const read = () => { const folded = foldWorldSimulationLedger_ACU(chat, anchor.messageIndex); return {
+      ledger: folded?.ledger ?? chat[0]._qrf_world_simulation.ledger,
+      fields: folded?.fields, archive: foldWorldSimulationArchive_ACU(chat, anchor.messageIndex).snapshot,
+    }; };
+    const runWrites = new WorldSimulationRunWriteState_ACU(read, identity.baseLedgerRevision);
+    const fieldInput = { identity, anchor, role: 'undercurrent-analyst', evidenceRegistry: { runId: identity.runId, entries: [] },
+      assertRunLedger: view => runWrites.assertCurrent(view), prepareRunProof: (view, refs, accepted) => runWrites.prepareConfirmation(identity, view, refs, accepted),
+      confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted) } as const;
+    expect((await commitWorldSimulationFieldWrites_ACU({ ...fieldInput,
+      sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-a', '风暴', 0)" })).status).toBe('committed');
+    expect((await commitWorldSimulationFieldWrites_ACU({ ...fieldInput,
+      sql: "UPDATE dimensions SET kind='pressure', value=10, trend='rising', rationale='海风', evidence_refs='[]' WHERE id='dim-a' AND expected_revision=0" })).status).toBe('committed');
+    expect((await commitWorldSimulationFieldWrites_ACU({ ...fieldInput,
+      sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-b', '暗潮', 0)" })).status).toBe('committed');
+    const before = structuredClone(read().ledger.dimensions[0]);
+    await commitWorldSimulationProjection_ACU({ ...commitInput, runWrites,
+      commitCandidate: { ...commitCandidate, acceptedCandidates: [], evidenceRefs: [] } });
+    const folded = foldWorldSimulationLedger_ACU(chat)!;
+    expect(folded.ledger.dimensions).toEqual([before]);
+    expect(folded.fields.records.dimensions?.['dim-b']).toMatchObject({ status: 'partial', fields: { name: { value: '暗潮' } } });
+    expect(chat[0]._qrf_world_simulation.task.status).toBe('completed');
+    expect(saveChat).toHaveBeenCalledTimes(4);
+  });
+
+  it('自身已确认写入后出现外部逐栏写入，终局冲突且不覆盖外部条目', async () => {
+    const { chat, anchor, identity, commitCandidate, commitInput, saveChat } = fixture();
+    const { WorldSimulationRunWriteState_ACU } = await import('../../../src/service/simulation/simulation-run-write-state');
+    const { commitWorldSimulationFieldWrites_ACU } = await import('../../../src/service/simulation/simulation-commit-adapter');
+    const { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU } = await import('../../../src/service/simulation/simulation-ledger-fold');
+    const read = () => { const folded = foldWorldSimulationLedger_ACU(chat, anchor.messageIndex); return {
+      ledger: folded?.ledger ?? chat[0]._qrf_world_simulation.ledger, fields: folded?.fields,
+      archive: foldWorldSimulationArchive_ACU(chat, anchor.messageIndex).snapshot,
+    }; };
+    const runWrites = new WorldSimulationRunWriteState_ACU(read, identity.baseLedgerRevision);
+    const fieldInput = { identity, anchor, role: 'undercurrent-analyst', evidenceRegistry: { runId: identity.runId, entries: [] } } as const;
+    expect((await commitWorldSimulationFieldWrites_ACU({ ...fieldInput,
+      sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-a', '风暴', 0)",
+      assertRunLedger: view => runWrites.assertCurrent(view),
+      prepareRunProof: (view, refs, accepted) => runWrites.prepareConfirmation(identity, view, refs, accepted),
+      confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted) })).status).toBe('committed');
+    expect((await commitWorldSimulationFieldWrites_ACU({ ...fieldInput,
+      sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('external', '外部变更', 0)" })).status).toBe('committed');
+    saveChat.mockClear();
+    await expect(commitWorldSimulationProjection_ACU({ ...commitInput, runWrites,
+      commitCandidate: { ...commitCandidate, acceptedCandidates: [], evidenceRefs: [] } })).rejects.toBeTruthy();
+    expect(foldWorldSimulationLedger_ACU(chat)?.fields.records.dimensions?.external.fields.name.value).toBe('外部变更');
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('world simulation terminal candidate overlap', () => {
+  beforeEach(() => { _set_SillyTavern_API_ACU(null as any); });
+
+  it('a candidate for an already saved row is rejected without replaying or overwriting it', async () => {
+    const { chat, anchor, identity, commitCandidate, commitInput, saveChat } = fixture();
+    const { WorldSimulationRunWriteState_ACU } = await import('../../../src/service/simulation/simulation-run-write-state');
+    const { commitWorldSimulationFieldWrites_ACU } = await import('../../../src/service/simulation/simulation-commit-adapter');
+    const { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU } = await import('../../../src/service/simulation/simulation-ledger-fold');
+    const read = () => { const folded = foldWorldSimulationLedger_ACU(chat, anchor.messageIndex); return {
+      ledger: folded?.ledger ?? chat[0]._qrf_world_simulation.ledger, fields: folded?.fields,
+      archive: foldWorldSimulationArchive_ACU(chat, anchor.messageIndex).snapshot,
+    }; };
+    const runWrites = new WorldSimulationRunWriteState_ACU(read, 0);
+    const receipt = await commitWorldSimulationFieldWrites_ACU({ identity, anchor, role: 'undercurrent-analyst',
+      sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-a', '风暴', 0)",
+      evidenceRegistry: { runId: identity.runId, entries: [] },
+      assertRunLedger: view => runWrites.assertCurrent(view), prepareRunProof: (view, refs, accepted) => runWrites.prepareConfirmation(identity, view, refs, accepted),
+      confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted) });
+    expect(receipt.status).toBe('committed');
+    saveChat.mockClear();
+    const duplicate = { candidateId: 'candidate:dim-a', agentName: 'undercurrent-analyst',
+      patch: { dimensions: { upsert: [{ id: 'dim-a', name: '覆盖' }] } }, summary: '重复', evidenceRefs: [], uncertainties: [], writableModules: ['dimensions'] };
+    await expect(commitWorldSimulationProjection_ACU({ ...commitInput, runWrites,
+      commitCandidate: { ...commitCandidate, acceptedCandidates: [duplicate] } })).rejects.toThrow('WORLD_SIMULATION_RUN_WRITE_OVERLAP:dimensions:dim-a');
+    expect(foldWorldSimulationLedger_ACU(chat)?.fields.records.dimensions?.['dim-a'].fields.name.value).toBe('风暴');
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('world simulation durable run write proof', () => {
+  beforeEach(() => {
+    _set_SillyTavern_API_ACU(null as any);
+    resetWorldSimulationOrchestratorStateForTests_ACU();
+  });
+
+  function resumeFixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
+    const f = fixture(saveChat);
+    const { chat, anchor, identity } = f;
+    const read = () => {
+      const folded = foldWorldSimulationLedger_ACU(chat, anchor.messageIndex);
+      return { ledger: folded?.ledger ?? new FirstFloorWorldSimulationStore_ACU().read()!.ledger,
+        fields: folded?.fields, archive: foldWorldSimulationArchive_ACU(chat, anchor.messageIndex).snapshot };
+    };
+    const proof = new WorldSimulationRunWriteState_ACU(read, 0);
+    const write = (sql: string) => commitWorldSimulationFieldWrites_ACU({ identity, anchor, sql, role: 'undercurrent-analyst',
+      evidenceRegistry: { runId: identity.runId, entries: [] },
+      assertRunLedger: view => { proof.assertCurrent(view); proof.assertPersistedProof(identity, readWorldSimulationRunWriteProof_ACU(anchor, chat)); },
+      prepareRunProof: (view, refs, accepted) => proof.prepareConfirmation(identity, view, refs, accepted),
+      confirmRunLedger: (view, refs, accepted) => proof.confirm(view, refs, accepted) });
+    return { ...f, read, proof, write };
+  }
+
+  it('一次保存同时携带 partial 和证明；重载后继续完成条目并保留原始 run base revision', async () => {
+    const { chat, anchor, identity, read, write, saveChat, commitInput, commitCandidate } = resumeFixture();
+    expect((await write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-reload', '山雨', 0)")).status).toBe('committed');
+    const saved = structuredClone(chat);
+    expect(readWorldSimulationRunWriteProof_ACU(anchor, chat)).toMatchObject({ runId: identity.runId,
+      baseLedgerRevision: 0, ledgerRevision: 0, confirmedWrites: 1, written: { dimensions: ['dim-reload'] } });
+    expect(saved[anchor.messageIndex]._qrf_world_simulation_run_writes).toBeDefined();
+    expect(saveChat).toHaveBeenCalledTimes(1);
+    const resumed = restoreWorldSimulationRunWrites_ACU(read, identity, anchor, chat);
+    resumed.assertCurrent();
+    const second = await commitWorldSimulationFieldWrites_ACU({ identity, anchor, role: 'undercurrent-analyst',
+      sql: "UPDATE dimensions SET kind='pressure', value=10, trend='rising', rationale='山雨', evidence_refs='[]' WHERE id='dim-reload' AND expected_revision=0",
+      evidenceRegistry: { runId: identity.runId, entries: [] },
+      assertRunLedger: view => { resumed.assertCurrent(view); resumed.assertPersistedProof(identity, readWorldSimulationRunWriteProof_ACU(anchor, chat)); },
+      prepareRunProof: (view, refs, accepted) => resumed.prepareConfirmation(identity, view, refs, accepted),
+      confirmRunLedger: (view, refs, accepted) => resumed.confirm(view, refs, accepted) });
+    expect(second).toMatchObject({ status: 'committed', ledgerRevision: 1 });
+    expect(readWorldSimulationRunWriteProof_ACU(anchor, chat)).toMatchObject({ confirmedWrites: 2, ledgerRevision: 1 });
+    const reloaded = restoreWorldSimulationRunWrites_ACU(read, identity, anchor, chat);
+    await commitWorldSimulationProjection_ACU({ ...commitInput, runWrites: reloaded,
+      commitCandidate: { ...commitCandidate, acceptedCandidates: [], evidenceRefs: [] } });
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.dimensions).toEqual([expect.objectContaining({ id: 'dim-reload' })]);
+    expect(chat[0]._qrf_world_simulation.task).toMatchObject({ status: 'completed', activeRun: null });
+    expect(saveChat).toHaveBeenCalledTimes(3);
+  });
+
+  it('revision 未前进的 partial 丢失证明时 fail-closed，不把已写栏目当作运行起点', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-reload', '山雨', 0)")).status).toBe('committed');
+    expect(f.read().ledger.revision).toBe(f.identity.baseLedgerRevision);
+    expect(f.read().fields?.records.dimensions?.['dim-reload'].status).toBe('partial');
+    delete f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes;
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, f.identity, f.anchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+    expect(f.saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('无证明且无 partial 的旧运行仍可按原始 revision 恢复', () => {
+    const f = resumeFixture();
+    const restored = restoreWorldSimulationRunWrites_ACU(f.read, f.identity, f.anchor, f.chat);
+    expect(restored.currentLedgerRevision).toBe(0);
+    expect(restored.hasConfirmedWrites).toBe(false);
+  });
+
+  it('别的运行留下的有来源 partial 可作为新运行基线；无来源的旧 partial 拒绝猜测归属', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-old', '山雨', 0)")).status).toBe('committed');
+    const newRun = { ...f.identity, runId: 'run-next', taskId: 'task-next' };
+    const restored = restoreWorldSimulationRunWrites_ACU(f.read, newRun, f.anchor, f.chat);
+    expect(restored.hasConfirmedWrites).toBe(false);
+    delete f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes;
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, newRun, f.anchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+  });
+
+  it('终局正文换锚点后 partial 仍有来源证明；下一运行可从该已确认草稿起步', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-left', '旧雨', 0)")).status).toBe('committed');
+    const input = { ...f.commitInput, runWrites: f.proof, commitCandidate: { ...f.commitCandidate, acceptedCandidates: [], evidenceRefs: [] } };
+    await commitWorldSimulationProjection_ACU(input);
+    const nextAnchor = resolveWorldSimulationAnchor_ACU(f.anchor.messageIndex, f.chat);
+    const nextRead = () => {
+      const folded = foldWorldSimulationLedger_ACU(f.chat, nextAnchor.messageIndex);
+      return { ledger: folded!.ledger, fields: folded!.fields,
+        archive: foldWorldSimulationArchive_ACU(f.chat, nextAnchor.messageIndex).snapshot };
+    };
+    expect(nextRead().fields.records.dimensions?.['dim-left'].status).toBe('partial');
+    expect(readWorldSimulationRunWriteProof_ACU(nextAnchor, f.chat)).toMatchObject({ runId: f.identity.runId });
+    const nextRun = { ...f.identity, runId: 'next-run', taskId: 'next-task',
+      anchorContentDigest: nextAnchor.contentDigest, baseLedgerRevision: nextRead().ledger.revision };
+    expect(restoreWorldSimulationRunWrites_ACU(nextRead, nextRun, nextAnchor, f.chat).hasConfirmedWrites).toBe(false);
+    delete f.chat[nextAnchor.messageIndex]._qrf_world_simulation_run_writes.entries[buildWorldSimulationBucketKey_ACU(nextAnchor)];
+    expect(() => restoreWorldSimulationRunWrites_ACU(nextRead, nextRun, nextAnchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+  });
+
+  it('终局保存监听器原地改写证明时不覆盖变化或宣称补偿成功', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-left', '山雨', 0)")).status).toBe('committed');
+    const before = structuredClone(f.chat);
+    f.saveChat.mockImplementationOnce(async () => {
+      const nextAnchor = resolveWorldSimulationAnchor_ACU(f.anchor.messageIndex, f.chat);
+      f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes.entries[
+        buildWorldSimulationBucketKey_ACU(nextAnchor)].value.fingerprint = 'host mutation';
+    }).mockResolvedValue(undefined);
+    await expect(commitWorldSimulationProjection_ACU({ ...f.commitInput, runWrites: f.proof,
+      commitCandidate: { ...f.commitCandidate, acceptedCandidates: [], evidenceRefs: [] } })).rejects.toMatchObject({
+        error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', details: { recovery: 'unavailable' } },
+      });
+    expect(f.chat).not.toEqual(before);
+    const nextAnchor = resolveWorldSimulationAnchor_ACU(f.anchor.messageIndex, f.chat);
+    expect(f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes.entries[
+      buildWorldSimulationBucketKey_ACU(nextAnchor)].value.fingerprint).toBe('host mutation');
+    expect(() => readWorldSimulationRunWriteProof_ACU(nextAnchor, f.chat)).toThrow('运行写入证明损坏');
+    expect(foldWorldSimulationLedger_ACU(f.chat)?.fields.records.dimensions?.['dim-left'].status).toBe('partial');
+    expect(f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes.entries[
+      buildWorldSimulationBucketKey_ACU(f.anchor)].value.confirmedWrites).toBe(1);
+    expect(f.saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('同 revision 外部归档改写不能借先前运行证明恢复', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-left', '山雨', 0)")).status).toBe('committed');
+    const archiveField = f.chat[f.anchor.messageIndex]._qrf_world_simulation_chronicle_archive;
+    archiveField.entries[buildWorldSimulationBucketKey_ACU(f.anchor)].value.checkpoint.records['arc-other'] = {
+      archiveRef: 'arc-other', day: 1, summary: '外部', fingerprints: [], relatedIds: [], sourceChronicleIds: [],
+    };
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, f.identity, f.anchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+  });
+
+  it('逐栏保存失败或保存后证明被改写时既不签发回执也不前移内存证明', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockResolvedValue(undefined);
+    const f = resumeFixture(saveChat);
+    const sql = "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-reload', '山雨', 0)";
+    expect(await f.write(sql)).toMatchObject({ status: 'persist_failed', accepted: [], recovery: 'saved' });
+    expect(f.proof.confirmedWrites).toBe(0);
+    expect(readWorldSimulationRunWriteProof_ACU(f.anchor, f.chat)).toBeNull();
+    saveChat.mockImplementationOnce(async () => {
+      f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes.entries[
+        buildWorldSimulationBucketKey_ACU(f.anchor)].value.fingerprint = 'tampered';
+    }).mockResolvedValue(undefined);
+    expect(await f.write(sql)).toMatchObject({ status: 'readback_failed', accepted: [] });
+    expect(f.proof.confirmedWrites).toBe(0);
+  });
+
+  it('重载时拒绝外部 revision、同 revision 的分栏或归档篡改，以及损坏的证明', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-reload', '山雨', 0)")).status).toBe('committed');
+    const snapshot = structuredClone(f.chat);
+    f.chat[f.anchor.messageIndex]._qrf_world_simulation_state.entries[buildWorldSimulationBucketKey_ACU(f.anchor)].value.deltas.at(-1).fieldUpserts.dimensions['dim-reload'].name.value = '外部改写';
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, f.identity, f.anchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+    f.chat.splice(0, f.chat.length, ...structuredClone(snapshot));
+    f.chat[f.anchor.messageIndex]._qrf_world_simulation_state.entries[buildWorldSimulationBucketKey_ACU(f.anchor)].value.deltas.at(-1).revision = 2;
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, f.identity, f.anchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+    f.chat.splice(0, f.chat.length, ...structuredClone(snapshot));
+    f.chat[f.anchor.messageIndex]._qrf_world_simulation_run_writes.entries[buildWorldSimulationBucketKey_ACU(f.anchor)].value.confirmedWrites = -1;
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, f.identity, f.anchor, f.chat)).toThrow('运行写入证明损坏');
+    f.chat.splice(0, f.chat.length, ...structuredClone(snapshot));
+    expect(() => restoreWorldSimulationRunWrites_ACU(f.read, { ...f.identity, runId: 'other', baseLedgerRevision: 1 }, f.anchor, f.chat)).toThrow('WORLD_SIMULATION_LEDGER_STALE');
+  });
+
+  it('生产级编排器在自身逐栏写入后暂停重载，核验证明并以空候选终局', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-reload', '山雨', 0)")).status).toBe('committed');
+    f.chat[0]._qrf_world_simulation.task.status = 'paused';
+    const store = new FirstFloorWorldSimulationStore_ACU();
+    let allocated = 0;
+    const orchestrator = new WorldSimulationOrchestrator_ACU({
+      store, now: () => 123, allocateId: kind => `${kind}-${++allocated}`,
+      assertAnchorCurrent: () => undefined,
+      readResumeLedgerRevision: (identity, anchor) => restoreWorldSimulationRunWrites_ACU(f.read, identity, anchor, f.chat).currentLedgerRevision,
+      prepare: async ({ identity, anchor }) => ({
+        revision: store.read()!.stages[0].revisions[0],
+        runWrites: restoreWorldSimulationRunWrites_ACU(f.read, identity, anchor, f.chat),
+        execute: async () => ({ outcome: 'no_change' as const, summary: '已保存', outcomes: [] }),
+      }),
+      commitProjection: commitWorldSimulationProjection_ACU,
+    });
+    const result = await orchestrator.resume({ anchor: f.anchor });
+    expect(result).toMatchObject({ status: 'completed', identity: { baseLedgerRevision: 0, runId: f.identity.runId },
+      result: { outcome: 'commit', commitCandidate: { acceptedCandidates: [] } } });
+    expect(f.chat[0]._qrf_world_simulation.task.status).toBe('completed');
+  });
 });

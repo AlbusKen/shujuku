@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU } from '../../../../src/service/simulation/agent/agent-model';
 import {
   appendWorldSimulationConversationSegment_ACU,
+  appendWorldSimulationDirectorHistory_ACU,
+  readWorldSimulationDirectorCompactionSource_ACU,
+  readWorldSimulationDirectorHistory_ACU,
   appendWorldSimulationSessionEvent_ACU,
   appendWorldSimulationUserInstruction_ACU,
   nextWorldSimulationUserInstructionSegmentId_ACU,
@@ -303,6 +306,78 @@ describe('world simulation conversation segments', () => {
     expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(previous);
     expect(readWorldSimulationConversation_ACU(chat).messages).toHaveLength(1);
     expect(saveChat).not.toHaveBeenCalled();
+  });
+
+
+  it('导演历史只读取存活的动作与反馈，不把展示事件或其它 swipe 混入请求', async () => {
+    const chat: any[] = [{ message_id: 1, mes: 'start', swipe_id: 0 }, { message_id: 2, mes: '正文 A', swipe_id: 0, swipes: ['正文 A', '正文 B'] }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-history', getCurrentChatId: () => 'chat-history', saveChat } as any);
+    const first = resolveWorldSimulationAnchor_ACU(0, chat);
+    const second = resolveWorldSimulationAnchor_ACU(1, chat);
+    await appendWorldSimulationUserInstruction_ACU({ anchor: first, runId: 'run-a', taskId: 'task-a', stageId: 'stage-a', stageRevision: 1, text: '先调查', idempotent: true }, chat);
+    await appendWorldSimulationSessionEvent_ACU({ anchor: second, runId: 'run-a', taskId: 'task-a', stageId: 'stage-a', stageRevision: 1, eventKey: 'read', event: { kind: 'tool_read', title: '展示卡片', detail: '不进入模型历史' } }, chat);
+    await appendWorldSimulationDirectorHistory_ACU({ anchor: second, runId: 'run-a', taskId: 'task-a', stageId: 'stage-a', stageRevision: 1,
+      messages: [{ role: 'assistant', content: '原始 read 动作' }, { role: 'user', content: '原始工具回执' }] }, chat);
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
+      { role: 'user', content: '先调查' }, { role: 'assistant', content: '原始 read 动作' }, { role: 'user', content: '原始工具回执' },
+    ]);
+    expect(saveChat).toHaveBeenCalledTimes(3);
+    chat[1].swipe_id = 1;
+    chat[1].mes = '正文 B';
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([{ role: 'user', content: '先调查' }]);
+    chat.splice(1, 1);
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([{ role: 'user', content: '先调查' }]);
+  });
+
+  it('导演楼层保存失败回滚；聊天切换和过期正文均不污染新聊天', async () => {
+    const chat: any[] = [{ message_id: 1, mes: '正文', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-history-fail', getCurrentChatId: () => 'chat-history-fail', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const input = { anchor, runId: 'run-a', taskId: 'task-a', stageId: 'stage-a', stageRevision: 1,
+      messages: [{ role: 'assistant' as const, content: 'read' }, { role: 'user' as const, content: 'read result' }] };
+    saveChat.mockRejectedValueOnce(new Error('HOST_SAVE_FAILED'));
+    await expect(appendWorldSimulationDirectorHistory_ACU(input, chat)).rejects.toThrow('HOST_SAVE_FAILED');
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([]);
+    expect(chat[0][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeUndefined();
+    await expect(appendWorldSimulationDirectorHistory_ACU(input, chat)).resolves.toBe(true);
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toHaveLength(2);
+    const otherChat: any[] = [{ message_id: 1, mes: '另一聊天', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat: otherChat, chatId: 'other-chat', getCurrentChatId: () => 'other-chat', saveChat } as any);
+    await expect(appendWorldSimulationDirectorHistory_ACU(input, chat)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_SNAPSHOT_INVALID' } });
+    expect(otherChat[0][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeUndefined();
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-history-fail', getCurrentChatId: () => 'chat-history-fail', saveChat } as any);
+    chat[0].mes = '被编辑的正文';
+    await expect(appendWorldSimulationDirectorHistory_ACU(input, chat)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' } });
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('压缩标记核对源快照，遇并发追加和宿主保存失败不覆盖历史', async () => {
+    const chat: any[] = [{ message_id: 1, mes: 'old', swipe_id: 0 }, { message_id: 2, mes: 'now', swipe_id: 0 }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-compaction-conflict', getCurrentChatId: () => 'chat-compaction-conflict', saveChat } as any);
+    const oldAnchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const anchor = resolveWorldSimulationAnchor_ACU(1, chat);
+    const first = [{ role: 'assistant' as const, content: 'old action' }, { role: 'user' as const, content: 'old result' }];
+    await appendWorldSimulationDirectorHistory_ACU({ anchor: oldAnchor, runId: 'r1', taskId: 't1', stageId: 's1', stageRevision: 1, messages: first }, chat);
+    await appendWorldSimulationSessionEvent_ACU({ anchor, runId: 'r2', taskId: 't2', stageId: 's2', stageRevision: 2, eventKey: 'start',
+      event: { kind: 'run_started', title: 'started', detail: 'pending' } }, chat);
+    const original = readWorldSimulationDirectorCompactionSource_ACU(chat);
+    const mark = { compactedThroughId: 2, report: 'handoff', at: 10 };
+    await appendWorldSimulationUserInstruction_ACU({ anchor, runId: 'r2', taskId: 't2', stageId: 's2', stageRevision: 2, text: 'newer instruction' }, chat);
+    const before = chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
+    saveChat.mockClear();
+    await expect(writeWorldSimulationConversationCompaction_ACU({ anchor, compaction: mark, expectedFingerprint: original.fingerprint }, chat))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_SNAPSHOT_INVALID' } });
+    expect(saveChat).not.toHaveBeenCalled();
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(before);
+    const fresh = readWorldSimulationDirectorCompactionSource_ACU(chat);
+    saveChat.mockRejectedValueOnce(new Error('HOST_MARK_FAILED'));
+    await expect(writeWorldSimulationConversationCompaction_ACU({ anchor, compaction: mark, expectedFingerprint: fresh.fingerprint }, chat))
+      .rejects.toThrow('HOST_MARK_FAILED');
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(before);
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
+      ...first, { role: 'user', content: 'newer instruction' },
+    ]);
+    expect(readWorldSimulationDirectorCompactionSource_ACU(chat).view.compaction).toBeNull();
   });
 
   it('楼层没有会话段时压缩标记拒绝落盘，不造空消息段', async () => {

@@ -17,6 +17,8 @@ import {
   WORLD_LEDGER_SCHEMA_VERSION_ACU,
   WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU,
   WORLD_SIMULATION_SINGLETON_ID_ACU,
+  WorldSimulationValidationError_ACU,
+  createWorldSimulationError_ACU,
   type WorldClock_ACU,
   type WorldGuidance_ACU,
   type WorldPlayer_ACU,
@@ -71,6 +73,8 @@ export interface WorldSimulationLedgerDelta_ACU {
 export interface WorldSimulationLedgerFrame_ACU {
   schemaVersion: typeof WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU;
   checkpoint?: WorldSimulationLedger_ACU;
+  /** 基线时刻的 partial 草稿栏目（只含值写入）。基线重建会越过其前的 delta，草稿必须随基线保存。 */
+  checkpointPartials?: WorldSimulationLedgerFieldUpserts_ACU;
   deltas: WorldSimulationLedgerDelta_ACU[];
 }
 
@@ -105,19 +109,100 @@ function cloneJson_ACU<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/** 键序无关的 JSON 文本，用于比较栏目值是否真的变化。 */
+function canonicalJson_ACU(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson_ACU).join(',')}]`;
+  if (!value || typeof value !== 'object') return JSON.stringify(value);
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson_ACU(record[key])}`).join(',')}}`;
+}
+
+const LEDGER_FIELD_MODULES_ACU = Object.keys(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU) as WorldSimulationLedgerModule_ACU[];
+
+function isLedgerFieldModule_ACU(value: string): value is WorldSimulationLedgerModule_ACU {
+  return (LEDGER_FIELD_MODULES_ACU as readonly string[]).includes(value);
+}
+
+function isLedgerFieldWrite_ACU(value: unknown): value is WorldSimulationLedgerFieldWrite_ACU {
+  return isRecord_ACU(value) && (value.unset === true || Object.prototype.hasOwnProperty.call(value, 'value'));
+}
+
+/**
+ * 解析推演逐栏写集（持久化 delta、基线草稿或调用方输入）。结构损坏返回 null；未知模块或栏目名只忽略。
+ * 单例模块的 ID 一律归一为固定 ID。
+ */
+export function parseWorldSimulationLedgerFieldUpserts_ACU(raw: unknown): WorldSimulationLedgerFieldUpserts_ACU | null {
+  if (!isRecord_ACU(raw)) return null;
+  const parsed: WorldSimulationLedgerFieldUpserts_ACU = {};
+  for (const [moduleKey, moduleUpserts] of Object.entries(raw)) {
+    if (!isRecord_ACU(moduleUpserts)) return null;
+    if (!isLedgerFieldModule_ACU(moduleKey)) continue;
+    const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[moduleKey];
+    const kept: Record<string, Record<string, WorldSimulationLedgerFieldWrite_ACU>> = {};
+    for (const [rawId, writes] of Object.entries(moduleUpserts)) {
+      if (!isRecord_ACU(writes)) return null;
+      const id = SINGLETON_MODULES_ACU.has(moduleKey) ? WORLD_SIMULATION_SINGLETON_ID_ACU : rawId.trim();
+      if (!id) return null;
+      const keptFields: Record<string, WorldSimulationLedgerFieldWrite_ACU> = {};
+      for (const [field, write] of Object.entries(writes)) {
+        if (!isLedgerFieldWrite_ACU(write)) return null;
+        if (!matrix.fields.includes(field)) continue;
+        keptFields[field] = write.unset === true ? { unset: true } : { value: cloneJson_ACU(write.value) };
+      }
+      if (Object.keys(keptFields).length) kept[id] = { ...(kept[id] ?? {}), ...keptFields };
+    }
+    if (Object.keys(kept).length) parsed[moduleKey] = kept;
+  }
+  return parsed;
+}
+
+function hasLedgerFieldUpserts_ACU(upserts: WorldSimulationLedgerFieldUpserts_ACU | null | undefined): upserts is WorldSimulationLedgerFieldUpserts_ACU {
+  return !!upserts && Object.values(upserts).some(bucket => !!bucket && Object.keys(bucket).length > 0);
+}
+
+/** 折叠遇到结构损坏的逐栏写集时 fail-closed：与账本本体损坏一样抛结构化错误，不静默丢草稿。 */
+function requireLedgerFieldUpserts_ACU(raw: unknown, path: string): WorldSimulationLedgerFieldUpserts_ACU {
+  const parsed = parseWorldSimulationLedgerFieldUpserts_ACU(raw);
+  if (!parsed) {
+    throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${path} 逐栏写集结构损坏`, false, { path }));
+  }
+  return parsed;
+}
+
 function isAssistant_ACU(message: unknown): boolean {
   return isRecord_ACU(message) && message.is_user !== true && message.is_system !== true;
 }
 
+function invalidFloorValue_ACU(path: string): never {
+  throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+    'WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${path} 结构损坏`, false, { path }));
+}
+
+function isStrictFoldField_ACU(field: string): boolean {
+  return field === WORLD_SIMULATION_STATE_FIELD_ACU || field === WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU;
+}
+
 function bucketEntries_ACU(message: Record<string, unknown>, field: string): Record<string, { anchor?: WorldSimulationAnchorIdentity_ACU; value?: unknown }> {
   const raw = message[field];
-  if (!isRecord_ACU(raw) || raw.schemaVersion !== 1 || !isRecord_ACU(raw.entries)) return {};
+  if (raw === undefined) return {};
+  if (!isRecord_ACU(raw) || raw.schemaVersion !== 1 || !isRecord_ACU(raw.entries)) {
+    if (isStrictFoldField_ACU(field)) invalidFloorValue_ACU(field);
+    return {};
+  }
   return raw.entries as Record<string, { anchor?: WorldSimulationAnchorIdentity_ACU; value?: unknown }>;
 }
 
 function entryValue_ACU(message: unknown, field: string, anchor: WorldSimulationAnchorIdentity_ACU): unknown {
   if (!isRecord_ACU(message)) return undefined;
-  return bucketEntries_ACU(message, field)[buildWorldSimulationBucketKey_ACU(anchor)]?.value;
+  const entry = bucketEntries_ACU(message, field)[buildWorldSimulationBucketKey_ACU(anchor)];
+  if (entry === undefined) return undefined;
+  if (isStrictFoldField_ACU(field)) {
+    if (!isRecord_ACU(entry) || !isRecord_ACU(entry.anchor) || !Object.prototype.hasOwnProperty.call(entry, 'value')) invalidFloorValue_ACU(field);
+    const stored = entry.anchor;
+    if (stored.chatIdentity !== anchor.chatIdentity || stored.messageKey !== anchor.messageKey
+      || stored.swipeId !== anchor.swipeId || stored.contentDigest !== anchor.contentDigest) invalidFloorValue_ACU(field);
+  }
+  return entry.value;
 }
 
 function writeEntry_ACU(message: Record<string, unknown>, field: string, anchor: WorldSimulationAnchorIdentity_ACU, value: unknown, updatedAt: number): void {
@@ -130,7 +215,10 @@ function writeEntry_ACU(message: Record<string, unknown>, field: string, anchor:
 }
 
 function isLedgerValue_ACU(value: unknown): value is WorldSimulationLedger_ACU {
-  return isRecord_ACU(value) && value.schemaVersion === WORLD_LEDGER_SCHEMA_VERSION_ACU && Array.isArray(value.dimensions) && Array.isArray(value.pendingFixes);
+  return isRecord_ACU(value) && Number.isInteger(value.schemaVersion)
+    && (value.schemaVersion as number) >= 1 && (value.schemaVersion as number) <= WORLD_LEDGER_SCHEMA_VERSION_ACU
+    && isRecord_ACU(value.clock) && Array.isArray(value.dimensions) && Array.isArray(value.seeds)
+    && Array.isArray(value.actors) && Array.isArray(value.chronicle) && isRecord_ACU(value.guidance);
 }
 
 function isLedgerFrame_ACU(value: unknown): value is WorldSimulationLedgerFrame_ACU {
@@ -183,77 +271,95 @@ function emptyLedgerFieldView_ACU(): WorldSimulationLedgerFieldSnapshot_ACU {
   return { records: {} };
 }
 
-function syncLedgerRecordToView_ACU(
-  view: WorldSimulationLedgerFieldSnapshot_ACU,
-  module: WorldSimulationLedgerModule_ACU,
-  value: unknown,
-  updatedAt: number,
-): void {
-  const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module];
-  const bucket: Record<string, WorldSimulationLedgerFieldRecord_ACU> = {};
+/** 账本里的条目按 ID 取出：单例模块（clock/player/guidance）固定 ID。 */
+function domainLedgerEntriesOf_ACU(ledger: WorldSimulationLedger_ACU, module: WorldSimulationLedgerModule_ACU): Map<string, Record<string, unknown>> {
+  const entries = new Map<string, Record<string, unknown>>();
+  const value = (ledger as unknown as Record<string, unknown>)[module];
   if (SINGLETON_MODULES_ACU.has(module)) {
-    if (isRecord_ACU(value)) {
-      const fields: Record<string, WorldSimulationLedgerFieldValue_ACU> = {};
-      for (const key of matrix.fields) {
-        if (Object.prototype.hasOwnProperty.call(value, key)) {
-          fields[key] = { value: cloneJson_ACU((value as Record<string, unknown>)[key]), revision: 0, updatedAt };
-        }
-      }
-      bucket[WORLD_SIMULATION_SINGLETON_ID_ACU] = {
-        module,
-        id: WORLD_SIMULATION_SINGLETON_ID_ACU,
-        status: 'legacy_unknown',
-        fields,
-        missingFields: [],
-        updatedAt,
-      };
-    }
-  } else if (Array.isArray(value)) {
-    for (const item of value) {
-      if (!isRecord_ACU(item)) continue;
-      const id = itemId_ACU(item, 'id');
-      if (!id) continue;
-      const fields: Record<string, WorldSimulationLedgerFieldValue_ACU> = {};
-      for (const key of matrix.fields) {
-        if (Object.prototype.hasOwnProperty.call(item, key)) {
-          fields[key] = { value: cloneJson_ACU((item as Record<string, unknown>)[key]), revision: 0, updatedAt };
-        }
-      }
-      bucket[id] = { module, id, status: 'legacy_unknown', fields, missingFields: [], updatedAt };
-    }
+    if (isRecord_ACU(value)) entries.set(WORLD_SIMULATION_SINGLETON_ID_ACU, value);
+    return entries;
   }
-  view.records[module] = bucket;
+  if (!Array.isArray(value)) return entries;
+  for (const item of value) {
+    if (!isRecord_ACU(item)) continue;
+    const id = itemId_ACU(item, 'id');
+    if (id) entries.set(id, item);
+  }
+  return entries;
 }
 
-function syncAllLedgerRecordsToView_ACU(view: WorldSimulationLedgerFieldSnapshot_ACU, ledger: WorldSimulationLedger_ACU, updatedAt: number): void {
-  for (const module of Object.keys(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU) as WorldSimulationLedgerModule_ACU[]) {
-    syncLedgerRecordToView_ACU(view, module, (ledger as unknown as Record<string, unknown>)[module], updatedAt);
+/** 从账本条目重建栏目：值未变的栏目沿用原 revision，变化或新出现的栏目 revision +1（基线为 0）。 */
+function domainLedgerRecordFields_ACU(
+  module: WorldSimulationLedgerModule_ACU,
+  item: Record<string, unknown>,
+  previous: WorldSimulationLedgerFieldRecord_ACU | undefined,
+  updatedAt: number,
+  baseline: boolean,
+): { fields: Record<string, WorldSimulationLedgerFieldValue_ACU>; changed: boolean } {
+  const fields: Record<string, WorldSimulationLedgerFieldValue_ACU> = {};
+  let changed = !previous;
+  for (const key of WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module].fields) {
+    if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+    // 与续写侧同一纪律：归一化校验留下的显式 undefined 在 JSON 语义下就是缺席，跳过而不是拿去 clone。
+    if (item[key] === undefined) continue;
+    const value = cloneJson_ACU(item[key]);
+    const prior = previous?.fields[key];
+    if (prior && canonicalJson_ACU(prior.value) === canonicalJson_ACU(value)) {
+      fields[key] = { value, revision: prior.revision, updatedAt: prior.updatedAt };
+      continue;
+    }
+    fields[key] = { value, revision: baseline ? 0 : (prior?.revision ?? 0) + 1, updatedAt };
+    changed = true;
   }
+  if (previous && Object.keys(previous.fields).some(key => !Object.prototype.hasOwnProperty.call(fields, key))) changed = true;
+  return { fields, changed };
 }
 
+/** 基线时刻的账本条目：栏目 revision 从 0 起算，记为 legacy_unknown。 */
 function seedLedgerFieldView_ACU(ledger: WorldSimulationLedger_ACU, updatedAt: number): WorldSimulationLedgerFieldSnapshot_ACU {
   const view = emptyLedgerFieldView_ACU();
-  syncAllLedgerRecordsToView_ACU(view, ledger, updatedAt);
+  reconcileLedgerFieldViewWithLedger_ACU(view, ledger, updatedAt, true);
   return view;
 }
 
-function recomputeLedgerFieldRecordStatus_ACU(record: WorldSimulationLedgerFieldRecord_ACU): void {
-  const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[record.module];
-  record.missingFields = matrix.required.filter(key => !(key in record.fields));
-  record.status = record.missingFields.length ? 'partial' : 'complete';
+/** 视图里的 partial 草稿栏目，按逐栏写集形态导出（只含值写入）。基线重建时随基线保存。 */
+export function extractWorldSimulationPartialFields_ACU(view: WorldSimulationLedgerFieldSnapshot_ACU): WorldSimulationLedgerFieldUpserts_ACU {
+  const partials: WorldSimulationLedgerFieldUpserts_ACU = {};
+  for (const module of LEDGER_FIELD_MODULES_ACU) {
+    const bucket = view.records[module];
+    if (!bucket) continue;
+    const kept: Record<string, Record<string, WorldSimulationLedgerFieldWrite_ACU>> = {};
+    for (const [id, record] of Object.entries(bucket)) {
+      if (record.status !== 'partial' || !Object.keys(record.fields).length) continue;
+      kept[id] = Object.fromEntries(Object.entries(record.fields).map(([field, entry]) => [field, { value: cloneJson_ACU(entry.value) }]));
+    }
+    if (Object.keys(kept).length) partials[module] = kept;
+  }
+  return partials;
 }
 
+/** 草稿记录不在账本中，恒为 partial；缺栏按模型必填栏计算。 */
+function recomputeLedgerPartialRecord_ACU(record: WorldSimulationLedgerFieldRecord_ACU): void {
+  const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[record.module];
+  record.missingFields = matrix.required.filter(key => !Object.prototype.hasOwnProperty.call(record.fields, key));
+  record.status = 'partial';
+}
+
+/**
+ * 把逐栏写集叠到视图上。被写到的记录先一律按草稿重算，随后的账本对账再把在账本里的 ID
+ * 改回完整状态；值未变的重复写入不推进栏目 revision。
+ */
 function applyLedgerFieldUpsertsToView_ACU(
   view: WorldSimulationLedgerFieldSnapshot_ACU,
   upserts: WorldSimulationLedgerFieldUpserts_ACU,
   updatedAt: number,
 ): WorldSimulationLedgerFieldSnapshot_ACU {
   const next: WorldSimulationLedgerFieldSnapshot_ACU = { records: {} };
-  for (const module of Object.keys(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU) as WorldSimulationLedgerModule_ACU[]) {
+  for (const module of LEDGER_FIELD_MODULES_ACU) {
     const bucket = view.records[module];
     if (bucket) next.records[module] = cloneJson_ACU(bucket) as Record<string, WorldSimulationLedgerFieldRecord_ACU>;
   }
-  for (const module of Object.keys(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU) as WorldSimulationLedgerModule_ACU[]) {
+  for (const module of LEDGER_FIELD_MODULES_ACU) {
     const moduleUpserts = upserts[module];
     if (!moduleUpserts) continue;
     const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module];
@@ -263,75 +369,57 @@ function applyLedgerFieldUpsertsToView_ACU(
       if (!stableId || !isRecord_ACU(fieldWrites)) continue;
       const record = (bucket[stableId] ??= { module, id: stableId, status: 'partial', fields: {}, missingFields: [], updatedAt: 0 });
       for (const [field, write] of Object.entries(fieldWrites as Record<string, WorldSimulationLedgerFieldWrite_ACU>)) {
-        if (!matrix.fields.includes(field)) continue;
-        if (write && typeof write === 'object' && (write as WorldSimulationLedgerFieldWrite_ACU).unset === true) {
+        if (!matrix.fields.includes(field) || !isLedgerFieldWrite_ACU(write)) continue;
+        if (write.unset === true) {
           delete record.fields[field];
           continue;
         }
-        if (!write || typeof write !== 'object' || !Object.prototype.hasOwnProperty.call(write, 'value')) continue;
         const previous = record.fields[field];
-        record.fields[field] = {
-          value: cloneJson_ACU((write as WorldSimulationLedgerFieldWrite_ACU).value),
-          revision: (previous?.revision ?? 0) + 1,
-          updatedAt,
-        };
+        const value = cloneJson_ACU(write.value);
+        if (previous && canonicalJson_ACU(previous.value) === canonicalJson_ACU(value)) continue;
+        record.fields[field] = { value, revision: (previous?.revision ?? 0) + 1, updatedAt };
       }
       record.updatedAt = updatedAt;
-      recomputeLedgerFieldRecordStatus_ACU(record);
+      recomputeLedgerPartialRecord_ACU(record);
     }
   }
   return next;
 }
 
 /**
- * 每条 delta 后的按 ID 对账：账本中的条目覆盖同名分栏记录（整条写入为权威），
- * 从账本消失的 legacy_unknown 记录同步删除；fieldUpserts 留下的 partial 记录保留在受控视图。
+ * 每条 delta 后的按 ID 对账。账本是完整条目的唯一来源：在账本里的 ID 按账本值重建栏目，此前经逐栏写入
+ * （partial/complete）的记为 complete，其余记为 legacy_unknown；不在账本里的记录只保留仍有栏目的 partial 草稿。
  */
-function reconcileLedgerFieldViewWithLedger_ACU(view: WorldSimulationLedgerFieldSnapshot_ACU, ledger: WorldSimulationLedger_ACU, updatedAt: number): void {
-  for (const module of Object.keys(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU) as WorldSimulationLedgerModule_ACU[]) {
-    const value = (ledger as unknown as Record<string, unknown>)[module];
+function reconcileLedgerFieldViewWithLedger_ACU(
+  view: WorldSimulationLedgerFieldSnapshot_ACU,
+  ledger: WorldSimulationLedger_ACU,
+  updatedAt: number,
+  baseline = false,
+): void {
+  for (const module of LEDGER_FIELD_MODULES_ACU) {
     const bucket = (view.records[module] ??= {});
-    const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module];
-    if (SINGLETON_MODULES_ACU.has(module)) {
-      if (isRecord_ACU(value)) {
-        const fields: Record<string, WorldSimulationLedgerFieldValue_ACU> = {};
-        for (const field of matrix.fields) {
-          if (Object.prototype.hasOwnProperty.call(value, field)) {
-            fields[field] = { value: cloneJson_ACU((value as Record<string, unknown>)[field]), revision: 0, updatedAt };
-          }
-        }
-        bucket[WORLD_SIMULATION_SINGLETON_ID_ACU] = {
-          module,
-          id: WORLD_SIMULATION_SINGLETON_ID_ACU,
-          status: 'legacy_unknown',
-          fields,
-          missingFields: [],
-          updatedAt,
-        };
-      }
-      continue;
-    }
-    const domainIds = new Set<string>();
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        if (!isRecord_ACU(item)) continue;
-        const id = itemId_ACU(item, 'id');
-        if (!id) continue;
-        domainIds.add(id);
-        const fields: Record<string, WorldSimulationLedgerFieldValue_ACU> = {};
-        for (const field of matrix.fields) {
-          if (Object.prototype.hasOwnProperty.call(item, field)) {
-            fields[field] = { value: cloneJson_ACU((item as Record<string, unknown>)[field]), revision: 0, updatedAt };
-          }
-        }
-        bucket[id] = { module, id, status: 'legacy_unknown', fields, missingFields: [], updatedAt };
-      }
+    const domain = domainLedgerEntriesOf_ACU(ledger, module);
+    for (const [id, item] of domain) {
+      const previous = bucket[id];
+      const lineage = previous?.status === 'partial' || previous?.status === 'complete';
+      const rebuilt = domainLedgerRecordFields_ACU(module, item, previous, updatedAt, baseline);
+      bucket[id] = {
+        module,
+        id,
+        status: lineage ? 'complete' : 'legacy_unknown',
+        fields: rebuilt.fields,
+        missingFields: [],
+        updatedAt: rebuilt.changed || !previous ? updatedAt : previous.updatedAt,
+      };
     }
     for (const id of Object.keys(bucket)) {
-      if (!domainIds.has(id) && bucket[id].status === 'legacy_unknown') delete bucket[id];
+      if (domain.has(id)) continue;
+      const record = bucket[id];
+      if (record.status !== 'partial' || !Object.keys(record.fields).length) delete bucket[id];
     }
   }
 }
+
 function applyLedgerDelta_ACU(ledger: WorldSimulationLedger_ACU, delta: WorldSimulationLedgerDelta_ACU): WorldSimulationLedger_ACU {
   const next = cloneJson_ACU(ledger);
   for (const [moduleName, idKey] of ARRAY_MODULES_ACU) {
@@ -449,19 +537,30 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
       if (materialsEvidence) evidenceRefs = materialsEvidence;
       continue;
     }
-    if (!isLedgerFrame_ACU(value)) continue;
+    if (value === undefined) continue;
+    if (!isLedgerFrame_ACU(value)) invalidFloorValue_ACU(`楼层 ${index} 账本帧`);
     let touched = false;
     if (value.checkpoint) {
       ledger = validateWorldSimulationLedger_ACU(value.checkpoint, 'load');
       view = seedLedgerFieldView_ACU(ledger, updatedAt);
+      if (value.checkpointPartials !== undefined) {
+        view = applyLedgerFieldUpsertsToView_ACU(view, requireLedgerFieldUpserts_ACU(value.checkpointPartials, `楼层 ${index} checkpointPartials`), updatedAt);
+        reconcileLedgerFieldViewWithLedger_ACU(view, ledger, updatedAt);
+      }
       checkpointIndex = index;
       foldedDeltaCount = 0;
       touched = true;
     }
     for (const delta of [...value.deltas].sort((left, right) => left.seq - right.seq)) {
+      if (!isRecord_ACU(delta) || !Number.isInteger(delta.seq) || !Number.isInteger(delta.revision)
+        || !Number.isFinite(delta.updatedAt) || !isRecord_ACU(delta.upserts) || !isRecord_ACU(delta.removedIds)) {
+        invalidFloorValue_ACU(`楼层 ${index} 账本 delta`);
+      }
       if (!ledger) continue;
       ledger = validateWorldSimulationLedger_ACU(applyLedgerDelta_ACU(ledger, delta), 'load');
-      if (delta.fieldUpserts) view = applyLedgerFieldUpsertsToView_ACU(view, delta.fieldUpserts, delta.updatedAt);
+      if (delta.fieldUpserts !== undefined) {
+        view = applyLedgerFieldUpsertsToView_ACU(view, requireLedgerFieldUpserts_ACU(delta.fieldUpserts, `楼层 ${index} delta#${delta.seq}.fieldUpserts`), delta.updatedAt);
+      }
       reconcileLedgerFieldViewWithLedger_ACU(view, ledger, delta.updatedAt);
       foldedDeltaCount += 1;
       touched = true;
@@ -504,13 +603,15 @@ export function foldWorldSimulationArchive_ACU(chat: readonly unknown[], through
       checkpointIndex = index;
       continue;
     }
-    if (!isArchiveFrame_ACU(value)) continue;
+    if (value === undefined) continue;
+    if (!isArchiveFrame_ACU(value)) invalidFloorValue_ACU(`楼层 ${index} 归档帧`);
     if (value.checkpoint) {
       records = { ...validateWorldSimulationChronicleArchiveSnapshot_ACU(value.checkpoint, 'load').records };
       checkpointIndex = index;
     }
     for (const delta of [...value.deltas].sort((left, right) => left.seq - right.seq)) {
-      records = { ...records, ...delta.records };
+      if (!isRecord_ACU(delta) || !Number.isInteger(delta.seq) || !isRecord_ACU(delta.records)) invalidFloorValue_ACU(`楼层 ${index} 归档 delta`);
+      records = { ...records, ...validateWorldSimulationChronicleArchiveSnapshot_ACU({ schemaVersion: 1, records: delta.records }, 'load').records };
     }
   }
   return { snapshot: { schemaVersion: 1, records }, checkpointIndex };
@@ -535,6 +636,42 @@ function clearActiveLedgerCheckpoints_ACU(chat: unknown[]): void {
   }
 }
 
+/** 在楼层现有 STATE 帧后追加一条 delta，保留该帧的基线与基线草稿；旧整条账本值先转为基线。 */
+function frameWithAppendedDelta_ACU(current: unknown, delta: WorldSimulationLedgerDelta_ACU): WorldSimulationLedgerFrame_ACU {
+  if (isLedgerFrame_ACU(current)) {
+    return {
+      schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+      ...(current.checkpoint ? { checkpoint: current.checkpoint } : {}),
+      ...(current.checkpointPartials ? { checkpointPartials: current.checkpointPartials } : {}),
+      deltas: [...current.deltas, delta],
+    };
+  }
+  if (isLedgerValue_ACU(current)) {
+    return { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, checkpoint: cloneJson_ACU(current), deltas: [delta] };
+  }
+  return { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, deltas: [delta] };
+}
+
+/** 构造带基线的 STATE 帧；草稿为空时不写 checkpointPartials 键。 */
+function checkpointFrame_ACU(
+  checkpoint: WorldSimulationLedger_ACU,
+  partials: WorldSimulationLedgerFieldUpserts_ACU,
+  deltas: WorldSimulationLedgerDelta_ACU[],
+): WorldSimulationLedgerFrame_ACU {
+  const frame: WorldSimulationLedgerFrame_ACU = {
+    schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
+    checkpoint: cloneJson_ACU(checkpoint),
+    deltas,
+  };
+  if (hasLedgerFieldUpserts_ACU(partials)) frame.checkpointPartials = cloneJson_ACU(partials);
+  return frame;
+}
+
+/**
+ * 提交链：按需把基线重建为提交前的完整账本（连同草稿），再在锚点楼追加本次提交的 delta。
+ * beforePartials 必须取自改写锚点正文之前的折叠——分桶键含正文摘要，改写后旧键下的逐栏草稿不再可读；
+ * 调用方未提供时在改动聊天前自行折叠。
+ */
 export function appendWorldSimulationCommitChain_ACU(input: {
   chat: unknown[];
   messageIndex: number;
@@ -546,9 +683,15 @@ export function appendWorldSimulationCommitChain_ACU(input: {
   checkpointIndex: number | null;
   beforeArchive: WorldChronicleArchiveSnapshot_ACU;
   nextArchive: WorldChronicleArchiveSnapshot_ACU;
+  beforePartials?: WorldSimulationLedgerFieldUpserts_ACU;
 }): void {
   const message = input.chat[input.messageIndex];
   if (!isRecord_ACU(message)) return;
+  const partials = input.beforePartials
+    ?? (() => {
+      const folded = foldWorldSimulationLedger_ACU(input.chat);
+      return folded ? extractWorldSimulationPartialFields_ACU(folded.fields) : {};
+    })();
   const seq = maxLedgerSeq_ACU(input.chat) + 1;
   const delta = diffWorldSimulationLedger_ACU(input.beforeLedger, input.nextLedger, input.evidenceRefs, input.updatedAt, seq);
   const baselineFloor = input.checkpointIndex ?? ensureWorldSimulationBaselineFloor_ACU(input.chat, input.messageIndex);
@@ -563,11 +706,7 @@ export function appendWorldSimulationCommitChain_ACU(input: {
   const installCheckpoint = baselineAnchor === null;
   if (baselineAnchor && baselineFloor !== null) {
     const baselineMessage = input.chat[baselineFloor] as Record<string, unknown>;
-    writeEntry_ACU(baselineMessage, WORLD_SIMULATION_STATE_FIELD_ACU, baselineAnchor, {
-      schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
-      checkpoint: cloneJson_ACU(input.beforeLedger),
-      deltas: [],
-    }, input.updatedAt);
+    writeEntry_ACU(baselineMessage, WORLD_SIMULATION_STATE_FIELD_ACU, baselineAnchor, checkpointFrame_ACU(input.beforeLedger, partials, []), input.updatedAt);
     writeEntry_ACU(baselineMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, baselineAnchor, {
       schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
       checkpoint: cloneJson_ACU(input.beforeArchive),
@@ -576,22 +715,11 @@ export function appendWorldSimulationCommitChain_ACU(input: {
   }
   if (installCheckpoint) {
     clearActiveLedgerCheckpoints_ACU(input.chat);
-    const frame: WorldSimulationLedgerFrame_ACU = {
-      schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
-      checkpoint: cloneJson_ACU(delta ? input.beforeLedger : input.nextLedger),
-      deltas: delta ? [delta] : [],
-    };
+    const frame = checkpointFrame_ACU(delta ? input.beforeLedger : input.nextLedger, partials, delta ? [delta] : []);
     writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frame, input.updatedAt);
   } else if (delta) {
     const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor);
-    const frame: WorldSimulationLedgerFrame_ACU = isLedgerFrame_ACU(current)
-      ? {
-        schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
-        ...(current.checkpoint ? { checkpoint: current.checkpoint } : {}),
-        deltas: [...current.deltas, delta],
-      }
-      : { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, deltas: [delta] };
-    writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frame, input.updatedAt);
+    writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frameWithAppendedDelta_ACU(current, delta), input.updatedAt);
   }
 
   const changedRecords: WorldChronicleArchiveSnapshot_ACU['records'] = {};
@@ -643,11 +771,13 @@ export function relocateWorldSimulationCheckpoint_ACU(chat: unknown[], anchorInd
       deltas: index < anchorIndex ? [] : value.deltas,
     }, Date.now());
   }
-  writeEntry_ACU(chat[anchorIndex] as Record<string, unknown>, WORLD_SIMULATION_STATE_FIELD_ACU, anchor, {
-    schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
-    checkpoint: cloneJson_ACU(folded.ledger),
-    deltas: [],
-  }, folded.updatedAt || Date.now());
+  writeEntry_ACU(
+    chat[anchorIndex] as Record<string, unknown>,
+    WORLD_SIMULATION_STATE_FIELD_ACU,
+    anchor,
+    checkpointFrame_ACU(folded.ledger, extractWorldSimulationPartialFields_ACU(folded.fields), []),
+    folded.updatedAt || Date.now(),
+  );
   return true;
 }
 
@@ -657,12 +787,21 @@ export function readFoldedWorldSimulationLedgerForEnvelope_ACU(envelope: WorldSi
   return { ...envelope, ledger: folded.ledger };
 }
 
-export function simulationLedgerCheckpointArtifact_ACU(message: unknown): { anchor: WorldSimulationAnchorIdentity_ACU; ledger: WorldSimulationLedger_ACU } | null {
+/** 删楼守卫嫁接用的基线制品：账本基线连同基线草稿。 */
+export interface WorldSimulationLedgerCheckpointArtifact_ACU {
+  anchor: WorldSimulationAnchorIdentity_ACU;
+  ledger: WorldSimulationLedger_ACU;
+  partials?: WorldSimulationLedgerFieldUpserts_ACU;
+}
+
+export function simulationLedgerCheckpointArtifact_ACU(message: unknown): WorldSimulationLedgerCheckpointArtifact_ACU | null {
   if (!isRecord_ACU(message)) return null;
   for (const entry of Object.values(bucketEntries_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU))) {
     if (!entry.anchor) continue;
     if (isLedgerFrame_ACU(entry.value) && entry.value.checkpoint) {
-      return { anchor: cloneJson_ACU(entry.anchor), ledger: cloneJson_ACU(entry.value.checkpoint) };
+      const artifact: WorldSimulationLedgerCheckpointArtifact_ACU = { anchor: cloneJson_ACU(entry.anchor), ledger: cloneJson_ACU(entry.value.checkpoint) };
+      if (entry.value.checkpointPartials) artifact.partials = cloneJson_ACU(entry.value.checkpointPartials);
+      return artifact;
     }
     if (isLedgerValue_ACU(entry.value)) {
       return { anchor: cloneJson_ACU(entry.anchor), ledger: cloneJson_ACU(entry.value) };
@@ -674,7 +813,7 @@ export function simulationLedgerCheckpointArtifact_ACU(message: unknown): { anch
 export function graftSimulationLedgerCheckpoint_ACU(
   chat: unknown[],
   message: unknown,
-  artifact: { anchor: WorldSimulationAnchorIdentity_ACU; ledger: WorldSimulationLedger_ACU },
+  artifact: WorldSimulationLedgerCheckpointArtifact_ACU,
 ): boolean {
   if (!isRecord_ACU(message)) return false;
   const index = chat.indexOf(message);
@@ -687,9 +826,7 @@ export function graftSimulationLedgerCheckpoint_ACU(
   }
   const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, anchor);
   if ((isLedgerFrame_ACU(current) && current.checkpoint) || isLedgerValue_ACU(current)) return false;
-  const frame: WorldSimulationLedgerFrame_ACU = isLedgerFrame_ACU(current)
-    ? { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, checkpoint: cloneJson_ACU(artifact.ledger), deltas: current.deltas }
-    : { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, checkpoint: cloneJson_ACU(artifact.ledger), deltas: [] };
+  const frame = checkpointFrame_ACU(artifact.ledger, artifact.partials ?? {}, isLedgerFrame_ACU(current) ? current.deltas : []);
   writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, anchor, frame, Date.now());
   return true;
 }
@@ -738,34 +875,8 @@ export function appendWorldSimulationFieldDeltaChain_ACU(input: {
   if (!isRecord_ACU(message)) return false;
   const folded = foldWorldSimulationLedger_ACU(input.chat, input.messageIndex);
   if (!folded) return false;
-  const cleaned: WorldSimulationLedgerFieldUpserts_ACU = {};
-  let hasWrite = false;
-  for (const module of Object.keys(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU) as WorldSimulationLedgerModule_ACU[]) {
-    const moduleUpserts = input.fieldUpserts[module];
-    if (!moduleUpserts || !isRecord_ACU(moduleUpserts)) continue;
-    const matrix = WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module];
-    const kept: Record<string, Record<string, WorldSimulationLedgerFieldWrite_ACU>> = {};
-    for (const [rawId, writes] of Object.entries(moduleUpserts)) {
-      const id = SINGLETON_MODULES_ACU.has(module) ? WORLD_SIMULATION_SINGLETON_ID_ACU : String(rawId ?? '').trim();
-      if (!id || !isRecord_ACU(writes)) continue;
-      const keptFields: Record<string, WorldSimulationLedgerFieldWrite_ACU> = {};
-      for (const [field, write] of Object.entries(writes as Record<string, WorldSimulationLedgerFieldWrite_ACU>)) {
-        if (!matrix.fields.includes(field)) continue;
-        if (write && typeof write === 'object' && (write as WorldSimulationLedgerFieldWrite_ACU).unset === true) {
-          keptFields[field] = { unset: true };
-          continue;
-        }
-        if (!write || typeof write !== 'object' || !Object.prototype.hasOwnProperty.call(write, 'value')) continue;
-        keptFields[field] = { value: cloneJson_ACU((write as WorldSimulationLedgerFieldWrite_ACU).value) };
-      }
-      if (Object.keys(keptFields).length) {
-        kept[id] = keptFields;
-        hasWrite = true;
-      }
-    }
-    if (Object.keys(kept).length) cleaned[module] = kept;
-  }
-  if (!hasWrite) return false;
+  const cleaned = parseWorldSimulationLedgerFieldUpserts_ACU(input.fieldUpserts);
+  if (!hasLedgerFieldUpserts_ACU(cleaned)) return false;
   const delta: WorldSimulationLedgerDelta_ACU = {
     seq: maxLedgerSeq_ACU(input.chat) + 1,
     revision: folded.ledger.revision,
@@ -775,16 +886,7 @@ export function appendWorldSimulationFieldDeltaChain_ACU(input: {
     updatedAt: input.updatedAt,
   };
   const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor);
-  const frame: WorldSimulationLedgerFrame_ACU = isLedgerFrame_ACU(current)
-    ? {
-      schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
-      ...(current.checkpoint ? { checkpoint: current.checkpoint } : {}),
-      deltas: [...current.deltas, delta],
-    }
-    : isLedgerValue_ACU(current)
-      ? { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, checkpoint: cloneJson_ACU(current), deltas: [delta] }
-      : { schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU, deltas: [delta] };
-  writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frame, input.updatedAt);
+  writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frameWithAppendedDelta_ACU(current, delta), input.updatedAt);
   return true;
 }
 

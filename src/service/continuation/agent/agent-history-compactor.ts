@@ -20,6 +20,7 @@ export interface AgentHistoryCompactionInput_ACU {
   activeMark: AgentConversationCompactionMarkV1_ACU | AgentConversationCompactionMarkV2_ACU | null;
   triggerTokens: number;
   fixedPromptTokens: number;
+  preparedMessages?: readonly { role: string; content: string }[];
   countTokens: TokenCounter_ACU;
   semanticAdapter?: AgentHandoffSemanticSummaryAdapter_ACU;
 }
@@ -42,30 +43,59 @@ function groups_ACU(messages: readonly AgentConversationMessage_ACU[]): AgentCon
   return result;
 }
 
+function replaceHistory_ACU(prepared: readonly { role: string; content: string }[], before: AgentConversationSnapshot_ACU, after: AgentConversationSnapshot_ACU): Array<{ role: string; content: string }> | null {
+  const source = renderAgentConversationMessages_ACU(before);
+  const replacement = renderAgentConversationMessages_ACU(after);
+  if (!source.length) return null;
+  for (let start = 0; start <= prepared.length - source.length; start += 1) {
+    if (source.every((message, offset) => message.role === prepared[start + offset].role && message.content === prepared[start + offset].content)) {
+      return [...prepared.slice(0, start), ...replacement, ...prepared.slice(start + source.length)];
+    }
+  }
+  return null;
+}
+
+async function measurePrepared_ACU(messages: readonly { role: string; content: string }[], count: TokenCounter_ACU): Promise<number> {
+  let total = 0;
+  for (const message of messages) total += await count(message.content);
+  return total;
+}
+
 export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompactionInput_ACU): Promise<AgentHistoryCompactionResult_ACU> {
   const unchanged = (status: AgentHistoryCompactionStatus_ACU, beforeTokens: number, targetTokens: number): AgentHistoryCompactionResult_ACU => ({ status, snapshot: input.snapshot, mark: null, beforeTokens, afterTokens: beforeTokens, targetTokens, droppedMessages: 0, droppedTurns: 0 });
   const trigger = Math.floor(input.triggerTokens);
   if (!Number.isFinite(trigger) || trigger <= 0) return unchanged('not_needed', 0, 0);
   const reserve = clamp(Math.floor(trigger * 0.2), 8000, 24000);
-  const targetTokens = trigger - reserve;
-  const beforeTokens = await measure_ACU(input.snapshot, input.fixedPromptTokens, input.countTokens);
+  const targetTokens = Math.max(0, trigger - reserve);
+  const beforeTokens = input.preparedMessages ? await measurePrepared_ACU(input.preparedMessages, input.countTokens) : await measure_ACU(input.snapshot, input.fixedPromptTokens, input.countTokens);
   if (beforeTokens <= trigger) return unchanged('not_needed', beforeTokens, targetTokens);
   const grouped = groups_ACU(input.snapshot.messages);
   if (grouped.length < 2) return unchanged('incompressible', beforeTokens, targetTokens);
+  let lastUser = -1;
+  grouped.forEach((group, index) => { if (group.some(message => message.kind === 'user')) lastUser = index; });
+  const maxDropped = Math.min(grouped.length - (grouped.length > 2 ? 2 : 1), lastUser < 0 ? grouped.length - 1 : lastUser);
+  if (maxDropped < 1) return unchanged('incompressible', beforeTokens, targetTokens);
   const maxHandoffTokens = clamp(Math.floor(trigger * 0.08), 2000, 8000);
   let droppedTurns = 1;
-  let kept = grouped.slice(1).flat();
-  while (droppedTurns < grouped.length - 1) {
-    const candidate = grouped.slice(droppedTurns).flat();
-    const candidateSnapshot = { ...input.snapshot, messages: candidate };
-    if ((await measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens)) + maxHandoffTokens <= targetTokens) {
-      kept = candidate;
-      break;
-    }
-    droppedTurns += 1;
-    kept = grouped.slice(droppedTurns).flat();
-  }
+  const currentTokens = async (turns: number): Promise<number> => {
+    const candidateSnapshot = { ...input.snapshot, messages: grouped.slice(turns).flat() };
+    if (!input.preparedMessages) return measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+    const prepared = replaceHistory_ACU(input.preparedMessages, input.snapshot, candidateSnapshot);
+    return prepared ? measurePrepared_ACU(prepared, input.countTokens) : Infinity;
+  };
+  while (droppedTurns < maxDropped && (await currentTokens(droppedTurns)) + maxHandoffTokens > targetTokens) droppedTurns += 1;
+  const kept = grouped.slice(droppedTurns).flat();
   const dropped = grouped.slice(0, droppedTurns).flat();
+  // Never summarize a receipt without its initiating action, or an action awaiting a tool result.
+  for (const group of grouped.slice(0, droppedTurns)) {
+    const hasAction = group.some(message => message.kind === 'agent');
+    const hasReceipt = group.some(message => message.kind === 'tool');
+    if (hasAction && !hasReceipt && group.some(message => message.kind === 'agent' && /"action"\s*:\s*"(?:read|search|delegate|open_round|tools)"/.test(message.text))) {
+      return unchanged('incompressible', beforeTokens, targetTokens);
+    }
+    if (hasReceipt && !hasAction) return unchanged('incompressible', beforeTokens, targetTokens);
+  }
+  if (kept[0]?.kind === 'tool' && dropped.some(item => item.kind === 'agent' && item.turnKey === kept[0].turnKey)) return unchanged('incompressible', beforeTokens, targetTokens);
   const compactedThroughId = dropped.reduce((max, item) => Math.max(max, item.id), 0);
   if (compactedThroughId <= (input.activeMark?.compactedThroughId ?? 0)) return unchanged('no_progress', beforeTokens, targetTokens);
   const previous: AgentHandoffSummaryStateV2_ACU | null = input.activeMark && 'summaryState' in input.activeMark
@@ -95,7 +125,9 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
     at,
   };
   const candidateSnapshot: AgentConversationSnapshot_ACU = { ...input.snapshot, messages: [handoff, ...kept] };
-  const afterTokens = await measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+  const preparedAfter = input.preparedMessages ? replaceHistory_ACU(input.preparedMessages, input.snapshot, candidateSnapshot) : null;
+  if (input.preparedMessages && !preparedAfter) return unchanged('incompressible', beforeTokens, targetTokens);
+  const afterTokens = preparedAfter ? await measurePrepared_ACU(preparedAfter, input.countTokens) : await measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
   if (afterTokens >= beforeTokens) return unchanged('no_progress', beforeTokens, targetTokens);
   const mark: AgentConversationCompactionMarkV2_ACU = {
     schemaVersion: 2,

@@ -17,8 +17,7 @@ export const continuationCopy = {
   },
   workflow: {
     title: "固定工作流",
-    description: "主会话每轮只做开局决策。结算、策划、条件审查、容错提交、自动修复和写作指令由程序按固定顺序执行。这里只改配置，提示词仍在下方各角色分组里改。",
-    autoFix: "自动修复违规模块（连续失败达到上限后交给主会话）",
+    description: "主会话每轮只做开局决策。结算、策划、条件审查、容错提交和写作指令由程序按固定顺序执行。这里只改配置，提示词仍在下方各角色分组里改。",
   },
   composer: {
     title: "写作指令编排子代理（instruction-composer）提示词",

@@ -195,6 +195,7 @@ function setSettings(): void {
     storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
     finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
+    workflow: { reviseLimit: 3 },
     webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false, baidu: true }, searchProvider: 'duckduckgo', searxngBaseUrl: '', maxToolRounds: 8, maxPages: 8, pageCharLimit: 4000, blockedDomains: '' },
     agentRunBudget: { maxIterations: 8, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxReads: 8, maxExtraReads: 3 },
     contextExtractRules: [], contextExcludeRules: [],
@@ -240,6 +241,9 @@ describe('ContinuationPage', () => {
       // 创建任务不再是一个单独按钮：发送第一句话就是创建。
       expect(buttonByText(el, '创建续写任务')).toBeUndefined();
       expect(el.textContent).not.toContain('循环提示词');
+      expect(el.textContent).not.toContain('自动修复次数上限');
+      expect(el.textContent).not.toContain('修复额外读取轮数');
+      expect(el.textContent).not.toContain('自动修复违规模块');
 
       typeInto(chatInput(el), '让主角找到出口');
       await nextTick();
@@ -409,6 +413,19 @@ describe('ContinuationPage', () => {
     expect(buttonByText(el, '停止')).toBeUndefined();
     expect(buttonByText(el, '继续当前轮次')).toBeUndefined();
     expect(buttonByText(el, '重试当前轮次')).toBeUndefined();
+    app.unmount();
+  });
+
+  it('只展示与当前 revision 和大纲轮次匹配的非门禁标注，原完成数保持不变', async () => {
+    setTask();
+    activeStage.value.agentTurnLabel = { revision: 2, turnId: 'turn-3', text: '暗中试探守卫' };
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('第 1 阶段 · 暗中试探守卫');
+    expect(el.textContent).toContain('已完成 2 / 4 轮');
+    activeStage.value.agentTurnLabel = { revision: 1, turnId: 'turn-3', text: '过期标注' };
+    await nextTick();
+    expect(el.textContent).not.toContain('过期标注');
+    expect(el.textContent).toContain('第 1 阶段');
     app.unmount();
   });
 
@@ -641,6 +658,7 @@ describe('ContinuationPage', () => {
       expect(saveSettings.mock.calls[0][0]).toMatchObject({
         stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
         finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },
+    workflow: { reviseLimit: 3 },
         agentApiPresets: { finalReviewer: { mode: 'inherit', presetName: '' } },
         agentPrompts: { finalReviewer: [{ content: '终审' }] },
       });

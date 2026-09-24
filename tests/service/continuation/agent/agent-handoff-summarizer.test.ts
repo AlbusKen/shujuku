@@ -66,6 +66,29 @@ describe('summarizeAgentHandoff_ACU', () => {
     expect(result.state.recentTurns).toEqual(['turn-real']);
   });
 
+  it('does not let the semantic adapter replace deterministic effective constraints', async () => {
+    const result = await summarizeAgentHandoff_ACU({
+      previous: null,
+      messages: [message(1, 'user', '不许揭穿守门人'), message(2, 'turn', '当前轮', { digest: '当前轮', turnKey: 'turn-x' })],
+      maxTokens: 2000,
+      countTokens: count,
+      semanticAdapter: { summarize: async () => ({ currentGoal: '语义目标', effectiveConstraints: ['编造的约束'], decisions: [], completedItems: [], pendingItems: [], blockers: [], continuityFacts: [], readKeys: [], recentTurns: [] }) },
+    });
+
+    expect(result.degraded).toBe(false);
+    expect(result.state.currentGoal).toBe('语义目标');
+    expect(result.state.effectiveConstraints).toEqual(['不许揭穿守门人']);
+  });
+
+  it('throws instead of trimming protected constraints when they alone exceed the report budget', async () => {
+    await expect(summarizeAgentHandoff_ACU({
+      previous: null,
+      messages: [message(1, 'user', '约'.repeat(300))],
+      maxTokens: 200,
+      countTokens: count,
+    })).rejects.toThrow('HANDOFF_SUMMARY_BUDGET_EXCEEDED');
+  });
+
   it('falls back to a bounded deterministic report when semantic summarization fails', async () => {
     const result = await summarizeAgentHandoff_ACU({
       previous: null,

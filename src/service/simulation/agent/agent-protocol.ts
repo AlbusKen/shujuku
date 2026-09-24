@@ -4,6 +4,7 @@ import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerce
 import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
+import { findWorldSimulationAgentDefinition_ACU } from './agent-catalog';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
 
 const SCAN_LIMIT_ACU = 6;
@@ -718,6 +719,24 @@ export function parseWorldSimulationMainOutput_ACU(raw: string | null | undefine
   return parseWorldSimulationMainAction_ACU(action, allowDelegate, evidenceRegistry);
 }
 
+/** 子代理专用写动作；主 Agent 与 reviewer 继续使用只读主协议。 */
+export function parseWorldSimulationSubagentToolCalls_ACU(raw: string | null | undefined, prefill = '', evidenceRegistry?: WorldSimulationEvidenceRegistrySnapshot_ACU, writable = false): Array<{ kind: 'write_sql'; sql: string; evidenceRefs: string[] } | Extract<WorldSimulationMainAction_ACU, { kind: 'read' | 'search' }>> | null {
+  const text = stripNoise_ACU(String(raw ?? ''));
+  const candidates = text.startsWith('{') || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  for (const candidate of candidates) {
+    const records = objects_ACU(candidate).map(normalizeLegacyToolAction_ACU);
+    if (!records.length) continue;
+    if (!records.some(record => ['read', 'search', 'write_sql'].includes(text_ACU(record.action)))) return null;
+    return records.map(record => {
+      if (record.action !== 'write_sql') return parseWorldSimulationMainAction_ACU(record, false, evidenceRegistry) as Extract<WorldSimulationMainAction_ACU, { kind: 'read' | 'search' }>;
+      if (!writable) fail_ACU('WRITE_SCOPE_DENIED', '$.action', 'read/search', record.action);
+      const payload = closedObject_ACU(record, '$', ['action', 'sql'], ['evidenceRefs']);
+      return { kind: 'write_sql' as const, sql: requiredText_ACU(payload.sql, '$.sql'), evidenceRefs: authorizedEvidenceRefs_ACU(payload.evidenceRefs, '$.evidenceRefs', false, evidenceRegistry) };
+    });
+  }
+  return null;
+}
+
 /**
  * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 合法动作样例。
  * 与智能续写 renderMainProtocolRejection_ACU 同语义：快速/推理模型对
@@ -866,4 +885,74 @@ export function recordWorldSimulationProtocolFailure_ACU(state: WorldSimulationP
   state.attempts += 1;
   state.fingerprints[fingerprint] = (state.fingerprints[fingerprint] ?? 0) + 1;
   return { retry: state.attempts <= state.maxAttempts && state.fingerprints[fingerprint] < 2, fingerprint, issue };
+}
+
+/** write_sql 的逐栏意图；旧 specialist 最终契约的整行转换不参与此入口。 */
+export interface WorldSimulationSqlFieldIntent_ACU {
+  kind: 'insert' | 'update' | 'delete';
+  module: keyof typeof WORLD_SIMULATION_SQL_TABLE_MODULE_ACU;
+  id: string;
+  fields: Record<string, unknown>;
+  expectedRevision?: number;
+  reason?: string;
+}
+export interface WorldSimulationSqlFieldRejection_ACU { path: string; reason: string }
+export interface WorldSimulationSqlFieldParseResult_ACU {
+  intents: WorldSimulationSqlFieldIntent_ACU[];
+  rejected: WorldSimulationSqlFieldRejection_ACU[];
+}
+
+/** 语法错误抛协议错误；无权的语句与非法栏目分别拒绝，不吞掉相邻合法栏目。 */
+export function parseWorldSimulationSqlFieldWrites_ACU(sql: string, role: string): WorldSimulationSqlFieldParseResult_ACU {
+  let statements: RestrictedSqlStatement_ACU[];
+  try { statements = parseRestrictedSqlDml_ACU(sql); }
+  catch (error) { fail_ACU('SQL_INVALID', '$.sql', 'restricted INSERT/UPDATE/DELETE', error instanceof Error ? error.message : String(error)); }
+  if (!statements.length) fail_ACU('SQL_EMPTY', '$.sql', 'non-empty DML write set', sql);
+  const writable = new Set(findWorldSimulationAgentDefinition_ACU(role)?.writableModules ?? []);
+  const result: WorldSimulationSqlFieldParseResult_ACU = { intents: [], rejected: [] };
+  statements.forEach((statement, index) => {
+    const path = `sql[${index}].${statement.table}`;
+    const reject = (field: string, reason: string) => result.rejected.push({ path: `${path}${field ? `.${field}` : ''}`, reason });
+    const module = WORLD_SIMULATION_SQL_TABLE_MODULE_ACU[statement.table as keyof typeof WORLD_SIMULATION_SQL_TABLE_MODULE_ACU];
+    if (!module || !writable.has(module === 'chronicleArchive' ? 'chronicle' : module)) { reject('', '角色无权写入该表'); return; }
+    const archive = statement.table === 'chronicle_archive' || statement.table === 'chronicle_overview';
+    const singleton = statement.table === 'clock' || statement.table === 'player' || statement.table === 'guidance';
+    const chronicle = statement.table === 'chronicle';
+    if ((archive || chronicle) && statement.kind === 'update'
+      || archive && statement.kind !== 'insert'
+      || singleton && statement.kind !== 'update') { reject('', '该表不允许此操作'); return; }
+    const where = statement.kind === 'insert' ? {} : statement.where;
+    const required = singleton ? ['expected_revision'] : chronicle ? ['id', 'reason'] : ['id', 'expected_revision', ...(statement.kind === 'delete' ? ['reason'] : [])];
+    if (statement.kind !== 'insert' && (Object.keys(where).some(key => !required.includes(key)) || required.some(key => !Object.prototype.hasOwnProperty.call(where, key)))) {
+      reject('WHERE', `WHERE 只允许且必须包含 ${required.join(', ')}`); return;
+    }
+    if (statement.kind !== 'insert' && !singleton && (typeof where.id !== 'string' || !where.id.trim())) { reject('WHERE.id', '必须指定非空 ID'); return; }
+    if (statement.kind === 'delete' && (typeof where.reason !== 'string' || !where.reason.trim())) { reject('WHERE.reason', '必须指定非空理由'); return; }
+    const rawRevision = statement.kind === 'insert' ? statement.values.expected_revision : where.expected_revision;
+    if (!archive && !chronicle && (typeof rawRevision !== 'number' || !Number.isInteger(rawRevision) || rawRevision < 0)) {
+      reject('expected_revision', '必须指定非负整数 revision'); return;
+    }
+    const id = singleton ? '_' : statement.kind === 'insert' ? statement.values.id : where.id;
+    if (statement.kind === 'insert' && id !== undefined && (typeof id !== 'string' || !id.trim())) { reject('id', 'ID 必须为非空字符串'); return; }
+    if (statement.kind === 'delete') {
+      result.intents.push({ kind: 'delete', module: statement.table as WorldSimulationSqlFieldIntent_ACU['module'], id: String(id).trim(), fields: {},
+        ...(typeof rawRevision === 'number' ? { expectedRevision: rawRevision } : {}), reason: String(where.reason).trim() });
+      return;
+    }
+    const fields: Record<string, unknown> = {};
+    const columns = WORLD_SIMULATION_SQL_COLUMNS_ACU[statement.table];
+    for (const [column, value] of Object.entries(statement.values)) {
+      if (column === 'expected_revision' || column === 'id') {
+        if (statement.kind !== 'insert') reject(column, 'SET 不得写入 ID 或 revision');
+        continue;
+      }
+      if (!columns?.has(column)) { reject(column, 'field_forbidden'); continue; }
+      fields[simulationSqlColumnName_ACU(column)] = simulationSqlValue_ACU(value);
+    }
+    if (!Object.keys(fields).length) { reject('', '没有可提交的栏目'); return; }
+    result.intents.push({ kind: statement.kind, module: statement.table as WorldSimulationSqlFieldIntent_ACU['module'],
+      id: typeof id === 'string' ? id.trim() : '', fields,
+      ...(typeof rawRevision === 'number' ? { expectedRevision: rawRevision } : {}) });
+  });
+  return result;
 }

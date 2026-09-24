@@ -317,6 +317,82 @@ export function readWorldSimulationConversation_ACU(chat?: any[]): WorldSimulati
   return { nextId: maxId + 1, messages: projected, compaction, diagnostics: collected.diagnostics };
 }
 
+/** Director requests and compaction must project the same confirmed, model-visible floor messages. */
+export function readWorldSimulationDirectorCompactionSource_ACU(chat?: any[]): {
+  view: WorldSimulationConversationView_ACU;
+  fingerprint: string;
+} {
+  const { segments, diagnostics } = collectSegments_ACU(chat);
+  if (diagnostics.length) reject_ACU('世界推演主会话历史楼层损坏', { diagnostics });
+  const all = segments.flatMap(segment => segment.messages);
+  const compaction = segments.flatMap(segment => segment.compaction ? [segment.compaction] : [])
+    .sort((left, right) => right.compactedThroughId - left.compactedThroughId)[0] ?? null;
+  const visible = all.filter(message => message.kind === 'model_agent' || message.kind === 'model_feedback'
+    || (message.kind === 'user' && !message.eventKind));
+  const projected = visible.filter(message => message.id > (compaction?.compactedThroughId ?? 0));
+  return {
+    view: {
+      nextId: all.reduce((max, message) => Math.max(max, message.id), 0) + 1,
+      messages: compaction
+        ? [{ id: 0, kind: 'handoff', text: compaction.report, digest: '早期会话交接报告', turnKey: '', at: compaction.at }, ...projected]
+        : projected,
+      compaction,
+      diagnostics,
+    },
+    fingerprint: sha256HexSync_ACU(JSON.stringify(segments)),
+  };
+}
+
+/** Only director requests use this projection; session cards and specialist output are never model turns. */
+export function readWorldSimulationDirectorHistory_ACU(chat?: any[]): Array<{ role: 'assistant' | 'user'; content: string }> {
+  return readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages.map(message => ({
+    role: message.kind === 'model_agent' ? 'assistant' : 'user', content: message.text,
+  }));
+}
+
+/** Only the current run's model turns are used when migrating an old run-state transcript. */
+export function readWorldSimulationDirectorRunHistory_ACU(runId: string, chat?: any[], afterId = 0): Array<{ role: 'assistant' | 'user'; content: string }> {
+  const { segments, diagnostics } = collectSegments_ACU(chat);
+  if (diagnostics.length) reject_ACU('世界推演主会话历史楼层损坏', { diagnostics });
+  return segments.filter(segment => segment.runId === runId).flatMap(segment => segment.messages.filter(message => message.id > afterId).flatMap((message): Array<{ role: 'assistant' | 'user'; content: string }> => {
+    if (message.kind === 'model_agent') return [{ role: 'assistant' as const, content: message.text }];
+    if (message.kind === 'model_feedback') return [{ role: 'user' as const, content: message.text }];
+    return [];
+  }));
+}
+
+/** Append a complete director action/feedback pair at the frozen assistant anchor. */
+export async function appendWorldSimulationDirectorHistory_ACU(input: {
+  anchor: WorldSimulationAnchorIdentity_ACU;
+  runId: string;
+  taskId: string;
+  stageId: string;
+  stageRevision: number;
+  messages: readonly { role: 'assistant' | 'user'; content: string }[];
+}, chat?: any[]): Promise<boolean> {
+  if (!input.messages.length) return false;
+  if (input.messages[0]?.role !== 'assistant' || input.messages[input.messages.length - 1]?.role !== 'user'
+    || input.messages.some((item, index) => item.role !== (index % 2 ? 'user' : 'assistant'))) {
+    reject_ACU('主会话动作与反馈必须成对保存');
+  }
+  return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
+    const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+    if (messages !== getChatArray_ACU()) reject_ACU('主会话锚点聊天已经切换');
+    const prefix = `director:${input.runId}:`;
+    const seq = peekCurrentConversationSegments_ACU(input.anchor, messages)
+      .filter(segment => segment.segmentId.startsWith(prefix)).length;
+    return appendWorldSimulationConversationSegmentUnlocked_ACU({
+      anchor: input.anchor,
+      segmentId: `${prefix}${seq}`,
+      runId: input.runId,
+      taskId: input.taskId,
+      stageId: input.stageId,
+      stageRevision: input.stageRevision,
+      appends: input.messages.map(item => ({ kind: item.role === 'assistant' ? 'model_agent' : 'model_feedback', text: item.content })),
+    }, messages);
+  });
+}
+
 function truncateText_ACU(text: string): string {
   return text.length <= TEXT_LIMIT_ACU
     ? text
@@ -328,7 +404,7 @@ function conversationAppendFingerprint_ACU(
 ): string {
   return sha256HexSync_ACU(JSON.stringify(items.map(item => [
     item.kind,
-    truncateText_ACU(String(item.text ?? '')),
+    item.kind === 'model_agent' || item.kind === 'model_feedback' ? String(item.text ?? '') : truncateText_ACU(String(item.text ?? '')),
     String(item.digest ?? ''),
     String(item.turnKey ?? ''),
   ])));
@@ -395,7 +471,7 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
   input: AppendWorldSimulationConversationInput_ACU,
   chat?: any[],
 ): Promise<boolean> {
-  const usable = input.appends.filter(item => String(item.text ?? '').trim());
+  const usable = input.appends.filter(item => String(item.text ?? '').trim() || item.kind === 'model_agent');
   if (usable.length === 0) return false;
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const currentView = readWorldSimulationConversation_ACU(messages);
@@ -405,7 +481,9 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
     const message: WorldSimulationConversationMessage_ACU = {
       id: nextId++,
       kind: item.kind,
-      text: truncateText_ACU(String(item.text)),
+      text: item.kind === 'model_agent' || item.kind === 'model_feedback'
+        ? String(item.text)
+        : truncateText_ACU(String(item.text)),
       digest: String(item.digest ?? ''),
       turnKey: String(item.turnKey ?? ''),
       at,
@@ -579,12 +657,19 @@ export async function writeWorldSimulationConversationCompaction_ACU(
   input: {
     anchor: WorldSimulationAnchorIdentity_ACU;
     compaction: WorldSimulationConversationCompaction_ACU;
+    expectedFingerprint?: string;
+    expectedStageId?: string;
+    expectedStageRevision?: number;
   },
   chat?: any[],
 ): Promise<boolean> {
   return serializeConversationWrite_ACU(input.anchor.chatIdentity, async () => {
     const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+    if (messages !== getChatArray_ACU()) reject_ACU('主会话锚点聊天已经切换');
     const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, messages);
+    if (input.expectedFingerprint && readWorldSimulationDirectorCompactionSource_ACU(messages).fingerprint !== input.expectedFingerprint) {
+      reject_ACU('主会话压缩来源或保留后缀在总结期间发生变化');
+    }
     const hostMessage = messages[currentAnchor.messageIndex] as Record<string, unknown>;
     const previous = hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
     const migrated = previous === undefined ? null : migrateLegacyWorldSimulationConversationBucket_ACU(
@@ -601,8 +686,13 @@ export async function writeWorldSimulationConversationCompaction_ACU(
       ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
       : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
     if (!existing.segments.length) return false;
+    if (readWorldSimulationDirectorCompactionSource_ACU(messages).view.compaction?.compactedThroughId >= input.compaction.compactedThroughId) return false;
     const at = Date.now();
     const last = existing.segments[existing.segments.length - 1];
+    if ((input.expectedStageId && last.stageId !== input.expectedStageId)
+      || (input.expectedStageRevision !== undefined && last.stageRevision !== input.expectedStageRevision)) {
+      reject_ACU('主会话压缩锚点阶段或 revision 已变化');
+    }
     const updated: WorldSimulationConversationSegment_ACU = {
       ...last,
       compaction: validateCompaction_ACU(input.compaction, 'compaction'),

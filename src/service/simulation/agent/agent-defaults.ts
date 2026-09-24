@@ -10,7 +10,9 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V12_ACU = 'world-simulation-v12';
 export const WORLD_SIMULATION_PROMPT_VERSION_V13_ACU = 'world-simulation-v13';
 export const WORLD_SIMULATION_PROMPT_VERSION_V14_ACU = 'world-simulation-v14';
 export const WORLD_SIMULATION_PROMPT_VERSION_V15_ACU = 'world-simulation-v15';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v16';
+export const WORLD_SIMULATION_PROMPT_VERSION_V16_ACU = 'world-simulation-v16';
+export const WORLD_SIMULATION_PROMPT_VERSION_V17_ACU = 'world-simulation-v17';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v18';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -62,6 +64,7 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
 export function worldSimulationSpecialistProtocolInstruction_ACU(
   name: WorldSimulationAgentName_ACU,
   writableModules: readonly string[],
+  legacy = false,
 ): string {
   const lines = [
     '只输出一个 specialist JSON 对象，不附加 Markdown、解释或思考标签。',
@@ -70,7 +73,8 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 必须包含非空 sql、summary、evidenceRefs、uncertainties；仅允许修改写入模块：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicle_archive | chronicle_overview' : ''}。不得输出 patch。`);
-    lines.push('evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。');
+    lines.push(legacy ? 'evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。'
+      : '可先用 {\"action\":\"write_sql\",\"sql\":\"受限 DML\",\"evidenceRefs\":[\"已颁发引用\"]} 即时提交职责模块。仅工具回执 status=committed 的 accepted 表示保存且折叠复核成功；按 field:模块:ID[:栏目] 读取 status、revision 和 missingFields，只补缺栏。拒绝或保存失败不得当作成功；partials/ledgerRevision=null 说明恢复状态不确定，先重新读取权威帧，不得按旧 revision 补写。最终 sql 不要重复已保存栏目。');
     lines.push('sql 只允许 INSERT INTO 表 (字段) VALUES (字面量)、UPDATE 表 SET 字段 = 字面量 WHERE id = 字符串 AND expected_revision = 整数、DELETE FROM 数组模块表 WHERE id = 字符串 AND reason = 字符串 AND expected_revision = 整数；chronicle DELETE 只用 WHERE id = 字符串 AND reason = 字符串；禁止 SELECT、DDL、函数、子查询及任意表达式。字符串必须用单引号，单引号写成两个单引号；数组/对象作为单引号包裹的 JSON 文本，字段用 snake_case。');
     lines.push('dimensions、seeds、actors、rumors：INSERT 新增（id 可省略，需 name；seeds 用 title，rumors 用 fact）、UPDATE 修改已有行、DELETE 删除已有行；DELETE 必须带 reason 与当前条目 expected_revision。');
     lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
@@ -91,7 +95,8 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
   }
-  lines.push('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。');
+  lines.push(legacy ? '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。'
+    : '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。');
   lines.push('no_change 必须包含 summary、evidenceRefs、uncertainties。');
   lines.push('failed 必须包含 reasonCode、message。blocked 必须包含非空 unresolved 数组。');
   return lines.join('\n');
@@ -116,7 +121,7 @@ function protocolFor_ACU(kind: string, name: WorldSimulationAgentName_ACU, writa
   if (kind === 'director') return worldSimulationDirectorProtocolInstruction_ACU();
   if (kind === 'planner') return worldSimulationPlannerProtocolInstruction_ACU();
   if (kind === 'reviewer') return worldSimulationReviewerProtocolInstruction_ACU();
-  return worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules);
+  return worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules, true);
 }
 
 function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
@@ -147,10 +152,15 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
   ];
 }
 
-export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+export function buildV16WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
   return buildRolePrompt_ACU(name).map(segment => {
     if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))) {
       return { ...segment, content: segment.content.replace('没有直接 ledger patch 权限', '没有直接 ledger 写入权限') };
+    }
+    if (segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')) && ['specialist', 'researcher'].includes(WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!.kind)) {
+      const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
+      return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}
+${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModules)}` };
     }
     if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return { ...segment };
     if (name === 'dramatis-keeper') {
@@ -163,6 +173,34 @@ export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulation
     if (name === 'chronicler') return { ...segment, content: segment.content.replace('append 条目', 'INSERT 条目').replace('提交 chronicleArchive', '成对 INSERT chronicle_archive 与 chronicle_overview').replace('目录追加后超过 512 行必须自带 collapseRefs', '目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入') };
     return { ...segment };
   });
+}
+
+function v17WorldSimulationContent_ACU(name: WorldSimulationAgentName_ACU, segment: WorldSimulationPromptSegment_ACU): WorldSimulationPromptSegment_ACU {
+  if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return {
+    ...segment,
+    content: segment.content.replace('runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。',
+      '工作流未合格时按当前 pendingFixes 告知缺口；用户中途要求可在现有身份与预算内改走 read 或单独派工，不对同批缺口再开相同工作流。')
+      + '默认节奏：先读本轮用户要求与已确认的锚点正文，确定幕后焦点后 open_round；工作流回执成功则本次主循环结束，等待下一条真实正文稳定并确认锚点后再运行。轮次标注只是提示，不阻断中途用户指令。',
+  };
+  if (segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))
+    && ['specialist', 'researcher'].includes(WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!.kind)) return {
+    ...segment,
+    content: segment.content + '\n逐栏工具只在本次派工会话内继续：先按 field:模块:ID[:栏目] 读取 status、revision、missingFields；经 write_sql 提交缺栏并依据刚收到的权威回执决定下一条 SQL。只认 status=committed 的 accepted；若保存/补偿不确定先复读，不把拒绝当成功。跨工作流只继承可读的已提交账本，不继承本次私有对话；预算尽仍有缺栏时输出 failed 或 blocked，不能输出 no_change 或再派独立自动修复。',
+  };
+  return { ...segment };
+}
+
+export function buildV17WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return buildV16WorldSimulationAgentPrompt_ACU(name).map(segment => v17WorldSimulationContent_ACU(name, segment));
+}
+
+export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  const segments = buildV17WorldSimulationAgentPrompt_ACU(name);
+  // Keep the editable user requirements, but put them after the stable protocol and workflow.
+  // Otherwise each new instruction invalidates the provider prefix before those static rules.
+  const [requirements] = segments.splice(2, 1);
+  segments.splice(4, 0, requirements);
+  return segments;
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -195,6 +233,16 @@ function promptFingerprint_ACU(segments: readonly WorldSimulationPromptSegment_A
   for (let index = 0; index < source.length; index += 1) hash = Math.imul(hash ^ source.charCodeAt(index), 16777619);
   return `${source.length}:${(hash >>> 0).toString(16)}`;
 }
+
+const WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = Object.fromEntries(
+  WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, promptFingerprint_ACU(buildV16WorldSimulationAgentPrompt_ACU(name))]),
+) as Partial<Record<WorldSimulationAgentName_ACU, string>>;
+const WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU = Object.fromEntries(
+  WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV16WorldSimulationAgentPrompt_ACU(name)]),
+) as WorldSimulationAgentPrompts_ACU;
+const WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU = Object.fromEntries(
+  WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV17WorldSimulationAgentPrompt_ACU(name)]),
+) as WorldSimulationAgentPrompts_ACU;
 
 const WORLD_SIMULATION_PROMPT_V3_FINGERPRINTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, string>> = {
   'world-director': '3591:f9e4f3ad',
@@ -332,6 +380,8 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V13_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V14_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] }] : []),
     { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V16_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU[name]! },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V17_ACU, fingerprint: promptFingerprint_ACU(buildV17WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -355,10 +405,29 @@ export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, W
       continue;
     }
     const v15 = buildRolePrompt_ACU(name);
+    const v16 = WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU[name];
+    const v17 = WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU[name];
     migrated[name] = value.map(segment => {
-      const oldIndex = v15.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
-      return oldIndex < 0 ? { ...segment } : { ...defaults[name][oldIndex] };
+      const oldIndex = v16.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      if (oldIndex >= 0) return { ...v17[oldIndex] };
+      const v17Index = v17.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      if (v17Index >= 0) return { ...v17[v17Index] };
+      const v15Index = v15.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      return v15Index < 0 ? { ...segment } : { ...v17[v15Index] };
     });
+    // Reordering a customized prompt is unsafe: it can change the user's precedence semantics.
+    // Only untouched, enabled static defaults may move across the editable guidance segment.
+    const next = migrated[name];
+    const requirementsIndex = next.findIndex(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));
+    const protocol = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
+    const workflow = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
+    if (requirementsIndex >= 0 && requirementsIndex < protocol && protocol < workflow
+      && JSON.stringify(next[protocol]) === JSON.stringify(v17[3])
+      && JSON.stringify(next[workflow]) === JSON.stringify(v17[4])) {
+      const [requirements] = next.splice(requirementsIndex, 1);
+      const afterWorkflow = next.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')));
+      next.splice(afterWorkflow + 1, 0, requirements);
+    }
   }
   return migrated;
 }

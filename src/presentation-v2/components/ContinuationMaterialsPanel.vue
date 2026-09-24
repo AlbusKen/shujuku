@@ -146,6 +146,63 @@
       </p>
       <p v-if="materials.loadError.value" class="acu-v2-continuation-materials__error">{{ materials.loadError.value }}</p>
 
+      <!-- 逐栏记录：按模块/ID 展示分栏视图；partial 只在这里可见，字段值不在这里展示 -->
+      <details class="acu-v2-continuation-materials__block">
+        <summary>逐栏记录 · {{ fieldRecordTotal }} 条</summary>
+        <p class="acu-v2-continuation-materials__meta">
+          逐栏记录来自子代理的逐栏写入：「部分」条目还没写齐必填栏，不进入上面的完整资料；「旧快照条目」来自旧整条快照，来源不可逐栏拆分。
+          这里只列栏目名与修订身份，字段值在各模块完整条目或原始 JSON 里查看。
+          <template v-if="materials.snapshot.value">
+            本轮结算：{{ COMPLETION_STATE_LABELS[materials.snapshot.value.materialCompletion.state] ?? materials.snapshot.value.materialCompletion.state }}<template v-if="materials.snapshot.value.materialCompletion.rangeEndIndex >= 0"> · 覆盖正文楼层 {{ materials.snapshot.value.materialCompletion.rangeStartIndex }}–{{ materials.snapshot.value.materialCompletion.rangeEndIndex }}</template>。
+          </template>
+        </p>
+        <p v-if="!fieldRecordGroups.length" class="acu-v2-continuation-materials__empty">还没有逐栏写入记录。</p>
+        <details v-for="group in fieldRecordGroups" :key="group.module" class="acu-v2-continuation-materials__block">
+          <summary>
+            {{ group.label }} · {{ group.records.length }} 条
+            <span v-if="group.completionLabel" class="acu-v2-continuation-materials__badge">结算：{{ group.completionLabel }}</span>
+          </summary>
+          <div class="acu-v2-continuation-materials__cards">
+            <div v-for="record in group.records" :key="record.id" class="acu-v2-continuation-materials__card">
+              <p class="acu-v2-continuation-materials__card-head">
+                <strong>{{ record.id }}</strong>
+                <span
+                  class="acu-v2-continuation-materials__badge"
+                  :class="{ 'acu-v2-continuation-materials__badge--primary': record.status === 'complete' }"
+                >{{ FIELD_STATUS_LABELS[record.status] ?? record.status }}</span>
+              </p>
+              <p class="acu-v2-continuation-materials__card-meta">已写字段：{{ record.fieldNames.join('、') || '（无）' }}</p>
+              <p v-if="record.missingFields.length" class="acu-v2-continuation-materials__card-meta">缺栏：{{ record.missingFields.join('、') }}</p>
+              <p class="acu-v2-continuation-materials__card-meta">
+                最近更新 {{ formatTimestamp(record.updatedAt) }}<template v-if="record.maxRevision > 0"> · 栏目修订号最高 {{ record.maxRevision }}</template>
+              </p>
+            </div>
+          </div>
+        </details>
+        <template v-if="materials.snapshot.value?.pendingFixes.length">
+          <p class="acu-v2-continuation-materials__meta">待修复的写入（{{ materials.snapshot.value.pendingFixes.length }} 条）：</p>
+          <div class="acu-v2-continuation-materials__cards">
+            <div
+              v-for="(fix, fixIndex) in materials.snapshot.value.pendingFixes"
+              :key="`${fix.module}-${fixIndex}`"
+              class="acu-v2-continuation-materials__card acu-v2-continuation-materials__card--failed"
+            >
+              <p class="acu-v2-continuation-materials__card-head">
+                <strong>{{ CONTINUATION_MATERIAL_MODULE_LABELS_ACU[fix.module] ?? fix.module }}</strong>
+                <span class="acu-v2-continuation-materials__badge">{{ fix.completion === 'partial' ? '部分接受' : '失败' }}</span>
+                <span class="acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--muted">{{ PENDING_FIX_SOURCE_LABELS[fix.source] ?? fix.source }}</span>
+              </p>
+              <p class="acu-v2-continuation-materials__card-meta">
+                出错路径：{{ fix.violations.map(item => `${item.path}（${item.message}）`).join('；') || fix.lastError || '（未记录）' }}
+              </p>
+              <p class="acu-v2-continuation-materials__card-meta">
+                覆盖楼层 {{ fix.rangeStartIndex }}–{{ fix.rangeEndIndex }} · 已接受 {{ fix.acceptedKeys.length }} 栏 · 尝试 {{ fix.attempts }} 次
+              </p>
+            </div>
+          </div>
+        </template>
+      </details>
+
       <!-- 伏笔账本 -->
       <details class="acu-v2-continuation-materials__block" open>
         <summary>伏笔账本 · {{ materials.snapshot.value?.hooks.length ?? 0 }} 条<span v-if="materials.modules.hooks.dirty" class="acu-v2-continuation-materials__badge">未保存</span></summary>
@@ -397,9 +454,10 @@ import { computed, onMounted, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import AcuTextarea from './_lib/AcuTextarea.vue';
 import UserRequirementsEditor from './UserRequirementsEditor.vue';
-import { useContinuationMaterials } from '../composables/useContinuationMaterials';
+import { useContinuationMaterials, CONTINUATION_MATERIAL_MODULE_LABELS_ACU } from '../composables/useContinuationMaterials';
 
 import type { ContinuationStage_ACU, ContinuationTask_ACU, StageOutline_ACU, StageRevision_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { AgentWritableModule_ACU } from '../../service/continuation/agent/agent-model'; // arch-ok: 仅类型导入，用于 emits 与分栏记录标注，编译后无运行时依赖
 
 
 const props = defineProps<{
@@ -463,6 +521,60 @@ const MATERIAL_STATUS_LABELS_ACU: Record<string, string> = {
   hooks: '伏笔账本', infoGap: '认知与信息差', constraints: '长期约束', storyArc: '故事总纲',
   chronology: '故事年代学账本', webRefs: '百科资料库', userRequirements: '用户要求',
 };
+
+/** 分栏记录状态：complete 完整、partial 未写齐（只在分栏视图）、legacy_unknown 旧整条快照条目。 */
+const FIELD_STATUS_LABELS: Record<string, string> = {
+  complete: '完整',
+  partial: '部分（未提升）',
+  legacy_unknown: '旧快照条目',
+};
+const COMPLETION_STATE_LABELS: Record<string, string> = {
+  complete: '已完成',
+  partial: '部分完成',
+  failed: '失败',
+  legacy_unknown: '未知（旧帧）',
+};
+const PENDING_FIX_SOURCE_LABELS: Record<string, string> = {
+  truncated: '输出截断',
+  contract_rejected: '契约拒绝',
+  protocol_failed: '协议失败',
+  invoke_failed: '调用失败',
+  transaction_rejected: '事务拒绝',
+};
+
+/** 逐栏记录按模块分组：只取栏目名与修订身份，不取字段值。 */
+const fieldRecordGroups = computed(() => {
+  const records = materials.fieldSnapshot.value.records;
+  const completion = materials.snapshot.value?.materialCompletion.modules ?? {};
+  return (Object.keys(CONTINUATION_MATERIAL_MODULE_LABELS_ACU) as AgentWritableModule_ACU[])
+    .map(module => {
+      const bucket = records[module];
+      const entries = bucket ? Object.values(bucket) : [];
+      if (!entries.length) return null;
+      const moduleState = completion[module];
+      return {
+        module,
+        label: CONTINUATION_MATERIAL_MODULE_LABELS_ACU[module],
+        completionLabel: moduleState ? (COMPLETION_STATE_LABELS[moduleState] ?? moduleState) : '',
+        records: entries
+          .map(record => ({
+            id: record.id,
+            status: record.status,
+            fieldNames: Object.keys(record.fields),
+            missingFields: record.missingFields,
+            maxRevision: Object.values(record.fields).reduce((max, field) => Math.max(max, field.revision), 0),
+            updatedAt: record.updatedAt,
+          }))
+          .sort((left, right) => left.id.localeCompare(right.id)),
+      };
+    })
+    .filter((group): group is NonNullable<typeof group> => group !== null);
+});
+const fieldRecordTotal = computed(() => fieldRecordGroups.value.reduce((total, group) => total + group.records.length, 0));
+
+function formatTimestamp(value: number): string {
+  return value > 0 ? new Date(value).toLocaleString() : '（未记录）';
+}
 
 
 

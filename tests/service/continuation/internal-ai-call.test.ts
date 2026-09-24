@@ -18,9 +18,9 @@ const preset_ACU: ContinuationResolvedApiPreset_ACU = {
   reason: 'fixed_preset',
   apiMode: 'custom',
   apiConfig: {
-    url: 'https://gateway.example/v1',
+    url: 'https://api.openai.com/v1',
     apiKey: 'sensitive-api-key',
-    model: 'model-alpha',
+    model: 'gpt-4o-mini',
     useMainApi: false,
     max_tokens: 4096,
     temperature: 0.7,
@@ -76,13 +76,15 @@ describe('callContinuationInternalAi_ACU prompt cache key', () => {
     identity?: ContinuationInternalAiRequestIdentity_ACU;
     preset?: ContinuationResolvedApiPreset_ACU;
     scope?: string;
+    tools?: string[];
+    boundary?: string;
   } = {}): Promise<string | undefined> {
     await callContinuationInternalAi_ACU(
       [{ role: 'user', content: '缓存路由测试' }],
       input.preset ?? preset_ACU,
       input.identity ?? identity_ACU(),
       null,
-      { promptCacheEnabled: true, cacheScope: input.scope ?? '主 Agent / scope' },
+      { promptCacheEnabled: true, cacheScope: input.scope ?? '主 Agent / scope', cacheTools: input.tools, cacheBoundary: input.boundary },
     );
     const extras = mockCallAIWithResolvedPreset_ACU.mock.calls.at(-1)?.[4] as { promptCacheKey?: string } | undefined;
     return extras?.promptCacheKey;
@@ -94,7 +96,7 @@ describe('callContinuationInternalAi_ACU prompt cache key', () => {
     const second = await captureKey_ACU({ identity: identity_ACU({ requestId: 'request-b' }), scope });
 
     expect(first).toBe(second);
-    expect(first).toMatch(/^acu-cont-v2-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}$/);
+    expect(first).toMatch(/^acu-v3-(?:[0-9a-f]{10}-){4}[0-9a-f]{10}$/);
     expect(first?.length).toBeLessThanOrEqual(64);
     for (const raw of [
       identity_ACU().chatIdentity,
@@ -107,21 +109,33 @@ describe('callContinuationInternalAi_ACU prompt cache key', () => {
     }
   });
 
-  it('chat、scope、apiMode、model 与 URL 任一变化时隔离缓存键', async () => {
-    const baseline = await captureKey_ACU();
+  it('chat、角色、工具、模型与已提交总结边界变化时隔离缓存键', async () => {
+    const baseline = await captureKey_ACU({ tools: ['read', 'search'] });
+    const reordered = await captureKey_ACU({ tools: ['search', 'read', 'read'], identity: identity_ACU({ requestId: 'retry' }) });
     const variants = [
-      await captureKey_ACU({ identity: identity_ACU({ chatIdentity: 'chat/另一个身份' }) }),
-      await captureKey_ACU({ scope: 'sub-mainline-planner' }),
-      await captureKey_ACU({ preset: { ...preset_ACU, apiMode: 'tavern' } }),
-      await captureKey_ACU({
-        preset: { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, model: 'model-beta' } },
-      }),
-      await captureKey_ACU({
-        preset: { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, url: 'https://gateway.example/v2' } },
-      }),
+      await captureKey_ACU({ tools: ['read', 'search'], identity: identity_ACU({ chatIdentity: 'chat/另一个身份' }) }),
+      await captureKey_ACU({ tools: ['read', 'search'], scope: 'sub-mainline-planner' }),
+      await captureKey_ACU({ tools: ['read', 'search', 'write_sql'] }),
+      await captureKey_ACU({ tools: ['read', 'search'], boundary: 'compacted-through:42' }),
+      await captureKey_ACU({ tools: ['read', 'search'], preset: { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, model: 'gpt-4.1-mini' } } }),
     ];
-
+    expect(reordered).toBe(baseline);
     expect(new Set([baseline, ...variants]).size).toBe(6);
+  });
+
+  it('未知网关、宿主托管路径、原生协议和 TT 路径均不注入显式键但仍可请求', async () => {
+    const configs: ContinuationResolvedApiPreset_ACU[] = [
+      { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, url: 'https://gateway.example/v1' } },
+      { ...preset_ACU, apiMode: 'tavern' },
+      { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, useMainApi: true } },
+      { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, customApiFormat: 'claude_messages' } },
+      { ...preset_ACU, apiConfig: { ...preset_ACU.apiConfig, excludeBodyParams: '- prompt_cache_key' } },
+    ];
+    for (const config of configs) expect(await captureKey_ACU({ preset: config })).toBeUndefined();
+    vi.stubGlobal('__TAURITAVERN__', true);
+    try { expect(await captureKey_ACU()).toBeUndefined(); }
+    finally { vi.stubGlobal('__TAURITAVERN__', false); }
+    expect(mockCallAIWithResolvedPreset_ACU).toHaveBeenCalledTimes(6);
   });
 
   it('缓存关闭时不向 AI 网关传递 promptCacheKey', async () => {

@@ -929,3 +929,35 @@ export function preflightWorldSimulationCandidates_ACU(
   }
   return { blocking, autoFixed };
 }
+
+/** 逐栏提交的领域检查：复用单例应用、条目归一化与跨模块一致性，不隐式创建 partial 完整行。 */
+export function applyWorldSimulationFieldDomain_ACU(
+  ledger: WorldSimulationLedger_ACU,
+  module: WorldSimulationLedgerModule_ACU,
+  id: string,
+  values: Record<string, unknown>,
+  action: 'insert' | 'update' | 'delete',
+  settings?: WorldSimulationSettings_ACU,
+  anchorMessage = '',
+  deferCrossValidation = false,
+): WorldSimulationLedger_ACU {
+  const next = clone_ACU(ledger);
+  if (module === 'clock') next.clock = applyClock_ACU(next.clock, values, resolveDynamics_ACU(settings));
+  else if (module === 'player') next.player = applyPlayer_ACU(next.player, values);
+  else if (module === 'guidance') next.guidance = applyGuidance_ACU(next.guidance, values, next, anchorMessage);
+  else if (module === 'chronicle') next.chronicle = applyChronicle_ACU(next.chronicle,
+    action === 'delete' ? { remove: [{ id, reason: values.reason }] } : { append: [{ id, ...values }] }, next.clock);
+  else {
+    const current = next[module] as Array<{ id: string; revision: number }>;
+    next[module] = applyUpserts_ACU(current,
+      action === 'delete' ? { remove: [{ id, expectedRevision: values.expectedRevision, reason: values.reason }] }
+        : { upsert: [{ id, ...values, expectedRevision: values.expectedRevision }] },
+      `patch.${module}`, module, next.clock.day) as never;
+  }
+  if (!deferCrossValidation) {
+    const problems = crossFieldProblems_ACU(next);
+    if (problems.length) fail_ACU(problems.map(item => item.message).join('；'));
+  }
+  next.revision = ledger.revision + 1;
+  return deferCrossValidation ? next : validateWorldSimulationLedger_ACU(next, 'agent_persist');
+}

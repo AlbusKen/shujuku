@@ -25,7 +25,7 @@ function baseSnapshot_ACU(): AgentModuleSnapshot_ACU {
 }
 
 function delta_ACU(patch: Partial<AgentModuleDelta_ACU> = {}): AgentModuleDelta_ACU {
-  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], constraintProposals: [], ...patch };
+  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], chronology: [], chronologyPatches: [], constraintProposals: [], ...patch };
 }
 
 function chronologyItem_ACU(patch: Record<string, unknown> = {}) {
@@ -392,6 +392,24 @@ describe('Agent 年代学写集事务', () => {
     expect(() => appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ anchor: ' ' })] }), ['chronology'], 6)).toThrowError(/anchor 不能为空/);
     expect(() => appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ elapsed: '' })] }), ['chronology'], 6)).toThrowError(/elapsed 不能为空/);
     expect(() => appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ transition: '' })] }), ['chronology'], 6)).toThrowError(/transition 不能为空/);
+  });
+
+  it('chronology patch 只改目标栏并校验证据，不得修改未来楼层或退休条目', () => {
+    const snapshot = baseSnapshot_ACU();
+    const applied = appliedDelta_ACU(snapshot, delta_ACU({
+      expectedRevisions: { chronology: 5 },
+      chronologyPatches: [{ id: 'T1', evidenceIndexes: [5, 2, 5] }],
+    }), ['chronology'], 6);
+    expect(applied.chronology[0]).toMatchObject({
+      anchor: snapshot.chronology[0].anchor, evidenceIndexes: [2, 5], updatedIndex: 6,
+    });
+    expect(applied.revisions.chronology).toBe(6);
+    expect(snapshot.chronology[0].evidenceIndexes).toEqual([2, 3]);
+    expect(() => appliedDelta_ACU(snapshot, delta_ACU({ chronologyPatches: [{ id: 'T1', evidenceIndexes: [8] }] }), ['chronology'], 6)).toThrowError(/未来楼层/);
+    expect(() => appliedDelta_ACU(snapshot, delta_ACU({ chronologyPatches: [{ id: 'T404', anchor: '其他日期' }] }), ['chronology'], 6)).toThrowError(/不存在/);
+    expect(() => appliedDelta_ACU(snapshot, delta_ACU({ chronologyPatches: [{ id: 'T1', anchor: '其他日期' }] }), ['hooks'], 6)).toThrowError(/未授权模块/);
+    const retired = { ...snapshot, chronology: [{ ...snapshot.chronology[0], retired: true }] };
+    expect(() => appliedDelta_ACU(retired, delta_ACU({ chronologyPatches: [{ id: 'T1', anchor: '其他日期' }] }), ['chronology'], 6)).toThrowError(/已废止/);
   });
 
   it('retire 必须命中既有条目并给出理由；合法 retire 保留条目可追溯', () => {

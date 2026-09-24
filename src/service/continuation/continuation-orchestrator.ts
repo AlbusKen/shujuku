@@ -8,7 +8,7 @@ import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveSta
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import { type AgentConversationAppend_ACU, type AgentOutlineEditOp_ACU, type AgentOutlineOpResult_ACU } from './agent/agent-model';
-import { appendAgentConversationToChat_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
+import { appendAgentConversationToChat_ACU, appendConfirmedAgentTurn_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
 import { clearAgentModuleField_ACU } from './agent/agent-module-store';
 import { seedAgentUserRequirementsIfEmpty_ACU } from './agent/agent-user-requirements';
 import { clearAgentRunState_ACU } from './agent/agent-run-cache';
@@ -394,6 +394,7 @@ export class ContinuationOrchestrator_ACU {
           undefined,
           async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
           controller.signal,
+          async text => this.updateAgentTurnLabelWithinLease_ACU(chatIdentity, lease, task.taskId, text),
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
@@ -403,6 +404,25 @@ export class ContinuationOrchestrator_ACU {
         if (abortControllersByChat_ACU.get(chatIdentity) === controller) abortControllersByChat_ACU.delete(chatIdentity);
       }
     });
+  }
+
+  /** 仅展示用：当前可执行大纲轮次的标注，不改变大纲、宿主身份或正文完成数。 */
+  private async updateAgentTurnLabelWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, taskId: string, text: string): Promise<void> {
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    const label = text.trim().slice(0, 200);
+    if (!label) return;
+    await this.dependencies.store.updatePersistedAtomically(current => {
+      const envelope = this.requireEnvelope_ACU(current);
+      const task = this.requireTask_ACU(envelope);
+      if (task.taskId !== taskId || task.status !== 'running' || task.stopReason !== null || !task.activeStageId) return envelope;
+      const stage = task.stages.find(item => item.stageId === task.activeStageId);
+      const revision = stage?.revisions.find(item => item.revision === stage.activeRevision);
+      const turnId = revision?.outline.nodes[stage!.activeNodeIndex]?.turns[stage!.activeTurnIndex]?.id;
+      if (stage?.status !== 'running' || !revision?.frozen || !turnId) return envelope;
+      const agentTurnLabel = { revision: stage.activeRevision, turnId, text: label };
+      if (stage.agentTurnLabel?.revision === agentTurnLabel.revision && stage.agentTurnLabel.turnId === turnId && stage.agentTurnLabel.text === label) return envelope;
+      return { ...envelope, activeTask: { ...task, stages: task.stages.map(item => item.stageId === stage.stageId ? { ...stage, agentTurnLabel } : item) } };
+    }, { chatIdentity });
   }
 
   async retryCurrentTurn(): Promise<ContinuationHostTurnActionResult_ACU> {
@@ -647,6 +667,21 @@ export class ContinuationOrchestrator_ACU {
         advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
         return advanced;
       }, { chatIdentity });
+      // 首楼确认是权威提交；通告是独立的正文楼会话写入，失败不撤销已确认轮次。
+      if (messageIndex !== undefined) {
+        const stage = getActiveStage_ACU(advanced!.activeTask!);
+        const revision = getActiveRevision_ACU(stage);
+        const nextTurn = stage.status === 'running' ? revision.outline.nodes[stage.activeNodeIndex]?.turns[stage.activeTurnIndex] : null;
+        const nextKey = `${stage.stageId}#${stage.activeRevision}#${nextTurn?.id ?? ''}`;
+        const nextGoal = nextTurn?.goal ?? '当前阶段已完成；继续时由主 Agent 准备下一阶段大纲';
+        try {
+          this.assertLeaseCurrent_ACU(chatIdentity, lease);
+          await appendConfirmedAgentTurn_ACU(getChatArray_ACU(), messageIndex, nextKey,
+            `第 ${messageIndex + 1} 楼正文已确认，上一轮已结束。开始新的一轮规划：第 ${stage.stageNumber} 阶段。下一轮目标：${nextGoal}。上文已读资料与工作流回执仍然有效；可按用户新指令调整。`);
+        } catch (error) {
+          logAgentSession_ACU({ kind: 'thought', title: '确认后会话通告未保存', detail: error instanceof Error ? error.message : String(error), ok: false });
+        }
+      }
       return taskResult_ACU(advanced!);
     });
   }

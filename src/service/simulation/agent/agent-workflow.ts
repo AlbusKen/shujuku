@@ -1,6 +1,5 @@
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import {
-  WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU,
   formatWorldSimulationLedgerRequiredFields_ACU,
   type WorldCollisionReport_ACU,
   type WorldSimulationLedger_ACU,
@@ -12,6 +11,7 @@ import {
   type WorldSimulationSettings_ACU,
 } from '../model';
 import { applyWorldSimulationCandidatesDetailedViaSql_ACU } from '../simulation-transaction';
+import type { WorldSimulationRunWriteState_ACU } from '../simulation-run-write-state';
 import { snapshotWorldSimulationEvidenceRegistry_ACU, type WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import type { WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
@@ -37,6 +37,11 @@ export interface WorldSimulationWorkflowInput_ACU {
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
+  writeSql?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql'];
+  readCurrent?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readCurrent'];
+  readFieldSnapshot?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readFieldSnapshot'];
+  runWrites?: WorldSimulationRunWriteState_ACU;
+  isCurrent?: () => boolean;
   opening: WorldSimulationWorkflowOpening_ACU;
   anchorMaterialsCommitted?: boolean;
   /** 显式补足时的程序级写集；省略表示正常固定工作流。 */
@@ -142,15 +147,12 @@ function instructionFor_ACU(
   agentName: string,
   focus: string,
   ledger: WorldSimulationLedger_ACU,
-  repair: boolean,
   targetModules?: readonly WorldSimulationLedgerModule_ACU[],
 ): string {
   const modules = targetModules ?? findWorldSimulationAgentDefinition_ACU(agentName)?.writableModules ?? [];
-  const fixes = repair
-    ? fixesForAgent_ACU(ledger, agentName).filter(item => item.attempts < WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU && modules.includes(item.module))
-    : fixesForAgent_ACU(ledger, agentName);
+  const fixes = fixesForAgent_ACU(ledger, agentName);
   const lines = [
-    repair ? '这是独立预算的自动修复派工。只提交违规模块的增量 patch，不要重写无关模块。' : `本轮焦点：${focus}`,
+    `本轮焦点：${focus}`,
     `只维护这些模块：${modules.join(', ') || '无'}。正文里已经发生或已经变化的事实，直接 upsert 到自己的模块。`,
     `本模块待修复：${formatFixes_ACU(fixes)}`,
     formatWorldSimulationLedgerRequiredFields_ACU(),
@@ -328,12 +330,6 @@ function anchorMaterialsComplete_ACU(ledger: WorldSimulationLedger_ACU): boolean
     && expected.every(module => COMPLETE_STATES_ACU.has(String(ledger.materialCompletion.modules[module])));
 }
 
-function needsEscalation_ACU(ledger: WorldSimulationLedger_ACU, autoFixEnabled: boolean): boolean {
-  if (!ledger.pendingFixes.length) return false;
-  if (!autoFixEnabled) return true;
-  return ledger.pendingFixes.some(item => item.attempts >= WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU);
-}
-
 function seedsClosedThisRound_ACU(before: WorldSimulationLedger_ACU, after: WorldSimulationLedger_ACU): boolean {
   const previous = new Map(before.seeds.map(seed => [seed.id, seed.status]));
   return after.seeds.some(seed => (seed.status === 'resolved' || seed.status === 'retired') && previous.get(seed.id) !== seed.status);
@@ -390,6 +386,10 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
+  writeSql?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql'];
+  readCurrent?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readCurrent'];
+  readFieldSnapshot?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readFieldSnapshot'];
+  isCurrent?: () => boolean;
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run'>;
   ledger: WorldSimulationLedger_ACU;
   focus: string;
@@ -400,13 +400,17 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
     return await input.subagents.run({
       delegation: {
         agentName,
-        instruction: instructionFor_ACU(agentName, input.focus, input.ledger, false),
+        instruction: instructionFor_ACU(agentName, input.focus, input.ledger),
         reads: ['ledger:current', 'anchor:message', 'player:current'],
       },
       settings: input.settings,
       promptContext: { ...input.promptContext, worldState: input.ledger },
       registry: input.registry,
       tools: input.tools,
+      writeSql: input.writeSql,
+      readCurrent: input.readCurrent,
+      readFieldSnapshot: input.readFieldSnapshot,
+      isCurrent: input.isCurrent,
       runId: input.identity.runId,
       candidateSeq: input.candidateSeq,
     });
@@ -416,7 +420,8 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
 }
 
 export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkflowInput_ACU): Promise<WorldSimulationWorkflowResult_ACU> {
-  const base = cloneLedger_ACU(requireLedger_ACU(input.promptContext.worldState));
+  input.runWrites?.assertCurrent();
+  const base = cloneLedger_ACU(requireLedger_ACU(input.readCurrent?.() ?? input.promptContext.worldState));
   const skipModules = new Set(input.opening.skipModules);
   const requestedTargets = input.targetModules ? new Set(input.targetModules) : null;
   const expectedModules = new Set<WorldSimulationLedgerModule_ACU>();
@@ -424,6 +429,26 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
   const seq = new Map<string, number>();
   const anchorMessage = anchorText_ACU(input.promptContext);
   const authorized = authorizedRefs_ACU(input.registry);
+  let confirmedWrites = input.runWrites?.confirmedWrites ?? 0;
+  const refreshLedger = async (preview: WorldSimulationLedger_ACU, candidates: readonly WorldSimulationCandidate_ACU[]): Promise<WorldSimulationLedger_ACU> => {
+    if (!input.readCurrent) return preview;
+    input.runWrites?.assertCurrent();
+    const current = requireLedger_ACU(input.readCurrent());
+    if ((input.runWrites?.confirmedWrites ?? 0) === confirmedWrites) {
+      if (current.revision !== base.revision && !input.runWrites) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+      return preview;
+    }
+    input.runWrites?.assertCandidatesDisjoint(candidates);
+    confirmedWrites = input.runWrites!.confirmedWrites;
+    if (!candidates.length) return cloneLedger_ACU(current);
+    const replay = await applyWorldSimulationCandidatesDetailedViaSql_ACU(current, candidates, authorized, input.settings, { anchorMessage });
+    if (!replay.appliedModules.length || replay.pendingFixes.length) throw new Error('WORLD_SIMULATION_WORKFLOW_REBASE_FAILED');
+    return replay.ledger;
+  };
+  const applyPending = async (preview: WorldSimulationLedger_ACU, candidates: readonly WorldSimulationCandidate_ACU[]) => {
+    input.runWrites?.assertCandidatesDisjoint(candidates);
+    return applySafely_ACU(preview, candidates, authorized, input.settings, anchorMessage);
+  };
   const nextSeq = (agentName: string): number => {
     const value = (seq.get(agentName) ?? 0) + 1;
     seq.set(agentName, value);
@@ -431,7 +456,6 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
   };
   const runAgent = async (
     agentName: WorldSimulationAgentName_ACU,
-    repair: boolean,
     ledger: WorldSimulationLedger_ACU,
     targetModules = modulesForAgent_ACU(agentName).filter(module => !skipModules.has(module)),
   ): Promise<WorldSimulationSubagentOutcome_ACU> => {
@@ -439,13 +463,18 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       const outcome = await input.subagents.run({
         delegation: {
           agentName,
-          instruction: instructionFor_ACU(agentName, input.opening.focus, ledger, repair, targetModules),
+          instruction: instructionFor_ACU(agentName, input.opening.focus, ledger, targetModules),
           reads: ['ledger:current', 'anchor:message'],
         },
         settings: input.settings,
         promptContext: { ...input.promptContext, worldState: ledger },
         registry: input.registry,
         tools: input.tools,
+        writeSql: input.writeSql,
+        readCurrent: input.readCurrent,
+        readFieldSnapshot: input.readFieldSnapshot,
+        isCurrent: input.isCurrent,
+        writableModules: targetModules,
         runId: input.identity.runId,
         candidateSeq: nextSeq(agentName),
       });
@@ -477,40 +506,20 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     targets.forEach(module => expectedModules.add(module));
   }
   const timekeeperTargets = primaryTargets.get('timekeeper');
-  if (timekeeperTargets?.length) outcomes.push(await runAgent('timekeeper', false, base, timekeeperTargets));
+  if (timekeeperTargets?.length) outcomes.push(await runAgent('timekeeper', base, timekeeperTargets));
+  const afterTimekeeper = await refreshLedger(base, []);
   const parallel = (['undercurrent-analyst', 'dramatis-keeper'] as const).filter(name => primaryTargets.has(name));
-  outcomes.push(...await Promise.all(parallel.map(name => runAgent(name, false, base, primaryTargets.get(name)!))));
+  outcomes.push(...await Promise.all(parallel.map(name => runAgent(name, afterTimekeeper, primaryTargets.get(name)!))));
 
   const primaryOutcomes = [...outcomes];
-  let ledger = base;
+  let ledger = await refreshLedger(afterTimekeeper, []);
   let accepted: WorldSimulationCandidate_ACU[] = [];
   const primaryCandidates = primaryOutcomes.flatMap(item => item.candidate ? [item.candidate] : []);
-  const primary = await applySafely_ACU(ledger, primaryCandidates, authorized, input.settings, anchorMessage);
+  const primary = await applyPending(ledger, primaryCandidates);
   ledger = primary.ledger;
   accepted = primary.accepted;
   outcomes.push(...primary.rejected);
   ledger = recordWorkflowIssues_ACU(ledger, [...primaryOutcomes, ...primary.rejected], input.identity);
-
-  const repairTargets = new Map<WorldSimulationAgentName_ACU, WorldSimulationLedgerModule_ACU[]>();
-  for (const fix of ledger.pendingFixes) {
-    if (requestedTargets && !requestedTargets.has(fix.module)) continue;
-    if (fix.attempts >= WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU) continue;
-    const definition = findWorldSimulationAgentDefinition_ACU(fix.agentName);
-    if (!definition || !definition.writableModules.includes(fix.module)) continue;
-    const modules = repairTargets.get(definition.name) ?? [];
-    if (!modules.includes(fix.module)) modules.push(fix.module);
-    repairTargets.set(definition.name, modules);
-  }
-  if (input.settings.workflow.autoFixEnabled && repairTargets.size) {
-    const repairs = await Promise.all([...repairTargets].map(([name, targets]) => runAgent(name, true, ledger, targets)));
-    outcomes.push(...repairs);
-    ledger = clearCompletedPending_ACU(ledger, repairs);
-    const repaired = await applySafely_ACU(ledger, repairs.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
-    ledger = repaired.ledger;
-    accepted = [...accepted, ...repaired.accepted];
-    outcomes.push(...repaired.rejected);
-    ledger = recordWorkflowIssues_ACU(ledger, [...repairs, ...repaired.rejected], input.identity);
-  }
 
   const shouldChronicle = (!requestedTargets || requestedTargets.has('chronicle'))
     && !agentSkipped_ACU('chronicler', skipModules) && (
@@ -520,11 +529,11 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
   );
   if (shouldChronicle) {
     expectedModules.add('chronicle');
-    const chronicler = await runAgent('chronicler', false, ledger, ['chronicle']);
+    const chronicler = await runAgent('chronicler', ledger, ['chronicle']);
     outcomes.push(chronicler);
-    ledger = clearCompletedPending_ACU(ledger, [chronicler]);
+    ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [chronicler]);
     if (chronicler.candidate) {
-      const archived = await applySafely_ACU(ledger, [chronicler.candidate], authorized, input.settings, anchorMessage);
+      const archived = await applyPending(ledger, [chronicler.candidate]);
       ledger = archived.ledger;
       accepted = [...accepted, ...archived.accepted];
       outcomes.push(...archived.rejected);
@@ -535,7 +544,8 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
   }
 
   const projectionChanged = worldSimulationProjectionFingerprint_ACU(ledger) !== projectionBefore;
-  const substantive = accepted.some(item => Object.keys(item.patch).some(key => (PROJECTION_MODULES_ACU as readonly string[]).includes(key)));
+  const substantive = accepted.some(item => Object.keys(item.patch).some(key => (PROJECTION_MODULES_ACU as readonly string[]).includes(key)))
+    || (input.runWrites?.hasConfirmedWrites && projectionChanged);
   if (substantive && projectionChanged && (!requestedTargets || requestedTargets.has('guidance'))
     && !agentSkipped_ACU('guidance-composer', skipModules)) {
     expectedModules.add('guidance');
@@ -545,15 +555,19 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       promptContext: input.promptContext,
       registry: input.registry,
       tools: input.tools,
+      writeSql: input.writeSql,
+      readCurrent: input.readCurrent,
+      readFieldSnapshot: input.readFieldSnapshot,
+      isCurrent: input.isCurrent,
       subagents: input.subagents,
       ledger,
       focus: input.opening.focus,
       candidateSeq: nextSeq('guidance-composer'),
     });
     outcomes.push(composer);
-    ledger = clearCompletedPending_ACU(ledger, [composer]);
+    ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [composer]);
     if (composer.candidate) {
-      const projected = await applySafely_ACU(ledger, [composer.candidate], authorized, input.settings, anchorMessage);
+      const projected = await applyPending(ledger, [composer.candidate]);
       ledger = projected.ledger;
       accepted = [...accepted, ...projected.accepted];
       outcomes.push(...projected.rejected);
@@ -563,12 +577,12 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     }
   }
 
-  ledger = recordWorkflowIssues_ACU(ledger, [], input.identity);
+  ledger = recordWorkflowIssues_ACU(await refreshLedger(ledger, accepted), [], input.identity);
   const materialCompletion = completionRecord_ACU(
     base, ledger, outcomes, [...expectedModules], input.identity, input.anchorMaterialsCommitted === true,
   );
   ledger = { ...ledger, materialCompletion };
-  const escalated = needsEscalation_ACU(ledger, input.settings.workflow.autoFixEnabled);
+  const escalated = ledger.pendingFixes.length > 0;
   const summary = escalated
     ? `工作流完成，仍有待修复模块需要主会话处理：${ledger.pendingFixes.map(item => `${item.module}(${item.attempts})`).join('、')}`
     : accepted.length
@@ -576,7 +590,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       : '固定工作流没有产生账本变更';
   const evidenceRefs = [...new Set(accepted.flatMap(item => item.evidenceRefs))];
   return {
-    outcome: accepted.length ? 'commit' : escalated ? 'escalate' : 'no_change',
+    outcome: escalated ? 'escalate' : accepted.length ? 'commit' : 'no_change',
     summary,
     outcomes,
     pendingFixes: ledger.pendingFixes,

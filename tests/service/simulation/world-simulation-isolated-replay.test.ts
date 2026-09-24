@@ -7,7 +7,7 @@ import { buildDirectorOwnedStageRevision_ACU } from '../../../src/service/simula
 import { WorldSimulationStageExecutionEngine_ACU } from '../../../src/service/simulation/simulation-stage-execution-engine';
 import { WorldSimulationMainLoop_ACU } from '../../../src/service/simulation/agent/agent-main-loop';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../src/service/simulation/agent/agent-subagent-runtime';
-import { appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
+import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU, readWorldSimulationDirectorHistory_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
 import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 import { resetWorldSimulationRunCacheForTests_ACU } from '../../../src/service/simulation/agent/agent-run-cache';
@@ -34,6 +34,7 @@ interface ReplayOptions {
   mode: ReplayMode;
   entry: 'assistant' | 'agent';
   trailingUser?: boolean;
+  anchored?: boolean;
 }
 
 function buildReplay(options: ReplayOptions) {
@@ -77,7 +78,7 @@ function buildReplay(options: ReplayOptions) {
   });
   let sequence = 0;
   let clock = 1000;
-  const invocations: Array<{ role: WorldSimulationAgentName_ACU; response: string }> = [];
+  const invocations: Array<{ role: WorldSimulationAgentName_ACU; response: string; messages: readonly { role: string; content: string }[] }> = [];
 
   const prepare = async (input: {
     identity: WorldSimulationRunIdentity_ACU;
@@ -141,11 +142,11 @@ function buildReplay(options: ReplayOptions) {
         uncertainties: [],
       })]],
     ]);
-    const invoke = vi.fn(async (role: WorldSimulationAgentName_ACU) => {
+    const invoke = vi.fn(async (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[]) => {
       const queue = scripts.get(role);
       const response = queue?.shift();
       if (!response) throw new Error(`UNEXPECTED_MODEL_INVOCATION:${role}`);
-      invocations.push({ role, response });
+      invocations.push({ role, response, messages });
       return response;
     });
     const countTokens = async () => 1;
@@ -192,6 +193,13 @@ function buildReplay(options: ReplayOptions) {
             promptContext: { ...promptContext, task: store.read()!.task },
             registry,
             tools,
+            ...(options.anchored ? {
+              anchor: input.anchor,
+              chat,
+              persistSessionEvent: (eventKey: string, event: import('../../../src/service/simulation/agent/agent-session-log').WorldSimulationSessionInput_ACU) =>
+                appendWorldSimulationSessionEvent_ACU({ anchor: input.anchor, runId: identity.runId, taskId: identity.taskId,
+                  stageId: identity.stageId, stageRevision: identity.stageRevision, eventKey, event }, chat),
+            } : {}),
           }),
         });
         return engine.run({ identity });
@@ -218,6 +226,11 @@ function buildReplay(options: ReplayOptions) {
       }, chat);
     },
     commitProjection,
+    ...(options.anchored ? { persistCompletion: async ({ identity, anchor, outcome, summary }) => {
+      await appendWorldSimulationSessionEvent_ACU({ anchor, runId: identity.runId, taskId: identity.taskId,
+        stageId: identity.stageId, stageRevision: identity.stageRevision, eventKey: `run-completed-${outcome}`,
+        event: { kind: 'run_completed', title: outcome === 'commit' ? '世界推演已提交' : '世界推演无变化', detail: summary, agentName: 'world-director' } }, chat);
+    } } : {}),
   });
   const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
   const initialAnchor = resolveWorldSimulationAnchor_ACU(0, chat);
@@ -343,6 +356,93 @@ describe('T9 世界推演隔离 API replay', () => {
       expect.objectContaining({ kind: 'main_action', title: '主 Agent 动作：open_round', ok: true }),
       expect.objectContaining({ kind: 'run_completed', title: '世界推演无变化', ok: true }),
     ]));
+  });
+
+  it('锚定导演仅在投影提交后公告完成，正文 D1 中保留原始动作与反馈', async () => {
+    const replay = buildReplay({ mode: 'commit_partial', entry: 'assistant', anchored: true });
+    replay.commitProjection.mockImplementationOnce(async input => {
+      const pending = readWorldSimulationConversation_ACU(replay.chat).messages;
+      expect(pending.filter(item => item.eventKind === 'run_completed')).toHaveLength(0);
+      expect(readWorldSimulationSessionLog_ACU('chat-replay').some(item => item.kind === 'run_completed')).toBe(false);
+      expect(pending.filter(item => item.kind === 'model_agent').length).toBeGreaterThan(0);
+      return commitWorldSimulationProjection_ACU(input);
+    });
+
+    const result = await replay.run();
+
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'commit' } });
+    const currentAnchor = resolveWorldSimulationAnchor_ACU(0, replay.chat);
+    expect(currentAnchor.contentDigest).not.toBe(replay.initialAnchor.contentDigest);
+    const messages = readWorldSimulationConversation_ACU(replay.chat).messages;
+    expect(messages.filter(item => item.eventKind === 'run_completed')).toMatchObject([{ title: '世界推演已提交' }]);
+    expect(messages.filter(item => item.kind === 'model_agent')).toHaveLength(messages.filter(item => item.kind === 'model_feedback').length);
+    const director = replay.invocations.filter(item => item.role === 'world-director');
+    expect(director[1].messages.filter(item => item.content === director[0].response)).toHaveLength(1);
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).filter(item => item.content === director[0].response)).toHaveLength(1);
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('prepared');
+    const duplicate = await replay.runtime.handleAssistantCompletion(createWorldSimulationCompletionIntent_ACU(42, 'chat-replay', '', replay.chat, 1));
+    expect(duplicate).toEqual({ status: 'skipped', reason: 'duplicate' });
+    expect(replay.commitProjection).toHaveBeenCalledOnce();
+    expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(1);
+  });
+
+  it('锚定导演 no_change 权威保存后仅有一次完成通告，blocked 不伪装完成', async () => {
+    const replay = buildReplay({ mode: 'no_change', entry: 'assistant', anchored: true });
+    const result = await replay.run();
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change' } });
+    expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed'))
+      .toMatchObject([{ title: '世界推演无变化' }]);
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('prepared');
+    expect(await replay.runtime.handleAssistantCompletion(createWorldSimulationCompletionIntent_ACU(42, 'chat-replay', '', replay.chat, 1)))
+      .toEqual({ status: 'skipped', reason: 'duplicate' });
+    expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(1);
+
+    const blocked = buildReplay({ mode: 'blocked', entry: 'assistant', anchored: true });
+    expect(await blocked.run()).toMatchObject({ status: 'completed', result: { outcome: 'blocked' } });
+    expect(readWorldSimulationConversation_ACU(blocked.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(0);
+  });
+
+  it('投影提交失败时不发完成通告；独立通告保存失败不回滚已经提交的正文', async () => {
+    const failed = buildReplay({ mode: 'commit_partial', entry: 'assistant', anchored: true });
+    failed.commitProjection.mockImplementationOnce(async () => { throw new Error('PRIMARY_COMMIT_FAILED'); });
+    const result = await failed.run();
+    expect(result).toMatchObject({ status: 'failed' });
+    expect(readWorldSimulationConversation_ACU(failed.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(0);
+    expect(readWorldSimulationSessionLog_ACU('chat-replay').filter(item => item.kind === 'run_completed')).toHaveLength(0);
+
+    resetWorldSimulationSessionLogForTests_ACU();
+    const receiptFailed = buildReplay({ mode: 'commit_partial', entry: 'assistant', anchored: true });
+    let committedContent = '';
+    receiptFailed.saveChat.mockImplementation(async () => {
+      if (readWorldSimulationConversation_ACU(receiptFailed.chat).messages.some(item => item.eventKind === 'run_completed')) {
+        committedContent = receiptFailed.chat[0].mes;
+        throw new Error('RECEIPT_SAVE_FAILED');
+      }
+    });
+    const completed = await receiptFailed.run();
+    expect(completed).toMatchObject({ status: 'completed', result: { outcome: 'commit' } });
+    expect(receiptFailed.chat[0].mes).toBe(committedContent);
+    expect(receiptFailed.store.read()?.task?.status).toBe('completed');
+    expect(readWorldSimulationConversation_ACU(receiptFailed.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(0);
+    expect(readWorldSimulationSessionLog_ACU('chat-replay')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'run_completed' }), expect.objectContaining({ title: '完成通告保存失败', ok: false }),
+    ]));
+  });
+
+  it('投影保存和补偿保存都失败时不公告完成，并保留双重失败诊断', async () => {
+    const replay = buildReplay({ mode: 'commit_partial', entry: 'assistant', anchored: true });
+    replay.commitProjection.mockImplementationOnce(async input => {
+      replay.saveChat.mockRejectedValueOnce(new Error('PRIMARY_COMMIT_FAILED'))
+        .mockRejectedValueOnce(new Error('ROLLBACK_SAVE_FAILED'));
+      return commitWorldSimulationProjection_ACU(input);
+    });
+    const result = await replay.run();
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' } });
+    if (result?.status !== 'failed') throw new Error('expected failed commit');
+    expect(result.error.details).toMatchObject({ primaryMessage: 'PRIMARY_COMMIT_FAILED', rollbackMessage: 'ROLLBACK_SAVE_FAILED' });
+    expect(replay.commitProjection).toHaveBeenCalledOnce();
+    expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(0);
+    expect(readWorldSimulationSessionLog_ACU('chat-replay').filter(item => item.kind === 'run_completed')).toHaveLength(0);
   });
 
   it('blocked 终局保留活动租约供恢复，但零 strict commit、零账本变更', async () => {

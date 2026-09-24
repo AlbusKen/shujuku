@@ -22,6 +22,7 @@ export const WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU = 1 as const;
 export interface WorldSimulationAnchorIdentity_ACU { chatIdentity: string; messageIndex: number; messageId: string | number; messageKey: string; swipeId: string; contentDigest: string; }
 export interface WorldSimulationBucketEntry_ACU<T> { anchor: WorldSimulationAnchorIdentity_ACU; value: T; updatedAt: number; }
 export const WORLD_SIMULATION_RUN_STATE_FIELD_ACU = '_qrf_world_simulation_agent_run';
+export const WORLD_SIMULATION_RUN_WRITE_FIELD_ACU = '_qrf_world_simulation_run_writes';
 export const WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU = 1 as const;
 export interface WorldSimulationRunResumeState_ACU {
   taskId: string;
@@ -53,7 +54,7 @@ export interface WorldSimulationRunStateRecord_ACU {
 
 export interface WorldSimulationBucket_ACU<T> { schemaVersion: typeof WORLD_SIMULATION_BUCKET_SCHEMA_VERSION_ACU; entries: Record<string, WorldSimulationBucketEntry_ACU<T>>; }
 
-export const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff'] as const;
+export const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff', 'model_agent', 'model_feedback'] as const;
 export type WorldSimulationMessageKind_ACU = typeof WORLD_SIMULATION_MESSAGE_KINDS_ACU[number];
 export type WorldSimulationConversationEventStatus_ACU = 'running' | 'done' | 'failed';
 export interface WorldSimulationConversationEventMetadata_ACU {

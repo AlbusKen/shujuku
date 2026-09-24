@@ -79,7 +79,7 @@ function buildDeterministicState_ACU(previous: AgentHandoffSummaryStateV2_ACU | 
     else if (message.kind === 'turn') { state.currentGoal = message.digest || message.text; state.recentTurns.push(message.turnKey || message.digest || message.text); }
     if (message.readKey) state.readKeys.push(message.readKey);
   }
-  for (const field of fields_ACU) state[field] = cleanList_ACU(state[field]).slice(-8) as never;
+  for (const field of fields_ACU) state[field] = (field === 'effectiveConstraints' || field === 'readKeys' ? cleanList_ACU(state[field]) : cleanList_ACU(state[field]).slice(-8)) as never;
   state.currentGoal = cleanText_ACU(state.currentGoal);
   return state;
 }
@@ -98,14 +98,14 @@ export async function summarizeAgentHandoff_ACU(input: { previous: AgentHandoffS
     try {
       const allowedReadKeys = state.readKeys;
       const proposed = await input.semanticAdapter.summarize({ previous: input.previous, messages: input.messages, allowedReadKeys });
-      state = { ...state, currentGoal: cleanText_ACU(proposed.currentGoal) || state.currentGoal, ...Object.fromEntries(fields_ACU.map(field => [field, field === 'readKeys' || field === 'recentTurns' ? state[field] : cleanList_ACU(proposed[field]).length ? cleanList_ACU(proposed[field]) : state[field]])) } as AgentHandoffSummaryStateV2_ACU;
+      state = { ...state, currentGoal: cleanText_ACU(proposed.currentGoal) || state.currentGoal, ...Object.fromEntries(fields_ACU.map(field => [field, field === 'readKeys' || field === 'recentTurns' || field === 'effectiveConstraints' ? state[field] : cleanList_ACU(proposed[field]).length ? cleanList_ACU(proposed[field]) : state[field]])) } as AgentHandoffSummaryStateV2_ACU;
     } catch {
       degraded = true;
       degradationReason = 'semantic_summary_failed';
     }
   }
   let report = renderAgentHandoffReport_ACU(state, degradationReason);
-  for (const field of [...fields_ACU].reverse()) {
+  for (const field of [...fields_ACU].reverse().filter(item => item !== 'effectiveConstraints' && item !== 'readKeys')) {
     while ((await input.countTokens(report)) > input.maxTokens && state[field].length) { state = { ...state, [field]: state[field].slice(1) }; report = renderAgentHandoffReport_ACU(state, degradationReason); }
   }
   const reportTokens = await input.countTokens(report);

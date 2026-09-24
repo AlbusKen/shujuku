@@ -102,6 +102,7 @@ export class StageExecutionEngine_ACU {
     existingAttempt?: TurnAttemptIdentity_ACU,
     applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>,
     signal?: AbortSignal | null,
+    updateTurnLabel?: (text: string) => Promise<void>,
   ): Promise<ContinuationPreparedTurnInstruction_ACU> {
     const chatIdentity = this.dependencies.getChatIdentity();
     const initial = currentAgentContext_ACU(this.dependencies.readEnvelope());
@@ -136,6 +137,7 @@ export class StageExecutionEngine_ACU {
       },
       isInternalRequestCurrent: isCurrent,
       applyOutline: existingAttempt ? undefined : applyOutline,
+      updateTurnLabel: existingAttempt ? undefined : updateTurnLabel,
       signal,
     });
 

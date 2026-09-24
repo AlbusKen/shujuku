@@ -8,6 +8,7 @@ import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { isTauriTavernHost_ACU } from '../../shared/host-detect';
+import { supportsExplicitOpenAiCacheKey_ACU } from './prompt-cache';
 import { resolveApiConfigByPreset_ACU, normalizeCustomApiFormat_ACU, normalizePromptPostProcessing_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 
 type CustomIncludeBodyRootType_ACU = 'empty' | 'mapping' | 'sequence' | 'scalar' | 'invalid';
@@ -664,7 +665,7 @@ export async function callAIWithResolvedPreset_ACU(
         body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
             maxTokens,
             stripModelPrefix: false,
-            promptCacheKey: extras?.promptCacheKey,
+            promptCacheKey: supportsExplicitOpenAiCacheKey_ACU(resolved) ? extras?.promptCacheKey : undefined,
             // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
             includeStreamUsage: !!lifecycle?.onUsage,
         })),

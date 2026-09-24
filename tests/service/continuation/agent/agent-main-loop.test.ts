@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ContinuationAgentTurnPlanner_ACU, evaluateArcArchitectDispatch_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
-import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
-import { appendAgentConversation_ACU, buildEmptyAgentConversation_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
+import { buildEmptyAgentModuleSnapshot_ACU, readAgentModuleFieldSnapshot_ACU, readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
+import { appendAgentConversation_ACU, appendPreparedAgentConversationMessages_ACU, buildEmptyAgentConversation_ACU, readActiveAgentConversationCompactionMark_ACU, readAgentConversation_ACU, readAgentConversationTimeline_ACU, writeAgentConversationCompactionMark_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
+import { AGENT_CONVERSATION_FIELD_ACU, AGENT_MODULE_FIELD_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 import { buildEmptyAgentWorldbookSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
@@ -83,6 +85,7 @@ interface Harness_ACU {
   planner: ContinuationAgentTurnPlanner_ACU;
   request: ContinuationAgentTurnPlanRequest_ACU;
   mainCalls: Array<Array<{ role: string; content: string }>>;
+  mainCacheBoundaries: Array<string | undefined>;
   handoffCalls: Array<Array<{ role: string; content: string }>>;
   subCalls: Array<Array<{ role: string; content: string }>>;
   written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }>;
@@ -92,6 +95,8 @@ interface Harness_ACU {
   /** 当前内存态的持久会话，用来断言迭代输出与工具结果是否被真的记进会话。 */
   conversation: () => AgentConversationSnapshot_ACU;
   conversationWrites: AgentConversationSnapshot_ACU[];
+  chat: any[];
+  saveChat: ReturnType<typeof vi.fn>;
 }
 
 function harness_ACU(options: {
@@ -113,19 +118,29 @@ function harness_ACU(options: {
   apiPresetMode?: 'current' | 'fixed';
   agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
   taskId?: string;
+  mutateChat?: (chat: any[]) => void;
+  onSubagentCall?: (chat: any[], messages: readonly { role: string; content: string }[]) => Promise<string> | string;
+  productionConversation?: boolean;
+  chat?: any[];
+  onHandoffCall?: (chat: any[], callNumber: number, saveChat: ReturnType<typeof vi.fn>) => void;
 }): Harness_ACU {
   const mainReplies = [...options.mainReplies];
   const subReplies = [...(options.subReplies ?? [])];
   const handoffReplies = [...(options.handoffReplies ?? [])];
   const mainCalls: Array<Array<{ role: string; content: string }>> = [];
+  const mainCacheBoundaries: Array<string | undefined> = [];
   const handoffCalls: Array<Array<{ role: string; content: string }>> = [];
   const subCalls: Array<Array<{ role: string; content: string }>> = [];
   const written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }> = [];
   const outlineCalls: string[] = [];
   const presetRoles: string[] = [];
-  const chat = chat_ACU();
+  const chat = options.chat ?? chat_ACU();
+  options.mutateChat?.(chat);
+  const saveChat = vi.fn(async () => undefined);
+  if (options.productionConversation) _set_SillyTavern_API_ACU({ chat, chatId: 'planner-production', getCurrentChatId: () => 'planner-production', saveChat } as any);
   let snapshot = options.snapshot ?? snapshotWithArc_ACU();
   let conversation = options.conversation ?? buildEmptyAgentConversation_ACU();
+  if (options.productionConversation && conversation.messages.length) chat[0][AGENT_CONVERSATION_FIELD_ACU] = { schemaVersion: 2, updatedAt: 0, segment: [...conversation.messages] };
   let persistedCompactionMark: AgentConversationCompactionMark_ACU | null = null;
   const conversationWrites: AgentConversationSnapshot_ACU[] = [];
   let contextFactory = options.context ?? execution_ACU;
@@ -133,26 +148,29 @@ function harness_ACU(options: {
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
     resolveAgentApiPreset: (() => preset_ACU) as any,
-    callInternalAi: async messages => { subCalls.push(messages); return subReplies.shift() ?? '{"summary":"空","recommendation":"随便推进"}'; },
+    callInternalAi: async messages => { subCalls.push(messages); return options.onSubagentCall
+      ? options.onSubagentCall(chat, messages) : subReplies.shift() ?? '{"summary":"空","recommendation":"随便推进"}'; },
   });
 
   const planner = new ContinuationAgentTurnPlanner_ACU({
     resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
-    callInternalAi: async (messages, _preset, identity) => {
+    callInternalAi: async (messages, _preset, identity, _signal, callOptions) => {
       if (identity.source === 'handoff_summary') {
         handoffCalls.push(messages);
+        options.onHandoffCall?.(chat, handoffCalls.length, saveChat);
         return handoffReplies.shift() ?? null;
       }
       mainCalls.push(messages);
+      mainCacheBoundaries.push(callOptions?.cacheBoundary);
       return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}';
     },
     subagentRuntime,
     readChat: () => chat,
     readModuleSnapshot: () => snapshot,
     writeModuleSnapshot: async (_chat, index, next) => { written.push({ index, snapshot: next }); snapshot = next; },
-    readConversation: () => conversation,
+    readConversation: options.productionConversation ? readAgentConversation_ACU : () => conversation,
     // 分段落盘的内存替身：把新消息接到会话尾部，与真实实现同样按 id 去重。
-    appendConversationMessages: async (_chat, prepared: readonly AgentConversationMessage_ACU[]) => {
+    appendConversationMessages: options.productionConversation ? appendPreparedAgentConversationMessages_ACU : async (_chat, prepared: readonly AgentConversationMessage_ACU[]) => {
       const existing = new Set(conversation.messages.map(message => message.id));
       const fresh = prepared.filter(message => !existing.has(message.id));
       if (!fresh.length) return false;
@@ -161,9 +179,9 @@ function harness_ACU(options: {
       conversationWrites.push(conversation);
       return true;
     },
-    readCompactionMark: () => persistedCompactionMark,
+    readCompactionMark: options.productionConversation ? readActiveAgentConversationCompactionMark_ACU : () => persistedCompactionMark,
     // 压缩标记的内存替身：保存权威 V2 mark，并应用与 readAgentConversation_ACU 相同的投影。
-    writeCompactionMark: async (_chat, mark) => {
+    writeCompactionMark: options.productionConversation ? writeAgentConversationCompactionMark_ACU : async (_chat, mark) => {
       if (options.compactionWrite === 'throw') throw new Error('simulated compaction write failure');
       if (options.compactionWrite === 'false') return false;
       persistedCompactionMark = options.mutatePersistedCompactionMark?.(mark as AgentConversationCompactionMarkV2_ACU) ?? mark;
@@ -204,14 +222,17 @@ function harness_ACU(options: {
     planner,
     request,
     mainCalls,
+    mainCacheBoundaries,
     handoffCalls,
     subCalls,
     written,
     outlineCalls,
     presetRoles,
     setContext: factory => { contextFactory = factory; },
-    conversation: () => conversation,
+    conversation: () => options.productionConversation ? readAgentConversation_ACU(chat) : conversation,
     conversationWrites,
+    chat,
+    saveChat,
   };
 }
 
@@ -306,7 +327,7 @@ describe('主 Agent 会话记录', () => {
     const messages = h.conversation().messages;
     expect(messages[0].kind).toBe('handoff');
     expect(h.handoffCalls).toHaveLength(2);
-    expect(messages[0].text).toContain('第 1 阶段 · 第 1/6 轮');
+    expect(messages[0].text).toContain('stage-1#0#turn-1');
     expect(messages[0].text).toContain('交付写作指导');
     expect(messages.some(message => message.text === filler)).toBe(false);
     // 刚结束的那一轮完整保留，主 Agent 不会忘记自己从哪儿接上。
@@ -397,6 +418,8 @@ describe('主 Agent 会话记录', () => {
     expect(h.mainCalls[0].some(message => message.content.includes(oldTurnFiller))).toBe(true);
     expect(h.mainCalls[1].some(message => message.content.includes(oldTurnFiller))).toBe(false);
     expect(h.mainCalls[1].some(message => message.content.includes(bulkyReport))).toBe(true);
+    expect(h.mainCacheBoundaries[0]).toBeUndefined();
+    expect(h.mainCacheBoundaries[1]).toBe(h.conversation().messages[0].text);
     expect(h.conversation().messages[0].kind).toBe('handoff');
     const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
     expect(compacted?.detail).toContain('本轮尚未结束');
@@ -448,7 +471,94 @@ describe('主 Agent 会话记录', () => {
 
 });
 
+describe('主 Agent 真实楼层会话压缩', () => {
+  const original = () => appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+    { kind: 'turn', text: '旧轮次', digest: '旧轮次', turnKey: 'stage-1#0#turn-1' },
+    { kind: 'agent', text: '{"action":"read","reads":["$STORY_RANGE:1-2"]}', digest: '读取旧正文', turnKey: 'stage-1#0#turn-1' },
+    { kind: 'tool', text: '守门人'.repeat(400), digest: '旧正文回执', readKey: '$STORY_RANGE:1-2', turnKey: 'stage-1#0#turn-1' },
+    { kind: 'turn', text: '上一轮次', digest: '上一轮次', turnKey: 'stage-1#0#turn-2' },
+    { kind: 'user', text: '最近要求：不要揭穿守门人', digest: '最近要求', turnKey: 'stage-1#0#turn-2' },
+  ]);
+  const options = () => ({ productionConversation: true, conversation: original(), historyTokenBudget: 200,
+    countTokens: fillerTokens_ACU, context: nextTurnContext_ACU, mainReplies: ['{"action":"finalize","instruction":"接着写"}'] });
+
+  it('双楼真实保存与回读：报告只替换旧完整动作/回执，删标记楼恢复原文', async () => {
+    const h = harness_ACU(options());
+    const baseline = structuredClone(h.chat[0][AGENT_CONVERSATION_FIELD_ACU]);
+    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
+    expect(h.saveChat).toHaveBeenCalled();
+    expect(h.chat[0][AGENT_CONVERSATION_FIELD_ACU]).toEqual(baseline);
+    const mark = readActiveAgentConversationCompactionMark_ACU(h.chat);
+    expect(mark).toMatchObject({ schemaVersion: 2, compactedThroughId: 3 });
+    expect(mark && 'summaryState' in mark && mark.summaryState.readKeys).toContain('$STORY_RANGE:1-2');
+    const projected = readAgentConversation_ACU(h.chat);
+    expect(projected.messages[0].text).toBe(mark?.report);
+    expect(projected.messages.some(item => item.text === '最近要求：不要揭穿守门人')).toBe(true);
+    expect(h.mainCalls[0].some(item => item.content.includes('最近要求：不要揭穿守门人'))).toBe(true);
+    expect(h.mainCalls[0].some(item => item.content.includes('守门人'.repeat(400)))).toBe(false);
+    const timeline = readAgentConversationTimeline_ACU(h.chat);
+    expect(timeline.some(item => item.kind === 'tool' && item.text === '守门人'.repeat(400))).toBe(true);
+    expect(h.chat[h.chat.length - 1][AGENT_CONVERSATION_FIELD_ACU].compaction).toEqual(mark);
+    h.chat.pop();
+    expect(readActiveAgentConversationCompactionMark_ACU(h.chat)).toBeNull();
+    expect(readAgentConversation_ACU(h.chat).messages).toEqual(baseline.segment);
+  });
+
+  it('候选生成期间新用户消息落盘时不写过时标记，保留两楼原文', async () => {
+    const h = harness_ACU({ ...options(), onHandoffCall: (chat, number) => {
+      if (number !== 1) return;
+      const record = chat[chat.length - 1][AGENT_CONVERSATION_FIELD_ACU];
+      record.segment.push({ id: record.segment.at(-1).id + 1, kind: 'user', text: '候选期间的新要求', digest: '', turnKey: 'stage-1#0#turn-2', at: 1 });
+    } });
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
+    expect(h.mainCalls).toHaveLength(0);
+    expect(readActiveAgentConversationCompactionMark_ACU(h.chat)).toBeNull();
+    expect(readAgentConversation_ACU(h.chat).messages.some(item => item.text === '候选期间的新要求')).toBe(true);
+  });
+
+  it('候选生成期间阶段游标前进时不提交过时压缩标记', async () => {
+    const h = harness_ACU({ ...options(), onHandoffCall: (_chat, number) => {
+      if (number !== 1) return;
+      // 摘要调用在途时大纲进入下一阶段：候选只代表旧游标，提交前核对必须拒绝。
+      const advanced = nextTurnContext_ACU();
+      h.setContext(() => ({ ...advanced, stage: { ...advanced.stage, stageId: 'stage-2' } as any }));
+    } });
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
+    expect(h.mainCalls).toHaveLength(0);
+    expect(readActiveAgentConversationCompactionMark_ACU(h.chat)).toBeNull();
+    expect(readAgentConversation_ACU(h.chat).messages.some(item => item.text === '守门人'.repeat(400))).toBe(true);
+  });
+
+  it('宿主拒绝压缩标记保存时还原末楼字段，保留已落盘的原始会话', async () => {
+    const h = harness_ACU({ ...options(), onHandoffCall: (_chat, number, save) => {
+      save.mockRejectedValueOnce(new Error(`host save failed ${number}`));
+    } });
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SNAPSHOT_INVALID' } });
+    expect(h.mainCalls).toHaveLength(0);
+    expect(readActiveAgentConversationCompactionMark_ACU(h.chat)).toBeNull();
+    expect(readAgentConversation_ACU(h.chat).messages.some(item => item.text === '守门人'.repeat(400))).toBe(true);
+    expect(h.chat[h.chat.length - 1][AGENT_CONVERSATION_FIELD_ACU].compaction).toBeUndefined();
+  });
+});
+
 describe('主 Agent read/search 工具批次', () => {
+  it('损坏栏目读取明确失败且不会占用成功读取缓存', async () => {
+    const h = harness_ACU({
+      mutateChat: chat => { chat[3]._qrf_continuation_agent = { schemaVersion: 4, invalid: true }; },
+      mainReplies: [
+        '{"action":"read","reads":["$FIELD:hooks:H1"]}',
+        '{"action":"read","reads":["$FIELD:hooks:H1"]}',
+        '{"action":"finalize","instruction":"资料损坏待修复"}',
+      ],
+    });
+    await h.planner.plan(h.request);
+    const failed = h.conversation().messages.filter(message => message.kind === 'tool' && message.text.includes('"status":"failed"'));
+    expect(failed).toHaveLength(2);
+    expect(failed.every(message => message.text.includes('资料帧校验失败') && message.readKey === undefined)).toBe(true);
+    expect(h.conversation().messages.some(message => message.kind === 'tool' && message.readKey === '$FIELD:hooks:H1')).toBe(false);
+    expect(h.mainCalls[2].some(message => message.content.includes('不再重注'))).toBe(false);
+  });
+
   it('调阅结果作为带 readKey 的工具消息回灌，重复调阅只回提示不重注内容', async () => {
     const h = harness_ACU({
       mainReplies: [
@@ -910,6 +1020,64 @@ describe('open_round 固定结构工作流', () => {
     expect(h.subCalls).toHaveLength(4);
   });
 
+  it('交付只追加权威状态回执、更新非门禁轮次标签，并停止当前主循环', async () => {
+    const h = harness_ACU({
+      snapshot: snapshotWithArc_ACU(),
+      mainReplies: ['{"action":"open_round","focus":"改为暗中试探守门人"}'],
+      subReplies: [maintainerReply_ACU, plannerReply_ACU, composerReply_ACU],
+    });
+    const updateTurnLabel = vi.fn(async (_text: string) => undefined);
+    h.request.updateTurnLabel = updateTurnLabel;
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
+    expect(h.mainCalls).toHaveLength(1);
+    expect(updateTurnLabel).toHaveBeenCalledWith('改为暗中试探守门人');
+    const receipt = h.conversation().messages.find(message => message.digest === '工作流状态回执');
+    expect(receipt).toBeDefined();
+    expect(JSON.parse(receipt!.text)).toMatchObject({ outcome: 'deliver', pending: [], revisions: expect.any(Object) });
+    expect(receipt!.text).not.toContain('按阶段大纲先观察守门人的回避');
+    expect(receipt!.text).not.toContain('没有新增资料');
+  });
+
+  it('固定工作流逐栏端口绑定派工时末楼，模型等待期间新增楼层不会改写新末楼', async () => {
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    let lastChat: any[] = [];
+    let calls = 0;
+    const h = harness_ACU({
+      snapshot: snapshotWithArc_ACU(),
+      context: preOutlineContext_ACU,
+      // 写入被拒后维护员没有重发 H1 而以空 delta 收尾：hooks 缺口留 pending，
+      // 固定工作流停止交付并直报主会话，由主 Agent 向用户说明缺口后 finalize。
+      mainReplies: ['{"action":"open_round","focus":"继续试探"}', '{"action":"finalize","instruction":"已向用户说明 hooks 缺口"}'],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '阶段大纲已建立' }),
+      onSubagentCall: (chat, _messages) => {
+        lastChat = chat;
+        _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+        if (calls++ === 0) {
+          chat.push({ mes: '新增的末楼', is_user: false });
+          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧楼线索', 0)" });
+        }
+        return [maintainerReply_ACU, plannerReply_ACU, composerReply_ACU][calls - 2] ?? composerReply_ACU;
+      },
+    });
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    try {
+      const result = await h.planner.plan(h.request);
+      expect(result.instruction).toBe('已向用户说明 hooks 缺口');
+      expect(saveChat).not.toHaveBeenCalled();
+      expect(lastChat.at(-1)?.[AGENT_MODULE_FIELD_ACU]).toBeUndefined();
+      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
+      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+      const escalation = h.mainCalls[1].map(message => message.content).join('\n');
+      expect(escalation).toContain('待修复模块需要主会话处理');
+      expect(escalation).toContain('hooks');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
   it('已有可用总纲但没有阶段大纲时，只自动准备大纲，不重复运行 arc-architect', async () => {
     const h = harness_ACU({
       snapshot: snapshotWithArc_ACU(),
@@ -951,6 +1119,96 @@ describe('open_round 固定结构工作流', () => {
 });
 
 describe('派工与写集落盘', () => {
+  it('主循环的逐栏端口绑定派工时末楼，模型等待期间新增楼层不能改写新末楼', async () => {
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    let lastChat: any[] = [];
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"逐栏结算","reads":[],"writes":["$HOOKS_LEDGER"]}]}',
+        '{"action":"finalize","instruction":"停止"}',
+      ],
+      onSubagentCall: (chat, _messages) => {
+        lastChat = chat;
+        _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+        if (chat.length === 4) {
+          chat.push({ mes: '新增的末楼', is_user: false });
+          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧楼线索', 0)" });
+        }
+        return JSON.stringify({ summary: '结束结算', delta: {} });
+      },
+    });
+    try {
+      await h.planner.plan(h.request);
+      expect(saveChat).not.toHaveBeenCalled();
+      expect(lastChat[lastChat.length - 1][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
+      expect(h.subCalls).toHaveLength(2);
+      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
+      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it('模型等待期间切换目标楼 active swipe 时旧派工不能写入新分桶', async () => {
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    let lastChat: any[] = [];
+    let calls = 0;
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"逐栏结算","reads":[],"writes":["$HOOKS_LEDGER"]}]}',
+        '{"action":"finalize","instruction":"停止"}',
+      ],
+      onSubagentCall: (chat, _messages) => {
+        lastChat = chat;
+        _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+        if (calls++ === 0) {
+          chat[3].swipe_id = 1;
+          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧 swipe 线索', 0)" });
+        }
+        return JSON.stringify({ summary: '结束结算', delta: {} });
+      },
+    });
+    try {
+      await h.planner.plan(h.request);
+      expect(saveChat).not.toHaveBeenCalled();
+      expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
+      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
+      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it('模型等待期间同一目标楼正文被改写时旧派工不得提交', async () => {
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    let lastChat: any[] = [];
+    let calls = 0;
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"逐栏结算","reads":[],"writes":["$HOOKS_LEDGER"]}]}',
+        '{"action":"finalize","instruction":"停止"}',
+      ],
+      onSubagentCall: (chat, _messages) => {
+        lastChat = chat;
+        _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+        if (calls++ === 0) {
+          chat[3].mes = '新的正文版本';
+          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧剧情线索', 0)" });
+        }
+        return JSON.stringify({ summary: '结束结算', delta: {} });
+      },
+    });
+    try {
+      await h.planner.plan(h.request);
+      expect(saveChat).not.toHaveBeenCalled();
+      expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
+      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
+      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
   it('维护类子代理的 delta 串行落盘，结果与约束提议回灌给主 Agent', async () => {
     const h = harness_ACU({
       mainReplies: [
@@ -1339,5 +1597,123 @@ describe('子代理运行时', () => {
     const isCurrent = vi.fn().mockReturnValue(false);
     await expect(runtime.run(input_ACU({ isCurrent } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_INTERNAL_REQUEST_STALE' } });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('S11 双模式双楼全链集成', () => {
+  it('续写双楼全链：主会话读→工作流子代理先写部分栏→本次下一条补栏→合格指导→宿主正文→主会话续接', async () => {
+    // 全部走生产持久化：模块快照读/写、会话分段、逐栏提交都落在真实楼层字段上，
+    // 只有 AI 调用是脚本替身。消息序列与生产存储回读分开断言。
+    const seeded = snapshotWithArc_ACU();
+    // 与生产遗留帧一致：legacy 整条快照必须自带合法水位，否则读取只能宽容抢救、逐栏提交会判帧损坏。
+    // 水位 1：plantedIndex 逐栏提交只接受已结算正文楼层（≤ 水位），结算本身再把水位推到末楼。
+    seeded.settledThroughIndex = 1;
+    const chat: any[] = [
+      { mes: '我要进禁区', is_user: true, [AGENT_MODULE_FIELD_ACU]: seeded },
+      { mes: '主角推开铁门。', is_user: false },
+      { mes: '继续', is_user: true },
+      { mes: '守门人挡在门后，右手藏着黑色晶屑。', is_user: false },
+    ];
+    const saveChat = vi.fn(async () => undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 's11-flow', getCurrentChatId: () => 's11-flow', saveChat } as any);
+
+    const mainReplies = [
+      '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+      '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算最近正文","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]}]}',
+      '{"action":"finalize","instruction":"主角假装离开，当夜折返。","summary":"交付折返指导"}',
+      '{"action":"finalize","instruction":"主角假装离开，当夜折返，查探晶屑来源。","summary":"交付二次指导"}',
+    ];
+    const subReplies = [
+      JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0)" }),
+      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
+      JSON.stringify({ action: 'write_sql', sql: "UPDATE hooks SET status = 'planted', importance = 'high', planted_index = 1, planned_payoff = '' WHERE id = 'H1' AND expected_revision = 1" }),
+      JSON.stringify({ summary: '结算了门后信件', delta: {} }),
+    ];
+    const mainCalls: Array<Array<{ role: string; content: string }>> = [];
+    const subCalls: Array<Array<{ role: string; content: string }>> = [];
+    const subagentRuntime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      resolveAgentApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => { subCalls.push(messages); return subReplies.shift() ?? '{"summary":"空","delta":{}}'; },
+    });
+    let turnId = 'turn-2';
+    const planner = new ContinuationAgentTurnPlanner_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
+      subagentRuntime,
+      readChat: () => chat,
+      readModuleSnapshot: source => readAgentModuleSnapshot_ACU(source),
+      writeModuleSnapshot: (source, index, next) => writeAgentModuleSnapshot_ACU(source, index, next),
+      readConversation: readAgentConversation_ACU,
+      appendConversationMessages: appendPreparedAgentConversationMessages_ACU,
+      readCompactionMark: readActiveAgentConversationCompactionMark_ACU,
+      writeCompactionMark: writeAgentConversationCompactionMark_ACU,
+      loadWorldbook: async () => buildEmptyAgentWorldbookSnapshot_ACU(true),
+      budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1 },
+    });
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.internalAiRetryLimit = 1;
+    settings.agentRunBudget = { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1 };
+    let contextFactory: () => any = execution_ACU;
+    const request: ContinuationAgentTurnPlanRequest_ACU = {
+      settings,
+      readContext: () => contextFactory(),
+      createInternalRequestIdentity: attempt => ({ taskId: 'task-1', stageId: 'stage-1', turnId, attemptId: `a-${attempt}`, source: 'turn_instruction' }) as any,
+      isInternalRequestCurrent: () => true,
+      applyOutline: async () => ({ op: 'revise' as const, requiresReview: false, stopped: null, summary: '已改写大纲' }),
+    };
+
+    try {
+      const result = await planner.plan(request);
+      expect(result.instruction).toBe('主角假装离开，当夜折返。');
+
+      // —— 消息序列：主会话三次请求依次是读→派工→交付，工具回执按真实 role 回灌 ——
+      expect(mainCalls).toHaveLength(3);
+      expect(mainCalls[1].some(message => message.content.includes('伏笔账本'))).toBe(true);
+      const delegationFeedback = mainCalls[2][findIndex_ACU(mainCalls[2], 'hook-cognition-maintainer｜成功')].content;
+      expect(delegationFeedback).toContain('结算了门后信件');
+      // 主会话只收到工作流状态/摘要：子代理的逐栏回执原文只在它自己的隔离会话里。
+      expect(mainCalls.map(call => call.map(message => message.content).join('\n')).join('\n')).not.toContain('"status":"committed"');
+      // 子代理序列：先写部分栏→读权威缺栏→本次下一条补栏→交付契约；回执在它的隔离视图里可见。
+      expect(subCalls).toHaveLength(4);
+      expect(subCalls[1].map(message => message.content).join('\n')).toContain('"status":"committed"');
+      expect(subCalls[2].map(message => message.content).join('\n')).toContain('"missingFields"');
+      expect(subCalls[3].map(message => message.content).join('\n')).toContain('"status":"committed"');
+
+      // —— 生产存储回读：部分栏逐栏提交后提升为完整条目，快照跟着楼层走 ——
+      expect(saveChat).toHaveBeenCalled();
+      const stored = readAgentModuleSnapshot_ACU(chat);
+      expect(stored.hooks).toHaveLength(1);
+      expect(stored.hooks[0]).toMatchObject({ id: 'H1', summary: '门后信件', status: 'planted', importance: 'high', plantedIndex: 1 });
+      expect(stored.settledThroughIndex).toBe(3);
+      expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.H1?.status).toBe('complete');
+      expect(chat.some((message: any, index: number) => index > 0 && message[AGENT_MODULE_FIELD_ACU])).toBe(true);
+
+      // —— 宿主正文落楼，主会话续接：旧会话保留、新换轮通告追加 ——
+      chat.push({ mes: '主角假装离开，当夜折返，看见守门人对着晶屑低语。', is_user: false });
+      turnId = 'turn-3';
+      contextFactory = nextTurnContext_ACU;
+      const second = await planner.plan(request);
+      expect(second.instruction).toBe('主角假装离开，当夜折返，查探晶屑来源。');
+
+      // 第二次运行的首个请求：新换轮通告与宿主新正文都进了上下文，旧资料仍可回读。
+      const resumed = mainCalls[3].map(message => message.content).join('\n');
+      expect(resumed).toContain('第 3/6 轮');
+      expect(resumed).toContain('低语');
+      const conversationText = readAgentConversation_ACU(chat).messages.map(message => `${message.kind}:${message.text}`).join('\n');
+      expect(conversationText).toContain('第 2/6 轮');
+      expect(conversationText).toContain('第 3/6 轮');
+      expect(readAgentModuleSnapshot_ACU(chat).hooks.map(entry => entry.id)).toEqual(['H1']);
+
+      // —— 会话流序列：读→派工→交付→完成，第二次运行重新开始 ——
+      const kinds = readAgentSessionLog_ACU()
+        .map(entry => entry.kind)
+        .filter(kind => ['run_started', 'tool_read', 'delegation', 'finalize', 'run_completed'].includes(kind));
+      expect(kinds).toEqual(['run_started', 'tool_read', 'delegation', 'finalize', 'run_completed', 'run_started', 'finalize', 'run_completed']);
+      const delegationEntry = readAgentSessionLog_ACU().find(entry => entry.kind === 'delegation');
+      expect(delegationEntry).toMatchObject({ agentName: 'hook-cognition-maintainer', ok: true });
+    } finally {
+      _set_SillyTavern_API_ACU(null as any);
+    }
   });
 });

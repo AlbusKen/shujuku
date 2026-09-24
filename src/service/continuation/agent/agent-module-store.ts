@@ -7,11 +7,15 @@
  */
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
+import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { findLatestTableFullCheckpointIndex_ACU } from '../../chat/material-checkpoint-sync';
 import {
   foldAgentModuleSnapshot_ACU,
   planAgentModuleSnapshotWrite_ACU,
   planAgentModuleFieldWrite_ACU,
+  planAgentModuleCommitDelta_ACU,
+  readMessageSwipeId_ACU,
+  type AgentModuleFoldResult_ACU,
   type AgentModuleFrameDeps_ACU,
 } from './agent-module-frame';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
@@ -42,6 +46,7 @@ import {
   type AgentModuleSnapshot_ACU,
   type AgentModuleFieldSnapshot_ACU,
   type AgentModuleFieldUpserts_ACU,
+  type AgentModuleFloorDelta_ACU,
   type AgentPendingFix_ACU,
   type AgentStoryArcEntry_ACU,
   type AgentWebRefEntry_ACU,
@@ -628,6 +633,109 @@ export async function writeAgentModuleFields_ACU(chat: any[], targetIndex: numbe
 
 function rejectSnapshotEdit_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
+}
+
+/** 一次性折叠快照与分栏视图，并保留损坏帧的结构化诊断供提交门禁使用。 */
+export function readAgentModuleFoldState_ACU(chat: any[]): AgentModuleFoldResult_ACU {
+  return foldAgentModuleSnapshot_ACU(chat, agentModuleFrameDeps_ACU());
+}
+
+/** 只标记可观察到的保存与同内存聊天折叠结果；宿主没有独立文件重读原语。 */
+export interface AgentModuleCommitResult_ACU {
+  status: 'committed' | 'persist_failed' | 'readback_failed';
+  reason?: string;
+  recovery?: 'saved' | 'failed' | 'unavailable';
+}
+
+/** 规划前固定聊天各楼资料字段；未暂存的旧楼仍可能在保存监听器中被改动。 */
+export function captureAgentModuleCommitBaseline_ACU(chat: any[]): {
+  identity: string;
+  floors: Array<{ message: unknown; swipeId: string; existed: boolean; content: string | undefined }>;
+} {
+  const asJson = (value: unknown): string | undefined => JSON.stringify(value);
+  return { identity: getActiveChatStorageIdentity_ACU(chat), floors: chat.map(message => ({
+    message,
+    swipeId: readMessageSwipeId_ACU(message),
+    existed: Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU),
+    content: asJson(message?.[AGENT_MODULE_FIELD_ACU]),
+  })) };
+}
+
+/** 已授权的逐栏变化提交到宿主一次；保存后折叠回读。失败时尽可能补偿，不把补偿称作事务。 */
+export async function writeAgentModuleCommitDelta_ACU(
+  chat: any[],
+  targetIndex: number,
+  changes: Pick<AgentModuleFloorDelta_ACU, 'writes' | 'revisions' | 'fieldUpserts' | 'removedIds'>,
+  updatedAt: number,
+  verify: (folded: AgentModuleFoldResult_ACU) => boolean,
+  baseline: ReturnType<typeof captureAgentModuleCommitBaseline_ACU>,
+  isCurrent?: () => boolean,
+): Promise<AgentModuleCommitResult_ACU> {
+  const asJson = (value: unknown): string | undefined => JSON.stringify(value);
+  const baselineIntact = (excluded: ReadonlySet<number> = new Set()): boolean =>
+    getChatArray_ACU() === chat && getActiveChatStorageIdentity_ACU(chat) === baseline.identity
+    && chat.length === baseline.floors.length && baseline.floors.every((entry, index) =>
+      chat[index] === entry.message && readMessageSwipeId_ACU(entry.message) === entry.swipeId && (excluded.has(index) || (
+        Object.prototype.hasOwnProperty.call(entry.message, AGENT_MODULE_FIELD_ACU) === entry.existed
+        && asJson((entry.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) === entry.content)));
+  if (!baselineIntact() || isCurrent?.() === false) return { status: 'persist_failed', reason: '资料基线或派工租约在规划期间已变化', recovery: 'unavailable' };
+  const plan = planAgentModuleCommitDelta_ACU(chat, targetIndex, changes, agentModuleFrameDeps_ACU(), findLatestTableFullCheckpointIndex_ACU(chat), updatedAt);
+  if (!plan.changed || getChatArray_ACU() !== chat || targetIndex !== chat.length - 1) {
+    return { status: 'persist_failed', reason: '提交目标或聊天身份已变化' };
+  }
+  const target = chat[targetIndex];
+  const first = chat[0];
+  const identity = getActiveChatStorageIdentity_ACU(chat);
+  const assigned = plan.assignments.map(assignment => ({ ...assignment, message: chat[assignment.index],
+    expected: JSON.stringify(assignment.value) }));
+  const intact = (): boolean => getChatArray_ACU() === chat && chat[0] === first
+    && getActiveChatStorageIdentity_ACU(chat) === identity && chat[targetIndex] === target && targetIndex === chat.length - 1
+    && assigned.every(assignment => chat[assignment.index] === assignment.message)
+    && baseline.floors.every(entry => readMessageSwipeId_ACU(entry.message) === entry.swipeId);
+  const stagedIndexes = new Set(plan.assignments.map(assignment => assignment.index));
+  const untouched = (): boolean => baselineIntact(stagedIndexes);
+  const ours = (): boolean => assigned.every(assignment =>
+    asJson((assignment.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) === assignment.expected);
+  const restore = (): boolean => {
+    if (!intact() || !ours()) return false;
+    for (const assignment of assigned) {
+      const message = assignment.message as Record<string, unknown>;
+      if (assignment.existed) message[AGENT_MODULE_FIELD_ACU] = assignment.previous;
+      else delete message[AGENT_MODULE_FIELD_ACU];
+    }
+    return true;
+  };
+  const recover = async (): Promise<AgentModuleCommitResult_ACU['recovery']> => {
+    const staleBaseline = !untouched();
+    if (staleBaseline || isCurrent?.() === false || !restore() || !intact()) return 'unavailable';
+    const restored = assigned.map(assignment => ({ exists: Object.prototype.hasOwnProperty.call(assignment.message, AGENT_MODULE_FIELD_ACU),
+      content: asJson((assignment.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) }));
+    try {
+      await saveChatToHostStrict_ACU();
+      return !staleBaseline && baselineIntact() && intact() && assigned.every((assignment, index) =>
+        Object.prototype.hasOwnProperty.call(assignment.message, AGENT_MODULE_FIELD_ACU) === restored[index].exists
+        && asJson((assignment.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) === restored[index].content) ? 'saved' : 'unavailable';
+    } catch { return 'failed'; }
+  };
+  for (const assignment of assigned) {
+    const message = assignment.message as Record<string, unknown>;
+    if (assignment.value === undefined) delete message[AGENT_MODULE_FIELD_ACU];
+    else message[AGENT_MODULE_FIELD_ACU] = assignment.value;
+  }
+  if (!intact() || !untouched() || isCurrent?.() === false) {
+    restore();
+    return { status: 'persist_failed', reason: '保存前聊天、资料基线或派工租约已变化', recovery: 'unavailable' };
+  }
+  try { await saveChatToHostStrict_ACU(); }
+  catch (error) {
+    return { status: 'persist_failed', reason: error instanceof Error ? error.message : String(error), recovery: await recover() };
+  }
+  try {
+    if (isCurrent?.() !== false && intact() && ours() && untouched() && verify(readAgentModuleFoldState_ACU(chat))) return { status: 'committed' };
+  } catch (error) {
+    return { status: 'readback_failed', reason: error instanceof Error ? error.message : String(error), recovery: await recover() };
+  }
+  return { status: 'readback_failed', reason: '宿主保存后聊天身份、资料字段或折叠结果不一致', recovery: await recover() };
 }
 
 /**

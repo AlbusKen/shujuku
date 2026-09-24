@@ -11,10 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU } from '../../../src/service/continuation/defaults';
 import {
   AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
   buildV33ContinuationAgentPrompts_ACU,
+  buildV34ContinuationAgentPrompts_ACU,
+  AGENT_PREFILLS_ACU,
   buildDefaultContinuationAgentPrompts_ACU,
   findAgentPromptSlot_ACU,
   hashAgentPromptContent_ACU,
@@ -25,6 +27,7 @@ import {
   V20_DEFAULT_ARC_ARCHITECT_TASK_ACU,
   V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU,
 } from '../../../src/service/continuation/agent/agent-defaults';
+import { parseAgentMainOutput_ACU, parseAgentWritableToolCalls_ACU } from '../../../src/service/continuation/agent/agent-protocol';
 import type { ContinuationPromptSegment_ACU } from '../../../src/service/continuation/model';
 
 interface FixtureSegmentRef_ACU { id: string; enabled?: boolean; deletable?: boolean; pinned?: boolean }
@@ -80,7 +83,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
@@ -140,7 +143,7 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 
@@ -164,5 +167,64 @@ describe('默认提示词谱系迁移', () => {
         expect(currentHashes.has(`${entry.hash}:${entry.length}`), `${role} ${entry.note} 仍是当前默认正文`).toBe(false);
       }
     }
+  });
+});
+
+describe('V34 → V35 逐段精确迁移', () => {
+  const frozen = JSON.parse(readFileSync(fileURLToPath(new URL('../../fixtures/prompt-lineage-v34-v16.json', import.meta.url)), 'utf8')) as {
+    continuationV34: Record<string, Array<{ role: string; length: number; hash: string }>>;
+  };
+
+  it('V34 旧默认组与修改前冻结的逐槽角色、长度和正文指纹完全一致', () => {
+    const previous = buildV34ContinuationAgentPrompts_ACU();
+    for (const [role, segments] of Object.entries(previous)) {
+      expect(segments.map(segment => ({ role: segment.role, length: segment.content.length, hash: hashAgentPromptContent_ACU(segment.content) })), role)
+        .toEqual(frozen.continuationV34[role]);
+    }
+    expect(Object.keys(previous).sort()).toEqual(Object.keys(frozen.continuationV34).sort());
+  });
+
+  it('仅升级原位旧默认正文，保留用户改写、追加段和已有元数据', () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU;
+    settings.agentPrompts = buildV34ContinuationAgentPrompts_ACU();
+    const previous = structuredClone(settings.agentPrompts);
+    const defaults = buildDefaultContinuationAgentPrompts_ACU();
+    const mainIndex = previous.main.findIndex(segment => segment.content.startsWith('我的行动规则：'));
+    const customIndex = previous.maintainer.findIndex(segment => segment.content.startsWith('我的最终交付是一个 JSON 对象：'));
+    expect(mainIndex).toBeGreaterThanOrEqual(0);
+    expect(customIndex).toBeGreaterThanOrEqual(0);
+    settings.agentPrompts.main[mainIndex].enabled = false;
+    settings.agentPrompts.maintainer[customIndex].content += '\n用户修改：保留我的交付术语。';
+    const appended = { role: 'user' as const, content: '用户追加的独立规则', enabled: true, deletable: true };
+    settings.agentPrompts.maintainer.push(appended);
+
+    const loaded = validateContinuationSettings_ACU(settings);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU);
+    expect(loaded.agentPrompts.main[mainIndex]).toEqual({ ...defaults.main[mainIndex], enabled: false });
+    expect(loaded.agentPrompts.maintainer[customIndex]).toEqual(settings.agentPrompts.maintainer[customIndex]);
+    expect(loaded.agentPrompts.maintainer.at(-1)).toEqual(appended);
+    expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
+    expect(settings.agentPrompts.main[mainIndex].content).toBe(previous.main[mainIndex].content);
+    expect(validateContinuationSettings_ACU(loaded).agentPrompts).toEqual(loaded.agentPrompts);
+  });
+
+  it('当前组与迁移后的文字契合工具、工作流、预填充和 parser', () => {
+    const current = buildDefaultContinuationAgentPrompts_ACU();
+    const main = current.main.map(segment => segment.content).join('\n');
+    const maintainer = current.maintainer.map(segment => segment.content).join('\n');
+    expect(main).toContain('open_round 固定工作流');
+    expect(main).toContain('用户中途指令');
+    expect(main).toContain('本次主循环结束');
+    expect(maintainer).toContain('$FIELD:模块:ID[:栏目]');
+    expect(maintainer).toContain('"action":"write_sql"');
+    expect(maintainer).toContain('status=committed');
+    expect(current.main.at(-1)?.content.endsWith(AGENT_PREFILLS_ACU.main)).toBe(true);
+    expect(parseAgentMainOutput_ACU('{"action":"open_round","focus":"核对真实剧情后结算"}', AGENT_PREFILLS_ACU.main, true).kind).toBe('open_round');
+    expect(parseAgentWritableToolCalls_ACU('{"action":"write_sql","sql":"INSERT INTO hooks (id, summary) VALUES (\'H1\', \'伏笔\')"}', AGENT_PREFILLS_ACU.maintainer))
+      .toEqual([{ kind: 'write_sql', sql: "INSERT INTO hooks (id, summary) VALUES ('H1', '伏笔')" }]);
+    const exported = JSON.stringify({ version: 1, outlinePrompt: buildDefaultContinuationSettings_ACU().outlinePrompt, agentPrompts: current });
+    const imported = JSON.parse(exported);
+    expect(validateContinuationSettings_ACU({ ...buildDefaultContinuationSettings_ACU(), agentPrompts: imported.agentPrompts, outlinePrompt: imported.outlinePrompt }).agentPrompts).toEqual(current);
   });
 });

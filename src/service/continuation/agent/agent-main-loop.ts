@@ -16,6 +16,7 @@
  */
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
+import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
@@ -39,10 +40,12 @@ import { findUnregisteredStageNumbers_ACU, hasActiveStoryArc_ACU, hasActiveStory
 import {
   appendAgentConversation_ACU,
   appendPreparedAgentConversationMessages_ACU,
+  fingerprintAgentConversationSource_ACU,
   lastAnnouncedTurnKey_ACU,
   lastRuntimeSnapshotText_ACU,
   readActiveAgentConversationCompactionMark_ACU,
   readAgentConversation_ACU,
+  readAgentConversationCompactionSource_ACU,
   renderAgentConversationMessages_ACU,
   writeAgentConversationCompactionMark_ACU,
 } from './agent-conversation-store';
@@ -51,13 +54,14 @@ import {
   countAgentTokens_ACU,
   createAgentTokenCounter_ACU,
   measureAgentPromptTokens_ACU,
-  resolveAgentCompactionTiming_ACU,
   type TokenCounter_ACU,
 } from './agent-token-budget';
 import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
+import { commitAgentModuleFieldWrites_ACU } from './agent-module-field-commit';
+import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU } from './agent-protocol';
 import {
   buildAgentWorldbookScanText_ACU,
@@ -170,9 +174,10 @@ interface AgentConversationHandle_ACU {
    * 运行中途按 token 阈值压缩历史（越界压缩）。先落盘未持久化的消息再压，成功则替换本运行的会话视图。
    * @returns 是否真的压缩并提交了
    */
-  compact: (emergency: boolean) => Promise<boolean>;
+  compact: (emergency: boolean, preparedMessages?: readonly { role: string; content: string }[]) => Promise<boolean>;
   /** 本次运行是否已经向用户通告过「上下文超过阈值但本轮内继续」，避免每次迭代重复刷屏。 */
   overBudgetNotified: boolean;
+  continuingSameTurn: boolean;
   turnKey: string;
 }
 
@@ -275,6 +280,16 @@ export function describeAgentActionLabel_ACU(action: AgentMainAction_ACU): strin
   if (action.kind === 'open_round') return '开局并交给固定工作流';
   if (action.kind === 'finalize') return '交付写作指导';
   return '阻断本轮';
+}
+
+/** 只把可回读的资料版本、待修复模块及受控步骤状态回灌主会话，不回灌子代理输出。 */
+function renderWorkflowReceipt_ACU(workflow: ContinuationWorkflowResult_ACU): string {
+  return JSON.stringify({
+    outcome: workflow.outcome,
+    revisions: workflow.snapshot.revisions,
+    pending: workflow.pendingFixes.map(item => ({ module: item.module, completion: item.completion, acceptedKeys: item.acceptedKeys, violations: item.violations, lastError: item.lastError })),
+    steps: workflow.steps.map(item => ({ agentName: item.agentName, status: item.status })),
+  });
 }
 
 /**
@@ -453,6 +468,19 @@ function readFinalReviewStateFromConversation_ACU(snapshot: AgentConversationSna
   }
   return null;
 }
+
+/**
+ * 读取当前阶段游标（stageId + revision）。任务被删除或信封损坏时返回 null：
+ * 调用方把它当作「无法确认游标」，而不是猜测一个游标继续。
+ */
+const readCurrentStageCursor_ACU = (request: ContinuationAgentTurnPlanRequest_ACU): { stageId: string | null; revision: number | null } | null => {
+  try {
+    const execution = request.readContext();
+    return { stageId: execution.stage?.stageId ?? null, revision: execution.revision?.revision ?? null };
+  } catch {
+    return null;
+  }
+};
 
 /** 主 Agent 轮次规划器。替代 V7 的一次性指令生成器，对外只暴露 plan 一个入口。 */
 export class ContinuationAgentTurnPlanner_ACU {
@@ -719,7 +747,14 @@ export class ContinuationAgentTurnPlanner_ACU {
             detail: workflow.summary,
             ok: workflow.outcome === 'deliver',
           });
+          session.record([{ kind: 'tool', text: renderWorkflowReceipt_ACU(workflow), digest: '工作流状态回执', turnKey: session.turnKey }]);
+          await session.flush();
           if (workflow.outcome === 'deliver') {
+            try {
+              await request.updateTurnLabel?.(action.focus.trim());
+            } catch (error) {
+              logAgentSession_ACU({ kind: 'thought', title: '轮次标注未保存', detail: error instanceof Error ? error.message : String(error), ok: false });
+            }
             logAgentSession_ACU({ kind: 'finalize', title: '最终写作指导', detail: workflow.instruction });
             logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: workflow.summary });
             terminalLogged = true;
@@ -727,7 +762,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             await session.flush();
             return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
           }
-          session.record([{ kind: 'tool', text: `${workflow.summary}\n自动修复已停止代为提交这些模块。请向用户说明阻塞；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
+          session.record([{ kind: 'tool', text: `${workflow.summary}\n资料维护未合格，请向用户说明缺口；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
           await session.flush();
           iteration += 1;
           continue;
@@ -912,34 +947,22 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
 
     const budgetTokens = request.settings.agentHistoryTokenBudget;
-    const compact = async (emergency: boolean): Promise<boolean> => {
+    const compact = async (emergency: boolean, preparedMessages?: readonly { role: string; content: string }[]): Promise<boolean> => {
       if (budgetTokens <= 0 || !snapshot.messages.length) return false;
       // 压缩成功后会话视图以持久层回读为准，未落盘的消息必须先写进去，否则会在回读时丢失。
       await flush();
-      const next = await this.compactConversation_ACU(chat, snapshot, budgetTokens, await measureOverhead(), counter, semanticAdapter, emergency, request, context, apiDependencies);
+      const overhead = preparedMessages
+        ? Math.max(0, (await measureAgentPromptTokens_ACU(preparedMessages, counter)) - (await measureAgentPromptTokens_ACU(renderAgentConversationMessages_ACU(snapshot), counter)))
+        : await measureOverhead();
+      const next = await this.compactConversation_ACU(chat, snapshot, budgetTokens, overhead, counter, semanticAdapter, emergency, request, context, apiDependencies, preparedMessages);
       if (!next) return false;
       snapshot = next;
       return true;
     };
 
-    // 本次运行是否仍在会话里最后通告的那一轮内。中断恢复、同一游标重跑都算「同一轮内」。
+    // 开场只保存轮次边界。正常与紧急压缩均在主请求完整渲染后判定，
+    // 不再用首次骨架估算替代最终准备发送的消息。
     const continuingSameTurn = !!turnKey && lastAnnouncedTurnKey_ACU(snapshot) === turnKey;
-    // 会话为空时压缩无意义，开销也就不必测——省一次完整的提示词渲染与逐条分词。
-    const overheadTokens = budgetTokens > 0 && snapshot.messages.length ? await measureOverhead() : 0;
-    const timing = await resolveAgentCompactionTiming_ACU(snapshot, budgetTokens, continuingSameTurn, counter, overheadTokens);
-    let overBudgetNotified = false;
-    if (timing.action === 'defer') {
-      overBudgetNotified = true;
-      logAgentSession_ACU({
-        kind: 'thought',
-        title: `上下文已到 token 阈值（约 ${timing.totalTokens} tokens）`,
-        detail: `实际读取的完整上下文（提示词骨架约 ${overheadTokens} tokens + 会话历史）超出阈值 ${budgetTokens}，但本轮规划还没结束。总结留到本轮完成、下一轮开始前再做，避免在一轮进行中换掉上下文；本轮内请求照常发送，超过阈值 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍才会提前压缩。`,
-      });
-    }
-    if (timing.action === 'compact') {
-      await compact(timing.emergency);
-    }
-
     return {
       snapshot: () => snapshot,
       history: () => renderAgentConversationMessages_ACU(snapshot),
@@ -950,7 +973,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       },
       flush,
       compact,
-      overBudgetNotified,
+      overBudgetNotified: false,
+      continuingSameTurn,
       turnKey,
     };
   }
@@ -971,13 +995,28 @@ export class ContinuationAgentTurnPlanner_ACU {
     request: ContinuationAgentTurnPlanRequest_ACU,
     context: AgentResolveContext_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
+    preparedMessages?: readonly { role: string; content: string }[],
   ): Promise<AgentConversationSnapshot_ACU | null> {
-    const previousThroughId = this.dependencies.readCompactionMark(chat)?.compactedThroughId ?? 0;
+    const expectedMark = this.dependencies.readCompactionMark(chat);
+    const source = this.dependencies.readConversation(chat);
+    // No persistent floor may be inferred from an in-memory transcript after a failed flush.
+    if (fingerprintAgentConversationSource_ACU(source, expectedMark) !== fingerprintAgentConversationSource_ACU(snapshot, expectedMark)) return null;
+    const anchor = chat[chat.length - 1];
+    if (!anchor || this.dependencies.readChat() !== chat) return null;
+    const swipeId = readMessageSwipeId_ACU(anchor);
+    const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
+    if (!chatIdentity) return null;
+    const sourceFingerprint = readAgentConversationCompactionSource_ACU(chat).fingerprint;
+    // 候选只代表规划时刻的阶段游标：摘要生成期间大纲 revision 可能已前进，
+    // 提交前必须重新核对，游标无法确认时宁可不压缩也不提交过期候选。
+    const planCursor = readCurrentStageCursor_ACU(request);
+    if (!planCursor) return null;
     const compaction = await planAgentHistoryCompaction_ACU({
-      snapshot,
-      activeMark: this.dependencies.readCompactionMark(chat),
+      snapshot: source,
+      activeMark: expectedMark,
       triggerTokens: budgetTokens,
       fixedPromptTokens: overheadTokens,
+      ...(preparedMessages ? { preparedMessages } : {}),
       countTokens: counter,
       semanticAdapter,
     });
@@ -985,7 +1024,13 @@ export class ContinuationAgentTurnPlanner_ACU {
     const candidate = compaction.mark;
     let reread: AgentConversationSnapshot_ACU | null = null;
     try {
-      if (await this.dependencies.writeCompactionMark(chat, candidate)) {
+      if (!request.isInternalRequestCurrent(request.createInternalRequestIdentity(0)) || request.signal?.aborted) return null;
+      const commitCursor = readCurrentStageCursor_ACU(request);
+      if (!commitCursor || commitCursor.stageId !== planCursor.stageId || commitCursor.revision !== planCursor.revision) return null;
+      if (this.dependencies.readChat() !== chat || getActiveChatStorageIdentity_ACU(chat) !== chatIdentity
+        || chat[chat.length - 1] !== anchor || readMessageSwipeId_ACU(anchor) !== swipeId
+        || readAgentConversationCompactionSource_ACU(chat).fingerprint !== sourceFingerprint) return null;
+      if (await this.dependencies.writeCompactionMark(chat, candidate, { fingerprint: sourceFingerprint, anchor, swipeId, chatIdentity })) {
         const persisted = this.dependencies.readCompactionMark(chat);
         const committed = !!persisted
           && 'summaryState' in persisted
@@ -993,7 +1038,11 @@ export class ContinuationAgentTurnPlanner_ACU {
           && persisted.report === candidate.report
           && JSON.stringify(persisted.summaryState) === JSON.stringify(candidate.summaryState)
           && JSON.stringify(persisted.metrics) === JSON.stringify(candidate.metrics);
-        if (committed) reread = this.dependencies.readConversation(chat);
+        if (committed) {
+          const authoritative = this.dependencies.readConversation(chat);
+          const expected = compaction.snapshot.messages.map(item => [item.id, item.kind, item.text]);
+          if (JSON.stringify(authoritative.messages.map(item => [item.id, item.kind, item.text])) === JSON.stringify(expected)) reread = authoritative;
+        }
       }
     } catch (error) {
       logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
@@ -1036,8 +1085,9 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 每次调用的用量由回调覆盖写入：协议重试时展示的是最终被采纳那次调用的用量。
     let callUsage: AiUsageMetadata_ACU | null = null;
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
-      promptCacheEnabled: false,
+      promptCacheEnabled: true,
       cacheScope: 'agent-main',
+      cacheTools: ['read', 'search', 'open_round', 'delegate', 'finalize', 'block'],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.main,
       onUsage: usage => { callUsage = usage; },
     };
@@ -1058,20 +1108,21 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (budgetTokens > 0) {
         const ceilingTokens = budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
         let promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
-        if (promptTokens > ceilingTokens) {
-          if (await session.compact(true)) {
+        if (promptTokens > budgetTokens && (!session.continuingSameTurn || promptTokens > ceilingTokens)) {
+          if (await session.compact(promptTokens > ceilingTokens, messages)) {
             messages = this.spliceHistory_ACU(rendered, session.history());
             promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
           }
-          if (promptTokens > ceilingTokens) {
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU(
-              'CONTINUATION_AGENT_SNAPSHOT_INVALID',
-              'agent_loop',
-              `主 Agent 最终请求约 ${promptTokens} tokens，超过会话 token 阈值 ${budgetTokens} 的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍且已无法再压缩，拒绝发送必然超长的请求。可在设置里提高「会话自动总结阈值」，或清空 Agent 会话历史后重试`,
-              false,
-            ));
-          }
-        } else if (promptTokens > budgetTokens && !session.overBudgetNotified) {
+        }
+        if (promptTokens > ceilingTokens) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+            'CONTINUATION_AGENT_SNAPSHOT_INVALID',
+            'agent_loop',
+            `主 Agent 最终请求约 ${promptTokens} tokens，超过会话 token 阈值 ${budgetTokens} 的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍且已无法再压缩，拒绝发送必然超长的请求。可在设置里提高「会话自动总结阈值」，或清空 Agent 会话历史后重试`,
+            false,
+          ));
+        }
+        if (promptTokens > budgetTokens && session.continuingSameTurn && !session.overBudgetNotified) {
           session.overBudgetNotified = true;
           logAgentSession_ACU({
             kind: 'thought',
@@ -1080,6 +1131,8 @@ export class ContinuationAgentTurnPlanner_ACU {
           });
         }
       }
+      // 轮内紧急总结可能已改变投影；缓存边界必须来自真正待发送的会话历史。
+      callOptions.cacheBoundary = session.snapshot().messages.find(item => item.kind === 'handoff')?.text;
       // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
       // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
       console.info('[SP·数据库][缓存诊断][agent-main]', trackAgentPromptDrift_ACU('agent-main', messages));
@@ -1255,6 +1308,7 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     interface FreshMaterial_ACU { key: string; label: string; title: string; text: string; }
     const fresh: FreshMaterial_ACU[] = [];
+    const failed: FreshMaterial_ACU[] = [];
     const duplicated: string[] = [];
     const seenInBatch = new Set<string>();
     for (const call of calls) {
@@ -1265,7 +1319,9 @@ export class ContinuationAgentTurnPlanner_ACU {
           seenInBatch.add(key);
           if (toolUsage.granted.has(key)) { duplicated.push(key); continue; }
           const resolved = resolveAgentReadToken_ACU(key, context);
-          fresh.push({ key, label: key, title: resolved.title, text: resolved.text });
+          const material = { key, label: key, title: resolved.title, text: resolved.text };
+          if (resolved.status === 'failed') failed.push(material);
+          else fresh.push(material);
         }
         continue;
       }
@@ -1278,7 +1334,12 @@ export class ContinuationAgentTurnPlanner_ACU {
       fresh.push({ key, label, title: `搜索「${call.query}」`, text: runAgentSearch_ACU(call, context) });
     }
 
-    const appends: AgentConversationAppend_ACU[] = [];
+    const appends: AgentConversationAppend_ACU[] = failed.map(material => ({
+      kind: 'tool',
+      text: JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }),
+      digest: `调阅失败 ${material.label}`,
+      turnKey: session.turnKey,
+    }));
     if (duplicated.length) {
       appends.push({ kind: 'tool', text: `以下调阅本轮已放行且内容未变，完整内容见上文，不再重注：${duplicated.join('、')}。`, digest: '重复调阅提示', turnKey: session.turnKey });
     }
@@ -1305,7 +1366,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         appends.push({ kind: 'tool', text: decision.report, digest: '读取被门禁打回', turnKey: session.turnKey });
         logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 读取批次被门禁打回（${decision.batchTokens} tokens）`, detail: decision.report, ok: false });
       }
-    } else if (!duplicated.length) {
+    } else if (!duplicated.length && !failed.length) {
       appends.push({ kind: 'tool', text: '本次工具批次没有任何有效的读取地址或搜索请求。请检查 read 的 reads 数组与 search 的 query。', digest: '空工具批次', turnKey: session.turnKey });
     }
 
@@ -1403,7 +1464,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, apiDependencies);
     const unsettled = renderAgentUnsettledHistory_ACU(context);
     const mapPayload = (result: AgentSubagentRunResult_ACU): ContinuationWorkflowAgentPayload_ACU => ({
-      ok: true,
+      ok: result.completion !== 'failed' && result.completion !== 'partial',
       summary: result.composer?.summary || result.maintainer?.summary || result.arc?.summary || result.planner?.summary || result.reviewer?.reason || result.researcher?.summary || '',
       maintainer: result.maintainer,
       arc: result.arc,
@@ -1416,11 +1477,13 @@ export class ContinuationAgentTurnPlanner_ACU {
       moduleCompletion: result.moduleCompletion,
       unresolvedIssues: result.unresolvedIssues,
       acceptedKeys: result.acceptedKeys,
+      usedFieldWrites: result.usedFieldWrites,
       noChange: result.completion === 'complete_no_change',
     });
     const workflow = await runContinuationAgentWorkflow_ACU({
       settings: request.settings,
       snapshot: context.moduleSnapshot,
+      readCommittedSnapshot: () => readAgentModuleSnapshot_ACU(chat),
       opening: {
         focus: action.focus,
         summary: action.summary,
@@ -1441,16 +1504,19 @@ export class ContinuationAgentTurnPlanner_ACU {
         const definition = findAgentSubagentDefinition_ACU(call.agentName);
         const role = definition?.promptKey ?? 'main';
         const preset = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
-        const repairReads = request.settings.workflow.repairMaxExtraReads;
+        const targetIndex = chat.length - 1;
+        const dispatchTarget = { message: chat[targetIndex], swipeId: readMessageSwipeId_ACU(chat[targetIndex]), content: chat[targetIndex]?.mes };
         const result = await this.dependencies.subagentRuntime.run({
           delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
           settings: request.settings,
           resolveContext: context,
-          budget: call.billing === 'repair' ? { ...budget, maxExtraReads: repairReads } : budget,
+          budget,
           preset,
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
+          writeSql: ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent,
+            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber) }),
         });
         if (call.billing === 'opening') {
           ledger.delegationsUsed += 1;
@@ -1612,15 +1678,16 @@ export class ContinuationAgentTurnPlanner_ACU {
       const applied = (await applyAgentWebRefsDeltaViaSql_ACU(snapshot, researcher, expected)).snapshot;
       const upserts = researcher.items.filter(item => item.action === 'upsert');
       const retires = researcher.items.filter(item => item.action === 'retire');
+      const patches = researcher.patches ?? [];
       const catalog = upserts.map(item => `[${item.id || '新'}]「${item.title}」${item.brief}`).join('；');
       return {
         snapshot: applied,
         outcome: {
           agentName: result.agentName,
           ok: true,
-          summary: researcher.summary || `百科资料库更新 ${upserts.length} 条`,
+          summary: researcher.summary || `百科资料库更新 ${upserts.length + patches.length} 条`,
           detail: [
-            `百科资料库：新增/更新 ${upserts.length} 条${retires.length ? `、退休 ${retires.length} 条` : ''}${catalog ? `：${catalog}` : ''}`,
+            `百科资料库：新增/更新 ${upserts.length} 条${retires.length ? `、退休 ${retires.length} 条` : ''}${patches.length ? `、逐栏修订 ${patches.length} 条` : ''}${catalog ? `：${catalog}` : ''}`,
             upserts.length ? '以上只是预览；详情与原文用 read $WEB_REFS:ID 精读，派工时也可把该地址写进 reads。它们是原作/公开设定的外部参考，不是本故事事实。' : '',
             result.expandedReads.length ? `检索轨迹：${result.expandedReads.slice(0, 12).join('、')}${result.expandedReads.length > 12 ? '…' : ''}` : '',
           ].filter(Boolean).join('\n'),
@@ -1719,6 +1786,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
         const definition = findAgentSubagentDefinition_ACU(delegation.agentName);
         const delegationPreset = this.dependencies.resolveApiPreset(request.settings, definition?.promptKey ?? 'main', 'agent_delegate', apiDependencies);
+        const targetIndex = chat.length - 1;
+        const dispatchTarget = { message: chat[targetIndex], swipeId: readMessageSwipeId_ACU(chat[targetIndex]), content: chat[targetIndex]?.mes };
         const result = await this.dependencies.subagentRuntime.run({
           delegation,
           settings: request.settings,
@@ -1729,6 +1798,8 @@ export class ContinuationAgentTurnPlanner_ACU {
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
+          writeSql: ({ role, sql, resolvePage, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent,
+            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber) }),
         });
         return { delegation, result, error: null as unknown };
       } catch (error) {
@@ -1736,7 +1807,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
     }));
 
-    let nextSnapshot = snapshot;
+    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites) ? readAgentModuleSnapshot_ACU(chat) : snapshot;
     let snapshotChanged = false;
 
     for (const item of settled) {
@@ -1747,10 +1818,16 @@ export class ContinuationAgentTurnPlanner_ACU {
         continue;
       }
       const result = item.result;
+      if (result.completion === 'failed' || result.completion === 'partial') {
+        const issues = result.unresolvedIssues?.map(issue => `${issue.path}: ${issue.message}`).join('；');
+        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '',
+          rejectedReason: `逐栏维护未完成${issues ? `：${issues}` : ''}；已确认栏目：${result.acceptedKeys?.join('、') || '无'}` }, result.usage);
+        continue;
+      }
       if (result.maintainer) {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-          const applied = (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1)).snapshot;
+          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1)).snapshot;
           // 结算派工成功交付契约即推进水位到当轮末楼：空 delta（这段楼层没有新增伏笔/信息差）
           // 同样代表已被处理过，不推水位会让同一区间每轮重复要求结算、白烧派工。
           const settledTarget = chat.length - 1;
@@ -1764,7 +1841,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             ok: true,
             summary: result.maintainer.summary,
             detail: [
-              `已结算：伏笔 ${result.maintainer.delta.hooks.length} 条、信息差 ${result.maintainer.delta.infoGap.length} 条、故事时间 ${result.maintainer.delta.chronology.length} 条`,
+              `已结算：伏笔 ${result.maintainer.delta.hooks.length} 条、信息差 ${result.maintainer.delta.infoGap.length} 条、故事时间 ${result.maintainer.delta.chronology.length + result.maintainer.delta.chronologyPatches.length} 条`,
               proposals.length ? `约束提议（需你裁决后登记）：${proposals.join('；')}` : '',
               result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
             ].filter(Boolean).join('\n'),
@@ -1781,7 +1858,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           const completedStageNumbers = context.execution.task.stages
             .filter(stage => stage.status === 'completed')
             .map(stage => stage.stageNumber);
-          const applied = (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers)).snapshot;
+          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers)).snapshot;
           // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
           // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
           if (applied !== nextSnapshot) { nextSnapshot = applied; snapshotChanged = true; }
@@ -1822,7 +1899,9 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       if (result.researcher) {
         // 与总纲分支同理：只换快照，不推进结算水位——百科条目不是正文事实。
-        const settled = await this.settleResearcherResult_ACU(result, nextSnapshot);
+        const settled = result.usedFieldWrites
+          ? { snapshot: nextSnapshot, outcome: { agentName: result.agentName, ok: true, summary: result.researcher.summary, detail: '逐栏写入已独立保存', rejectedReason: '' } }
+          : await this.settleResearcherResult_ACU(result, nextSnapshot);
         if (settled.snapshot !== nextSnapshot) { nextSnapshot = settled.snapshot; snapshotChanged = true; }
         settleOutcome(item.delegation, settled.outcome, result.usage);
         continue;

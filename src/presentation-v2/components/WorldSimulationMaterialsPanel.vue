@@ -49,6 +49,53 @@
           </article>
         </div>
       </details>
+
+      <!-- 逐栏记录：按模块/ID 展示分栏视图；partial 只在这里可见，字段值不在这里展示 -->
+      <details class="acu-v2-ws-materials__block">
+        <summary>逐栏记录 · {{ fieldRecordTotal }} 条</summary>
+        <p class="acu-v2-ws-materials__meta">
+          逐栏记录来自子代理的逐栏写入：「部分」条目还没写齐必填栏，不并入上面的完整账本；「旧账本条目」来自旧整条账本，来源不可逐栏拆分。
+          这里只列栏目名与修订身份，字段值在上面各模块的完整条目里查看。
+        </p>
+        <p v-if="!fieldRecordGroups.length" class="acu-v2-ws-materials__empty">还没有逐栏写入记录。</p>
+        <details v-for="group in fieldRecordGroups" :key="group.module" class="acu-v2-ws-materials__block">
+          <summary>{{ group.label }} · {{ group.records.length }} 条</summary>
+          <div class="acu-v2-ws-materials__cards">
+            <article v-for="record in group.records" :key="record.id" class="acu-v2-ws-materials__card">
+              <p class="acu-v2-ws-materials__card-head">
+                <strong>{{ record.id }}</strong>
+                <span class="acu-v2-ws-materials__badge">{{ FIELD_STATUS_LABELS[record.status] ?? record.status }}</span>
+              </p>
+              <p class="acu-v2-ws-materials__card-meta">已写字段：{{ record.fieldNames.join('、') || '（无）' }}</p>
+              <p v-if="record.missingFields.length" class="acu-v2-ws-materials__card-meta">缺栏：{{ record.missingFields.join('、') }}</p>
+              <p class="acu-v2-ws-materials__card-meta">
+                最近更新 {{ formatTimestamp(record.updatedAt) }}<template v-if="record.maxRevision > 0"> · 栏目修订号最高 {{ record.maxRevision }}</template>
+              </p>
+            </article>
+          </div>
+        </details>
+        <template v-if="ledger?.pendingFixes.length">
+          <p class="acu-v2-ws-materials__meta">待修复的写入（{{ ledger.pendingFixes.length }} 条）：</p>
+          <div class="acu-v2-ws-materials__cards">
+            <article
+              v-for="(fix, fixIndex) in ledger.pendingFixes"
+              :key="`${fix.module}-${fix.candidateId}-${fixIndex}`"
+              class="acu-v2-ws-materials__card acu-v2-ws-materials__card--failed"
+            >
+              <p class="acu-v2-ws-materials__card-head">
+                <strong>{{ LEDGER_MODULE_LABELS[fix.module] ?? fix.module }} · {{ fix.candidateId }}</strong>
+                <span class="acu-v2-ws-materials__badge">{{ fix.completion === 'partial' ? '部分接受' : '失败' }}</span>
+              </p>
+              <p class="acu-v2-ws-materials__card-meta">
+                出错路径：{{ fix.violations.map(item => `${item.path}（${item.message}）`).join('；') || fix.lastError || '（未记录）' }}
+              </p>
+              <p class="acu-v2-ws-materials__card-meta">
+                <template v-if="fix.anchor">来源楼层 {{ fix.anchor.messageIndex + 1 }} · </template>已接受 {{ fix.acceptedKeys.length }} 栏 · 尝试 {{ fix.attempts }} 次 · 首次失败于第 {{ fix.firstFailedAtDay }} 天
+              </p>
+            </article>
+          </div>
+        </template>
+      </details>
     </template>
 
     <!-- 候选轨迹：派工 / 阶段计划 / 交付 / 阻断，卡片结构与续写资料面板一致 -->
@@ -150,7 +197,7 @@ import AcuButton from './_lib/AcuButton.vue';
 import UserRequirementsEditor from './UserRequirementsEditor.vue';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
-import type { WorldSimulationLedger_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { WorldSimulationLedger_ACU, WorldSimulationLedgerFieldSnapshot_ACU, WorldSimulationLedgerModule_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
 import { buildWorldChronicleContrast_ACU, buildWorldMissedList_ACU, buildWorldRumorQueue_ACU, type WorldChronicleContrastRow_ACU, type WorldMissedItem_ACU, type WorldRumorQueueItem_ACU } from '../simulation/world-simulation-dynamics-views';
 
@@ -158,6 +205,7 @@ import { buildWorldChronicleContrast_ACU, buildWorldMissedList_ACU, buildWorldRu
 const props = withDefaults(defineProps<{
   conversation: WorldSimulationConversationView_ACU;
   materials: WorldSimulationMaterialsReadResult_ACU;
+  fieldSnapshot: WorldSimulationLedgerFieldSnapshot_ACU;
   userRequirements: WorldSimulationUserRequirementsReadResult_ACU;
   saveRequirements: (requirements: string[]) => Promise<boolean>;
   session: WorldSimulationSessionEntry_ACU[];
@@ -327,6 +375,48 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
 const CONTACT_LABELS: Record<string, string> = { open: '开放', secluded: '隔绝' };
 const RUMOR_STATUS_LABELS: Record<string, string> = { latent: '潜伏', ripe: '待命', revealed: '已得知', dead: '已失效' };
 const HIT_STATE_LABELS: Record<string, string> = { 'open-hit': '开放可命中', 'secluded-delay': '隔绝延迟中', waiting: '等待到访' };
+
+/** 分栏记录状态：complete 完整、partial 未写齐（只在分栏视图）、legacy_unknown 旧整条账本条目。 */
+const FIELD_STATUS_LABELS: Record<string, string> = {
+  complete: '完整',
+  partial: '部分（未提升）',
+  legacy_unknown: '旧账本条目',
+};
+const LEDGER_MODULE_LABELS: Record<WorldSimulationLedgerModule_ACU, string> = {
+  clock: '世界时钟', dimensions: '世界维度', seeds: '暗流种子', actors: '行动者',
+  chronicle: '世界编年', guidance: '指导信号', rumors: '传闻', player: '玩家状态',
+};
+
+/** 账本分栏记录按模块分组：只取栏目名与修订身份，不取字段值。 */
+const fieldRecordGroups = computed(() => {
+  const records = props.fieldSnapshot.records;
+  return (Object.keys(LEDGER_MODULE_LABELS) as WorldSimulationLedgerModule_ACU[])
+    .map(module => {
+      const bucket = records[module];
+      const entries = bucket ? Object.values(bucket) : [];
+      if (!entries.length) return null;
+      return {
+        module,
+        label: LEDGER_MODULE_LABELS[module],
+        records: entries
+          .map(record => ({
+            id: record.id,
+            status: record.status,
+            fieldNames: Object.keys(record.fields),
+            missingFields: record.missingFields,
+            maxRevision: Object.values(record.fields).reduce((max, field) => Math.max(max, field.revision), 0),
+            updatedAt: record.updatedAt,
+          }))
+          .sort((left, right) => left.id.localeCompare(right.id)),
+      };
+    })
+    .filter((group): group is NonNullable<typeof group> => group !== null);
+});
+const fieldRecordTotal = computed(() => fieldRecordGroups.value.reduce((total, group) => total + group.records.length, 0));
+
+function formatTimestamp(value: number): string {
+  return value > 0 ? new Date(value).toLocaleString() : '（未记录）';
+}
 
 const chronicleRows = computed(() => (props.ledger ? buildWorldChronicleContrast_ACU(props.ledger) : []));
 const missedItems = computed(() => (props.ledger ? buildWorldMissedList_ACU(props.ledger, props.timeline) : []));

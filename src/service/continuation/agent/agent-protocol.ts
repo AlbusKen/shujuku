@@ -22,6 +22,7 @@ import {
   AGENT_VOLUME_NARRATIVE_ROLES_ACU,
   AGENT_WEB_TOOL_ACTIONS_ACU,
   type AgentChronologyDeltaItem_ACU,
+  type AgentChronologyPatch_ACU,
   type AgentComposerOutput_ACU,
   type AgentDelegation_ACU,
   type AgentFinalReviewerOutput_ACU,
@@ -32,12 +33,15 @@ import {
   type AgentMainAction_ACU,
   type AgentMaintainerOutput_ACU,
   type AgentModuleDelta_ACU,
+  type AgentSubagentName_ACU,
+  type AgentWritableModule_ACU,
   type AgentPlannerOutput_ACU,
   type AgentReviewerOutput_ACU,
   type AgentSearchScope_ACU,
   type AgentStoryArcDeltaItem_ACU,
   type AgentStoryArcPatch_ACU,
   type AgentToolCall_ACU,
+  type AgentWebRefPatch_ACU,
   type AgentWebRefSource_ACU,
   type AgentWebToolCall_ACU,
 } from './agent-model';
@@ -329,6 +333,32 @@ export function parseAgentSubagentToolCalls_ACU(raw: string | null | undefined, 
   return null;
 }
 
+/** write_sql 只在普通可写子代理的运行时提取；主 Agent 和终审仍用只读解析器。 */
+export function parseAgentWritableToolCalls_ACU(raw: string | null | undefined, prefill: string, allowWeb = false): Array<AgentToolCall_ACU | AgentWebToolCall_ACU | { kind: 'write_sql'; sql: string }> | null {
+  const text = normalizeModelText_ACU(raw);
+  if (!text.trim()) return null;
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  for (const candidate of candidates) {
+    const records = parseObjectsFrom_ACU(candidate);
+    if (!records.length) continue;
+    const actions = records.map(record => readText_ACU(record.action));
+    if (!actions.some(action => action === 'read' || action === 'search' || action === 'write_sql' || (allowWeb && isWebToolAction_ACU(action)))) return null;
+    return records.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(record => {
+      const action = readText_ACU(record.action);
+      if (action === 'write_sql') {
+        if (Object.keys(record).some(key => key !== 'action' && key !== 'sql')) failProtocol_ACU('write_sql 只允许 action 和 sql');
+        const sql = readText_ACU(record.sql);
+        if (!sql) failProtocol_ACU('write_sql 必须提供非空 sql 字符串');
+        return { kind: 'write_sql' as const, sql };
+      }
+      if (allowWeb && isWebToolAction_ACU(action)) return parseAgentWebToolCall_ACU(record);
+      return parseAgentToolCall_ACU(record);
+    });
+  }
+  return null;
+}
+
 const ENCYCLOPEDIA_SOURCE_ALIASES_ACU: Record<string, Exclude<AgentWebRefSource_ACU, 'web'>> = {
   moegirl: 'moegirl', 萌娘百科: 'moegirl', 萌娘: 'moegirl', moe: 'moegirl',
   wikipedia_zh: 'wikipedia_zh', wikipedia: 'wikipedia_zh', zhwiki: 'wikipedia_zh', 维基百科: 'wikipedia_zh', 中文维基: 'wikipedia_zh', 维基: 'wikipedia_zh',
@@ -446,31 +476,55 @@ export interface AgentResearcherDraft_ACU {
   summary: string;
   expectedRevision: number | undefined;
   items: AgentResearcherDraftItem_ACU[];
+  /** 栏级修补（pageRef 可选，给了才回填来源字段）。 */
+  patches: AgentWebRefPatch_ACU[];
 }
 
 /**
  * 解析 web-researcher 的契约输出（回填前）。每条资料以一个实体分份，固定字段只有
  * name（名称）与 brief（一句话简介）；detail 自由发挥。upsert 必须带 pageRef、name、brief；
- * retire 必须带 id 与 reason。
+ * patch 至少带一个要改的字段，pageRef 只在需要换来源时给；retire 必须带 id 与 reason。
  * @param payload 已解析的 JSON 载荷
  */
 export function parseAgentResearcherOutput_ACU(payload: Record<string, unknown>): AgentResearcherDraft_ACU {
   const normalizedPayload = normalizeResearcherSqlPayload_ACU(payload);
   const rawDelta = isRecord_ACU(normalizedPayload.delta) ? normalizedPayload.delta : normalizedPayload;
+  const expectedRevision = parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? normalizedPayload.expectedRevisions);
+  const summary = readText_ACU(normalizedPayload.summary);
   const list = rawDelta.webRefs ?? rawDelta.entries ?? rawDelta.items;
   if (list === undefined || list === null) {
-    return { summary: readText_ACU(normalizedPayload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? normalizedPayload.expectedRevisions), items: [] };
+    return { summary, expectedRevision, items: [], patches: [] };
   }
   if (!Array.isArray(list)) failProtocol_ACU('delta.webRefs 必须是数组');
-  const items = list.map((raw, index): AgentResearcherDraftItem_ACU => {
+  const items: AgentResearcherDraftItem_ACU[] = [];
+  const patches: AgentWebRefPatch_ACU[] = [];
+  list.forEach((raw, index) => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.webRefs[${index}] 必须是对象`);
     const actionText = readText_ACU(raw.action) || 'upsert';
-    if (actionText !== 'upsert' && actionText !== 'retire') failProtocol_ACU(`delta.webRefs[${index}].action 必须是 upsert / retire`);
+    if (actionText === 'patch') {
+      const id = readText_ACU(raw.id);
+      if (!id) failProtocol_ACU(`delta.webRefs[${index}] 的 patch 需要 id`);
+      const patch: AgentWebRefPatch_ACU = { id };
+      const pageRef = readText_ACU(raw.pageRef ?? raw.page ?? raw.ref);
+      if (pageRef) patch.pageRef = pageRef;
+      const title = readText_ACU(raw.name ?? raw.title);
+      if (title) patch.title = title;
+      const brief = readText_ACU(raw.brief ?? raw.intro ?? raw.oneLine);
+      if (brief) patch.brief = brief;
+      if (raw.tags !== undefined) patch.tags = readTextList_ACU(raw.tags);
+      const detailRaw = raw.detail ?? raw.summary ?? raw.body;
+      if (detailRaw !== undefined) patch.summary = typeof detailRaw === 'string' ? detailRaw.trim() : (detailRaw && typeof detailRaw === 'object' ? JSON.stringify(detailRaw, null, 1) : '');
+      if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.webRefs[${index}] 的 patch 至少要带一个要修改的字段`);
+      patches.push(patch);
+      return;
+    }
+    if (actionText !== 'upsert' && actionText !== 'retire') failProtocol_ACU(`delta.webRefs[${index}].action 必须是 upsert / patch / retire`);
     const action = actionText as 'upsert' | 'retire';
     const id = readText_ACU(raw.id);
     if (action === 'retire') {
       if (!id) failProtocol_ACU(`delta.webRefs[${index}] retire 需要 id`);
-      return { action, id, pageRef: '', title: '', tags: [], brief: '', summary: '', reason: readText_ACU(raw.reason) };
+      items.push({ action, id, pageRef: '', title: '', tags: [], brief: '', summary: '', reason: readText_ACU(raw.reason) });
+      return;
     }
     const pageRef = readText_ACU(raw.pageRef ?? raw.page ?? raw.ref);
     if (!pageRef) failProtocol_ACU(`delta.webRefs[${index}] upsert 必须带 pageRef（工具结果里的页面句柄，如 P1）；不允许手写 url 或原文`);
@@ -479,10 +533,10 @@ export function parseAgentResearcherOutput_ACU(payload: Record<string, unknown>)
     const brief = readText_ACU(raw.brief ?? raw.intro ?? raw.oneLine);
     if (!brief) failProtocol_ACU(`delta.webRefs[${index}]「${title}」的 brief 不能为空：一句话说清它是什么`);
     const detailRaw = raw.detail ?? raw.summary ?? raw.body;
-    const summary = typeof detailRaw === 'string' ? detailRaw.trim() : (detailRaw && typeof detailRaw === 'object' ? JSON.stringify(detailRaw, null, 1) : '');
-    return { action, id, pageRef, title, tags: readTextList_ACU(raw.tags), brief, summary, reason: '' };
+    const detail = typeof detailRaw === 'string' ? detailRaw.trim() : (detailRaw && typeof detailRaw === 'object' ? JSON.stringify(detailRaw, null, 1) : '');
+    items.push({ action, id, pageRef, title, tags: readTextList_ACU(raw.tags), brief, summary: detail, reason: '' });
   });
-  return { summary: readText_ACU(normalizedPayload.summary), expectedRevision: parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? normalizedPayload.expectedRevisions), items };
+  return { summary, expectedRevision, items, patches };
 }
 
 function parseWebRefsExpectedRevision_ACU(value: unknown): number | undefined {
@@ -807,19 +861,54 @@ function parseStoryArcItems_ACU(value: unknown, rejected?: RejectionSink_ACU): {
   return { items, patches };
 }
 
+function parseChronologyEvidenceIndexes_ACU(value: unknown, path: string): number[] {
+  if (!Array.isArray(value) || !value.length) {
+    failProtocol_ACU(`${path} 必须是非空数组：每条时间事实都要引用真实正文楼层`);
+  }
+  const evidenceIndexes = value.map(item => {
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < 0) {
+      failProtocol_ACU(`${path} 的元素必须是非负整数楼层号，实际收到：${JSON.stringify(item)}`);
+    }
+    return item;
+  });
+  return [...new Set(evidenceIndexes)].sort((left, right) => left - right);
+}
+
+/** 年代学栏级修补：只带要改的字段，至少一栏；precision 与证据的合法性与 upsert 同一标准。 */
+function parseChronologyPatch_ACU(raw: Record<string, unknown>, index: number): AgentChronologyPatch_ACU {
+  const id = readText_ACU(raw.id);
+  if (!id) failProtocol_ACU(`delta.chronology[${index}] 的 patch 需要 id`);
+  const patch: AgentChronologyPatch_ACU = { id };
+  if (typeof raw.anchor === 'string' && raw.anchor.trim()) patch.anchor = raw.anchor.trim();
+  if (typeof raw.elapsed === 'string' && raw.elapsed.trim()) patch.elapsed = raw.elapsed.trim();
+  if (typeof raw.transition === 'string' && raw.transition.trim()) patch.transition = raw.transition.trim();
+  const precision = readText_ACU(raw.precision);
+  if (precision) {
+    if (!(AGENT_CHRONOLOGY_PRECISIONS_ACU as readonly string[]).includes(precision)) {
+      failProtocol_ACU(`delta.chronology[${index}] 的 patch.precision 必须是 ${AGENT_CHRONOLOGY_PRECISIONS_ACU.join(' / ')}，实际收到：${precision}`);
+    }
+    patch.precision = precision as AgentChronologyPatch_ACU['precision'];
+  }
+  if (raw.evidenceIndexes !== undefined) patch.evidenceIndexes = parseChronologyEvidenceIndexes_ACU(raw.evidenceIndexes, `delta.chronology[${index}] 的 patch.evidenceIndexes`);
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.chronology[${index}] 的 patch 至少要带一个要修改的字段`);
+  return patch;
+}
+
 /**
  * 解析年代学写集。时间事实的登记契约是硬边界：非法 action、非法 precision、非空必填
  * 文本缺失、证据数组为空或含非整数楼层都必须拒绝——把坏时间记录静默降级会污染后续
  * 每一次时间一致性审查的基准。
  */
-function parseChronologyItems_ACU(value: unknown, rejected?: RejectionSink_ACU): AgentChronologyDeltaItem_ACU[] {
-  if (value === undefined || value === null) return [];
+function parseChronologyItems_ACU(value: unknown, rejected?: RejectionSink_ACU): { items: AgentChronologyDeltaItem_ACU[]; patches: AgentChronologyPatch_ACU[] } {
+  if (value === undefined || value === null) return { items: [], patches: [] };
   if (!Array.isArray(value)) failProtocol_ACU('delta.chronology 必须是数组');
   const items: AgentChronologyDeltaItem_ACU[] = [];
+  const patches: AgentChronologyPatch_ACU[] = [];
   value.forEach((raw, index) => collectItem_ACU(rejected, 'chronology', index, raw, () => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.chronology[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
-    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.chronology[${index}].action 必须是 upsert / retire，实际收到：${action || '(空)'}`);
+    if (action === 'patch') { patches.push(parseChronologyPatch_ACU(raw, index)); return; }
+    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.chronology[${index}].action 必须是 upsert / patch / retire，实际收到：${action || '(空)'}`);
     const id = readText_ACU(raw.id);
     if (!id) failProtocol_ACU(`delta.chronology[${index}] 需要非空 id`);
     if (action === 'retire') {
@@ -836,15 +925,7 @@ function parseChronologyItems_ACU(value: unknown, rejected?: RejectionSink_ACU):
     if (!(AGENT_CHRONOLOGY_PRECISIONS_ACU as readonly string[]).includes(precision)) {
       failProtocol_ACU(`delta.chronology[${index}].precision 必须是 ${AGENT_CHRONOLOGY_PRECISIONS_ACU.join(' / ')}，实际收到：${precision || '(空)'}`);
     }
-    if (!Array.isArray(raw.evidenceIndexes) || !raw.evidenceIndexes.length) {
-      failProtocol_ACU(`delta.chronology[${index}].evidenceIndexes 必须是非空数组：每条时间事实都要引用真实正文楼层`);
-    }
-    const evidenceIndexes = raw.evidenceIndexes.map(item => {
-      if (typeof item !== 'number' || !Number.isInteger(item) || item < 0) {
-        failProtocol_ACU(`delta.chronology[${index}].evidenceIndexes 的元素必须是非负整数楼层号，实际收到：${JSON.stringify(item)}`);
-      }
-      return item;
-    });
+    const evidenceIndexes = parseChronologyEvidenceIndexes_ACU(raw.evidenceIndexes, `delta.chronology[${index}].evidenceIndexes`);
     items.push({
       action,
       id,
@@ -852,11 +933,11 @@ function parseChronologyItems_ACU(value: unknown, rejected?: RejectionSink_ACU):
       elapsed,
       precision: precision as AgentChronologyDeltaItem_ACU['precision'],
       transition,
-      evidenceIndexes: [...new Set(evidenceIndexes)].sort((left, right) => left - right),
+      evidenceIndexes,
       reason: readText_ACU(raw.reason),
     });
   }));
-  return items;
+  return { items, patches };
 }
 
 function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expectedRevisions'] {
@@ -971,18 +1052,112 @@ function continuationSqlDelta_ACU(statements: readonly RestrictedSqlStatement_AC
     if (statement.kind === 'insert') {
       list.push({ action: 'upsert', ...sqlRecord_ACU(statement.values, ['expected_revision']) });
     } else if (statement.kind === 'update') {
-      if (statement.table === 'web_refs' || statement.table === 'chronology') {
-        const required = statement.table === 'web_refs' ? ['page_ref', 'name', 'brief'] : ['anchor', 'elapsed', 'precision', 'transition', 'evidence_indexes'];
-        for (const field of required) if (!(field in statement.values)) failProtocol_ACU(`UPDATE ${statement.table} 需要完整字段 ${field}`);
-        list.push({ action: 'upsert', ...sqlRecord_ACU(statement.values), id: requireSqlText_ACU(statement.where.id, `${statement.table}.WHERE id`) });
-      } else {
-        list.push({ action: 'patch', ...sqlRecord_ACU(statement.values), id: requireSqlText_ACU(statement.where.id, `${statement.table}.WHERE id`) });
-      }
+      list.push({ action: 'patch', ...sqlRecord_ACU(statement.values), id: requireSqlText_ACU(statement.where.id, `${statement.table}.WHERE id`) });
     } else {
       list.push({ action: 'retire', id: requireSqlText_ACU(statement.where.id, `${statement.table}.WHERE id`), reason: requireSqlText_ACU(statement.where.reason, `${statement.table}.WHERE reason`) });
     }
   }
   return delta;
+}
+
+/** write_sql 的逐栏意图不经过最终契约的 upsert 缺省值；不合法栏目逐栏拒绝。 */
+export interface AgentModuleSqlFieldIntent_ACU {
+  kind: 'insert' | 'update' | 'delete';
+  module: AgentWritableModule_ACU;
+  id: string;
+  fields: Record<string, unknown>;
+  expectedRevision: number;
+  reason?: string;
+  /** 只能由本次 web-researcher 已抓取的页面句柄回填，不允许模型手写来源。 */
+  pageRef?: string;
+}
+
+export interface AgentModuleSqlFieldRejection_ACU {
+  path: string;
+  reason: string;
+}
+
+export interface AgentModuleSqlFieldParseResult_ACU {
+  intents: AgentModuleSqlFieldIntent_ACU[];
+  rejected: AgentModuleSqlFieldRejection_ACU[];
+  constraintProposals: string[];
+}
+
+const FIELD_SQL_COLUMNS_ACU: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  hooks: { summary: 'summary', status: 'status', importance: 'importance', planted_index: 'plantedIndex', planned_payoff: 'plannedPayoff' },
+  info_gap: { topic: 'topic', objective_fact: 'objectiveFact', reader_known: 'readerKnown', character_knowledge: 'characterKnowledge', reveal_status: 'revealStatus', reveal_index: 'revealIndex' },
+  story_arc: {
+    scope: 'scope', title: 'title', direction: 'direction', escalation: 'escalation', withheld: 'withheld', status: 'status',
+    stage_numbers: 'stageNumbers', completion_stage_number: 'completionStageNumber', completion_state: 'completionState',
+    continuation_rationale: 'continuationRationale', narrative_role: 'narrativeRole', target_stage_range: 'targetStageRange',
+    target_time_span: 'targetTimeSpan', progress_ceiling: 'progressCeiling', sustaining_threads: 'sustainingThreads',
+    payoff_targets: 'payoffTargets', completion_rationale: 'completionRationale',
+  },
+  chronology: { anchor: 'anchor', elapsed: 'elapsed', precision: 'precision', transition: 'transition', evidence_indexes: 'evidenceIndexes' },
+  web_refs: { name: 'title', brief: 'brief', tags: 'tags', detail: 'summary', page_ref: 'pageRef' },
+};
+
+const FIELD_SQL_ROLE_TABLES_ACU: Readonly<Partial<Record<AgentSubagentName_ACU, readonly string[]>>> = {
+  'arc-architect': ['story_arc'],
+  'hook-cognition-maintainer': ['hooks', 'info_gap', 'chronology', 'constraint_proposals'],
+  'web-researcher': ['web_refs'],
+};
+
+/** 一次性解析语法；语句/栏目错误归入拒绝清单，合法栏保留供提交入口独立领域校验。 */
+export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentSubagentName_ACU): AgentModuleSqlFieldParseResult_ACU {
+  let statements: RestrictedSqlStatement_ACU[];
+  try { statements = parseRestrictedSqlDml_ACU(sql); }
+  catch (error) { failProtocol_ACU(`受限 SQL 解析失败：${error instanceof Error ? error.message : String(error)}`); }
+  if (!statements.length) failProtocol_ACU('受限 SQL 不允许空写集');
+  const result: AgentModuleSqlFieldParseResult_ACU = { intents: [], rejected: [], constraintProposals: [] };
+  const allowed = FIELD_SQL_ROLE_TABLES_ACU[role] ?? [];
+  statements.forEach((statement, index) => {
+    const path = `sql[${index}].${statement.table}`;
+    const reject = (field: string, reason: string) => result.rejected.push({ path: `${path}${field ? `.${field}` : ''}`, reason });
+    if (!allowed.includes(statement.table)) { reject('', `角色 ${role} 无权写入 ${statement.table}`); return; }
+    if (statement.table === 'constraint_proposals') {
+      if (statement.kind !== 'insert' || Object.keys(statement.values).some(key => key !== 'text')
+        || typeof statement.values.text !== 'string' || !statement.values.text.trim()) {
+        reject('', 'constraint_proposals 只允许 INSERT 非空 text');
+      } else result.constraintProposals.push(statement.values.text.trim());
+      return;
+    }
+    const module = CONTINUATION_SQL_TABLE_MODULE_ACU[statement.table as keyof typeof CONTINUATION_SQL_TABLE_MODULE_ACU];
+    const columns = FIELD_SQL_COLUMNS_ACU[statement.table];
+    if (!module || !columns) { reject('', 'SQL 表不在逐栏写入白名单'); return; }
+    const values = statement.kind === 'delete' ? {} : statement.values;
+    const where = statement.kind === 'insert' ? statement.values : statement.where;
+    const expectedWhere = statement.kind === 'insert' ? null : statement.kind === 'delete' ? ['id', 'expected_revision', 'reason'] : ['id', 'expected_revision'];
+    if (expectedWhere && Object.keys(where).some(key => !expectedWhere.includes(key))) { reject('WHERE', 'WHERE 含白名单外条件'); return; }
+    const id = where.id;
+    if ((typeof id !== 'string' || !id.trim()) && !(statement.kind === 'insert' && module === 'webRefs' && id === undefined)) { reject('id', '必须指定非空 ID'); return; }
+    const revision = where.expected_revision;
+    if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) { reject('expected_revision', '必须指定非负整数 revision'); return; }
+    if (statement.kind === 'delete') {
+      const reason = where.reason;
+      if (typeof reason !== 'string' || !reason.trim()) { reject('reason', '退役理由必须是非空字符串'); return; }
+      result.intents.push({ kind: 'delete', module, id: String(id).trim(), fields: {}, expectedRevision: revision, reason: reason.trim() });
+      return;
+    }
+    const fields: Record<string, unknown> = {};
+    let pageRef: string | undefined;
+    for (const [column, raw] of Object.entries(values)) {
+      if (column === 'reason') { reject(column, 'reason 只允许在 DELETE 的 WHERE 中用于退役'); continue; }
+      if (column === 'id' || column === 'expected_revision') {
+        if (statement.kind === 'update') reject(column, 'UPDATE 的 SET 不得指定 id 或 expected_revision');
+        continue;
+      }
+      const field = columns[column];
+      if (!field) { reject(column, '栏目不在逐栏写入白名单'); continue; }
+      if (field === 'pageRef') {
+        if (typeof raw !== 'string' || !raw.trim()) reject(column, 'page_ref 必须是本次抓取的非空页面句柄');
+        else pageRef = raw.trim();
+      } else fields[field] = sqlProtocolValue_ACU(raw);
+    }
+    if (!Object.keys(fields).length && !pageRef) { reject('', '没有可提交的栏目'); return; }
+    result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, expectedRevision: revision, ...(pageRef ? { pageRef } : {}) });
+  });
+  return result;
 }
 
 function normalizeMaintainerSqlPayload_ACU(payload: Record<string, unknown>): Record<string, unknown> {
@@ -1076,7 +1251,8 @@ export function parseAgentMaintainerOutputDraft_ACU(payload: Record<string, unkn
         infoGapPatches: infoGap.patches,
         storyArc: storyArc.items,
         storyArcPatches: storyArc.patches,
-        chronology,
+        chronology: chronology.items,
+        chronologyPatches: chronology.patches,
         constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
       },
     },
@@ -1114,6 +1290,7 @@ export function mergeAgentMaintainerOutputs_ACU(base: AgentMaintainerOutput_ACU,
       storyArc: mergeById(base.delta.storyArc, incoming.delta.storyArc),
       storyArcPatches: mergeById(base.delta.storyArcPatches, incoming.delta.storyArcPatches),
       chronology: mergeById(base.delta.chronology, incoming.delta.chronology),
+      chronologyPatches: mergeById(base.delta.chronologyPatches, incoming.delta.chronologyPatches),
       constraintProposals: [...new Set([...base.delta.constraintProposals, ...incoming.delta.constraintProposals])],
     },
   };
@@ -1129,7 +1306,7 @@ export function renderAgentContractContinuationRequest_ACU(accepted: AgentMainta
     ['伏笔', [...accepted.delta.hooks, ...accepted.delta.hookPatches]],
     ['信息差', [...accepted.delta.infoGap, ...accepted.delta.infoGapPatches]],
     ['总纲', [...accepted.delta.storyArc, ...accepted.delta.storyArcPatches]],
-    ['年代学', accepted.delta.chronology],
+    ['年代学', [...accepted.delta.chronology, ...accepted.delta.chronologyPatches]],
   ] as const) {
     const ids = list.map(item => item.id).filter(Boolean);
     if (ids.length) acceptedIds.push(`${label}：${ids.join('、')}`);

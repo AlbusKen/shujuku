@@ -19,6 +19,8 @@
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
+import { readMessageSwipeId_ACU } from './agent-module-frame';
+import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import {
   AGENT_CONVERSATION_FIELD_ACU,
   AGENT_CONVERSATION_MESSAGE_KINDS_ACU,
@@ -32,7 +34,7 @@ import {
   type AgentConversationSnapshot_ACU,
 } from './agent-model';
 
-/** 单条会话消息的字符上限。模型原始输出与工具结果都可能很长，超出即截断并如实标注。 */
+/** 展示消息的字符上限；模型会话中的真实动作和工具结果不截断。 */
 export const AGENT_CONVERSATION_TEXT_LIMIT_ACU = 8000;
 
 /** UI 回灌时间线默认只解析最近这么多条消息，避免长任务把主线程卡死。完整扫描仍可通过不传 maxMessages 获得。 */
@@ -85,7 +87,7 @@ function validateMessage_ACU(raw: unknown): AgentConversationMessage_ACU | null 
 }
 
 /**
- * 校验一份 v1 全量快照（历史遗留格式）。整体结构非法返回 null；个别条目非法只丢该条。
+ * 校验一份 v1 全量快照（历史遗留格式）。结构或消息非法返回 null，不伪装成完整会话。
  * @param raw 楼层字段上的原始值
  * @returns 合法快照或 null
  */
@@ -93,15 +95,17 @@ export function validateAgentConversationSnapshot_ACU(raw: unknown): AgentConver
   if (!isRecord_ACU(raw)) return null;
   if (raw.schemaVersion !== AGENT_CONVERSATION_SCHEMA_VERSION_ACU) return null;
   if (!Array.isArray(raw.messages)) return null;
-  const messages = raw.messages.flatMap(item => { const message = validateMessage_ACU(item); return message ? [message] : []; });
+  const messages = raw.messages.map(item => validateMessage_ACU(item));
+  if (messages.some(item => !item)) return null;
   const highestId = messages.reduce((max, message) => Math.max(max, message.id), 0);
+  if (new Set(messages.map(message => message.id)).size !== messages.length) return null;
   const declaredNextId = typeof raw.nextId === 'number' && Number.isInteger(raw.nextId) && raw.nextId > 0 ? raw.nextId : 1;
   return {
     schemaVersion: AGENT_CONVERSATION_SCHEMA_VERSION_ACU,
     // nextId 必须严格大于已有最大 id，否则追加会撞号导致 UI 的 key 冲突。
     nextId: Math.max(declaredNextId, highestId + 1),
     updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
-    messages,
+    messages: messages as AgentConversationMessage_ACU[],
   };
 }
 
@@ -193,7 +197,7 @@ function validateCompactionMark_ACU(raw: unknown): AgentConversationCompactionMa
 }
 
 /**
- * 校验一份 v2 楼层段记录。整体结构非法返回 null；个别消息非法只丢该条。
+ * 校验一份 v2 楼层段记录。结构或消息非法返回 null，不伪装成完整楼层。
  * @param raw 楼层字段上的原始值
  * @returns 合法段记录或 null
  */
@@ -201,11 +205,12 @@ export function validateAgentConversationFloorRecord_ACU(raw: unknown): AgentCon
   if (!isRecord_ACU(raw)) return null;
   if (raw.schemaVersion !== AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU) return null;
   if (!Array.isArray(raw.segment)) return null;
-  const segment = raw.segment.flatMap(item => { const message = validateMessage_ACU(item); return message ? [message] : []; });
+  const segment = raw.segment.map(item => validateMessage_ACU(item));
+  if (segment.some(item => !item) || new Set(segment.map(item => item.id)).size !== segment.length) return null;
   const record: AgentConversationFloorRecord_ACU = {
     schemaVersion: AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU,
     updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
-    segment,
+    segment: segment as AgentConversationMessage_ACU[],
   };
   if (Object.prototype.hasOwnProperty.call(raw, 'compaction')) {
     const compaction = validateCompactionMark_ACU(raw.compaction);
@@ -222,15 +227,21 @@ export function validateAgentConversationFloorRecord_ACU(raw: unknown): AgentCon
   return record;
 }
 
+function invalidConversation_ACU(index: number): never {
+  throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'load', 'Agent 会话楼层记录损坏，不能当作空历史', false, { index }));
+}
+
 /** 读取当前生效的压缩标记；与模型投影相同，选择 compactedThroughId 最大的合法标记。 */
 export function readActiveAgentConversationCompactionMark_ACU(chat?: any[]): AgentConversationCompactionMark_ACU | null {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   let active: AgentConversationCompactionMark_ACU | null = null;
-  for (const message of messages) {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
     if (!message || typeof message !== 'object') continue;
     if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) continue;
     const raw = (message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU];
     const record = validateAgentConversationFloorRecord_ACU(raw);
+    if (!record && !validateAgentConversationSnapshot_ACU(raw)) invalidConversation_ACU(index);
     if (record?.compaction && (!active || record.compaction.compactedThroughId > active.compactedThroughId)) active = record.compaction;
   }
   if (!active) return null;
@@ -279,11 +290,12 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
     }
     // v1 全量快照：它是当时的完整会话，充当基线段——之前收集的段全部被它覆盖。
     const legacy = validateAgentConversationSnapshot_ACU(raw);
-    if (legacy) {
-      collected = [...legacy.messages];
-      updatedAt = Math.max(updatedAt, legacy.updatedAt);
-    }
+    if (!legacy) invalidConversation_ACU(index);
+    collected = [...legacy.messages];
+    updatedAt = Math.max(updatedAt, legacy.updatedAt);
   }
+  const ids = collected.map(item => item.id);
+  if (new Set(ids).size !== ids.length || ids.some((id, index) => index > 0 && id <= ids[index - 1])) invalidConversation_ACU(-1);
   const mark = readActiveAgentConversationCompactionMark_ACU(messages);
   if (!collected.length && !mark) return buildEmptyAgentConversation_ACU();
   let projected = collected;
@@ -314,7 +326,7 @@ function readFloorTimelineContribution_ACU(message: any): {
   }
   const legacy = validateAgentConversationSnapshot_ACU(raw);
   if (legacy) return { segment: [...legacy.messages], replacesEarlier: true };
-  return null;
+  invalidConversation_ACU(-1);
 }
 
 /**
@@ -391,7 +403,8 @@ function floorRecordOf_ACU(container: Record<string, unknown>): AgentConversatio
   if (record) return record;
   // 该楼层挂着 v1 快照时就地升级为段记录：v1 的消息全部转为本楼的段。
   // 回退语义不变——v1 本来也是删掉这一楼就整体消失。
-  const legacy = validateAgentConversationSnapshot_ACU(raw);
+  const legacy = raw === undefined ? null : validateAgentConversationSnapshot_ACU(raw);
+  if (raw !== undefined && !legacy) invalidConversation_ACU(-1);
   return {
     schemaVersion: AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU,
     updatedAt: legacy?.updatedAt ?? 0,
@@ -423,18 +436,31 @@ async function writeFloorRecord_ACU(chat: any[], targetIndex: number, record: Ag
  * @param prepared 待落盘的消息（id 由调用方从拼接视图的 nextId 起分配）
  * @returns 是否真的写入；没有楼层可承载或列表为空时为 false
  */
-export async function appendPreparedAgentConversationMessages_ACU(chat: any[], prepared: readonly AgentConversationMessage_ACU[]): Promise<boolean> {
+export async function appendPreparedAgentConversationMessages_ACU(chat: any[], prepared: readonly AgentConversationMessage_ACU[], targetIndex = chat.length - 1): Promise<boolean> {
   if (!prepared.length) return false;
-  const targetIndex = chat.length - 1;
   if (targetIndex < 0) return false;
   const container = chat[targetIndex];
   if (!container || typeof container !== 'object') return false;
   const record = floorRecordOf_ACU(container as Record<string, unknown>);
   const existingIds = new Set(record.segment.map(item => item.id));
+  if (prepared.some(item => existingIds.has(item.id) && JSON.stringify(record.segment.find(saved => saved.id === item.id)) !== JSON.stringify(item))) invalidConversation_ACU(targetIndex);
   const fresh = prepared.filter(item => !existingIds.has(item.id));
   if (!fresh.length) return false;
+  const nextId = readAgentConversation_ACU(chat).nextId;
+  if (fresh[0].id !== nextId || fresh.some((item, index) => item.id !== nextId + index)) invalidConversation_ACU(targetIndex);
   await writeFloorRecord_ACU(chat, targetIndex, { ...record, segment: [...record.segment, ...fresh] });
   return true;
+}
+
+/** 压缩规划与提交共用模型投影，逐字比较来源和保留后缀，不用易碰撞的短 hash。 */
+export function fingerprintAgentConversationSource_ACU(snapshot: AgentConversationSnapshot_ACU, mark: AgentConversationCompactionMark_ACU | null): string {
+  return JSON.stringify({ messages: snapshot.messages, nextId: snapshot.nextId, mark });
+}
+
+export function readAgentConversationCompactionSource_ACU(chat: any[]): { snapshot: AgentConversationSnapshot_ACU; fingerprint: string } {
+  const snapshot = readAgentConversation_ACU(chat);
+  const mark = readActiveAgentConversationCompactionMark_ACU(chat);
+  return { snapshot, fingerprint: fingerprintAgentConversationSource_ACU(snapshot, mark) };
 }
 
 /**
@@ -443,11 +469,14 @@ export async function appendPreparedAgentConversationMessages_ACU(chat: any[], p
  * @param mark 压缩标记（截止消息 id + 交接报告）
  * @returns 是否真的写入
  */
-export async function writeAgentConversationCompactionMark_ACU(chat: any[], mark: AgentConversationCompactionMark_ACU): Promise<boolean> {
+export async function writeAgentConversationCompactionMark_ACU(chat: any[], mark: AgentConversationCompactionMark_ACU, expected?: { fingerprint: string; anchor: object; swipeId: string; chatIdentity: string }): Promise<boolean> {
   const targetIndex = chat.length - 1;
   if (targetIndex < 0) return false;
   const container = chat[targetIndex];
   if (!container || typeof container !== 'object') return false;
+  if (expected && (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== expected.chatIdentity || container !== expected.anchor
+    || readMessageSwipeId_ACU(container) !== expected.swipeId
+    || readAgentConversationCompactionSource_ACU(chat).fingerprint !== expected.fingerprint)) return false;
   const record = floorRecordOf_ACU(container as Record<string, unknown>);
   if (record.compaction && record.compaction.compactedThroughId >= mark.compactedThroughId) return false;
   await writeFloorRecord_ACU(chat, targetIndex, { ...record, compaction: { ...mark, at: mark.at || Date.now() } });
@@ -469,7 +498,8 @@ export function appendAgentConversation_ACU(snapshot: AgentConversationSnapshot_
     const message: AgentConversationMessage_ACU = {
       id: nextId++,
       kind: item.kind,
-      text: item.kind === 'runtime' ? String(item.text) : truncateText_ACU(String(item.text)),
+      text: item.kind === 'runtime' || item.kind === 'tool' || item.kind === 'agent' || item.kind === 'user'
+        ? String(item.text) : truncateText_ACU(String(item.text)),
       digest: String(item.digest ?? ''),
       turnKey: String(item.turnKey ?? ''),
       at,
@@ -494,6 +524,15 @@ export async function appendAgentConversationToChat_ACU(appends: readonly AgentC
   const next = appendAgentConversation_ACU(snapshot, appends);
   if (next === snapshot) return false;
   return appendPreparedAgentConversationMessages_ACU(messages, next.messages.slice(snapshot.messages.length));
+}
+
+/** 正文确认后只把通告写到该正文楼；不可把迟到的通告写到另一个末楼。 */
+export async function appendConfirmedAgentTurn_ACU(chat: any[], messageIndex: number, turnKey: string, text: string): Promise<boolean> {
+  if (getChatArray_ACU() !== chat || messageIndex !== chat.length - 1 || !chat[messageIndex] || chat[messageIndex].is_user) return false;
+  const snapshot = readAgentConversation_ACU(chat);
+  if (lastAnnouncedTurnKey_ACU(snapshot) === turnKey) return false;
+  const next = appendAgentConversation_ACU(snapshot, [{ kind: 'turn', text, digest: `已确认正文 · 第 ${messageIndex + 1} 楼`, turnKey }]);
+  return appendPreparedAgentConversationMessages_ACU(chat, next.messages.slice(snapshot.messages.length), messageIndex);
 }
 
 /**

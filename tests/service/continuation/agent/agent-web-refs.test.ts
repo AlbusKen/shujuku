@@ -133,6 +133,27 @@ describe('百科资料库写集事务', () => {
     expect(tolerant.pendingFixes[0]).toMatchObject({ module: 'webRefs', attempts: 1, agentName: 'web-researcher' });
   });
 
+  it('patch 仅修改指定资料栏位，换源才更新抓取时间，且拒绝未知或退休 ID', () => {
+    const snapshot = snapshotWith_ACU(entry_ACU({ fetchedAt: 5 }));
+    const contentOnly = applyAgentWebRefsDelta_ACU(snapshot, {
+      summary: '', expectedRevision: 2, items: [], patches: [{ id: 'WR-001', brief: '新的简介' }],
+    }, 2, 99).snapshot;
+    expect(contentOnly.webRefs[0]).toMatchObject({
+      brief: '新的简介', title: snapshot.webRefs[0].title, url: snapshot.webRefs[0].url, fetchedAt: 5,
+    });
+    expect(contentOnly.revisions.webRefs).toBe(3);
+    const refreshed = applyAgentWebRefsDelta_ACU(snapshot, {
+      summary: '', expectedRevision: 2, items: [], patches: [{ id: 'WR-001', source: 'web', url: 'https://example.org/new', query: 'new', sourceStatus: 'ok' }],
+    }, 2, 99).snapshot;
+    expect(refreshed.webRefs[0]).toMatchObject({ url: 'https://example.org/new', fetchedAt: 99, brief: snapshot.webRefs[0].brief });
+    expect(() => applyAgentWebRefsDelta_ACU(snapshot, {
+      summary: '', expectedRevision: 2, items: [], patches: [{ id: 'WR-404', brief: '无效' }],
+    }, 2, 99)).toThrowError(/不存在/);
+    expect(() => applyAgentWebRefsDelta_ACU(snapshotWith_ACU(entry_ACU({ retired: true })), {
+      summary: '', expectedRevision: 2, items: [], patches: [{ id: 'WR-001', brief: '无效' }],
+    }, 2, 99)).toThrowError(/已废止/);
+  });
+
   it('对既有 id 重复 upsert 覆盖内容但保留首次入库时间', () => {
     const snapshot = snapshotWith_ACU(entry_ACU({ fetchedAt: 5 }));
     const next = applyAgentWebRefsDelta_ACU(snapshot, { summary: '', expectedRevision: undefined, items: [upsert({ id: 'WR-001', title: '鲁迪', brief: '新简介。' })] }, undefined, 50).snapshot;

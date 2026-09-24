@@ -2,7 +2,6 @@ export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
 export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 5 as const;
 export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
 export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;
-export const WORLD_SIMULATION_AUTO_FIX_MAX_ATTEMPTS_ACU = 3 as const;
 export const WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU = 80 as const;
 
 export type WorldSimulationTaskStatus_ACU = 'drafting' | 'paused' | 'running' | 'stopping_after_inflight' | 'completed' | 'abandoned' | 'failed';
@@ -40,7 +39,7 @@ export interface WorldSimulationWebResearchSettings_ACU {
   blockedDomains: string;
 }
 export interface WorldSimulationDynamicsSettings_ACU { rumorTTLDays: number; maxClockAdvanceDays: number; collisionEnforcement: 'strict' | 'relaxed'; missedSweepEnabled: boolean; }
-export interface WorldSimulationWorkflowSettings_ACU { autoFixEnabled: boolean; chroniclerHotThreshold: number; }
+export interface WorldSimulationWorkflowSettings_ACU { chroniclerHotThreshold: number; }
 export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; dynamics: WorldSimulationDynamicsSettings_ACU; workflow: WorldSimulationWorkflowSettings_ACU; promptForceDefaultVersion?: string; }
 
 export interface WorldEvidenceRef_ACU { ref: string; source: string; summary: string; }
@@ -154,7 +153,10 @@ export interface WorldSimulationLedgerFieldWrite_ACU {
 /** 推演逐栏写集：模块 → ID → 栏目 → 写入值。单例模块使用固定 ID '_'；只点名本次提交的栏目。 */
 export type WorldSimulationLedgerFieldUpserts_ACU = Partial<Record<WorldSimulationLedgerModule_ACU, Record<string, Record<string, WorldSimulationLedgerFieldWrite_ACU>>>>;
 
-/** 推演分栏条目状态：complete 可并入完整账本投影；partial 仅在受控分栏视图可见；legacy_unknown 来自旧整条快照。 */
+/**
+ * 推演分栏条目状态：complete 是经逐栏写入提升（或逐栏更新过）的账本条目；partial 仅在受控分栏视图可见，
+ * 不并入完整账本；legacy_unknown 是来自旧整条账本或整条提交的条目。complete 与 legacy_unknown 都在账本里。
+ */
 export const WORLD_SIMULATION_LEDGER_FIELD_STATUSES_ACU = ['complete', 'partial', 'legacy_unknown'] as const;
 export type WorldSimulationLedgerFieldStatus_ACU = typeof WORLD_SIMULATION_LEDGER_FIELD_STATUSES_ACU[number];
 
@@ -180,22 +182,30 @@ export interface WorldSimulationLedgerFieldSnapshot_ACU {
   records: Partial<Record<WorldSimulationLedgerModule_ACU, Record<string, WorldSimulationLedgerFieldRecord_ACU>>>;
 }
 
-/** 推演模块的栏目矩阵：可逐栏写入的栏目白名单与提升为完整条目的必填栏目。 */
+/**
+ * 推演模块的栏目矩阵：fields 是分栏视图可见的栏目（含机器栏 revision）；required 是提升为完整账本条目前
+ * 模型必须写过的栏目（与字段纪律一致，合法空值也算写过）；consistencyGroups 是不可拆开校验的跨字段组。
+ */
 export interface WorldSimulationLedgerFieldMatrixEntry_ACU {
   fields: readonly string[];
   required: readonly string[];
+  consistencyGroups: ReadonlyArray<readonly string[]>;
 }
 
-/** 各推演模块的栏目矩阵。必填栏目与 WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU 对齐（去掉 ID 键）。 */
+/**
+ * 各推演模块的栏目矩阵。必填栏目对齐 formatWorldSimulationLedgerRequiredFields_ACU 的字段纪律；
+ * 可空/可缺省栏（actorIds、expiresAtDay、exposePolicy、locationRef、earliestRevealDay 等）提升时按领域缺省补齐，
+ * revision 由入库层接管。单例（clock/player/guidance）恒为完整记录，逐栏更新按 patch 语义合并。
+ */
 export const WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU: Record<WorldSimulationLedgerModule_ACU, WorldSimulationLedgerFieldMatrixEntry_ACU> = {
-  clock: { fields: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], required: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'] },
-  dimensions: { fields: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], required: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'] },
-  seeds: { fields: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'], required: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'] },
-  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'], required: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'] },
-  chronicle: { fields: ['at', 'summary', 'relatedIds', 'evidenceRefs'], required: ['at', 'summary', 'relatedIds', 'evidenceRefs'] },
-  guidance: { fields: ['signals', 'excludedFacts', 'evidenceRefs'], required: ['signals', 'excludedFacts', 'evidenceRefs'] },
-  rumors: { fields: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'], required: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'] },
-  player: { fields: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'], required: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'] },
+  clock: { fields: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], required: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], consistencyGroups: [] },
+  dimensions: { fields: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], required: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs'], consistencyGroups: [] },
+  seeds: { fields: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'], required: ['title', 'status', 'level', 'catalyst', 'visibility', 'location', 'evidenceRefs'], consistencyGroups: [['status', 'retiredReason']] },
+  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'], required: ['name', 'interests', 'location', 'goals', 'informationSources', 'knownFacts'], consistencyGroups: [['life', 'diedAtDay', 'deathSummary']] },
+  chronicle: { fields: ['at', 'summary', 'relatedIds', 'evidenceRefs'], required: ['summary'], consistencyGroups: [] },
+  guidance: { fields: ['signals', 'excludedFacts', 'evidenceRefs'], required: ['signals', 'excludedFacts', 'evidenceRefs'], consistencyGroups: [] },
+  rumors: { fields: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'], required: ['fact', 'originDay', 'channels'], consistencyGroups: [['originDay', 'earliestRevealDay'], ['status', 'revealedAtDay']] },
+  player: { fields: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'], required: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'], consistencyGroups: [] },
 };
 
 
@@ -261,6 +271,8 @@ export interface WorldSimulationTask_ACU {
   updatedAt: number;
   activeRun: WorldSimulationRunIdentity_ACU | null;
   stopReason: string | null;
+  /** 已结算的自动触发锚点；提交改写正文时记录改写后的摘要，防止完成事件重放。 */
+  completedAutoAnchor?: Pick<import('./agent/agent-model').WorldSimulationAnchorIdentity_ACU, 'chatIdentity' | 'messageKey' | 'swipeId' | 'contentDigest'>;
 }
 
 export interface WorldSimulationTimelineEntry_ACU {

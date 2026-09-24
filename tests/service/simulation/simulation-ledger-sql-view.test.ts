@@ -168,3 +168,211 @@ describe('simulation-ledger-sql-view', () => {
     await expect(materializeWorldSimulationLedgerSqlView_ACU(broken)).rejects.toThrow(/无法物化/);
   });
 });
+
+describe('simulation-ledger-sql-view 逐栏层', () => {
+  let view: WorldSimulationLedgerSqlView_ACU | null = null;
+  afterEach(() => { view?.dispose(); view = null; });
+
+  function fullActor(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id, name: '新角色', interests: ['打铁'], location: '北岭', locationRef: null, life: 'alive',
+      diedAtDay: null, deathSummary: null, resources: [], goals: ['活下去'], constraints: [],
+      informationSources: ['村民'], knownFacts: ['山路'], visibility: 'public', revision: 1,
+      ...overrides,
+    };
+  }
+
+  it('未提供分栏视图时按领域条目播种：数组条目与单例均 legacy_unknown、栏目 revision 0', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    const actor = view.readFieldRecord('actors', 'a1');
+    expect(actor?.status).toBe('legacy_unknown');
+    expect(actor?.fields.name).toEqual({ value: '商人会长', revision: 0, updatedAt: 0 });
+    const clock = view.readFieldRecord('clock', '_');
+    expect(clock?.status).toBe('legacy_unknown');
+    expect(clock?.fields.day).toEqual({ value: 3, revision: 0, updatedAt: 0 });
+  });
+
+  it('数组模块单栏更新已登记条目：账本 revision 推进一次，领域行与分栏层同步并导出', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    const merged = { id: 'a1', name: '商人会长', interests: '贸易利益', location: '北境', locationRef: '', life: 'alive', diedAtDay: null, deathSummary: '', resources: '商队', goals: '找回商队', constraints: '', informationSources: ['商队汇报'], knownFacts: ['商队失踪'], visibility: 'public', revision: 2 };
+    const next = view.applyFieldBatch({
+      module: 'actors',
+      expectedRevision: 7,
+      updatedAt: 2000,
+      fieldWrites: { a1: { location: { value: '北境' }, goals: { value: '找回商队' } } },
+      domainUpserts: { a1: merged },
+    });
+    expect(next).toBe(8);
+    const record = view.readFieldRecord('actors', 'a1');
+    expect(record?.status).toBe('complete');
+    expect(record?.fields.location).toEqual({ value: '北境', revision: 1, updatedAt: 2000 });
+    expect(record?.fields.goals).toEqual({ value: '找回商队', revision: 1, updatedAt: 2000 });
+    expect(record?.fields.name.revision).toBe(0);
+    expect(record?.fields.revision.value).toBe(2);
+    const delta = view.exportDelta();
+    expect(delta.upserts.actors).toEqual([merged]);
+    expect(delta.fieldUpserts?.actors?.a1).toEqual({ location: { value: '北境' }, goals: { value: '找回商队' } });
+    expect(delta.revision).toBe(8);
+    expect(view.hasChanges()).toBe(false);
+  });
+
+  it('纯草稿批次不推进账本 revision，partial 草稿随 fieldUpserts 导出', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    const next = view.applyFieldBatch({
+      module: 'actors',
+      expectedRevision: 7,
+      updatedAt: 2000,
+      fieldWrites: { a9: { name: { value: '新角色' }, interests: { value: ['打铁'] } } },
+    });
+    expect(next).toBe(7);
+    expect(view.readLedger().revision).toBe(7);
+    const record = view.readFieldRecord('actors', 'a9');
+    expect(record?.status).toBe('partial');
+    expect(record?.missingFields).toEqual(['location', 'goals', 'informationSources', 'knownFacts']);
+    expect(view.readLedger().actors.map(item => item.id)).toEqual(['a1']);
+    const delta = view.exportDelta();
+    expect(delta.revision).toBe(7);
+    expect(delta.upserts.actors).toBeUndefined();
+    expect(delta.fieldUpserts?.actors?.a9).toEqual({ name: { value: '新角色' }, interests: { value: ['打铁'] } });
+  });
+
+  it('必填栏补齐并给出领域整行后提升为 complete，账本 revision 此时才推进', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    view.applyFieldBatch({
+      module: 'actors',
+      expectedRevision: 7,
+      updatedAt: 2000,
+      fieldWrites: { a9: { name: { value: '新角色' }, interests: { value: ['打铁'] } } },
+    });
+    const promoted = fullActor('a9');
+    const next = view.applyFieldBatch({
+      module: 'actors',
+      expectedRevision: 7,
+      updatedAt: 2100,
+      fieldWrites: {
+        a9: {
+          location: { value: '北岭' },
+          goals: { value: ['活下去'] },
+          informationSources: { value: ['村民'] },
+          knownFacts: { value: ['山路'] },
+        },
+      },
+      domainUpserts: { a9: promoted },
+    });
+    expect(next).toBe(8);
+    const record = view.readFieldRecord('actors', 'a9');
+    expect(record?.status).toBe('complete');
+    expect(record?.missingFields).toEqual([]);
+    expect(record?.fields.name).toEqual({ value: '新角色', revision: 1, updatedAt: 2000 });
+    expect(record?.fields.location).toEqual({ value: '北岭', revision: 1, updatedAt: 2100 });
+    expect(record?.fields.life).toEqual({ value: 'alive', revision: 1, updatedAt: 2100 });
+    expect(view.readPartialRecords()).toEqual([]);
+    expect(view.readLedger().actors.map(item => item.id)).toEqual(['a1', 'a9']);
+    const delta = view.exportDelta();
+    expect(delta.revision).toBe(8);
+    expect(delta.upserts.actors).toEqual([promoted]);
+    expect(delta.fieldUpserts?.actors?.a9).toEqual({
+      name: { value: '新角色' },
+      interests: { value: ['打铁'] },
+      location: { value: '北岭' },
+      goals: { value: ['活下去'] },
+      informationSources: { value: ['村民'] },
+      knownFacts: { value: ['山路'] },
+    });
+  });
+
+  it('单例 clock 逐栏更新：固定 ID 归一、领域替换与导出', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    const clock4 = { day: 4, slot: 'dusk', storyTime: '第四日黄昏', precision: 'exact', evidenceRefs: ['m2'] };
+    const next = view.applyFieldBatch({
+      module: 'clock',
+      expectedRevision: 7,
+      updatedAt: 2000,
+      fieldWrites: { '_': { day: { value: 4 }, storyTime: { value: '第四日黄昏' }, slot: { value: 'dusk' }, evidenceRefs: { value: ['m2'] } } },
+      domainUpserts: { '_': clock4 },
+    });
+    expect(next).toBe(8);
+    const record = view.readFieldRecord('clock', '任意输入归一');
+    expect(record?.status).toBe('complete');
+    expect(record?.fields.day).toEqual({ value: 4, revision: 1, updatedAt: 2000 });
+    const delta = view.exportDelta();
+    expect(delta.clock?.day).toBe(4);
+    expect(delta.fieldUpserts?.clock?._).toEqual({
+      day: { value: 4 },
+      storyTime: { value: '第四日黄昏' },
+      slot: { value: 'dusk' },
+      evidenceRefs: { value: ['m2'] },
+    });
+    expect(delta.revision).toBe(8);
+  });
+
+  it('丢弃草稿：记录删除并导出全栏 unset，账本 revision 不推进', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    view.applyFieldBatch({
+      module: 'actors',
+      expectedRevision: 7,
+      updatedAt: 2000,
+      fieldWrites: { a9: { name: { value: '新角色' } } },
+    });
+    const next = view.applyFieldBatch({
+      module: 'actors',
+      expectedRevision: 7,
+      updatedAt: 2100,
+      discardPartialIds: ['a9'],
+    });
+    expect(next).toBe(7);
+    expect(view.readFieldRecord('actors', 'a9')).toBeNull();
+    const delta = view.exportDelta();
+    expect(delta.revision).toBe(7);
+    expect(delta.fieldUpserts?.actors?.a9).toEqual({ name: { unset: true } });
+  });
+
+  it('完整条目按草稿丢弃、撤销完整条目栏目、矩阵外模块、空批次、陈旧 revision 均 fail-closed', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    expect(() => view!.applyFieldBatch({ module: 'actors', expectedRevision: 7, updatedAt: 2000, discardPartialIds: ['a1'] })).toThrow(/完整条目/);
+    expect(() => view!.applyFieldBatch({ module: 'actors', expectedRevision: 7, updatedAt: 2000, fieldWrites: { a1: { name: { unset: true } } } })).toThrow(/不能按草稿撤销/);
+    expect(() => view!.applyFieldBatch({ module: 'chronicleOverview', expectedRevision: 7, updatedAt: 2000, fieldWrites: { x: { oneLine: { value: 'x' } } } })).toThrow(/未知账本栏目模块/);
+    expect(() => view!.applyFieldBatch({ module: 'actors', expectedRevision: 7, updatedAt: 2000 })).toThrow(/批次为空/);
+    expect(() => view!.applyFieldBatch({ module: 'actors', expectedRevision: 99, updatedAt: 2000, fieldWrites: { a1: { name: { value: 'x' } } } })).toThrow(/revision 冲突/);
+    const back = view.readLedger();
+    expect(back.actors).toHaveLength(1);
+    expect(back.revision).toBe(7);
+    expect(view.hasChanges()).toBe(false);
+    expect(view.readFieldRecord('actors', 'a1')?.status).toBe('legacy_unknown');
+  });
+
+  it('行写同步分栏层：upsert 记为 legacy_unknown，remove 删除记录', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    view.applyArrayWrite({
+      module: 'actors',
+      expectedRevision: 7,
+      upserts: [fullActor('a2', { name: '山贼头目' })],
+    });
+    const inserted = view.readFieldRecord('actors', 'a2');
+    expect(inserted?.status).toBe('legacy_unknown');
+    expect(inserted?.fields.name).toEqual({ value: '山贼头目', revision: 1, updatedAt: 0 });
+    view.applyArrayWrite({ module: 'actors', expectedRevision: 8, removedIds: ['a2'] });
+    expect(view.readFieldRecord('actors', 'a2')).toBeNull();
+    expect(view.readFieldRecord('actors', 'a1')?.status).toBe('legacy_unknown');
+  });
+});
+
+describe('simulation-ledger-sql-view 批次复算边界', () => {
+  let view: WorldSimulationLedgerSqlView_ACU | null = null;
+  afterEach(() => { view?.dispose(); view = null; });
+
+  it('跨模块合批只推进一次 revision，其余批次用当前 revision 作为乐观锁', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    view.applyFieldBatch({ module: 'dimensions', expectedRevision: 7, updatedAt: 123, fieldWrites: { 'dim-1': { value: { value: '加剧' } } }, domainUpserts: { 'dim-1': { ...makeLedger().dimensions[0], value: '加剧', revision: 2 } }, advanceRevision: true });
+    view.applyFieldBatch({ module: 'actors', expectedRevision: 8, updatedAt: 123, fieldWrites: { a1: { name: { value: '新会长' } } }, domainUpserts: { a1: { ...makeLedger().actors[0], name: '新会长', revision: 2 } }, advanceRevision: false });
+    expect(view.readLedger().revision).toBe(8);
+    expect(view.exportDelta()).toMatchObject({ revision: 8, upserts: { dimensions: [{ value: '加剧' }], actors: [{ name: '新会长' }] } });
+  });
+
+  it('删除完整条目清理其栏目记录且导出删除 ID', async () => {
+    view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());
+    view.applyFieldBatch({ module: 'actors', expectedRevision: 7, updatedAt: 123, domainRemovedIds: ['a1'] });
+    expect(view.readFieldRecord('actors', 'a1')).toBeNull();
+    expect(view.exportDelta()).toMatchObject({ revision: 8, removedIds: { actors: ['a1'] } });
+  });
+});

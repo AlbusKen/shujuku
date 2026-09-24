@@ -2,10 +2,10 @@ import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIWithResolvedPreset_ACU } from '../ai/api-call';
-import { worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
+import { buildOpenAiPromptCacheKey_ACU, supportsExplicitOpenAiCacheKey_ACU } from '../ai/prompt-cache';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from './agent/agent-module-store';
-import { compactWorldSimulationConversation_ACU } from './agent/agent-requirements-dispatch';
 import { clearWorldSimulationRunState_ACU } from './agent/agent-run-cache';
 import { clearWorldSimulationSessionLog_ACU, isWorldSimulationSessionRunning_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU } from './agent/agent-session-log';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from './world-simulation-agent-tools';
@@ -15,6 +15,7 @@ import {
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
   WORLD_SIMULATION_RUN_STATE_FIELD_ACU,
+  WORLD_SIMULATION_RUN_WRITE_FIELD_ACU,
   WORLD_SIMULATION_STATE_FIELD_ACU,
   WORLD_SIMULATION_USER_REQUIREMENTS_FIELD_ACU,
   type WorldSimulationAnchorIdentity_ACU,
@@ -28,7 +29,7 @@ import {
   seedWorldSimulationUserRequirementsIfEmpty_ACU,
 } from './agent/agent-user-requirements';
 import { createWorldSimulationError_ACU, WorldSimulationValidationError_ACU, type WorldCollisionReport_ACU, type WorldSimulationEnvelope_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from './model';
-import { commitWorldSimulationProjection_ACU } from './simulation-commit-adapter';
+import { commitWorldSimulationFieldWrites_ACU, commitWorldSimulationProjection_ACU } from './simulation-commit-adapter';
 import {
   WORLD_SIMULATION_STOP_REASON_INTERRUPTED_ACU,
   WORLD_SIMULATION_STOP_REASON_MANUAL_ACU,
@@ -38,11 +39,13 @@ import {
 } from './simulation-orchestrator';
 import { buildDirectorOwnedStageRevision_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
-import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, buildEmptyWorldChronicleArchiveSnapshot_ACU, readWorldSimulationBucketEntry_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationChronicleArchiveSnapshot_ACU } from './simulation-store';
+import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import { detectWorldCollisions_ACU } from './world-dynamics';
 import { createWorldSimulationHostToolDependencies_ACU } from './world-simulation-host-tools';
+import { foldWorldSimulationArchive_ACU, foldWorldSimulationLedger_ACU, readWorldSimulationLedgerFieldSnapshot_ACU } from './simulation-ledger-fold';
+import { readWorldSimulationRunWriteProof_ACU, restoreWorldSimulationRunWrites_ACU } from './simulation-run-write-state';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from './world-simulation-evidence-registry';
 import { beginWorldSimulationInternalAiMainApiInvocation_ACU, beginWorldSimulationInternalAiRequest_ACU, endWorldSimulationInternalAiMainApiInvocation_ACU, settleWorldSimulationInternalAiRequest_ACU } from './simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntent_ACU, resolveLatestWorldSimulationAssistant_ACU, resolveWorldSimulationAssistantCompletion_ACU, restoreWorldSimulationAnchor_ACU } from './simulation-trigger-adapter';
@@ -66,10 +69,17 @@ async function invokeWorldSimulationAgent_ACU(
   const requestId = `${identity.runId}:${role}:${++internalRequestSequence_ACU}`;
   beginWorldSimulationInternalAiRequest_ACU({ requestId, runId: identity.runId, role });
   try {
+    const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === role);
+    const boundary = readWorldSimulationConversation_ACU(getChatArray_ACU()).compaction?.report;
+    const promptCacheKey = supportsExplicitOpenAiCacheKey_ACU(preset) ? buildOpenAiPromptCacheKey_ACU({
+      chatIdentity: identity.chatIdentity, role,
+      tools: ['read', 'search', ...(definition?.writableModules.length ? ['write_sql', ...definition.writableModules.map(module => `module:${module}`)] : [])],
+      boundary, preset,
+    }) : undefined;
     const response = await callAIWithResolvedPreset_ACU([...messages], preset, signal, {
       beforeMainApiCall: () => beginWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
       afterMainApiCall: () => endWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
-    });
+    }, promptCacheKey ? { promptCacheKey } : undefined);
     if (typeof response === 'string' && response.trim()) return response;
     throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
       'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '世界推演 Agent 返回空响应', false, { role },
@@ -89,9 +99,10 @@ function buildPromptContext_ACU(input: {
   chat: any[];
 }): WorldSimulationPlaceholderContext_ACU {
   const history = readWorldSimulationConversation_ACU(input.chat);
+  const visibleHistory = { ...history, messages: history.messages.filter(item => item.kind !== 'model_agent' && item.kind !== 'model_feedback') };
   return {
     task: input.envelope.task,
-    history,
+    history: visibleHistory,
     runtimeContext: {
       triggerKind: input.identity.triggerKind,
       instruction: input.instruction,
@@ -125,7 +136,31 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
     now: () => Date.now(),
     allocateId: allocateId_ACU,
     assertAnchorCurrent: anchor => { resolveCurrentWorldSimulationAnchor_ACU(anchor, getChatArray_ACU()); },
+    readResumeLedgerRevision: (identity, anchor) => {
+      const chat = getChatArray_ACU();
+      const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
+      const read = () => {
+        const activeChat = getChatArray_ACU();
+        const activeAnchor = resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, activeChat);
+        const folded = foldWorldSimulationLedger_ACU(activeChat, activeAnchor.messageIndex);
+        const envelope = store.read();
+        if (!folded && !envelope) throw new Error('WORLD_SIMULATION_LEDGER_UNAVAILABLE');
+        return { ledger: folded?.ledger ?? envelope!.ledger, fields: folded?.fields,
+          archive: foldWorldSimulationArchive_ACU(activeChat, activeAnchor.messageIndex).snapshot };
+      };
+      return restoreWorldSimulationRunWrites_ACU(read, identity, currentAnchor, chat).currentLedgerRevision;
+    },
     commitProjection: commitWorldSimulationProjection_ACU,
+    persistCompletion: async ({ identity, anchor, outcome, summary }) => {
+      const chat = getChatArray_ACU();
+      const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
+      await appendWorldSimulationSessionEvent_ACU({
+        anchor: currentAnchor, runId: identity.runId, taskId: identity.taskId,
+        stageId: identity.stageId, stageRevision: identity.stageRevision,
+        eventKey: `run-completed-${outcome}`,
+        event: { kind: 'run_completed', title: outcome === 'commit' ? '世界推演已提交' : '世界推演无变化', detail: summary, agentName: 'world-director' },
+      }, chat);
+    },
     appendUserMessage: async ({ identity, anchor, text, idempotent }) => {
       // 与智能续写 recordUserMessage 同语义：用户指令先写会话流（实时显示），再持久化到楼层锚定会话。
       logWorldSimulationSession_ACU(identity.chatIdentity, { kind: 'user_message', title: '你的消息', detail: text });
@@ -180,7 +215,25 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         identity, anchor: currentAnchor, instruction, envelope,
         stagePlan: plannedRevision.plan, registry, chat,
       });
+      const liveLedger = () => {
+        const activeChat = getChatArray_ACU();
+        const activeAnchor = resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, activeChat);
+        const folded = foldWorldSimulationLedger_ACU(activeChat, activeAnchor.messageIndex);
+        if (folded) return folded;
+        const current = store.read();
+        if (!current) throw new Error('WORLD_SIMULATION_LEDGER_UNAVAILABLE');
+        return { ledger: current.ledger, fields: undefined as import('./model').WorldSimulationLedgerFieldSnapshot_ACU | undefined };
+      };
+      const readRunView = () => {
+        const current = liveLedger();
+        const activeChat = getChatArray_ACU();
+        const activeAnchor = resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, activeChat);
+        return { ledger: current.ledger, fields: current.fields,
+          archive: foldWorldSimulationArchive_ACU(activeChat, activeAnchor.messageIndex).snapshot };
+      };
+      const runWrites = restoreWorldSimulationRunWrites_ACU(readRunView, identity, currentAnchor, chat);
       const tools = createWorldSimulationHostToolDependencies_ACU({
+        liveLedger,
         anchorMessage: promptContext.anchorMessage,
         summary: '',
         ledger: envelope.ledger,
@@ -188,17 +241,28 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         candidates: [],
         chronicle: envelope.ledger.chronicle,
         projectionPreview: promptContext.projectionPreview,
-        chronicleArchive: readWorldSimulationBucketEntry_ACU(
-          WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
-          currentAnchor,
-          validateWorldSimulationChronicleArchiveSnapshot_ACU,
-          chat,
-        ) ?? buildEmptyWorldChronicleArchiveSnapshot_ACU(),
+        liveArchive: () => {
+          const activeChat = getChatArray_ACU();
+          const activeAnchor = resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, activeChat);
+          return foldWorldSimulationArchive_ACU(activeChat, activeAnchor.messageIndex).snapshot;
+        },
         webResearch: envelope.settings.webResearch,
       });
       const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1]) =>
         invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal);
       const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
+      const writeSql = (runIdentity: WorldSimulationRunIdentity_ACU) => async (write: Parameters<NonNullable<import('./agent/agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql']>>[0]) => {
+        if (signal.aborted) throw new Error('WORLD_SIMULATION_RUN_STALE');
+        return commitWorldSimulationFieldWrites_ACU({ identity: runIdentity, anchor: currentAnchor, ...write,
+          isCurrent: () => !signal.aborted && (write.isCurrent?.() ?? true),
+          assertRunLedger: view => {
+            runWrites.assertCurrent(view);
+            runWrites.assertPersistedProof(runIdentity, readWorldSimulationRunWriteProof_ACU(currentAnchor, getChatArray_ACU()));
+          },
+          prepareRunProof: (view, refs, accepted) => runWrites.prepareConfirmation(runIdentity, view, refs, accepted),
+          confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted),
+        });
+      };
       const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents });
       if (identity.triggerKind === 'agent_chat_message') {
         await seedWorldSimulationUserRequirementsIfEmpty_ACU(envelope.task?.originInstruction ?? instruction, currentAnchor, chat);
@@ -207,17 +271,13 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
           envelope.task?.originInstruction ?? instruction,
         );
       }
-      await compactWorldSimulationConversation_ACU({
-        anchor: currentAnchor,
-        settings: envelope.settings,
-        promptContext,
-        chat: getChatArray_ACU(),
-      });
       return {
         revision: plannedRevision,
+        runWrites,
         execute: async runIdentity => {
           const engine = new WorldSimulationStageExecutionEngine_ACU({
             readEnvelope: () => store.read(),
+            runWrites,
             getChatIdentity: () => getActiveChatStorageIdentity_ACU(getChatArray_ACU()),
             assertAnchorCurrent: currentIdentity => {
               const restored = restoreWorldSimulationAnchor_ACU(currentIdentity, getChatArray_ACU());
@@ -229,6 +289,15 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               promptContext: { ...promptContext, task: store.read()!.task, worldStagePlan: plannedRevision.plan },
               registry,
               tools,
+              writeSql: writeSql(runIdentity),
+              runWrites,
+              readCurrent: () => liveLedger().ledger,
+              readFieldSnapshot: () => {
+                const fields = liveLedger().fields;
+                if (!fields) throw new Error('WORLD_SIMULATION_FIELD_VIEW_UNAVAILABLE');
+                return fields;
+              },
+              isCurrent: () => !signal.aborted && store.read()?.task?.activeRun?.runId === runIdentity.runId,
               persistSessionEvent: (eventKey, event) => persistSessionEvent(eventKey, event, runIdentity.stageRevision),
               anchor: currentAnchor,
               chat: getChatArray_ACU(),
@@ -248,6 +317,8 @@ export interface WorldSimulationUiSnapshot_ACU {
   envelope: WorldSimulationEnvelope_ACU | null;
   conversation: ReturnType<typeof readWorldSimulationConversation_ACU>;
   materials: ReturnType<typeof readLatestWorldSimulationMaterials_ACU>;
+  /** 账本分栏视图：partial 记录只出现在这里，面板据此按模块/ID 展示已写字段与缺栏。 */
+  fieldSnapshot: ReturnType<typeof readWorldSimulationLedgerFieldSnapshot_ACU>;
   userRequirements: ReturnType<typeof readLatestWorldSimulationUserRequirements_ACU>;
   session: {
     chatIdentity: string | null;
@@ -273,6 +344,7 @@ const WORLD_SIMULATION_FLOOR_FIELDS_ACU = [
   WORLD_SIMULATION_USER_REQUIREMENTS_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_RUN_STATE_FIELD_ACU,
+  WORLD_SIMULATION_RUN_WRITE_FIELD_ACU,
   WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
 ] as const;
 
@@ -313,6 +385,7 @@ export class WorldSimulationRuntime_ACU {
       envelope,
       conversation: readWorldSimulationConversation_ACU(chat),
       materials: readLatestWorldSimulationMaterials_ACU(chat),
+      fieldSnapshot: readWorldSimulationLedgerFieldSnapshot_ACU(chat),
       userRequirements: readLatestWorldSimulationUserRequirements_ACU(chat),
       session: {
         chatIdentity,

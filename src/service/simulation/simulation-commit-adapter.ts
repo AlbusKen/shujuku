@@ -17,7 +17,9 @@ import {
   WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
+  WORLD_SIMULATION_RUN_WRITE_FIELD_ACU,
   WORLD_SIMULATION_STATE_FIELD_ACU,
+  type WorldChronicleArchiveDetail_ACU,
   type WorldChronicleArchiveSnapshot_ACU,
   type WorldSimulationAnchorIdentity_ACU,
   type WorldSimulationBucket_ACU,
@@ -30,7 +32,9 @@ import { progressionPlan_ACU } from './progression-plan';
 import { relevanceGate_ACU } from './relevance-gate';
 import { applyWorldSimulationProjection_ACU, buildWorldSimulationProjection_ACU, readWorldSimulationMessageContent_ACU, writeWorldSimulationActiveSwipeContent_ACU } from './simulation-projection';
 import { applyWorldSimulationCandidatesDetailedViaSql_ACU } from './simulation-transaction';
-import { appendWorldSimulationCommitChain_ACU, foldWorldSimulationArchive_ACU, foldWorldSimulationLedger_ACU } from './simulation-ledger-fold';
+import { appendWorldSimulationCommitChain_ACU, extractWorldSimulationPartialFields_ACU, foldWorldSimulationArchive_ACU, foldWorldSimulationLedger_ACU } from './simulation-ledger-fold';
+import { commitWorldSimulationFieldWritesWithinQueue_ACU, type WorldSimulationFieldCommitInput_ACU, type WorldSimulationFieldCommitReceipt_ACU } from './simulation-field-commit-adapter';
+import { hasPartialWorldSimulationRunWrites_ACU, readWorldSimulationRunWriteProof_ACU, rebaseWorldSimulationRunWriteProof_ACU, stageWorldSimulationRunWriteProof_ACU, type WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
 import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU } from './simulation-store';
 
 interface CommitInput_ACU {
@@ -39,10 +43,11 @@ interface CommitInput_ACU {
   commitCandidate: WorldSimulationCommitCandidate_ACU;
   completedAt: number;
   timelineId: string;
+  runWrites?: WorldSimulationRunWriteState_ACU;
 }
 
 type Record_ACU = Record<string, unknown>;
-const tailsByChat_ACU = new Map<string, Promise<void>>();
+const tailsByChat_ACU = new Map<string, Promise<unknown>>();
 const isRecord_ACU = (value: unknown): value is Record_ACU => value !== null && typeof value === 'object' && !Array.isArray(value);
 const clone_ACU = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -70,7 +75,7 @@ function assertRun_ACU(envelope: WorldSimulationEnvelope_ACU, input: CommitInput
   const candidate = input.commitCandidate;
   if (!run || envelope.task?.taskId !== input.identity.taskId || run.runId !== input.identity.runId) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交租约已失效');
   if (envelope.activeStageId !== input.identity.stageId || run.stageRevision !== input.identity.stageRevision) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交阶段已失效');
-  if (envelope.ledger.revision !== input.identity.baseLedgerRevision) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交基础账本 revision 已变化');
+  if (!input.runWrites?.hasConfirmedWrites && envelope.ledger.revision !== input.identity.baseLedgerRevision) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交基础账本 revision 已变化');
   if (candidate.runId !== input.identity.runId || candidate.taskId !== input.identity.taskId || candidate.stageId !== input.identity.stageId || candidate.stageRevision !== input.identity.stageRevision || candidate.baseLedgerRevision !== input.identity.baseLedgerRevision) {
     reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', 'commit candidate 身份与运行租约不一致');
   }
@@ -171,6 +176,7 @@ function completedEnvelope_ACU(
   input: CommitInput_ACU,
   ledger: WorldSimulationEnvelope_ACU['ledger'],
   extraTimeline: WorldSimulationTimelineEntry_ACU[] = [],
+  persistedAnchor: WorldSimulationAnchorIdentity_ACU,
 ): WorldSimulationEnvelope_ACU {
   const next: WorldSimulationEnvelope_ACU = {
     ...envelope,
@@ -181,6 +187,10 @@ function completedEnvelope_ACU(
       updatedAt: input.completedAt,
       activeRun: null,
       stopReason: null,
+      ...(input.identity.triggerKind === 'assistant_completed' ? { completedAutoAnchor: {
+        chatIdentity: persistedAnchor.chatIdentity, messageKey: persistedAnchor.messageKey,
+        swipeId: persistedAnchor.swipeId, contentDigest: persistedAnchor.contentDigest,
+      } } : {}),
     } : null,
     stages: envelope.stages.map(stage => stage.stageId === input.identity.stageId
       ? { ...stage, status: 'completed' as const }
@@ -206,7 +216,7 @@ function restoreField_ACU(target: Record_ACU, key: string, existed: boolean, val
   else delete target[key];
 }
 
-async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
+async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimulationAnchorIdentity_ACU> {
   const chat = getChatArray_ACU();
   const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
   if (chatIdentity !== input.identity.chatIdentity || chatIdentity !== input.anchor.chatIdentity) {
@@ -219,18 +229,25 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
 
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
   const validatedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
-  const foldedBefore = foldWorldSimulationLedger_ACU(chat);
+  const foldedBefore = foldWorldSimulationLedger_ACU(chat, currentAnchor.messageIndex);
   const envelope = foldedBefore ? { ...validatedEnvelope, ledger: foldedBefore.ledger } : validatedEnvelope;
   assertRun_ACU(envelope, input);
   const storyText = readWorldSimulationMessageContent_ACU(anchorMessage);
-  const archiveBefore = foldWorldSimulationArchive_ACU(chat).snapshot;
-  const applied = await applyWorldSimulationCandidatesDetailedViaSql_ACU(
-    envelope.ledger,
-    input.commitCandidate.acceptedCandidates,
-    new Set(input.commitCandidate.evidenceRefs),
-    envelope.settings,
-    { anchorMessage: storyText, chronicleArchive: archiveBefore },
-  );
+  const archiveBefore = foldWorldSimulationArchive_ACU(chat, currentAnchor.messageIndex).snapshot;
+  const runWriteView = { ledger: envelope.ledger, fields: foldedBefore?.fields, archive: archiveBefore };
+  input.runWrites?.assertCurrent(runWriteView);
+  const runWriteProof = readWorldSimulationRunWriteProof_ACU(currentAnchor, chat);
+  input.runWrites?.assertPersistedProof(input.identity, runWriteProof);
+  input.runWrites?.assertCandidatesDisjoint(input.commitCandidate.acceptedCandidates);
+  if (!input.commitCandidate.acceptedCandidates.length && !input.runWrites?.hasConfirmedWrites) {
+    reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交缺少已确认写入和候选');
+  }
+  const applied = input.commitCandidate.acceptedCandidates.length
+    ? await applyWorldSimulationCandidatesDetailedViaSql_ACU(
+      envelope.ledger, input.commitCandidate.acceptedCandidates, new Set(input.commitCandidate.evidenceRefs),
+      envelope.settings, { anchorMessage: storyText, chronicleArchive: archiveBefore },
+    )
+    : { ledger: envelope.ledger, chronicleArchiveWrites: [] as WorldChronicleArchiveDetail_ACU[] };
   let ledger = {
     ...applied.ledger,
     ...(input.commitCandidate.pendingFixes
@@ -312,7 +329,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     ...currentAnchor,
     contentDigest: sha256HexSync_ACU(newContent),
   };
-  const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline);
+  const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline, persistedAnchor);
   const archiveSnapshot: WorldChronicleArchiveSnapshot_ACU = {
     schemaVersion: archiveBefore.schemaVersion,
     records: { ...archiveBefore.records },
@@ -332,11 +349,28 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
     { target: anchorMessage, key: WORLD_SIMULATION_MATERIALS_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_MATERIALS_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_MATERIALS_FIELD_ACU] },
     { target: anchorMessage, key: WORLD_SIMULATION_CONVERSATION_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_CONVERSATION_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] },
     { target: anchorMessage, key: WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU] },
+    { target: anchorMessage, key: WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_RUN_WRITE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_RUN_WRITE_FIELD_ACU] },
     { target: anchorMessage, key: 'mes', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'mes'), value: anchorMessage.mes },
     { target: anchorMessage, key: 'message', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'message'), value: anchorMessage.message },
     { target: anchorMessage, key: 'swipes', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'swipes'), value: Array.isArray(anchorMessage.swipes) ? [...anchorMessage.swipes] : anchorMessage.swipes },
   ];
+  // 基线重建可能改写早于当前锚点的 checkpoint 与归档；补偿必须覆盖那些楼层。
+  for (const message of chat) {
+    if (!isRecord_ACU(message) || message === anchorMessage) continue;
+    for (const key of [WORLD_SIMULATION_STATE_FIELD_ACU, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU]) {
+      snapshots.push({ target: message, key, existed: Object.prototype.hasOwnProperty.call(message, key), value: message[key] });
+    }
+  }
+  const messages = [...chat];
+  const originalFields = snapshots.map(({ target, key, existed, value }) => ({ target, key, existed, value,
+    content: JSON.stringify(value) }));
+  const messagesIntact = (): boolean => chat.length === messages.length && messages.every((message, index) => chat[index] === message);
+  const fieldsIntact = (fields: Array<Omit<(typeof originalFields)[number], 'value'>>): boolean => messagesIntact() && fields.every(field =>
+    Object.prototype.hasOwnProperty.call(field.target, field.key) === field.existed
+    && JSON.stringify(field.target[field.key]) === field.content);
   let saveAttempted = false;
+  let stagedFields: Array<Omit<(typeof originalFields)[number], 'value'>> | null = null;
+  const currentFieldsIntact = (): boolean => stagedFields !== null && fieldsIntact(stagedFields);
   try {
     firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] = nextEnvelope;
     if (nextConversationBucket) anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = nextConversationBucket;
@@ -352,37 +386,76 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<void> {
       checkpointIndex: foldedBefore?.checkpointIndex ?? null,
       beforeArchive: archiveBefore,
       nextArchive: archiveSnapshot,
+      // 必须取改写锚点正文前的折叠：分桶键含正文摘要，改写后旧键下的逐栏草稿不可再读。
+      beforePartials: foldedBefore ? extractWorldSimulationPartialFields_ACU(foldedBefore.fields) : {},
     });
-    if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
-      reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交前聊天上下文已变化');
+    const projectedFold = foldWorldSimulationLedger_ACU(chat, persistedAnchor.messageIndex);
+    const projectedView = { ledger: projectedFold?.ledger ?? nextEnvelope.ledger, fields: projectedFold?.fields,
+      archive: foldWorldSimulationArchive_ACU(chat, persistedAnchor.messageIndex).snapshot };
+    if (hasPartialWorldSimulationRunWrites_ACU(projectedView)) {
+      if (!runWriteProof) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+      stageWorldSimulationRunWriteProof_ACU(chat, persistedAnchor,
+        rebaseWorldSimulationRunWriteProof_ACU(runWriteProof, runWriteView, projectedView), input.completedAt);
     }
+    if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity
+      || !messagesIntact() || !originalFields.every(field => JSON.stringify(field.value) === field.content)) {
+      reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交前聊天或旧字段已变化');
+    }
+    stagedFields = snapshots.map(({ target, key }) => ({ target, key,
+      content: JSON.stringify(target[key]), existed: Object.prototype.hasOwnProperty.call(target, key) }));
     saveAttempted = true;
     await saveChatToHostStrict_ACU();
     if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
       reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存后聊天上下文已变化');
     }
     resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat);
+    if (!currentFieldsIntact()) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存期间提交字段已变化');
+    if (hasPartialWorldSimulationRunWrites_ACU(projectedView)) {
+      const persistedProof = readWorldSimulationRunWriteProof_ACU(persistedAnchor, chat);
+      const expectedProof = rebaseWorldSimulationRunWriteProof_ACU(runWriteProof!, runWriteView, projectedView);
+      const verifiedFold = foldWorldSimulationLedger_ACU(chat, persistedAnchor.messageIndex);
+      const verifiedView = { ledger: verifiedFold?.ledger ?? nextEnvelope.ledger, fields: verifiedFold?.fields,
+        archive: foldWorldSimulationArchive_ACU(chat, persistedAnchor.messageIndex).snapshot };
+      const verifiedProof = rebaseWorldSimulationRunWriteProof_ACU(runWriteProof!, runWriteView, verifiedView);
+      if (!persistedProof || persistedProof.stateDigest !== expectedProof.stateDigest
+        || verifiedProof.fingerprint !== expectedProof.fingerprint) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+    }
   } catch (error) {
-    for (const snapshot of snapshots) restoreField_ACU(snapshot.target, snapshot.key, snapshot.existed, snapshot.value);
     const stillActive = getChatArray_ACU() === chat && getActiveChatStorageIdentity_ACU(chat) === input.identity.chatIdentity;
+    // 宿主监听器若原地改写已保存对象，不能把自己的旧快照覆盖其新状态并声称补偿成功。
+    if (saveAttempted && (!stillActive || !currentFieldsIntact() || !originalFields.every(field =>
+      JSON.stringify(field.value) === field.content))) {
+      reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '世界推演保存期间状态已变化，无法安全补偿', {
+        message: error instanceof Error ? error.message : String(error), recovery: 'unavailable',
+      });
+    }
+    for (const snapshot of snapshots) restoreField_ACU(snapshot.target, snapshot.key, snapshot.existed, snapshot.value);
     if (saveAttempted && stillActive) {
       try {
         await saveChatToHostStrict_ACU();
       } catch (rollbackError) {
         reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '世界推演联合提交与补偿保存均失败', {
           primaryMessage: error instanceof Error ? error.message : String(error),
-          rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+          rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError), recovery: 'failed',
+        });
+      }
+      if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity
+        || !fieldsIntact(originalFields)) {
+        reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '世界推演补偿保存后状态已变化，无法确认恢复', {
+          message: error instanceof Error ? error.message : String(error), recovery: 'unavailable',
         });
       }
     }
     if (error instanceof WorldSimulationValidationError_ACU) throw error;
     reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '世界推演联合提交失败，内存快照已恢复', {
       message: error instanceof Error ? error.message : String(error),
+      ...(saveAttempted ? { recovery: 'saved' } : {}),
     });
   }
+  return persistedAnchor;
 }
 
-export function commitWorldSimulationProjection_ACU(input: CommitInput_ACU): Promise<void> {
+export function commitWorldSimulationProjection_ACU(input: CommitInput_ACU): Promise<WorldSimulationAnchorIdentity_ACU> {
   const previous = tailsByChat_ACU.get(input.identity.chatIdentity) ?? Promise.resolve();
   const result = previous.then(() => commitWithinQueue_ACU(input), () => commitWithinQueue_ACU(input));
   const settled = result.catch((): void => undefined);
@@ -394,3 +467,14 @@ export function commitWorldSimulationProjection_ACU(input: CommitInput_ACU): Pro
 }
 
 export type WorldSimulationCommitInput_ACU = CommitInput_ACU;
+
+/** 世界推演逐栏写入和最终投影提交共享队列，防止旧账本覆盖即时写入。 */
+export function commitWorldSimulationFieldWrites_ACU(input: WorldSimulationFieldCommitInput_ACU): Promise<WorldSimulationFieldCommitReceipt_ACU> {
+  const key = input.identity.chatIdentity;
+  const previous = tailsByChat_ACU.get(key) ?? Promise.resolve();
+  const result = previous.then(() => commitWorldSimulationFieldWritesWithinQueue_ACU(input), () => commitWorldSimulationFieldWritesWithinQueue_ACU(input));
+  const settled: Promise<void> = result.then((): void => undefined, (): void => undefined);
+  tailsByChat_ACU.set(key, settled);
+  void settled.finally(() => { if (tailsByChat_ACU.get(key) === settled) tailsByChat_ACU.delete(key); });
+  return result;
+}

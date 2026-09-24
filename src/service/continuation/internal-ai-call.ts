@@ -1,5 +1,6 @@
 import { callAIWithResolvedPreset_ACU, type AiUsageMetadata_ACU } from '../ai/api-call';
 import type { ContinuationResolvedApiPreset_ACU } from './api-preset';
+import { buildOpenAiPromptCacheKey_ACU, supportsExplicitOpenAiCacheKey_ACU } from '../ai/prompt-cache';
 import { ContinuationValidationError_ACU, type ContinuationAgentApiPresetRole_ACU, type ContinuationInternalAiRequestIdentity_ACU } from './model';
 import {
   beginContinuationInternalAiMainApiInvocation_ACU,
@@ -12,17 +13,14 @@ export type { AiUsageMetadata_ACU };
 
 /** 内部 AI 调用的缓存与用量选项。全部可选：不传时行为与历史版本完全一致。 */
 export interface ContinuationInternalAiCallOptions_ACU {
-  /**
-   * 是否注入 prompt_cache_key。生产调用方恒传 false：该字段会干扰部分渠道的前缀缓存。
-   * 仅 custom（chat-completions）路径生效；tavern / 主 API 路径不受影响。
-   * 用量回调 onUsage 与此开关无关，关闭注入后仍统计缓存命中。
-   */
+  /** 在已验证可控且供应商支持的请求体上使用稳定缓存命名空间；未知路由不注入。 */
   promptCacheEnabled?: boolean;
-  /**
-   * 缓存命名空间的调用方标识（如 'agent-main'、'sub-mainline-planner'、'outline'）。
-   * 不同调用方的提示词前缀不同，分开命名空间可避免互相挤占缓存路由。缺省用 identity.source。
-   */
+  /** 当前角色的稳定命名空间（不得包含迭代号或本次工具结果）。 */
   cacheScope?: string;
+  /** 角色实际可用的文本工具协议集合；变化时必须隔离缓存路由。 */
+  cacheTools?: readonly string[];
+  /** 已提交主会话总结边界；总结改变时隔离缓存路由，不跟随每轮消息增长。 */
+  cacheBoundary?: string;
   /** 响应带回 token 用量时回调。并发调用各自持有闭包，互不干扰。 */
   onUsage?: (usage: AiUsageMetadata_ACU) => void;
   /** 本次调用的最大输出 token 下限；预设值更大时沿用预设。缺省不抬。 */
@@ -47,45 +45,6 @@ export const CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU: Readonly<Record<Continua
   webResearcher: 8192,
   instructionComposer: 4096,
 };
-
-/**
- * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
- * 输入可能含中文与路径分隔符，哈希后得到纯 [0-9a-f] 串，满足请求体注入通道的字符白名单。
- */
-function fnv1aHex_ACU(input: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
-}
-
-const PROMPT_CACHE_KEY_NAMESPACE_ACU = 'acu-cont-v2';
-const PROMPT_CACHE_KEY_MAX_LENGTH_ACU = 64;
-
-/**
- * 组装本次调用的 prompt_cache_key。只含版本、聊天身份、调用 scope 与模型路由四类稳定因子；
- * 不含任何随请求、迭代或轮次变化的内容，也不暴露原始聊天身份、scope、模型或 URL。
- */
-function buildPromptCacheKey_ACU(
-  identity: ContinuationInternalAiRequestIdentity_ACU,
-  scope: string,
-  preset: ContinuationResolvedApiPreset_ACU,
-): string {
-  const chatHash = fnv1aHex_ACU(identity.chatIdentity);
-  const scopeHash = fnv1aHex_ACU(scope);
-  const routeHash = fnv1aHex_ACU(JSON.stringify([
-    preset.apiMode,
-    preset.apiConfig.model,
-    preset.apiConfig.url,
-  ]));
-  const key = `${PROMPT_CACHE_KEY_NAMESPACE_ACU}-${chatHash}-${scopeHash}-${routeHash}`;
-  if (key.length > PROMPT_CACHE_KEY_MAX_LENGTH_ACU || !/^[A-Za-z0-9_-]+$/.test(key)) {
-    throw new Error('内部 AI 缓存路由键不符合长度或字符约束。');
-  }
-  return key;
-}
 
 /**
  * 把一次调用的用量渲染成会话流条目里的紧凑标签。
@@ -118,9 +77,12 @@ export async function callContinuationInternalAi_ACU(
   options?: ContinuationInternalAiCallOptions_ACU,
 ): Promise<string | null> {
   beginContinuationInternalAiRequest_ACU(identity);
-  const cacheEnabled = options?.promptCacheEnabled === true;
+  const cacheEnabled = options?.promptCacheEnabled === true && supportsExplicitOpenAiCacheKey_ACU(preset);
   const extras = {
-    ...(cacheEnabled ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source, preset) } : {}),
+    ...(cacheEnabled ? { promptCacheKey: buildOpenAiPromptCacheKey_ACU({
+      chatIdentity: identity.chatIdentity, role: options?.cacheScope || identity.source,
+      tools: options?.cacheTools ?? [], boundary: options?.cacheBoundary, preset,
+    }) } : {}),
     ...(options?.minOutputTokens ? { minOutputTokens: options.minOutputTokens } : {}),
   };
   try {

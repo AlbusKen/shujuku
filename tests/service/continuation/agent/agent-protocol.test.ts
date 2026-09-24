@@ -12,6 +12,7 @@ import {
   parseAgentReviewerOutput_ACU,
   parseAgentComposerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
+  parseAgentModuleSqlFieldWrites_ACU,
 } from '../../../../src/service/continuation/agent/agent-protocol';
 import { AGENT_PREFILLS_ACU } from '../../../../src/service/continuation/agent/agent-defaults';
 
@@ -240,7 +241,7 @@ describe('子代理输出解析', () => {
 
   it('年代学写集的非法 action、precision、空证据与非整数证据全部拒绝', () => {
     const item = { action: 'upsert', id: 'T1', anchor: '入城后的第七天', elapsed: '约十七日', precision: 'approximate', transition: '休整七日', evidenceIndexes: [4] };
-    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, action: 'patch' }] } })).toThrowError(/action 必须是 upsert \/ retire/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, action: 'delete' }] } })).toThrowError(/action 必须是 upsert \/ patch \/ retire/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, precision: '大概吧' }] } })).toThrowError(/precision 必须是 exact \/ approximate \/ unknown/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, evidenceIndexes: [] }] } })).toThrowError(/evidenceIndexes 必须是非空数组/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ ...item, evidenceIndexes: [1.5] }] } })).toThrowError(/必须是非负整数楼层号/);
@@ -286,14 +287,17 @@ describe('子代理输出解析', () => {
   });
 
 
-  it('网页资料与年代学 SQL UPDATE 经完整领域写集映射，不丢失 id 和 revision', () => {
-    const web = parseAgentResearcherOutput_ACU({ summary: '更新百科', sql: "UPDATE web_refs SET page_ref = 'P1', name = '阿锦', brief = '人物', detail = '见网页' WHERE id = 'WR-001' AND expected_revision = 2;" });
-    expect(web).toMatchObject({ expectedRevision: 2, items: [{ action: 'upsert', id: 'WR-001', pageRef: 'P1', title: '阿锦', brief: '人物' }] });
-    const chronology = parseAgentMaintainerOutput_ACU({ summary: '修正时间', sql: "UPDATE chronology SET anchor = '隔日', elapsed = '两日', precision = 'exact', transition = '经过一夜', evidence_indexes = '[2]' WHERE id = 'T1' AND expected_revision = 4;" });
+  it('网页资料与年代学 SQL UPDATE 只映射指定栏位，不丢失 id 和 revision', () => {
+    const web = parseAgentResearcherOutput_ACU({ summary: '更新百科', sql: "UPDATE web_refs SET brief = '新简介' WHERE id = 'WR-001' AND expected_revision = 2;" });
+    expect(web).toMatchObject({ expectedRevision: 2, items: [], patches: [{ id: 'WR-001', brief: '新简介' }] });
+    const chronology = parseAgentMaintainerOutput_ACU({ summary: '修正时间', sql: "UPDATE chronology SET evidence_indexes = '[5,2,5]' WHERE id = 'T1' AND expected_revision = 4;" });
     expect(chronology.delta.expectedRevisions).toMatchObject({ chronology: 4 });
-    expect(chronology.delta.chronology).toEqual([expect.objectContaining({ action: 'upsert', id: 'T1', anchor: '隔日', evidenceIndexes: [2] })]);
+    expect(chronology.delta.chronology).toEqual([]);
+    expect(chronology.delta.chronologyPatches).toEqual([{ id: 'T1', evidenceIndexes: [2, 5] }]);
     expect(() => parseAgentResearcherOutput_ACU({ sql: "UPDATE hooks SET summary = '越权' WHERE id = 'H1';" })).toThrow(/只允许写入 web_refs/);
-    expect(() => parseAgentResearcherOutput_ACU({ sql: "UPDATE web_refs SET brief = '不完整' WHERE id = 'WR-001' AND expected_revision = 0;" })).toThrow(/完整字段/);
+    expect(() => parseAgentMaintainerOutput_ACU({ sql: "UPDATE chronology SET precision = '大概吧' WHERE id = 'T1' AND expected_revision = 4;" })).toThrow(/precision 必须是/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { chronology: [{ action: 'patch', id: 'T1' }] } })).toThrow(/至少要带一个/);
+    expect(() => parseAgentResearcherOutput_ACU({ delta: { webRefs: [{ action: 'patch', id: 'WR-001' }] } })).toThrow(/至少要带一个/);
   });
 
   it('策划类必须给出 recommendation，资料不足应改走工具调用', () => {
@@ -322,5 +326,44 @@ describe('协议错误压缩', () => {
       expect(compactAgentProtocolError_ACU(error)).toContain('CONTINUATION_AGENT_PROTOCOL_INVALID');
     }
     expect(compactAgentProtocolError_ACU(new Error('普通错误'))).toBe('普通错误');
+  });
+});
+
+
+describe('逐栏 write_sql 意图解析', () => {
+  it('保留合法栏目并逐栏拒绝未知列，不把坏列扩大为整条拒绝', () => {
+    const parsed = parseAgentModuleSqlFieldWrites_ACU(
+      "UPDATE hooks SET summary='新内容', bogus=7, status='active' WHERE id='H1' AND expected_revision=2",
+      'hook-cognition-maintainer',
+    );
+    expect(parsed.intents).toEqual([{ kind: 'update', module: 'hooks', id: 'H1', expectedRevision: 2, fields: { summary: '新内容', status: 'active' } }]);
+    expect(parsed.rejected).toEqual([{ path: 'sql[0].hooks.bogus', reason: expect.stringContaining('白名单') }]);
+  });
+
+  it('严格校验角色、条件与修订号；拒绝的语句不提交', () => {
+    const parsed = parseAgentModuleSqlFieldWrites_ACU(
+      "UPDATE web_refs SET brief='越权' WHERE id='WR-001' AND expected_revision=0; UPDATE hooks SET summary='有效' WHERE id='H1' AND expected_revision=1 AND scope='bad'; UPDATE hooks SET summary='合法' WHERE id='H1' AND expected_revision=1",
+      'hook-cognition-maintainer',
+    );
+    expect(parsed.rejected.map(item => item.path)).toEqual(['sql[0].web_refs', 'sql[1].hooks.WHERE']);
+    expect(parsed.intents).toEqual([{ kind: 'update', module: 'hooks', id: 'H1', expectedRevision: 1, fields: { summary: '合法' } }]);
+    expect(() => parseAgentModuleSqlFieldWrites_ACU("UPDATE hooks SET summary=() WHERE id='H1'", 'hook-cognition-maintainer')).toThrow();
+  });
+
+  it('映射结构化值与网页句柄，退役语句携带原因，约束提议单独归集', () => {
+    const parsed = parseAgentModuleSqlFieldWrites_ACU(
+      "INSERT INTO web_refs (expected_revision, page_ref, name, brief) VALUES (0, 'page-1', '名称', '摘要'); DELETE FROM web_refs WHERE id='WR-001' AND expected_revision=0 AND reason='过时'",
+      'web-researcher',
+    );
+    expect(parsed.intents).toEqual([
+      { kind: 'insert', module: 'webRefs', id: '', expectedRevision: 0, fields: { title: '名称', brief: '摘要' }, pageRef: 'page-1' },
+      { kind: 'delete', module: 'webRefs', id: 'WR-001', expectedRevision: 0, fields: {}, reason: '过时' },
+    ]);
+    const maintainer = parseAgentModuleSqlFieldWrites_ACU(
+      "INSERT INTO constraint_proposals (text) VALUES ('请登记红线'); UPDATE info_gap SET character_knowledge='[{\"name\":\"林\",\"knows\":\"事\"}]' WHERE id='E1' AND expected_revision=3",
+      'hook-cognition-maintainer',
+    );
+    expect(maintainer.constraintProposals).toEqual(['请登记红线']);
+    expect(maintainer.intents[0].fields.characterKnowledge).toEqual([{ name: '林', knows: '事' }]);
   });
 });
