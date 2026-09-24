@@ -561,4 +561,39 @@ describe('子代理逐栏工具会话', () => {
     expect(follow).not.toContain('delta 里各数组');
     expect(result.usedFieldWrites).toBe(true);
   });
+
+  it('总纲空交付改为要求一条 SQL，不再索要 delta.storyArc', async () => {
+    const input = input_ACU();
+    input.delegation = { agentName: 'arc-architect', prompt: '立总纲', reads: [] };
+    const seen: string[] = [];
+    input.writeSql = async ({ sql }) => {
+      seen.push(sql);
+      return {
+        status: 'committed',
+        accepted: [{ module: 'storyArc', id: 'STORY-01', field: 'title', revision: 1 }],
+        rejected: [],
+        partials: [],
+        revisions: input.resolveContext.moduleSnapshot.revisions,
+        constraintProposals: [],
+      } as any;
+    };
+    const messages: Array<readonly { role: string; content: string }[]> = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async value => {
+        messages.push(value);
+        return messages.length === 1
+          ? '{"summary":"资料已充分，直接交付总纲契约"}'
+          : JSON.stringify({ summary: '补写', sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)" });
+      },
+    });
+    const result = await runtime.run(input);
+    const follow = messages[1].map(item => item.content).join('\n');
+    expect(follow).toContain('调用 write_sql');
+    expect(follow).toContain('["经营线"]');
+    expect(follow).toContain('expected_revision 必须等于 0');
+    expect(follow).not.toContain('delta.storyArc');
+    expect(seen).toEqual(["INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)"]);
+    expect(result.usedFieldWrites).toBe(true);
+  });
 });

@@ -157298,11 +157298,40 @@ Expected function or array of functions, received type ${typeof value}.`
             },
         };
     }
+    /** 把写回执里的失败译成下一条 SQL 该怎么写，避免模型改去输出 delta 或整篇说明。 */
+    function renderWriteSqlRepair_ACU(receipt) {
+        const lines = [];
+        const fatal = receipt.rejected.find(item => item.path === 'host' || item.path === 'sql');
+        if (fatal?.reason.includes('字段数与值数量不一致')) {
+            lines.push('这条 SQL 没有解析，任何栏目都没写入。字段个数必须等于值的个数；字符串里的单引号写成两个单引号；一次只写一条语句、一个 id。');
+        }
+        else if (fatal?.reason.includes('领域快照')) {
+            lines.push('这条 SQL 被整句退回，没有写入。下一次只提交一个 id 的一条语句。');
+        }
+        for (const item of receipt.rejected) {
+            if (item.path === 'host' || item.path === 'sql')
+                continue;
+            if (item.reason.includes('必须是非空字符串数组'))
+                lines.push(`${item.path} 要写成单引号包裹的 JSON 数组，例如 '["经营线"]'，不要用竖线或一整句中文。`);
+            else if (item.reason.startsWith('revision_conflict'))
+                lines.push(`${item.path} 的 expected_revision 改为 ${/actual=(\d+)/.exec(item.reason)?.[1] ?? '回执 revisions 里该模块的当前值'}。`);
+            else if (item.reason === 'not_found')
+                lines.push(`${item.path} 还没有记录，用 INSERT，不要 UPDATE。`);
+            else if (item.reason === 'id_exists')
+                lines.push(`${item.path} 已有记录，用 UPDATE，不要再 INSERT。`);
+            else if (item.reason.includes('SET 不得指定'))
+                lines.push('UPDATE 的 SET 里不要写 id 或 expected_revision，这两项只放在 WHERE。');
+        }
+        if ((receipt.partials ?? []).some(item => item.promotionError?.includes('active') || item.promotionError?.includes('sustainingThreads'))) {
+            lines.push('同一时刻只能有一条 volume 的 status 为 active，其余用 planned。scope=story 不要带卷级栏目。');
+        }
+        return lines.join('\n');
+    }
     /** 契约 SQL 已经按栏目落库时，只追缺栏和被拒栏目，不再把整行收成会失败的 patch。 */
     function renderIncompleteFieldWrite_ACU(receipt) {
         const rejected = receipt.rejected.filter(item => item.path !== 'host');
         const missing = (receipt.partials ?? []).filter(item => item.missingFields.length || item.promotionError);
-        if (!rejected.length && !missing.length && receipt.partials !== null)
+        if (!rejected.length && !missing.length && receipt.partials !== null && !renderWriteSqlRepair_ACU(receipt))
             return null;
         const lines = [];
         if (receipt.accepted.length)
@@ -157319,7 +157348,40 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         if (receipt.partials === null)
             lines.push('保存状态不确定。先 read $FIELD:模块:ID 读取权威帧，再决定补写。');
+        const repair = renderWriteSqlRepair_ACU(receipt);
+        if (repair)
+            lines.push(repair);
         lines.push('请调用 write_sql，只提交上面点名的栏目。分栏记录已经存在时用 UPDATE，WHERE 带 id 和当前 expected_revision；还没有记录时才用 INSERT。不要把尚未入库的新行写成 UPDATE。');
+        return lines.join('\n');
+    }
+    /** 总纲还没建立时，直接要一条 SQL，不再把模型赶回 delta.storyArc。 */
+    function renderArcSqlBootstrap_ACU(chat, remainingWriteRounds) {
+        const lines = [
+            '总纲还不能执行。summary、Markdown、delta 和顶层 storyArc 数组都不会入库。',
+            remainingWriteRounds > 0
+                ? '请调用 write_sql。sql 只能是一条 INSERT 或 UPDATE，一次一个 id。'
+                : 'write_sql 轮次已用尽。不要再调用函数。只输出一个 JSON：{"sql":"一条 INSERT 或 UPDATE"}，一次一个 id。',
+        ];
+        const folded = readAgentModuleFoldState_ACU(chat);
+        if (folded.salvaged || folded.candidates.some(item => !item.valid)) {
+            lines.push('资料帧状态不确定。先 read $FIELD:storyArc 读取权威帧，再决定补写。');
+            return lines.join('\n');
+        }
+        const revision = folded.snapshot.revisions.storyArc;
+        lines.push(`当前 story_arc 修订号是 ${revision}。expected_revision 必须等于 ${revision}。`);
+        const records = Object.entries(folded.fields.records.storyArc ?? {});
+        if (!records.length) {
+            lines.push('现在没有任何总纲记录。先 INSERT 一条 scope=\'story\' 的全书方向，不要带 narrative_role、target_stage_range、sustaining_threads、payoff_targets。再逐条 INSERT volume：只有第一卷 status=\'active\'，其余 \'planned\'。');
+        }
+        else {
+            lines.push('已有分栏记录，不要重发已保存栏目：');
+            for (const [id, record] of records) {
+                const saved = Object.keys(record.fields);
+                lines.push(`- ${id}（${record.status === 'complete' ? '已是正式条目' : '尚未成为正式条目'}）：已有 ${saved.join('、') || '无'}；缺 ${record.missingFields.join('、') || '无'}。`);
+            }
+            lines.push('缺栏用 UPDATE，WHERE 带 id 和上面的修订号。还没有的 id 才用 INSERT。');
+        }
+        lines.push('sustaining_threads 与 payoff_targets 必须是单引号包裹的 JSON 数组，例如 \'["经营线"]\'。target_stage_range 例如 \'{"min":6,"max":10}\'。字符串里的单引号写成两个单引号。');
         return lines.join('\n');
     }
     function rejectedFieldReadAddresses_ACU$1(receipt) {
@@ -157430,7 +157492,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
             baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
             if (input.writeSql && writes.length)
-                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数逐栏即时提交，参数 sql 为受限 INSERT/UPDATE/DELETE SQL。不要把它写成 JSON。只写职责模块，用回执中的实际 revision 与 $FIELD:模块:ID[:栏目] 补缺栏；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧，不得按旧 revision 补写。一次工具轮优先一个写动作；最终契约不得重复提交已写栏目。' });
+                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数逐栏即时提交，参数 sql 为受限 INSERT/UPDATE/DELETE，一次只写一条语句和一个 id。不要写成 JSON、delta、Markdown 或顶层 storyArc 数组。只写职责模块，用回执中的实际 revision 与 $FIELD:模块:ID[:栏目] 补缺栏；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧，不得按旧 revision 补写。最终契约不得重复提交已写栏目。sustaining_threads 与 payoff_targets 写成 \'["条目"]\'，target_stage_range 写成 \'{"min":6,"max":10}\'。volume 同时只能有一条 status 为 active，其余 planned。scope=story 不要写卷级栏目。' });
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
             const transcript = [];
@@ -157718,13 +157780,15 @@ Expected function or array of functions, received type ${typeof value}.`
                                         if (key.startsWith('$FIELD:') || key.startsWith('$HOOKS_LEDGER') || key.startsWith('$INFO_GAP') || key.startsWith('$CHRONOLOGY') || key.startsWith('$STORY_ARC') || key.startsWith('$WEB_REFS'))
                                             gate.granted.delete(key);
                                 }
-                                toolResultSections.push(JSON.stringify({ action: 'write_sql', ...receipt,
+                                const repair = renderWriteSqlRepair_ACU(receipt);
+                                const receiptText = JSON.stringify({ action: 'write_sql', ...receipt,
                                     readAddresses: [...new Set([
                                             ...receipt.accepted.map(item => `$FIELD:${item.module}:${item.id}:${item.field}`),
                                             ...(receipt.partials ?? []).map(item => `$FIELD:${item.module}:${item.id}`),
                                             ...rejectedFieldReadAddresses_ACU$1(receipt),
                                         ])],
-                                    remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: maxWriteRounds - writeRoundsUsed }));
+                                    remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: maxWriteRounds - writeRoundsUsed });
+                                toolResultSections.push(repair ? `${receiptText}\n${repair}` : receiptText);
                             }
                             catch (error) {
                                 if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE')
@@ -157874,6 +157938,16 @@ Expected function or array of functions, received type ${typeof value}.`
                             && !hasActiveStoryArc_ACU(input.resolveContext.moduleSnapshot)
                             && !accumulated.delta.storyArc.length
                             && !accumulated.delta.storyArcPatches.length;
+                        if (emptyArcBootstrap && !pending.length && !draft.truncated && input.writeSql) {
+                            const request = renderArcSqlBootstrap_ACU(input.resolveContext.chat, maxWriteRounds - writeRoundsUsed);
+                            if (continuationsUsed >= maxContinuations) {
+                                return deliverContract(accumulated, [{ module: 'storyArc', index: 0, id: '', reason: request }]);
+                            }
+                            continuationsUsed += 1;
+                            transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+                            transcript.push({ role: 'user', content: request });
+                            continue;
+                        }
                         if (emptyArcBootstrap && !pending.length && !draft.truncated) {
                             pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 id / title / direction / escalation / withheld / status 与卷级契约字段' });
                         }
@@ -157926,7 +158000,10 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     // 被拒原文也要留在小循环对话里：模型必须看到自己上一次写了什么才能真正修正。
                     transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-                    transcript.push({ role: 'user', content: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合契约的 JSON 对象。` });
+                    const protocolRepair = input.writeSql && writes.length
+                        ? `你上一次的输出没有被采纳。原因：${lastReason}\n不要写说明、Markdown 或 delta。${maxWriteRounds - writeRoundsUsed > 0 ? '调用 write_sql，sql 是一条 INSERT 或 UPDATE。' : 'write_sql 轮次已用尽，不要再调用函数，只输出 {"sql":"一条 INSERT 或 UPDATE"}。'}一次一个 id。sustaining_threads 与 payoff_targets 写成 '["条目"]'。volume 同时只能有一条 active，其余 planned。`
+                        : `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合契约的 JSON 对象。`;
+                    transcript.push({ role: 'user', content: protocolRepair });
                 }
             }
             if (writeAttempted) {
