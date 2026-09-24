@@ -1941,7 +1941,8 @@ describe('世界推演 Agent runtime', () => {
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '山雨将至', summary: '正文' })), search: tools.search },
     });
     expect(result).toMatchObject({ outcome: 'blocked' });
-    expect(sent[0]?.at(-1)?.content).not.toBe('{');
+    expect(sent[0]?.at(-1)).toMatchObject({ role: 'assistant', content: '<think>\n' });
+    expect(sent[1]?.at(-1)).toMatchObject({ role: 'assistant', content: '<think>\n' });
     expect(sent[1]?.some(message => message.role === 'tool' && message.tool_call_id === 'call-rain' && message.content.includes('山雨将至'))).toBe(true);
   });
 

@@ -86258,18 +86258,41 @@ $CONTENT
     function toOpenAiToolCalls_ACU(calls) {
         return calls.map(call => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } }));
     }
-    /** 默认提示词尾部的未完成 JSON 预填充不能占住请求末尾，否则模型不会发起函数调用。 */
+    function isJsonPrefillStub_ACU(content) {
+        const trimmed = content.trim();
+        return trimmed === '{'
+            || trimmed.includes('<continue>')
+            || trimmed.endsWith('{\n  "thought": "')
+            || trimmed.endsWith('{\n  "summary": "')
+            || trimmed.endsWith('{\n  "verdict": "')
+            || trimmed.endsWith('{\n  "instruction": "');
+    }
+    /**
+     * 去掉未完成的 JSON 预填充。
+     * 它不能只从请求末尾拿掉：一旦后面跟上带 tool_calls 的助手消息，
+     * 酒馆会把连续的 assistant 并成前一条，tool_calls 被丢掉，
+     * MiniMax 就会报 tool result's tool id not found。
+     */
     function dropTerminalJsonPrefill_ACU(messages) {
-        if (!messages.length)
-            return [...messages];
-        const last = messages[messages.length - 1];
-        if (last.role !== 'assistant')
-            return [...messages];
-        const trimmed = last.content.trim();
-        if (trimmed === '{' || trimmed.includes('<continue>') || trimmed.endsWith('{\n  "thought": "') || trimmed.endsWith('{\n  "summary": "') || trimmed.endsWith('{\n  "verdict": "') || trimmed.endsWith('{\n  "instruction": "')) {
-            return messages.slice(0, -1);
-        }
-        return [...messages];
+        return messages.filter(message => !(message.role === 'assistant' && isJsonPrefillStub_ACU(message.content)));
+    }
+    /** 原生工具请求的尾部预填充：让模型先写思维链，闭合后再调用函数或输出 JSON。 */
+    const NATIVE_TOOL_THINK_PREFILL_ACU = '<think>\n';
+    function isThinkPrefillStub_ACU(content) {
+        return content.trim() === '<think>';
+    }
+    /**
+     * 去掉 JSON 预填充，并在请求最末补上思维链开头。
+     * 思维链只能是最后一条：若它留在带 tool_calls 的助手消息前面，
+     * 酒馆会把连续 assistant 并掉，工具编号随之丢失。
+     * 上一条已经是 assistant 时不再追加，避免再次并成一条。
+     */
+    function withNativeToolThinkPrefill_ACU(messages) {
+        const stripped = dropTerminalJsonPrefill_ACU(messages).filter(message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)));
+        const last = stripped[stripped.length - 1];
+        if (!last || last.role === 'assistant')
+            return stripped;
+        return [...stripped, { role: 'assistant', content: NATIVE_TOOL_THINK_PREFILL_ACU }];
     }
     /**
      * assistant 之后必须有 user 或 tool 反馈。一个动作可以跟多条 tool 结果。
@@ -90825,11 +90848,20 @@ $CONTENT
         }
         return next;
     }
+    function alignThinkPrefillProtocol_ACU(content) {
+        return content
+            .split('不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。').join('推理写在已开始的思维链里，</think> 之后再调用函数或输出 JSON。不要把推理写进 JSON，不要输出 Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。')
+            .split('不附加 Markdown、解释或思考标签。').join('推理写在思维链里，闭合后再输出协议 JSON，不附加 Markdown 或解释。')
+            .split('不附加 Markdown、解释、思考标签或其他字段。').join('推理写在思维链里。闭合后不附加 Markdown、解释或其他字段。');
+    }
     function worldSimulationDirectorRuntimeProtocolInstruction_ACU() {
-        return applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU());
+        return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU()));
     }
     function worldSimulationSpecialistRuntimeProtocolInstruction_ACU(name, writableModules) {
-        return applyWorldSimulationNativeToolPrompt_ACU(name, worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules));
+        return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU(name, worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules)));
+    }
+    function worldSimulationReviewerRuntimeProtocolInstruction_ACU() {
+        return alignThinkPrefillProtocol_ACU(worldSimulationReviewerProtocolInstruction_ACU());
     }
     function worldSimulationReviewerProtocolInstruction_ACU() {
         return [
@@ -157574,7 +157606,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
                 const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(this.dependencies.nativeTools
-                    ? dropTerminalJsonPrefill_ACU([...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : [])])
+                    ? withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : [])])
                     : [...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : []),
                         ...(trailingPrefill ? [trailingPrefill] : [])], input.preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
@@ -157992,7 +158024,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
                 }
                 const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(this.dependencies.nativeTools
-                    ? dropTerminalJsonPrefill_ACU([...baseMessages, ...transcript])
+                    ? withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript])
                     : [...baseMessages, ...transcript, ...(trailingPrefill ? [trailingPrefill] : [])], preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
@@ -158806,7 +158838,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderMainProtocolRejection_ACU(reason, execution, allowDelegate) {
         const lines = [
             `你上一次的输出没有被采纳。原因：${reason}`,
-            'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
+            'read 与 search 使用函数调用，不要写成 JSON。推理写在思维链里，闭合后再输出一个决策 JSON（不要 Markdown 围栏），格式必须是下面之一：',
         ];
         const hasTurn = !!execution.turn;
         if (!hasTurn && allowDelegate) {
@@ -159626,7 +159658,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
                 let messages = this.dependencies.nativeTools
-                    ? dropTerminalJsonPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
+                    ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
                     : this.spliceHistory_ACU(rendered, session.history());
                 // 发送前预检与压缩时机规则同一口径：阈值只是压缩触发线，一轮进行中允许超出到越界线
                 // （阈值 × AGENT_HISTORY_EMERGENCY_FACTOR_ACU）。轮内追加的工具结果、派工报告、迭代输出
@@ -159639,7 +159671,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (promptTokens > budgetTokens && (!session.continuingSameTurn || promptTokens > ceilingTokens)) {
                         if (await session.compact(promptTokens > ceilingTokens, messages)) {
                             messages = this.dependencies.nativeTools
-                                ? dropTerminalJsonPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
+                                ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
                                 : this.spliceHistory_ACU(rendered, session.history());
                             promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
                         }
@@ -163615,7 +163647,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderWorldSimulationDirectorProtocolRejection_ACU(issue, allowDelegate) {
         const lines = [
             `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（不要 <think> 块、不要 Markdown 围栏、不要 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签——这些标记只属于系统提示词，输出中禁止出现）。',
+            'read 与 search 使用函数调用，不要写成 JSON。推理写在思维链里，闭合后再输出一个决策 JSON。不要 Markdown 围栏，也不要输出 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
             '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
             'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
             'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
@@ -163636,7 +163668,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderWorldSimulationSpecialistProtocolRejection_ACU(issue, agentName, writableModules) {
         const lines = [
             `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 Markdown、解释、思考标签或额外字段。',
+            '推理写在思维链里。闭合后只输出一个 JSON 对象，不要 Markdown、解释或额外字段。',
             'status 必须精确为 candidate、no_change、failed、blocked 之一。',
             `agentName 必须精确为 ${agentName}。`,
         ];
@@ -163664,7 +163696,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderWorldSimulationReviewerProtocolRejection_ACU(issue) {
         return [
             `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+            '推理写在思维链里，闭合后再输出一个 JSON 对象。不要 Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
             '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。',
             'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
             'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
@@ -163688,7 +163720,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function renderWorldSimulationPlannerProtocolRejection_ACU(issue) {
         return [
             `你上一次的阶段规划输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-            '只输出一个 JSON 对象，不要 <think>、Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+            '推理写在思维链里，闭合后再输出一个 JSON 对象。不要 Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
             '顶层必须且只能包含 action、summary、plan；action 必须精确为 plan，summary 必须是非空字符串，plan 不得省略、设为 null 或只返回摘要。',
             `plan 必须完整包含 schemaVersion、title、objective、impactScope、factsToVerify、plannedTools、plannedSpecialists、expectedLedgerChanges、convergenceConditions、blockingConditions、completedSteps、nextStep。expectedLedgerChanges 只能使用：${WORLD_SIMULATION_LEDGER_MODULES_ACU.join(' | ')}。`,
             JSON.stringify({
@@ -167184,7 +167216,10 @@ Expected function or array of functions, received type ${typeof value}.`
                     const tail = [...(input.anchor && handoffHint ? [handoffHint] : []),
                         ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }])];
                     const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
-                    let prepared = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU([...fixed, ...transcript, ...tail]) : [...fixed, ...transcript, ...tail];
+                    const assemble = (body) => this.dependencies.nativeTools
+                        ? withNativeToolThinkPrefill_ACU([...fixed, ...body, ...tail])
+                        : [...fixed, ...body, ...tail];
+                    let prepared = assemble(transcript);
                     // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
                     // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。
                     if (!input.anchor) {
@@ -167200,7 +167235,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             });
                             if (compacted.compacted) {
                                 transcript.splice(0, transcript.length, ...compacted.transcript);
-                                prepared = [...fixed, ...transcript, ...tail];
+                                prepared = assemble(transcript);
                             }
                         }
                     }
@@ -167217,7 +167252,7 @@ Expected function or array of functions, received type ${typeof value}.`
                                 // the candidate and the final request from the same authoritative projection.
                                 transcript.splice(0, transcript.length, ...confirmedHistory);
                                 persistedTranscriptLength = transcript.length;
-                                prepared = [...fixed, ...transcript, ...tail];
+                                prepared = assemble(transcript);
                             }
                             const planned = confirmedHistory.length && await measureWorldSimulationPrompt_ACU(prepared, count) > threshold
                                 ? await planWorldSimulationHistoryCompaction_ACU({
@@ -167239,7 +167274,7 @@ Expected function or array of functions, received type ${typeof value}.`
                                 }
                                 transcript.splice(0, transcript.length, ...readWorldSimulationDirectorHistory_ACU(input.chat));
                                 persistedTranscriptLength = transcript.length;
-                                prepared = [...fixed, ...transcript, ...tail];
+                                prepared = assemble(transcript);
                             }
                         }
                     }
@@ -167951,7 +167986,7 @@ ${rejectionText}` : delegationFeedback,
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
                 const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
                 const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
-                const messages = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(drafted) : drafted;
+                const messages = this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(drafted) : drafted;
                 const sent = await executeWorldSimulationFinalRequest_ACU({
                     messages,
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
@@ -168112,10 +168147,10 @@ ${rejectionText}` : delegationFeedback,
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                 const requestContext = { ...context, evidenceRegistry: requestSnapshot };
                 const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
-                const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
+                const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
                 const reviewerDraft = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
                 const sent = await executeWorldSimulationFinalRequest_ACU({
-                    messages: this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(reviewerDraft) : reviewerDraft,
+                    messages: this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(reviewerDraft) : reviewerDraft,
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
                     invoke: value => this.dependencies.invoke(agentName, value, preset),

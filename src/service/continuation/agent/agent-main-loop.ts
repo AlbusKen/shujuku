@@ -19,7 +19,7 @@ import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
-import { agentNativeTools_ACU, dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, nativeToolCallsToProtocolJson_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
@@ -243,7 +243,7 @@ export function evaluateArcArchitectDispatch_ACU(context: AgentResolveContext_AC
 export function renderMainProtocolRejection_ACU(reason: string, execution: ContinuationAgentExecutionContext_ACU, allowDelegate: boolean): string {
   const lines = [
     `你上一次的输出没有被采纳。原因：${reason}`,
-    'read 与 search 使用函数调用，不要写成 JSON。决策动作只输出一个 JSON 对象（可在前面写少量思路，但不要 <think> 块、不要 Markdown 围栏），格式必须是下面之一：',
+    'read 与 search 使用函数调用，不要写成 JSON。推理写在思维链里，闭合后再输出一个决策 JSON（不要 Markdown 围栏），格式必须是下面之一：',
   ];
   const hasTurn = !!execution.turn;
   if (!hasTurn && allowDelegate) {
@@ -1118,7 +1118,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
       let messages = this.dependencies.nativeTools
-        ? dropTerminalJsonPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
+        ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
         : this.spliceHistory_ACU(rendered, session.history());
       // 发送前预检与压缩时机规则同一口径：阈值只是压缩触发线，一轮进行中允许超出到越界线
       // （阈值 × AGENT_HISTORY_EMERGENCY_FACTOR_ACU）。轮内追加的工具结果、派工报告、迭代输出
@@ -1131,7 +1131,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         if (promptTokens > budgetTokens && (!session.continuingSameTurn || promptTokens > ceilingTokens)) {
           if (await session.compact(promptTokens > ceilingTokens, messages)) {
             messages = this.dependencies.nativeTools
-              ? dropTerminalJsonPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
+              ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
               : this.spliceHistory_ACU(rendered, session.history());
             promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
           }

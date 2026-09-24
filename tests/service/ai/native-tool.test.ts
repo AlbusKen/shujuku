@@ -5,6 +5,8 @@ import {
   agentNativeTools_ACU,
   chatTurnFromJson_ACU,
   dropTerminalJsonPrefill_ACU,
+  NATIVE_TOOL_THINK_PREFILL_ACU,
+  withNativeToolThinkPrefill_ACU,
   isModelExchangeSequence_ACU,
   nativeToolCallsToProtocolJson_ACU,
   nativeToolExchange_ACU,
@@ -42,6 +44,22 @@ describe('native tool calls', () => {
       { role: 'user', content: '任务' },
       { role: 'assistant', content: '<continue>\n{\n  "thought": "' },
     ]).map(message => message.role)).toEqual(['user']);
+    const kept = dropTerminalJsonPrefill_ACU([
+      { role: 'user', content: '任务' },
+      { role: 'assistant', content: '{\n  "summary": "' },
+      { role: 'assistant', content: '<think>先读世界书</think>', tool_calls: [{ id: 'call_function_1', type: 'function' as const, function: { name: 'read', arguments: '{"reads":["$WORLDBOOK:书:1"]}' } }] },
+      { role: 'tool', tool_call_id: 'call_function_1', content: '已读' },
+    ]);
+    expect(kept.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(kept[1]?.tool_calls?.[0]?.id).toBe('call_function_1');
+    const primed = withNativeToolThinkPrefill_ACU(kept);
+    expect(primed.map(message => message.role)).toEqual(['user', 'assistant', 'tool', 'assistant']);
+    expect(primed[1]?.tool_calls?.[0]?.id).toBe('call_function_1');
+    expect(primed.at(-1)?.content).toBe(NATIVE_TOOL_THINK_PREFILL_ACU);
+    expect(withNativeToolThinkPrefill_ACU([
+      { role: 'user', content: '任务' },
+      { role: 'assistant', content: '{\n  "summary": "' },
+    ]).map(message => message.content)).toEqual(['任务', NATIVE_TOOL_THINK_PREFILL_ACU]);
     expect(isModelExchangeSequence_ACU([
       { role: 'assistant' },
       { role: 'tool' },

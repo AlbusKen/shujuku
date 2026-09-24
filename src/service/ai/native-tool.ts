@@ -185,16 +185,46 @@ export function toOpenAiToolCalls_ACU(calls: readonly StoredNativeToolCall_ACU[]
   return calls.map(call => ({ id: call.id, type: 'function' as const, function: { name: call.name, arguments: call.arguments } }));
 }
 
-/** 默认提示词尾部的未完成 JSON 预填充不能占住请求末尾，否则模型不会发起函数调用。 */
+function isJsonPrefillStub_ACU(content: string): boolean {
+  const trimmed = content.trim();
+  return trimmed === '{'
+    || trimmed.includes('<continue>')
+    || trimmed.endsWith('{\n  "thought": "')
+    || trimmed.endsWith('{\n  "summary": "')
+    || trimmed.endsWith('{\n  "verdict": "')
+    || trimmed.endsWith('{\n  "instruction": "');
+}
+
+/**
+ * 去掉未完成的 JSON 预填充。
+ * 它不能只从请求末尾拿掉：一旦后面跟上带 tool_calls 的助手消息，
+ * 酒馆会把连续的 assistant 并成前一条，tool_calls 被丢掉，
+ * MiniMax 就会报 tool result's tool id not found。
+ */
 export function dropTerminalJsonPrefill_ACU<T extends { role: string; content: string }>(messages: readonly T[]): T[] {
-  if (!messages.length) return [...messages];
-  const last = messages[messages.length - 1];
-  if (last.role !== 'assistant') return [...messages];
-  const trimmed = last.content.trim();
-  if (trimmed === '{' || trimmed.includes('<continue>') || trimmed.endsWith('{\n  "thought": "') || trimmed.endsWith('{\n  "summary": "') || trimmed.endsWith('{\n  "verdict": "') || trimmed.endsWith('{\n  "instruction": "')) {
-    return messages.slice(0, -1);
-  }
-  return [...messages];
+  return messages.filter(message => !(message.role === 'assistant' && isJsonPrefillStub_ACU(message.content)));
+}
+
+/** 原生工具请求的尾部预填充：让模型先写思维链，闭合后再调用函数或输出 JSON。 */
+export const NATIVE_TOOL_THINK_PREFILL_ACU = '<think>\n';
+
+function isThinkPrefillStub_ACU(content: string): boolean {
+  return content.trim() === '<think>';
+}
+
+/**
+ * 去掉 JSON 预填充，并在请求最末补上思维链开头。
+ * 思维链只能是最后一条：若它留在带 tool_calls 的助手消息前面，
+ * 酒馆会把连续 assistant 并掉，工具编号随之丢失。
+ * 上一条已经是 assistant 时不再追加，避免再次并成一条。
+ */
+export function withNativeToolThinkPrefill_ACU<T extends { role: string; content: string }>(messages: readonly T[]): T[] {
+  const stripped = dropTerminalJsonPrefill_ACU(messages).filter(
+    message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)),
+  );
+  const last = stripped[stripped.length - 1];
+  if (!last || last.role === 'assistant') return stripped;
+  return [...stripped, { role: 'assistant', content: NATIVE_TOOL_THINK_PREFILL_ACU } as T];
 }
 
 /**

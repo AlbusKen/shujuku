@@ -25,7 +25,7 @@ import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
 import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
-import { dropTerminalJsonPrefill_ACU, isModelExchangeSequence_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
+import { isModelExchangeSequence_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
@@ -454,7 +454,10 @@ export class WorldSimulationMainLoop_ACU {
         const tail = [...(input.anchor && handoffHint ? [handoffHint] : []),
           ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] }])];
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
-        let prepared = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU([...fixed, ...transcript, ...tail]) : [...fixed, ...transcript, ...tail];
+        const assemble = (body: typeof transcript) => this.dependencies.nativeTools
+          ? withNativeToolThinkPrefill_ACU([...fixed, ...body, ...tail])
+          : [...fixed, ...body, ...tail];
+        let prepared = assemble(transcript);
         // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
         // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。
         if (!input.anchor) {
@@ -470,7 +473,7 @@ export class WorldSimulationMainLoop_ACU {
             });
             if (compacted.compacted) {
               transcript.splice(0, transcript.length, ...compacted.transcript);
-              prepared = [...fixed, ...transcript, ...tail];
+              prepared = assemble(transcript);
             }
           }
         }
@@ -487,7 +490,7 @@ export class WorldSimulationMainLoop_ACU {
               // the candidate and the final request from the same authoritative projection.
               transcript.splice(0, transcript.length, ...confirmedHistory);
               persistedTranscriptLength = transcript.length;
-              prepared = [...fixed, ...transcript, ...tail];
+              prepared = assemble(transcript);
             }
             const planned = confirmedHistory.length && await measureWorldSimulationPrompt_ACU(prepared, count) > threshold
               ? await planWorldSimulationHistoryCompaction_ACU({
@@ -508,7 +511,7 @@ export class WorldSimulationMainLoop_ACU {
               }
               transcript.splice(0, transcript.length, ...readWorldSimulationDirectorHistory_ACU(input.chat));
               persistedTranscriptLength = transcript.length;
-              prepared = [...fixed, ...transcript, ...tail];
+              prepared = assemble(transcript);
             }
           }
         }

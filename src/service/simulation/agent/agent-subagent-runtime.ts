@@ -11,7 +11,7 @@ import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationFieldCommitReceipt_ACU } from '../simulation-field-commit-adapter';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerRuntimeProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type {
   WorldSimulationCandidate_ACU,
   WorldSimulationDelegation_ACU,
@@ -26,7 +26,7 @@ import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudge
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
-import { dropTerminalJsonPrefill_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string | AiChatTurn_ACU>; }
 export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; nativeTools?: boolean; }
@@ -360,7 +360,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
       const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
-      const messages = this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(drafted) : drafted;
+      const messages = this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(drafted) : drafted;
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
@@ -512,10 +512,10 @@ export class WorldSimulationSubagentRuntime_ACU {
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const requestContext = { ...context, evidenceRegistry: requestSnapshot };
       const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
-      const protocolGuard = { role: 'system', content: worldSimulationReviewerProtocolInstruction_ACU() };
+      const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
       const reviewerDraft = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const sent = await executeWorldSimulationFinalRequest_ACU({
-        messages: this.dependencies.nativeTools ? dropTerminalJsonPrefill_ACU(reviewerDraft) : reviewerDraft,
+        messages: this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(reviewerDraft) : reviewerDraft,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => this.dependencies.invoke(agentName, value, preset),

@@ -140,15 +140,26 @@ export function applyWorldSimulationNativeToolPrompt_ACU(name: WorldSimulationAg
   return next;
 }
 
+function alignThinkPrefillProtocol_ACU(content: string): string {
+  return content
+    .split('不得输出 <think>、Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。').join('推理写在已开始的思维链里，</think> 之后再调用函数或输出 JSON。不要把推理写进 JSON，不要输出 Markdown 围栏或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。')
+    .split('不附加 Markdown、解释或思考标签。').join('推理写在思维链里，闭合后再输出协议 JSON，不附加 Markdown 或解释。')
+    .split('不附加 Markdown、解释、思考标签或其他字段。').join('推理写在思维链里。闭合后不附加 Markdown、解释或其他字段。');
+}
+
 export function worldSimulationDirectorRuntimeProtocolInstruction_ACU(): string {
-  return applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU());
+  return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU()));
 }
 
 export function worldSimulationSpecialistRuntimeProtocolInstruction_ACU(
   name: WorldSimulationAgentName_ACU,
   writableModules: readonly string[],
 ): string {
-  return applyWorldSimulationNativeToolPrompt_ACU(name, worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules));
+  return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU(name, worldSimulationSpecialistProtocolInstruction_ACU(name, writableModules)));
+}
+
+export function worldSimulationReviewerRuntimeProtocolInstruction_ACU(): string {
+  return alignThinkPrefillProtocol_ACU(worldSimulationReviewerProtocolInstruction_ACU());
 }
 
 export function worldSimulationReviewerProtocolInstruction_ACU(): string {
