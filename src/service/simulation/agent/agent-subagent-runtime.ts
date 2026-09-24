@@ -25,6 +25,7 @@ import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationSubag
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
+import { renderWorldSimulationSnapshotTemplate_ACU, splitWorldSimulationSubagentPrompt_ACU } from './agent-shared-materials';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 
@@ -43,8 +44,10 @@ export interface WorldSimulationSubagentRunInput_ACU {
   readCurrent?: () => WorldSimulationLedger_ACU;
   readFieldSnapshot?: () => WorldSimulationLedgerFieldSnapshot_ACU;
   isCurrent?: () => boolean;
+  /** 主会话快照里未单独注入的部分，以及主会话已经读到的全文。 */
+  directorMaterials?: string;
 }
-export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; }
+export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; directorMaterials?: string; }
 
 
 function candidate_ACU(
@@ -357,9 +360,13 @@ export class WorldSimulationSubagentRuntime_ACU {
       const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
       const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
       const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
-      const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+      const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
+      const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
+      const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
+      const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+      const appendix = [snapshotText, input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
-      const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+      const drafted = [protocolGuard, ...rendered.messages, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const messages = this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(drafted) : drafted;
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
@@ -511,9 +518,13 @@ export class WorldSimulationSubagentRuntime_ACU {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
       const requestContext = { ...context, evidenceRegistry: requestSnapshot };
-      const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+      const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
+      const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
+      const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
+      const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+      const appendix = [snapshotText, input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
-      const reviewerDraft = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+      const reviewerDraft = [protocolGuard, ...rendered.messages, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages: this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(reviewerDraft) : reviewerDraft,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,

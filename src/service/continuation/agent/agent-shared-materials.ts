@@ -1,5 +1,5 @@
 /**
- * 子代理与主会话共用同一份运行时快照。任务段里只保留该子代理自己维护的资料占位符。
+ * 子代理任务段保留和本职强相关的资料占位符。附在末尾的快照去掉已经由这些占位符注入的段落。
  */
 
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU } from '../model';
@@ -17,7 +17,7 @@ import {
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
 import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU } from './agent-worldbook-read';
-import type { AgentSubagentKind_ACU, AgentWritableModule_ACU } from './agent-model';
+import type { AgentConversationMessage_ACU, AgentSubagentKind_ACU, AgentWritableModule_ACU } from './agent-model';
 
 const MODULE_TOKEN_ACU: Record<AgentWritableModule_ACU, string> = {
   storyArc: '$STORY_ARC',
@@ -37,11 +37,64 @@ const SHARED_PLACEHOLDERS_ACU = [
   '$WEB_REFS', '$WEB_TOOL_CATALOG',
 ];
 
+/** 主会话本轮已经 read/search 到的正文。附在子代理快照后面，避免再对同一地址调阅。 */
+export function renderMainSessionReadAppendix_ACU(messages: readonly AgentConversationMessage_ACU[]): string {
+  const latest = new Map<string, string>();
+  for (const message of messages) {
+    if (message.kind !== 'tool') continue;
+    const text = message.text.trim();
+    if (!text || text === '工具没有返回内容' || text.includes('不再重注')) continue;
+    const isRead = Boolean(message.readKey) || message.digest === 'read' || message.digest === 'search' || message.digest.startsWith('调阅 ');
+    if (!isRead) continue;
+    latest.set(message.readKey || `${message.digest}:${text.slice(0, 80)}`, text);
+  }
+  if (!latest.size) return '';
+  return [
+    '【主会话已调阅】',
+    '下面是主会话本轮已经读到的全文。快照里写着「应精读」的条目如果已出现在这里，直接使用，不要再对同一地址调用 read 或 search。',
+    ...latest.values(),
+  ].join('\n\n');
+}
+
+const KIND_RELATED_TOKENS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = {
+  arc: ['$STORY_ARC', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+  maintain: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+  plan: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
+  review: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+  research: ['$WEB_REFS', '$WEB_TOOL_CATALOG', '$WORLDBOOK_CATALOG', '$STORY_TAIL', '$TABLE_CATALOG', '$USER_REQUIREMENTS'],
+  compose: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+};
+
 export function keptSubagentMaterialTokens_ACU(kind: AgentSubagentKind_ACU, writes: readonly AgentWritableModule_ACU[]): Set<string> {
-  const kept = new Set<string>(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', ...writes.map(module => MODULE_TOKEN_ACU[module])]);
-  if (kind === 'maintain') kept.add('$HISTORY_UNSETTLED');
-  if (kind === 'research') kept.add('$WEB_TOOL_CATALOG');
-  return kept;
+  return new Set<string>(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...KIND_RELATED_TOKENS_ACU[kind], ...writes.map(module => MODULE_TOKEN_ACU[module])]);
+}
+
+/** 子代理任务段已经注入的资料，不再在附带快照里重复。主会话自己的快照不走这里。 */
+export function omitSnapshotSectionsForSubagent_ACU(snapshot: string, kept: ReadonlySet<string>): string {
+  const drop = new Set<string>();
+  if (kept.has('$USER_REQUIREMENTS')) drop.add('以下是用户对任务曾经提过的要求：');
+  if (kept.has('$OUTLINE_WINDOW')) {
+    drop.add('【完整当前阶段大纲】');
+    drop.add('【大纲状态】');
+    drop.add('【本轮目标】');
+    drop.add('【本轮节奏】');
+  }
+  if (kept.has('$STORY_ARC')) drop.add('【故事总纲状态】');
+  if (kept.has('$HISTORY_UNSETTLED')) drop.add('【未结算历史范围】');
+  if (kept.has('$TABLE_CATALOG')) drop.add('【表格目录】');
+  if (kept.has('$WORLDBOOK_CATALOG')) drop.add('【已启用世界书目录】');
+  if (kept.has('$WORLDBOOK_HITS')) drop.add('【本轮语境命中的世界书条目】');
+  if (kept.has('$WEB_REFS')) drop.add('【百科资料库目录】');
+  if (kept.has('$AGENT_READ_CATALOG')) drop.add('【读取地址词汇表】');
+  const keptBlocks: string[] = [];
+  let skipping = false;
+  for (const block of snapshot.split(/\n\n/)) {
+    const first = block.split('\n')[0].trim();
+    const heading = first.startsWith('【') || first.startsWith('以下是用户对任务曾经提过的要求');
+    if (heading) skipping = drop.has(first);
+    if (!skipping) keptBlocks.push(block);
+  }
+  return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 export function stripUnownedSubagentPrompt_ACU(

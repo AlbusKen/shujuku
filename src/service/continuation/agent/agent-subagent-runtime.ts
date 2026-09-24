@@ -23,7 +23,7 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
-import { keptSubagentMaterialTokens_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
+import { keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
 import { agentNativeTools_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
@@ -602,9 +602,10 @@ export class AgentSubagentRuntime_ACU {
       toolRoundsUsed: roundsUsed,
       grantedTokens: gate.state.grantedTokens,
     });
+    const keptTokens = keptSubagentMaterialTokens_ACU(definition.kind, writes);
     const promptSegments = stripUnownedSubagentPrompt_ACU(
       selectPromptSegments_ACU(input.settings, definition) as readonly ContinuationPromptSegment_ACU[],
-      keptSubagentMaterialTokens_ACU(definition.kind, writes),
+      keptTokens,
     );
     const rendered = await renderContinuationPrompt_ACU(promptSegments, {
       $AGENT_READ_MATERIALS: () => materials,
@@ -643,7 +644,8 @@ export class AgentSubagentRuntime_ACU {
     let baseMessages = definition.promptKey === 'arcArchitect'
       ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
       : rendered.messages;
-    const snapshotText = input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+    const presentTokens = new Set(promptSegments.flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
+    const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens);
     if (snapshotText) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
     // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
@@ -1188,7 +1190,8 @@ export class AgentSubagentRuntime_ACU {
     gate.state.grantedTokens += fixedDecision.batchTokens;
     for (const key of evidence.fixedReadKeys) gate.granted.add(key);
 
-    const rendered = await renderContinuationPrompt_ACU(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, keptSubagentMaterialTokens_ACU('review', [])), {
+    const reviewKept = keptSubagentMaterialTokens_ACU('review', []);
+    const rendered = await renderContinuationPrompt_ACU(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, reviewKept), {
       $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
       $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(input.resolveContext.moduleSnapshot, input.resolveContext.originInstruction),
       $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
@@ -1214,7 +1217,8 @@ export class AgentSubagentRuntime_ACU {
       grantedTokens: gate.state.grantedTokens,
     });
     // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
-    const reviewSnapshot = input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+    const reviewPresent = new Set(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, reviewKept).flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
+    const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), reviewPresent);
     let baseMessages = rendered.messages;
     if (reviewSnapshot) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: reviewSnapshot });
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });

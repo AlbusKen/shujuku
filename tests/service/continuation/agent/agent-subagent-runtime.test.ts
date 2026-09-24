@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
 import { AgentSubagentRuntime_ACU, renderStoryArcVolumePlanInstruction_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
+import { renderMainSessionReadAppendix_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import type { AiUsageMetadata_ACU } from '../../../../src/service/continuation/internal-ai-call';
 
 const preset_ACU = { presetName: 'p1', source: 'settings', reason: 'test' } as any;
+
+it('主会话已读到的全文会附在快照后面，重复调阅提示不带上', () => {
+  const text = renderMainSessionReadAppendix_ACU([
+    { id: 1, kind: 'tool', text: '### 顾雨涵\n人设全文', digest: 'read', turnKey: 't', at: 1, readKey: '$WORLDBOOK:书:2' },
+    { id: 2, kind: 'tool', text: '不再重注', digest: 'read', turnKey: 't', at: 1, readKey: '$WORLDBOOK:书:2' },
+    { id: 3, kind: 'tool', text: '{"outcome":"deliver"}', digest: '工作流状态回执', turnKey: 't', at: 1 },
+  ] as any);
+  expect(text).toContain('人设全文');
+  expect(text).toContain('不要再对同一地址调用 read');
+  expect(text).not.toContain('不再重注');
+  expect(text).not.toContain('deliver');
+});
 const readReply_ACU = '{"action":"read","reads":["$TABLE:角色表"]}';
 const finalReply_ACU = JSON.stringify({ summary: '结算完成', delta: {} });
 
@@ -174,11 +187,16 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(messages[messages.length - 3].content).toContain('【本回合运行时数据】');
     expect(messages[messages.length - 4].role).toBe('user');
     expect(messages[messages.length - 4].content).toContain('【总纲卷数计划】');
-    // 任务段保留自己维护的总纲全文，共享目录改由末尾快照提供。
+    // 总纲子代理保留正文、总纲和世界书命中；目录仍在快照里，命中列表不重复。
     expect(messages[messages.length - 5].content).toContain('【本次任务】\n立总纲');
     expect(messages[messages.length - 5].content).toContain('【故事总纲现状】');
-    expect(messages[messages.length - 5].content).not.toContain('$WORLDBOOK_CATALOG');
+    expect(messages[messages.length - 5].content).toContain('【事件概览】');
+    expect(messages[messages.length - 5].content).toContain('【最近正文】');
+    expect(messages[messages.length - 5].content).toContain('【本轮语境命中的世界书条目】');
     expect(messages[messages.length - 5].content).not.toContain('【已启用世界书目录】');
+    expect(messages[messages.length - 3].content).toContain('【已启用世界书目录】');
+    expect(messages[messages.length - 3].content).not.toContain('【故事总纲状态】');
+    expect(messages[messages.length - 3].content).not.toContain('【本轮语境命中的世界书条目】');
   });
 
   it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {

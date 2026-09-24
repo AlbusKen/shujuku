@@ -151267,111 +151267,198 @@ Expected function or array of functions, received type ${typeof value}.`
         ].join('\n');
     }
 
-    const fields_ACU = ['effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
-    function cleanText_ACU(value) {
-        return typeof value === 'string' ? value.trim() : '';
+    /**
+     * service/continuation/agent/agent-tables.ts — 表格系统的只读投影
+     *
+     * 表名由用户模板决定，不能硬编码物理标识。三张保底表按别名列表匹配，
+     * 别名取值与工程既有惯例一致（如纪要表在多处按 name === '纪要表' 取表）。
+     * 命中零张或多张都如实标注，绝不猜测目标表。
+     */
+    const AGENT_TABLE_ALIASES_ACU = {
+        global: ['全局数据表', '全局表', '总体大纲'],
+        characters: ['角色表', '重要人物表', '人物表'],
+        chronicles: ['纪要表', '总结表'],
+    };
+    const TABLE_LABELS_ACU = {
+        global: '全局数据表',
+        characters: '角色表',
+        chronicles: '纪要表',
+    };
+    function readTableData_ACU(tableData) {
+        const source = tableData ?? currentJsonTableData_ACU;
+        return source && typeof source === 'object' && !Array.isArray(source) ? source : {};
     }
-    function cleanList_ACU(value) {
-        return Array.isArray(value) ? [...new Set(value.map(cleanText_ACU).filter(Boolean))] : [];
-    }
-    function isSummaryState_ACU(value) {
-        if (!value || typeof value !== 'object' || Array.isArray(value))
-            return false;
-        const raw = value;
-        const keys = ['currentGoal', 'effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
-        return keys.every(key => Object.prototype.hasOwnProperty.call(raw, key))
-            && Object.keys(raw).every(key => keys.includes(key))
-            && typeof raw.currentGoal === 'string'
-            && keys.slice(1).every(key => Array.isArray(raw[key]) && raw[key].every(item => typeof item === 'string'));
-    }
-    function parseSemanticSummary_ACU(raw) {
-        try {
-            const parsed = JSON.parse(String(raw ?? '').trim());
-            return isSummaryState_ACU(parsed) ? parsed : null;
-        }
-        catch {
+    function toSheetView_ACU(sheet) {
+        if (!sheet || typeof sheet !== 'object')
             return null;
+        const name = String(sheet.name ?? '').trim();
+        const content = Array.isArray(sheet.content) ? sheet.content : [];
+        if (!name || !Array.isArray(content[0]))
+            return null;
+        const header = content[0].map((cell) => String(cell ?? '').trim());
+        const rows = content.slice(1)
+            .filter((row) => Array.isArray(row))
+            .map((row) => row.map(cell => String(cell ?? '').trim()));
+        return { name, header, rows };
+    }
+    function listSheetViews_ACU(tableData) {
+        return Object.entries(readTableData_ACU(tableData))
+            .filter(([key]) => key !== 'mate')
+            .flatMap(([, sheet]) => { const view = toSheetView_ACU(sheet); return view ? [view] : []; });
+    }
+    /**
+     * 按别名列表查找 sheet。
+     * @param aliases 候选表名
+     * @param tableData 表格数据对象，缺省取运行时快照
+     * @returns 命中的 sheet 视图列表，可能为空或多条
+     */
+    function findAgentSheetsByAliases_ACU(aliases, tableData) {
+        return listSheetViews_ACU(tableData).filter(view => aliases.includes(view.name));
+    }
+    /**
+     * 把一张表渲染成紧凑文本。
+     * @param view sheet 视图
+     * @param range 可选行区间（1 基含两端）；只渲染区间内的行，行号保持全表口径
+     * @returns 形如「表名（共 N 行）\n列: a | b\n1. x | y」的文本
+     */
+    function renderAgentSheet_ACU(view, range) {
+        const lines = [`表名：${view.name}（共 ${view.rows.length} 行）`, `列：${view.header.join(' | ')}`];
+        if (!view.rows.length) {
+            lines.push('（该表暂无数据行）');
+            return lines.join('\n');
         }
-    }
-    /** 构造只产出结构化交接状态的语义 adapter；调用方负责提供已隔离的内部 AI 通道。 */
-    function createAgentHandoffSemanticSummaryAdapter_ACU(call) {
-        return {
-            async summarize(input) {
-                const source = JSON.stringify({ previous: input.previous, messages: input.messages });
-                const request = (repair) => [
-                    {
-                        role: 'system',
-                        content: '你只负责把输入会话事实压缩成 JSON。不得调用工具、不得计划、不得写小说。输出必须是单个 JSON 对象，字段恰好为 currentGoal、effectiveConstraints、decisions、completedItems、pendingItems、blockers、continuityFacts、readKeys、recentTurns；currentGoal 是字符串，其余字段都是字符串数组。不得编造读取地址或轮次指纹。',
-                    },
-                    { role: 'user', content: repair ? `上一次输出不符合 JSON 契约。只输出符合契约的 JSON，不要解释。\n来源：${source}` : `来源：${source}` },
-                ];
-                const first = parseSemanticSummary_ACU(await call(request(false)));
-                if (first)
-                    return first;
-                const repaired = parseSemanticSummary_ACU(await call(request(true)));
-                if (repaired)
-                    return repaired;
-                throw new Error('HANDOFF_SEMANTIC_SUMMARY_INVALID');
-            },
-        };
-    }
-    function buildDeterministicState_ACU(previous, messages) {
-        const state = previous ? {
-            currentGoal: previous.currentGoal,
-            effectiveConstraints: [...previous.effectiveConstraints], decisions: [...previous.decisions], completedItems: [...previous.completedItems],
-            pendingItems: [...previous.pendingItems], blockers: [...previous.blockers], continuityFacts: [...previous.continuityFacts],
-            readKeys: [...previous.readKeys], recentTurns: [...previous.recentTurns],
-        } : { currentGoal: '', effectiveConstraints: [], decisions: [], completedItems: [], pendingItems: [], blockers: [], continuityFacts: [], readKeys: [], recentTurns: [] };
-        for (const message of messages) {
-            if (message.kind === 'user')
-                state.effectiveConstraints.push(message.text);
-            else if (message.kind === 'agent')
-                state.decisions.push(message.digest || message.text);
-            else if (message.kind === 'tool' || message.kind === 'runtime')
-                state.continuityFacts.push(message.digest || message.text);
-            else if (message.kind === 'turn') {
-                state.currentGoal = message.digest || message.text;
-                state.recentTurns.push(message.turnKey || message.digest || message.text);
-            }
-            if (message.readKey)
-                state.readKeys.push(message.readKey);
+        if (!range) {
+            view.rows.forEach((row, index) => lines.push(`${index + 1}. ${row.join(' | ')}`));
+            return lines.join('\n');
         }
-        for (const field of fields_ACU)
-            state[field] = (field === 'effectiveConstraints' || field === 'readKeys' ? cleanList_ACU(state[field]) : cleanList_ACU(state[field]).slice(-8));
-        state.currentGoal = cleanText_ACU(state.currentGoal);
-        return state;
+        const start = Math.max(1, range.start);
+        const end = Math.min(view.rows.length, range.end);
+        if (start > end) {
+            lines.push(`请求的行区间 ${range.start}-${range.end} 超出范围：该表只有 1-${view.rows.length} 行。请修正区间后重读。`);
+            return lines.join('\n');
+        }
+        lines.push(`（只列第 ${start}-${end} 行）`);
+        for (let index = start; index <= end; index += 1)
+            lines.push(`${index}. ${view.rows[index - 1].join(' | ')}`);
+        return lines.join('\n');
     }
-    function renderAgentHandoffReport_ACU(state, degradationReason) {
-        const sections = [['当前目标', state.currentGoal ? [state.currentGoal] : []], ['有效约束', state.effectiveConstraints], ['已执行决策', state.decisions], ['已完成', state.completedItems], ['待办', state.pendingItems], ['阻塞', state.blockers], ['连续性事实', state.continuityFacts], ['资料地址', state.readKeys], ['近期轮次', state.recentTurns]];
-        const body = sections.filter(([, items]) => items.length).map(([title, items]) => `【${title}】\n${items.map(item => `- ${item}`).join('\n')}`).join('\n');
-        return `${degradationReason ? `【摘要降级】${degradationReason}\n` : ''}【更早会话交接】\n${body || '没有可保留的早期事项。'}`;
+    /**
+     * 渲染一张保底表。缺失或同名多张都如实标注。
+     * @param table 保底表标识
+     * @param tableData 表格数据对象，缺省取运行时快照
+     * @returns 自然语言文本
+     */
+    function renderAgentTableByAliases_ACU(table, tableData) {
+        const matched = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU[table], tableData);
+        if (!matched.length) {
+            return `当前聊天不存在${TABLE_LABELS_ACU[table]}（已按候选表名 ${AGENT_TABLE_ALIASES_ACU[table].join('、')} 查找）。请勿据此推断内容，需要该类信息时改用表格目录里实际存在的表。`;
+        }
+        if (matched.length === 1)
+            return renderAgentSheet_ACU(matched[0]);
+        const header = `命中 ${matched.length} 张同名或同类表，全部列出，请自行判断使用哪一张：`;
+        return [header, ...matched.map(view => renderAgentSheet_ACU(view))].join('\n\n');
     }
-    async function summarizeAgentHandoff_ACU(input) {
-        let state = buildDeterministicState_ACU(input.previous, input.messages);
-        let degraded = !input.semanticAdapter;
-        let degradationReason = degraded ? 'deterministic_adapter' : undefined;
-        if (input.semanticAdapter) {
+    /**
+     * 按精确表名渲染一张表，支撑 `$TABLE:<表名>` 与 `$TABLE:<表名>:a-b` 形式的读集。
+     * @param name 表名
+     * @param tableData 表格数据对象，缺省取运行时快照
+     * @param range 可选行区间（1 基含两端）
+     * @returns 自然语言文本；不存在时如实标注
+     */
+    function renderAgentTableByName_ACU(name, tableData, range) {
+        const target = String(name ?? '').trim();
+        if (!target)
+            return '读集里的表名为空，无法读取。';
+        const matched = listSheetViews_ACU(tableData).filter(view => view.name === target);
+        if (!matched.length)
+            return `当前聊天不存在名为「${target}」的表。可用表名见表格目录。`;
+        if (matched.length === 1)
+            return renderAgentSheet_ACU(matched[0], range);
+        return [`命中 ${matched.length} 张名为「${target}」的表，全部列出：`, ...matched.map(view => renderAgentSheet_ACU(view, range))].join('\n\n');
+    }
+    /**
+     * 渲染表格目录。目录是权威来源：主 Agent 据此知道当前聊天到底有哪些表可读。
+     * @param tableData 表格数据对象，缺省取运行时快照
+     * @returns 每行一张表的目录文本
+     */
+    function renderAgentTableCatalog_ACU(tableData) {
+        const views = listSheetViews_ACU(tableData);
+        if (!views.length)
+            return '当前聊天没有任何可读表格。';
+        const lines = views.map(view => `- ${view.name}（${view.rows.length} 行）列：${view.header.join(' | ')}｜整表读取：$TABLE:${view.name}｜行区间读取：$TABLE:${view.name}:起始行-结束行`);
+        return ['以下是当前聊天实际存在的全部表格；只有这里列出的表才能读取：', ...lines].join('\n');
+    }
+
+    const AM_CODE_PATTERN_ACU = /^AM\d+$/i;
+    /** 归一化 AM 码（纪要地址码）；非法返回 null。同时供 Agent 世界书读取工具使用。 */
+    function normalizeAmCode_ACU(value) {
+        const code = String(value ?? '').trim().toUpperCase();
+        return AM_CODE_PATTERN_ACU.test(code) ? code : null;
+    }
+    /** 去掉隔离前缀后的条目显示名。 */
+    function normalizeGeneratedComment_ACU(entry, isolationPrefix) {
+        const raw = String(entry.comment ?? entry.name ?? '').trim();
+        return isolationPrefix && raw.startsWith(isolationPrefix) ? raw.slice(isolationPrefix.length) : raw;
+    }
+    /** 是否为纪要（总结）条目的显示名。 */
+    function isSummaryEntryComment_ACU(comment) {
+        return /^(?:总结条目|小总结条目)\d+$/.test(comment);
+    }
+    function isGeneratedEntryComment_ACU(comment) {
+        return comment.startsWith('TavernDB-ACU-')
+            || comment.startsWith('总结条目')
+            || comment.startsWith('小总结条目')
+            || comment.startsWith('重要人物条目');
+    }
+    /** 解析当前生效的世界书名单（手动选择或角色绑定）。同时供 Agent 世界书读取工具使用。 */
+    async function resolveRelevantBookNames_ACU() {
+        const config = getCurrentWorldbookConfig_ACU();
+        if (config?.source === 'manual') {
+            const manualSelection = Array.isArray(config.manualSelection)
+                ? config.manualSelection
+                : [];
+            return [...new Set(manualSelection
+                    .map((name) => String(name ?? '').trim())
+                    .filter(Boolean))];
+        }
+        return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
+    }
+    // 依赖表里的函数一律延迟绑定：直接引用会在模块求值时就解析 pipeline 的导出，
+    // 让「谁先被 import」决定本模块能否加载。改成调用时解析后，加载顺序不再影响可用性。
+    const defaultDependencies_ACU$3 = {
+        resolveRelevantBookNames: resolveRelevantBookNames_ACU,
+        resolveInjectionTarget: () => getInjectionTargetLorebook_ACU(),
+        getIsolationPrefix: () => getIsolationPrefix_ACU(),
+        buildRelevantWorldbookContent: options => buildCombinedWorldbookContentByStrategy_ACU(options),
+        readLorebookEntries: bookNames => getLorebookEntriesByNames_ACU(bookNames),
+        logReadFailure: phase => logWarn_ACU('[Continuation] 世界书只读失败。', { phase, error: { category: 'read_failed' } }),
+    };
+    /**
+     * Continuation 的只读世界书 seam。它只读取当前注入目标世界书，绝不调度剧情任务或写入宿主状态。
+     */
+    class ContinuationWorldbookContext_ACU {
+        constructor(dependencies = defaultDependencies_ACU$3) {
+            this.dependencies = dependencies;
+        }
+        async readRelevantBackground(scanText) {
             try {
-                const allowedReadKeys = state.readKeys;
-                const proposed = await input.semanticAdapter.summarize({ previous: input.previous, messages: input.messages, allowedReadKeys });
-                state = { ...state, currentGoal: cleanText_ACU(proposed.currentGoal) || state.currentGoal, ...Object.fromEntries(fields_ACU.map(field => [field, field === 'readKeys' || field === 'recentTurns' || field === 'effectiveConstraints' ? state[field] : cleanList_ACU(proposed[field]).length ? cleanList_ACU(proposed[field]) : state[field]])) };
+                const bookNames = await this.dependencies.resolveRelevantBookNames();
+                if (!bookNames.length)
+                    return '';
+                const isolationPrefix = this.dependencies.getIsolationPrefix();
+                return await this.dependencies.buildRelevantWorldbookContent({
+                    logPrefix: '[Continuation]',
+                    bookNames,
+                    baseScanText: typeof scanText === 'string' ? scanText : '',
+                    excludeEntry: (entry) => isGeneratedEntryComment_ACU(normalizeGeneratedComment_ACU(entry, isolationPrefix)),
+                    formatEntry: (entry) => String(entry.content ?? '').trim(),
+                });
             }
             catch {
-                degraded = true;
-                degradationReason = 'semantic_summary_failed';
+                this.dependencies.logReadFailure('background');
+                return '';
             }
         }
-        let report = renderAgentHandoffReport_ACU(state, degradationReason);
-        for (const field of [...fields_ACU].reverse().filter(item => item !== 'effectiveConstraints' && item !== 'readKeys')) {
-            while ((await input.countTokens(report)) > input.maxTokens && state[field].length) {
-                state = { ...state, [field]: state[field].slice(1) };
-                report = renderAgentHandoffReport_ACU(state, degradationReason);
-            }
-        }
-        const reportTokens = await input.countTokens(report);
-        if (reportTokens > input.maxTokens)
-            throw new Error('HANDOFF_SUMMARY_BUDGET_EXCEEDED');
-        return { state, report, reportTokens, degraded, ...(degradationReason ? { degradationReason } : {}) };
     }
 
     /**
@@ -151599,6 +151686,1025 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
+    /**
+     * service/continuation/agent/agent-worldbook-read.ts — Agent 的世界书只读接入
+     *
+     * 运行起点一次性预取启用条目做运行内快照，之后目录 / 精读 / 命中提示 / 搜索都基于
+     * 同一份快照（世界书读取是异步宿主调用，预取后地址在一次运行内不漂移）。
+     *
+     * 暴露范围：已启用集合内的普通条目全部可读可搜（含插件生成的重要人物条目等）；
+     * 遗留的总结条目（旧总结系统的残留）不再暴露；未启用条目不进目录、不进搜索、不可读。
+     */
+    function buildEmptyAgentWorldbookSnapshot_ACU(available = true) {
+        return { entries: [], available };
+    }
+    function isRecord_ACU$f(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function readEntryKeys_ACU(entry) {
+        const raw = Array.isArray(entry.keys) ? entry.keys : typeof entry.keys === 'string' ? entry.keys.split(/[,，]/) : [];
+        return raw.map(key => String(key ?? '').trim()).filter(Boolean);
+    }
+    /** 与 pipeline 的 isSelected 语义一致：插件侧勾选表缺书/缺列表都视为全选。 */
+    function isEntrySelected_ACU(bookName, uid, enabledEntriesMap) {
+        if (!isRecord_ACU$f(enabledEntriesMap) || !Object.keys(enabledEntriesMap).length)
+            return true;
+        const list = enabledEntriesMap[bookName];
+        if (typeof list === 'undefined' || !Array.isArray(list))
+            return true;
+        return list.some(item => String(item) === uid);
+    }
+    /**
+     * 条目 token 数的跨运行缓存。键含内容长度：同一条目被编辑后长度几乎必变，
+     * 变了即重算；极小概率的等长改写只影响预算估算精度，不影响正确性。
+     */
+    const entryTokenCache_ACU = new Map();
+    async function countEntryTokens_ACU(bookName, uid, content) {
+        const key = `${bookName}#${uid}#${content.length}`;
+        const cached = entryTokenCache_ACU.get(key);
+        if (cached !== undefined)
+            return cached;
+        const counted = await countAgentTokens_ACU(content);
+        entryTokenCache_ACU.set(key, counted);
+        return counted;
+    }
+    /**
+     * 预取当前已启用的世界书条目为运行内快照。
+     *
+     * 启用判定与提示词注入管线一致：条目自身 enabled 为真、且通过插件侧 enabledEntries
+     * 勾选表、且不属于屏蔽名单（当前屏蔽词为空，逻辑保留备用）。遗留总结条目直接跳过。
+     * 内部插件条目（TavernDB-ACU- 前缀）是存储载体而非叙事资料，不暴露。
+     * 每条条目在预取时统计 token 数（结果缓存跨运行复用），供目录标注读取预算。
+     * @returns 快照；宿主读取失败时返回 available=false 的空快照
+     */
+    async function loadAgentWorldbookSnapshot_ACU() {
+        try {
+            const bookNames = await resolveRelevantBookNames_ACU();
+            if (!bookNames.length)
+                return buildEmptyAgentWorldbookSnapshot_ACU();
+            const entriesByBook = await getLorebookEntriesByNames_ACU(bookNames);
+            const isolationPrefix = getIsolationPrefix_ACU();
+            const enabledEntriesMap = getCurrentWorldbookConfig_ACU()?.enabledEntries;
+            const entries = [];
+            for (const bookName of bookNames) {
+                for (const raw of entriesByBook[bookName] ?? []) {
+                    if (!isRecord_ACU$f(raw))
+                        continue;
+                    if (raw.enabled !== true)
+                        continue;
+                    const uid = String(raw.uid ?? '').trim();
+                    const title = normalizeGeneratedComment_ACU(raw, isolationPrefix);
+                    const content = String(raw.content ?? '').trim();
+                    // 旧总结系统的残留条目不再是可用资料域，静默跳过。
+                    if (isSummaryEntryComment_ACU(title))
+                        continue;
+                    if (!uid || !content)
+                        continue;
+                    if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap))
+                        continue;
+                    if (isEntryBlocked_ACU$1(raw))
+                        continue;
+                    if (title.startsWith('TavernDB-ACU-'))
+                        continue;
+                    entries.push({
+                        bookName,
+                        uid,
+                        title: title || `条目 ${uid}`,
+                        keys: readEntryKeys_ACU(raw),
+                        constant: raw.type === 'constant',
+                        content,
+                        tokens: await countEntryTokens_ACU(bookName, uid, content),
+                    });
+                }
+            }
+            return { entries, available: true };
+        }
+        catch (error) {
+            logWarn_ACU('[Continuation][Agent] 世界书快照预取失败，本轮目录与搜索将不含世界书。', { error: error instanceof Error ? error.message : String(error) });
+            return buildEmptyAgentWorldbookSnapshot_ACU(false);
+        }
+    }
+    /** 目录行里的内容摘要：压平空白后取前 10 个字符。 */
+    function entryExcerpt_ACU(content) {
+        const flat = content.replace(/\s+/g, ' ').trim();
+        return flat.length <= 10 ? flat : `${flat.slice(0, 10)}…`;
+    }
+    /**
+     * 渲染世界书目录：每条一行「标题｜关键词｜10 字摘要｜token 估算 → 精读地址」。
+     * token 标注让 AI 在动手读之前就能对照读取预算分配额度。
+     * @param snapshot 运行内快照
+     * @returns 目录文本，进入主 Agent 骨架的 $WORLDBOOK_CATALOG
+     */
+    function renderAgentWorldbookCatalog_ACU(snapshot) {
+        if (!snapshot.available)
+            return '本轮世界书读取失败，目录不可用；请勿臆测世界书内容，可照常使用其他资料域。';
+        if (!snapshot.entries.length)
+            return '当前没有已启用的世界书条目。';
+        const lines = snapshot.entries.map(entry => {
+            const keys = entry.keys.length ? entry.keys.join('、') : '（无）';
+            return `- ${entry.title}｜关键词：${keys}｜摘要：${entryExcerpt_ACU(entry.content)}｜约 ${entry.tokens} token → 读取地址 $WORLDBOOK:${entry.bookName}:${entry.uid}`;
+        });
+        return `## 已启用的世界书条目（共 ${snapshot.entries.length} 条，只有这里列出的可读；行尾 token 数用于估算读取预算）\n${lines.join('\n')}`;
+    }
+    /**
+     * 渲染本轮语境命中的世界书条目提示：常开条目始终列出，关键词条目在扫描文本
+     * 命中任一关键词（大小写不敏感的包含匹配）时列出。
+     * 这是「该读哪些设定」的直接信号——命中条目与本轮剧情高度相关，应优先精读。
+     * @param snapshot 运行内快照
+     * @param scanText 扫描文本（本轮目标 + 未结算正文 + 尾部楼层 + 用户初始要求）
+     * @returns 命中提示文本；无命中/世界书不可用时如实说明
+     */
+    function renderAgentWorldbookHits_ACU(snapshot, scanText) {
+        if (!snapshot.available)
+            return '本轮世界书读取失败，无法给出命中提示；请勿臆测世界书内容。';
+        if (!snapshot.entries.length)
+            return '当前没有已启用的世界书条目，无命中提示。';
+        const haystack = String(scanText ?? '').toLowerCase();
+        const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+        if (!hits.length)
+            return '本轮语境没有命中任何世界书条目的关键词，也没有常开条目。需要设定时从世界书目录挑选精读。';
+        const lines = hits.map(entry => `- ${entry.title}（${entry.constant ? '常开' : '关键词命中'}｜约 ${entry.tokens} token）→ $WORLDBOOK:${entry.bookName}:${entry.uid}`);
+        return `以下条目与本轮语境直接相关（常开条目 + 关键词命中），本轮涉及对应设定时应精读：\n${lines.join('\n')}`;
+    }
+    /**
+     * 按书名 + uid 列表精读世界书条目全文，支撑 `$WORLDBOOK:书名:uid1,uid2`。
+     * @param snapshot 运行内快照
+     * @param bookName 世界书名
+     * @param uids 条目 uid 列表
+     * @returns 条目全文；未知书名/uid 或条目未启用时回灌可修正的错误文本
+     */
+    /** 本轮命中的世界书条目全文。主会话备好后交给所有子代理，子代理不再各自精读。 */
+    function renderAgentWorldbookHitBodies_ACU(snapshot, scanText) {
+        if (!snapshot.available)
+            return '本轮世界书不可用。';
+        if (!snapshot.entries.length)
+            return '当前没有已启用的世界书条目。';
+        const haystack = String(scanText ?? '').toLowerCase();
+        const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
+        if (!hits.length)
+            return '本轮没有命中世界书条目。';
+        const byBook = new Map();
+        for (const hit of hits) {
+            const list = byBook.get(hit.bookName) ?? [];
+            list.push(hit.uid);
+            byBook.set(hit.bookName, list);
+        }
+        return [...byBook].map(([book, uids]) => renderAgentWorldbookEntries_ACU(snapshot, book, uids)).join('\n\n');
+    }
+    function renderAgentWorldbookEntries_ACU(snapshot, bookName, uids) {
+        if (!snapshot.available)
+            return '本轮世界书读取失败，无法精读条目。';
+        const book = String(bookName ?? '').trim();
+        const wanted = uids.map(uid => String(uid ?? '').trim()).filter(Boolean);
+        if (!book || !wanted.length)
+            return '世界书读取地址不完整：需要 $WORLDBOOK:书名:uid（逗号分隔多个 uid）。地址请从世界书目录复制。';
+        const inBook = snapshot.entries.filter(entry => entry.bookName === book);
+        if (!inBook.length)
+            return `已启用条目中不存在世界书「${book}」。可用地址见世界书目录；未启用的条目不可读。`;
+        const found = inBook.filter(entry => wanted.includes(entry.uid));
+        const missing = wanted.filter(uid => !inBook.some(entry => entry.uid === uid));
+        const parts = found.map(entry => `### ${entry.title}（${entry.bookName}#${entry.uid}）\n${entry.content}`);
+        if (missing.length)
+            parts.push(`以下 uid 不存在于「${book}」的已启用条目中：${missing.join('、')}。地址请从世界书目录复制。`);
+        return parts.join('\n\n');
+    }
+
+    /**
+     * service/continuation/agent/agent-placeholder-resolver.ts — 读写集占位符解析
+     *
+     * 读集 token 只是资料接口标识符，不是提示词 token：解析结果统一汇成一块材料文本，
+     * 通过单个 `$AGENT_READ_MATERIALS` 注入子代理提示词。这样动态表名（$TABLE:xxx）
+     * 不需要扩展提示词渲染器的固定 token 表。
+     */
+    const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
+    const AGENT_STORY_RANGE_TOKEN_PREFIX_ACU = '$STORY_RANGE:';
+    const AGENT_WORLDBOOK_TOKEN_PREFIX_ACU = '$WORLDBOOK:';
+    /** 每条虚拟/模块/表占位符对应的人类可读标题，进入材料块的分节标题。 */
+    const READ_TOKEN_TITLES_ACU = {
+        $STORY_TEXT: '已经发生的小说正文（只含 AI 楼层）',
+        $STORY_CATALOG: '正文楼层索引',
+        $STORY_OVERVIEW: '事件概览（纪要表逐轮）',
+        $STORY_TAIL: '最近正文（尾部全文楼层）',
+        $HISTORY_UNSETTLED: '尚未结算的真实历史',
+        $OUTLINE_WINDOW: '当前大纲窗口',
+        $CURRENT_TURN_GOAL: '本轮目标',
+        $CURRENT_TURN_PACING: '本轮节奏',
+        $USER_INTENT: '用户的初始要求',
+        $USER_REQUIREMENTS: '用户对任务曾经提过的要求',
+        $STORY_ARC: '故事总纲',
+        $HOOKS_LEDGER: '伏笔账本',
+        $INFO_GAP: '认知与信息差时间线',
+        $ACTIVE_CONSTRAINTS: '长期约束',
+        $CHRONOLOGY: '故事年代学账本',
+        $WEB_REFS: '百科资料库',
+        $TABLE_GLOBAL: '全局数据表',
+        $TABLE_CHARACTERS: '角色表',
+        $TABLE_CHRONICLES: '纪要表',
+    };
+    function applyAgentContextRules_ACU(text, rules) {
+        if (!rules || (!rules.extractRules.length && !rules.excludeRules.length))
+            return text;
+        return applyContextTagFilters_ACU(text, { extractTags: '', extractRules: rules.extractRules, excludeTags: '', excludeRules: rules.excludeRules }).trim();
+    }
+    function messageText_ACU(message, rules) {
+        return applyAgentContextRules_ACU(String(message?.mes ?? '').trim(), rules);
+    }
+    function listAgentStoryFloors_ACU(source) {
+        const chat = Array.isArray(source.chat) ? source.chat : [];
+        return chat
+            .map((message, index) => ({ index, text: messageText_ACU(message, source.contextRules) }))
+            .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
+    }
+    /** 与正文目录共用的 AI 正文楼层判断；证据校验不受读取窗口限制。 */
+    function agentStoryEvidenceFloorIndexes_ACU(chat) {
+        return new Set(listAgentStoryFloors_ACU({ chat }).map(floor => floor.index));
+    }
+    function agentStoryWindowSize_ACU(source) {
+        return Math.max(0, source.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
+    }
+    /** Agent 可读/可搜的正文窗口：最近 storyWindowFloors 个 AI 楼层。同时供搜索工具划定 story 域。 */
+    function listAgentStoryWindowFloors_ACU(source) {
+        const window = agentStoryWindowSize_ACU(source);
+        return window > 0 ? listAgentStoryFloors_ACU(source).slice(-window) : [];
+    }
+    /**
+     * 从最后一个用户楼层提取本轮召回的 AM 码。
+     * 剧情推进 AI 的召回结果（<recall>AMxxxx</recall> 等）就落在这层文本里，直接复用即可，
+     * 不需要续写侧再发一次召回调用。取原始文本而非过滤后的文本：召回码可能位于会被规则剥掉的标签内。
+     * @param chat 聊天数组
+     * @returns 去重后的规范化 AM 码列表；没有用户楼层或无命中时为空数组
+     */
+    function extractAgentRecallCodesFromChat_ACU(chat) {
+        const list = Array.isArray(chat) ? chat : [];
+        for (let index = list.length - 1; index >= 0; index -= 1) {
+            const message = list[index];
+            if (!message || !message.is_user)
+                continue;
+            const matches = String(message.mes ?? '').match(/AM\d+/gi) ?? [];
+            return [...new Set(matches
+                    .map(code => normalizeAmCode_ACU(code))
+                    .filter((code) => code !== null))];
+        }
+        return [];
+    }
+    function renderStoryFloors_ACU(floors) {
+        return floors.map(floor => `【楼层 ${floor.index}】\n${floor.text}`).join('\n\n');
+    }
+    function storyOpening_ACU(text) {
+        const flat = text.replace(/\s+/g, ' ').trim();
+        return flat.length <= 40 ? flat : `${flat.slice(0, 40)}…`;
+    }
+    /** 定位纪要表的一列：按表头包含关系匹配候选名，命中第一个。 */
+    function findColumnIndex_ACU(header, candidates) {
+        for (const candidate of candidates) {
+            const index = header.findIndex(cell => cell.includes(candidate));
+            if (index >= 0)
+                return index;
+        }
+        return -1;
+    }
+    /**
+     * 渲染事件概览：纪要表逐轮的「概览」列注入，命中本轮召回 AM 码的行升级为「纪要」全文。
+     *
+     * 这是主会话与策划类子代理掌握全局剧情脉络的固定来源——概览按剧情轮记录（每轮一行），
+     * 与楼层号没有一一映射，精确正文要走 $STORY_RANGE 或楼层索引。
+     * @param source 表格数据与本轮召回码
+     * @param options 渲染选项；maxRows 见 AgentStoryOverviewOptions_ACU
+     * @returns 概览文本；纪要表缺失/为空时如实说明
+     */
+    function renderAgentStoryOverview_ACU(source, options) {
+        const sheets = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU.chronicles, source.tableData);
+        if (!sheets.length) {
+            return '当前聊天没有纪要表，无法提供事件概览。剧情脉络只能依靠楼层索引与正文楼层本身。';
+        }
+        const recall = new Set((source.recallCodes ?? []).map(code => normalizeAmCode_ACU(code)).filter(Boolean));
+        const maxRows = options?.maxRows && options.maxRows > 0 ? Math.floor(options.maxRows) : null;
+        let anyExpanded = false;
+        const sections = sheets.map(sheet => {
+            if (!sheet.rows.length)
+                return `表「${sheet.name}」存在但没有数据行。`;
+            const codeColumn = findColumnIndex_ACU(sheet.header, ['编码索引', '编码']);
+            const overviewColumn = findColumnIndex_ACU(sheet.header, ['概览', '概要']);
+            const digestColumn = sheet.header.findIndex(cell => cell.includes('纪要') && !cell.includes('概'));
+            const renderRow = (row, rowIndex) => {
+                const code = codeColumn >= 0 ? normalizeAmCode_ACU(row[codeColumn]) : null;
+                const overview = overviewColumn >= 0 ? row[overviewColumn] : '';
+                const digest = digestColumn >= 0 ? row[digestColumn] : '';
+                const label = code ?? `第 ${rowIndex + 1} 行`;
+                if (code && recall.has(code) && digest) {
+                    anyExpanded = true;
+                    return `- ${label}｜【纪要全文】${digest}`;
+                }
+                return `- ${label}｜${overview || digest || '（空行）'}`;
+            };
+            const windowStart = maxRows !== null ? Math.max(0, sheet.rows.length - maxRows) : 0;
+            const windowLines = sheet.rows.slice(windowStart).map((row, offset) => renderRow(row, windowStart + offset));
+            const parts = [];
+            if (windowStart > 0) {
+                parts.push(`更早的 ${windowStart} 轮概览已省略（对应「${sheet.name}」第 1-${windowStart} 行），需要时用 $TABLE:${sheet.name}:行区间 精读。`);
+                // 窗口外被召回命中的行按行序前置：召回命中说明与本轮直接相关，不能被截断静默丢掉。
+                const recalledEarlier = sheet.rows.slice(0, windowStart)
+                    .map((row, rowIndex) => ({ row, rowIndex }))
+                    .filter(({ row }) => {
+                    const code = codeColumn >= 0 ? normalizeAmCode_ACU(row[codeColumn]) : null;
+                    return code !== null && recall.has(code);
+                });
+                if (recalledEarlier.length) {
+                    parts.push(`以下为本轮召回命中的更早轮次（不受截断影响）：\n${recalledEarlier.map(({ row, rowIndex }) => renderRow(row, rowIndex)).join('\n')}`);
+                }
+            }
+            parts.push(windowLines.join('\n'));
+            const head = sheets.length > 1 ? `## 表「${sheet.name}」\n` : '';
+            return `${head}${parts.join('\n\n')}`;
+        });
+        const expandedNote = anyExpanded
+            ? '带【纪要全文】标记的行已按本轮召回码展开为详细纪要。'
+            : '';
+        return [
+            '以下是纪要表的逐轮事件概览（每行对应一轮剧情，与楼层号无一一映射；需要某轮的详细纪要时用 $TABLE:纪要表:行区间 精读）：',
+            ...sections,
+            expandedNote,
+        ].filter(Boolean).join('\n\n');
+    }
+    /**
+     * 渲染最近正文：末尾 storyTailFloors 个 AI 楼层的全文（已过上下文提取/排除规则）。
+     * 这是承接锚点——续写必须无缝衔接的最新正文。
+     * @param source 正文楼层来源
+     * @returns 逐楼全文；storyTailFloors=0 或无 AI 楼层时如实标注
+     */
+    function renderAgentStoryTail_ACU(source) {
+        const windowFloors = listAgentStoryWindowFloors_ACU(source);
+        if (!windowFloors.length)
+            return '当前没有可注入的正文楼层（聊天里还没有 AI 正文，或可读窗口为 0）。';
+        const tailCount = Math.max(0, source.storyTailFloors ?? AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU);
+        if (tailCount === 0)
+            return '未注入正文楼层全文（尾部楼层数设置为 0）。需要正文时用 $STORY_RANGE:起始楼-结束楼 读取。';
+        const tailFloors = windowFloors.slice(-tailCount);
+        return `最近 ${tailFloors.length} 楼全文（续写必须无缝衔接这里的结尾）：\n${renderStoryFloors_ACU(tailFloors)}`;
+    }
+    /**
+     * 渲染正文楼层索引：纯索引，不含任何正文全文（全文见 $STORY_TAIL，脉络见 $STORY_OVERVIEW）。
+     * 每楼一行「楼层号 + 约字数 + 读取地址」；纪要表缺失时退回附带开头摘要的形式以保底可导航。
+     * @param source 正文楼层来源 + 表格数据（用于判断纪要表是否存在）
+     * @returns 索引文本，进入主 Agent 骨架的 $STORY_CATALOG
+     */
+    function renderAgentStoryCatalog_ACU(source) {
+        const allFloors = listAgentStoryFloors_ACU(source);
+        if (!allFloors.length)
+            return '当前聊天还没有 AI 产出的正文楼层。';
+        const windowFloors = listAgentStoryWindowFloors_ACU(source);
+        if (!windowFloors.length)
+            return '正文可读窗口设置为 0 楼：正文楼层不可直接读取；剧情脉络请依靠事件概览与 $TABLE:纪要表。';
+        const hiddenCount = allFloors.length - windowFloors.length;
+        const headNote = hiddenCount > 0
+            ? `更早的 ${hiddenCount} 个 AI 楼层不在可读窗口内；其剧情脉络请查看事件概览，或用 $TABLE:纪要表:行区间 精读对应纪要。`
+            : '当前全部 AI 楼层都在可读窗口内。';
+        const hasChronicleRows = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU.chronicles, source.tableData)
+            .some(sheet => sheet.rows.length > 0);
+        const lines = windowFloors.map(floor => hasChronicleRows
+            ? `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`
+            : `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜开头：${storyOpening_ACU(floor.text)}｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`);
+        return [
+            `${headNote}\n可读窗口内的楼层索引（区间读取写 $STORY_RANGE:起始楼-结束楼；按内容找楼层用 search story）：`,
+            lines.join('\n'),
+            '注意：事件概览按剧情轮记录，与楼层号无一一映射；需要精确正文时按本索引区间读取。',
+        ].join('\n');
+    }
+    /**
+     * 按楼层区间读取窗口内的 AI 正文全文，支撑 `$STORY_RANGE:a-b`。
+     * @param context 解析上下文
+     * @param startRaw 起始楼层号
+     * @param endRaw 结束楼层号
+     * @returns 区间内逐楼全文；区间非法/落在窗口外时回灌可修正的错误文本
+     */
+    function renderAgentStoryRange_ACU(context, startRaw, endRaw) {
+        const start = Number.parseInt(startRaw, 10);
+        const end = Number.parseInt(endRaw, 10);
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) {
+            return `楼层区间「${startRaw}-${endRaw}」不合法：写法为 $STORY_RANGE:起始楼-结束楼（两端都是楼层号，起始不大于结束）。可用楼层见正文目录。`;
+        }
+        const windowFloors = listAgentStoryWindowFloors_ACU(context);
+        if (!windowFloors.length)
+            return '正文可读窗口当前为空，无法读取正文；早期剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。';
+        const hit = windowFloors.filter(floor => floor.index >= start && floor.index <= end);
+        if (!hit.length) {
+            const first = windowFloors[0].index;
+            const last = windowFloors[windowFloors.length - 1].index;
+            return `区间 ${start}-${end} 内没有可读的 AI 楼层。可读窗口目前覆盖楼层 ${first}-${last}（只含 AI 楼）；更早的剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。`;
+        }
+        return renderStoryFloors_ACU(hit);
+    }
+    /**
+     * 渲染已经发生的小说正文。
+     *
+     * 只取 AI 楼层——用户楼是操作指令而不是小说内容，把它当正文注入会让模型把指令误读成剧情。
+     * 分「已结算」「尚未结算」两段：已结算段按窗口取最近若干楼（更早部分已经沉淀进资料模块与纪要），
+     * 未结算段全量注入（它还没被任何资料模块吸收，是本轮必须亲自读的部分）。
+     * @param context 解析上下文
+     * @returns 分段的逐楼正文；没有 AI 楼层时如实说明
+     */
+    function renderAgentStoryText_ACU(context) {
+        const chat = Array.isArray(context.chat) ? context.chat : [];
+        const highestIndex = chat.length - 1;
+        if (highestIndex < 0)
+            return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
+        // 删楼后残留的水位可能指向已不存在的楼层，必须钳制，否则未结算段起点会越过末楼输出空段。
+        const settledThrough = Math.min(context.settledThroughIndex, highestIndex);
+        const floors = chat
+            .map((message, index) => ({ index, text: messageText_ACU(message, context.contextRules) }))
+            .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
+        if (!floors.length)
+            return '当前聊天还没有 AI 产出的正文楼层。';
+        const window = Math.max(0, context.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
+        const settled = floors.filter(item => item.index <= settledThrough);
+        const unsettled = floors.filter(item => item.index > settledThrough);
+        const shownSettled = window > 0 ? settled.slice(-window) : [];
+        const hiddenSettled = settled.length - shownSettled.length;
+        const render = (items) => items.map(item => `【楼层 ${item.index}】\n${item.text}`).join('\n\n');
+        const sections = [];
+        const settledHead = hiddenSettled > 0
+            ? `## 已结算正文（只列最近 ${shownSettled.length} 楼；更早的 ${hiddenSettled} 楼未注入，其事实已沉淀进资料模块与纪要，需要时派工读取）`
+            : '## 已结算正文';
+        if (shownSettled.length)
+            sections.push(`${settledHead}\n${render(shownSettled)}`);
+        else if (settled.length)
+            sections.push(`${settledHead}\n（本次未注入任何已结算正文。）`);
+        sections.push(unsettled.length
+            ? `## 尚未结算的最新正文（全量）\n${render(unsettled)}`
+            : '## 尚未结算的最新正文\n没有尚未结算的正文楼层；上一轮已结算到当前最后一楼。');
+        return sections.join('\n\n');
+    }
+    /**
+     * 渲染尚未结算的真实历史。只含 AI 楼层——正文域永远不含用户楼层，
+     * 用户楼层的唯一职责是承载召回码（见 extractAgentRecallCodesFromChat_ACU）。
+     * 该区间不做任何截断：结算子代理必须看到全部未结算正文，否则水位推进会吞掉未处理的楼层。
+     * @param context 解析上下文
+     * @returns 逐楼文本；无未结算楼层时如实标注
+     */
+    function renderAgentUnsettledHistory_ACU(context) {
+        const start = context.settledThroughIndex + 1;
+        const lines = [];
+        for (let index = start; index < context.chat.length; index += 1) {
+            const message = context.chat[index];
+            if (!message || message.is_user)
+                continue;
+            const text = messageText_ACU(message, context.contextRules);
+            if (text)
+                lines.push(`【楼层 ${index}】\n${text}`);
+        }
+        return lines.length ? lines.join('\n\n') : '没有尚未结算的真实历史；上一轮已结算到当前最后一楼。';
+    }
+    /**
+     * 拼装世界书关键词命中的扫描文本：本轮目标 + 未结算正文 + 尾部全文楼层 + 用户初始要求。
+     * 主循环与子代理运行时共用，保证命中提示在两侧口径一致。
+     * @param context 解析上下文
+     * @returns 扫描文本
+     */
+    function buildAgentWorldbookScanText_ACU(context) {
+        return [
+            context.originInstruction,
+            context.execution.turn?.goal ?? '',
+            renderAgentUnsettledHistory_ACU(context),
+            renderAgentStoryTail_ACU(context),
+        ].filter(Boolean).join('\n');
+    }
+    /** 四档节奏标签的语义与写作指导。低压轮的约束写成禁令，否则模型会习惯性地往每一轮里塞冲突。 */
+    const TURN_PACING_GUIDANCE_ACU = {
+        setup: '铺垫日常轮：允许主线 hold，通过具体生活动作与人物互动，让关系、习惯、世界理解、资源、身体或认知发生可观察变化；没有必须立即处理的危机时，可隔夜、数日后或更久开始。本轮禁止制造新危机、引入新敌对方或让局势升级，允许安静闭合或留下普通生活期待。',
+        pressure: '冲突推进轮：外部压力上升，危机、对抗或追逼向前推进一步。本轮只推进一个冲突，不要同时开新战线。',
+        turn: '转折揭示轮：反转、信息揭露或伏笔回收。揭示要落在已经埋过的东西上，不要临时造一个真相。',
+        cooldown: '余波消化轮：允许主线 hold，完整处理上一波的伤势、代价、情绪与关系变化；可让恢复所需的一夜或数日自然流逝。本轮禁止制造新危机，让后果被真正看见，并允许安静闭合。',
+    };
+    /**
+     * 渲染某一轮的节奏指导。
+     * @param pacing 轮次节奏标签；无可执行轮次时传 null
+     * @returns 标签名与对应的写作指导
+     */
+    function renderAgentTurnPacingGuidance_ACU(pacing) {
+        if (!pacing)
+            return '本轮节奏：尚无可执行的大纲轮次，节奏待大纲创建或继续后确定。';
+        return `本轮节奏：${pacing}。${TURN_PACING_GUIDANCE_ACU[pacing]}`;
+    }
+    const TURN_FUNCTION_LABELS_ACU = {
+        daily_bond: '关系日常',
+        daily_world: '世界日常',
+        recovery: '恢复余波',
+        preparation: '准备',
+        training: '训练/成长',
+        economy: '经营',
+        side_thread: '支线',
+        conflict: '冲突',
+        reveal: '揭示',
+        payoff: '兑现',
+        transition: '过渡',
+    };
+    const TURN_MAINLINE_LABELS_ACU = {
+        hold: '主线停驻',
+        micro: '主线微推进',
+        step: '主线前进一步',
+        milestone: '主线里程碑',
+    };
+    const TURN_TIME_LABELS_ACU = {
+        continuous: '紧接上一轮',
+        same_day: '同日稍后',
+        overnight: '隔夜',
+        days: '数日后',
+        weeks: '数周后',
+        months: '数月后',
+        years: '数年后',
+    };
+    const LONG_TIME_ADVANCES_ACU = new Set(['days', 'weeks', 'months', 'years']);
+    /**
+     * 渲染本轮的完整四维标记与由此触发的义务：pacing 指导 + 叙事功能 / 主线增量 / 时间关系 / 时间锚。
+     * 时间跨度较大时把 V26 的时间跳跃义务直接写在这里，主 Agent 不必再去大纲窗口的箭头行比对。
+     * 系统补全的字段单独点名，避免把推断值当成作者意图。
+     * @param turn 当前轮次；无可执行轮次时传 null
+     */
+    function renderAgentTurnGuidance_ACU(turn) {
+        if (!turn)
+            return renderAgentTurnPacingGuidance_ACU(null);
+        const lines = [renderAgentTurnPacingGuidance_ACU(turn.pacing)];
+        const marks = [];
+        if (turn.function)
+            marks.push(`叙事功能=${turn.function}（${TURN_FUNCTION_LABELS_ACU[turn.function]}）`);
+        if (turn.mainlineDelta)
+            marks.push(`主线增量=${turn.mainlineDelta}（${TURN_MAINLINE_LABELS_ACU[turn.mainlineDelta]}）`);
+        if (turn.timeAdvance)
+            marks.push(`时间关系=${turn.timeAdvance}（${TURN_TIME_LABELS_ACU[turn.timeAdvance]}）`);
+        if (turn.timeAnchor)
+            marks.push(`时间锚=${turn.timeAnchor}`);
+        if (marks.length)
+            lines.push(`本轮标记：${marks.join('；')}。`);
+        if (turn.inferred?.length) {
+            lines.push(`注意：${turn.inferred.join('、')} 是系统按节奏档保守补全的推断值，不是大纲作者的明确意图；与正文实际情况冲突时以正文为准。`);
+        }
+        if (turn.timeAdvance && LONG_TIME_ADVANCES_ACU.has(turn.timeAdvance)) {
+            lines.push('时间跳跃义务：本轮计划跨越较长故事时间，finalize 的 instruction 必须写明新的相对时间锚、至少两项可感知变化（季节天气、身体伤势、衣着环境、关系熟悉度、资源经营、社会状态等），以及上一紧迫问题为何允许被跨过的连续性桥梁；不得用摘要跳过此前已承诺的关键场景。先 read $CHRONOLOGY 核对累计时间。');
+        }
+        if (turn.mainlineDelta === 'hold') {
+            lines.push('本轮主线允许停驻：不推进核心矛盾、不揭示重大情报、不制造敌方动作，但必须有一项可观察的非危机变化。');
+        }
+        return lines.join('\n');
+    }
+    /**
+     * 渲染当前大纲窗口：本阶段目标、当前节点与本节点全部轮次目标。
+     * 大纲缺失或当前阶段已完成时如实说明状态，并指出必须先派工大纲子代理。
+     * @param context 解析上下文
+     * @returns 自然语言文本
+     */
+    function renderTurnSemanticMeta_ACU(turn) {
+        const parts = [
+            `pacing=${turn.pacing}`,
+            `function=${turn.function ?? '未标注'}`,
+            `mainline=${turn.mainlineDelta ?? '未标注'}`,
+            `time=${turn.timeAdvance ?? '未标注'}`,
+        ];
+        if (turn.timeAnchor)
+            parts.push(`anchor=${turn.timeAnchor}`);
+        if (turn.inferred?.length)
+            parts.push(`系统补全=${turn.inferred.join(',')}`);
+        return parts.join('｜');
+    }
+    function renderAgentOutlineWindow_ACU(context) {
+        const { execution } = context;
+        if (!execution.stage) {
+            return '当前任务还没有阶段大纲。输出 open_round 后，固定工作流会先准备可执行阶段大纲，再进入资料工作流与写作指令编排；主 Agent 不直接派工 outline-architect。';
+        }
+        if (execution.stage.status === 'completed') {
+            return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。输出 open_round 后，固定工作流会继续下一阶段大纲，再进入资料工作流与写作指令编排。`;
+        }
+        if (!execution.revision || !execution.node || !execution.turn) {
+            return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
+        }
+        // 轮次与节点都带 [ID] 前缀：便于主 Agent 在委派 outline-architect 时精确引用待维护目标。
+        const turns = execution.node.turns
+            .map((turn, index) => `${index + 1}. [${turn.id}]（${renderTurnSemanticMeta_ACU(turn)}）${turn.goal}${turn.id === execution.turn.id ? '  ← 本轮' : ''}`)
+            .join('\n');
+        return [
+            `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
+            `阶段目标：${execution.revision.outline.goal}`,
+            `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
+            `阶段结构职责：${execution.revision.outline.role ?? '旧快照未标注'}`,
+            `阶段时间目标：${execution.revision.outline.timeSpanGoal ?? '未设定'}`,
+            `当前节点：[${execution.node.id}] ${execution.node.title}`,
+            `节点目标：${execution.node.goal}`,
+            `阶段内轮次进度：第 ${execution.turnNumber} / ${execution.revision.outline.totalTurns} 轮`,
+            '本节点逐轮目标（括号内依次给出 pacing、function、mainline、time 与可选 anchor）：',
+            turns,
+            renderAgentTurnPacingGuidance_ACU(execution.turn.pacing),
+            '注意：大纲是计划，不是已经发生的事实。',
+        ].join('\n');
+    }
+    /**
+     * 渲染大纲游标的一行状态，进入主 Agent 骨架的 $OUTLINE_STATE。
+     * 完整大纲窗口靠 read $OUTLINE_WINDOW 调阅，骨架只保留「现在在哪」。
+     * @param context 解析上下文
+     * @returns 一行状态文本
+     */
+    function renderAgentOutlineState_ACU(context) {
+        const { execution } = context;
+        if (!execution.stage)
+            return '大纲状态：尚无阶段大纲（须先派工 outline-architect 创建，之后才能 finalize）。';
+        if (execution.stage.status === 'completed') {
+            return `大纲状态：第 ${execution.stage.stageNumber} 阶段已全部完成，下一阶段大纲未创建（须派工 outline-architect 继续）。`;
+        }
+        if (!execution.revision || !execution.node || !execution.turn) {
+            return `大纲状态：第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待确认或游标无效）。`;
+        }
+        return `大纲状态：第 ${execution.stage.stageNumber} 阶段「${execution.revision.outline.title}」（节奏形态 ${describeStageTempo_ACU(execution.revision.outline.tempo)}，结构职责 ${execution.revision.outline.role ?? '未标注'}），第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮，当前节点 [${execution.node.id}]，本轮轮次 [${execution.turn.id}]，${renderTurnSemanticMeta_ACU(execution.turn)}。完整大纲窗口用 read $OUTLINE_WINDOW 调阅。`;
+    }
+    const ROW_RANGE_PATTERN_ACU = /^(\d+)-(\d+)$/;
+    function parseRowRange_ACU(raw) {
+        const matched = ROW_RANGE_PATTERN_ACU.exec(raw.trim());
+        if (!matched)
+            return null;
+        return { start: Number.parseInt(matched[1], 10), end: Number.parseInt(matched[2], 10) };
+    }
+    function splitIdSuffix_ACU(token, prefix) {
+        if (token === prefix)
+            return [];
+        if (!token.startsWith(`${prefix}:`))
+            return null;
+        return token.slice(prefix.length + 1).split(/[,，]/).map(id => id.trim()).filter(Boolean);
+    }
+    function resolveTableToken_ACU(token, context) {
+        const body = token.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
+        // 末段若形如 a-b 视为行区间，其余部分是表名——表名本身可能含冒号之外的任意字符。
+        const lastColon = body.lastIndexOf(':');
+        const rangeCandidate = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
+        const name = rangeCandidate ? body.slice(0, lastColon).trim() : body;
+        const title = rangeCandidate ? `表格「${name}」第 ${rangeCandidate.start}-${rangeCandidate.end} 行` : `表格「${name}」`;
+        return { title, text: renderAgentTableByName_ACU(name, context.tableData, rangeCandidate ?? undefined) };
+    }
+    function resolveWorldbookToken_ACU(token, context) {
+        const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+        const body = token.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
+        const lastColon = body.lastIndexOf(':');
+        if (lastColon <= 0) {
+            return { title: '世界书条目', text: '世界书读取地址不完整：写法为 $WORLDBOOK:书名:uid（逗号分隔多个 uid），地址请从世界书目录复制。' };
+        }
+        const bookName = body.slice(0, lastColon).trim();
+        const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean);
+        return { title: `世界书「${bookName}」条目 ${uids.join('、')}`, text: renderAgentWorldbookEntries_ACU(worldbook, bookName, uids) };
+    }
+    /**
+     * 解析一个读集 token 的内容。
+     *
+     * 支持的地址体系（与各资料目录里给出的读取地址一一对应）：
+     * - `$STORY_RANGE:a-b` 窗口内正文楼层区间；`$STORY_CATALOG` 楼层索引
+     * - `$STORY_OVERVIEW` 事件概览；`$STORY_TAIL` 尾部全文楼层
+     * - `$TABLE:表名` / `$TABLE:表名:a-b` 整表或行区间
+     * - `$STORY_ARC[:ID,ID]` / `$HOOKS_LEDGER[:ID,ID]` / `$INFO_GAP[:ID,ID]` / `$ACTIVE_CONSTRAINTS[:ID,ID]` 模块全量或按 ID 精读
+     * - `$WORLDBOOK:书名:uid[,uid]` 已启用世界书条目全文
+     * - 旧固定 token（$STORY_TEXT / $OUTLINE_WINDOW 等）保留兼容
+     * @param token 读集标识符
+     * @param context 解析上下文
+     * @returns { title, text } 分节标题与正文；未知 token 的 text 会明确说明不可读
+     */
+    function resolveAgentReadToken_ACU(token, context) {
+        const normalized = String(token ?? '').trim();
+        if (normalized.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU))
+            return resolveTableToken_ACU(normalized, context);
+        if (normalized.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU))
+            return resolveWorldbookToken_ACU(normalized, context);
+        if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
+            const body = normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim();
+            const matched = /^(\d+)-(\d+)$/.exec(body);
+            return {
+                title: matched ? `正文楼层 ${matched[1]}-${matched[2]}` : '正文楼层区间',
+                text: matched
+                    ? renderAgentStoryRange_ACU(context, matched[1], matched[2])
+                    : `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼。可用楼层见正文目录。`,
+            };
+        }
+        if (normalized.startsWith('$FIELD:')) {
+            const match = /^\$FIELD:(storyArc|hooks|infoGap|chronology|webRefs|constraints):([^:]+)(?::([^:]+))?$/.exec(normalized);
+            if (!match)
+                return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。' };
+            const [, moduleName, id, field] = match;
+            const module = moduleName;
+            if (field && !AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field))
+                return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。` };
+            const folded = readAgentModuleFoldState_ACU(context.chat);
+            if (folded.salvaged || folded.candidates.some(item => !item.valid))
+                return { title: '资料栏目读取失败', text: '资料帧校验失败；不得将损坏数据解释为空状态。', status: 'failed' };
+            const record = folded.fields.records[module]?.[id];
+            return { title: `资料栏目 ${module}#${id}`, text: JSON.stringify(record
+                    ? { module, id, status: record.status, missingFields: record.missingFields,
+                        fields: field ? { [field]: record.fields[field] ?? null } : record.fields,
+                        revisions: folded.snapshot.revisions[module] }
+                    : { module, id, status: 'unwritten', missingFields: AGENT_MODULE_FIELD_MATRIX_ACU[module].required, revisions: folded.snapshot.revisions[module] }) };
+        }
+        const storyArcIds = splitIdSuffix_ACU(normalized, '$STORY_ARC');
+        if (storyArcIds !== null) {
+            const completedStageNumbers = context.execution.task.stages
+                .filter(stage => stage.status === 'completed')
+                .map(stage => stage.stageNumber);
+            return { title: storyArcIds.length ? `故事总纲条目 ${storyArcIds.join('、')}` : '故事总纲（全部活跃条目）', text: renderAgentStoryArcByIds_ACU(context.moduleSnapshot, storyArcIds.length ? storyArcIds : undefined, completedStageNumbers) };
+        }
+        const hookIds = splitIdSuffix_ACU(normalized, '$HOOKS_LEDGER');
+        if (hookIds !== null) {
+            return { title: hookIds.length ? `伏笔账本条目 ${hookIds.join('、')}` : '伏笔账本（全部活跃条目）', text: renderAgentHooksByIds_ACU(context.moduleSnapshot, hookIds.length ? hookIds : undefined) };
+        }
+        const infoGapIds = splitIdSuffix_ACU(normalized, '$INFO_GAP');
+        if (infoGapIds !== null) {
+            return { title: infoGapIds.length ? `信息差条目 ${infoGapIds.join('、')}` : '认知与信息差时间线（全部活跃条目）', text: renderAgentInfoGapByIds_ACU(context.moduleSnapshot, infoGapIds.length ? infoGapIds : undefined) };
+        }
+        const constraintIds = splitIdSuffix_ACU(normalized, '$ACTIVE_CONSTRAINTS');
+        if (constraintIds !== null) {
+            return { title: constraintIds.length ? `长期约束条目 ${constraintIds.join('、')}` : '长期约束（全部条目）', text: renderAgentConstraintsByIds_ACU(context.moduleSnapshot, constraintIds.length ? constraintIds : undefined) };
+        }
+        const chronologyIds = splitIdSuffix_ACU(normalized, '$CHRONOLOGY');
+        if (chronologyIds !== null) {
+            return chronologyIds.length
+                ? { title: `故事年代学条目 ${chronologyIds.join('、')}`, text: renderAgentChronologyByIds_ACU(context.moduleSnapshot, chronologyIds) }
+                : { title: '故事年代学账本（已发生正文结算出的时间事实）', text: renderAgentChronology_ACU(context.moduleSnapshot) };
+        }
+        const webRefIds = splitIdSuffix_ACU(normalized, '$WEB_REFS');
+        if (webRefIds !== null) {
+            return {
+                title: webRefIds.length ? `百科资料库条目 ${webRefIds.join('、')}（外部参考，非本故事事实）` : '百科资料库（全部活跃条目摘要；外部参考，非本故事事实）',
+                text: renderAgentWebRefsByIds_ACU(context.moduleSnapshot, webRefIds.length ? webRefIds : undefined),
+            };
+        }
+        const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;
+        switch (normalized) {
+            case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
+            case '$STORY_CATALOG': return { title, text: renderAgentStoryCatalog_ACU(context) };
+            case '$STORY_OVERVIEW': return { title, text: renderAgentStoryOverview_ACU(context) };
+            case '$STORY_TAIL': return { title, text: renderAgentStoryTail_ACU(context) };
+            case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
+            case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
+            case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
+            case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnGuidance_ACU(context.execution.turn ?? null) };
+            case '$USER_INTENT': return { title, text: context.originInstruction || '（用户未提供初始要求）' };
+            case '$USER_REQUIREMENTS': return { title, text: renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction) };
+            case '$TABLE_GLOBAL': return { title, text: renderAgentTableByAliases_ACU('global', context.tableData) };
+            case '$TABLE_CHARACTERS': return { title, text: renderAgentTableByAliases_ACU('characters', context.tableData) };
+            case '$TABLE_CHRONICLES': return { title, text: renderAgentTableByAliases_ACU('chronicles', context.tableData) };
+            default: return { title, text: `占位符 ${normalized || '(空)'} 不是可读资料接口，本次没有为你提供任何内容。请从各资料目录里复制读取地址。` };
+        }
+    }
+    /**
+     * 把一批读集 token 渲染成一整块注入材料。
+     * @param tokens 读集标识符列表
+     * @param context 解析上下文
+     * @returns 分节材料文本；读集为空时如实标注
+     */
+    function renderAgentReadMaterials_ACU(tokens, context) {
+        const unique = [...new Set(tokens.map(token => String(token ?? '').trim()).filter(Boolean))];
+        if (!unique.length)
+            return '本次没有为你注入任何资料。你只能基于任务描述作答，缺少的信息必须标注「信息不足」。';
+        return unique
+            .map(token => { const resolved = resolveAgentReadToken_ACU(token, context); return `### ${resolved.title}（${token}）\n${resolved.text}`; })
+            .join('\n\n');
+    }
+
+    /**
+     * 子代理任务段保留和本职强相关的资料占位符。附在末尾的快照去掉已经由这些占位符注入的段落。
+     */
+    const MODULE_TOKEN_ACU = {
+        storyArc: '$STORY_ARC',
+        hooks: '$HOOKS_LEDGER',
+        infoGap: '$INFO_GAP',
+        chronology: '$CHRONOLOGY',
+        constraints: '$ACTIVE_CONSTRAINTS',
+        webRefs: '$WEB_REFS',
+        userRequirements: '$USER_REQUIREMENTS',
+    };
+    /** 这些占位符已经在主会话快照里，子代理任务段不再各注入一份。 */
+    const SHARED_PLACEHOLDERS_ACU = [
+        '$USER_REQUIREMENTS', '$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_OVERVIEW', '$STORY_TAIL', '$STORY_CATALOG',
+        '$WORLDBOOK_CATALOG', '$WORLDBOOK_HITS', '$AGENT_READ_CATALOG', '$TABLE_CATALOG',
+        '$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$STORY_ARC', '$CHRONOLOGY',
+        '$WEB_REFS', '$WEB_TOOL_CATALOG',
+    ];
+    /** 主会话本轮已经 read/search 到的正文。附在子代理快照后面，避免再对同一地址调阅。 */
+    function renderMainSessionReadAppendix_ACU(messages) {
+        const latest = new Map();
+        for (const message of messages) {
+            if (message.kind !== 'tool')
+                continue;
+            const text = message.text.trim();
+            if (!text || text === '工具没有返回内容' || text.includes('不再重注'))
+                continue;
+            const isRead = Boolean(message.readKey) || message.digest === 'read' || message.digest === 'search' || message.digest.startsWith('调阅 ');
+            if (!isRead)
+                continue;
+            latest.set(message.readKey || `${message.digest}:${text.slice(0, 80)}`, text);
+        }
+        if (!latest.size)
+            return '';
+        return [
+            '【主会话已调阅】',
+            '下面是主会话本轮已经读到的全文。快照里写着「应精读」的条目如果已出现在这里，直接使用，不要再对同一地址调用 read 或 search。',
+            ...latest.values(),
+        ].join('\n\n');
+    }
+    const KIND_RELATED_TOKENS_ACU = {
+        arc: ['$STORY_ARC', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+        maintain: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+        plan: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
+        review: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+        research: ['$WEB_REFS', '$WEB_TOOL_CATALOG', '$WORLDBOOK_CATALOG', '$STORY_TAIL', '$TABLE_CATALOG', '$USER_REQUIREMENTS'],
+        compose: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+    };
+    function keptSubagentMaterialTokens_ACU(kind, writes) {
+        return new Set(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...KIND_RELATED_TOKENS_ACU[kind], ...writes.map(module => MODULE_TOKEN_ACU[module])]);
+    }
+    /** 子代理任务段已经注入的资料，不再在附带快照里重复。主会话自己的快照不走这里。 */
+    function omitSnapshotSectionsForSubagent_ACU(snapshot, kept) {
+        const drop = new Set();
+        if (kept.has('$USER_REQUIREMENTS'))
+            drop.add('以下是用户对任务曾经提过的要求：');
+        if (kept.has('$OUTLINE_WINDOW')) {
+            drop.add('【完整当前阶段大纲】');
+            drop.add('【大纲状态】');
+            drop.add('【本轮目标】');
+            drop.add('【本轮节奏】');
+        }
+        if (kept.has('$STORY_ARC'))
+            drop.add('【故事总纲状态】');
+        if (kept.has('$HISTORY_UNSETTLED'))
+            drop.add('【未结算历史范围】');
+        if (kept.has('$TABLE_CATALOG'))
+            drop.add('【表格目录】');
+        if (kept.has('$WORLDBOOK_CATALOG'))
+            drop.add('【已启用世界书目录】');
+        if (kept.has('$WORLDBOOK_HITS'))
+            drop.add('【本轮语境命中的世界书条目】');
+        if (kept.has('$WEB_REFS'))
+            drop.add('【百科资料库目录】');
+        if (kept.has('$AGENT_READ_CATALOG'))
+            drop.add('【读取地址词汇表】');
+        const keptBlocks = [];
+        let skipping = false;
+        for (const block of snapshot.split(/\n\n/)) {
+            const first = block.split('\n')[0].trim();
+            const heading = first.startsWith('【') || first.startsWith('以下是用户对任务曾经提过的要求');
+            if (heading)
+                skipping = drop.has(first);
+            if (!skipping)
+                keptBlocks.push(block);
+        }
+        return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+    function stripUnownedSubagentPrompt_ACU(segments, kept) {
+        const dropped = new Set(SHARED_PLACEHOLDERS_ACU.filter(token => !kept.has(token)));
+        return segments.flatMap(segment => {
+            if (!segment.content.includes('$AGENT_TASK'))
+                return [{ ...segment }];
+            const lines = segment.content.split('\n');
+            const dropLine = new Set();
+            lines.forEach((line, index) => {
+                const tokens = line.match(/\$[A-Z][A-Z0-9_]*/g) ?? [];
+                if (!tokens.some(token => dropped.has(token)) || tokens.some(token => kept.has(token)))
+                    return;
+                dropLine.add(index);
+                const previous = lines[index - 1] ?? '';
+                if (previous.includes('【') && !previous.includes('$'))
+                    dropLine.add(index - 1);
+            });
+            const content = lines.filter((_, index) => !dropLine.has(index)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+            return content ? [{ ...segment, content }] : [];
+        });
+    }
+    async function renderFallbackAgentSnapshot_ACU(settings, context) {
+        const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+        const start = context.settledThroughIndex + 1;
+        const last = context.chat.length - 1;
+        const rendered = await renderContinuationPrompt_ACU([{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }], {
+            $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction),
+            $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(context),
+            $CURRENT_TURN_GOAL: () => context.execution.turn?.goal || '（尚无可执行的大纲轮次）',
+            $CURRENT_TURN_PACING: () => renderAgentTurnGuidance_ACU(context.execution.turn ?? null),
+            $OUTLINE_STATE: () => renderAgentOutlineState_ACU(context),
+            $STORY_ARC_STATE: () => hasActiveStoryArc_ACU(context.moduleSnapshot)
+                ? `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}）。`
+                : '故事总纲：尚未建立。',
+            $UNSETTLED_RANGE: () => start > last ? '没有尚未结算的真实历史。' : `未结算楼层区间：${start} 到 ${last}。`,
+            $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU({ webResearchEnabled: settings.webResearch.enabled }),
+            $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU({
+                webResearchEnabled: settings.webResearch.enabled,
+                webRefsPresent: context.moduleSnapshot.webRefs.some(entry => !entry.retired),
+            }),
+            $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(context.tableData),
+            $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(worldbook),
+            $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(worldbook, buildAgentWorldbookScanText_ACU(context)),
+            $WEB_REFS_CATALOG: () => renderAgentWebRefsCatalog_ACU(context.moduleSnapshot, settings.webResearch.enabled),
+            $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
+            $BUDGET: () => '主会话预算见会话里的最新快照。本子代理的读取轮次见紧随其后的【读取预算状态】。',
+        }, 'agent_delegate');
+        return rendered.messages[0]?.content?.trim() ?? '';
+    }
+
+    const fields_ACU = ['effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
+    function cleanText_ACU(value) {
+        return typeof value === 'string' ? value.trim() : '';
+    }
+    function cleanList_ACU(value) {
+        return Array.isArray(value) ? [...new Set(value.map(cleanText_ACU).filter(Boolean))] : [];
+    }
+    function isSummaryState_ACU(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return false;
+        const raw = value;
+        const keys = ['currentGoal', 'effectiveConstraints', 'decisions', 'completedItems', 'pendingItems', 'blockers', 'continuityFacts', 'readKeys', 'recentTurns'];
+        return keys.every(key => Object.prototype.hasOwnProperty.call(raw, key))
+            && Object.keys(raw).every(key => keys.includes(key))
+            && typeof raw.currentGoal === 'string'
+            && keys.slice(1).every(key => Array.isArray(raw[key]) && raw[key].every(item => typeof item === 'string'));
+    }
+    function parseSemanticSummary_ACU(raw) {
+        try {
+            const parsed = JSON.parse(String(raw ?? '').trim());
+            return isSummaryState_ACU(parsed) ? parsed : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /** 构造只产出结构化交接状态的语义 adapter；调用方负责提供已隔离的内部 AI 通道。 */
+    function createAgentHandoffSemanticSummaryAdapter_ACU(call) {
+        return {
+            async summarize(input) {
+                const source = JSON.stringify({ previous: input.previous, messages: input.messages });
+                const request = (repair) => [
+                    {
+                        role: 'system',
+                        content: '你只负责把输入会话事实压缩成 JSON。不得调用工具、不得计划、不得写小说。输出必须是单个 JSON 对象，字段恰好为 currentGoal、effectiveConstraints、decisions、completedItems、pendingItems、blockers、continuityFacts、readKeys、recentTurns；currentGoal 是字符串，其余字段都是字符串数组。不得编造读取地址或轮次指纹。',
+                    },
+                    { role: 'user', content: repair ? `上一次输出不符合 JSON 契约。只输出符合契约的 JSON，不要解释。\n来源：${source}` : `来源：${source}` },
+                ];
+                const first = parseSemanticSummary_ACU(await call(request(false)));
+                if (first)
+                    return first;
+                const repaired = parseSemanticSummary_ACU(await call(request(true)));
+                if (repaired)
+                    return repaired;
+                throw new Error('HANDOFF_SEMANTIC_SUMMARY_INVALID');
+            },
+        };
+    }
+    function buildDeterministicState_ACU(previous, messages) {
+        const state = previous ? {
+            currentGoal: previous.currentGoal,
+            effectiveConstraints: [...previous.effectiveConstraints], decisions: [...previous.decisions], completedItems: [...previous.completedItems],
+            pendingItems: [...previous.pendingItems], blockers: [...previous.blockers], continuityFacts: [...previous.continuityFacts],
+            readKeys: [...previous.readKeys], recentTurns: [...previous.recentTurns],
+        } : { currentGoal: '', effectiveConstraints: [], decisions: [], completedItems: [], pendingItems: [], blockers: [], continuityFacts: [], readKeys: [], recentTurns: [] };
+        for (const message of messages) {
+            if (message.kind === 'user')
+                state.effectiveConstraints.push(message.text);
+            else if (message.kind === 'agent')
+                state.decisions.push(message.digest || message.text);
+            else if (message.kind === 'tool' || message.kind === 'runtime')
+                state.continuityFacts.push(message.digest || message.text);
+            else if (message.kind === 'turn') {
+                state.currentGoal = message.digest || message.text;
+                state.recentTurns.push(message.turnKey || message.digest || message.text);
+            }
+            if (message.readKey)
+                state.readKeys.push(message.readKey);
+        }
+        for (const field of fields_ACU)
+            state[field] = (field === 'effectiveConstraints' || field === 'readKeys' ? cleanList_ACU(state[field]) : cleanList_ACU(state[field]).slice(-8));
+        state.currentGoal = cleanText_ACU(state.currentGoal);
+        return state;
+    }
+    function renderAgentHandoffReport_ACU(state, degradationReason) {
+        const sections = [['当前目标', state.currentGoal ? [state.currentGoal] : []], ['有效约束', state.effectiveConstraints], ['已执行决策', state.decisions], ['已完成', state.completedItems], ['待办', state.pendingItems], ['阻塞', state.blockers], ['连续性事实', state.continuityFacts], ['资料地址', state.readKeys], ['近期轮次', state.recentTurns]];
+        const body = sections.filter(([, items]) => items.length).map(([title, items]) => `【${title}】\n${items.map(item => `- ${item}`).join('\n')}`).join('\n');
+        return `${degradationReason ? `【摘要降级】${degradationReason}\n` : ''}【更早会话交接】\n${body || '没有可保留的早期事项。'}`;
+    }
+    async function summarizeAgentHandoff_ACU(input) {
+        let state = buildDeterministicState_ACU(input.previous, input.messages);
+        let degraded = !input.semanticAdapter;
+        let degradationReason = degraded ? 'deterministic_adapter' : undefined;
+        if (input.semanticAdapter) {
+            try {
+                const allowedReadKeys = state.readKeys;
+                const proposed = await input.semanticAdapter.summarize({ previous: input.previous, messages: input.messages, allowedReadKeys });
+                state = { ...state, currentGoal: cleanText_ACU(proposed.currentGoal) || state.currentGoal, ...Object.fromEntries(fields_ACU.map(field => [field, field === 'readKeys' || field === 'recentTurns' || field === 'effectiveConstraints' ? state[field] : cleanList_ACU(proposed[field]).length ? cleanList_ACU(proposed[field]) : state[field]])) };
+            }
+            catch {
+                degraded = true;
+                degradationReason = 'semantic_summary_failed';
+            }
+        }
+        let report = renderAgentHandoffReport_ACU(state, degradationReason);
+        for (const field of [...fields_ACU].reverse().filter(item => item !== 'effectiveConstraints' && item !== 'readKeys')) {
+            while ((await input.countTokens(report)) > input.maxTokens && state[field].length) {
+                state = { ...state, [field]: state[field].slice(1) };
+                report = renderAgentHandoffReport_ACU(state, degradationReason);
+            }
+        }
+        const reportTokens = await input.countTokens(report);
+        if (reportTokens > input.maxTokens)
+            throw new Error('HANDOFF_SUMMARY_BUDGET_EXCEEDED');
+        return { state, report, reportTokens, degraded, ...(degradationReason ? { degradationReason } : {}) };
+    }
+
     const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
     async function measure_ACU$1(snapshot, fixed, count) {
         let total = fixed;
@@ -151750,128 +152856,6 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
-     * service/continuation/agent/agent-tables.ts — 表格系统的只读投影
-     *
-     * 表名由用户模板决定，不能硬编码物理标识。三张保底表按别名列表匹配，
-     * 别名取值与工程既有惯例一致（如纪要表在多处按 name === '纪要表' 取表）。
-     * 命中零张或多张都如实标注，绝不猜测目标表。
-     */
-    const AGENT_TABLE_ALIASES_ACU = {
-        global: ['全局数据表', '全局表', '总体大纲'],
-        characters: ['角色表', '重要人物表', '人物表'],
-        chronicles: ['纪要表', '总结表'],
-    };
-    const TABLE_LABELS_ACU = {
-        global: '全局数据表',
-        characters: '角色表',
-        chronicles: '纪要表',
-    };
-    function readTableData_ACU(tableData) {
-        const source = tableData ?? currentJsonTableData_ACU;
-        return source && typeof source === 'object' && !Array.isArray(source) ? source : {};
-    }
-    function toSheetView_ACU(sheet) {
-        if (!sheet || typeof sheet !== 'object')
-            return null;
-        const name = String(sheet.name ?? '').trim();
-        const content = Array.isArray(sheet.content) ? sheet.content : [];
-        if (!name || !Array.isArray(content[0]))
-            return null;
-        const header = content[0].map((cell) => String(cell ?? '').trim());
-        const rows = content.slice(1)
-            .filter((row) => Array.isArray(row))
-            .map((row) => row.map(cell => String(cell ?? '').trim()));
-        return { name, header, rows };
-    }
-    function listSheetViews_ACU(tableData) {
-        return Object.entries(readTableData_ACU(tableData))
-            .filter(([key]) => key !== 'mate')
-            .flatMap(([, sheet]) => { const view = toSheetView_ACU(sheet); return view ? [view] : []; });
-    }
-    /**
-     * 按别名列表查找 sheet。
-     * @param aliases 候选表名
-     * @param tableData 表格数据对象，缺省取运行时快照
-     * @returns 命中的 sheet 视图列表，可能为空或多条
-     */
-    function findAgentSheetsByAliases_ACU(aliases, tableData) {
-        return listSheetViews_ACU(tableData).filter(view => aliases.includes(view.name));
-    }
-    /**
-     * 把一张表渲染成紧凑文本。
-     * @param view sheet 视图
-     * @param range 可选行区间（1 基含两端）；只渲染区间内的行，行号保持全表口径
-     * @returns 形如「表名（共 N 行）\n列: a | b\n1. x | y」的文本
-     */
-    function renderAgentSheet_ACU(view, range) {
-        const lines = [`表名：${view.name}（共 ${view.rows.length} 行）`, `列：${view.header.join(' | ')}`];
-        if (!view.rows.length) {
-            lines.push('（该表暂无数据行）');
-            return lines.join('\n');
-        }
-        if (!range) {
-            view.rows.forEach((row, index) => lines.push(`${index + 1}. ${row.join(' | ')}`));
-            return lines.join('\n');
-        }
-        const start = Math.max(1, range.start);
-        const end = Math.min(view.rows.length, range.end);
-        if (start > end) {
-            lines.push(`请求的行区间 ${range.start}-${range.end} 超出范围：该表只有 1-${view.rows.length} 行。请修正区间后重读。`);
-            return lines.join('\n');
-        }
-        lines.push(`（只列第 ${start}-${end} 行）`);
-        for (let index = start; index <= end; index += 1)
-            lines.push(`${index}. ${view.rows[index - 1].join(' | ')}`);
-        return lines.join('\n');
-    }
-    /**
-     * 渲染一张保底表。缺失或同名多张都如实标注。
-     * @param table 保底表标识
-     * @param tableData 表格数据对象，缺省取运行时快照
-     * @returns 自然语言文本
-     */
-    function renderAgentTableByAliases_ACU(table, tableData) {
-        const matched = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU[table], tableData);
-        if (!matched.length) {
-            return `当前聊天不存在${TABLE_LABELS_ACU[table]}（已按候选表名 ${AGENT_TABLE_ALIASES_ACU[table].join('、')} 查找）。请勿据此推断内容，需要该类信息时改用表格目录里实际存在的表。`;
-        }
-        if (matched.length === 1)
-            return renderAgentSheet_ACU(matched[0]);
-        const header = `命中 ${matched.length} 张同名或同类表，全部列出，请自行判断使用哪一张：`;
-        return [header, ...matched.map(view => renderAgentSheet_ACU(view))].join('\n\n');
-    }
-    /**
-     * 按精确表名渲染一张表，支撑 `$TABLE:<表名>` 与 `$TABLE:<表名>:a-b` 形式的读集。
-     * @param name 表名
-     * @param tableData 表格数据对象，缺省取运行时快照
-     * @param range 可选行区间（1 基含两端）
-     * @returns 自然语言文本；不存在时如实标注
-     */
-    function renderAgentTableByName_ACU(name, tableData, range) {
-        const target = String(name ?? '').trim();
-        if (!target)
-            return '读集里的表名为空，无法读取。';
-        const matched = listSheetViews_ACU(tableData).filter(view => view.name === target);
-        if (!matched.length)
-            return `当前聊天不存在名为「${target}」的表。可用表名见表格目录。`;
-        if (matched.length === 1)
-            return renderAgentSheet_ACU(matched[0], range);
-        return [`命中 ${matched.length} 张名为「${target}」的表，全部列出：`, ...matched.map(view => renderAgentSheet_ACU(view, range))].join('\n\n');
-    }
-    /**
-     * 渲染表格目录。目录是权威来源：主 Agent 据此知道当前聊天到底有哪些表可读。
-     * @param tableData 表格数据对象，缺省取运行时快照
-     * @returns 每行一张表的目录文本
-     */
-    function renderAgentTableCatalog_ACU(tableData) {
-        const views = listSheetViews_ACU(tableData);
-        if (!views.length)
-            return '当前聊天没有任何可读表格。';
-        const lines = views.map(view => `- ${view.name}（${view.rows.length} 行）列：${view.header.join(' | ')}｜整表读取：$TABLE:${view.name}｜行区间读取：$TABLE:${view.name}:起始行-结束行`);
-        return ['以下是当前聊天实际存在的全部表格；只有这里列出的表才能读取：', ...lines].join('\n');
-    }
-
-    /**
      * service/continuation/agent/agent-module-sql-view.ts — 续写资料快照的 SQL 易失视图
      *
      * 把折叠后的楼层快照物化进独立 SqliteEngine 内存库：一模块一表，条目 id 为主键，
@@ -151895,7 +152879,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const FIELD_RECORDS_TABLE_ACU$1 = 'field_records';
     const FIELD_VALUES_TABLE_ACU$1 = 'field_values';
     const FIELD_CHANGES_TABLE_ACU$1 = 'field_changes';
-    function isRecord_ACU$f(value) {
+    function isRecord_ACU$e(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function cloneJson_ACU$2(value) {
@@ -151911,7 +152895,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson_ACU$1(record[key])}`).join(',')}}`;
     }
     function entryId_ACU(item) {
-        if (!isRecord_ACU$f(item) || typeof item.id !== 'string' || !item.id.trim())
+        if (!isRecord_ACU$e(item) || typeof item.id !== 'string' || !item.id.trim())
             return '';
         return item.id;
     }
@@ -151970,7 +152954,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!rows.length)
             return null;
         const item = JSON.parse(String(rows[0][0]));
-        return isRecord_ACU$f(item) ? item : null;
+        return isRecord_ACU$e(item) ? item : null;
     }
     function readFieldRecordRow_ACU(engine, module, id) {
         const rows = engine.query(`SELECT status, updated_at FROM ${FIELD_RECORDS_TABLE_ACU$1} WHERE module = ? AND id = ?`, [module, id]).values;
@@ -152062,7 +153046,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 continue;
             }
             for (const entry of snapshot[module]) {
-                if (!isRecord_ACU$f(entry))
+                if (!isRecord_ACU$e(entry))
                     continue;
                 const id = entryId_ACU(entry);
                 if (!id)
@@ -152180,7 +153164,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     const id = entryId_ACU(item);
                     engine.run(`INSERT INTO ${table} (id, payload) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload`, [id, JSON.stringify(item)]);
                     recordChange_ACU$1(engine, module, id, 'upsert', JSON.stringify(item));
-                    if (isRecord_ACU$f(item))
+                    if (isRecord_ACU$e(item))
                         syncDomainRecordToFieldLayer_ACU(engine, module, id, item, input.updatedAt ?? 0, false);
                 }
             }
@@ -152214,14 +153198,14 @@ Expected function or array of functions, received type ${typeof value}.`
             const id = normalizeFieldRecordId_ACU(module, rawId);
             if (!id)
                 throw new AgentModuleSqlViewError_ACU(`模块 ${module} 逐栏写入含非法 id`, { module });
-            if (!isRecord_ACU$f(writes))
+            if (!isRecord_ACU$e(writes))
                 throw new AgentModuleSqlViewError_ACU(`模块 ${module}#${id} 的栏目写集必须是对象`, { module });
             const merged = writeIds.get(id) ?? {};
             for (const [field, write] of Object.entries(writes)) {
                 if (!matrix.fields.includes(field)) {
                     throw new AgentModuleSqlViewError_ACU(`模块 ${module}#${id} 的栏目 ${field} 不在栏目矩阵`, { module });
                 }
-                if (!isRecord_ACU$f(write) || (write.unset !== true && !Object.prototype.hasOwnProperty.call(write, 'value'))) {
+                if (!isRecord_ACU$e(write) || (write.unset !== true && !Object.prototype.hasOwnProperty.call(write, 'value'))) {
                     throw new AgentModuleSqlViewError_ACU(`模块 ${module}#${id} 的栏目 ${field} 写入必须给 value 或 unset`, { module });
                 }
                 merged[field] = write;
@@ -152240,7 +153224,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 upsertIds.set(id, { value: [...payload] });
                 continue;
             }
-            if (!isRecord_ACU$f(payload))
+            if (!isRecord_ACU$e(payload))
                 throw new AgentModuleSqlViewError_ACU(`模块 ${module}#${id} 的领域写必须是对象`, { module });
             if (entryId_ACU(payload) !== id) {
                 throw new AgentModuleSqlViewError_ACU(`模块 ${module} 领域写 id 不一致：键 ${id}，条目 ${entryId_ACU(payload) || '(无 id)'}`, { module });
@@ -153582,7 +154566,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function failProtocol_ACU(reason, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', reason, true, details));
     }
-    function isRecord_ACU$e(value) {
+    function isRecord_ACU$d(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function readText_ACU(value) {
@@ -153675,7 +154659,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const records = [];
         for (const extracted of extractJsonObjects_ACU(candidate)) {
             const parsed = parseJsonLenient_ACU(extracted);
-            if (isRecord_ACU$e(parsed))
+            if (isRecord_ACU$d(parsed))
                 records.push(parsed);
         }
         return records;
@@ -153744,7 +154728,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!salvaged)
                 continue;
             const parsed = parseJsonLenient_ACU(salvaged.json);
-            if (isRecord_ACU$e(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
+            if (isRecord_ACU$d(parsed) && (!requiredKeys.length || requiredKeys.some(key => key in parsed))) {
                 return { payload: parsed, truncated: true };
             }
         }
@@ -153756,7 +154740,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!Array.isArray(value) || !value.length)
             failProtocol_ACU('delegate 动作必须提供非空的 delegations 数组');
         return value.map((raw, index) => {
-            if (!isRecord_ACU$e(raw))
+            if (!isRecord_ACU$d(raw))
                 failProtocol_ACU(`delegations[${index}] 必须是对象`);
             const agentName = readText_ACU(raw.agentName);
             const prompt = readText_ACU(raw.prompt);
@@ -154020,7 +155004,7 @@ Expected function or array of functions, received type ${typeof value}.`
      */
     function parseAgentResearcherOutput_ACU(payload) {
         const normalizedPayload = normalizeResearcherSqlPayload_ACU(payload);
-        const rawDelta = isRecord_ACU$e(normalizedPayload.delta) ? normalizedPayload.delta : normalizedPayload;
+        const rawDelta = isRecord_ACU$d(normalizedPayload.delta) ? normalizedPayload.delta : normalizedPayload;
         const expectedRevision = parseWebRefsExpectedRevision_ACU(rawDelta.expectedRevisions ?? normalizedPayload.expectedRevisions);
         const summary = readText_ACU(normalizedPayload.summary);
         const list = rawDelta.webRefs ?? rawDelta.entries ?? rawDelta.items;
@@ -154032,7 +155016,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const items = [];
         const patches = [];
         list.forEach((raw, index) => {
-            if (!isRecord_ACU$e(raw))
+            if (!isRecord_ACU$d(raw))
                 failProtocol_ACU(`delta.webRefs[${index}] 必须是对象`);
             const actionText = readText_ACU(raw.action) || 'upsert';
             if (actionText === 'patch') {
@@ -154085,7 +155069,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { summary, expectedRevision, items, patches };
     }
     function parseWebRefsExpectedRevision_ACU(value) {
-        if (!isRecord_ACU$e(value))
+        if (!isRecord_ACU$d(value))
             return undefined;
         const raw = value.webRefs;
         return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
@@ -154122,7 +155106,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 failProtocol_ACU('finalize 动作必须提供非空 instruction');
             const rawConstraints = payload.constraints;
             let constraints = null;
-            if (isRecord_ACU$e(rawConstraints)) {
+            if (isRecord_ACU$d(rawConstraints)) {
                 // 兼容旧全量形态：current 视为「确保存在」（已存在的条目由事务层幂等跳过），retired 同 retire。
                 const add = [...new Set([...readTextList_ACU(rawConstraints.add), ...readTextList_ACU(rawConstraints.current)])];
                 const retire = [...new Set([...readTextList_ACU(rawConstraints.retire), ...readTextList_ACU(rawConstraints.retired)])];
@@ -154148,7 +155132,7 @@ Expected function or array of functions, received type ${typeof value}.`
             failProtocol_ACU('instruction-composer 必须提供非空 instruction');
         const rawConstraints = payload.constraints;
         let constraints = null;
-        if (isRecord_ACU$e(rawConstraints)) {
+        if (isRecord_ACU$d(rawConstraints)) {
             const add = readTextList_ACU(rawConstraints.add);
             const retire = readTextList_ACU(rawConstraints.retire);
             if (add.length || retire.length)
@@ -154159,7 +155143,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function parseCharacterKnowledge_ACU(value) {
         const knowledge = Array.isArray(value) ? value : [];
         return knowledge.flatMap(item => {
-            if (!isRecord_ACU$e(item))
+            if (!isRecord_ACU$d(item))
                 return [];
             const name = readText_ACU(item.name);
             return name ? [{ name, knows: readText_ACU(item.knows) }] : [];
@@ -154232,7 +155216,7 @@ Expected function or array of functions, received type ${typeof value}.`
         catch (error) {
             if (!sink || !(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_PROTOCOL_INVALID')
                 throw error;
-            sink.push({ module, index, id: isRecord_ACU$e(raw) ? readText_ACU(raw.id) : '', reason: error.error.message });
+            sink.push({ module, index, id: isRecord_ACU$d(raw) ? readText_ACU(raw.id) : '', reason: error.error.message });
         }
     }
     function parseHookItems_ACU(value, rejected) {
@@ -154243,7 +155227,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'hooks', index, raw, () => {
-            if (!isRecord_ACU$e(raw))
+            if (!isRecord_ACU$d(raw))
                 failProtocol_ACU(`delta.hooks[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -154275,7 +155259,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'infoGap', index, raw, () => {
-            if (!isRecord_ACU$e(raw))
+            if (!isRecord_ACU$d(raw))
                 failProtocol_ACU(`delta.infoGap[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -154309,7 +155293,7 @@ Expected function or array of functions, received type ${typeof value}.`
         });
     }
     function parseTargetStageRange_ACU(value, path) {
-        if (!isRecord_ACU$e(value))
+        if (!isRecord_ACU$d(value))
             failProtocol_ACU(`${path} 必须是包含 min / max 的对象`);
         const { min, max } = value;
         if (!Number.isInteger(min) || min < 1 || !Number.isInteger(max) || max < 1) {
@@ -154394,7 +155378,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'storyArc', index, raw, () => {
-            if (!isRecord_ACU$e(raw))
+            if (!isRecord_ACU$d(raw))
                 failProtocol_ACU(`delta.storyArc[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -154500,7 +155484,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const items = [];
         const patches = [];
         value.forEach((raw, index) => collectItem_ACU(rejected, 'chronology', index, raw, () => {
-            if (!isRecord_ACU$e(raw))
+            if (!isRecord_ACU$d(raw))
                 failProtocol_ACU(`delta.chronology[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
             if (action === 'patch') {
@@ -154544,7 +155528,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { items, patches };
     }
     function parseExpectedRevisions_ACU(value) {
-        if (!isRecord_ACU$e(value))
+        if (!isRecord_ACU$d(value))
             return {};
         const result = {};
         for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs']) {
@@ -154858,9 +155842,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     sawAlternative = true;
                 merged.push(...candidate);
             }
-            else if (isRecord_ACU$e(candidate) && Object.keys(candidate).length) {
+            else if (isRecord_ACU$d(candidate) && Object.keys(candidate).length) {
                 sawAlternative = true;
-                merged.push(...Object.entries(candidate).map(([id, value]) => (isRecord_ACU$e(value) ? { id, action: 'upsert', ...value } : value)));
+                merged.push(...Object.entries(candidate).map(([id, value]) => (isRecord_ACU$d(value) ? { id, action: 'upsert', ...value } : value)));
             }
         });
         // 只有标准位置且为空/缺失时保持原值，让“未提供”与“提供了空数组”的语义与其他模块一致。
@@ -154870,7 +155854,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function parseAgentMaintainerOutputDraft_ACU(payload) {
         const normalizedPayload = normalizeMaintainerSqlPayload_ACU(payload);
-        const rawDelta = isRecord_ACU$e(normalizedPayload.delta) ? normalizedPayload.delta : {};
+        const rawDelta = isRecord_ACU$d(normalizedPayload.delta) ? normalizedPayload.delta : {};
         const rejected = [];
         const hooks = parseHookItems_ACU(rawDelta.hooks, rejected);
         const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap, rejected);
@@ -155017,852 +156001,6 @@ Expected function or array of functions, received type ${typeof value}.`
         if (error instanceof ContinuationValidationError_ACU)
             return `${error.error.code}: ${error.error.message}`;
         return error instanceof Error ? error.message : String(error);
-    }
-
-    const AM_CODE_PATTERN_ACU = /^AM\d+$/i;
-    /** 归一化 AM 码（纪要地址码）；非法返回 null。同时供 Agent 世界书读取工具使用。 */
-    function normalizeAmCode_ACU(value) {
-        const code = String(value ?? '').trim().toUpperCase();
-        return AM_CODE_PATTERN_ACU.test(code) ? code : null;
-    }
-    /** 去掉隔离前缀后的条目显示名。 */
-    function normalizeGeneratedComment_ACU(entry, isolationPrefix) {
-        const raw = String(entry.comment ?? entry.name ?? '').trim();
-        return isolationPrefix && raw.startsWith(isolationPrefix) ? raw.slice(isolationPrefix.length) : raw;
-    }
-    /** 是否为纪要（总结）条目的显示名。 */
-    function isSummaryEntryComment_ACU(comment) {
-        return /^(?:总结条目|小总结条目)\d+$/.test(comment);
-    }
-    function isGeneratedEntryComment_ACU(comment) {
-        return comment.startsWith('TavernDB-ACU-')
-            || comment.startsWith('总结条目')
-            || comment.startsWith('小总结条目')
-            || comment.startsWith('重要人物条目');
-    }
-    /** 解析当前生效的世界书名单（手动选择或角色绑定）。同时供 Agent 世界书读取工具使用。 */
-    async function resolveRelevantBookNames_ACU() {
-        const config = getCurrentWorldbookConfig_ACU();
-        if (config?.source === 'manual') {
-            const manualSelection = Array.isArray(config.manualSelection)
-                ? config.manualSelection
-                : [];
-            return [...new Set(manualSelection
-                    .map((name) => String(name ?? '').trim())
-                    .filter(Boolean))];
-        }
-        return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
-    }
-    // 依赖表里的函数一律延迟绑定：直接引用会在模块求值时就解析 pipeline 的导出，
-    // 让「谁先被 import」决定本模块能否加载。改成调用时解析后，加载顺序不再影响可用性。
-    const defaultDependencies_ACU$3 = {
-        resolveRelevantBookNames: resolveRelevantBookNames_ACU,
-        resolveInjectionTarget: () => getInjectionTargetLorebook_ACU(),
-        getIsolationPrefix: () => getIsolationPrefix_ACU(),
-        buildRelevantWorldbookContent: options => buildCombinedWorldbookContentByStrategy_ACU(options),
-        readLorebookEntries: bookNames => getLorebookEntriesByNames_ACU(bookNames),
-        logReadFailure: phase => logWarn_ACU('[Continuation] 世界书只读失败。', { phase, error: { category: 'read_failed' } }),
-    };
-    /**
-     * Continuation 的只读世界书 seam。它只读取当前注入目标世界书，绝不调度剧情任务或写入宿主状态。
-     */
-    class ContinuationWorldbookContext_ACU {
-        constructor(dependencies = defaultDependencies_ACU$3) {
-            this.dependencies = dependencies;
-        }
-        async readRelevantBackground(scanText) {
-            try {
-                const bookNames = await this.dependencies.resolveRelevantBookNames();
-                if (!bookNames.length)
-                    return '';
-                const isolationPrefix = this.dependencies.getIsolationPrefix();
-                return await this.dependencies.buildRelevantWorldbookContent({
-                    logPrefix: '[Continuation]',
-                    bookNames,
-                    baseScanText: typeof scanText === 'string' ? scanText : '',
-                    excludeEntry: (entry) => isGeneratedEntryComment_ACU(normalizeGeneratedComment_ACU(entry, isolationPrefix)),
-                    formatEntry: (entry) => String(entry.content ?? '').trim(),
-                });
-            }
-            catch {
-                this.dependencies.logReadFailure('background');
-                return '';
-            }
-        }
-    }
-
-    /**
-     * service/continuation/agent/agent-worldbook-read.ts — Agent 的世界书只读接入
-     *
-     * 运行起点一次性预取启用条目做运行内快照，之后目录 / 精读 / 命中提示 / 搜索都基于
-     * 同一份快照（世界书读取是异步宿主调用，预取后地址在一次运行内不漂移）。
-     *
-     * 暴露范围：已启用集合内的普通条目全部可读可搜（含插件生成的重要人物条目等）；
-     * 遗留的总结条目（旧总结系统的残留）不再暴露；未启用条目不进目录、不进搜索、不可读。
-     */
-    function buildEmptyAgentWorldbookSnapshot_ACU(available = true) {
-        return { entries: [], available };
-    }
-    function isRecord_ACU$d(value) {
-        return value !== null && typeof value === 'object' && !Array.isArray(value);
-    }
-    function readEntryKeys_ACU(entry) {
-        const raw = Array.isArray(entry.keys) ? entry.keys : typeof entry.keys === 'string' ? entry.keys.split(/[,，]/) : [];
-        return raw.map(key => String(key ?? '').trim()).filter(Boolean);
-    }
-    /** 与 pipeline 的 isSelected 语义一致：插件侧勾选表缺书/缺列表都视为全选。 */
-    function isEntrySelected_ACU(bookName, uid, enabledEntriesMap) {
-        if (!isRecord_ACU$d(enabledEntriesMap) || !Object.keys(enabledEntriesMap).length)
-            return true;
-        const list = enabledEntriesMap[bookName];
-        if (typeof list === 'undefined' || !Array.isArray(list))
-            return true;
-        return list.some(item => String(item) === uid);
-    }
-    /**
-     * 条目 token 数的跨运行缓存。键含内容长度：同一条目被编辑后长度几乎必变，
-     * 变了即重算；极小概率的等长改写只影响预算估算精度，不影响正确性。
-     */
-    const entryTokenCache_ACU = new Map();
-    async function countEntryTokens_ACU(bookName, uid, content) {
-        const key = `${bookName}#${uid}#${content.length}`;
-        const cached = entryTokenCache_ACU.get(key);
-        if (cached !== undefined)
-            return cached;
-        const counted = await countAgentTokens_ACU(content);
-        entryTokenCache_ACU.set(key, counted);
-        return counted;
-    }
-    /**
-     * 预取当前已启用的世界书条目为运行内快照。
-     *
-     * 启用判定与提示词注入管线一致：条目自身 enabled 为真、且通过插件侧 enabledEntries
-     * 勾选表、且不属于屏蔽名单（当前屏蔽词为空，逻辑保留备用）。遗留总结条目直接跳过。
-     * 内部插件条目（TavernDB-ACU- 前缀）是存储载体而非叙事资料，不暴露。
-     * 每条条目在预取时统计 token 数（结果缓存跨运行复用），供目录标注读取预算。
-     * @returns 快照；宿主读取失败时返回 available=false 的空快照
-     */
-    async function loadAgentWorldbookSnapshot_ACU() {
-        try {
-            const bookNames = await resolveRelevantBookNames_ACU();
-            if (!bookNames.length)
-                return buildEmptyAgentWorldbookSnapshot_ACU();
-            const entriesByBook = await getLorebookEntriesByNames_ACU(bookNames);
-            const isolationPrefix = getIsolationPrefix_ACU();
-            const enabledEntriesMap = getCurrentWorldbookConfig_ACU()?.enabledEntries;
-            const entries = [];
-            for (const bookName of bookNames) {
-                for (const raw of entriesByBook[bookName] ?? []) {
-                    if (!isRecord_ACU$d(raw))
-                        continue;
-                    if (raw.enabled !== true)
-                        continue;
-                    const uid = String(raw.uid ?? '').trim();
-                    const title = normalizeGeneratedComment_ACU(raw, isolationPrefix);
-                    const content = String(raw.content ?? '').trim();
-                    // 旧总结系统的残留条目不再是可用资料域，静默跳过。
-                    if (isSummaryEntryComment_ACU(title))
-                        continue;
-                    if (!uid || !content)
-                        continue;
-                    if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap))
-                        continue;
-                    if (isEntryBlocked_ACU$1(raw))
-                        continue;
-                    if (title.startsWith('TavernDB-ACU-'))
-                        continue;
-                    entries.push({
-                        bookName,
-                        uid,
-                        title: title || `条目 ${uid}`,
-                        keys: readEntryKeys_ACU(raw),
-                        constant: raw.type === 'constant',
-                        content,
-                        tokens: await countEntryTokens_ACU(bookName, uid, content),
-                    });
-                }
-            }
-            return { entries, available: true };
-        }
-        catch (error) {
-            logWarn_ACU('[Continuation][Agent] 世界书快照预取失败，本轮目录与搜索将不含世界书。', { error: error instanceof Error ? error.message : String(error) });
-            return buildEmptyAgentWorldbookSnapshot_ACU(false);
-        }
-    }
-    /** 目录行里的内容摘要：压平空白后取前 10 个字符。 */
-    function entryExcerpt_ACU(content) {
-        const flat = content.replace(/\s+/g, ' ').trim();
-        return flat.length <= 10 ? flat : `${flat.slice(0, 10)}…`;
-    }
-    /**
-     * 渲染世界书目录：每条一行「标题｜关键词｜10 字摘要｜token 估算 → 精读地址」。
-     * token 标注让 AI 在动手读之前就能对照读取预算分配额度。
-     * @param snapshot 运行内快照
-     * @returns 目录文本，进入主 Agent 骨架的 $WORLDBOOK_CATALOG
-     */
-    function renderAgentWorldbookCatalog_ACU(snapshot) {
-        if (!snapshot.available)
-            return '本轮世界书读取失败，目录不可用；请勿臆测世界书内容，可照常使用其他资料域。';
-        if (!snapshot.entries.length)
-            return '当前没有已启用的世界书条目。';
-        const lines = snapshot.entries.map(entry => {
-            const keys = entry.keys.length ? entry.keys.join('、') : '（无）';
-            return `- ${entry.title}｜关键词：${keys}｜摘要：${entryExcerpt_ACU(entry.content)}｜约 ${entry.tokens} token → 读取地址 $WORLDBOOK:${entry.bookName}:${entry.uid}`;
-        });
-        return `## 已启用的世界书条目（共 ${snapshot.entries.length} 条，只有这里列出的可读；行尾 token 数用于估算读取预算）\n${lines.join('\n')}`;
-    }
-    /**
-     * 渲染本轮语境命中的世界书条目提示：常开条目始终列出，关键词条目在扫描文本
-     * 命中任一关键词（大小写不敏感的包含匹配）时列出。
-     * 这是「该读哪些设定」的直接信号——命中条目与本轮剧情高度相关，应优先精读。
-     * @param snapshot 运行内快照
-     * @param scanText 扫描文本（本轮目标 + 未结算正文 + 尾部楼层 + 用户初始要求）
-     * @returns 命中提示文本；无命中/世界书不可用时如实说明
-     */
-    function renderAgentWorldbookHits_ACU(snapshot, scanText) {
-        if (!snapshot.available)
-            return '本轮世界书读取失败，无法给出命中提示；请勿臆测世界书内容。';
-        if (!snapshot.entries.length)
-            return '当前没有已启用的世界书条目，无命中提示。';
-        const haystack = String(scanText ?? '').toLowerCase();
-        const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
-        if (!hits.length)
-            return '本轮语境没有命中任何世界书条目的关键词，也没有常开条目。需要设定时从世界书目录挑选精读。';
-        const lines = hits.map(entry => `- ${entry.title}（${entry.constant ? '常开' : '关键词命中'}｜约 ${entry.tokens} token）→ $WORLDBOOK:${entry.bookName}:${entry.uid}`);
-        return `以下条目与本轮语境直接相关（常开条目 + 关键词命中），本轮涉及对应设定时应精读：\n${lines.join('\n')}`;
-    }
-    /**
-     * 按书名 + uid 列表精读世界书条目全文，支撑 `$WORLDBOOK:书名:uid1,uid2`。
-     * @param snapshot 运行内快照
-     * @param bookName 世界书名
-     * @param uids 条目 uid 列表
-     * @returns 条目全文；未知书名/uid 或条目未启用时回灌可修正的错误文本
-     */
-    /** 本轮命中的世界书条目全文。主会话备好后交给所有子代理，子代理不再各自精读。 */
-    function renderAgentWorldbookHitBodies_ACU(snapshot, scanText) {
-        if (!snapshot.available)
-            return '本轮世界书不可用。';
-        if (!snapshot.entries.length)
-            return '当前没有已启用的世界书条目。';
-        const haystack = String(scanText ?? '').toLowerCase();
-        const hits = snapshot.entries.filter(entry => entry.constant || (haystack && entry.keys.some(key => haystack.includes(key.toLowerCase()))));
-        if (!hits.length)
-            return '本轮没有命中世界书条目。';
-        const byBook = new Map();
-        for (const hit of hits) {
-            const list = byBook.get(hit.bookName) ?? [];
-            list.push(hit.uid);
-            byBook.set(hit.bookName, list);
-        }
-        return [...byBook].map(([book, uids]) => renderAgentWorldbookEntries_ACU(snapshot, book, uids)).join('\n\n');
-    }
-    function renderAgentWorldbookEntries_ACU(snapshot, bookName, uids) {
-        if (!snapshot.available)
-            return '本轮世界书读取失败，无法精读条目。';
-        const book = String(bookName ?? '').trim();
-        const wanted = uids.map(uid => String(uid ?? '').trim()).filter(Boolean);
-        if (!book || !wanted.length)
-            return '世界书读取地址不完整：需要 $WORLDBOOK:书名:uid（逗号分隔多个 uid）。地址请从世界书目录复制。';
-        const inBook = snapshot.entries.filter(entry => entry.bookName === book);
-        if (!inBook.length)
-            return `已启用条目中不存在世界书「${book}」。可用地址见世界书目录；未启用的条目不可读。`;
-        const found = inBook.filter(entry => wanted.includes(entry.uid));
-        const missing = wanted.filter(uid => !inBook.some(entry => entry.uid === uid));
-        const parts = found.map(entry => `### ${entry.title}（${entry.bookName}#${entry.uid}）\n${entry.content}`);
-        if (missing.length)
-            parts.push(`以下 uid 不存在于「${book}」的已启用条目中：${missing.join('、')}。地址请从世界书目录复制。`);
-        return parts.join('\n\n');
-    }
-
-    /**
-     * service/continuation/agent/agent-placeholder-resolver.ts — 读写集占位符解析
-     *
-     * 读集 token 只是资料接口标识符，不是提示词 token：解析结果统一汇成一块材料文本，
-     * 通过单个 `$AGENT_READ_MATERIALS` 注入子代理提示词。这样动态表名（$TABLE:xxx）
-     * 不需要扩展提示词渲染器的固定 token 表。
-     */
-    const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
-    const AGENT_STORY_RANGE_TOKEN_PREFIX_ACU = '$STORY_RANGE:';
-    const AGENT_WORLDBOOK_TOKEN_PREFIX_ACU = '$WORLDBOOK:';
-    /** 每条虚拟/模块/表占位符对应的人类可读标题，进入材料块的分节标题。 */
-    const READ_TOKEN_TITLES_ACU = {
-        $STORY_TEXT: '已经发生的小说正文（只含 AI 楼层）',
-        $STORY_CATALOG: '正文楼层索引',
-        $STORY_OVERVIEW: '事件概览（纪要表逐轮）',
-        $STORY_TAIL: '最近正文（尾部全文楼层）',
-        $HISTORY_UNSETTLED: '尚未结算的真实历史',
-        $OUTLINE_WINDOW: '当前大纲窗口',
-        $CURRENT_TURN_GOAL: '本轮目标',
-        $CURRENT_TURN_PACING: '本轮节奏',
-        $USER_INTENT: '用户的初始要求',
-        $USER_REQUIREMENTS: '用户对任务曾经提过的要求',
-        $STORY_ARC: '故事总纲',
-        $HOOKS_LEDGER: '伏笔账本',
-        $INFO_GAP: '认知与信息差时间线',
-        $ACTIVE_CONSTRAINTS: '长期约束',
-        $CHRONOLOGY: '故事年代学账本',
-        $WEB_REFS: '百科资料库',
-        $TABLE_GLOBAL: '全局数据表',
-        $TABLE_CHARACTERS: '角色表',
-        $TABLE_CHRONICLES: '纪要表',
-    };
-    function applyAgentContextRules_ACU(text, rules) {
-        if (!rules || (!rules.extractRules.length && !rules.excludeRules.length))
-            return text;
-        return applyContextTagFilters_ACU(text, { extractTags: '', extractRules: rules.extractRules, excludeTags: '', excludeRules: rules.excludeRules }).trim();
-    }
-    function messageText_ACU(message, rules) {
-        return applyAgentContextRules_ACU(String(message?.mes ?? '').trim(), rules);
-    }
-    function listAgentStoryFloors_ACU(source) {
-        const chat = Array.isArray(source.chat) ? source.chat : [];
-        return chat
-            .map((message, index) => ({ index, text: messageText_ACU(message, source.contextRules) }))
-            .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
-    }
-    /** 与正文目录共用的 AI 正文楼层判断；证据校验不受读取窗口限制。 */
-    function agentStoryEvidenceFloorIndexes_ACU(chat) {
-        return new Set(listAgentStoryFloors_ACU({ chat }).map(floor => floor.index));
-    }
-    function agentStoryWindowSize_ACU(source) {
-        return Math.max(0, source.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
-    }
-    /** Agent 可读/可搜的正文窗口：最近 storyWindowFloors 个 AI 楼层。同时供搜索工具划定 story 域。 */
-    function listAgentStoryWindowFloors_ACU(source) {
-        const window = agentStoryWindowSize_ACU(source);
-        return window > 0 ? listAgentStoryFloors_ACU(source).slice(-window) : [];
-    }
-    /**
-     * 从最后一个用户楼层提取本轮召回的 AM 码。
-     * 剧情推进 AI 的召回结果（<recall>AMxxxx</recall> 等）就落在这层文本里，直接复用即可，
-     * 不需要续写侧再发一次召回调用。取原始文本而非过滤后的文本：召回码可能位于会被规则剥掉的标签内。
-     * @param chat 聊天数组
-     * @returns 去重后的规范化 AM 码列表；没有用户楼层或无命中时为空数组
-     */
-    function extractAgentRecallCodesFromChat_ACU(chat) {
-        const list = Array.isArray(chat) ? chat : [];
-        for (let index = list.length - 1; index >= 0; index -= 1) {
-            const message = list[index];
-            if (!message || !message.is_user)
-                continue;
-            const matches = String(message.mes ?? '').match(/AM\d+/gi) ?? [];
-            return [...new Set(matches
-                    .map(code => normalizeAmCode_ACU(code))
-                    .filter((code) => code !== null))];
-        }
-        return [];
-    }
-    function renderStoryFloors_ACU(floors) {
-        return floors.map(floor => `【楼层 ${floor.index}】\n${floor.text}`).join('\n\n');
-    }
-    function storyOpening_ACU(text) {
-        const flat = text.replace(/\s+/g, ' ').trim();
-        return flat.length <= 40 ? flat : `${flat.slice(0, 40)}…`;
-    }
-    /** 定位纪要表的一列：按表头包含关系匹配候选名，命中第一个。 */
-    function findColumnIndex_ACU(header, candidates) {
-        for (const candidate of candidates) {
-            const index = header.findIndex(cell => cell.includes(candidate));
-            if (index >= 0)
-                return index;
-        }
-        return -1;
-    }
-    /**
-     * 渲染事件概览：纪要表逐轮的「概览」列注入，命中本轮召回 AM 码的行升级为「纪要」全文。
-     *
-     * 这是主会话与策划类子代理掌握全局剧情脉络的固定来源——概览按剧情轮记录（每轮一行），
-     * 与楼层号没有一一映射，精确正文要走 $STORY_RANGE 或楼层索引。
-     * @param source 表格数据与本轮召回码
-     * @param options 渲染选项；maxRows 见 AgentStoryOverviewOptions_ACU
-     * @returns 概览文本；纪要表缺失/为空时如实说明
-     */
-    function renderAgentStoryOverview_ACU(source, options) {
-        const sheets = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU.chronicles, source.tableData);
-        if (!sheets.length) {
-            return '当前聊天没有纪要表，无法提供事件概览。剧情脉络只能依靠楼层索引与正文楼层本身。';
-        }
-        const recall = new Set((source.recallCodes ?? []).map(code => normalizeAmCode_ACU(code)).filter(Boolean));
-        const maxRows = options?.maxRows && options.maxRows > 0 ? Math.floor(options.maxRows) : null;
-        let anyExpanded = false;
-        const sections = sheets.map(sheet => {
-            if (!sheet.rows.length)
-                return `表「${sheet.name}」存在但没有数据行。`;
-            const codeColumn = findColumnIndex_ACU(sheet.header, ['编码索引', '编码']);
-            const overviewColumn = findColumnIndex_ACU(sheet.header, ['概览', '概要']);
-            const digestColumn = sheet.header.findIndex(cell => cell.includes('纪要') && !cell.includes('概'));
-            const renderRow = (row, rowIndex) => {
-                const code = codeColumn >= 0 ? normalizeAmCode_ACU(row[codeColumn]) : null;
-                const overview = overviewColumn >= 0 ? row[overviewColumn] : '';
-                const digest = digestColumn >= 0 ? row[digestColumn] : '';
-                const label = code ?? `第 ${rowIndex + 1} 行`;
-                if (code && recall.has(code) && digest) {
-                    anyExpanded = true;
-                    return `- ${label}｜【纪要全文】${digest}`;
-                }
-                return `- ${label}｜${overview || digest || '（空行）'}`;
-            };
-            const windowStart = maxRows !== null ? Math.max(0, sheet.rows.length - maxRows) : 0;
-            const windowLines = sheet.rows.slice(windowStart).map((row, offset) => renderRow(row, windowStart + offset));
-            const parts = [];
-            if (windowStart > 0) {
-                parts.push(`更早的 ${windowStart} 轮概览已省略（对应「${sheet.name}」第 1-${windowStart} 行），需要时用 $TABLE:${sheet.name}:行区间 精读。`);
-                // 窗口外被召回命中的行按行序前置：召回命中说明与本轮直接相关，不能被截断静默丢掉。
-                const recalledEarlier = sheet.rows.slice(0, windowStart)
-                    .map((row, rowIndex) => ({ row, rowIndex }))
-                    .filter(({ row }) => {
-                    const code = codeColumn >= 0 ? normalizeAmCode_ACU(row[codeColumn]) : null;
-                    return code !== null && recall.has(code);
-                });
-                if (recalledEarlier.length) {
-                    parts.push(`以下为本轮召回命中的更早轮次（不受截断影响）：\n${recalledEarlier.map(({ row, rowIndex }) => renderRow(row, rowIndex)).join('\n')}`);
-                }
-            }
-            parts.push(windowLines.join('\n'));
-            const head = sheets.length > 1 ? `## 表「${sheet.name}」\n` : '';
-            return `${head}${parts.join('\n\n')}`;
-        });
-        const expandedNote = anyExpanded
-            ? '带【纪要全文】标记的行已按本轮召回码展开为详细纪要。'
-            : '';
-        return [
-            '以下是纪要表的逐轮事件概览（每行对应一轮剧情，与楼层号无一一映射；需要某轮的详细纪要时用 $TABLE:纪要表:行区间 精读）：',
-            ...sections,
-            expandedNote,
-        ].filter(Boolean).join('\n\n');
-    }
-    /**
-     * 渲染最近正文：末尾 storyTailFloors 个 AI 楼层的全文（已过上下文提取/排除规则）。
-     * 这是承接锚点——续写必须无缝衔接的最新正文。
-     * @param source 正文楼层来源
-     * @returns 逐楼全文；storyTailFloors=0 或无 AI 楼层时如实标注
-     */
-    function renderAgentStoryTail_ACU(source) {
-        const windowFloors = listAgentStoryWindowFloors_ACU(source);
-        if (!windowFloors.length)
-            return '当前没有可注入的正文楼层（聊天里还没有 AI 正文，或可读窗口为 0）。';
-        const tailCount = Math.max(0, source.storyTailFloors ?? AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU);
-        if (tailCount === 0)
-            return '未注入正文楼层全文（尾部楼层数设置为 0）。需要正文时用 $STORY_RANGE:起始楼-结束楼 读取。';
-        const tailFloors = windowFloors.slice(-tailCount);
-        return `最近 ${tailFloors.length} 楼全文（续写必须无缝衔接这里的结尾）：\n${renderStoryFloors_ACU(tailFloors)}`;
-    }
-    /**
-     * 渲染正文楼层索引：纯索引，不含任何正文全文（全文见 $STORY_TAIL，脉络见 $STORY_OVERVIEW）。
-     * 每楼一行「楼层号 + 约字数 + 读取地址」；纪要表缺失时退回附带开头摘要的形式以保底可导航。
-     * @param source 正文楼层来源 + 表格数据（用于判断纪要表是否存在）
-     * @returns 索引文本，进入主 Agent 骨架的 $STORY_CATALOG
-     */
-    function renderAgentStoryCatalog_ACU(source) {
-        const allFloors = listAgentStoryFloors_ACU(source);
-        if (!allFloors.length)
-            return '当前聊天还没有 AI 产出的正文楼层。';
-        const windowFloors = listAgentStoryWindowFloors_ACU(source);
-        if (!windowFloors.length)
-            return '正文可读窗口设置为 0 楼：正文楼层不可直接读取；剧情脉络请依靠事件概览与 $TABLE:纪要表。';
-        const hiddenCount = allFloors.length - windowFloors.length;
-        const headNote = hiddenCount > 0
-            ? `更早的 ${hiddenCount} 个 AI 楼层不在可读窗口内；其剧情脉络请查看事件概览，或用 $TABLE:纪要表:行区间 精读对应纪要。`
-            : '当前全部 AI 楼层都在可读窗口内。';
-        const hasChronicleRows = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU.chronicles, source.tableData)
-            .some(sheet => sheet.rows.length > 0);
-        const lines = windowFloors.map(floor => hasChronicleRows
-            ? `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`
-            : `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜开头：${storyOpening_ACU(floor.text)}｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`);
-        return [
-            `${headNote}\n可读窗口内的楼层索引（区间读取写 $STORY_RANGE:起始楼-结束楼；按内容找楼层用 search story）：`,
-            lines.join('\n'),
-            '注意：事件概览按剧情轮记录，与楼层号无一一映射；需要精确正文时按本索引区间读取。',
-        ].join('\n');
-    }
-    /**
-     * 按楼层区间读取窗口内的 AI 正文全文，支撑 `$STORY_RANGE:a-b`。
-     * @param context 解析上下文
-     * @param startRaw 起始楼层号
-     * @param endRaw 结束楼层号
-     * @returns 区间内逐楼全文；区间非法/落在窗口外时回灌可修正的错误文本
-     */
-    function renderAgentStoryRange_ACU(context, startRaw, endRaw) {
-        const start = Number.parseInt(startRaw, 10);
-        const end = Number.parseInt(endRaw, 10);
-        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) {
-            return `楼层区间「${startRaw}-${endRaw}」不合法：写法为 $STORY_RANGE:起始楼-结束楼（两端都是楼层号，起始不大于结束）。可用楼层见正文目录。`;
-        }
-        const windowFloors = listAgentStoryWindowFloors_ACU(context);
-        if (!windowFloors.length)
-            return '正文可读窗口当前为空，无法读取正文；早期剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。';
-        const hit = windowFloors.filter(floor => floor.index >= start && floor.index <= end);
-        if (!hit.length) {
-            const first = windowFloors[0].index;
-            const last = windowFloors[windowFloors.length - 1].index;
-            return `区间 ${start}-${end} 内没有可读的 AI 楼层。可读窗口目前覆盖楼层 ${first}-${last}（只含 AI 楼）；更早的剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。`;
-        }
-        return renderStoryFloors_ACU(hit);
-    }
-    /**
-     * 渲染已经发生的小说正文。
-     *
-     * 只取 AI 楼层——用户楼是操作指令而不是小说内容，把它当正文注入会让模型把指令误读成剧情。
-     * 分「已结算」「尚未结算」两段：已结算段按窗口取最近若干楼（更早部分已经沉淀进资料模块与纪要），
-     * 未结算段全量注入（它还没被任何资料模块吸收，是本轮必须亲自读的部分）。
-     * @param context 解析上下文
-     * @returns 分段的逐楼正文；没有 AI 楼层时如实说明
-     */
-    function renderAgentStoryText_ACU(context) {
-        const chat = Array.isArray(context.chat) ? context.chat : [];
-        const highestIndex = chat.length - 1;
-        if (highestIndex < 0)
-            return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
-        // 删楼后残留的水位可能指向已不存在的楼层，必须钳制，否则未结算段起点会越过末楼输出空段。
-        const settledThrough = Math.min(context.settledThroughIndex, highestIndex);
-        const floors = chat
-            .map((message, index) => ({ index, text: messageText_ACU(message, context.contextRules) }))
-            .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
-        if (!floors.length)
-            return '当前聊天还没有 AI 产出的正文楼层。';
-        const window = Math.max(0, context.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
-        const settled = floors.filter(item => item.index <= settledThrough);
-        const unsettled = floors.filter(item => item.index > settledThrough);
-        const shownSettled = window > 0 ? settled.slice(-window) : [];
-        const hiddenSettled = settled.length - shownSettled.length;
-        const render = (items) => items.map(item => `【楼层 ${item.index}】\n${item.text}`).join('\n\n');
-        const sections = [];
-        const settledHead = hiddenSettled > 0
-            ? `## 已结算正文（只列最近 ${shownSettled.length} 楼；更早的 ${hiddenSettled} 楼未注入，其事实已沉淀进资料模块与纪要，需要时派工读取）`
-            : '## 已结算正文';
-        if (shownSettled.length)
-            sections.push(`${settledHead}\n${render(shownSettled)}`);
-        else if (settled.length)
-            sections.push(`${settledHead}\n（本次未注入任何已结算正文。）`);
-        sections.push(unsettled.length
-            ? `## 尚未结算的最新正文（全量）\n${render(unsettled)}`
-            : '## 尚未结算的最新正文\n没有尚未结算的正文楼层；上一轮已结算到当前最后一楼。');
-        return sections.join('\n\n');
-    }
-    /**
-     * 渲染尚未结算的真实历史。只含 AI 楼层——正文域永远不含用户楼层，
-     * 用户楼层的唯一职责是承载召回码（见 extractAgentRecallCodesFromChat_ACU）。
-     * 该区间不做任何截断：结算子代理必须看到全部未结算正文，否则水位推进会吞掉未处理的楼层。
-     * @param context 解析上下文
-     * @returns 逐楼文本；无未结算楼层时如实标注
-     */
-    function renderAgentUnsettledHistory_ACU(context) {
-        const start = context.settledThroughIndex + 1;
-        const lines = [];
-        for (let index = start; index < context.chat.length; index += 1) {
-            const message = context.chat[index];
-            if (!message || message.is_user)
-                continue;
-            const text = messageText_ACU(message, context.contextRules);
-            if (text)
-                lines.push(`【楼层 ${index}】\n${text}`);
-        }
-        return lines.length ? lines.join('\n\n') : '没有尚未结算的真实历史；上一轮已结算到当前最后一楼。';
-    }
-    /**
-     * 拼装世界书关键词命中的扫描文本：本轮目标 + 未结算正文 + 尾部全文楼层 + 用户初始要求。
-     * 主循环与子代理运行时共用，保证命中提示在两侧口径一致。
-     * @param context 解析上下文
-     * @returns 扫描文本
-     */
-    function buildAgentWorldbookScanText_ACU(context) {
-        return [
-            context.originInstruction,
-            context.execution.turn?.goal ?? '',
-            renderAgentUnsettledHistory_ACU(context),
-            renderAgentStoryTail_ACU(context),
-        ].filter(Boolean).join('\n');
-    }
-    /** 四档节奏标签的语义与写作指导。低压轮的约束写成禁令，否则模型会习惯性地往每一轮里塞冲突。 */
-    const TURN_PACING_GUIDANCE_ACU = {
-        setup: '铺垫日常轮：允许主线 hold，通过具体生活动作与人物互动，让关系、习惯、世界理解、资源、身体或认知发生可观察变化；没有必须立即处理的危机时，可隔夜、数日后或更久开始。本轮禁止制造新危机、引入新敌对方或让局势升级，允许安静闭合或留下普通生活期待。',
-        pressure: '冲突推进轮：外部压力上升，危机、对抗或追逼向前推进一步。本轮只推进一个冲突，不要同时开新战线。',
-        turn: '转折揭示轮：反转、信息揭露或伏笔回收。揭示要落在已经埋过的东西上，不要临时造一个真相。',
-        cooldown: '余波消化轮：允许主线 hold，完整处理上一波的伤势、代价、情绪与关系变化；可让恢复所需的一夜或数日自然流逝。本轮禁止制造新危机，让后果被真正看见，并允许安静闭合。',
-    };
-    /**
-     * 渲染某一轮的节奏指导。
-     * @param pacing 轮次节奏标签；无可执行轮次时传 null
-     * @returns 标签名与对应的写作指导
-     */
-    function renderAgentTurnPacingGuidance_ACU(pacing) {
-        if (!pacing)
-            return '本轮节奏：尚无可执行的大纲轮次，节奏待大纲创建或继续后确定。';
-        return `本轮节奏：${pacing}。${TURN_PACING_GUIDANCE_ACU[pacing]}`;
-    }
-    const TURN_FUNCTION_LABELS_ACU = {
-        daily_bond: '关系日常',
-        daily_world: '世界日常',
-        recovery: '恢复余波',
-        preparation: '准备',
-        training: '训练/成长',
-        economy: '经营',
-        side_thread: '支线',
-        conflict: '冲突',
-        reveal: '揭示',
-        payoff: '兑现',
-        transition: '过渡',
-    };
-    const TURN_MAINLINE_LABELS_ACU = {
-        hold: '主线停驻',
-        micro: '主线微推进',
-        step: '主线前进一步',
-        milestone: '主线里程碑',
-    };
-    const TURN_TIME_LABELS_ACU = {
-        continuous: '紧接上一轮',
-        same_day: '同日稍后',
-        overnight: '隔夜',
-        days: '数日后',
-        weeks: '数周后',
-        months: '数月后',
-        years: '数年后',
-    };
-    const LONG_TIME_ADVANCES_ACU = new Set(['days', 'weeks', 'months', 'years']);
-    /**
-     * 渲染本轮的完整四维标记与由此触发的义务：pacing 指导 + 叙事功能 / 主线增量 / 时间关系 / 时间锚。
-     * 时间跨度较大时把 V26 的时间跳跃义务直接写在这里，主 Agent 不必再去大纲窗口的箭头行比对。
-     * 系统补全的字段单独点名，避免把推断值当成作者意图。
-     * @param turn 当前轮次；无可执行轮次时传 null
-     */
-    function renderAgentTurnGuidance_ACU(turn) {
-        if (!turn)
-            return renderAgentTurnPacingGuidance_ACU(null);
-        const lines = [renderAgentTurnPacingGuidance_ACU(turn.pacing)];
-        const marks = [];
-        if (turn.function)
-            marks.push(`叙事功能=${turn.function}（${TURN_FUNCTION_LABELS_ACU[turn.function]}）`);
-        if (turn.mainlineDelta)
-            marks.push(`主线增量=${turn.mainlineDelta}（${TURN_MAINLINE_LABELS_ACU[turn.mainlineDelta]}）`);
-        if (turn.timeAdvance)
-            marks.push(`时间关系=${turn.timeAdvance}（${TURN_TIME_LABELS_ACU[turn.timeAdvance]}）`);
-        if (turn.timeAnchor)
-            marks.push(`时间锚=${turn.timeAnchor}`);
-        if (marks.length)
-            lines.push(`本轮标记：${marks.join('；')}。`);
-        if (turn.inferred?.length) {
-            lines.push(`注意：${turn.inferred.join('、')} 是系统按节奏档保守补全的推断值，不是大纲作者的明确意图；与正文实际情况冲突时以正文为准。`);
-        }
-        if (turn.timeAdvance && LONG_TIME_ADVANCES_ACU.has(turn.timeAdvance)) {
-            lines.push('时间跳跃义务：本轮计划跨越较长故事时间，finalize 的 instruction 必须写明新的相对时间锚、至少两项可感知变化（季节天气、身体伤势、衣着环境、关系熟悉度、资源经营、社会状态等），以及上一紧迫问题为何允许被跨过的连续性桥梁；不得用摘要跳过此前已承诺的关键场景。先 read $CHRONOLOGY 核对累计时间。');
-        }
-        if (turn.mainlineDelta === 'hold') {
-            lines.push('本轮主线允许停驻：不推进核心矛盾、不揭示重大情报、不制造敌方动作，但必须有一项可观察的非危机变化。');
-        }
-        return lines.join('\n');
-    }
-    /**
-     * 渲染当前大纲窗口：本阶段目标、当前节点与本节点全部轮次目标。
-     * 大纲缺失或当前阶段已完成时如实说明状态，并指出必须先派工大纲子代理。
-     * @param context 解析上下文
-     * @returns 自然语言文本
-     */
-    function renderTurnSemanticMeta_ACU(turn) {
-        const parts = [
-            `pacing=${turn.pacing}`,
-            `function=${turn.function ?? '未标注'}`,
-            `mainline=${turn.mainlineDelta ?? '未标注'}`,
-            `time=${turn.timeAdvance ?? '未标注'}`,
-        ];
-        if (turn.timeAnchor)
-            parts.push(`anchor=${turn.timeAnchor}`);
-        if (turn.inferred?.length)
-            parts.push(`系统补全=${turn.inferred.join(',')}`);
-        return parts.join('｜');
-    }
-    function renderAgentOutlineWindow_ACU(context) {
-        const { execution } = context;
-        if (!execution.stage) {
-            return '当前任务还没有阶段大纲。输出 open_round 后，固定工作流会先准备可执行阶段大纲，再进入资料工作流与写作指令编排；主 Agent 不直接派工 outline-architect。';
-        }
-        if (execution.stage.status === 'completed') {
-            return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。输出 open_round 后，固定工作流会继续下一阶段大纲，再进入资料工作流与写作指令编排。`;
-        }
-        if (!execution.revision || !execution.node || !execution.turn) {
-            return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
-        }
-        // 轮次与节点都带 [ID] 前缀：便于主 Agent 在委派 outline-architect 时精确引用待维护目标。
-        const turns = execution.node.turns
-            .map((turn, index) => `${index + 1}. [${turn.id}]（${renderTurnSemanticMeta_ACU(turn)}）${turn.goal}${turn.id === execution.turn.id ? '  ← 本轮' : ''}`)
-            .join('\n');
-        return [
-            `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
-            `阶段目标：${execution.revision.outline.goal}`,
-            `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
-            `阶段结构职责：${execution.revision.outline.role ?? '旧快照未标注'}`,
-            `阶段时间目标：${execution.revision.outline.timeSpanGoal ?? '未设定'}`,
-            `当前节点：[${execution.node.id}] ${execution.node.title}`,
-            `节点目标：${execution.node.goal}`,
-            `阶段内轮次进度：第 ${execution.turnNumber} / ${execution.revision.outline.totalTurns} 轮`,
-            '本节点逐轮目标（括号内依次给出 pacing、function、mainline、time 与可选 anchor）：',
-            turns,
-            renderAgentTurnPacingGuidance_ACU(execution.turn.pacing),
-            '注意：大纲是计划，不是已经发生的事实。',
-        ].join('\n');
-    }
-    /**
-     * 渲染大纲游标的一行状态，进入主 Agent 骨架的 $OUTLINE_STATE。
-     * 完整大纲窗口靠 read $OUTLINE_WINDOW 调阅，骨架只保留「现在在哪」。
-     * @param context 解析上下文
-     * @returns 一行状态文本
-     */
-    function renderAgentOutlineState_ACU(context) {
-        const { execution } = context;
-        if (!execution.stage)
-            return '大纲状态：尚无阶段大纲（须先派工 outline-architect 创建，之后才能 finalize）。';
-        if (execution.stage.status === 'completed') {
-            return `大纲状态：第 ${execution.stage.stageNumber} 阶段已全部完成，下一阶段大纲未创建（须派工 outline-architect 继续）。`;
-        }
-        if (!execution.revision || !execution.node || !execution.turn) {
-            return `大纲状态：第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待确认或游标无效）。`;
-        }
-        return `大纲状态：第 ${execution.stage.stageNumber} 阶段「${execution.revision.outline.title}」（节奏形态 ${describeStageTempo_ACU(execution.revision.outline.tempo)}，结构职责 ${execution.revision.outline.role ?? '未标注'}），第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮，当前节点 [${execution.node.id}]，本轮轮次 [${execution.turn.id}]，${renderTurnSemanticMeta_ACU(execution.turn)}。完整大纲窗口用 read $OUTLINE_WINDOW 调阅。`;
-    }
-    const ROW_RANGE_PATTERN_ACU = /^(\d+)-(\d+)$/;
-    function parseRowRange_ACU(raw) {
-        const matched = ROW_RANGE_PATTERN_ACU.exec(raw.trim());
-        if (!matched)
-            return null;
-        return { start: Number.parseInt(matched[1], 10), end: Number.parseInt(matched[2], 10) };
-    }
-    function splitIdSuffix_ACU(token, prefix) {
-        if (token === prefix)
-            return [];
-        if (!token.startsWith(`${prefix}:`))
-            return null;
-        return token.slice(prefix.length + 1).split(/[,，]/).map(id => id.trim()).filter(Boolean);
-    }
-    function resolveTableToken_ACU(token, context) {
-        const body = token.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
-        // 末段若形如 a-b 视为行区间，其余部分是表名——表名本身可能含冒号之外的任意字符。
-        const lastColon = body.lastIndexOf(':');
-        const rangeCandidate = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
-        const name = rangeCandidate ? body.slice(0, lastColon).trim() : body;
-        const title = rangeCandidate ? `表格「${name}」第 ${rangeCandidate.start}-${rangeCandidate.end} 行` : `表格「${name}」`;
-        return { title, text: renderAgentTableByName_ACU(name, context.tableData, rangeCandidate ?? undefined) };
-    }
-    function resolveWorldbookToken_ACU(token, context) {
-        const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
-        const body = token.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
-        const lastColon = body.lastIndexOf(':');
-        if (lastColon <= 0) {
-            return { title: '世界书条目', text: '世界书读取地址不完整：写法为 $WORLDBOOK:书名:uid（逗号分隔多个 uid），地址请从世界书目录复制。' };
-        }
-        const bookName = body.slice(0, lastColon).trim();
-        const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean);
-        return { title: `世界书「${bookName}」条目 ${uids.join('、')}`, text: renderAgentWorldbookEntries_ACU(worldbook, bookName, uids) };
-    }
-    /**
-     * 解析一个读集 token 的内容。
-     *
-     * 支持的地址体系（与各资料目录里给出的读取地址一一对应）：
-     * - `$STORY_RANGE:a-b` 窗口内正文楼层区间；`$STORY_CATALOG` 楼层索引
-     * - `$STORY_OVERVIEW` 事件概览；`$STORY_TAIL` 尾部全文楼层
-     * - `$TABLE:表名` / `$TABLE:表名:a-b` 整表或行区间
-     * - `$STORY_ARC[:ID,ID]` / `$HOOKS_LEDGER[:ID,ID]` / `$INFO_GAP[:ID,ID]` / `$ACTIVE_CONSTRAINTS[:ID,ID]` 模块全量或按 ID 精读
-     * - `$WORLDBOOK:书名:uid[,uid]` 已启用世界书条目全文
-     * - 旧固定 token（$STORY_TEXT / $OUTLINE_WINDOW 等）保留兼容
-     * @param token 读集标识符
-     * @param context 解析上下文
-     * @returns { title, text } 分节标题与正文；未知 token 的 text 会明确说明不可读
-     */
-    function resolveAgentReadToken_ACU(token, context) {
-        const normalized = String(token ?? '').trim();
-        if (normalized.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU))
-            return resolveTableToken_ACU(normalized, context);
-        if (normalized.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU))
-            return resolveWorldbookToken_ACU(normalized, context);
-        if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
-            const body = normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim();
-            const matched = /^(\d+)-(\d+)$/.exec(body);
-            return {
-                title: matched ? `正文楼层 ${matched[1]}-${matched[2]}` : '正文楼层区间',
-                text: matched
-                    ? renderAgentStoryRange_ACU(context, matched[1], matched[2])
-                    : `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼。可用楼层见正文目录。`,
-            };
-        }
-        if (normalized.startsWith('$FIELD:')) {
-            const match = /^\$FIELD:(storyArc|hooks|infoGap|chronology|webRefs|constraints):([^:]+)(?::([^:]+))?$/.exec(normalized);
-            if (!match)
-                return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。' };
-            const [, moduleName, id, field] = match;
-            const module = moduleName;
-            if (field && !AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field))
-                return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。` };
-            const folded = readAgentModuleFoldState_ACU(context.chat);
-            if (folded.salvaged || folded.candidates.some(item => !item.valid))
-                return { title: '资料栏目读取失败', text: '资料帧校验失败；不得将损坏数据解释为空状态。', status: 'failed' };
-            const record = folded.fields.records[module]?.[id];
-            return { title: `资料栏目 ${module}#${id}`, text: JSON.stringify(record
-                    ? { module, id, status: record.status, missingFields: record.missingFields,
-                        fields: field ? { [field]: record.fields[field] ?? null } : record.fields,
-                        revisions: folded.snapshot.revisions[module] }
-                    : { module, id, status: 'unwritten', missingFields: AGENT_MODULE_FIELD_MATRIX_ACU[module].required, revisions: folded.snapshot.revisions[module] }) };
-        }
-        const storyArcIds = splitIdSuffix_ACU(normalized, '$STORY_ARC');
-        if (storyArcIds !== null) {
-            const completedStageNumbers = context.execution.task.stages
-                .filter(stage => stage.status === 'completed')
-                .map(stage => stage.stageNumber);
-            return { title: storyArcIds.length ? `故事总纲条目 ${storyArcIds.join('、')}` : '故事总纲（全部活跃条目）', text: renderAgentStoryArcByIds_ACU(context.moduleSnapshot, storyArcIds.length ? storyArcIds : undefined, completedStageNumbers) };
-        }
-        const hookIds = splitIdSuffix_ACU(normalized, '$HOOKS_LEDGER');
-        if (hookIds !== null) {
-            return { title: hookIds.length ? `伏笔账本条目 ${hookIds.join('、')}` : '伏笔账本（全部活跃条目）', text: renderAgentHooksByIds_ACU(context.moduleSnapshot, hookIds.length ? hookIds : undefined) };
-        }
-        const infoGapIds = splitIdSuffix_ACU(normalized, '$INFO_GAP');
-        if (infoGapIds !== null) {
-            return { title: infoGapIds.length ? `信息差条目 ${infoGapIds.join('、')}` : '认知与信息差时间线（全部活跃条目）', text: renderAgentInfoGapByIds_ACU(context.moduleSnapshot, infoGapIds.length ? infoGapIds : undefined) };
-        }
-        const constraintIds = splitIdSuffix_ACU(normalized, '$ACTIVE_CONSTRAINTS');
-        if (constraintIds !== null) {
-            return { title: constraintIds.length ? `长期约束条目 ${constraintIds.join('、')}` : '长期约束（全部条目）', text: renderAgentConstraintsByIds_ACU(context.moduleSnapshot, constraintIds.length ? constraintIds : undefined) };
-        }
-        const chronologyIds = splitIdSuffix_ACU(normalized, '$CHRONOLOGY');
-        if (chronologyIds !== null) {
-            return chronologyIds.length
-                ? { title: `故事年代学条目 ${chronologyIds.join('、')}`, text: renderAgentChronologyByIds_ACU(context.moduleSnapshot, chronologyIds) }
-                : { title: '故事年代学账本（已发生正文结算出的时间事实）', text: renderAgentChronology_ACU(context.moduleSnapshot) };
-        }
-        const webRefIds = splitIdSuffix_ACU(normalized, '$WEB_REFS');
-        if (webRefIds !== null) {
-            return {
-                title: webRefIds.length ? `百科资料库条目 ${webRefIds.join('、')}（外部参考，非本故事事实）` : '百科资料库（全部活跃条目摘要；外部参考，非本故事事实）',
-                text: renderAgentWebRefsByIds_ACU(context.moduleSnapshot, webRefIds.length ? webRefIds : undefined),
-            };
-        }
-        const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;
-        switch (normalized) {
-            case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
-            case '$STORY_CATALOG': return { title, text: renderAgentStoryCatalog_ACU(context) };
-            case '$STORY_OVERVIEW': return { title, text: renderAgentStoryOverview_ACU(context) };
-            case '$STORY_TAIL': return { title, text: renderAgentStoryTail_ACU(context) };
-            case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
-            case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
-            case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
-            case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnGuidance_ACU(context.execution.turn ?? null) };
-            case '$USER_INTENT': return { title, text: context.originInstruction || '（用户未提供初始要求）' };
-            case '$USER_REQUIREMENTS': return { title, text: renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction) };
-            case '$TABLE_GLOBAL': return { title, text: renderAgentTableByAliases_ACU('global', context.tableData) };
-            case '$TABLE_CHARACTERS': return { title, text: renderAgentTableByAliases_ACU('characters', context.tableData) };
-            case '$TABLE_CHRONICLES': return { title, text: renderAgentTableByAliases_ACU('chronicles', context.tableData) };
-            default: return { title, text: `占位符 ${normalized || '(空)'} 不是可读资料接口，本次没有为你提供任何内容。请从各资料目录里复制读取地址。` };
-        }
-    }
-    /**
-     * 把一批读集 token 渲染成一整块注入材料。
-     * @param tokens 读集标识符列表
-     * @param context 解析上下文
-     * @returns 分节材料文本；读集为空时如实标注
-     */
-    function renderAgentReadMaterials_ACU(tokens, context) {
-        const unique = [...new Set(tokens.map(token => String(token ?? '').trim()).filter(Boolean))];
-        if (!unique.length)
-            return '本次没有为你注入任何资料。你只能基于任务描述作答，缺少的信息必须标注「信息不足」。';
-        return unique
-            .map(token => { const resolved = resolveAgentReadToken_ACU(token, context); return `### ${resolved.title}（${token}）\n${resolved.text}`; })
-            .join('\n\n');
     }
 
     /** 续写子代理逐栏 SQL：楼层帧是权威，SQLite 只负责复算。 */
@@ -156715,82 +156853,6 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         void state;
         return { allowed: true, batchTokens, itemTokens, report: '' };
-    }
-
-    /**
-     * 子代理与主会话共用同一份运行时快照。任务段里只保留该子代理自己维护的资料占位符。
-     */
-    const MODULE_TOKEN_ACU = {
-        storyArc: '$STORY_ARC',
-        hooks: '$HOOKS_LEDGER',
-        infoGap: '$INFO_GAP',
-        chronology: '$CHRONOLOGY',
-        constraints: '$ACTIVE_CONSTRAINTS',
-        webRefs: '$WEB_REFS',
-        userRequirements: '$USER_REQUIREMENTS',
-    };
-    /** 这些占位符已经在主会话快照里，子代理任务段不再各注入一份。 */
-    const SHARED_PLACEHOLDERS_ACU = [
-        '$USER_REQUIREMENTS', '$USER_INTENT', '$OUTLINE_WINDOW', '$STORY_OVERVIEW', '$STORY_TAIL', '$STORY_CATALOG',
-        '$WORLDBOOK_CATALOG', '$WORLDBOOK_HITS', '$AGENT_READ_CATALOG', '$TABLE_CATALOG',
-        '$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$STORY_ARC', '$CHRONOLOGY',
-        '$WEB_REFS', '$WEB_TOOL_CATALOG',
-    ];
-    function keptSubagentMaterialTokens_ACU(kind, writes) {
-        const kept = new Set(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', ...writes.map(module => MODULE_TOKEN_ACU[module])]);
-        if (kind === 'maintain')
-            kept.add('$HISTORY_UNSETTLED');
-        if (kind === 'research')
-            kept.add('$WEB_TOOL_CATALOG');
-        return kept;
-    }
-    function stripUnownedSubagentPrompt_ACU(segments, kept) {
-        const dropped = new Set(SHARED_PLACEHOLDERS_ACU.filter(token => !kept.has(token)));
-        return segments.flatMap(segment => {
-            if (!segment.content.includes('$AGENT_TASK'))
-                return [{ ...segment }];
-            const lines = segment.content.split('\n');
-            const dropLine = new Set();
-            lines.forEach((line, index) => {
-                const tokens = line.match(/\$[A-Z][A-Z0-9_]*/g) ?? [];
-                if (!tokens.some(token => dropped.has(token)) || tokens.some(token => kept.has(token)))
-                    return;
-                dropLine.add(index);
-                const previous = lines[index - 1] ?? '';
-                if (previous.includes('【') && !previous.includes('$'))
-                    dropLine.add(index - 1);
-            });
-            const content = lines.filter((_, index) => !dropLine.has(index)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
-            return content ? [{ ...segment, content }] : [];
-        });
-    }
-    async function renderFallbackAgentSnapshot_ACU(settings, context) {
-        const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
-        const start = context.settledThroughIndex + 1;
-        const last = context.chat.length - 1;
-        const rendered = await renderContinuationPrompt_ACU([{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }], {
-            $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(context.moduleSnapshot, context.originInstruction),
-            $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(context),
-            $CURRENT_TURN_GOAL: () => context.execution.turn?.goal || '（尚无可执行的大纲轮次）',
-            $CURRENT_TURN_PACING: () => renderAgentTurnGuidance_ACU(context.execution.turn ?? null),
-            $OUTLINE_STATE: () => renderAgentOutlineState_ACU(context),
-            $STORY_ARC_STATE: () => hasActiveStoryArc_ACU(context.moduleSnapshot)
-                ? `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}）。`
-                : '故事总纲：尚未建立。',
-            $UNSETTLED_RANGE: () => start > last ? '没有尚未结算的真实历史。' : `未结算楼层区间：${start} 到 ${last}。`,
-            $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU({ webResearchEnabled: settings.webResearch.enabled }),
-            $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU({
-                webResearchEnabled: settings.webResearch.enabled,
-                webRefsPresent: context.moduleSnapshot.webRefs.some(entry => !entry.retired),
-            }),
-            $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(context.tableData),
-            $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(worldbook),
-            $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(worldbook, buildAgentWorldbookScanText_ACU(context)),
-            $WEB_REFS_CATALOG: () => renderAgentWebRefsCatalog_ACU(context.moduleSnapshot, settings.webResearch.enabled),
-            $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
-            $BUDGET: () => '主会话预算见会话里的最新快照。本子代理的读取轮次见紧随其后的【读取预算状态】。',
-        }, 'agent_delegate');
-        return rendered.messages[0]?.content?.trim() ?? '';
     }
 
     /**
@@ -157691,7 +157753,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 toolRoundsUsed: roundsUsed,
                 grantedTokens: gate.state.grantedTokens,
             });
-            const promptSegments = stripUnownedSubagentPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), keptSubagentMaterialTokens_ACU(definition.kind, writes));
+            const keptTokens = keptSubagentMaterialTokens_ACU(definition.kind, writes);
+            const promptSegments = stripUnownedSubagentPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), keptTokens);
             const rendered = await renderContinuationPrompt_ACU(promptSegments, {
                 $AGENT_READ_MATERIALS: () => materials,
                 $AGENT_TASK: () => input.delegation.prompt,
@@ -157728,7 +157791,8 @@ Expected function or array of functions, received type ${typeof value}.`
             let baseMessages = definition.promptKey === 'arcArchitect'
                 ? insertBeforeTrailingPrefill_ACU(rendered.messages, { role: 'user', content: renderStoryArcVolumePlanInstruction_ACU(input.settings) })
                 : rendered.messages;
-            const snapshotText = input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+            const presentTokens = new Set(promptSegments.flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? []));
+            const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens);
             if (snapshotText)
                 baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
             // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
@@ -158295,7 +158359,8 @@ Expected function or array of functions, received type ${typeof value}.`
             gate.state.grantedTokens += fixedDecision.batchTokens;
             for (const key of evidence.fixedReadKeys)
                 gate.granted.add(key);
-            const rendered = await renderContinuationPrompt_ACU(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, keptSubagentMaterialTokens_ACU('review', [])), {
+            const reviewKept = keptSubagentMaterialTokens_ACU('review', []);
+            const rendered = await renderContinuationPrompt_ACU(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, reviewKept), {
                 $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
                 $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(input.resolveContext.moduleSnapshot, input.resolveContext.originInstruction),
                 $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(input.resolveContext),
@@ -158321,7 +158386,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 grantedTokens: gate.state.grantedTokens,
             });
             // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
-            const reviewSnapshot = input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+            const reviewPresent = new Set(stripUnownedSubagentPrompt_ACU(input.settings.agentPrompts.finalReviewer, reviewKept).flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? []));
+            const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), reviewPresent);
             let baseMessages = rendered.messages;
             if (reviewSnapshot)
                 baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: reviewSnapshot });
@@ -159693,7 +159759,6 @@ Expected function or array of functions, received type ${typeof value}.`
                         session.record([{ kind: 'tool', text: renderWorkflowReceipt_ACU(workflow), digest: '工作流状态回执', turnKey: session.turnKey }]);
                         await session.flush();
                         if (workflow.outcome === 'deliver') {
-                            await session.discardPreviousRound();
                             try {
                                 await request.updateTurnLabel?.(action.focus.trim());
                             }
@@ -159705,6 +159770,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             terminalLogged = true;
                             clearAgentRunState_ACU(identitySeed.chatIdentity);
                             await session.flush();
+                            await session.discardPreviousRound();
                             return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
                         }
                         session.record([{ kind: 'tool', text: `${workflow.summary}\n资料维护未合格，请向用户说明缺口；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
@@ -159723,7 +159789,7 @@ Expected function or array of functions, received type ${typeof value}.`
                                 const review = await this.dependencies.subagentRuntime.runFinalReview({
                                     settings: request.settings,
                                     resolveContext: context,
-                                    mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                                    mainSnapshot: this.subagentTail_ACU(session),
                                     candidateInstruction: action.instruction,
                                     currentUserInput: context.originInstruction,
                                     planningSummary: action.summary,
@@ -160120,7 +160186,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         logAgentSession_ACU({
                             kind: 'thought',
                             title: `上下文已超过 token 阈值（约 ${promptTokens} tokens）`,
-                            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。还没到两倍，本轮结束不总结。工作流成功交付时会直接丢弃本轮会话记录、工具调用和运行时快照，下一轮不再确认上一轮。`,
+                            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。还没到两倍，本轮结束不总结。本轮规划完成后再丢弃会话记录、工具调用和运行时快照，下一轮不再确认上一轮。`,
                         });
                     }
                 }
@@ -160241,6 +160307,12 @@ Expected function or array of functions, received type ${typeof value}.`
          * 把当前目录与预算渲染成一条运行时快照。内容相对上一条快照未变则不追加，
          * 保证会话只在尾部增长，已发出的前缀字节级不变。
          */
+        /** 子代理末尾：主会话当前快照，再加上主会话本轮已经读到的全文。 */
+        subagentTail_ACU(session) {
+            const snapshot = lastRuntimeSnapshotText_ACU(session.snapshot());
+            const reads = renderMainSessionReadAppendix_ACU(session.snapshot().messages);
+            return [snapshot, reads].filter(Boolean).join('\n\n');
+        }
         async ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle) {
             const rendered = await renderContinuationPrompt_ACU([{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }], this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle), 'agent_loop');
             const text = rendered.messages[0]?.content?.trim() ?? '';
@@ -160426,7 +160498,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
                         writeSql: this.moduleFieldWrite_ACU(chat, context),
-                        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                        mainSnapshot: this.subagentTail_ACU(session),
                     });
                     if (result.usedFieldWrites)
                         context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
@@ -160527,7 +160599,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
                         writeSql: this.moduleFieldWrite_ACU(chat, context),
-                        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                        mainSnapshot: this.subagentTail_ACU(session),
                     });
                     if (call.billing === 'opening') {
                         ledger.delegationsUsed += 1;
@@ -160547,7 +160619,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
-                        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                        mainSnapshot: this.subagentTail_ACU(session),
                     });
                     if (!result.composer?.instruction.trim()) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', 'instruction-composer 必须提供非空 instruction', false));
@@ -160561,7 +160633,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         candidateInstruction: instruction,
                         currentUserInput: context.originInstruction,
                         planningSummary: summary,
-                        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                        mainSnapshot: this.subagentTail_ACU(session),
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
@@ -160645,7 +160717,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     isCurrent: identity => request.isInternalRequestCurrent(identity),
                     signal: request.signal,
                     writeSql: this.moduleFieldWrite_ACU(chat, context),
-                    mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                    mainSnapshot: this.subagentTail_ACU(session),
                 });
                 const settled = result.usedFieldWrites
                     ? { snapshot: readAgentModuleSnapshot_ACU(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
@@ -160791,7 +160863,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
                         writeSql: this.moduleFieldWrite_ACU(chat, context),
-                        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                        mainSnapshot: this.subagentTail_ACU(session),
                     });
                     return { delegation, result, error: null };
                 }
@@ -166980,6 +167052,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 isCurrent: input.isCurrent,
                 runId: input.identity.runId,
                 candidateSeq: input.candidateSeq,
+                directorMaterials: input.directorMaterials,
             });
         }
         catch (error) {
@@ -167044,6 +167117,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     writableModules: targetModules,
                     runId: input.identity.runId,
                     candidateSeq: nextSeq(agentName),
+                    directorMaterials: input.directorMaterials,
                 });
                 return restrictOutcome_ACU(outcome, targetModules);
             }
@@ -167125,6 +167199,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 ledger,
                 focus: input.opening.focus,
                 candidateSeq: nextSeq('guidance-composer'),
+                directorMaterials: input.directorMaterials,
             });
             outcomes.push(composer);
             ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [composer]);
@@ -167172,6 +167247,87 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
     const WORLD_SIMULATION_WORKFLOW_AGENT_ORDER_ACU = WORKFLOW_AGENTS_ACU;
+
+    /**
+     * 世界推演子代理保留和本职强相关的占位符。其余主会话快照附在末尾，并去掉已经单独注入的行。
+     */
+    const RUNTIME_LINE_ACU = [
+        ['$WORLD_TASK', '任务：$WORLD_TASK'],
+        ['$WORLD_RUNTIME_CONTEXT', '运行快照：$WORLD_RUNTIME_CONTEXT'],
+        ['$WORLD_STATE', '世界状态：$WORLD_STATE'],
+        ['$ANCHOR_MESSAGE', '锚点正文：$ANCHOR_MESSAGE'],
+        ['$ANCHOR_IDENTITY', '锚点身份：$ANCHOR_IDENTITY'],
+        ['$WORLD_STAGE_PLAN', '阶段计划：$WORLD_STAGE_PLAN'],
+        ['$WORLD_CHRONICLE', '编年：$WORLD_CHRONICLE'],
+        ['$WORLD_CANDIDATES', '候选：$WORLD_CANDIDATES'],
+        ['$WORLD_COLLISIONS', '碰撞：$WORLD_COLLISIONS'],
+        ['$CURRENT_EVIDENCE_REGISTRY', '证据注册表：$CURRENT_EVIDENCE_REGISTRY'],
+        ['$PROJECTION_PREVIEW', '投影预览：$PROJECTION_PREVIEW'],
+        ['$READ_BUDGET', '实时阅读预算：$READ_BUDGET'],
+        ['$WORLD_AGENT_CATALOG', '角色目录：$WORLD_AGENT_CATALOG'],
+        ['$WORLD_TOOL_CATALOG', '工具目录：$WORLD_TOOL_CATALOG'],
+        ['$WORLD_EVIDENCE', '证据：$WORLD_EVIDENCE'],
+    ];
+    const COMMON_KEPT_ACU = ['$WORLD_TASK', '$WORLD_USER_REQUIREMENTS', '$READ_BUDGET', '$ANCHOR_MESSAGE'];
+    const RELATED_TOKENS_ACU = {
+        timekeeper: ['$WORLD_STATE'],
+        'undercurrent-analyst': ['$WORLD_STATE', '$WORLD_COLLISIONS'],
+        'dramatis-keeper': ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'],
+        chronicler: ['$WORLD_STATE', '$WORLD_CHRONICLE'],
+        'guidance-composer': ['$WORLD_STATE', '$PROJECTION_PREVIEW', '$WORLD_COLLISIONS'],
+        'causality-reviewer': ['$WORLD_STATE', '$WORLD_CANDIDATES', '$CURRENT_EVIDENCE_REGISTRY', '$WORLD_COLLISIONS'],
+        'lore-researcher': ['$WORLD_TOOL_CATALOG'],
+        'world-stage-planner': ['$WORLD_COLLISIONS', '$WORLD_STAGE_PLAN'],
+    };
+    function worldSimulationKeptTokens_ACU(name) {
+        return new Set([...COMMON_KEPT_ACU, ...(RELATED_TOKENS_ACU[name] ?? [])]);
+    }
+    function splitWorldSimulationSubagentPrompt_ACU(segments, name) {
+        const kept = worldSimulationKeptTokens_ACU(name);
+        const runtimeMarker = worldSimulationSeamMarker_ACU('RUNTIME_CONTEXT');
+        const historyMarker = worldSimulationSeamMarker_ACU('HISTORY');
+        const snapshotLines = [];
+        const next = segments.map(segment => {
+            if (segment.content.includes(runtimeMarker)) {
+                const present = RUNTIME_LINE_ACU.filter(([token]) => segment.content.includes(token));
+                snapshotLines.push(...present.filter(([token]) => !kept.has(token)).map(([, line]) => line));
+                const stay = present.filter(([token]) => kept.has(token)).map(([, line]) => line);
+                return { ...segment, content: [runtimeMarker, ...stay].join('\n') };
+            }
+            if (segment.content.includes(historyMarker) && segment.content.includes('$WORLD_HISTORY')) {
+                snapshotLines.push('历史锚点与会话：$WORLD_HISTORY');
+                return { ...segment, content: `${historyMarker}\n主会话历史见末尾快照。` };
+            }
+            return { ...segment };
+        });
+        const snapshotTemplate = snapshotLines.length
+            ? `【本回合运行时数据】\n以下是主会话快照里本角色没有单独注入的部分。\n${snapshotLines.join('\n')}`
+            : '';
+        return { segments: next, snapshotTemplate };
+    }
+    async function renderWorldSimulationSnapshotTemplate_ACU(template, resolvers) {
+        const tokens = [...new Set(template.match(/\$[A-Z][A-Z0-9_]*/g) ?? [])];
+        let text = template;
+        for (const token of tokens) {
+            const resolve = resolvers[token];
+            if (!resolve)
+                continue;
+            text = text.split(token).join(String(await resolve()));
+        }
+        return text.trim();
+    }
+    /** 主会话本轮 read/search 的回执。附在子代理快照后面。 */
+    function renderWorldSimulationDirectorReads_ACU(transcript) {
+        const chunks = transcript.filter(item => {
+            if (item.role !== 'user' && item.role !== 'tool')
+                return false;
+            const text = item.content.trim();
+            return text.includes('"kind":"read"') || text.includes('"kind":"search"') || text.includes('worldbook:entry:');
+        }).map(item => item.content.trim());
+        if (!chunks.length)
+            return '';
+        return ['【主会话已调阅】', '下面是主会话本轮已经读到的全文。不要再对同一地址调用 read。', ...chunks].join('\n\n');
+    }
 
     const clamp_ACU = (value, min, max) => Math.max(min, Math.min(max, value));
     async function measure_ACU(messages, fixed, count) {
@@ -167559,6 +167715,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         registry: input.registry,
                         tools: input.tools,
                         isCurrent: input.isCurrent,
+                        directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
                     }),
                 };
             };
@@ -167859,6 +168016,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             anchorMaterialsCommitted: input.anchorMaterialsCommitted === true,
                             targetModules: input.targetModules,
                             subagents: this.dependencies.subagents,
+                            directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
                         });
                     }
                     catch (error) {
@@ -167945,6 +168103,7 @@ ${workflow.summary}
                                 isCurrent: input.isCurrent,
                                 runId: input.identity.runId,
                                 candidateSeq: nextSeq,
+                                directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
                             });
                         }
                         catch (error) {
@@ -168046,7 +168205,7 @@ ${rejectionText}` : delegationFeedback,
                 try {
                     reviewer = pendingReview?.fingerprint === reviewFingerprint
                         ? await pendingReview.promise
-                        : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, isCurrent: input.isCurrent });
+                        : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, isCurrent: input.isCurrent, directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript) });
                     pendingReview = null;
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
                     await persistEntry(reviewerEntryId, `causality-review-${iteration}`);
@@ -168425,9 +168584,13 @@ ${rejectionText}` : delegationFeedback,
                 const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
                 const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
                 const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
-                const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+                const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
+                const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
+                const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
+                const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+                const appendix = [snapshotText, input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
                 const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
-                const drafted = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+                const drafted = [protocolGuard, ...rendered.messages, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
                 const messages = this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(drafted) : drafted;
                 const sent = await executeWorldSimulationFinalRequest_ACU({
                     messages,
@@ -168588,9 +168751,13 @@ ${rejectionText}` : delegationFeedback,
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
                 const requestSnapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                 const requestContext = { ...context, evidenceRegistry: requestSnapshot };
-                const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[agentName], agentName, createWorldSimulationPlaceholderResolvers_ACU(requestContext));
+                const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
+                const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
+                const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
+                const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+                const appendix = [snapshotText, input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
                 const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
-                const reviewerDraft = [protocolGuard, ...rendered.messages, ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+                const reviewerDraft = [protocolGuard, ...rendered.messages, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...transcript, ...(this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
                 const sent = await executeWorldSimulationFinalRequest_ACU({
                     messages: this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(reviewerDraft) : reviewerDraft,
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,

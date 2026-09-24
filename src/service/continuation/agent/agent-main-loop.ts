@@ -30,6 +30,7 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU, AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
+import { renderMainSessionReadAppendix_ACU } from './agent-shared-materials';
 import {
   applyAgentUserRequirementsReplace_ACU,
   renderAgentUserRequirements_ACU,
@@ -774,7 +775,6 @@ export class ContinuationAgentTurnPlanner_ACU {
           session.record([{ kind: 'tool', text: renderWorkflowReceipt_ACU(workflow), digest: '工作流状态回执', turnKey: session.turnKey }]);
           await session.flush();
           if (workflow.outcome === 'deliver') {
-            await session.discardPreviousRound();
             try {
               await request.updateTurnLabel?.(action.focus.trim());
             } catch (error) {
@@ -785,6 +785,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             terminalLogged = true;
             clearAgentRunState_ACU(identitySeed.chatIdentity);
             await session.flush();
+            await session.discardPreviousRound();
             return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
           }
           session.record([{ kind: 'tool', text: `${workflow.summary}\n资料维护未合格，请向用户说明缺口；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
@@ -804,7 +805,7 @@ export class ContinuationAgentTurnPlanner_ACU {
               const review = await this.dependencies.subagentRuntime.runFinalReview({
                 settings: request.settings,
                 resolveContext: context,
-                mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+                mainSnapshot: this.subagentTail_ACU(session),
                 candidateInstruction: action.instruction,
                 currentUserInput: context.originInstruction,
                 planningSummary: action.summary,
@@ -1227,7 +1228,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           logAgentSession_ACU({
             kind: 'thought',
             title: `上下文已超过 token 阈值（约 ${promptTokens} tokens）`,
-            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。还没到两倍，本轮结束不总结。工作流成功交付时会直接丢弃本轮会话记录、工具调用和运行时快照，下一轮不再确认上一轮。`,
+            detail: `阈值 ${budgetTokens}，越界线 ${ceilingTokens}。还没到两倍，本轮结束不总结。本轮规划完成后再丢弃会话记录、工具调用和运行时快照，下一轮不再确认上一轮。`,
           });
         }
       }
@@ -1374,6 +1375,13 @@ export class ContinuationAgentTurnPlanner_ACU {
    * 把当前目录与预算渲染成一条运行时快照。内容相对上一条快照未变则不追加，
    * 保证会话只在尾部增长，已发出的前缀字节级不变。
    */
+  /** 子代理末尾：主会话当前快照，再加上主会话本轮已经读到的全文。 */
+  private subagentTail_ACU(session: AgentConversationHandle_ACU): string {
+    const snapshot = lastRuntimeSnapshotText_ACU(session.snapshot());
+    const reads = renderMainSessionReadAppendix_ACU(session.snapshot().messages);
+    return [snapshot, reads].filter(Boolean).join('\n\n');
+  }
+
   private async ensureRuntimeSnapshot_ACU(
     request: ContinuationAgentTurnPlanRequest_ACU,
     session: AgentConversationHandle_ACU,
@@ -1585,7 +1593,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
-          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+          mainSnapshot: this.subagentTail_ACU(session),
         });
         if (result.usedFieldWrites) context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
         if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
@@ -1698,7 +1706,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
-          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+          mainSnapshot: this.subagentTail_ACU(session),
         });
         if (call.billing === 'opening') {
           ledger.delegationsUsed += 1;
@@ -1718,7 +1726,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
-          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+          mainSnapshot: this.subagentTail_ACU(session),
         });
         if (!result.composer?.instruction.trim()) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', 'instruction-composer 必须提供非空 instruction', false));
@@ -1732,7 +1740,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           candidateInstruction: instruction,
           currentUserInput: context.originInstruction,
           planningSummary: summary,
-          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+          mainSnapshot: this.subagentTail_ACU(session),
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
@@ -1828,7 +1836,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         isCurrent: identity => request.isInternalRequestCurrent(identity),
         signal: request.signal,
         writeSql: this.moduleFieldWrite_ACU(chat, context),
-        mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+        mainSnapshot: this.subagentTail_ACU(session),
       });
       const settled = result.usedFieldWrites
         ? { snapshot: readAgentModuleSnapshot_ACU(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
@@ -1987,7 +1995,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
-          mainSnapshot: lastRuntimeSnapshotText_ACU(session.snapshot()),
+          mainSnapshot: this.subagentTail_ACU(session),
         });
         return { delegation, result, error: null as unknown };
       } catch (error) {

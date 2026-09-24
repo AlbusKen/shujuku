@@ -22,6 +22,7 @@ import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type 
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
+import { renderWorldSimulationDirectorReads_ACU } from './agent-shared-materials';
 import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
@@ -341,6 +342,7 @@ export class WorldSimulationMainLoop_ACU {
           registry: input.registry,
           tools: input.tools,
           isCurrent: input.isCurrent,
+          directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
         }),
       };
     };
@@ -654,6 +656,7 @@ export class WorldSimulationMainLoop_ACU {
             anchorMaterialsCommitted: input.anchorMaterialsCommitted === true,
             targetModules: input.targetModules,
             subagents: this.dependencies.subagents,
+            directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
           });
         } catch (error) {
           updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, { title: '固定工作流失败', detail: compact_ACU(error), ok: false, status: 'failed' });
@@ -742,10 +745,11 @@ ${workflow.summary}
               tools: input.tools,
               writeSql: input.writeSql,
               readCurrent: input.readCurrent,
-            readFieldSnapshot: input.readFieldSnapshot,
+              readFieldSnapshot: input.readFieldSnapshot,
               isCurrent: input.isCurrent,
               runId: input.identity.runId,
               candidateSeq: nextSeq,
+              directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
             });
           } catch (error) {
             const issue = compactWorldSimulationProtocolError_ACU(error);
@@ -850,7 +854,7 @@ ${rejectionText}` : delegationFeedback,
       try {
         reviewer = pendingReview?.fingerprint === reviewFingerprint
           ? await pendingReview.promise
-          : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, isCurrent: input.isCurrent });
+          : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, isCurrent: input.isCurrent, directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript) });
         pendingReview = null;
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
         await persistEntry(reviewerEntryId, `causality-review-${iteration}`);
