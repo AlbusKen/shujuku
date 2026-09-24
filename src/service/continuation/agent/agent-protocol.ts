@@ -1066,7 +1066,8 @@ export interface AgentModuleSqlFieldIntent_ACU {
   module: AgentWritableModule_ACU;
   id: string;
   fields: Record<string, unknown>;
-  expectedRevision: number;
+  /** 省略时由提交规划按当前模块修订号补上。新行 INSERT 会补 0。 */
+  expectedRevision?: number;
   reason?: string;
   /** 只能由本次 web-researcher 已抓取的页面句柄回填，不允许模型手写来源。 */
   pageRef?: string;
@@ -1130,13 +1131,13 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentSubag
     const expectedWhere = statement.kind === 'insert' ? null : statement.kind === 'delete' ? ['id', 'expected_revision', 'reason'] : ['id', 'expected_revision'];
     if (expectedWhere && Object.keys(where).some(key => !expectedWhere.includes(key))) { reject('WHERE', 'WHERE 含白名单外条件'); return; }
     const id = where.id;
-    if ((typeof id !== 'string' || !id.trim()) && !(statement.kind === 'insert' && module === 'webRefs' && id === undefined)) { reject('id', '必须指定非空 ID'); return; }
+    if ((typeof id !== 'string' || !id.trim()) && statement.kind !== 'insert') { reject('id', '必须指定非空 ID'); return; }
     const revision = where.expected_revision;
-    if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) { reject('expected_revision', '必须指定非负整数 revision'); return; }
+    if (revision !== undefined && (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0)) { reject('expected_revision', '必须是非负整数'); return; }
     if (statement.kind === 'delete') {
       const reason = where.reason;
       if (typeof reason !== 'string' || !reason.trim()) { reject('reason', '退役理由必须是非空字符串'); return; }
-      result.intents.push({ kind: 'delete', module, id: String(id).trim(), fields: {}, expectedRevision: revision, reason: reason.trim() });
+      result.intents.push({ kind: 'delete', module, id: String(id).trim(), fields: {}, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), reason: reason.trim() });
       return;
     }
     const fields: Record<string, unknown> = {};
@@ -1155,7 +1156,7 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentSubag
       } else fields[field] = sqlProtocolValue_ACU(raw);
     }
     if (!Object.keys(fields).length && !pageRef) { reject('', '没有可提交的栏目'); return; }
-    result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, expectedRevision: revision, ...(pageRef ? { pageRef } : {}) });
+    result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), ...(pageRef ? { pageRef } : {}) });
   });
   return result;
 }

@@ -170,6 +170,32 @@ function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, 
   return { ...applied.snapshot, pendingFixes: snapshot.pendingFixes };
 }
 
+function nextSequentialId_ACU(prefix: string, width: number, taken: ReadonlySet<string>): string {
+  const pattern = new RegExp(`^${prefix}(\\d+)$`);
+  let max = 0;
+  for (const id of taken) {
+    const matched = pattern.exec(id);
+    if (matched) max = Math.max(max, Number(matched[1]));
+  }
+  return `${prefix}${String(max + 1).padStart(width, '0')}`;
+}
+
+function moduleTakenIds_ACU(module: Module_ACU, snapshot: AgentModuleSnapshot_ACU, fields: AgentModuleFieldSnapshot_ACU, drafts: ReadonlyMap<string, Record<string, unknown>>, reserved: ReadonlySet<string>): Set<string> {
+  const taken = new Set<string>();
+  for (const row of snapshot[module] as Array<{ id?: string }>) if (row?.id) taken.add(row.id);
+  for (const id of Object.keys(fields.records[module] ?? {})) taken.add(id);
+  for (const key of drafts.keys()) if (key.startsWith(`${module}#`)) taken.add(key.slice(module.length + 1));
+  for (const id of reserved) if (id) taken.add(id);
+  return taken;
+}
+
+function storyArcMeta_ACU(snapshot: AgentModuleSnapshot_ACU, fields: AgentModuleFieldSnapshot_ACU, drafts: ReadonlyMap<string, Record<string, unknown>>): Array<{ scope?: unknown; status?: unknown; retired?: unknown }> {
+  const rows: Array<{ scope?: unknown; status?: unknown; retired?: unknown }> = snapshot.storyArc.map(entry => ({ scope: entry.scope, status: entry.status, retired: entry.retired }));
+  for (const record of Object.values(fields.records.storyArc ?? {})) rows.push({ scope: record.fields.scope?.value, status: record.fields.status?.value });
+  for (const [key, values] of drafts) if (key.startsWith('storyArc#')) rows.push({ scope: values.scope, status: values.status, retired: values.retired });
+  return rows;
+}
+
 /** 纯规划：单栏校验独立；跨字段合并仍调用领域事务作一致性检查。 */
 export function planAgentModuleFieldCommit_ACU(
   snapshot: AgentModuleSnapshot_ACU,
@@ -200,18 +226,40 @@ export function planAgentModuleFieldCommit_ACU(
   };
   for (const intent of intents) {
     const module = intent.module as Module_ACU;
-    const id = intent.id || (module === 'webRefs' && intent.kind === 'insert'
-      ? nextAgentWebRefId_ACU(snapshot.webRefs, new Set([...reserved, ...Object.keys(fields.records.webRefs ?? {})])) : '');
-    const path = `${module}#${id || '(无 ID)'}`;
     if (!modules.includes(intent.module) || !['hooks', 'infoGap', 'storyArc', 'chronology', 'webRefs'].includes(module)) {
-      reject(path, '角色无权写入该模块'); continue;
+      reject(`${module}#${intent.id || '(无 ID)'}`, '角色无权写入该模块'); continue;
     }
+    if (intent.kind === 'insert' && !intent.id) {
+      const taken = moduleTakenIds_ACU(module, snapshot, fields, drafts, reserved);
+      if (module === 'storyArc') {
+        const meta = storyArcMeta_ACU(snapshot, fields, drafts);
+        const volumeLike = intent.fields.scope === 'volume' || intent.fields.narrativeRole !== undefined || intent.fields.targetStageRange !== undefined || intent.fields.sustainingThreads !== undefined || intent.fields.payoffTargets !== undefined;
+        const storyTaken = meta.some(row => row.scope === 'story' && row.retired !== true);
+        if (intent.fields.scope === 'story' || (!volumeLike && !storyTaken)) {
+          intent.id = nextSequentialId_ACU('STORY-', 2, taken);
+          if (intent.fields.scope === undefined) intent.fields.scope = 'story';
+        } else {
+          intent.id = nextSequentialId_ACU('VOL-', 2, taken);
+          if (intent.fields.scope === undefined) intent.fields.scope = 'volume';
+        }
+      } else if (module === 'hooks') intent.id = nextSequentialId_ACU('H', 3, taken);
+      else if (module === 'infoGap') intent.id = nextSequentialId_ACU('E', 3, taken);
+      else if (module === 'chronology') intent.id = nextSequentialId_ACU('T', 3, taken);
+      else intent.id = nextAgentWebRefId_ACU(snapshot.webRefs, new Set([...reserved, ...Object.keys(fields.records.webRefs ?? {})]));
+    }
+    const id = intent.id;
+    const path = `${module}#${id || '(无 ID)'}`;
     if (!id || id.includes('#') || ['__proto__', 'prototype', 'constructor'].includes(id) || id.length > 128) { reject(path, '条目 ID 无效'); continue; }
+    if (module === 'storyArc' && intent.kind === 'insert') {
+      if (intent.fields.scope === undefined && /^STORY-\d+$/.test(id)) intent.fields.scope = 'story';
+      if (intent.fields.scope === undefined && /^VOL-\d+$/.test(id)) intent.fields.scope = 'volume';
+    }
     const key = `${module}#${id}`;
     const existing = domainRow_ACU(working, module, id);
     const record = fields.records[module]?.[id];
-    // 新行用 0。模块修订号只约束 UPDATE/DELETE，避免每写成一条就把同批后面的新卷打成 revision_conflict。
-    const newInsert = intent.kind === 'insert' && !existing && !record && !drafts.has(key) && !reserved.has(id);
+    // 新行用 0。没写修订号时按这个规则补，模块修订号只约束显式写错的 UPDATE/DELETE。
+    const newInsert = intent.kind === 'insert' && !existing && !record && !reserved.has(id);
+    if (intent.expectedRevision === undefined) intent.expectedRevision = newInsert ? 0 : snapshot.revisions[module];
     const revisionOk = intent.expectedRevision === snapshot.revisions[module] || (newInsert && intent.expectedRevision === 0);
     if (!revisionOk) {
       reject(path, `revision_conflict: expected=${intent.expectedRevision}, actual=${snapshot.revisions[module]}`); continue;
@@ -269,6 +317,14 @@ export function planAgentModuleFieldCommit_ACU(
       }
     }
     if (!Object.keys(writable).length) continue;
+    if (module === 'storyArc' && !existing && !Object.prototype.hasOwnProperty.call(baseline, 'status') && !Object.prototype.hasOwnProperty.call(writable, 'status')) {
+      const scope = writable.scope ?? baseline.scope;
+      if (scope === 'story') writable.status = 'active';
+      if (scope === 'volume') {
+        const active = storyArcMeta_ACU(snapshot, fields, drafts).some(row => row.scope === 'volume' && row.status === 'active' && row.retired !== true);
+        writable.status = active ? 'planned' : 'active';
+      }
+    }
     const candidate = { ...baseline, ...writable };
     const complete = existing || AGENT_MODULE_FIELD_MATRIX_ACU[module].required.every(field => Object.prototype.hasOwnProperty.call(candidate, field));
     if (complete) {

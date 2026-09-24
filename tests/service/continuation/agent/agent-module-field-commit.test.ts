@@ -18,6 +18,28 @@ function setup() {
 }
 beforeEach(() => _set_SillyTavern_API_ACU(null as any));
 describe('续写逐栏真实提交', () => {
+  it('没写 id 和 expected_revision 时按顺序补号，卷状态也一起补上', async () => {
+    const { chat } = setup();
+    const sql = [
+      "INSERT INTO story_arc (title, direction, escalation, withheld) VALUES ('全书', '方向', '台阶', '底牌')",
+      "INSERT INTO story_arc (scope, title, direction, escalation, withheld, narrative_role, target_stage_range, target_time_span, progress_ceiling, sustaining_threads, payoff_targets) VALUES ('volume', '卷一', '方向', '台阶', '底牌', 'setup', '{\"min\":6,\"max\":10}', '十日', '到婚礼', '[\"线\"]', '[\"兑现\"]')",
+      "INSERT INTO story_arc (title, direction, escalation, withheld, narrative_role, target_stage_range, target_time_span, progress_ceiling, sustaining_threads, payoff_targets) VALUES ('卷二', '方向', '台阶', '底牌', 'development', '{\"min\":6,\"max\":10}', '十日', '到后宅', '[\"线\"]', '[\"兑现\"]')",
+    ].join('; ');
+    const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql, role: 'arc-architect' });
+    expect(receipt.rejected.map(item => `${item.path}:${item.reason}`)).toEqual([]);
+    expect(receipt.status).toBe('committed');
+    const arc = readAgentModuleSnapshot_ACU(chat).storyArc;
+    expect(arc.map(item => item.id).sort()).toEqual(['STORY-01', 'VOL-01', 'VOL-02']);
+    expect(arc.find(item => item.id === 'VOL-01')?.status).toBe('active');
+    expect(arc.find(item => item.id === 'VOL-02')?.status).toBe('planned');
+    const renamed = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: "UPDATE story_arc SET title = '新全书' WHERE id = 'STORY-01'", role: 'arc-architect' });
+    expect(renamed.status).toBe('committed');
+    expect(readAgentModuleSnapshot_ACU(chat).storyArc.find(item => item.id === 'STORY-01')?.title).toBe('新全书');
+    const hook = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: "INSERT INTO hooks (summary) VALUES ('信件')", role: 'hook-cognition-maintainer' });
+    expect(hook.status).toBe('committed');
+    expect(hook.accepted.map(item => item.id)).toContain('H001');
+  });
+
   it('同一条 SQL 一次写入多条新卷，再用同一修订号一次补齐 withheld', async () => {
     const { chat } = setup();
     const insert = [

@@ -154699,13 +154699,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 return;
             }
             const id = where.id;
-            if ((typeof id !== 'string' || !id.trim()) && !(statement.kind === 'insert' && module === 'webRefs' && id === undefined)) {
+            if ((typeof id !== 'string' || !id.trim()) && statement.kind !== 'insert') {
                 reject('id', '必须指定非空 ID');
                 return;
             }
             const revision = where.expected_revision;
-            if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) {
-                reject('expected_revision', '必须指定非负整数 revision');
+            if (revision !== undefined && (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0)) {
+                reject('expected_revision', '必须是非负整数');
                 return;
             }
             if (statement.kind === 'delete') {
@@ -154714,7 +154714,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     reject('reason', '退役理由必须是非空字符串');
                     return;
                 }
-                result.intents.push({ kind: 'delete', module, id: String(id).trim(), fields: {}, expectedRevision: revision, reason: reason.trim() });
+                result.intents.push({ kind: 'delete', module, id: String(id).trim(), fields: {}, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), reason: reason.trim() });
                 return;
             }
             const fields = {};
@@ -154747,7 +154747,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 reject('', '没有可提交的栏目');
                 return;
             }
-            result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, expectedRevision: revision, ...(pageRef ? { pageRef } : {}) });
+            result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), ...(pageRef ? { pageRef } : {}) });
         });
         return result;
     }
@@ -155958,6 +155958,40 @@ Expected function or array of functions, received type ${typeof value}.`
         // 单栏独立事务只使用领域规则校验，不把旧 pendingFixes 视作本次修复。
         return { ...applied.snapshot, pendingFixes: snapshot.pendingFixes };
     }
+    function nextSequentialId_ACU(prefix, width, taken) {
+        const pattern = new RegExp(`^${prefix}(\\d+)$`);
+        let max = 0;
+        for (const id of taken) {
+            const matched = pattern.exec(id);
+            if (matched)
+                max = Math.max(max, Number(matched[1]));
+        }
+        return `${prefix}${String(max + 1).padStart(width, '0')}`;
+    }
+    function moduleTakenIds_ACU(module, snapshot, fields, drafts, reserved) {
+        const taken = new Set();
+        for (const row of snapshot[module])
+            if (row?.id)
+                taken.add(row.id);
+        for (const id of Object.keys(fields.records[module] ?? {}))
+            taken.add(id);
+        for (const key of drafts.keys())
+            if (key.startsWith(`${module}#`))
+                taken.add(key.slice(module.length + 1));
+        for (const id of reserved)
+            if (id)
+                taken.add(id);
+        return taken;
+    }
+    function storyArcMeta_ACU(snapshot, fields, drafts) {
+        const rows = snapshot.storyArc.map(entry => ({ scope: entry.scope, status: entry.status, retired: entry.retired }));
+        for (const record of Object.values(fields.records.storyArc ?? {}))
+            rows.push({ scope: record.fields.scope?.value, status: record.fields.status?.value });
+        for (const [key, values] of drafts)
+            if (key.startsWith('storyArc#'))
+                rows.push({ scope: values.scope, status: values.status, retired: values.retired });
+        return rows;
+    }
     /** 纯规划：单栏校验独立；跨字段合并仍调用领域事务作一致性检查。 */
     function planAgentModuleFieldCommit_ACU(snapshot, fields, intents, role, completedStages = [], resolvePage, now = Date.now(), evidence) {
         var _a;
@@ -155980,22 +156014,55 @@ Expected function or array of functions, received type ${typeof value}.`
         };
         for (const intent of intents) {
             const module = intent.module;
-            const id = intent.id || (module === 'webRefs' && intent.kind === 'insert'
-                ? nextAgentWebRefId_ACU(snapshot.webRefs, new Set([...reserved, ...Object.keys(fields.records.webRefs ?? {})])) : '');
-            const path = `${module}#${id || '(无 ID)'}`;
             if (!modules.includes(intent.module) || !['hooks', 'infoGap', 'storyArc', 'chronology', 'webRefs'].includes(module)) {
-                reject(path, '角色无权写入该模块');
+                reject(`${module}#${intent.id || '(无 ID)'}`, '角色无权写入该模块');
                 continue;
             }
+            if (intent.kind === 'insert' && !intent.id) {
+                const taken = moduleTakenIds_ACU(module, snapshot, fields, drafts, reserved);
+                if (module === 'storyArc') {
+                    const meta = storyArcMeta_ACU(snapshot, fields, drafts);
+                    const volumeLike = intent.fields.scope === 'volume' || intent.fields.narrativeRole !== undefined || intent.fields.targetStageRange !== undefined || intent.fields.sustainingThreads !== undefined || intent.fields.payoffTargets !== undefined;
+                    const storyTaken = meta.some(row => row.scope === 'story' && row.retired !== true);
+                    if (intent.fields.scope === 'story' || (!volumeLike && !storyTaken)) {
+                        intent.id = nextSequentialId_ACU('STORY-', 2, taken);
+                        if (intent.fields.scope === undefined)
+                            intent.fields.scope = 'story';
+                    }
+                    else {
+                        intent.id = nextSequentialId_ACU('VOL-', 2, taken);
+                        if (intent.fields.scope === undefined)
+                            intent.fields.scope = 'volume';
+                    }
+                }
+                else if (module === 'hooks')
+                    intent.id = nextSequentialId_ACU('H', 3, taken);
+                else if (module === 'infoGap')
+                    intent.id = nextSequentialId_ACU('E', 3, taken);
+                else if (module === 'chronology')
+                    intent.id = nextSequentialId_ACU('T', 3, taken);
+                else
+                    intent.id = nextAgentWebRefId_ACU(snapshot.webRefs, new Set([...reserved, ...Object.keys(fields.records.webRefs ?? {})]));
+            }
+            const id = intent.id;
+            const path = `${module}#${id || '(无 ID)'}`;
             if (!id || id.includes('#') || ['__proto__', 'prototype', 'constructor'].includes(id) || id.length > 128) {
                 reject(path, '条目 ID 无效');
                 continue;
             }
+            if (module === 'storyArc' && intent.kind === 'insert') {
+                if (intent.fields.scope === undefined && /^STORY-\d+$/.test(id))
+                    intent.fields.scope = 'story';
+                if (intent.fields.scope === undefined && /^VOL-\d+$/.test(id))
+                    intent.fields.scope = 'volume';
+            }
             const key = `${module}#${id}`;
             const existing = domainRow_ACU$1(working, module, id);
             const record = fields.records[module]?.[id];
-            // 新行用 0。模块修订号只约束 UPDATE/DELETE，避免每写成一条就把同批后面的新卷打成 revision_conflict。
-            const newInsert = intent.kind === 'insert' && !existing && !record && !drafts.has(key) && !reserved.has(id);
+            // 新行用 0。没写修订号时按这个规则补，模块修订号只约束显式写错的 UPDATE/DELETE。
+            const newInsert = intent.kind === 'insert' && !existing && !record && !reserved.has(id);
+            if (intent.expectedRevision === undefined)
+                intent.expectedRevision = newInsert ? 0 : snapshot.revisions[module];
             const revisionOk = intent.expectedRevision === snapshot.revisions[module] || (newInsert && intent.expectedRevision === 0);
             if (!revisionOk) {
                 reject(path, `revision_conflict: expected=${intent.expectedRevision}, actual=${snapshot.revisions[module]}`);
@@ -156081,6 +156148,15 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             if (!Object.keys(writable).length)
                 continue;
+            if (module === 'storyArc' && !existing && !Object.prototype.hasOwnProperty.call(baseline, 'status') && !Object.prototype.hasOwnProperty.call(writable, 'status')) {
+                const scope = writable.scope ?? baseline.scope;
+                if (scope === 'story')
+                    writable.status = 'active';
+                if (scope === 'volume') {
+                    const active = storyArcMeta_ACU(snapshot, fields, drafts).some(row => row.scope === 'volume' && row.status === 'active' && row.retired !== true);
+                    writable.status = active ? 'planned' : 'active';
+                }
+            }
             const candidate = { ...baseline, ...writable };
             const complete = existing || AGENT_MODULE_FIELD_MATRIX_ACU[module].required.every(field => Object.prototype.hasOwnProperty.call(candidate, field));
             if (complete) {
@@ -157503,7 +157579,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
             baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
             if (input.writeSql && writes.length)
-                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用。不要写成 JSON、delta、Markdown 或顶层 storyArc 数组。新行 INSERT 的 expected_revision 固定写 0。补已有行才用回执 revisions 里的模块修订号，同一条 sql 里的多条 UPDATE 都用这个号。只写职责模块；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧。最终契约不得重复提交已写栏目。story_arc 的每条 INSERT 必须带 withheld，缺了就还只是草稿。已有行缺 withheld 时，下一次把这些 UPDATE 放进同一条 sql 一次补完，不要新开卷。sustaining_threads 与 payoff_targets 写成 \'["条目"]\'，target_stage_range 写成 \'{"min":6,"max":10}\'。volume 同时只能有一条 status 为 active，其余 planned。scope=story 不要写卷级栏目。' });
+                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用。不要写成 JSON、delta、Markdown 或顶层 storyArc 数组。id 和 expected_revision 可以不写：新行按 STORY-01、VOL-01、H001、E001、T001 顺序补号，修订号由系统按当前模块补上。volume 没写 status 时，第一条补 active，其余补 planned。只写职责模块；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧。最终契约不得重复提交已写栏目。story_arc 的每条 INSERT 必须带 withheld，缺了就还只是草稿。已有行缺 withheld 时，下一次把这些 UPDATE 放进同一条 sql 一次补完，不要新开卷。sustaining_threads 与 payoff_targets 写成 \'["条目"]\'，target_stage_range 写成 \'{"min":6,"max":10}\'。volume 同时只能有一条 status 为 active，其余 planned。scope=story 不要写卷级栏目。' });
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
             const transcript = [];
