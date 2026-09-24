@@ -1525,11 +1525,15 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     if (nativeCalls.length) {
       const grouped = nativeCalls.map(() => [] as string[]);
-      const readKeys = nativeCalls.map(() => [] as string[]);
+      const readSpans = nativeCalls.map(() => [] as { key: string; start: number; length: number }[]);
+      const lengths = nativeCalls.map(() => 0);
       appends.forEach((item, index) => {
         const owner = owners[index] ?? 0;
-        grouped[owner]?.push(item.text);
-        if (item.readKey) readKeys[owner]?.push(item.readKey);
+        if (!grouped[owner]) return;
+        const start = lengths[owner] + (grouped[owner].length ? 2 : 0);
+        grouped[owner].push(item.text);
+        lengths[owner] = start + item.text.length;
+        if (item.readKey) readSpans[owner].push({ key: item.readKey, start, length: item.text.length });
       });
       session.record(nativeCalls.map((call, index) => ({
         kind: 'tool' as const,
@@ -1537,7 +1541,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         digest: call.name,
         turnKey: session.turnKey,
         toolCallId: call.id,
-        ...(readKeys[index]?.length === 1 ? { readKey: readKeys[index][0] } : {}),
+        ...(readSpans[index]?.length === 1 ? { readKey: readSpans[index][0].key } : {}),
+        ...(readSpans[index]?.length ? { readSpans: readSpans[index] } : {}),
       })));
     } else {
       session.record(appends);

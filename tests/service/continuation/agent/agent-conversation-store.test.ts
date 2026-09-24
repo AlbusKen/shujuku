@@ -428,3 +428,22 @@ describe('会话追加与渲染', () => {
     expect(lastRuntimeSnapshotText_ACU(snapshot)).toBe('新快照');
   });
 });
+
+describe('原生批量调阅元数据', () => {
+  it('各项地址和跨度跨楼落盘后仍与原文对齐', async () => {
+    const chat: any[] = [{ mes: '正文' }];
+    useChat(chat);
+    const text = '### 总纲（$STORY_ARC）\n总纲\n\n### 分卷（$STORY_ARC:VOL-01）\n细读';
+    const start = text.indexOf('### 分卷');
+    const readSpans = [
+      { key: '$STORY_ARC', start: 0, length: start - 2 },
+      { key: '$STORY_ARC:VOL-01', start, length: text.length - start },
+    ];
+    await appendAgentConversationToChat_ACU([{ kind: 'tool', text, digest: 'read', toolCallId: 'c1', readSpans }], chat);
+    const saved = readAgentConversation_ACU(chat).messages[0];
+    expect(saved.readSpans).toEqual(readSpans);
+    expect(saved.readSpans?.map(span => saved.text.slice(span.start, span.start + span.length))).toEqual([
+      '### 总纲（$STORY_ARC）\n总纲', '### 分卷（$STORY_ARC:VOL-01）\n细读',
+    ]);
+  });
+});

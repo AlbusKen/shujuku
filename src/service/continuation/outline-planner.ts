@@ -309,8 +309,8 @@ export class ContinuationOutlinePlanner_ACU {
     const injected: string[] = [];
     const storyArc = resolvers.$STORY_ARC ? String(await resolvers.$STORY_ARC() ?? '').trim() : '';
     const enabledOutline = resolvers.$OUTLINE_WINDOW ? String(await resolvers.$OUTLINE_WINDOW() ?? '').trim() : '';
-    if (storyArc && !renderedBlob.includes(storyArc.slice(0, Math.min(80, storyArc.length)))) injected.push(`【当前故事总纲】\n${storyArc}`);
-    if (enabledOutline && !renderedBlob.includes(enabledOutline.slice(0, Math.min(80, enabledOutline.length)))) injected.push(`【当前启用的阶段大纲】\n${enabledOutline}`);
+    if (storyArc && !renderedBlob.includes(storyArc)) injected.push(`【当前故事总纲】\n${storyArc}`);
+    if (enabledOutline && !renderedBlob.includes(enabledOutline)) injected.push(`【当前启用的阶段大纲】\n${enabledOutline}`);
     if (injected.length) rendered.messages.push({ role: 'user', content: injected.join('\n\n') });
     const transcript: Array<{ role: string; content: string }> = [];
     let lastRaw = '';
@@ -335,13 +335,27 @@ export class ContinuationOutlinePlanner_ACU {
       }
       return String(raw ?? '');
     };
-    const buildFromRaw = (raw: string): StageOutline_ACU => buildStageOutlineFromTags_ACU(parseOutlineTags_ACU(raw), request.allocateId, constraints ? {
+    // 仅对提示词确实展示了格式样例的生成轮次拦截照抄；旧任务的持久化大纲不在此处重验。
+    const hasFormatExample = renderedBlob.includes('<stage_title>阶段标题</stage_title>');
+    const buildFromRaw = (raw: string): StageOutline_ACU => {
+      const parsed = parseOutlineTags_ACU(raw);
+      if (hasFormatExample) {
+        const copied = [parsed.title, parsed.goal, parsed.timeSpanGoal,
+          ...parsed.nodes.flatMap(node => [node.title, node.goal, ...node.turns.flatMap(turn => [turn.goal, turn.timeAnchor])])]
+          .find(value => value && (['阶段标题', '阶段整体目标', '可选：本阶段预计覆盖的故事内部时间', '节点标题', '节点目标', '本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）', '…'].includes(value.trim())));
+        const enumExample = /<stage_(?:tempo|role)>\s*(?:本阶段节奏形态|阶段结构职责)，取值只能是/.test(raw);
+        if (copied || enumExample) throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+          'CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse',
+          `大纲照抄了格式说明${copied ? `「${copied}」` : '里的枚举说明'}；请用具体剧情替换示例文本，枚举标签只填一个标准值。范例：<stage_title>入城与试探</stage_title> <stage_tempo>mixed</stage_tempo> <node_title>城门盘查</node_title>。`, true));
+      }
+      return buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? {
       title: constraints.previousOutline.title,
       goal: constraints.previousOutline.goal,
       tempo: constraints.previousOutline.tempo,
       role: constraints.previousOutline.role,
       timeSpanGoal: constraints.previousOutline.timeSpanGoal,
     } : undefined);
+    };
     // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
     // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
     const validateDraft = (planned: StageOutline_ACU): { validation: StageOutlineValidation_ACU; prefixNodeCount: number } => {
@@ -384,6 +398,10 @@ export class ContinuationOutlinePlanner_ACU {
             planned = buildFromRaw(reply);
           } else {
             break;
+          }
+          if (hasFormatExample && planned.nodes.some(node => node.turns.some(turn => turn.timeAnchor?.trim() === '…'))) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse',
+              '修补时不能照抄 anchor="…"；请填写可定位的相对时间锚，例如 anchor="入城后三周"。', true));
           }
           ({ validation, prefixNodeCount } = validateDraft(planned));
         }

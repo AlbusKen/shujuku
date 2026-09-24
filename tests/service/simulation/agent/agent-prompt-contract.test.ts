@@ -193,8 +193,8 @@ describe('世界推演提示词装配契约', () => {
       WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'chronicler')!.writableModules,
     );
     expect(chronicler).toContain('chronicle_archive');
-    expect(chronicler).toContain('chronicle DELETE 不使用 expected_revision');
-    expect(chronicler).toContain('数组模块 UPDATE/DELETE 的 WHERE 必须明确给出当前条目 revision');
+    expect(chronicler).toContain('DELETE 不使用 expected_revision');
+    expect(chronicler).toContain('完整编年禁止 UPDATE');
     expect(chronicler).toContain('目录中任一条目都可通过 read 工具按地址调阅详细信息');
     expect(chronicler).toContain('chronicle 的 id/at');
     expect(chroniclerPrompt).toContain('调用 read 函数');
@@ -236,8 +236,8 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain('审核清单逐项过');
     expect(reviewerPrompt).toContain('仅因事实客观存在、读者知道或账本有记录而赋知');
     expect(reviewerPrompt).toContain('空壳条目按 MISSING_FIELD 打回');
-    expect(undercurrent).toContain('rationale（依据摘要）、catalyst（催化条件）');
-    expect(undercurrent).toContain('证据不足时不要新建该条目，把缺口写进 uncertainties');
+    expect(undercurrent).toContain('rationale、catalyst、interests/goals/known_facts');
+    expect(undercurrent).toContain('缺少事实依据时把缺口写进 uncertainties');
     expect(undercurrent).not.toContain('其余字段由服务端按缺省补齐');
     expect(director).toContain('chronicle-archive:');
     expect(director).toContain('seeds:{id}');

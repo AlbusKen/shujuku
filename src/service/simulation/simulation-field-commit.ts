@@ -154,6 +154,8 @@ export function planWorldSimulationFieldCommit_ACU(input: {
     const prior = pending.get(key);
     if (intent.kind === 'insert' && (original || fieldRecord || prior)) { reject(path, 'id_exists'); continue; }
     if (intent.kind !== 'insert' && !original && !fieldRecord && !prior) { reject(path, 'not_found'); continue; }
+    if (module === 'chronicle' && intent.kind === 'update' && (original || fieldRecord?.status !== 'partial')) { reject(path, '完整编年不可 UPDATE；仅已保存的 partial 草稿可补栏'); continue; }
+    if (module === 'chronicle' && intent.kind === 'update' && intent.expectedRevision !== 0) { reject(path, 'revision_conflict: 编年草稿补栏必须使用 expected_revision=0'); continue; }
     if (prior?.remove || prior?.discard) { reject(path, '同批已删除此 ID'); continue; }
     const revision = singleton ? baseRevision : typeof original?.revision === 'number' ? original.revision : 0;
     if (module !== 'chronicle' && intent.expectedRevision !== revision) {
@@ -172,7 +174,6 @@ export function planWorldSimulationFieldCommit_ACU(input: {
       if (field === 'revision' || !WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module].fields.includes(field) && !(module === 'clock' && field === 'days')) {
         reject(fieldPath, 'field_forbidden'); continue;
       }
-      if (module === 'chronicle' && intent.kind === 'update') { reject(fieldPath, '编年只允许 INSERT/DELETE'); continue; }
       const normalized = validateField_ACU(module, field, raw, fieldPath, input.evidenceRegistry, declared);
       if (normalized.problem) { reject(fieldPath, normalized.problem); continue; }
       if (entry.original && same_ACU(entry.original[field], normalized.value)) {

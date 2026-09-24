@@ -54,7 +54,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'read',
-        description: '按地址调阅资料。reads 必须是非空字符串数组，地址来自当前提示词里的读取地址词汇表。',
+        description: '按地址读取一条或一批资料的全文。何时使用：提示词里已经给出地址，或 search 命中行右侧有地址，需要正文、表格行、总纲、伏笔、世界书条目或推演账本字段时。不要用它搜索未知内容。参数 reads 是非空字符串数组，一次可混用多种地址，例如 ["$STORY_RANGE:3-5","$STORY_ARC:VOL-01"] 或 ["ledger:current","field:seeds:seed-1:title"]。世界书命中全文通常已注入，不要对 $WORLDBOOK:... 反复 read；地址必须从当前提示词的目录或词汇表复制。',
         parameters: objectSchema_ACU({
           reads: { type: 'array', items: { type: 'string' }, minItems: 1 },
         }, ['reads']),
@@ -64,7 +64,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'search',
-        description: '跨域检索。query 必填。scope、maxResults、isRegex 可选。',
+        description: '在资料里按关键词找位置。何时使用：知道要找什么，但还没有读取地址。先 search 再按命中行里的地址 read。query 必填，用短关键词或人名，不要贴整段正文。scope 是范围数组，续写可用 story、tables、modules、outline、worldbook，推演可用 worldbook、encyclopedia、web；省略表示该角色允许的全部范围。可选 isRegex、maxResults（1 到 50）。范例：{"query":"晶屑","scope":["worldbook"],"maxResults":8}。',
         parameters: objectSchema_ACU({
           query: { type: 'string' },
           scope: { type: 'array', items: { type: 'string' } },
@@ -77,7 +77,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'write_sql',
-        description: '提交一条受限 INSERT、UPDATE 或 DELETE。只写当前职责允许的模块，并使用回执里的 revision。',
+        description: '把资料写入你负责的表。何时使用：要新增、修改或删除一条已有资料，而且系统提示里给你的表允许写。没有变化不要调用。sql 是一条或多条用分号隔开的 INSERT、UPDATE 或 DELETE。字符串用单引号，正文里的单引号写成两个单引号；数组和对象写成单引号包裹的 JSON。新行是否须显式给 expected_revision=0 依具体角色的表契约：推演 dimensions/seeds/actors/rumors 必须给 0，续写新行可省略；已有数组行的 WHERE 带 id 与当前条目/模块修订号，单例模块只带当前账本修订号；已保存 partial 仅按 missingFields 补未存栏目，状态不确定先 read。具体表、必填列和范例以系统提示中你这个角色的 write_sql 说明为准。范例：INSERT INTO hooks (summary, status, importance, planted_index, planned_payoff) VALUES (\'守门人藏着晶屑\', \'planted\', \'mid\', 3, \'稍后交出\');',
         parameters: objectSchema_ACU({
           sql: { type: 'string' },
           evidenceRefs: { type: 'array', items: { type: 'string' } },
@@ -88,7 +88,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'encyclopedia_search',
-        description: '在百科里检索候选词条。query 必填。sources 可省略，省略即使用全部启用来源。',
+        description: '在百科里找候选词条。何时使用：要登记原作或公开设定，还不知道准确标题。query 用「角色名」或「作品名 角色名」，不要用整句剧情。sources 可省略，省略即全部启用来源；可填 moegirl、wikipedia_zh、wikipedia_en、baidu。萌娘按标题前缀匹配，百度按精确词条名匹配。范例：{"query":"守门人","sources":["moegirl","wikipedia_zh"]}。查到后再调用 encyclopedia_read。',
         parameters: objectSchema_ACU({
           query: { type: 'string' },
           sources: { type: 'array', items: { type: 'string' } },
@@ -100,7 +100,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'encyclopedia_read',
-        description: '按来源和准确标题精读百科词条。title 从 encyclopedia_search 的候选里复制。',
+        description: '精读一条百科词条。何时使用：encyclopedia_search 已经返回候选，需要正文才能写入 web_refs。source 和 title 必须从候选里原样复制，不要改写标题。范例：{"source":"moegirl","title":"守门人"}。返回的页面句柄才能作为 web_refs.page_ref。',
         parameters: objectSchema_ACU({
           source: { type: 'string' },
           title: { type: 'string' },
@@ -112,7 +112,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'web_search',
-        description: '通用网页搜索。百科查不到的冷门设定再用它。',
+        description: '通用网页搜索。何时使用：百科没有这个实体，或只在专栏、设定站里出现。query 用短关键词加作品名。范例：{"query":"禁区 守门人 设定"}。先看标题和摘要，再对可信链接调用 web_read。论坛和自媒体只作旁证。',
         parameters: objectSchema_ACU({
           query: { type: 'string' },
           notes: notesSchema_ACU,
@@ -123,7 +123,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'web_read',
-        description: '抓取一个网页的正文。url 必须是完整地址。',
+        description: '抓取一个网页的正文。何时使用：web_search 给出了可信 url，需要页面内容才能写入资料。url 必须是结果里的完整地址，不要编造。范例：{"url":"https://example.com/setting"}。内网、酒馆自身和黑名单域名会被拒绝。返回的页面句柄才能作为 web_refs.page_ref。',
         parameters: objectSchema_ACU({
           url: { type: 'string' },
           notes: notesSchema_ACU,

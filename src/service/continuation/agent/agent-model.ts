@@ -60,6 +60,8 @@ export interface AgentConversationMessage_ACU {
   at: number;
   /** 工具消息专用：本条承载的读取地址（如 $STORY_RANGE:12-15），用于本轮读取去重、重读识别与压缩元数据。 */
   readKey?: string;
+  /** 原生工具单条回执包含多项读取时，各项正文在 text 中的精确位置。 */
+  readSpans?: readonly { key: string; start: number; length: number }[];
   /** 原生函数调用。agent 消息携带请求，tool 消息用 toolCallId 对应其中一条。 */
   toolCalls?: readonly { id: string; name: string; arguments: string }[];
   toolCallId?: string;
@@ -144,6 +146,7 @@ export interface AgentConversationAppend_ACU {
   digest?: string;
   turnKey?: string;
   readKey?: string;
+  readSpans?: readonly { key: string; start: number; length: number }[];
   toolCalls?: readonly { id: string; name: string; arguments: string }[];
   toolCallId?: string;
 }
@@ -248,6 +251,23 @@ export type AgentVolumeNarrativeRole_ACU = typeof AGENT_VOLUME_NARRATIVE_ROLES_A
  * 倾向一次性用光手上的料。withheld 是「本层禁止提前翻的底牌」，stageNumbers 是
  * 已由哪些阶段承载的进度记录——两者共同防止一次性打穿。
  */
+/** 仅拒绝模型把总纲格式说明原样当作资料；不对普通叙事语句做模糊匹配。 */
+export function copiedStoryArcExample_ACU(field: string, value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const examples: Record<string, readonly string[]> = {
+    id: ['ARC-STORY 或 VOL-01'], title: ['简称'],
+    direction: ['本层推进方向与人物驱动力'],
+    escalation: ['本层的进入状态→中段风险或反转→高潮兑现→卷末新局面'],
+    withheld: ['本层禁止提前释放的底牌与终局储备'],
+    completionState: ['done 时达到的卷末状态，否则空字符串'],
+    continuationRationale: ['续卷时由前卷后果推出的依据，否则空字符串'],
+    targetTimeSpan: ['volume upsert 时必填的故事时间目标'],
+    progressCeiling: ['volume upsert 时必填的主线推进上限'],
+    completionRationale: ['容量偏离 targetStageRange 时必填，否则空字符串'],
+  };
+  return (examples[field] ?? []).includes(value.trim());
+}
+
 export interface AgentStoryArcEntry_ACU {
   id: string;
   scope: AgentStoryArcScope_ACU;

@@ -86,6 +86,16 @@ function validateMessage_ACU(raw: unknown): AgentConversationMessage_ACU | null 
     at: typeof raw.at === 'number' && raw.at >= 0 ? raw.at : 0,
   };
   if (typeof raw.readKey === 'string' && raw.readKey.trim()) message.readKey = raw.readKey.trim();
+  if (Array.isArray(raw.readSpans)) {
+    const spans = raw.readSpans.flatMap((item: unknown) => {
+      if (!isRecord_ACU(item)) return [];
+      const { key, start, length } = item;
+      if (typeof key !== 'string' || !key.trim() || !Number.isSafeInteger(start) || !Number.isSafeInteger(length)
+        || (start as number) < 0 || (length as number) < 0 || (start as number) + (length as number) > text.length) return [];
+      return [{ key: key.trim(), start: start as number, length: length as number }];
+    });
+    if (spans.length === raw.readSpans.length && spans.length) message.readSpans = spans;
+  }
   if (toolCalls?.length) message.toolCalls = toolCalls;
   if (toolCallId) message.toolCallId = toolCallId;
   return message;
@@ -524,6 +534,7 @@ export function appendAgentConversation_ACU(snapshot: AgentConversationSnapshot_
       at,
     };
     if (item.readKey) message.readKey = item.readKey;
+    if (item.readSpans?.length) message.readSpans = item.readSpans.map(span => ({ ...span }));
     if (item.toolCalls?.length) message.toolCalls = item.toolCalls.map(call => ({ ...call }));
     if (item.toolCallId) message.toolCallId = item.toolCallId;
     return message;

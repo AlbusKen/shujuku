@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
 import { planWorldSimulationFieldCommit_ACU } from '../../../src/service/simulation/simulation-field-commit';
 import { parseWorldSimulationSqlFieldWrites_ACU } from '../../../src/service/simulation/agent/agent-protocol';
+import { renderWorldSimulationSqlGuide_ACU } from '../../../src/service/simulation/agent/agent-defaults';
+import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../src/service/simulation/world-simulation-evidence-registry';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU } from '../../../src/service/simulation/agent/agent-model';
 import type { WorldSimulationLedgerFieldSnapshot_ACU } from '../../../src/service/simulation/model';
 
@@ -12,6 +14,49 @@ function plan(sql: string, role: string, options: Partial<Parameters<typeof plan
   const applied = planWorldSimulationFieldCommit_ACU({ ledger: buildEmptyWorldSimulationLedger_ACU(), fields: blankFields(), archive: blankArchive(), intents: parsed.intents, role, ...options });
   return { ...applied, rejected: [...parsed.rejected, ...applied.rejected] };
 }
+
+describe('推演提示中的 SQL 范例与逐栏提交契约', () => {
+  const roles = [
+    ['timekeeper', 'clock'], ['undercurrent-analyst', 'dimensions'], ['undercurrent-analyst', 'seeds'],
+    ['dramatis-keeper', 'actors'], ['dramatis-keeper', 'player'], ['dramatis-keeper', 'rumors'],
+    ['chronicler', 'chronicle'], ['guidance-composer', 'guidance'],
+  ] as const;
+  const exampleFor = (module: string) => {
+    const line = renderWorldSimulationSqlGuide_ACU([module]).split(String.fromCharCode(10)).find(item => item.startsWith(`${module}：`));
+    if (!line) throw new Error(`无 ${module} 范例`);
+    return line.slice(line.indexOf('范例：') + '范例：'.length).trim();
+  };
+
+  it.each(roles)('%s 的 %s 范例须能解析且无拒绝栏目', (role, module) => {
+    const sql = exampleFor(module);
+    const parsed = parseWorldSimulationSqlFieldWrites_ACU(sql, role);
+    expect(parsed.rejected).toEqual([]);
+    expect(parsed.intents).toHaveLength(1);
+    expect(parsed.intents[0].module).toBe(module);
+  });
+
+  it.each(roles)('%s 的 %s 范例替换引用并满足实际关系后可入账', (role, module) => {
+    const registry = createWorldSimulationEvidenceRegistry_ACU(`guide-${module}`);
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'read', address: 'ledger:current', status: 'ok', exact: true, summary: '已核对事实' }).evidenceRef!;
+    const sql = exampleFor(module).replaceAll('evidence:已颁发引用', ref)
+      .replace("'seed-1'", "'seed-real'").replace('"sourceId":"seed-1"', '"sourceId":"seed-real"');
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    if (module === 'rumors') ledger.clock.day = 3;
+    if (module === 'guidance') {
+      ledger.seeds = [{ id: 'seed-real', title: '禁区外泄', status: 'active', level: 2, catalyst: '守门人离岗', visibility: 'limited', actorIds: [],
+        location: { region: '禁区门口' }, expiresAtDay: null, missedOutcome: null, exposePolicy: 'gradual', evidenceRefs: [ref], retiredReason: null, revision: 1 }];
+      ledger.player.location = { region: '禁区门口' };
+    }
+    if (module === 'player') ledger.clock.day = 2;
+    const parsed = parseWorldSimulationSqlFieldWrites_ACU(sql, role);
+    const applied = planWorldSimulationFieldCommit_ACU({ ledger, fields: blankFields(), archive: blankArchive(), intents: parsed.intents, role,
+      evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), declaredEvidenceRefs: [ref],
+      anchorMessage: module === 'player' ? '主角走入客栈' : '主角远远望见禁区门口的守门人' });
+    expect([...parsed.rejected, ...applied.rejected]).toEqual([]);
+    expect(applied.partials).toEqual([]);
+    expect(applied.accepted.length).toBeGreaterThan(0);
+  });
+});
 
 describe('世界推演逐栏领域规划', () => {
   it('缺必填栏目保留 partial；同批后续 UPDATE 补齐才提升完整条目', () => {
@@ -54,6 +99,25 @@ describe('世界推演逐栏领域规划', () => {
     const result = plan("INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-a', '失踪', 1, '[\"码头\"]', '[\"actor-a\"]', 0); INSERT INTO actors (id, name, interests, location, goals, information_sources, known_facts, life, died_at_day, death_summary, expected_revision) VALUES ('actor-a', '水手', '[]', '港口', '[]', '[]', '[]', 'dead', 1, '暴风中失踪', 0)", 'dramatis-keeper');
     expect(result.rejected).toEqual([]);
     expect(result.ledger.actors).toEqual([expect.objectContaining({ id: 'actor-a', life: 'dead' })]);
+  });
+
+  it('仅已保存的编年草稿允许按 ID 补缺栏，完整编年不可 UPDATE', () => {
+    const fields: WorldSimulationLedgerFieldSnapshot_ACU = { records: { chronicle: {
+      'chr-1': { module: 'chronicle', id: 'chr-1', status: 'partial', fields: {
+        at: { value: '第一日', revision: 1, updatedAt: 1 },
+      }, missingFields: ['summary'], updatedAt: 1 },
+    } } };
+    const sql = "UPDATE chronicle SET summary = '守门人盘查入城者' WHERE id = 'chr-1' AND expected_revision = 0";
+    const wrongRevision = plan("UPDATE chronicle SET summary = '守门人盘查入城者' WHERE id = 'chr-1' AND expected_revision = 1", 'chronicler', { fields });
+    expect(wrongRevision.accepted).toEqual([]);
+    expect(wrongRevision.rejected.length).toBeGreaterThan(0);
+    const updated = plan(sql, 'chronicler', { fields });
+    expect(updated.rejected).toEqual([]);
+    expect(updated.ledger.chronicle).toEqual([expect.objectContaining({ id: 'chr-1', at: '第一日', summary: '守门人盘查入城者' })]);
+    expect(updated.partials).toEqual([]);
+    const full = plan(sql, 'chronicler', { ledger: updated.ledger });
+    expect(full.accepted).toEqual([]);
+    expect(full.rejected).toEqual([expect.objectContaining({ reason: expect.stringContaining('完整编年不可 UPDATE') })]);
   });
 
   it('编年归档需一对一概览，单独归档不产生任何接受条目', () => {

@@ -131,7 +131,7 @@ describe('世界推演 Agent 协议', () => {
     expect(message).toContain('expected_revision');
     expect(message).toContain('UPDATE clock');
     const chroniclerMessage = renderWorldSimulationSpecialistProtocolRejection_ACU({ reasonCode: 'SQL_WHERE_FORBIDDEN', path: '$.sql.where.expected_revision', expected: 'only supported WHERE conditions', actual: 'expected_revision' }, 'chronicler', ['chronicle']);
-    expect(chroniclerMessage).toContain('chronicle 仅允许 INSERT 或 DELETE，DELETE WHERE 只带 id、reason，不带 expected_revision');
+    expect(chroniclerMessage).toContain('chronicle 仅 INSERT 新事件、UPDATE 已保存未完成的草稿缺栏');
     expect(chroniclerMessage).toContain('数组模块 UPDATE/DELETE 的 WHERE 必须带 id、expected_revision');
   });
 
@@ -195,11 +195,11 @@ describe('世界推演 Agent 协议', () => {
   it('初始提示词声明受限 SQL DML 与 director 动作字段白名单', () => {
     const specialist = worldSimulationSpecialistProtocolInstruction_ACU('chronicler', ['chronicle']);
     expect(specialist).toContain('INSERT');
-    expect(specialist).toContain('expected_revision 可省略');
-    expect(specialist).toContain('新建默认 0');
+    expect(specialist).toContain('INSERT 仍须显式给 expected_revision=0');
+    expect(specialist).toContain('数组行 INSERT 的 id 可省略');
     expect(specialist).toContain('账本 revision');
-    expect(specialist).toContain('可只提交变更字段');
-    expect(specialist).toContain('字段纪律：dimensions 必须给 id,name');
+    expect(specialist).toContain('已保存草稿按 missingFields 仅 UPDATE 缺栏');
+    expect(specialist).toContain('字段纪律（逐栏 SQL）：dimensions 新行需 name,kind');
     const noWrite = worldSimulationSpecialistProtocolInstruction_ACU('lore-researcher', []);
     expect(noWrite).toContain('不得输出 candidate');
     expect(noWrite).not.toContain('expectedRevision');
@@ -212,10 +212,10 @@ describe('世界推演 Agent 协议', () => {
   it('默认提示词模板已接线 specialist SQL 契约与 director 字段白名单', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const specialist = prompts['undercurrent-analyst'].map(segment => segment.content).join('\n');
-    expect(specialist).toContain('expected_revision 可省略');
-    expect(specialist).toContain('新建默认 0');
-    expect(specialist).toContain('字段纪律：dimensions 必须给 id,name');
-    expect(specialist).toContain('可只提交变更字段');
+    expect(specialist).toContain('INSERT 仍须显式给 expected_revision=0');
+    expect(specialist).toContain('数组行 INSERT 的 id 可省略');
+    expect(specialist).toContain('字段纪律（逐栏 SQL）：dimensions 新行需 name,kind');
+    expect(specialist).toContain('已保存草稿按 missingFields 仅 UPDATE 缺栏');
     expect(specialist).toContain('INSERT INTO');
     const director = prompts['world-director'].map(segment => segment.content).join('\n');
     expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');
@@ -319,6 +319,13 @@ describe('世界推演逐栏 SQL 意图', () => {
     expect(parseWorldSimulationSqlFieldWrites_ACU("INSERT INTO actors (id, name, expected_revision) VALUES ('actor-1', 'A', 0)", 'timekeeper').intents).toEqual([]);
     expect(parseWorldSimulationSqlFieldWrites_ACU("UPDATE clock SET story_time = '次日' WHERE id = 'fake' AND expected_revision = 0", 'timekeeper').rejected).toHaveLength(1);
     expect(parseWorldSimulationSqlFieldWrites_ACU("DELETE FROM chronicle_archive WHERE archive_ref = 'a' AND reason = 'b'", 'chronicler').intents).toEqual([]);
+  });
+
+  it('编年补栏只接受明确 ID 和 revision=0，仍拒绝无条件 UPDATE', () => {
+    const update = parseWorldSimulationSqlFieldWrites_ACU("UPDATE chronicle SET summary = '新事实' WHERE id = 'chr-1' AND expected_revision = 0", 'chronicler');
+    expect(update.intents).toMatchObject([{ kind: 'update', module: 'chronicle', id: 'chr-1', expectedRevision: 0, fields: { summary: '新事实' } }]);
+    expect(parseWorldSimulationSqlFieldWrites_ACU("UPDATE chronicle SET summary = '新事实' WHERE id = 'chr-1'", 'chronicler').intents).toEqual([]);
+    expect(parseWorldSimulationSqlFieldWrites_ACU("UPDATE chronicle SET summary = '新事实' WHERE id = 'chr-1' AND expected_revision = 1", 'chronicler').intents).toEqual([]);
   });
 
   it('语法损坏与无效 revision 不伪造写入', () => {

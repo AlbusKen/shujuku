@@ -442,36 +442,108 @@ function blankMaintainerOutput_ACU(summary: string): AgentMaintainerOutput_ACU {
   };
 }
 
-/** 把写回执里的失败译成下一条 SQL 该怎么写，避免模型改去输出 delta 或整篇说明。 */
+const SQL_QUOTING_ACU = '字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON 文本，例如 \'["条目"]\'、\'{"min":1,"max":2}\'。列名用 snake_case。新行可以不写 id 和 expected_revision；若写 expected_revision，必须是 0。已有行的 UPDATE/DELETE 在 WHERE 里写 id 和回执给出的当前修订号，SET 里不要写这两项。';
+
+/** 各维护角色的 write_sql 格式、范例和使用时机。运行时注入，不依赖提示词模板是否已迁移。 */
+function renderMaintenanceSqlGuide_ACU(name: string): string {
+  const head = [
+    '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用，也不要写成 JSON、delta 或 Markdown。',
+    SQL_QUOTING_ACU,
+    '只在资料确实要新增、修改或删除时调用。没有变化就不要调用，直接交最终 JSON 的 summary。status=committed 的 accepted 已保存；有 partials 时按 missingFields 仅 UPDATE 补未保存栏目，不要重发整行。保存状态不确定时先 read 权威帧。',
+  ];
+  if (name === 'arc-architect') {
+    return [
+      ...head,
+      '只写 story_arc。scope=story 全局只能有一条活跃记录，不要写卷级栏目。volume 在 story 必填栏之外，还必须写 narrative_role、target_stage_range、target_time_span、progress_ceiling、sustaining_threads、payoff_targets。同一时刻只能有一条 volume 的 status 为 active，其余 planned。',
+      '何时使用：还没有总纲时 INSERT 全书和各卷；阶段完成后只 UPDATE 当前卷的 stage_numbers；卷收束时再 UPDATE status 和完成依据；废弃一卷用 DELETE 并写 reason。',
+      '范例（全书加第一卷，新行修订号为 0）：',
+      'INSERT INTO story_arc (scope, title, direction, escalation, withheld, status) VALUES (\'story\', \'追查真相\', \'主角要查清禁区来历，失败就会失去进城资格\', \'从门外怀疑到确认守门人知情\', \'终局身份\', \'active\');',
+      'INSERT INTO story_arc (scope, title, direction, escalation, withheld, status, narrative_role, target_stage_range, target_time_span, progress_ceiling, sustaining_threads, payoff_targets) VALUES (\'volume\', \'入城\', \'主角选择进城并结识守门人\', \'从门外观察进入到获得第一块线索\', \'守门人真实身份\', \'active\', \'setup\', \'{"min":1,"max":2}\', \'数日\', \'只确认入口，不揭开禁区核心\', \'["与守门人的信任"]\', \'["拿到第一块晶屑线索"]\');',
+      '改已有卷：UPDATE story_arc SET stage_numbers = \'[1]\' WHERE id = \'VOL-01\' AND expected_revision = 0;',
+      '删除：DELETE FROM story_arc WHERE id = \'VOL-02\' AND reason = \'与正文冲突\' AND expected_revision = 0;',
+    ].join('\n');
+  }
+  if (name === 'hook-cognition-maintainer') {
+    return [
+      ...head,
+      '只写 hooks、info_gap、chronology，以及建议登记的 constraint_proposals。只登记真实正文里已经发生的变化。大纲里的时间字段是计划，不能写进 chronology。',
+      '何时使用：新正文出现线索、伏笔被再次触碰、角色知晓变化、或正文实际跨夜/跨日时调用。没有可证实的变化就不要调用。',
+      '伏笔范例：INSERT INTO hooks (summary, status, importance, planted_index, planned_payoff) VALUES (\'守门人右手藏着晶屑\', \'planted\', \'mid\', 3, \'入城后由守门人自己交出\');',
+      'status 只能是 planted、reinforced、misled、partially_paid、paid、abandoned。importance 只能是 high、mid、low。',
+      '信息差范例：INSERT INTO info_gap (topic, objective_fact, reader_known, character_knowledge, reveal_status) VALUES (\'晶屑来历\', \'晶屑来自禁区核心\', \'读者只看见守门人藏起晶屑\', \'[{"name":"守门人","knows":"亲身保管晶屑"}]\', \'partial\');',
+      'reveal_status 为 revealed 时必须同时写 reveal_index；未揭示时 reveal_index 写 NULL。角色知道的内容必须能追溯到亲历、目击、听闻、阅读或转述。',
+      '年代学范例：INSERT INTO chronology (anchor, elapsed, precision, transition, evidence_indexes) VALUES (\'入城后的第二天清晨\', \'自开篇约两日\', \'approximate\', \'在城门口守了一夜\', \'[3,4]\');',
+      'precision 只能是 exact、approximate、unknown。evidence_indexes 必须是已经出现的正文楼层号。',
+      "约束建议：只有真实正文暴露出需要长期遵守的新边界时才登记提议；这不会直接修改长期约束，须由主 Agent 裁决。constraint_proposals 只能 INSERT，只有 text 一列，不写 id、UPDATE 或 DELETE。范例：INSERT INTO constraint_proposals (text) VALUES ('伏笔回收前不要提前揭露守门人身份');",
+      '改已有伏笔：UPDATE hooks SET status = \'reinforced\' WHERE id = \'H001\' AND expected_revision = 0;',
+      '作废：DELETE FROM hooks WHERE id = \'H001\' AND reason = \'正文已经明示回收\' AND expected_revision = 0;',
+    ].join('\n');
+  }
+  if (name === 'web-researcher') {
+    return [
+      ...head,
+      '只写 web_refs。page_ref 必须是本轮 encyclopedia_read 或 web_read 返回的页面句柄，例如 P1。不要编造 URL，原文不入库。',
+      '何时使用：抓到可用页面后 INSERT；确认旧条目过时或错误时 UPDATE 或 DELETE。没有抓到页面就不要 INSERT。',
+      '范例：INSERT INTO web_refs (page_ref, name, brief, tags, detail) VALUES (\'P1\', \'守门人\', \'禁区入口的常驻看守\', \'["人物"]\', \'页面写明其只知道铁门前的事\');',
+      '修订已有条目：UPDATE web_refs SET name = \'守门人\', brief = \'禁区入口的常驻看守\', page_ref = \'P1\' WHERE id = \'WR-001\' AND expected_revision = 0;',
+      '删除：DELETE FROM web_refs WHERE id = \'WR-001\' AND reason = \'页面已不存在\' AND expected_revision = 0;',
+    ].join('\n');
+  }
+  return head.join('\n');
+}
+
+/** 回执给出已保存草稿的缺栏时，只示范补齐这些栏目，不重写已接受栏目。 */
+function renderMissingAgentSql_ACU(
+  item: NonNullable<AgentModuleFieldReceipt_ACU['partials']>[number],
+  revision: number,
+): string | null {
+  const table = { hooks: 'hooks', infoGap: 'info_gap', storyArc: 'story_arc', chronology: 'chronology', webRefs: 'web_refs' }[item.module];
+  const samples: Record<string, Record<string, string>> = {
+    hooks: { summary: "'守门人藏起晶屑'", status: "'planted'", importance: "'mid'", plantedIndex: '3', plannedPayoff: "'入城后由守门人交出'" },
+    infoGap: { topic: "'晶屑来历'", objectiveFact: "'来自禁区核心'", readerKnown: "'读者只见守门人藏起晶屑'", characterKnowledge: `'[{"name":"守门人","knows":"亲身保管晶屑"}]'`, revealStatus: "'unrevealed'" },
+    storyArc: { scope: item.id.startsWith('VOL-') ? "'volume'" : "'story'", title: "'入城追查'", direction: "'主角查明晶屑来历'", escalation: "'从守门人隐瞒推进到线索显现'", withheld: "'晶屑真正用途'", status: item.id.startsWith('VOL-') ? "'planned'" : "'active'", narrativeRole: "'setup'", targetStageRange: `'{"min":1,"max":2}'`, targetTimeSpan: "'数日'", progressCeiling: "'仅确认禁区入口'", sustainingThreads: `'["与守门人的信任"]'`, payoffTargets: `'["取得第一块线索"]'` },
+    chronology: { anchor: "'入城后的次日'", elapsed: "'约两日'", precision: "'approximate'", transition: "'守了一夜'", evidenceIndexes: "'[3]'" },
+    webRefs: { title: "'守门人'", brief: "'禁区入口的看守'", url: "'P1'" },
+  };
+  // web_refs.url 只能由本次成功读取的页面句柄 page_ref 颁发，不能直接写 URL。
+  const assignments = item.missingFields.map(field => {
+    const sample = samples[item.module]?.[field];
+    if (!sample) return null;
+    const column = field === 'url' && item.module === 'webRefs' ? 'page_ref' : field === 'title' && item.module === 'webRefs' ? 'name'
+      : field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+    return `${column} = ${sample}`;
+  });
+  if (!table || !assignments.length || assignments.some(value => value === null)) return null;
+  return `UPDATE ${table} SET ${assignments.join(', ')} WHERE id = '${item.id.replace(/'/g, "''")}' AND expected_revision = ${revision};`;
+}
+
+/** 写回执以已落库的栏目为基线；保存不确定时不能根据旧号建议写入。 */
 function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string {
+  if (receipt.partials === null || receipt.revisions === null) {
+    return '【write_sql 补栏】保存或恢复状态不确定。先按上一次回执的 ID read $FIELD:模块:ID 权威栏目，核实已存栏目与当前 revisions；不要重发原 SQL 或猜测修订号。';
+  }
   const lines: string[] = [];
-  const fatal = receipt.rejected.find(item => item.path === 'host' || item.path === 'sql');
-  if (fatal?.reason.includes('字段数与值数量不一致')) {
-    lines.push('这条 SQL 没有解析，任何栏目都没写入。不是缺 id。正文里的单引号要写成两个单引号，否则一个值会被拆成好几段。id 和 expected_revision 可以不写。');
-  } else if (fatal?.reason.includes('领域快照')) {
-    lines.push('这条 SQL 被整句退回，没有写入。把要改的行放在同一次调用里再交。');
+  const drafts = receipt.partials.filter(item => item.missingFields.length || item.promotionError);
+  if (drafts.length || receipt.rejected.length) {
+    lines.push('【write_sql 补栏】status=committed 的 accepted 已保存，不要重新 INSERT 或重发已保存栏目。示例值仅演示格式：必须换成当前故事的真实内容、正文楼层与已颁发的页面句柄。');
+  }
+  for (const item of drafts) {
+    const revision = receipt.revisions[item.module];
+    lines.push(`${item.module}#${item.id} 已有草稿；只缺 ${item.missingFields.join('、') || '领域校验所需的修正'}。当前模块修订号 ${revision}。`);
+    if (item.missingFields.length) {
+      const sql = renderMissingAgentSql_ACU(item, revision);
+      if (sql) lines.push(`仅补缺栏范例：${sql}`);
+      else lines.push('先 read 对应 $FIELD:模块:ID，按 missingFields 核对可写列，再仅补未保存的栏目。');
+    }
+    if (item.module === 'webRefs' && item.missingFields.includes('url')) lines.push('page_ref 必须来自本轮成功的 encyclopedia_read 或 web_read 页面句柄；没有句柄时先读取页面，不要把 P1 当作实际句柄。');
+    if (item.promotionError) lines.push(`未能提升：${item.promotionError}。如 missingFields 为空，先 read 核对已存栏目，再只修正领域校验失败的栏目；不能照搬缺栏范例。`);
   }
   for (const item of receipt.rejected) {
-    if (item.path === 'host' || item.path === 'sql') continue;
-    if (item.reason.includes('必须是非空字符串数组')) lines.push(`${item.path} 要写成单引号包裹的 JSON 数组，例如 '["经营线"]'，不要用竖线或一整句中文。`);
-    else if (item.reason.startsWith('revision_conflict')) {
-      const module = item.path.split('#')[0] as keyof NonNullable<AgentModuleFieldReceipt_ACU['revisions']>;
-      const current = receipt.revisions?.[module];
-      lines.push(`${item.path} 是在改已有行。下一次 UPDATE 的 expected_revision 用 ${current ?? '回执 revisions 里该模块的当前值'}。新行 INSERT 固定写 0，不要改成这个号。`);
-    }
-    else if (item.reason === 'not_found') lines.push(`${item.path} 还没有记录，用 INSERT，不要 UPDATE。`);
-    else if (item.reason === 'id_exists') lines.push(`${item.path} 已有记录，用 UPDATE，不要再 INSERT。`);
-    else if (item.reason.includes('SET 不得指定')) lines.push('UPDATE 的 SET 里不要写 id 或 expected_revision，这两项只放在 WHERE。');
-  }
-  if ((receipt.partials ?? []).some(item => item.promotionError?.includes('active') || item.promotionError?.includes('sustainingThreads'))) {
-    lines.push('同一时刻只能有一条 volume 的 status 为 active，其余用 planned。scope=story 不要带卷级栏目。');
-  }
-  const drafts = (receipt.partials ?? []).filter(item => item.missingFields.length);
-  if (drafts.length) {
-    const ids = drafts.map(item => item.id).join('、');
-    const fields = [...new Set(drafts.flatMap(item => item.missingFields))].join('、');
-    const hasVolume = drafts.some(item => item.id.startsWith('VOL-'));
-    lines.push(`${ids} 的编号已经写上，不缺 id。还缺栏目：${fields}。用同一条 UPDATE 补这些栏目，id 和 expected_revision 可以不写。${hasVolume ? '不要再新开一条同样的卷。' : '还没有卷时，继续 INSERT 新卷，卷号会按 VOL-01 顺序补上。'}`);
+    lines.push(`${item.path}：${item.reason}。被拒栏目尚未保存；按报错核对类型、枚举和正文证据，只补拒绝的栏目，不重发 accepted。`);
+    if (item.reason === 'not_found') lines.push('先 read 对应 $FIELD:模块:ID 确认记录确实不存在；只有确认为新记录时才用 INSERT，已有草稿必须用 UPDATE。');
+    if (item.reason === 'id_exists' || item.reason.startsWith('revision_conflict')) lines.push('先 read 对应 $FIELD:模块:ID 核实已存栏目，再用回执 revisions 或权威快照中的当前模块修订号补写；不要使用旧号或示例的 0。');
+    if (item.reason.includes('字段数与值数量不一致') || item.reason.includes('字符串字面量未闭合')) lines.push('正文里的单引号写成两个单引号；检查每个值与列一一对应。');
+    if (item.reason.includes('必须是非空字符串数组')) lines.push("数组必须写成单引号包裹的 JSON 文本，例如 '[\"与守门人的信任\"]'，不能用逗号或竖线代替。");
   }
   return lines.join('\n');
 }
@@ -491,10 +563,12 @@ function renderIncompleteFieldWrite_ACU(receipt: AgentModuleFieldReceipt_ACU): s
     lines.push('下列条目还缺必填栏目，补齐后才会成为正式资料：');
     for (const item of missing) lines.push(`- ${item.module}#${item.id}：${item.missingFields.join('、') || '提升失败'}${item.promotionError ? `（${item.promotionError}）` : ''}`);
   }
-  if (receipt.partials === null) lines.push('保存状态不确定。先 read $FIELD:模块:ID 读取权威帧，再决定补写。');
+  if (receipt.partials === null || receipt.revisions === null) lines.push('保存状态不确定。先 read $FIELD:模块:ID 读取权威帧，再决定补写。');
   const repair = renderWriteSqlRepair_ACU(receipt);
   if (repair) lines.push(repair);
-  lines.push('请调用一次 write_sql，把上面点名的栏目放进同一条 sql。已有记录用 UPDATE，WHERE 带 id 和同一个 expected_revision；还没有记录的才用 INSERT，expected_revision 写 0。不要拆成多次调用，也不要把尚未入库的新行写成 UPDATE。');
+  lines.push(receipt.partials === null || receipt.revisions === null
+    ? '保存状态不确定时先 read 权威帧确认已存栏目和修订号，不要继续写入。'
+    : '请只补尚未保存的栏目；已有草稿用 UPDATE，WHERE 带 id 和当前模块 expected_revision。只有权威读取确认不存在的全新行才用 INSERT。不要拆成多次调用。');
   return lines.join('\n');
 }
 
@@ -650,21 +724,12 @@ export class AgentSubagentRuntime_ACU {
       : rendered.messages;
     const presentTokens = new Set(promptSegments.flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const snapshotText = omitSnapshotSectionsForSubagent_ACU(input.mainSnapshot?.trim() || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc' });
-    const arcMaterials = definition.kind === 'arc'
-      ? [
-        '【当前故事总纲】（直接注入，这是你要维护的对象，不要再 read $STORY_ARC）',
-        resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
-        '【当前启用的阶段大纲】（直接注入）',
-        renderAgentOutlineWindow_ACU(input.resolveContext),
-      ].join('\n')
-      : '';
-    const snapshotWithStructure = [snapshotText, arcMaterials].filter(Boolean).join('\n\n');
-    if (snapshotWithStructure) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotWithStructure });
+    if (snapshotText) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: snapshotText });
     // 预算状态同样是运行时信息；首轮先给上限，之后随每个工具批次刷新剩余轮次与遥测。
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: renderReadBudgetNote(0) });
     if (input.sharedMaterials !== undefined) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'user', content: input.sharedMaterials });
     const ownReads = input.sharedMaterials !== undefined ? ownReadPrefixes_ACU(writes) : null;
-    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用。不要写成 JSON、delta、Markdown 或顶层 storyArc 数组。id 和 expected_revision 可以不写：新行按 STORY-01、VOL-01、H001、E001、T001 顺序补号，修订号由系统按当前模块补上。volume 没写 status 时，第一条补 active，其余补 planned。只写职责模块；仅 status=committed 的 accepted 已保存；partials/revisions=null 表示恢复状态不确定，先重新读权威帧。最终契约不得重复提交已写栏目。story_arc 的每条 INSERT 必须带 withheld，缺了就还只是草稿。已有行缺 withheld 时，下一次把这些 UPDATE 放进同一条 sql 一次补完。还没有卷时可以继续 INSERT 新卷。sustaining_threads 与 payoff_targets 写成 \'["条目"]\'，target_stage_range 写成 \'{"min":6,"max":10}\'。volume 同时只能有一条 status 为 active，其余 planned。scope=story 不要写卷级栏目。' });
+    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
     if (ownReads) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `世界书全文和各资料库已在【本轮已备资料】。不要再读世界书、正文、大纲或做跨库搜索。你只能 read 自己维护的详细资料：${ownReads.join('、')}。` : '世界书全文和各资料库已在【本轮已备资料】。你没有调阅工具，直接根据这些资料交付。' });
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
@@ -971,10 +1036,10 @@ export class AgentSubagentRuntime_ACU {
               if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
               writeStateUnknown = true;
               writeProblems.set('host', { module: writes[0], source: 'invoke_failed', path: 'host', message: compactAgentProtocolError_ACU(error) });
-              toolResultSections.push(JSON.stringify({ action: 'write_sql', status: 'rejected', accepted: [],
+              toolResultSections.push(`${JSON.stringify({ action: 'write_sql', status: 'rejected', accepted: [],
                 rejected: [{ path: 'host', reason: compactAgentProtocolError_ACU(error) }], partials: null, revisions: null,
                 readAddresses: [], reason: compactAgentProtocolError_ACU(error),
-                remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: maxWriteRounds - writeRoundsUsed }));
+                remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: maxWriteRounds - writeRoundsUsed })}\n【write_sql 补栏】保存状态无法确认。先 read 对应 $FIELD:模块:ID 权威帧与当前修订号，不要重发原 SQL。`);
             }
           } else {
             if (!readsAllowed) {

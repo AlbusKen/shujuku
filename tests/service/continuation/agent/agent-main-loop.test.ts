@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ContinuationAgentTurnPlanner_ACU, evaluateArcArchitectDispatch_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
+import { renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { buildEmptyAgentModuleSnapshot_ACU, readAgentModuleFieldSnapshot_ACU, readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { appendAgentConversation_ACU, appendPreparedAgentConversationMessages_ACU, buildEmptyAgentConversation_ACU, readActiveAgentConversationCompactionMark_ACU, readAgentConversation_ACU, readAgentConversationTimeline_ACU, writeAgentConversationCompactionMark_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
 import { AGENT_CONVERSATION_FIELD_ACU, AGENT_MODULE_FIELD_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import type { AiChatTurn_ACU } from '../../../../src/service/ai/native-tool';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 import { buildEmptyAgentWorldbookSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
@@ -100,7 +102,8 @@ interface Harness_ACU {
 }
 
 function harness_ACU(options: {
-  mainReplies: string[];
+  mainReplies: Array<string | AiChatTurn_ACU>;
+  nativeTools?: boolean;
   subReplies?: string[];
   handoffReplies?: string[];
   compactionWrite?: 'success' | 'false' | 'throw';
@@ -165,6 +168,7 @@ function harness_ACU(options: {
       return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}';
     },
     subagentRuntime,
+    nativeTools: options.nativeTools,
     readChat: () => chat,
     readModuleSnapshot: () => snapshot,
     writeModuleSnapshot: async (_chat, index, next) => { written.push({ index, snapshot: next }); snapshot = next; },
@@ -561,6 +565,31 @@ describe('主 Agent 真实楼层会话压缩', () => {
     expect(readActiveAgentConversationCompactionMark_ACU(h.chat)).toBeNull();
     expect(readAgentConversation_ACU(h.chat).messages.some(item => item.text === '守门人'.repeat(400))).toBe(true);
     expect(h.chat[h.chat.length - 1][AGENT_CONVERSATION_FIELD_ACU].compaction).toBeUndefined();
+  });
+});
+
+describe('主 Agent 原生批量 read', () => {
+  it('单次工具回执逐项记录读取地址，子代理附录仅剔除任务已注入的完整总纲', async () => {
+    const h = harness_ACU({
+      nativeTools: true,
+      mainReplies: [
+        { content: '', toolCalls: [{ id: 'call-read', name: 'read', arguments: JSON.stringify({ reads: ['$STORY_ARC', '$STORY_ARC:A2'] }) }] },
+        '{"action":"finalize","instruction":"按本卷已读资料推进"}',
+      ],
+    });
+    await h.planner.plan(h.request);
+    const reply = h.conversation().messages.find(message => message.toolCallId === 'call-read');
+    expect(reply?.readSpans?.map(span => span.key)).toEqual(['$STORY_ARC', '$STORY_ARC:A2']);
+    expect(reply?.readSpans?.map(span => reply.text.slice(span.start, span.start + span.length))).toEqual([
+      expect.stringContaining('故事总纲'), expect.stringContaining('A2'),
+    ]);
+    const appendix = renderMainSessionReadAppendix_ACU(h.conversation().messages);
+    const filtered = omitSnapshotSectionsForSubagent_ACU(`【故事总纲状态】
+已建立
+
+${appendix}`, new Set(['$STORY_ARC']));
+    expect(filtered).not.toContain('【调阅项 "$STORY_ARC"');
+    expect(filtered).toContain('【调阅项 "$STORY_ARC:A2"');
   });
 });
 

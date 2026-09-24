@@ -89,6 +89,43 @@ describe('ContinuationOutlinePlanner_ACU', () => {
     expect(resolveApiPreset).toHaveBeenCalledTimes(1);
   });
 
+  it('格式范例照抄会重试并指出具体字段，不拦截没有该范例的旧模板', async () => {
+    const formatSettings = { ...settings_ACU(1), outlinePrompt: [{ role: 'system' as const, content: `<stage_title>阶段标题</stage_title>
+<node_title>节点标题</node_title>` }] };
+    const { planner, callInternalAi } = createPlanner_ACU([tagOutline_ACU(6), tagOutline_ACU(6, '入城试探').replace('<node_goal>节点目标</node_goal>', '<node_goal>守门人决定透露第一处线索</node_goal>')]);
+    const result = await planner.plan(request_ACU(formatSettings));
+    expect(result).toMatchObject({ attempts: 2, outline: { title: '入城试探' } });
+    expect(lastMessageContent_ACU(callInternalAi, 1)).toContain('大纲照抄了格式说明「阶段标题」');
+    const legacy = createPlanner_ACU([tagOutline_ACU(6)]);
+    expect((await legacy.planner.plan(request_ACU(settings_ACU(0)))).outline.title).toBe('阶段标题');
+  });
+
+  it('修补轮不得把时间锚补成省略号，正确时间锚重试后通过', async () => {
+    const formatSettings = { ...settings_ACU(1), outlinePrompt: [{ role: 'system' as const, content: '<stage_title>阶段标题</stage_title>' }] };
+    const withoutAnchor = tagOutline_ACU(6, '入城试探').replace('<node_goal>节点目标</node_goal>', '<node_goal>追索晶屑</node_goal>').replace('<stage_role>development</stage_role>', '');
+    const withAnchor = tagOutline_ACU(6, '入城试探').replace('<node_goal>节点目标</node_goal>', '<node_goal>追索晶屑</node_goal>').replace('time="continuous"', 'time="weeks" anchor="入城后三周"');
+    const { planner, callInternalAi } = createPlanner_ACU([withoutAnchor, '<fix stage role="development"/><fix node="1" turn="2" anchor="…"/>', withAnchor]);
+    const result = await planner.plan(request_ACU(formatSettings));
+    expect(result.attempts).toBe(2);
+    expect(lastMessageContent_ACU(callInternalAi, 2)).toContain('修补时不能照抄 anchor="…"');
+    expect(result.outline.nodes[0].turns[1].timeAnchor).toBe('入城后三周');
+  });
+
+  it('重规划只审新输出，不重验旧前缀，但会拦截新节点的格式标题', async () => {
+    const previous = buildOutline_ACU(6);
+    const formatSettings = { ...settings_ACU(1), outlinePrompt: [{ role: 'system' as const, content: '<stage_title>阶段标题</stage_title>' }] };
+    const wrong = `<node><node_title>节点标题</node_title><node_goal>新节点目标</node_goal>${tagTurns_ACU(4, '新目标')}</node>`;
+    const right = wrong.replace('<node_title>节点标题</node_title>', '<node_title>新的分岔</node_title>');
+    const { planner, callInternalAi } = createPlanner_ACU([wrong, right]);
+    const result = await planner.plan(request_ACU(formatSettings, {
+      reason: 'manual_replan', replanConstraints: { previousOutline: previous, completedTurns: 2, expectedRemainingTurns: 4 },
+    }));
+    expect(result.attempts).toBe(2);
+    expect(lastMessageContent_ACU(callInternalAi, 1)).toContain('大纲照抄了格式说明「节点标题」');
+    expect(result.outline.title).toBe('阶段标题');
+    expect(result.outline.nodes[1].title).toBe('新的分岔');
+  });
+
   it('parses tags surrounded by reasoning prose and markdown fences', async () => {
     const { planner } = createPlanner_ACU([`先写思路：这一阶段要做铺垫。\n\`\`\`xml\n${tagOutline_ACU(6)}\n\`\`\`\n以上是本阶段规划。`]);
     const result = await planner.plan(request_ACU());

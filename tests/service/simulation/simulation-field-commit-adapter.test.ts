@@ -50,6 +50,29 @@ describe('world simulation field commit adapter', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
+  it('编年草稿拒绝坏 summary 后保留 at，仅补 summary 再提升；完整编年不可更新', async () => {
+    const { chat, input, saveChat } = fixture();
+    const base = { ...input, role: 'chronicler' };
+    const first = await commitWorldSimulationFieldWrites_ACU({ ...base,
+      sql: "INSERT INTO chronicle (id, at, summary) VALUES ('chr-1', '第一日', '')" });
+    expect(first.status).toBe('committed');
+    expect(first.accepted.map(item => item.field)).toEqual(['at']);
+    expect(first.rejected).toEqual([expect.objectContaining({ path: 'chronicle#chr-1.summary' })]);
+    expect(first.partials).toEqual([expect.objectContaining({ module: 'chronicle', id: 'chr-1', missingFields: ['summary'] })]);
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.chronicle).toEqual([]);
+    const second = await commitWorldSimulationFieldWrites_ACU({ ...base,
+      sql: "UPDATE chronicle SET summary = '守门人夜间盘查' WHERE id = 'chr-1' AND expected_revision = 0" });
+    expect(second.status).toBe('committed');
+    expect(second.accepted.map(item => item.field)).toEqual(['summary']);
+    expect(second.partials).toEqual([]);
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.chronicle).toEqual([expect.objectContaining({ id: 'chr-1', at: '第一日', summary: '守门人夜间盘查' })]);
+    const third = await commitWorldSimulationFieldWrites_ACU({ ...base,
+      sql: "UPDATE chronicle SET summary = '改写' WHERE id = 'chr-1' AND expected_revision = 0" });
+    expect(third.status).toBe('rejected');
+    expect(third.rejected).toEqual([expect.objectContaining({ reason: expect.stringContaining('完整编年不可 UPDATE') })]);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
   it('无权模块、伪证据、陈旧条目 revision 不产生保存', async () => {
     const { saveChat, input } = fixture();
     expect((await commitWorldSimulationFieldWrites_ACU({ ...input, sql: "INSERT INTO actors (id, name, expected_revision) VALUES ('actor-a', '陌生人', 0)" })).status).toBe('rejected');
@@ -546,7 +569,7 @@ describe('world simulation subagent production write loop', () => {
     expect(firstReceipt).toMatchObject({ status: 'committed', accepted: [expect.objectContaining({ field: 'name' })], ledgerRevision: 0 });
     expect(requests[1].at(-3)!.content).toContain('write_sql');
     expect(requests[1].at(-1)).toMatchObject({ role: 'assistant', content: '{' });
-    expect(requests[2].some(message => message.role === 'user' && message.content.includes('"ledgerRevision":1'))).toBe(true);
+    expect(requests[2].some(message => message.content.includes('\"ledgerRevision\":1'))).toBe(true);
     const otherRequests: Array<readonly { role: string; content: string }[]> = [];
     const fresh = new WorldSimulationSubagentRuntime_ACU({ invoke: (async (_role: string, messages: readonly { role: string; content: string }[]) => {
       otherRequests.push(messages);

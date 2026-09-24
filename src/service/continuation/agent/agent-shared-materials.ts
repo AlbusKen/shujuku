@@ -39,20 +39,26 @@ const SHARED_PLACEHOLDERS_ACU = [
 
 /** 主会话本轮已经 read/search 到的正文。附在子代理快照后面，避免再对同一地址调阅。 */
 export function renderMainSessionReadAppendix_ACU(messages: readonly AgentConversationMessage_ACU[]): string {
-  const latest = new Map<string, string>();
+  const latest = new Map<string, { address: string; text: string }>();
   for (const message of messages) {
     if (message.kind !== 'tool') continue;
-    const text = message.text.trim();
-    if (!text || text === '工具没有返回内容' || text.includes('不再重注')) continue;
-    const isRead = Boolean(message.readKey) || message.digest === 'read' || message.digest === 'search' || message.digest.startsWith('调阅 ');
-    if (!isRead) continue;
-    latest.set(message.readKey || `${message.digest}:${text.slice(0, 80)}`, text);
+    const parts = message.readSpans?.length
+      ? message.readSpans.map(span => ({ address: span.key, text: message.text.slice(span.start, span.start + span.length) }))
+      : [{ address: message.readKey || '', text: message.text }];
+    for (const part of parts) {
+      const text = part.text;
+      if (!text.trim() || text.trim() === '工具没有返回内容' || text.includes('不再重注')) continue;
+      const isRead = Boolean(part.address) || message.digest === 'read' || message.digest === 'search' || message.digest.startsWith('调阅 ');
+      if (!isRead) continue;
+      const key = part.address || `${message.digest}:${text.slice(0, 80)}`;
+      latest.set(key, { address: part.address, text });
+    }
   }
   if (!latest.size) return '';
   return [
     '【主会话已调阅】',
     '下面是主会话本轮已经读到的全文。不要再对同一地址调用 read。世界书触发全文已在快照里；触发内容不够时，用 search，scope 设为 ["worldbook"]。',
-    ...latest.values(),
+    ...[...latest.values()].map(({ address, text }) => `【调阅项 ${JSON.stringify(address)} ${text.length}】\n${text}`),
   ].join('\n\n');
 }
 
@@ -91,13 +97,50 @@ export function omitSnapshotSectionsForSubagent_ACU(
   if (kept.has('$WORLDBOOK_HITS')) drop.add('【本轮语境命中的世界书条目】');
   if (kept.has('$WEB_REFS')) drop.add('【百科资料库目录】');
   if (kept.has('$AGENT_READ_CATALOG')) drop.add('【读取地址词汇表】');
+  const appendixAt = snapshot.indexOf('\n\n【主会话已调阅】');
+  const prefix = appendixAt < 0 ? snapshot : snapshot.slice(0, appendixAt);
   const keptBlocks: string[] = [];
   let skipping = false;
-  for (const block of snapshot.split(/\n\n/)) {
+  for (const block of prefix.split(/\n\n/)) {
     const first = block.split('\n')[0].trim();
     const heading = first.startsWith('【') || first.startsWith('以下是用户对任务曾经提过的要求');
     if (heading) skipping = drop.has(first);
     if (!skipping) keptBlocks.push(block);
+  }
+  if (appendixAt < 0) return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+  const appendix = snapshot.slice(appendixAt + 2);
+  const frame = /【调阅项 ("(?:[^"\\]|\\.)*") (\d+)】\n/g;
+  const first = frame.exec(appendix);
+  if (first) {
+    const entries: string[] = [];
+    let next = first;
+    while (next) {
+      const textStart = next.index + next[0].length;
+      const length = Number(next[2]);
+      const textEnd = textStart + length;
+      if (!Number.isSafeInteger(length) || textEnd > appendix.length) break;
+      const address = JSON.parse(next[1]) as string;
+      if (!kept.has(address)) entries.push(appendix.slice(next.index, textEnd));
+      frame.lastIndex = textEnd;
+      next = frame.exec(appendix);
+    }
+    const keptPrefix = keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (!entries.length) return keptPrefix;
+    const readHeader = appendix.slice(0, first.index).trim();
+    return [keptPrefix, `${readHeader}\n\n${entries.join('\n\n')}`].filter(Boolean).join('\n\n');
+  } else {
+    // 兼容已有快照的旧附录格式；只识别以真实 read 标题开头的段落。
+    let inReadAppendix = false;
+    skipping = false;
+    for (const block of appendix.split(/\n\n/)) {
+      const firstLine = block.split('\n')[0].trim();
+      if (firstLine === '【主会话已调阅】') { inReadAppendix = true; skipping = false; }
+      else if (inReadAppendix && firstLine.startsWith('### ')) {
+        const address = firstLine.match(/（(\$[A-Z][A-Z0-9_]*(?::[^）]+)?)）$/)?.[1];
+        if (address) skipping = kept.has(address);
+      }
+      if (!skipping) keptBlocks.push(block);
+    }
   }
   return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
 }

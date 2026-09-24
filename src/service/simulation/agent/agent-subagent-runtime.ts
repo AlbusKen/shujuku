@@ -11,7 +11,7 @@ import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationFieldCommitReceipt_ACU } from '../simulation-field-commit-adapter';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationReviewerRuntimeProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, renderWorldSimulationWriteRepair_ACU, worldSimulationReviewerRuntimeProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type {
   WorldSimulationCandidate_ACU,
   WorldSimulationDelegation_ACU,
@@ -423,7 +423,8 @@ export class WorldSimulationSubagentRuntime_ACU {
                 isCurrent: input.isCurrent });
               if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
               recordWriteReceipt(receipt);
-              bucket.push({ action: 'write_sql', ...receipt, readAddresses: [...new Set([
+              const repair = renderWorldSimulationWriteRepair_ACU(writableModules, receipt);
+              bucket.push({ action: 'write_sql', ...receipt, ...(repair ? { repair } : {}), readAddresses: [...new Set([
                 ...receipt.accepted.map(item => `field:${item.module}:${item.id}:${item.field}`),
                 ...(receipt.partials ?? []).map(item => `field:${item.module}:${item.id}`),
                 ...rejectedFieldReadAddresses_ACU(receipt),
@@ -434,10 +435,11 @@ export class WorldSimulationSubagentRuntime_ACU {
               const reason = error instanceof Error ? error.message : String(error);
               writeStateUnknown = true;
               writeProblems.set('host', { module: writableModules[0], source: 'invoke_failed', path: 'host', message: reason });
-              bucket.push({ action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
+              const unknown: Parameters<typeof renderWorldSimulationWriteRepair_ACU>[1] & Record<string, unknown> = { action: 'write_sql', status: 'rejected', accepted: [], rejected: [{ path: 'host', reason }],
                 partials: null, ledgerRevision: null, readAddresses: [], reason,
                 remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds),
-                remainingWriteRounds: maxWriteRounds - writeRounds });
+                remainingWriteRounds: maxWriteRounds - writeRounds };
+              bucket.push({ ...unknown, repair: renderWorldSimulationWriteRepair_ACU(writableModules, unknown) });
             }
           } else if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
             bucket.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });

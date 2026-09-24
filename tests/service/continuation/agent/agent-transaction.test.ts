@@ -83,6 +83,17 @@ describe('Agent 总纲写集事务', () => {
     expect(() => appliedDelta_ACU(baseSnapshot_ACU(), noEscalation, ['storyArc'], 6)).toThrowError(/escalation/);
   });
 
+  it('总纲 upsert 与显式 patch 拒绝格式伪值，不重验旧条目的历史内容', () => {
+    expect(() => appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ direction: '本层推进方向与人物驱动力' })] }), ['storyArc'], 6))
+      .toThrowError(/direction 照抄了格式范例/);
+    const seeded = appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU()] }), ['storyArc'], 6);
+    expect(() => appliedDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', progressCeiling: 'volume upsert 时必填的主线推进上限' }] }), ['storyArc'], 7))
+      .toThrowError(/progressCeiling 照抄了格式范例/);
+    const legacy = { ...seeded, storyArc: seeded.storyArc.map(entry => ({ ...entry, direction: '本层推进方向与人物驱动力' })) };
+    const patched = appliedDelta_ACU(legacy, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', title: '新的商行之乱' }] }), ['storyArc'], 7);
+    expect(patched.storyArc.find(entry => entry.id === 'VOL-01')?.title).toBe('新的商行之乱');
+  });
+
   it('对既有卷重复 upsert 时，省略或留空的字段沿用原值，status 未明确写出时不回落成 planned', () => {
     const first = appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU()] }), ['storyArc'], 6);
     // 模型按惯性“更新总纲”：只带了 title 与 direction，其余留空、status 省略。

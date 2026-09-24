@@ -208,7 +208,7 @@ export function renderAgentModuleCatalog_ACU(options?: AgentCatalogOptions_ACU &
  */
 export function renderAgentReadCatalog_ACU(): string {
   return [
-    'read 函数的地址体系（参数 reads 可混用多种地址，一次批量取数）：',
+    'read 在已经有地址时使用；还不知道地址时先 search。参数 reads 可混用多种地址，一次批量取数：',
     '- $STORY_RANGE:起始楼-结束楼：可读窗口内的 AI 正文楼层区间，逐楼全文。可用楼层与窗口范围见正文目录。',
     '- $TABLE:表名 / $TABLE:表名:起始行-结束行：整表或行区间。可用表名与行数见表格目录。',
     '- $STORY_ARC / $STORY_ARC:ID,ID：故事总纲全部活跃条目（全书方向与卷台阶），或按 ID 精读（含已废止条目）。',
@@ -218,7 +218,7 @@ export function renderAgentReadCatalog_ACU(): string {
     '- $CHRONOLOGY / $CHRONOLOGY:ID,ID：故事年代学账本（已发生正文结算出的时间锚、累计经过时间与转换证据），或按 ID 精读（含已作废条目）。',
     '- $WEB_REFS / $WEB_REFS:ID,ID：百科资料库——全量只给每条「名称 + 一句话简介」预览；按 ID 精读才有自由格式详情与来源链接，不保存网页原文。它是原作/公开设定的外部参考，不是本故事事实。',
     '- $USER_REQUIREMENTS：用户在 Agent 会话里累计提过的任务要求，逐条分行；由系统在历史压缩后维护，不是正文事实。',
-    '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
+    '- 世界书触发条目全文已在快照里，不直接 read $WORLDBOOK:书名:uid；需要更多内容时用 search，scope=["worldbook"]，从检索命中了解设定。目录仅用于定位和估算条目 token 数。',
     '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
     '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
     'search 使用函数调用。参数示例：{"query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',

@@ -3,7 +3,7 @@ import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import {
   AGENT_CHRONOLOGY_PRECISIONS_ACU, AGENT_HOOK_IMPORTANCES_ACU, AGENT_HOOK_STATUSES_ACU,
   AGENT_MODULE_FIELD_ACU, AGENT_MODULE_FIELD_MATRIX_ACU, AGENT_REVEAL_STATUSES_ACU,
-  AGENT_STORY_ARC_SCOPES_ACU, AGENT_STORY_ARC_STATUSES_ACU, AGENT_VOLUME_NARRATIVE_ROLES_ACU,
+  AGENT_STORY_ARC_SCOPES_ACU, AGENT_STORY_ARC_STATUSES_ACU, AGENT_VOLUME_NARRATIVE_ROLES_ACU, copiedStoryArcExample_ACU,
   type AgentModuleDelta_ACU, type AgentModuleFieldRecord_ACU, type AgentModuleFieldSnapshot_ACU,
   type AgentModuleFloorDelta_ACU, type AgentModuleSnapshot_ACU, type AgentSubagentName_ACU,
   type AgentWebRefEntry_ACU, type AgentWritableModule_ACU, type AgentResearcherOutput_ACU,
@@ -87,6 +87,7 @@ function fieldProblem_ACU(module: Module_ACU, field: string, value: unknown, sna
       }
       return nonempty_ACU(value) ? null : '时间事实栏目必须为非空文本';
     case 'storyArc':
+      if (copiedStoryArcExample_ACU(field, value)) return `${field} 不能照抄总纲格式范例；请填写本故事的具体内容`;
       if (field === 'scope') return inList_ACU(value, AGENT_STORY_ARC_SCOPES_ACU) ? null : 'scope 枚举非法';
       if (field === 'status') return inList_ACU(value, AGENT_STORY_ARC_STATUSES_ACU) ? null : 'status 枚举非法';
       if (field === 'narrativeRole') return inList_ACU(value, AGENT_VOLUME_NARRATIVE_ROLES_ACU) ? null : 'narrativeRole 枚举非法';

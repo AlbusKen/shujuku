@@ -8,7 +8,7 @@
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import {
-  isAgentWritableModule_ACU,
+  isAgentWritableModule_ACU, copiedStoryArcExample_ACU,
   type AgentChronologyDeltaItem_ACU,
   type AgentChronologyEntry_ACU,
   type AgentChronologyPatch_ACU,
@@ -443,6 +443,9 @@ function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: Agent
     if (item.scope === 'volume' && !escalation) {
       reject_ACU(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
     }
+    for (const [field, value] of Object.entries({ id: item.id, title, direction, escalation, withheld, completionState: item.completionState, continuationRationale: item.continuationRationale, targetTimeSpan: item.targetTimeSpan, progressCeiling: item.progressCeiling, completionRationale: item.completionRationale })) {
+      if (copiedStoryArcExample_ACU(field, value)) reject_ACU(`总纲条目 ${item.id} 的 ${field} 照抄了格式范例；请填写本故事的具体内容`);
+    }
     byId.set(item.id, {
       id: item.id,
       scope: item.scope,
@@ -498,6 +501,9 @@ function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: Ag
       payoffTargets: patch.payoffTargets ?? current.payoffTargets,
       completionRationale: patch.completionRationale ?? current.completionRationale,
     };
+    for (const [field, value] of Object.entries(patch)) {
+      if (copiedStoryArcExample_ACU(field, value)) reject_ACU(`总纲条目 ${patch.id} 的 ${field} 照抄了格式范例；请填写本故事的具体内容`);
+    }
     if (!merged.title.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
     if (!merged.direction.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
     byId.set(patch.id, merged);

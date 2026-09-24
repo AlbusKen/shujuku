@@ -1,4 +1,4 @@
-import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
+import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
@@ -62,10 +62,85 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
   ].join('\n');
 }
 
+/** 各账本模块的 write_sql 时机、列和需替换证据与事实的格式范例。 */
+export function renderWorldSimulationSqlGuide_ACU(modules: readonly string[]): string {
+  const lines = ['【write_sql 格式】只在对应资料确实变化时调用。字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON。evidence_refs 只能填本轮已经颁发的引用。没有可验证的事实依据就不要编造新条目，把缺口写进 uncertainties；无可写事实时交 no_change。'];
+  if (modules.includes('clock')) lines.push('clock：正文明确经过昼夜或更长时间时 UPDATE。days 是推进量，不是绝对日。没有时间证据不要写。范例：UPDATE clock SET days = 1, story_time = \'次日午后\', slot = \'午后\', evidence_refs = \'["evidence:已颁发引用"]\' WHERE expected_revision = 0;');
+  if (modules.includes('dimensions')) lines.push(`dimensions：维度烈度或趋势变了才写。必填 name、kind（pressure 或 growth）、value（0-100）、trend（rising、stable、falling）、rationale（说明依据与趋势，建议 30 到 80 字）、evidence_refs。范例：INSERT INTO dimensions (name, kind, value, trend, rationale, evidence_refs, expected_revision) VALUES ('城中戒备', 'pressure', 40, 'rising', '守门人开始盘查入城者，烈度上升', '["evidence:已颁发引用"]', 0);`);
+  if (modules.includes('seeds')) lines.push(`seeds：暗流生命周期前进时写。必填 title、status（established、incubating、active、converging、resolved、retired）、level（0-100 的整数；建议按 0-4 的影响层级评估）、catalyst、visibility（hidden、limited、public）、location（带 region 的 JSON 对象或 null）、evidence_refs。有时限时同时给 expires_at_day 和 missed_outcome。范例：INSERT INTO seeds (title, status, level, catalyst, visibility, location, evidence_refs, expected_revision) VALUES ('禁区外泄', 'incubating', 2, '守门人连续三夜离岗', 'limited', '{"region":"禁区门口"}', '["evidence:已颁发引用"]', 0);`);
+  if (modules.includes('actors')) lines.push(`actors：人物位置、目标或所知事实变了才写。location 是地名文本，角色移动还需同时写 location_ref 为带 region 的 JSON 对象。必填 name、interests、location、goals、information_sources、known_facts。每条 known_facts 必须能由 information_sources 里的亲历、目击、听闻、阅读或转述支撑。死亡要同时写 life、died_at_day、death_summary，并另 INSERT 一条 rumors。范例：INSERT INTO actors (name, interests, location, goals, information_sources, known_facts, expected_revision) VALUES ('守门人', '["守住禁区"]', '禁区门口', '["查明入城者来意"]', '["亲历值守"]', '["晶屑由自己保管"]', 0);`);
+  if (modules.includes('player')) lines.push('player：正文地标变化或社交渠道变化时 UPDATE。只写 location、contact（open 或 secluded）、evidence_refs。闭关、昏迷、囚禁、荒野独行用 secluded，城镇人群用 open。范例：UPDATE player SET location = \'{"region":"客栈"}\', contact = \'open\', evidence_refs = \'["evidence:已颁发引用"]\' WHERE expected_revision = 0;');
+  if (modules.includes('rumors')) lines.push(`rumors：有一条玩家尚未得知、但世界里已经在传的消息时 INSERT。必填 fact、origin_day、channels。earliest_reveal_day 不得早于 origin_day。范例：INSERT INTO rumors (fact, origin_day, channels, expected_revision) VALUES ('禁区门口连续三夜有人值守', 3, '["市井"]', 0);`);
+  if (modules.includes('chronicle')) lines.push('chronicle：只在事件完结或热层过长时 INSERT 新事实；完整条目不可 UPDATE，仅已保存的 partial 草稿可按 ID 补缺栏。summary 写发生了什么，不复述玩家对话。DELETE 只用于删错，WHERE 只带 id 和 reason，不带 expected_revision。归档必须成对 INSERT chronicle_archive 与 chronicle_overview。范例：INSERT INTO chronicle (summary, related_ids, evidence_refs) VALUES (\'守门人开始盘查入城者\', \'[]\', \'["evidence:已颁发引用"]\');');
+  if (modules.includes('guidance')) lines.push('guidance：有一条贴近正文位置、正文还没写、玩家能察觉的场外动态时 UPDATE。signals 是单引号包裹的 JSON 数组，每项含 text（不超过 80 字）、voice（encounter、rumor、ambient）和 sourceId（必须是当前账本已有条目 ID，或合成源 clock/player）。不要复述锚点正文。玩家 secluded 时不要写 rumor。范例：UPDATE guidance SET signals = \'[{"text":"门口新换了一块禁入木牌","voice":"encounter","sourceId":"seed-1"}]\', excluded_facts = \'[]\', evidence_refs = \'["evidence:已颁发引用"]\' WHERE expected_revision = 0;');
+  if (modules.includes('seeds')) lines.push("已有 seed 的修改：UPDATE seeds SET status = 'active' WHERE id = 'seed-1' AND expected_revision = 1; 删除：DELETE FROM seeds WHERE id = 'seed-1' AND reason = '记录有误' AND expected_revision = 1。seed-1 须真实存在，完整条目用当前条目 revision；已保存草稿的补栏用 0，只补 missingFields。");
+  lines.push('回执有 partials 时先 read 确认已存栏目，按 missingFields 只补未保存栏；revision 冲突先读当前行。只有确认不存在的新记录才 INSERT。单引号在正文中写成两个。');
+  return lines.join('\n');
+}
+
+/** 根据已保存草稿的 missingFields，只构造未保存栏目的 SQL 示意。 */
+function renderMissingSimulationSql_ACU(
+  item: { module: string; id: string; missingFields: readonly string[] }, ledgerRevision: number,
+): string | null {
+  const samples: Record<string, Record<string, string>> = {
+    clock: { slot: "'午后'", storyTime: "'次日午后'", evidenceRefs: `'["evidence:本轮真实引用"]'` },
+    dimensions: { name: "'城中戒备'", kind: "'pressure'", value: '40', trend: "'rising'", rationale: "'入城盘查加强，守卫增加，进入城内的难度明显上升'", evidenceRefs: `'["evidence:本轮真实引用"]'` },
+    seeds: { title: "'禁区外泄'", status: "'incubating'", level: '2', catalyst: "'守门人离岗'", visibility: "'limited'", location: `'♯LOCATION♯'`, evidenceRefs: `'["evidence:本轮真实引用"]'` },
+    actors: { name: "'守门人'", interests: `'["守住禁区"]'`, location: "'禁区门口'", goals: `'["查明入城者来意"]'`, informationSources: `'["亲历值守"]'`, knownFacts: `'["晶屑由自己保管"]'` },
+    player: { location: `'♯LOCATION♯'`, contact: "'open'", evidenceRefs: `'["evidence:本轮真实引用"]'` },
+    rumors: { fact: "'城中正在增派守卫'", originDay: '2', channels: `'["市井"]'` },
+    chronicle: { summary: "'守门人开始盘查入城者'" },
+    guidance: { signals: `'[{"text":"城门新增禁入木牌","voice":"encounter","sourceId":"seed-1"}]'`, excludedFacts: `'[]'`, evidenceRefs: `'["evidence:本轮真实引用"]'` },
+  };
+  const writable = samples[item.module];
+  if (!writable || !item.missingFields.length || item.missingFields.some(field => !(field in writable))) return null;
+  const assignments = item.missingFields.map(field => {
+    const value = writable[field]!;
+    const sample = value.includes('♯LOCATION♯') ? value.replace('♯LOCATION♯', '{"region":"禁区门口"}') : value;
+    return `${field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)} = ${sample}`;
+  });
+  const singleton = ['clock', 'player', 'guidance'].includes(item.module);
+  return `UPDATE ${item.module} SET ${assignments.join(', ')} WHERE ${singleton ? '' : `id = '${item.id.replace(/'/g, "''")}' AND `}expected_revision = ${singleton ? ledgerRevision : 0};`;
+}
+
+/** 已接受栏目保留；未知保存状态和冲突必须先读取权威帧。 */
+export function renderWorldSimulationWriteRepair_ACU(
+  modules: readonly string[],
+  receipt: { rejected: readonly { path: string; reason: string }[];
+    partials: readonly { module: string; id: string; missingFields: readonly string[]; promotionError?: string }[] | null;
+    ledgerRevision: number | null },
+): string {
+  if (receipt.partials === null || receipt.ledgerRevision === null) {
+    return '【write_sql 补栏】保存或恢复状态无法确认。先 read ledger:current 及 field:模块:ID 权威栏目，核实已存内容和当前 revision；不要按旧号重发 SQL。';
+  }
+  if (!receipt.rejected.length && !receipt.partials.some(item => item.missingFields.length || item.promotionError)) return '';
+  const lines = ['【write_sql 补栏】status=committed 的 accepted 已保存，不要重新 INSERT 或重发整行。示例值只演示语法：需换成本轮真实的故事事实、字段 ID 和已颁发的 evidence_refs（若该模块需要）。'];
+  for (const item of receipt.partials) {
+    if (!modules.includes(item.module) || (!item.missingFields.length && !item.promotionError)) continue;
+    lines.push(`${item.module}#${item.id} 已是草稿；缺 ${item.missingFields.join('、') || '领域校验所需的修正'}。先 read field:${item.module}:${item.id} 核实已存栏目。`);
+    if (item.missingFields.length) {
+      const sql = renderMissingSimulationSql_ACU(item, receipt.ledgerRevision);
+      if (sql) lines.push(`仅补缺栏范例：${sql}`);
+      else lines.push('缺栏不能直接按示例映射；先 read 权威栏目和 ledger:current，确认可写列后仅补未保存的栏目。');
+    }
+    if (item.missingFields.includes('evidenceRefs')) lines.push('evidence_refs 只能填本轮注册表颁发的引用，示例里的 evidence:本轮真实引用 不能照抄。');
+    if (item.promotionError) lines.push(`提升失败：${item.promotionError}。若无 missingFields，先 read 已存栏目与当前修订号，仅改领域校验失败的栏目。`);
+  }
+  for (const item of receipt.rejected) {
+    lines.push(`${item.path}：${item.reason}。被拒栏目未写入；对照模块字段、枚举和证据，只补拒绝的栏目，不重发 accepted。`);
+    if (item.reason.startsWith('revision_conflict') || item.reason === 'id_exists') lines.push('先 read 回执所指的 field:模块:ID 与 ledger:current 核实已存内容和当前 revision；单例用当前账本 revision，草稿行用 0，正式数组条目用条目 revision。');
+    if (item.reason === 'not_found') lines.push('先 read field:模块:ID 确认确实不存在；只有确认为新记录时才用 INSERT，已有 partial 草稿用 UPDATE 补栏。');
+    if (item.reason.includes('字段数与值数量不一致') || item.reason.includes('字符串字面量未闭合')) lines.push('正文的单引号要写成两个单引号；逐项核对列和值。');
+    if (item.reason.includes('consistency_group')) lines.push('同时补齐一致性组：死亡的 life、died_at_day、death_summary；时限的 expires_at_day、missed_outcome；已接受的栏目先 read，勿重发。');
+    if (item.reason.includes('未授权证据') || item.reason.includes('引用不存在')) lines.push('evidence_refs 只能使用本轮真实注册引用；没有证据就不要捏造，记入 uncertainties。');
+  }
+  return lines.join('\n');
+}
+
 export function worldSimulationSpecialistProtocolInstruction_ACU(
   name: WorldSimulationAgentName_ACU,
   writableModules: readonly string[],
-  legacy = false,
+  legacy = false, historical = false,
 ): string {
   const lines = [
     '只输出一个 specialist JSON 对象，不附加 Markdown、解释或思考标签。',
@@ -77,13 +152,16 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
     lines.push(legacy ? 'evidenceRefs 只能引用本轮工具结果或证据注册表中已经存在的引用，禁止自行编造。'
       : '可先用 {\"action\":\"write_sql\",\"sql\":\"受限 DML\",\"evidenceRefs\":[\"已颁发引用\"]} 即时提交职责模块。仅工具回执 status=committed 的 accepted 表示保存且折叠复核成功；按 field:模块:ID[:栏目] 读取 status、revision 和 missingFields，只补缺栏。拒绝或保存失败不得当作成功；partials/ledgerRevision=null 说明恢复状态不确定，先重新读取权威帧，不得按旧 revision 补写。最终 sql 不要重复已保存栏目。');
     lines.push('sql 只允许 INSERT INTO 表 (字段) VALUES (字面量)、UPDATE 表 SET 字段 = 字面量 WHERE id = 字符串 AND expected_revision = 整数、DELETE FROM 数组模块表 WHERE id = 字符串 AND reason = 字符串 AND expected_revision = 整数；chronicle DELETE 只用 WHERE id = 字符串 AND reason = 字符串；禁止 SELECT、DDL、函数、子查询及任意表达式。字符串必须用单引号，单引号写成两个单引号；数组/对象作为单引号包裹的 JSON 文本，字段用 snake_case。');
-    lines.push('dimensions、seeds、actors、rumors：INSERT 新增（id 可省略，需 name；seeds 用 title，rumors 用 fact）、UPDATE 修改已有行、DELETE 删除已有行；DELETE 必须带 reason 与当前条目 expected_revision。');
-    lines.push(formatWorldSimulationLedgerRequiredFields_ACU());
-    lines.push('INSERT 的 expected_revision 可省略（新建默认 0）；数组模块 UPDATE/DELETE 的 WHERE 必须明确给出当前条目 revision；chronicle DELETE 不使用 expected_revision；clock、player、guidance 单例 UPDATE 使用账本 revision。SQL 仅归一化为领域事务，不是直接数据库执行。');
+    lines.push(historical ? 'dimensions、seeds、actors、rumors：INSERT 新增（id 可省略，需 name；seeds 用 title，rumors 用 fact）、UPDATE 修改已有行、DELETE 删除已有行；DELETE 必须带 reason 与当前条目 expected_revision。'
+      : 'dimensions、seeds、actors、rumors：INSERT 新增（id 可省略；dimensions 与 actors 用 name，seeds 用 title，rumors 用 fact）、UPDATE 修改已有行、DELETE 删除已有行；DELETE 必须带 reason 与当前条目 expected_revision。');
+    lines.push(historical ? formatWorldSimulationLedgerRequiredFieldsLegacy_ACU() : formatWorldSimulationLedgerRequiredFields_ACU());
+    lines.push(historical ? 'INSERT 的 expected_revision 可省略（新建默认 0）；数组模块 UPDATE/DELETE 的 WHERE 必须明确给出当前条目 revision；chronicle DELETE 不使用 expected_revision；clock、player、guidance 单例 UPDATE 使用账本 revision。SQL 仅归一化为领域事务，不是直接数据库执行。'
+      : 'dimensions、seeds、actors、rumors 的 INSERT 必须带 expected_revision = 0（新行），chronicle INSERT 不带 expected_revision；dimensions/seeds/actors/rumors 的 UPDATE/DELETE 在完整条目上使用当前条目 revision；chronicle 仅允许对已保存草稿用 expected_revision=0 UPDATE 缺栏，完整编年禁止 UPDATE，DELETE 不使用 expected_revision；clock、player、guidance 单例 UPDATE 使用账本 revision。evidence_refs 只给 SQL 白名单允许该栏的模块；actors 与 rumors 不写此列。SQL 仅归一化为领域事务，不是直接数据库执行。');
     lines.push('chronicle 的 id/at、chronicle_archive 的 archive_ref、chronicle_overview 的 fingerprint 均可在 INSERT 时省略，由系统编号；不要编造机器字段。');
     lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
     if (writableModules.includes('chronicle')) {
-      lines.push('chronicle 仅 INSERT 新事件或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；不能 UPDATE。归档须成对 INSERT chronicle_archive 与 chronicle_overview，archive_ref 配对；禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。');
+      lines.push(historical ? 'chronicle 仅 INSERT 新事件或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；不能 UPDATE。归档须成对 INSERT chronicle_archive 与 chronicle_overview，archive_ref 配对；禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。'
+        : 'chronicle 仅 INSERT 新事件、对已保存 partial 草稿按 ID 用 expected_revision=0 UPDATE 缺栏，或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；完整条目不能 UPDATE。归档须成对 INSERT chronicle_archive 与 chronicle_overview，archive_ref 配对；禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。');
     }
     if (writableModules.includes('clock')) lines.push('clock 只允许 UPDATE clock SET days = 非负整数、story_time、slot、evidence_refs WHERE expected_revision = 当前账本 revision；days 是推进量，禁止直接写 day。');
     if (writableModules.includes('player')) {
@@ -93,6 +171,7 @@ export function worldSimulationSpecialistProtocolInstruction_ACU(
     if (writableModules.includes('rumors')) lines.push('rumors 的 earliest_reveal_day >= origin_day。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors INSERT。');
     if (writableModules.includes('guidance')) lines.push('guidance 使用 UPDATE guidance SET signals = 单引号包裹的 JSON 数组 WHERE expected_revision = 当前账本 revision。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
     lines.push('示例：{"status":"candidate","agentName":"timekeeper","sql":"UPDATE clock SET days = 1, story_time = \'次日\' WHERE expected_revision = 0;","summary":"时间推进","evidenceRefs":["evidence:已颁发引用"],"uncertainties":[]}');
+    if (!historical) lines.push(renderWorldSimulationSqlGuide_ACU(writableModules));
   } else {
     lines.push('当前角色没有账本写入权限，不得输出 candidate；只能输出 no_change、failed 或 blocked。');
   }
@@ -219,8 +298,7 @@ export function buildV16WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
     }
     if (segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')) && ['specialist', 'researcher'].includes(WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!.kind)) {
       const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
-      return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}
-${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModules)}` };
+      return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModules, false, true)}` };
     }
     if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return { ...segment };
     if (name === 'dramatis-keeper') {
@@ -264,7 +342,15 @@ export function buildV18WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
 }
 
 export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  return buildV18WorldSimulationAgentPrompt_ACU(name).map(segment => ({ ...segment, content: applyWorldSimulationNativeToolPrompt_ACU(name, segment.content) }));
+  const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
+  return buildV18WorldSimulationAgentPrompt_ACU(name).map(segment => {
+    let content = segment.content;
+    if (content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')) && ['specialist', 'researcher'].includes(definition.kind)) {
+      const continuation = content.indexOf('\n逐栏工具只在本次派工会话内继续：');
+      content = `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModules)}${continuation >= 0 ? content.slice(continuation) : ''}`;
+    }
+    return { ...segment, content: applyWorldSimulationNativeToolPrompt_ACU(name, content) };
+  });
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {

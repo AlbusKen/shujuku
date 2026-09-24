@@ -777,11 +777,12 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   ];
   if (writableModules.length) {
     lines.push(`candidate 的 sql 只允许写：${writableModules.join(' | ')}${writableModules.includes('chronicle') ? ' | chronicle_archive | chronicle_overview' : ''}；不得输出 patch。`);
-    lines.push('使用受限 INSERT/UPDATE/DELETE；数组模块 UPDATE/DELETE 的 WHERE 必须带 id、expected_revision，DELETE 还须带 reason；chronicle 仅允许 INSERT 或 DELETE，DELETE WHERE 只带 id、reason，不带 expected_revision；单例 UPDATE 只带 expected_revision。字符串用单引号，数组与对象用单引号包裹 JSON 文本；禁止 SELECT、DDL、函数及子查询。');
+    lines.push('使用受限 INSERT/UPDATE/DELETE；数组模块 UPDATE/DELETE 的 WHERE 必须带 id、expected_revision，DELETE 还须带 reason；chronicle 仅 INSERT 新事件、UPDATE 已保存未完成的草稿缺栏（WHERE id、expected_revision=0）或 DELETE（WHERE 只带 id、reason），完整编年禁止 UPDATE；单例 UPDATE 只带 expected_revision。字符串用单引号，数组与对象用单引号包裹 JSON 文本；禁止 SELECT、DDL、函数及子查询。');
     const firstModule = writableModules[0];
     const sqlExample = ['clock', 'player', 'guidance'].includes(firstModule)
       ? `UPDATE ${firstModule} SET ${firstModule === 'clock' ? 'days = 1' : firstModule === 'player' ? "contact = 'open'" : "signals = '[]'"} WHERE expected_revision = 0;`
-      : `INSERT INTO ${firstModule} (${firstModule === 'chronicle' ? 'summary' : firstModule === 'seeds' ? 'title' : firstModule === 'rumors' ? 'fact' : 'name'}) VALUES ('示例');`;
+      : firstModule === 'chronicle' ? "INSERT INTO chronicle (summary) VALUES ('有证据的新事件');"
+        : `INSERT INTO ${firstModule} (${firstModule === 'seeds' ? 'title' : firstModule === 'rumors' ? 'fact' : 'name'}, expected_revision) VALUES ('有证据的新条目', 0);`;
     lines.push(JSON.stringify({
       status: 'candidate',
       agentName,
@@ -918,19 +919,21 @@ export function parseWorldSimulationSqlFieldWrites_ACU(sql: string, role: string
     const archive = statement.table === 'chronicle_archive' || statement.table === 'chronicle_overview';
     const singleton = statement.table === 'clock' || statement.table === 'player' || statement.table === 'guidance';
     const chronicle = statement.table === 'chronicle';
-    if ((archive || chronicle) && statement.kind === 'update'
-      || archive && statement.kind !== 'insert'
+    if (archive && statement.kind !== 'insert'
       || singleton && statement.kind !== 'update') { reject('', '该表不允许此操作'); return; }
     const where = statement.kind === 'insert' ? {} : statement.where;
-    const required = singleton ? ['expected_revision'] : chronicle ? ['id', 'reason'] : ['id', 'expected_revision', ...(statement.kind === 'delete' ? ['reason'] : [])];
+    const required = singleton ? ['expected_revision'] : chronicle && statement.kind === 'delete' ? ['id', 'reason'] : ['id', 'expected_revision', ...(statement.kind === 'delete' ? ['reason'] : [])];
     if (statement.kind !== 'insert' && (Object.keys(where).some(key => !required.includes(key)) || required.some(key => !Object.prototype.hasOwnProperty.call(where, key)))) {
       reject('WHERE', `WHERE 只允许且必须包含 ${required.join(', ')}`); return;
     }
     if (statement.kind !== 'insert' && !singleton && (typeof where.id !== 'string' || !where.id.trim())) { reject('WHERE.id', '必须指定非空 ID'); return; }
     if (statement.kind === 'delete' && (typeof where.reason !== 'string' || !where.reason.trim())) { reject('WHERE.reason', '必须指定非空理由'); return; }
     const rawRevision = statement.kind === 'insert' ? statement.values.expected_revision : where.expected_revision;
-    if (!archive && !chronicle && (typeof rawRevision !== 'number' || !Number.isInteger(rawRevision) || rawRevision < 0)) {
+    if (!archive && !(chronicle && statement.kind !== 'update') && (typeof rawRevision !== 'number' || !Number.isInteger(rawRevision) || rawRevision < 0)) {
       reject('expected_revision', '必须指定非负整数 revision'); return;
+    }
+    if (chronicle && statement.kind === 'update' && rawRevision !== 0) {
+      reject('expected_revision', '编年草稿补栏必须使用 expected_revision=0'); return;
     }
     const id = singleton ? '_' : statement.kind === 'insert' ? statement.values.id : where.id;
     if (statement.kind === 'insert' && id !== undefined && (typeof id !== 'string' || !id.trim())) { reject('id', 'ID 必须为非空字符串'); return; }

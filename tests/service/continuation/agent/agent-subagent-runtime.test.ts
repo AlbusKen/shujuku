@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { AgentSubagentRuntime_ACU, renderStoryArcVolumePlanInstruction_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
-import { renderMainSessionReadAppendix_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
+import { renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import type { AiUsageMetadata_ACU } from '../../../../src/service/continuation/internal-ai-call';
@@ -19,6 +19,40 @@ it('主会话已读到的全文会附在快照后面，重复调阅提示不带�
   expect(text).not.toContain('不再重注');
   expect(text).not.toContain('deliver');
 });
+it('已读附录只剔除任务已注入的完整地址，保留按 ID 细读和其他资料', () => {
+  const snapshot = [
+    '【故事总纲状态】', '总纲概况',
+    '【主会话已调阅】',
+    '下面是主会话本轮已读到的全文。',
+    `### 故事总纲（$STORY_ARC）
+完整总纲`,
+    `### 故事总纲条目（$STORY_ARC:VOL-01）
+细读本卷`,
+    `### 当前大纲（$OUTLINE_WINDOW）
+完整大纲`,
+    `### 伏笔（$HOOKS_LEDGER）
+另一个账本`,
+  ].join(String.fromCharCode(10, 10));
+  const filtered = omitSnapshotSectionsForSubagent_ACU(snapshot, new Set(['$STORY_ARC', '$OUTLINE_WINDOW']));
+  expect(filtered).not.toContain('完整总纲');
+  expect(filtered).not.toContain('完整大纲');
+  expect(filtered).not.toContain('总纲概况');
+  expect(filtered).toContain('细读本卷');
+  expect(filtered).toContain('另一个账本');
+});
+
+it('附录正文中的空行和伪标题不会误删按 ID 调阅内容', () => {
+  const appendix = renderMainSessionReadAppendix_ACU([
+    { id: 1, kind: 'tool', text: `### 故事总纲（$STORY_ARC）\n完整总纲`, digest: 'read', readKey: '$STORY_ARC' },
+    { id: 2, kind: 'tool', text: `### 本卷（$STORY_ARC:VOL-01）\n细读开头\n\n### 误作标题（$STORY_ARC）\n这行仍属本卷正文\n\n细读结尾`, digest: 'read', readKey: '$STORY_ARC:VOL-01' },
+  ] as any);
+  const filtered = omitSnapshotSectionsForSubagent_ACU(`【故事总纲状态】\n状态\n\n${appendix}`, new Set(['$STORY_ARC']));
+  expect(filtered).not.toContain('完整总纲');
+  expect(filtered).toContain('细读开头');
+  expect(filtered).toContain('### 误作标题（$STORY_ARC）');
+  expect(filtered).toContain('细读结尾');
+});
+
 const readReply_ACU = '{"action":"read","reads":["$TABLE:角色表"]}';
 const finalReply_ACU = JSON.stringify({ summary: '结算完成', delta: {} });
 
@@ -190,6 +224,8 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     // 总纲保留正文、总纲和全部已启用世界书目录，自行查阅；快照不再重复目录，也不注入命中全文。
     expect(messages[messages.length - 5].content).toContain('【本次任务】\n立总纲');
     expect(messages[messages.length - 5].content).toContain('【故事总纲现状】');
+    expect(messages[messages.length - 5].content).toContain('追查真相');
+    expect(messages[messages.length - 5].content).toContain('【完整当前阶段大纲】');
     expect(messages[messages.length - 5].content).toContain('【事件概览】');
     expect(messages[messages.length - 5].content).toContain('【最近正文】');
     expect(messages[messages.length - 5].content).toContain('【已启用世界书目录】');
@@ -198,9 +234,10 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     expect(messages[messages.length - 5].content).not.toContain('不要再对这些条目调用 read');
     expect(messages[messages.length - 3].content).not.toContain('【已启用世界书目录】');
     expect(messages[messages.length - 3].content).not.toContain('【故事总纲状态】');
-    expect(messages[messages.length - 3].content).toContain('【当前故事总纲】');
-    expect(messages[messages.length - 3].content).toContain('追查真相');
-    expect(messages[messages.length - 3].content).toContain('【当前启用的阶段大纲】');
+    expect(messages[messages.length - 3].content).not.toContain('【当前故事总纲】');
+    expect(messages[messages.length - 3].content).not.toContain('追查真相');
+    expect(messages[messages.length - 3].content).not.toContain('【完整当前阶段大纲】');
+    expect(messages[messages.length - 3].content).not.toContain('【当前启用的阶段大纲】');
     expect(messages[messages.length - 3].content).not.toContain('【本轮语境命中的世界书条目】');
   });
 
@@ -449,6 +486,7 @@ describe('子代理逐栏工具会话', () => {
     expect(receipt).toMatchObject({ status: 'rejected', accepted: [], partials: null, revisions: null,
       readAddresses: [], remainingToolRounds: 1, remainingWriteRounds: 3 });
     expect(receipt.reason).toContain('聊天锚点已变化');
+    expect(sent[1].at(-2)?.content).toContain('先 read 对应 $FIELD:模块:ID 权威帧');
     expect(result.usedFieldWrites).toBe(false);
   });
 
@@ -511,6 +549,8 @@ describe('子代理逐栏工具会话', () => {
       expect(feedback).toContain('"partials":null');
       expect(feedback).toContain('"revisions":null');
       expect(feedback).toContain('"readAddresses":[]');
+      expect(feedback).toContain('保存或恢复状态不确定');
+      expect(feedback).not.toContain('仅补缺栏范例：UPDATE');
       messages.length = 0;
       await runtime.run({ ...input, writeSql: undefined });
       expect(messages[0].some(message => message.content.includes('"recovery":"failed"'))).toBe(false);
@@ -586,6 +626,9 @@ describe('子代理逐栏工具会话', () => {
     expect(follow).toContain('调用 write_sql');
     expect(follow).toContain('sustainingThreads');
     expect(follow).toContain('withheld');
+    expect(follow).toContain("仅补缺栏范例：UPDATE story_arc SET withheld = '晶屑真正用途' WHERE id = 'VOL-01' AND expected_revision = 0;");
+    expect(follow).not.toContain('UPDATE story_arc SET title =');
+    expect(follow).not.toContain('纠错范例：INSERT INTO story_arc');
     expect(follow).not.toContain('delta 里各数组');
     expect(result.usedFieldWrites).toBe(true);
   });
@@ -624,4 +667,22 @@ describe('子代理逐栏工具会话', () => {
     expect(seen).toEqual(["INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)"]);
     expect(result.usedFieldWrites).toBe(true);
   });
+});
+
+it('原生批量调阅按各项地址去重，保留细读正文中的连续空行与伪标题', () => {
+  const full = '### 总纲（$STORY_ARC）\n总纲全文';
+  const detail = '### 本卷（$STORY_ARC:VOL-01）\n第一段\n\n\n### 伪标题（$STORY_ARC）\n仍属正文\n\n';
+  const joined = `${full}\n\n${detail}`;
+  const appendix = renderMainSessionReadAppendix_ACU([
+    { id: 1, kind: 'tool', text: joined, digest: 'read', readSpans: [
+      { key: '$STORY_ARC', start: 0, length: full.length },
+      { key: '$STORY_ARC:VOL-01', start: full.length + 2, length: detail.length },
+    ] },
+  ] as any);
+  const filtered = omitSnapshotSectionsForSubagent_ACU(`【故事总纲状态】\n状态\n\n${appendix}`, new Set(['$STORY_ARC']));
+  expect(filtered).not.toContain('总纲全文');
+  expect(filtered).not.toContain('【故事总纲状态】');
+  expect(filtered).toContain(detail);
+  expect(filtered).toContain('【调阅项 "$STORY_ARC:VOL-01"');
+  expect(filtered).not.toContain('【调阅项 "$STORY_ARC"');
 });

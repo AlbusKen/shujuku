@@ -468,6 +468,11 @@ describe('世界推演 Agent runtime', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
     expect(sent[1].at(-2)?.content).toContain('"status":"committed"');
     expect(sent[1].at(-2)?.content).toContain('"missingFields"');
+    const supplement = sent[1].at(-2)?.content ?? '';
+    expect(supplement).toContain("仅补缺栏范例：UPDATE dimensions SET kind = 'pressure', value = 40, trend = 'rising'");
+    expect(supplement).toContain("WHERE id = 'dim-loop' AND expected_revision = 0;");
+    expect(supplement).not.toContain('UPDATE dimensions SET name =');
+    expect(supplement).not.toContain('纠错范例：INSERT INTO dimensions');
     expect(sent[1].at(-2)?.content).toContain('field:dimensions:dim-loop');
     expect(sent[1].at(-2)?.content).toContain('"path":"dimensions#dim-loop.kind"');
     expect(sent[2].at(-2)?.content).toContain('"status":"rejected"');
@@ -502,6 +507,37 @@ describe('世界推演 Agent runtime', () => {
     expect(outcome.completion).toBe('failed');
     expect(outcome.unresolvedIssues).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'dimensions', id: 'd1', path: 'dimensions#d1.kind' })]));
     expect(outcome.acceptedKeys).toContain('dimensions:d1:name');
+  });
+
+  it('位置缺栏只写缺失的 location，JSON 对象保留 SQL 字符串引号', async () => {
+    const { renderWorldSimulationWriteRepair_ACU } = await import('../../../../src/service/simulation/agent/agent-defaults');
+    const { parseWorldSimulationSqlFieldWrites_ACU } = await import('../../../../src/service/simulation/agent/agent-protocol');
+    const repair = renderWorldSimulationWriteRepair_ACU(['seeds'], {
+      rejected: [], partials: [{ module: 'seeds', id: 'seed-1', missingFields: ['location'] }], ledgerRevision: 2,
+    });
+    const sql = repair.split('仅补缺栏范例：')[1]?.split(String.fromCharCode(10))[0] ?? '';
+    expect(sql).toContain(`location = '{"region":"禁区门口"}'`);
+    expect(parseWorldSimulationSqlFieldWrites_ACU(sql, 'undercurrent-analyst').rejected).toEqual([]);
+  });
+
+  it('编年草稿回执仅示范补写 summary，不重复已保存栏目', async () => {
+    const { renderWorldSimulationWriteRepair_ACU } = await import('../../../../src/service/simulation/agent/agent-defaults');
+    const repair = renderWorldSimulationWriteRepair_ACU(['chronicle'], {
+      rejected: [{ path: 'chronicle#chr-1.summary', reason: '必须是非空字符串' }],
+      partials: [{ module: 'chronicle', id: 'chr-1', missingFields: ['summary'] }], ledgerRevision: 2,
+    });
+    expect(repair).toContain("UPDATE chronicle SET summary = '守门人开始盘查入城者' WHERE id = 'chr-1' AND expected_revision = 0;");
+    expect(repair).not.toContain('INSERT INTO chronicle');
+  });
+
+  it('推演补栏回执在恢复状态不确定时只要求读取，不提供旧号写入范例', async () => {
+    const { renderWorldSimulationWriteRepair_ACU } = await import('../../../../src/service/simulation/agent/agent-defaults');
+    const repair = renderWorldSimulationWriteRepair_ACU(['dimensions'], {
+      rejected: [{ path: 'host', reason: 'readback_failed' }], partials: null, ledgerRevision: null,
+    });
+    expect(repair).toContain('先 read ledger:current');
+    expect(repair).not.toContain('UPDATE dimensions SET');
+    expect(repair).not.toContain('INSERT INTO dimensions');
   });
 
   it('无效写动作回灌协议错误，不虚记一次写入或成功回执', async () => {
@@ -572,6 +608,7 @@ describe('世界推演 Agent runtime', () => {
     expect(receipt).toMatchObject({ status: 'rejected', accepted: [], partials: null, ledgerRevision: null,
       readAddresses: [], remainingReadRounds: 1, remainingWriteRounds: 2 });
     expect(receipt.reason).toContain('锚点已失效');
+    expect(receipt.repair).toContain('先 read ledger:current');
     expect(outcome.status).toBe('failed');
     expect(outcome.unresolvedIssues).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'write_state' })]));
   });
@@ -1199,7 +1236,7 @@ describe('世界推演 Agent runtime', () => {
     expect(JSON.stringify(invoke.mock.calls)).toContain('revision 冲突');
     expect(JSON.stringify(invoke.mock.calls)).toContain('重新派工');
     expect(JSON.stringify(invoke.mock.calls)).toContain('完整必填字段模板');
-    expect(JSON.stringify(invoke.mock.calls)).toContain('字段纪律：dimensions 必须给 id,name');
+    expect(JSON.stringify(invoke.mock.calls)).toContain('字段纪律（逐栏 SQL）：dimensions 新行需 name,kind');
     expect(subagents.run).toHaveBeenCalledTimes(2);
     expect(subagents.runReviewer.mock.calls.at(-1)![0].candidates).toEqual([corrected]);
   });

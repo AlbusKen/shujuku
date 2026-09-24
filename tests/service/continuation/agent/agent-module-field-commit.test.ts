@@ -40,6 +40,24 @@ describe('续写逐栏真实提交', () => {
     expect(hook.accepted.map(item => item.id)).toContain('H001');
   });
 
+  it('总纲单栏写入拒绝照抄格式示例，同时接受真实短标题', async () => {
+    const { chat } = setup();
+    const bad = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'arc-architect',
+      sql: "INSERT INTO story_arc (id, title, direction, expected_revision) VALUES ('STORY-01', '简称', '本层推进方向与人物驱动力', 0)",
+    });
+    expect(bad.status).toBe('committed');
+    expect(bad.accepted.map(item => item.field)).toEqual(['scope', 'status']);
+    expect(bad.rejected).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'storyArc#STORY-01.title', reason: expect.stringContaining('不能照抄') }),
+      expect.objectContaining({ path: 'storyArc#STORY-01.direction', reason: expect.stringContaining('不能照抄') }),
+    ]));
+    const saved = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'arc-architect',
+      sql: `UPDATE story_arc SET title = '标题', direction = '主角追查禁区的真实来历' WHERE id = 'STORY-01' AND expected_revision = ${bad.revisions?.storyArc}`,
+    });
+    expect(saved.status).toBe('committed');
+    expect(saved.partials).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'storyArc', id: 'STORY-01', missingFields: expect.arrayContaining(['escalation', 'withheld']) })]));
+  });
+
   it('同一条 SQL 一次写入多条新卷，再用同一修订号一次补齐 withheld', async () => {
     const { chat } = setup();
     const insert = [

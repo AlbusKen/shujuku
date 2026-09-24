@@ -193,7 +193,7 @@ export interface WorldSimulationLedgerFieldMatrixEntry_ACU {
 }
 
 /**
- * 各推演模块的栏目矩阵。必填栏目对齐 formatWorldSimulationLedgerRequiredFields_ACU 的字段纪律；
+ * 各推演模块的栏目矩阵。required 列出逐栏提交提升完整条目所需的业务栏目；
  * 可空/可缺省栏（actorIds、expiresAtDay、exposePolicy、locationRef、earliestRevealDay 等）提升时按领域缺省补齐，
  * revision 由入库层接管。单例（clock/player/guidance）恒为完整记录，逐栏更新按 patch 语义合并。
  */
@@ -209,8 +209,12 @@ export const WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU: Record<WorldSimulationLed
 };
 
 
-export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
+export function formatWorldSimulationLedgerRequiredFieldsLegacy_ACU(): string {
   return '字段纪律：dimensions 必须给 id,name,kind,value,trend,rationale,evidenceRefs；seeds 必须给 id,title,status,level,catalyst,visibility,location,evidenceRefs；actors 必须给 id,name,interests,location,goals,informationSources,knownFacts,evidenceRefs；rumors 必须给 id,fact,originDay,channels,evidenceRefs。rationale（依据摘要）、catalyst（催化条件）、interests/goals/knownFacts 等说明性字段必须给出有内容的非空值，禁止留空或写"暂无/未知"凑数；证据不足时不要新建该条目，把缺口写进 uncertainties。仅机器字段可省略：revision 由入库层接管，expiresAtDay/missedOutcome/locationRef 等可空项按缺省补齐；更新已有条目可只提交变更字段';
+}
+
+export function formatWorldSimulationLedgerRequiredFields_ACU(): string {
+  return '字段纪律（逐栏 SQL）：dimensions 新行需 name,kind,value,trend,rationale,evidence_refs；seeds 新行需 title,status,level,catalyst,visibility,location,evidence_refs；actors 新行需 name,interests,location,goals,information_sources,known_facts；rumors 新行需 fact,origin_day,channels。数组行 INSERT 的 id 可省略，由系统生成；dimensions/seeds/actors/rumors 的 INSERT 仍须显式给 expected_revision=0，chronicle INSERT 不带修订号。actors/rumors 不写 evidence_refs；其他需要该栏的模块只使用真实已颁发证据。rationale、catalyst、interests/goals/known_facts 等说明性字段必须给出真实内容，不写"暂无/未知"凑数；缺少事实依据时把缺口写进 uncertainties。revision 由保存层接管；actor_ids、expires_at_day、missed_outcome、location_ref 等可缺省栏目按领域规则补齐；已保存草稿按 missingFields 仅 UPDATE 缺栏，不重发 accepted。';
 }
 
 export type WorldSimulationStageRevisionReason_ACU = 'initial' | 'automatic_replan' | 'manual_replan' | 'resume_repair';
