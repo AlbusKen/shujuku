@@ -353,11 +353,14 @@ describe('Agent 写集事务', () => {
   it('信息差 patch 的合并结果必须满足揭示状态一致性', () => {
     const revealed = baseSnapshot_ACU();
     revealed.infoGap[0] = { ...revealed.infoGap[0], revealStatus: 'partial', revealIndex: 4 };
-    expect(() => appliedDelta_ACU(revealed, delta_ACU({ infoGapPatches: [{ id: 'E1', revealStatus: 'unrevealed' }] }), ['infoGap'], 7))
-      .toThrowError(/揭示楼层必须同时清空/);
+    const reset = appliedDelta_ACU(revealed, delta_ACU({ infoGapPatches: [{ id: 'E1', revealStatus: 'unrevealed' }] }), ['infoGap'], 7);
+    expect(reset.infoGap[0]).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null, topic: '守门人身份' });
 
     const fixed = appliedDelta_ACU(revealed, delta_ACU({ infoGapPatches: [{ id: 'E1', revealStatus: 'unrevealed', revealIndex: null }] }), ['infoGap'], 7);
     expect(fixed.infoGap[0]).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null, topic: '守门人身份' });
+
+    expect(() => appliedDelta_ACU(revealed, delta_ACU({ infoGapPatches: [{ id: 'E1', revealStatus: 'unrevealed', readerKnown: '另有线索' }] }), ['infoGap'], 7))
+      .toThrowError(/揭示楼层必须同时清空/);
   });
 
   it('空 delta 原样返回同一份快照，不产生无意义的版本递增', () => {

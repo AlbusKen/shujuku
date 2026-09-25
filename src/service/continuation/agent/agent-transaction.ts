@@ -172,6 +172,13 @@ function applyInfoGapPatches_ACU(entries: AgentInfoGapEntry_ACU[], patches: Agen
       revealIndex: 'revealIndex' in patch ? patch.revealIndex! : current.revealIndex,
     };
     // 合并结果必须满足与 upsert 相同的一致性规则：把计划写成事实的典型症状在 patch 路径同样要拦。
+    if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null
+      && patch.revealStatus === 'unrevealed'
+      && !Object.prototype.hasOwnProperty.call(patch, 'revealIndex')
+      && Object.keys(patch).length === 2) {
+      // 仅明确回退状态时，旧揭示楼层可确定是历史残留脏字段；成对清空，避免阻断主流程。
+      merged.revealIndex = null;
+    }
     if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null) {
       reject_ACU(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
     }
