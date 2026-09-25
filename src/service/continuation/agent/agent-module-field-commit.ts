@@ -311,7 +311,13 @@ export function planAgentModuleFieldCommit_ACU(
       && merged.revealStatus !== undefined && (merged.revealIndex !== undefined || !!existing)) {
       const status = merged.revealStatus;
       const reveal = merged.revealIndex ?? null;
-      if ((status === 'unrevealed' && reveal !== null) || (status !== 'unrevealed' && reveal === null)) {
+      if (status === 'unrevealed' && reveal !== null
+        && Object.prototype.hasOwnProperty.call(writable, 'revealStatus')
+        && !Object.prototype.hasOwnProperty.call(writable, 'revealIndex')
+        && Object.keys(writable).length === 1) {
+        // 明确回退为未揭示时，旧资料残留的揭示楼层是可判定的脏字段；成对补写 null，避免把修复责任推回主会话。
+        writable.revealIndex = null;
+      } else if ((status === 'unrevealed' && reveal !== null) || (status !== 'unrevealed' && reveal === null)) {
         for (const field of ['revealStatus', 'revealIndex']) if (Object.prototype.hasOwnProperty.call(writable, field)) {
           reject(`${path}.${field}`, 'consistency_group: 揭示状态与楼层必须一致'); delete writable[field];
         }
@@ -456,12 +462,12 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     const confirmed = readAgentModuleFoldState_ACU(input.chat);
     receipt.revisions = confirmed.snapshot.revisions;
     receipt.partials = confirmedPartials_ACU(confirmed.fields, plan.partials);
-    receipt.accepted = plan.accepted.map(item => {
-      const field = confirmed.fields.records[item.module]?.[item.id]?.fields[item.field];
-      const row = domainRow_ACU(confirmed.snapshot, item.module, item.id);
-      return { ...item, revision: field?.revision ?? 0,
-        ...(field ? { value: field.value } : row && Object.prototype.hasOwnProperty.call(row, item.field) ? { value: row[item.field] } : {}) };
-    });
+    receipt.accepted = plan.accepted.map(item => ({
+      module: item.module,
+      id: item.id,
+      field: item.field,
+      revision: confirmed.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision ?? 0,
+    }));
     return receipt;
   });
   queue_ACU.set(input.chat, run.then(() => {}, () => {}));

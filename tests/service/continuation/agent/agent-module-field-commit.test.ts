@@ -251,6 +251,31 @@ describe('续写逐栏真实提交', () => {
     expect(readAgentModuleSnapshot_ACU(chat).infoGap[0]).toMatchObject({ revealStatus: 'revealed', readerKnown: '另有线索' });
   });
 
+  it('信息差单独回退未揭示时自动清除旧揭示楼层，显式冲突楼层仍拒绝', async () => {
+    const { chat } = setup();
+    const insert = "INSERT INTO info_gap (id, topic, objective_fact, reader_known, character_knowledge, reveal_status, expected_revision) VALUES ('G2', '秘密', '钥匙', '无人知道', '[]', 'unrevealed', 0)";
+    expect((await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: insert, role: 'hook-cognition-maintainer' })).status).toBe('committed');
+    const revealed = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1,
+      sql: "UPDATE info_gap SET reveal_status = 'revealed', reveal_index = 1 WHERE id = 'G2' AND expected_revision = 1",
+      role: 'hook-cognition-maintainer',
+    });
+    expect(revealed.status).toBe('committed');
+    const reset = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1,
+      sql: "UPDATE info_gap SET reveal_status = 'unrevealed' WHERE id = 'G2' AND expected_revision = 2",
+      role: 'hook-cognition-maintainer',
+    });
+    expect(reset.status).toBe('committed');
+    expect(reset.rejected).toEqual([]);
+    expect(readAgentModuleSnapshot_ACU(chat).infoGap.find(item => item.id === 'G2')).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null });
+    const conflict = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1,
+      sql: "UPDATE info_gap SET reveal_status = 'unrevealed', reveal_index = 1 WHERE id = 'G2' AND expected_revision = 3",
+      role: 'hook-cognition-maintainer',
+    });
+    expect(conflict.status).toBe('rejected');
+    expect(conflict.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'infoGap#G2.revealStatus' })]));
+    expect(readAgentModuleSnapshot_ACU(chat).infoGap.find(item => item.id === 'G2')).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null });
+  });
+
   it('web_refs 无法解析页面句柄时保留独立草稿，不伪造完整行', async () => {
     const { chat } = setup();
     const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'web-researcher',
