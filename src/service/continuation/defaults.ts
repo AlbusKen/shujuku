@@ -1,5 +1,6 @@
 import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationAgentApiPresets_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationStageSize_ACU, type ContinuationTurnRange_ACU, type ContinuationWebResearchSettings_ACU } from './model';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
+import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -229,6 +230,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU = 'spv4.3-continu
 /** read、search、write_sql 改为原生函数调用；决策与契约 JSON 保持原协议。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU = 'spv4.4-continuation-native-tool-prompts-v36';
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU = 'spv4.5-continuation-user-prefill-v37';
+/** V37 漏掉独立存放的 outlinePrompt；只对它补一次默认末段。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU = 'spv4.6-continuation-outline-user-prefill-v38';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -269,7 +272,7 @@ function clonePromptSegments_ACU(segments: readonly ContinuationPromptSegment_AC
 }
 
 export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
-  return clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU);
+  return [...clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU), { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true }];
 }
 
 export function buildDefaultContinuationWorkflowSettings_ACU(): ContinuationSettings_ACU['workflow'] {
@@ -321,7 +324,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU,
   };
 }
 

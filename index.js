@@ -88056,6 +88056,8 @@ $CONTENT
     /** read、search、write_sql 改为原生函数调用；决策与契约 JSON 保持原协议。 */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU = 'spv4.4-continuation-native-tool-prompts-v36';
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU = 'spv4.5-continuation-user-prefill-v37';
+    /** V37 漏掉独立存放的 outlinePrompt；只对它补一次默认末段。 */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU = 'spv4.6-continuation-outline-user-prefill-v38';
     /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
@@ -88089,7 +88091,7 @@ $CONTENT
         return segments.map(segment => ({ ...segment }));
     }
     function buildDefaultContinuationOutlinePrompt_ACU() {
-        return clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU);
+        return [...clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU), { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true }];
     }
     function buildDefaultContinuationWorkflowSettings_ACU() {
         return { reviseLimit: 3 };
@@ -88138,7 +88140,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -89872,7 +89874,8 @@ $CONTENT
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU
-            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -89938,6 +89941,10 @@ $CONTENT
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU) {
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU;
+        }
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
+            outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -152197,6 +152204,7 @@ Expected function or array of functions, received type ${typeof value}.`
             resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
             // 校验错误不再写回骨架占位符：重试只追加 transcript，前缀保持字节级稳定以便命中缓存。
             const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
+            const trailingPrefill = rendered.messages[rendered.messages.length - 1]?.content === USER_PREFILL_CONTENT_ACU ? rendered.messages.pop() : undefined;
             const renderedBlob = rendered.messages.map(message => message.content).join('\n');
             const injected = [];
             const storyArc = resolvers.$STORY_ARC ? String(await resolvers.$STORY_ARC() ?? '').trim() : '';
@@ -152217,7 +152225,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
                 }
-                const rawValue = await this.dependencies.callInternalAi(messages, preset, identity, undefined, {
+                const rawValue = await this.dependencies.callInternalAi(trailingPrefill ? [...messages, trailingPrefill] : messages, preset, identity, undefined, {
                     promptCacheEnabled: true,
                     cacheScope: 'outline',
                     cacheTools: [],
@@ -162303,7 +162311,7 @@ Expected function or array of functions, received type ${typeof value}.`
         else {
             const first = getChatArray_ACU()?.[0];
             const raw = first?.[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
-            if (raw && raw.settings?.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
+            if (raw && raw.settings?.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU) {
                 await store.updatePersistedAtomically(current => current ? { ...current, settings: validateContinuationSettings_ACU(current.settings) } : existing);
             }
         }
