@@ -6,6 +6,8 @@
  * rollup moduleAssemblyPlugin 对 .js 文件跳过 TS 转译，直接注入。
  */
 
+    import { USER_PREFILL_CONTENT_ACU } from "./user-prefill.js";
+
     export const DEFAULT_CHAR_CARD_PROMPT_ACU = [
   {
     "role": "SYSTEM",
@@ -47,8 +49,8 @@
     "isMain2": true
   },
   {
-    "role": "assistant",
-    "content": "<thought>\n收到指令，我将一步一步开始思考，并完成填表，首先我要分析当前轮次的剧情变化",
+    "role": "user",
+    "content": USER_PREFILL_CONTENT_ACU,
     "deletable": true
   }
 ];
@@ -596,8 +598,8 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
     "deletable": true
   },
   {
-    "role": "assistant",
-    "content": "<thought>\n收到指令，我将一步一步进行思考，首先让我来根据用户的输入结合上下文与背景设定推测剧情大概会如何发展",
+    "role": "user",
+    "content": USER_PREFILL_CONTENT_ACU,
     "deletable": true
   }
 ];

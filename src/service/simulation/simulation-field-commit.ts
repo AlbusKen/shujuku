@@ -14,7 +14,7 @@ import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEv
 import type { WorldChronicleArchiveDetail_ACU, WorldChronicleArchiveSnapshot_ACU } from './agent/agent-model';
 import type { WorldSimulationSqlFieldBatch_ACU } from './simulation-ledger-sql-view';
 
-export interface WorldSimulationFieldAccepted_ACU { module: WorldSimulationLedgerModule_ACU; id: string; field: string; revision: number }
+export interface WorldSimulationFieldAccepted_ACU { module: WorldSimulationLedgerModule_ACU; id: string; field: string; revision: number; value?: unknown }
 export interface WorldSimulationFieldPlan_ACU {
   ledger: WorldSimulationLedger_ACU;
   batches: WorldSimulationSqlFieldBatch_ACU[];

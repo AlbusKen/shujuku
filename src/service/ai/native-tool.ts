@@ -1,3 +1,4 @@
+import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 /**
  * 续写与推演共用的原生函数调用。
  * 请求走 /api/backends/chat-completions/generate 时，工具定义放在 body.tools，
@@ -54,7 +55,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'read',
-        description: '按地址读取一条或一批资料的全文。何时使用：提示词里已经给出地址，或 search 命中行右侧有地址，需要正文、表格行、总纲、伏笔、世界书条目或推演账本字段时。不要用它搜索未知内容。参数 reads 是非空字符串数组，一次可混用多种地址，例如 ["$STORY_RANGE:3-5","$STORY_ARC:VOL-01"] 或 ["ledger:current","field:seeds:seed-1:title"]。世界书命中全文通常已注入，不要对 $WORLDBOOK:... 反复 read；地址必须从当前提示词的目录或词汇表复制。',
+        description: '按地址读取一条或一批资料的全文。何时使用：提示词里已经给出地址，或 search 命中行右侧有地址，需要正文、表格行、总纲、伏笔、世界书条目或推演账本字段时。预算与授权允许时，同一次回复把所有相互独立的读取地址放入 reads 数组并并发完成，不要分批等待；依赖 search 结果的精读留到下一轮。不要用它搜索未知内容。参数 reads 是非空字符串数组，一次可混用多种地址，例如 ["$STORY_RANGE:3-5","$STORY_ARC:VOL-01"] 或 ["ledger:current","field:seeds:seed-1:title"]。世界书命中全文通常已注入，不要对 $WORLDBOOK:... 反复 read；地址必须从当前提示词的目录或词汇表复制。',
         parameters: objectSchema_ACU({
           reads: { type: 'array', items: { type: 'string' }, minItems: 1 },
         }, ['reads']),
@@ -64,7 +65,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'search',
-        description: '在资料里按关键词找位置。何时使用：知道要找什么，但还没有读取地址。先 search 再按命中行里的地址 read。query 必填，用短关键词或人名，不要贴整段正文。scope 是范围数组，续写可用 story、tables、modules、outline、worldbook，推演可用 worldbook、encyclopedia、web；省略表示该角色允许的全部范围。可选 isRegex、maxResults（1 到 50）。范例：{"query":"晶屑","scope":["worldbook"],"maxResults":8}。',
+        description: '在资料里按关键词找位置。何时使用：知道要找什么，但还没有读取地址。预算与授权允许时，同一回复并发发出所有相互独立的 search / read，不要把独立查询拆成多批等待；只有依赖搜索结果的精读留待回执后。先 search 再按命中行里的地址 read。query 必填，用短关键词或人名，不要贴整段正文。scope 是范围数组，续写可用 story、tables、modules、outline、worldbook，推演可用 worldbook、encyclopedia、web；省略表示该角色允许的全部范围。可选 isRegex、maxResults（1 到 50）。范例：{"query":"晶屑","scope":["worldbook"],"maxResults":8}。',
         parameters: objectSchema_ACU({
           query: { type: 'string' },
           scope: { type: 'array', items: { type: 'string' } },
@@ -317,7 +318,7 @@ export function withNativeToolThinkPrefill_ACU<T extends ToolAnchorMessage_ACU>(
     message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)),
   ));
   const last = stripped[stripped.length - 1];
-  if (!last || last.role === 'assistant') return stripped;
+  if (!last || last.role === 'assistant' || (last.role === 'user' && last.content === USER_PREFILL_CONTENT_ACU)) return stripped;
   return [...stripped, { role: 'assistant', content: NATIVE_TOOL_THINK_PREFILL_ACU } as T];
 }
 

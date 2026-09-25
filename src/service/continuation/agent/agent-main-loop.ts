@@ -16,6 +16,7 @@
  */
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
+import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
@@ -79,7 +80,7 @@ import {
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
-import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, WORLDBOOK_READ_REFUSAL_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
+import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
 import { runAgentSearch_ACU } from './agent-search';
 import {
   createAgentReadGateState_ACU,
@@ -1198,9 +1199,10 @@ export class ContinuationAgentTurnPlanner_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 请求已失效', false));
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
+      const latestSnapshot = lastRuntimeSnapshotText_ACU(session.snapshot());
       let messages = this.dependencies.nativeTools
-        ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
-        : this.spliceHistory_ACU(rendered, session.history());
+        ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history(), latestSnapshot))
+        : this.spliceHistory_ACU(rendered, session.history(), latestSnapshot);
       // 发送前只在越过两倍越界线时压缩，避免这次请求因超长失败。
       // 没到两倍不总结；下一轮开始时直接丢弃上一轮的会话、工具调用和快照。
       const budgetTokens = request.settings.agentHistoryTokenBudget;
@@ -1210,8 +1212,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         if (promptTokens > ceilingTokens) {
           if (await session.compact(true, messages)) {
             messages = this.dependencies.nativeTools
-              ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history()))
-              : this.spliceHistory_ACU(rendered, session.history());
+              ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history(), latestSnapshot))
+              : this.spliceHistory_ACU(rendered, session.history(), latestSnapshot);
             promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
           }
         }
@@ -1458,10 +1460,6 @@ export class ContinuationAgentTurnPlanner_ACU {
           const key = String(raw ?? '').trim();
           if (!key || seenInBatch.has(key)) continue;
           seenInBatch.add(key);
-          if (key.startsWith('$WORLDBOOK:')) {
-            failed.push({ key, label: key, title: '世界书条目', text: WORLDBOOK_READ_REFUSAL_ACU });
-            continue;
-          }
           if (toolUsage.granted.has(key)) { duplicated.push(key); continue; }
           const resolved = resolveAgentReadToken_ACU(key, context);
           const material = { key, label: key, title: resolved.title, text: resolved.text };
@@ -1789,21 +1787,25 @@ export class ContinuationAgentTurnPlanner_ACU {
 
   private spliceHistory_ACU(
     messages: ReadonlyArray<{ role: string; content: string }>,
-    history: ReadonlyArray<{ role: string; content: string }>,
-  ): Array<{ role: string; content: string }> {
-    const result: Array<{ role: string; content: string }> = [];
+    history: ReadonlyArray<{ role: string; content: string; tool_calls?: ReturnType<typeof renderAgentConversationMessages_ACU>[number]['tool_calls']; tool_call_id?: string }>,
+    latestSnapshot: string,
+  ): Array<{ role: string; content: string; tool_calls?: ReturnType<typeof renderAgentConversationMessages_ACU>[number]['tool_calls']; tool_call_id?: string }> {
+    const result: Array<{ role: string; content: string; tool_calls?: ReturnType<typeof renderAgentConversationMessages_ACU>[number]['tool_calls']; tool_call_id?: string }> = [];
+    const historical = history.filter(item => item.content !== USER_PREFILL_CONTENT_ACU && !(item.role === 'user' && item.content.startsWith('【运行时快照】\n')));
     let inserted = false;
     for (const message of messages) {
       if (message.content.includes(HISTORY_SENTINEL_ACU)) {
-        result.push(...history.map(item => ({ ...item })));
+        result.push(...historical.map(item => ({ ...item })));
         inserted = true;
         continue;
       }
+      if (message.content === USER_PREFILL_CONTENT_ACU) continue;
       result.push({ ...message });
     }
-    // 提示词被用户删掉锚点段时历史无处可插，此时把历史接在最前面而不是静默丢弃。
-    if (!inserted && history.length) return [...history.map(item => ({ ...item })), ...result];
-    return result;
+    const body = !inserted && historical.length ? [...historical.map(item => ({ ...item })), ...result] : result;
+    body.push({ role: 'user', content: latestSnapshot || '【运行时快照】\n本次没有可用的运行时资料；请以此前已确认的工具回执为准。' });
+    if (messages.some(item => item.content === USER_PREFILL_CONTENT_ACU)) body.push({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+    return body;
   }
 
   /**

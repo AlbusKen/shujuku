@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
 import type { WorldChronicleArchiveDetail_ACU, WorldChronicleArchiveSnapshot_ACU, WorldSimulationAnchorIdentity_ACU, WorldSimulationBucket_ACU } from './agent/agent-model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU } from './agent/agent-model';
@@ -390,7 +390,11 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   const validatedPrompts = Object.keys(raw.agentPrompts).length === 0
     ? buildDefaultWorldSimulationAgentPrompts_ACU()
     : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);
-  const agentPrompts = migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {});
+  const previousPromptVersion = Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion')
+    ? string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) : undefined;
+  const agentPrompts = previousPromptVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU
+    ? migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {})
+    : buildDefaultWorldSimulationAgentPrompts_ACU();
   const readBudget = typeof raw.agentReadTokenBudget === 'string'
     ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU('settings.agentReadTokenBudget 百分比非法', phase))
     : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);
@@ -451,7 +455,7 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     fixedApiPresetName: string_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName', phase, true),
     agentApiPresets,
     agentPrompts,
-    ...(Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion') ? { promptForceDefaultVersion: string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) } : {}),
+    promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
     dynamics,
     workflow,
   };

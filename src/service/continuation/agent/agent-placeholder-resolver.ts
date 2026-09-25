@@ -34,6 +34,7 @@ import {
 import { normalizeAmCode_ACU } from '../worldbook-context';
 import { applyContextTagFilters_ACU } from '../../runtime/helpers-context-tags';
 import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
+import { isAiMessage_ACU } from '../../runtime/message-handler';
 
 export const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
 export const AGENT_STORY_RANGE_TOKEN_PREFIX_ACU = '$STORY_RANGE:';
@@ -375,19 +376,22 @@ export function renderAgentUnsettledHistory_ACU(context: AgentResolveContext_ACU
   return lines.length ? lines.join('\n\n') : '没有尚未结算的真实历史；上一轮已结算到当前最后一楼。';
 }
 
-/**
- * 拼装世界书关键词命中的扫描文本：本轮目标 + 未结算正文 + 尾部全文楼层 + 用户初始要求。
- * 主循环与子代理运行时共用，保证命中提示在两侧口径一致。
- * @param context 解析上下文
- * @returns 扫描文本
- */
+/** 世界书触发只扫描最近一个用户楼层与最近一个 AI 楼层；不拼入任务或旧历史。 */
+export function buildRecentWorldbookScanText_ACU(chat: readonly any[], rules?: AgentContextRules_ACU): string {
+  let user = '';
+  let assistant = '';
+  let foundUser = false;
+  let foundAssistant = false;
+  for (let index = chat.length - 1; index >= 0 && (!foundUser || !foundAssistant); index -= 1) {
+    const message = chat[index];
+    if (!foundUser && message?.is_user === true) { user = messageText_ACU(message, rules); foundUser = true; }
+    if (!foundAssistant && isAiMessage_ACU(message)) { assistant = messageText_ACU(message, rules); foundAssistant = true; }
+  }
+  return [user, assistant].filter(Boolean).join('\n');
+}
+
 export function buildAgentWorldbookScanText_ACU(context: AgentResolveContext_ACU): string {
-  return [
-    context.originInstruction,
-    context.execution.turn?.goal ?? '',
-    renderAgentUnsettledHistory_ACU(context),
-    renderAgentStoryTail_ACU(context),
-  ].filter(Boolean).join('\n');
+  return buildRecentWorldbookScanText_ACU(context.chat, context.contextRules);
 }
 
 /** 四档节奏标签的语义与写作指导。低压轮的约束写成禁令，否则模型会习惯性地往每一轮里塞冲突。 */

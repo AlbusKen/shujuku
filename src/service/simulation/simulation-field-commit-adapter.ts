@@ -283,8 +283,13 @@ export async function commitWorldSimulationFieldWritesWithinQueue_ACU(input: Wor
       || (proof && !equal_ACU(readWorldSimulationRunWriteProof_ACU(anchor, chat), proof))
       || !staged.changes.every(change => change.target[change.key] === change.staged && canonical_ACU(change.staged) === change.expected)) throw new Error('保存后同内存聊天折叠与提交规划不一致');
     input.confirmRunLedger?.({ ledger: readback.ledger, fields: readback.fields, archive: foldWorldSimulationArchive_ACU(chat, anchor.messageIndex).snapshot }, input.declaredEvidenceRefs ?? [], plan.accepted);
-    return receipt('committed', { partials: confirmedPartials_ACU(readback.fields, plan.partials), accepted: plan.accepted.map(item => ({ ...item,
-      revision: readback.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision ?? readback.ledger.revision })) });
+    return receipt('committed', { partials: confirmedPartials_ACU(readback.fields, plan.partials), accepted: plan.accepted.map(item => {
+      const field = readback.fields.records[item.module]?.[item.id]?.fields[item.field];
+      const row = (readback.ledger as unknown as Record<string, unknown>)[item.module];
+      const savedRow = Array.isArray(row) ? row.find(candidate => isRecord_ACU(candidate) && candidate.id === item.id) : null;
+      return { ...item, revision: field?.revision ?? readback.ledger.revision,
+        ...(field ? { value: field.value } : isRecord_ACU(savedRow) && Object.prototype.hasOwnProperty.call(savedRow, item.field) ? { value: savedRow[item.field] } : {}) };
+    }) });
   } catch (error) {
     const staleBaseline = !unstagedIntact();
     const safe = staged.changes.every(change => change.target[change.key] === change.staged && canonical_ACU(change.staged) === change.expected);

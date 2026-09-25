@@ -7,8 +7,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
-import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
-import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
+import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_PLOT_PROMPT_GROUP_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -751,6 +751,19 @@ export   function loadSettings_ACU() {
               shouldPersistSettingsAfterLoad_ACU = true;
               logDebug_ACU(`[交火模式配置] 已一次性覆盖召回参数为 spv9.2 默认值${changed.length ? `：${changed.join(', ')}` : '（无变化）'}`);
           }
+          if (vectorConfig.keywordPromptForceDefaultVersion !== USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU) {
+              const previousGroup = vectorConfig.keywordPromptGroup;
+              const previousVersion = vectorConfig.keywordPromptForceDefaultVersion;
+              try {
+                  vectorConfig.keywordPromptGroup = cloneDefaultValue_ACU(defaultVectorMemoryConfig_ACU.keywordPromptGroup);
+                  vectorConfig.keywordPromptForceDefaultVersion = USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU;
+                  if (!saveGlobalMeta_ACU()) throw new Error('全局元数据保存失败');
+              } catch (error) {
+                  vectorConfig.keywordPromptGroup = previousGroup;
+                  vectorConfig.keywordPromptForceDefaultVersion = previousVersion;
+                  logWarn_ACU('[交火关键词提示词] 一次性覆盖未保存，下一次加载重试:', error);
+              }
+          }
       }
 
       settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
@@ -759,6 +772,7 @@ export   function loadSettings_ACU() {
       refreshDefaultTableTemplateOnce_ACU(activeCode);
       forceDisableStrictJsonTableFillOnce_ACU();
       forceDefaultTableFillPromptsOnce_ACU();
+      forceUserPrefillProfilePromptsOnce_ACU();
       forceDefaultTemplateAssistantPromptOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
@@ -958,6 +972,40 @@ function forceDefaultTableFillPromptsOnce_ACU() {
           logDebug_ACU(`[填表提示词] 已一次性强制恢复默认提示词并记录版本: ${TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU}`);
       } catch (error) {
           logWarn_ACU('[填表提示词] 一次性强制恢复默认提示词失败:', error);
+      }
+  }
+
+function forceUserPrefillProfilePromptsOnce_ACU() {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.userPrefillProfileForceDefaultVersion === USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU) return;
+      const code = normalizeIsolationCode_ACU(settings_ACU.dataIsolationCode || globalMeta_ACU.activeIsolationCode || '');
+      const previous = {
+          charCardPrompt: settings_ACU.charCardPrompt,
+          strictJsonCharCardPrompt: settings_ACU.strictJsonCharCardPrompt,
+          strictJsonSqlCharCardPrompt: settings_ACU.strictJsonSqlCharCardPrompt,
+          plotSettings: settings_ACU.plotSettings,
+          version: settings_ACU.userPrefillProfileForceDefaultVersion,
+      };
+      try {
+          settings_ACU.charCardPrompt = cloneDefaultValue_ACU(
+              settings_ACU.storageMode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU,
+          );
+          settings_ACU.strictJsonCharCardPrompt = cloneDefaultValue_ACU(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU);
+          settings_ACU.strictJsonSqlCharCardPrompt = cloneDefaultValue_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU);
+          if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
+              settings_ACU.plotSettings = cloneDefaultValue_ACU(DEFAULT_PLOT_SETTINGS_ACU);
+          }
+          settings_ACU.plotSettings = { ...settings_ACU.plotSettings, promptGroup: cloneDefaultValue_ACU(DEFAULT_PLOT_PROMPT_GROUP_ACU) };
+          settings_ACU.userPrefillProfileForceDefaultVersion = USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU;
+          writeProfileSettingsToStorage_ACU(code, sanitizeSettingsForProfileSave_ACU(settings_ACU));
+          logDebug_ACU(`[提示词预填充] 已一次性覆盖 profile 默认组: ${USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU}`);
+      } catch (error) {
+          settings_ACU.charCardPrompt = previous.charCardPrompt;
+          settings_ACU.strictJsonCharCardPrompt = previous.strictJsonCharCardPrompt;
+          settings_ACU.strictJsonSqlCharCardPrompt = previous.strictJsonSqlCharCardPrompt;
+          settings_ACU.plotSettings = previous.plotSettings;
+          settings_ACU.userPrefillProfileForceDefaultVersion = previous.version;
+          logWarn_ACU('[提示词预填充] profile 覆盖未保存，下一次加载重试:', error);
       }
   }
 

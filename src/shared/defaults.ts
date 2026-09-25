@@ -204,6 +204,9 @@ export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8.5-table-note-
 export const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
 // 一次性强制恢复填表默认提示词；执行后用户仍可继续自定义。
 export const TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.2-force-default-table-fill-prompt';
+// 预填充切换为 user 的独立一次性迁移；各权威存储域分别记录标记。
+export const USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU = 'spv9.3-user-prefill-profile';
+export const USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU = 'spv9.3-user-prefill-vector';
 // 一次性强制恢复 AI 改表助手提示词；执行后用户仍可继续自定义。
 // 空 segments 是既有契约：运行时回退到内置伪 role 默认提示词。
 export const TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.4-force-default-template-assistant-prompt';
@@ -313,8 +316,8 @@ export const defaultVectorMemoryConfig_ACU = {
       deletable: true,
     },
     {
-      role: 'assistant',
-      content: '<thinking>\n',
+      role: 'user',
+      content: USER_PREFILL_CONTENT_ACU,
       deletable: true,
     },
   ],
@@ -337,6 +340,7 @@ export const defaultWorldbookConfig_ACU = {
 };
 
 import { DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU } from './defaults-json.js';
+import { USER_PREFILL_CONTENT_ACU } from './user-prefill.js';
 
 /** 构建默认正文优化提示词组（纯数据构造，无运行时依赖） */
 export function buildDefaultContentOptimizationPromptGroup_ACU({ mainContent = '' } = {}) {

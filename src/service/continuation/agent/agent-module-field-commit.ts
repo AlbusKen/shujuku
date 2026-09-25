@@ -30,7 +30,7 @@ export interface AgentFieldPage_ACU {
   query: string;
   sourceStatus: AgentWebRefEntry_ACU['sourceStatus'];
 }
-export interface AgentModuleFieldAccepted_ACU { module: Module_ACU; id: string; field: string; revision: number }
+export interface AgentModuleFieldAccepted_ACU { module: Module_ACU; id: string; field: string; revision: number; value?: unknown }
 export interface AgentModuleFieldReceipt_ACU {
   status: 'committed' | 'rejected' | 'persist_failed' | 'readback_failed';
   accepted: AgentModuleFieldAccepted_ACU[];
@@ -456,7 +456,12 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     const confirmed = readAgentModuleFoldState_ACU(input.chat);
     receipt.revisions = confirmed.snapshot.revisions;
     receipt.partials = confirmedPartials_ACU(confirmed.fields, plan.partials);
-    receipt.accepted = plan.accepted.map(item => ({ ...item, revision: confirmed.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision ?? 0 }));
+    receipt.accepted = plan.accepted.map(item => {
+      const field = confirmed.fields.records[item.module]?.[item.id]?.fields[item.field];
+      const row = domainRow_ACU(confirmed.snapshot, item.module, item.id);
+      return { ...item, revision: field?.revision ?? 0,
+        ...(field ? { value: field.value } : row && Object.prototype.hasOwnProperty.call(row, item.field) ? { value: row[item.field] } : {}) };
+    });
     return receipt;
   });
   queue_ACU.set(input.chat, run.then(() => {}, () => {}));

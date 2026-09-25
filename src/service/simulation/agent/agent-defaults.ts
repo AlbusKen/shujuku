@@ -1,3 +1,4 @@
+import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
@@ -13,7 +14,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V15_ACU = 'world-simulation-v15';
 export const WORLD_SIMULATION_PROMPT_VERSION_V16_ACU = 'world-simulation-v16';
 export const WORLD_SIMULATION_PROMPT_VERSION_V17_ACU = 'world-simulation-v17';
 export const WORLD_SIMULATION_PROMPT_VERSION_V18_ACU = 'world-simulation-v18';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v19';
+export const WORLD_SIMULATION_PROMPT_VERSION_V19_ACU = 'world-simulation-v19';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = 'world-simulation-v20';
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -114,7 +116,7 @@ export function renderWorldSimulationWriteRepair_ACU(
     return '【write_sql 补栏】保存或恢复状态无法确认。先 read ledger:current 及 field:模块:ID 权威栏目，核实已存内容和当前 revision；不要按旧号重发 SQL。';
   }
   if (!receipt.rejected.length && !receipt.partials.some(item => item.missingFields.length || item.promotionError)) return '';
-  const lines = ['【write_sql 补栏】status=committed 的 accepted 已保存，不要重新 INSERT 或重发整行。示例值只演示语法：需换成本轮真实的故事事实、字段 ID 和已颁发的 evidence_refs（若该模块需要）。'];
+  const lines = ['【write_sql 补栏】只以 status=committed 的 accepted 为已保存。字段对照示例：原 INSERT A/B/C/D，回执确认 A/C 已存而 B/D 未存，下次按实际 ID/revision 仅 UPDATE B/D；不要重新 INSERT 或重发 A/C。示例值只演示语法，须换成本轮真实事实和已颁发的证据引用。'];
   for (const item of receipt.partials) {
     if (!modules.includes(item.module) || (!item.missingFields.length && !item.promotionError)) continue;
     lines.push(`${item.module}#${item.id} 已是草稿；缺 ${item.missingFields.join('、') || '领域校验所需的修正'}。先 read field:${item.module}:${item.id} 核实已存栏目。`);
@@ -341,7 +343,7 @@ export function buildV18WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
   return segments;
 }
 
-export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+export function buildV19WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
   const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
   return buildV18WorldSimulationAgentPrompt_ACU(name).map(segment => {
     let content = segment.content;
@@ -351,6 +353,13 @@ export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulation
     }
     return { ...segment, content: applyWorldSimulationNativeToolPrompt_ACU(name, content) };
   });
+}
+
+export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  const segments = buildV19WorldSimulationAgentPrompt_ACU(name);
+  const protocol = segments.find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
+  if (protocol) protocol.content += '\n独立的 read/search 需求在授权及预算许可时同一回复并发调用，不分批等待；只有依赖搜索结果的精读等回执。上一轮具体工具指令、SQL 和真实回执在历史中；仅对未存栏目补写，不重发已存字段。';
+  return [...segments, { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true, pinned: false }];
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -536,6 +545,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V16_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU[name]! },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V17_ACU, fingerprint: promptFingerprint_ACU(buildV17WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V18_ACU, fingerprint: promptFingerprint_ACU(buildV18WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V19_ACU, fingerprint: promptFingerprint_ACU(buildV19WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;

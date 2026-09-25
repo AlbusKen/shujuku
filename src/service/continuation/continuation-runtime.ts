@@ -2,12 +2,13 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import {
   CONTINUATION_GLOBAL_SETTINGS_KEY_ACU,
+  CONTINUATION_FIRST_FLOOR_FIELD_ACU,
   FirstFloorContinuationStore_ACU,
   buildMigratedContinuationEnvelope_ACU,
   stripLegacyContinuationLoopFields_ACU,
   validateContinuationSettings_ACU,
 } from './continuation-store';
-import { buildDefaultContinuationSettings_ACU } from './defaults';
+import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU, buildDefaultContinuationSettings_ACU } from './defaults';
 import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } from './continuation-orchestrator';
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
@@ -233,6 +234,12 @@ async function migrateLegacySettings_ACU(store: FirstFloorContinuationStore_ACU)
     const migration = buildMigratedContinuationEnvelope_ACU(legacyPlotSettings, buildInitialContinuationSettings_ACU());
     if (!migration.didMigrate) return null;
     await store.replaceAtomically(migration.envelope);
+  } else {
+    const first = getChatArray_ACU()?.[0] as Record<string, unknown> | undefined;
+    const raw = first?.[CONTINUATION_FIRST_FLOOR_FIELD_ACU] as { settings?: { promptForceDefaultVersion?: string } } | undefined;
+    if (raw && raw.settings?.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
+      await store.updatePersistedAtomically(current => current ? { ...current, settings: validateContinuationSettings_ACU(current.settings) } : existing);
+    }
   }
   if (!hasLegacyContinuationLoopFields_ACU(legacyPlotSettings)) return store.read();
   const stripped = stripLegacyContinuationLoopFields_ACU(legacyPlotSettings);

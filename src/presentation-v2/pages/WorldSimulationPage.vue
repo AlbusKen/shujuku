@@ -644,6 +644,7 @@ async function onImportPromptsFile(event: Event): Promise<void> {
 function refreshAll(): void {
   apiStore.refreshFromSettings();
   runtime.refresh();
+  void runtime.initialize();
 }
 
 /**
@@ -657,6 +658,7 @@ function refreshAfterChatMutation(): void {
 onMounted(() => {
   apiStore.refreshFromSettings();
   runtime.refresh();
+  void runtime.initialize();
 });
 onBeforeUnmount(() => {
   // 防抖窗口内离开页面时冲刷一次未落盘的改动，避免"改了像改了、重进没了"。

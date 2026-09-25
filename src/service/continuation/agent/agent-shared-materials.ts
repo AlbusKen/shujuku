@@ -57,7 +57,7 @@ export function renderMainSessionReadAppendix_ACU(messages: readonly AgentConver
   if (!latest.size) return '';
   return [
     '【主会话已调阅】',
-    '下面是主会话本轮已经读到的全文。不要再对同一地址调用 read。世界书触发全文已在快照里；触发内容不够时，用 search，scope 设为 ["worldbook"]。',
+    '下面是主会话本轮已经读到的全文。不要再对同一地址调用 read。世界书触发全文已在快照里；未命中条目可用 search（scope=["worldbook"]）定位后按地址精读。',
     ...[...latest.values()].map(({ address, text }) => `【调阅项 ${JSON.stringify(address)} ${text.length}】\n${text}`),
   ].join('\n\n');
 }

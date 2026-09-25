@@ -4,7 +4,7 @@
 
 import type { WorldSimulationPromptSegment_ACU } from '../model';
 import { type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { worldSimulationSeamMarker_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompt_ACU, worldSimulationSeamMarker_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
 const RUNTIME_LINE_ACU: ReadonlyArray<readonly [WorldSimulationPromptPlaceholder_ACU, string]> = [
   ['$WORLD_TASK', '任务：$WORLD_TASK'],
@@ -44,28 +44,36 @@ export function worldSimulationKeptTokens_ACU(name: WorldSimulationAgentName_ACU
 export function splitWorldSimulationSubagentPrompt_ACU(
   segments: readonly WorldSimulationPromptSegment_ACU[],
   name: WorldSimulationAgentName_ACU,
-): { segments: WorldSimulationPromptSegment_ACU[]; snapshotTemplate: string } {
-  const kept = worldSimulationKeptTokens_ACU(name);
+): { segments: WorldSimulationPromptSegment_ACU[]; snapshotTemplate: string; movedGuidanceIndex: number } {
+  const kept = name === 'world-director' ? worldSimulationKeptTokens_ACU(name) : new Set<string>();
   const runtimeMarker = worldSimulationSeamMarker_ACU('RUNTIME_CONTEXT');
   const historyMarker = worldSimulationSeamMarker_ACU('HISTORY');
+  const defaults = buildDefaultWorldSimulationAgentPrompt_ACU(name);
+  const guidanceIndex = defaults.findIndex(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS'));
+  const movedGuidanceIndex = name !== 'world-director' && guidanceIndex >= 0
+    && segments[guidanceIndex]?.content === defaults[guidanceIndex].content && segments[guidanceIndex]?.enabled
+    && segments.filter(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS')).length === 1
+    ? segments.slice(0, guidanceIndex).filter(segment => segment.enabled).length : -1;
   const snapshotLines: string[] = [];
-  const next = segments.map(segment => {
+  const next = segments.map((segment, index) => {
     if (segment.content.includes(runtimeMarker)) {
+      if (segment.content !== defaults[index]?.content) return { ...segment };
       const present = RUNTIME_LINE_ACU.filter(([token]) => segment.content.includes(token));
       snapshotLines.push(...present.filter(([token]) => !kept.has(token)).map(([, line]) => line));
       const stay = present.filter(([token]) => kept.has(token)).map(([, line]) => line);
       return { ...segment, content: [runtimeMarker, ...stay].join('\n') };
     }
     if (segment.content.includes(historyMarker) && segment.content.includes('$WORLD_HISTORY')) {
+      if (segment.content !== defaults[index]?.content) return { ...segment };
       snapshotLines.push('历史锚点与会话：$WORLD_HISTORY');
       return { ...segment, content: `${historyMarker}\n主会话历史见末尾快照。` };
     }
     return { ...segment };
   });
   const snapshotTemplate = snapshotLines.length
-    ? `【本回合运行时数据】\n以下是主会话快照里本角色没有单独注入的部分。\n${snapshotLines.join('\n')}`
+    ? `【本回合运行时数据】\n以下是本角色本次请求的最新完整快照，按这里的实时状态行动。\n${snapshotLines.join('\n')}`
     : '';
-  return { segments: next, snapshotTemplate };
+  return { segments: next, snapshotTemplate, movedGuidanceIndex };
 }
 
 export async function renderWorldSimulationSnapshotTemplate_ACU(

@@ -1,3 +1,4 @@
+import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 /**
  * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
  *
@@ -1039,11 +1040,29 @@ export const CONTINUATION_V35_DEFAULT_LINEAGE_ACU = Object.fromEntries(
 ) as Record<keyof ContinuationAgentPrompts_ACU, Array<{ index: number; role: string; hash: string; length: number }>>;
 
 /** 当前默认组：read、search、write_sql 使用函数调用，决策与契约仍是 JSON。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+export function buildV36ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const previous = buildV35ContinuationAgentPrompts_ACU();
   const current = { ...previous };
   for (const role of Object.keys(previous) as Array<keyof ContinuationAgentPrompts_ACU>) {
     current[role] = previous[role].map(segment => ({ ...segment, content: v36Content_ACU(segment.content) }));
   }
   return current;
+}
+
+/** 仅替换每个 Agent 默认组的最后一段；V36 默认组保留供历史迁移使用。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV36ContinuationAgentPrompts_ACU();
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    const segments = prompts[role];
+    segments[segments.length - 1] = { ...segments[segments.length - 1], role: 'user', content: USER_PREFILL_CONTENT_ACU };
+    if (role === 'main') {
+      const protocol = segments.find(segment => segment.content.includes('【工具：read / search'));
+      if (protocol) protocol.content += '\n独立 read/search 请在预算许可范围内于同一回复并发调用，不要分批等待；仅搜索结果决定的精读须等回执。上一轮的工具指令（尤其 SQL）和真实回执在会话历史中，按实际已存/未存栏目行动。';
+      continue;
+    }
+    // 任务段连同所有资料占位符由装配器整体移到每次请求末尾；不能按块删除任务或自检契约。
+    const protocol = segments.find(segment => segment.role === 'system');
+    if (protocol) protocol.content += '\n独立 read/search 在授权和预算内于同一回复并发调用，不拆批等待；搜索结果决定的精读等回执后再读。逐栏写入只认真实回执中的已存栏目，缺栏只补缺失项。';
+  }
+  return prompts;
 }

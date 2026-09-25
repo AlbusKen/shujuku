@@ -102,6 +102,16 @@ export function useWorldSimulationRuntime() {
     if (projected.length) hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
   }
 
+  async function initialize(): Promise<void> {
+    try {
+      await runtime.initialize();
+      refresh();
+    } catch (cause) {
+      toast.error(errorMessage_ACU(cause), { muteable: false });
+      refresh();
+    }
+  }
+
   function refresh(): boolean {
     try {
       const next = runtime.readUiSnapshot();
@@ -369,6 +379,7 @@ export function useWorldSimulationRuntime() {
     stageText,
     revisionText,
     refresh,
+    initialize,
     send,
     stop,
     resume,

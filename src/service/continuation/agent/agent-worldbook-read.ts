@@ -108,7 +108,8 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
         if (!uid || !content) continue;
         if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap)) continue;
         if (isEntryBlocked_ACU(raw)) continue;
-        if (title.startsWith('TavernDB-ACU-')) continue;
+        // CustomExport 是插件生成的普通表格世界书内容；其余内部载体仍不暴露。
+        if (title.startsWith('TavernDB-ACU-') && !title.startsWith('TavernDB-ACU-CustomExport-')) continue;
         entries.push({
           bookName,
           uid,
@@ -217,20 +218,10 @@ export function renderAgentWorldbookHits_ACU(snapshot: AgentWorldbookSnapshot_AC
   return `以下条目与本轮语境直接相关（常开条目 + 关键词命中），本轮涉及对应设定时应精读：\n${lines.join('\n')}`;
 }
 
-/**
- * 按书名 + uid 列表精读世界书条目全文，支撑 `$WORLDBOOK:书名:uid1,uid2`。
- * @param snapshot 运行内快照
- * @param bookName 世界书名
- * @param uids 条目 uid 列表
- * @returns 条目全文；未知书名/uid 或条目未启用时回灌可修正的错误文本
- */
-/** 主会话、伏笔等子代理与世界推演拒绝自行精读世界书时的说明。 */
-export const WORLDBOOK_READ_REFUSAL_ACU = '世界书条目全文已经按关键词触发注入。不要 read 世界书地址。如果触发内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
-
 /** 总纲与大纲看到的是目录，由它们自己决定读哪一条。 */
 export const WORLDBOOK_BROWSE_NOTE_ACU = '这是全部已启用世界书条目的目录，不是命中清单，没有注入条目全文。需要哪一条就按行尾地址 read。也可以用 search，scope 设为 ["worldbook"]，按关键词在世界书域里检索。';
 
-const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。不要再对世界书条目调用 read。如果这些内容不够，用 search，scope 设为 ["worldbook"]，在全部世界书内容里按关键词检索。';
+const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。已注入的条目不必重复 read；需要未命中内容时用 search，scope 设为 ["worldbook"]，按返回地址精读。';
 
 /** 总纲、大纲使用的已启用目录。不附带命中条目全文。 */
 export function renderAgentWorldbookBrowseCatalog_ACU(snapshot: AgentWorldbookSnapshot_ACU): string {
@@ -268,6 +259,10 @@ export function renderAgentWorldbookHitBodies_ACU(snapshot: AgentWorldbookSnapsh
   return [...byBook].map(([book, uids]) => renderAgentWorldbookEntries_ACU(snapshot, book, uids)).join('\n\n');
 }
 
+/**
+ * 按书名 + uid 列表精读世界书条目全文，支撑 `$WORLDBOOK:书名:uid1,uid2`。
+ * @returns 条目全文；未知书名/uid 或条目未启用时回灌可修正的错误文本
+ */
 export function renderAgentWorldbookEntries_ACU(snapshot: AgentWorldbookSnapshot_ACU, bookName: string, uids: readonly string[]): string {
   if (!snapshot.available) return '本轮世界书读取失败，无法精读条目。';
   const book = String(bookName ?? '').trim();

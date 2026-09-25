@@ -40,11 +40,13 @@ import {
 } from './simulation-orchestrator';
 import { buildDirectorOwnedStageRevision_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
-import { FirstFloorWorldSimulationStore_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
+import { FirstFloorWorldSimulationStore_ACU, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
+import { WORLD_SIMULATION_PROMPT_VERSION_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import { detectWorldCollisions_ACU } from './world-dynamics';
 import { createWorldSimulationHostToolDependencies_ACU } from './world-simulation-host-tools';
+import { loadAgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
 import { foldWorldSimulationArchive_ACU, foldWorldSimulationLedger_ACU, readWorldSimulationLedgerFieldSnapshot_ACU } from './simulation-ledger-fold';
 import { readWorldSimulationRunWriteProof_ACU, restoreWorldSimulationRunWrites_ACU } from './simulation-run-write-state';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from './world-simulation-evidence-registry';
@@ -236,7 +238,9 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
           archive: foldWorldSimulationArchive_ACU(activeChat, activeAnchor.messageIndex).snapshot };
       };
       const runWrites = restoreWorldSimulationRunWrites_ACU(readRunView, identity, currentAnchor, chat);
+      const worldbookSnapshot = loadAgentWorldbookSnapshot_ACU();
       const tools = createWorldSimulationHostToolDependencies_ACU({
+        worldbookSnapshot,
         liveLedger,
         anchorMessage: promptContext.anchorMessage,
         summary: '',
@@ -293,6 +297,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               promptContext: { ...promptContext, task: store.read()!.task, worldStagePlan: plannedRevision.plan },
               registry,
               tools,
+              worldbookSnapshot,
               writeSql: writeSql(runIdentity),
               runWrites,
               readCurrent: () => liveLedger().ledger,
@@ -360,6 +365,19 @@ export class WorldSimulationRuntime_ACU {
     private readonly getChat: () => any[] = getChatArray_ACU,
   ) {}
 
+  private async persistPromptMigration_ACU(): Promise<void> {
+    const chat = this.getChat();
+    const raw = (chat[0] as Record<string, any> | undefined)?.[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
+    if (!raw || raw.settings?.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) return;
+    const identity = getActiveChatStorageIdentity_ACU(chat);
+    if (!identity || this.orchestrator.isInFlight(identity)) return;
+    await new FirstFloorWorldSimulationStore_ACU().updateAtomically(current => current!, { chatIdentity: identity });
+  }
+
+  async initialize(): Promise<void> {
+    await this.persistPromptMigration_ACU();
+  }
+
   /** 读取派生视图：重载后残留的 running 以 paused/interrupted 呈现，不落盘。 */
   private readEnvelopeView_ACU(): WorldSimulationEnvelope_ACU | null {
     return this.orchestrator.deriveEnvelopeView(new FirstFloorWorldSimulationStore_ACU().read());
@@ -407,6 +425,7 @@ export class WorldSimulationRuntime_ACU {
   }
 
   async handleAssistantCompletion(intent: Parameters<typeof resolveWorldSimulationAssistantCompletion_ACU>[0]): Promise<WorldSimulationOrchestratorResult_ACU | null> {
+    await this.persistPromptMigration_ACU();
     const resolved = await resolveWorldSimulationAssistantCompletion_ACU(intent, { getChat: this.getChat, delay: ms => new Promise(resolve => setTimeout(resolve, ms)) });
     if (resolved.kind !== 'resolved') {
       logWarn_ACU(`世界推演自动触发跳过：锚点解析失败（${resolved.reason}）`);
@@ -430,6 +449,7 @@ export class WorldSimulationRuntime_ACU {
     const chat = this.getChat();
     const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
     if (chatIdentity && this.orchestrator.isInFlight(chatIdentity)) await this.orchestrator.interrupt(chatIdentity);
+    await this.persistPromptMigration_ACU();
     const envelope = this.readEnvelopeView_ACU();
     const pausedRun = envelope?.task?.status === 'paused' ? envelope.task.activeRun : null;
     const resumeKeyword = !instruction || RESUME_KEYWORD_ACU.test(instruction);
@@ -445,6 +465,7 @@ export class WorldSimulationRuntime_ACU {
   }
 
   async resume(): Promise<WorldSimulationOrchestratorResult_ACU | null> {
+    await this.persistPromptMigration_ACU();
     const envelope = this.readEnvelopeView_ACU();
     const identity = envelope?.task?.activeRun;
     if (!identity) return null;
@@ -457,6 +478,7 @@ export class WorldSimulationRuntime_ACU {
    * paused / blocked / 已完成任务都允许改设置——设置在每次运行开始时才被读取。
    */
   async saveSettings(settings: WorldSimulationSettings_ACU): Promise<void> {
+    await this.persistPromptMigration_ACU();
     const chat = this.getChat();
     const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
     if (!chatIdentity) {
