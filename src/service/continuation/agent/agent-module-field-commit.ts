@@ -111,7 +111,7 @@ function freshDelta_ACU(module: Module_ACU, revision: number): AgentModuleDelta_
 }
 
 /** 逐 ID 复用既有领域事务：缺栏或领域不合格时不产生完整领域行。 */
-function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, id: string, values: Record<string, unknown>, action: 'insert' | 'update' | 'delete', reason: string | undefined, completedStages: readonly number[], now: number): AgentModuleSnapshot_ACU {
+function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, id: string, values: Record<string, unknown>, action: 'insert' | 'update' | 'delete', reason: string | undefined, completedStages: readonly number[], now: number, evidenceFloorIndexes?: ReadonlySet<number>): AgentModuleSnapshot_ACU {
   if (module === 'webRefs') {
     if (action === 'delete') return applyAgentWebRefsDelta_ACU(snapshot, {
       summary: '', expectedRevision: snapshot.revisions.webRefs, items: [{ action: 'retire', id, title: '', source: 'web', url: '', query: '', tags: [], brief: '', summary: '', sourceStatus: 'ok', reason: reason ?? '' }],
@@ -166,7 +166,7 @@ function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, 
       precision: values.precision as AgentModuleDelta_ACU['chronology'][number]['precision'] ?? 'unknown',
       transition: values.transition as string ?? '', evidenceIndexes: values.evidenceIndexes as number[] ?? [], reason: reason ?? '' });
   }
-  const applied = applyAgentModuleDelta_ACU(snapshot, delta, [module], snapshot.settledThroughIndex, completedStages);
+  const applied = applyAgentModuleDelta_ACU(snapshot, delta, [module], snapshot.settledThroughIndex, completedStages, undefined, evidenceFloorIndexes);
   // 单栏独立事务只使用领域规则校验，不把旧 pendingFixes 视作本次修复。
   return { ...applied.snapshot, pendingFixes: snapshot.pendingFixes };
 }

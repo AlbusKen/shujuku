@@ -156146,7 +156146,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * 2. retire 必须命中既有条目并给理由；漏写不等于删除。
      * 3. 任一条目失败即整份 delta 拒绝，不做部分登记。
      */
-    function applyChronologyDelta_ACU(existing, items, settledIndex) {
+    function applyChronologyDelta_ACU(existing, items, settledIndex, evidenceFloorIndexes) {
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const item of items) {
             if (!item.id.trim())
@@ -156174,6 +156174,9 @@ Expected function or array of functions, received type ${typeof value}.`
             if (future.length) {
                 reject_ACU$5(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
             }
+            const missing = evidenceIndexes.filter(index => evidenceFloorIndexes !== undefined && !evidenceFloorIndexes.has(index));
+            if (missing.length)
+                reject_ACU$5(`年代学条目 ${item.id} 引用了不存在的正文楼层：${missing.join('、')}`, { id: item.id, missing });
             byId.set(item.id, {
                 id: item.id,
                 anchor: item.anchor.trim(),
@@ -156188,7 +156191,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return [...byId.values()];
     }
-    function applyChronologyPatches_ACU(existing, patches, settledIndex) {
+    function applyChronologyPatches_ACU(existing, patches, settledIndex, evidenceFloorIndexes) {
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const patch of patches) {
             const current = byId.get(patch.id);
@@ -156206,6 +156209,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (future.length) {
                     reject_ACU$5(`年代学条目 ${patch.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: patch.id, future, settledIndex });
                 }
+                const missing = normalized.filter(index => evidenceFloorIndexes !== undefined && !evidenceFloorIndexes.has(index));
+                if (missing.length)
+                    reject_ACU$5(`年代学条目 ${patch.id} 引用了不存在的正文楼层：${missing.join('、')}`, { id: patch.id, missing });
                 evidenceIndexes = normalized;
             }
             const anchor = patch.anchor?.trim() || current.anchor;
@@ -156407,7 +156413,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * @param settledIndex 本次结算的水位楼层，用于记录条目变动楼层
      * @returns 被写入模块的 revision 各自 +1；容错模式下违规模块留在 pendingFixes
      */
-    function applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options) {
+    function applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options, evidenceFloorIndexes) {
         assertWritePermission_ACU(delta, allowedWrites);
         const touched = collectTouchedModules_ACU(delta);
         if (!touched.length)
@@ -156451,9 +156457,9 @@ Expected function or array of functions, received type ${typeof value}.`
         const chronology = chronologyTouched
             ? isolateModule_ACU('chronology', snapshot.chronology, () => {
                 assertModuleRevision_ACU('chronology', delta, snapshot);
-                let next = delta.chronology.length ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;
+                let next = delta.chronology.length ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex, evidenceFloorIndexes) : snapshot.chronology;
                 if (delta.chronologyPatches.length)
-                    next = applyChronologyPatches_ACU(next, delta.chronologyPatches, settledIndex);
+                    next = applyChronologyPatches_ACU(next, delta.chronologyPatches, settledIndex, evidenceFloorIndexes);
                 return next;
             }, pending, applied, options, settledIndex)
             : snapshot.chronology;
@@ -156722,8 +156728,8 @@ Expected function or array of functions, received type ${typeof value}.`
      * upsert/remove 行 → SQL 层 revision 乐观锁 + 写回比对。SQL 物化或执行失败时
      * fail-closed 回退 JSON 链结果，CONTINUATION_AGENT_WRITE_REJECTED 语义不变。
      */
-    async function applyAgentModuleDeltaViaSql_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options) {
-        const applied = applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers, options);
+    async function applyAgentModuleDeltaViaSql_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers = [], options, evidenceFloorIndexes) {
+        const applied = applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers, options, evidenceFloorIndexes);
         if (!applied.appliedModules.length)
             return applied;
         try {
@@ -156843,7 +156849,7 @@ Expected function or array of functions, received type ${typeof value}.`
             storyArc: [], storyArcPatches: [], chronology: [], chronologyPatches: [], constraintProposals: [] };
     }
     /** 逐 ID 复用既有领域事务：缺栏或领域不合格时不产生完整领域行。 */
-    function applyDomain_ACU(snapshot, module, id, values, action, reason, completedStages, now) {
+    function applyDomain_ACU(snapshot, module, id, values, action, reason, completedStages, now, evidenceFloorIndexes) {
         if (module === 'webRefs') {
             if (action === 'delete')
                 return applyAgentWebRefsDelta_ACU(snapshot, {
@@ -156909,7 +156915,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     precision: values.precision ?? 'unknown',
                     transition: values.transition ?? '', evidenceIndexes: values.evidenceIndexes ?? [], reason: reason ?? '' });
         }
-        const applied = applyAgentModuleDelta_ACU(snapshot, delta, [module], snapshot.settledThroughIndex, completedStages);
+        const applied = applyAgentModuleDelta_ACU(snapshot, delta, [module], snapshot.settledThroughIndex, completedStages, undefined, evidenceFloorIndexes);
         // 单栏独立事务只使用领域规则校验，不把旧 pendingFixes 视作本次修复。
         return { ...applied.snapshot, pendingFixes: snapshot.pendingFixes };
     }
@@ -159338,7 +159344,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!output || !deltaTouched_ACU(output.delta))
                 return [];
             const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
-            const applied = await applyAgentModuleDeltaViaSql_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
+            const applied = await applyAgentModuleDeltaViaSql_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName), input.evidenceFloorIndexes);
             snapshot = applied.snapshot;
             return applied.appliedModules;
         };
@@ -161003,7 +161009,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
                     if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
                         const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
-                        const applied = await applyAgentModuleDeltaViaSql_ACU(context.moduleSnapshot, delta, result.writes, Math.max(0, chat.length - 1), completedStageNumbers, { onViolation: () => undefined, agentName: 'arc-architect' });
+                        const applied = await applyAgentModuleDeltaViaSql_ACU(context.moduleSnapshot, delta, result.writes, Math.max(0, chat.length - 1), completedStageNumbers, { onViolation: () => undefined, agentName: 'arc-architect' }, agentStoryEvidenceFloorIndexes_ACU(chat));
                         context.moduleSnapshot = applied.snapshot;
                         await this.persistSnapshot_ACU(chat, applied.snapshot);
                     }
@@ -161078,6 +161084,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 turnNumber: context.execution.turnNumber ?? 1,
                 settledIndex: Math.max(0, chat.length - 1),
                 completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
+                evidenceFloorIndexes: agentStoryEvidenceFloorIndexes_ACU(chat),
                 runAgent: async (call) => {
                     if (call.billing === 'opening') {
                         const used = ledger.perAgent.get(call.agentName) ?? 0;
@@ -161393,7 +161400,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (result.maintainer) {
                     try {
                         const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-                        const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1)).snapshot;
+                        const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
                         // 结算派工成功交付契约即推进水位到当轮末楼：空 delta（这段楼层没有新增伏笔/信息差）
                         // 同样代表已被处理过，不推水位会让同一区间每轮重复要求结算、白烧派工。
                         const settledTarget = chat.length - 1;
@@ -161425,7 +161432,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         const completedStageNumbers = context.execution.task.stages
                             .filter(stage => stage.status === 'completed')
                             .map(stage => stage.stageNumber);
-                        const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers)).snapshot;
+                        const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers, undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
                         // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
                         // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
                         if (applied !== nextSnapshot) {

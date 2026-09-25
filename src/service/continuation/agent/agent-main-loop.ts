@@ -78,6 +78,7 @@ import {
   renderAgentTurnGuidance_ACU,
   renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
+  agentStoryEvidenceFloorIndexes_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
 import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
@@ -1598,6 +1599,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             Math.max(0, chat.length - 1),
             completedStageNumbers,
             { onViolation: () => undefined, agentName: 'arc-architect' },
+            agentStoryEvidenceFloorIndexes_ACU(chat),
           );
           context.moduleSnapshot = applied.snapshot;
           await this.persistSnapshot_ACU(chat, applied.snapshot);
@@ -1679,6 +1681,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       turnNumber: context.execution.turnNumber ?? 1,
       settledIndex: Math.max(0, chat.length - 1),
       completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
+      evidenceFloorIndexes: agentStoryEvidenceFloorIndexes_ACU(chat),
       runAgent: async call => {
         if (call.billing === 'opening') {
           const used = ledger.perAgent.get(call.agentName) ?? 0;
@@ -2020,7 +2023,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (result.maintainer) {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1)).snapshot;
+          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
           // 结算派工成功交付契约即推进水位到当轮末楼：空 delta（这段楼层没有新增伏笔/信息差）
           // 同样代表已被处理过，不推水位会让同一区间每轮重复要求结算、白烧派工。
           const settledTarget = chat.length - 1;
@@ -2051,7 +2054,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           const completedStageNumbers = context.execution.task.stages
             .filter(stage => stage.status === 'completed')
             .map(stage => stage.stageNumber);
-          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers)).snapshot;
+          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers, undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
           // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
           // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
           if (applied !== nextSnapshot) { nextSnapshot = applied; snapshotChanged = true; }

@@ -97,6 +97,7 @@ export interface ContinuationWorkflowInput_ACU {
   turnNumber: number;
   settledIndex: number;
   completedStageNumbers: readonly number[];
+  evidenceFloorIndexes?: ReadonlySet<number>;
   runAgent: (call: ContinuationWorkflowAgentCall_ACU) => Promise<ContinuationWorkflowAgentPayload_ACU>;
   readCommittedSnapshot?: () => AgentModuleSnapshot_ACU;
   runComposer: (call: { prompt: string; revisionFeedback: string; priorInstruction: string }) => Promise<AgentComposerOutput_ACU>;
@@ -254,7 +255,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   ): Promise<AgentWritableModule_ACU[]> => {
     if (!output || !deltaTouched_ACU(output.delta)) return [];
     const delta = readRevisions ? mergeAgentDeltaRevisions_ACU(output.delta, readRevisions) : output.delta;
-    const applied = await applyAgentModuleDeltaViaSql_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName));
+    const applied = await applyAgentModuleDeltaViaSql_ACU(snapshot, delta, writes, input.settledIndex, input.completedStageNumbers, tolerantOptions_ACU(agentName), input.evidenceFloorIndexes);
     snapshot = applied.snapshot;
     return applied.appliedModules;
   };

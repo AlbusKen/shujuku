@@ -1320,7 +1320,7 @@ describe('派工与写集落盘', () => {
         summary: '结算了晶屑与三日行程',
         delta: {
           hooks: [{ action: 'upsert', id: 'H1', summary: '守门人手中的黑色晶屑', status: 'planted', importance: 'high', plantedIndex: 3 }],
-          chronology: [{ action: 'upsert', id: 'T1', anchor: '抵达禁区外围的第三日', elapsed: '自开篇约三日', precision: 'approximate', transition: '主角一行赶路三日抵达禁区外围', evidenceIndexes: [2, 3] }],
+          chronology: [{ action: 'upsert', id: 'T1', anchor: '抵达禁区外围的第三日', elapsed: '自开篇约三日', precision: 'approximate', transition: '主角一行赶路三日抵达禁区外围', evidenceIndexes: [1, 3] }],
         },
       })],
     });
@@ -1332,7 +1332,7 @@ describe('派工与写集落盘', () => {
     expect(h.written).toHaveLength(1);
     expect(h.written[0].snapshot.hooks).toHaveLength(1);
     expect(h.written[0].snapshot.chronology).toHaveLength(1);
-    expect(h.written[0].snapshot.chronology[0]).toMatchObject({ id: 'T1', anchor: '抵达禁区外围的第三日', evidenceIndexes: [2, 3], updatedIndex: 3 });
+    expect(h.written[0].snapshot.chronology[0]).toMatchObject({ id: 'T1', anchor: '抵达禁区外围的第三日', evidenceIndexes: [1, 3], updatedIndex: 3 });
     expect(h.written[0].snapshot.revisions).toMatchObject({ hooks: 1, chronology: 1 });
     expect(h.written[0].snapshot.settledThroughIndex).toBe(3);
 

@@ -351,7 +351,7 @@ function assertVolumeLifecycle_ACU(
  * 2. retire 必须命中既有条目并给理由；漏写不等于删除。
  * 3. 任一条目失败即整份 delta 拒绝，不做部分登记。
  */
-function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: AgentChronologyDeltaItem_ACU[], settledIndex: number): AgentChronologyEntry_ACU[] {
+function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: AgentChronologyDeltaItem_ACU[], settledIndex: number, evidenceFloorIndexes?: ReadonlySet<number>): AgentChronologyEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
   for (const item of items) {
     if (!item.id.trim()) reject_ACU('年代学条目缺少 id');
@@ -373,6 +373,8 @@ function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: A
     if (future.length) {
       reject_ACU(`年代学条目 ${item.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: item.id, future, settledIndex });
     }
+    const missing = evidenceIndexes.filter(index => evidenceFloorIndexes !== undefined && !evidenceFloorIndexes.has(index));
+    if (missing.length) reject_ACU(`年代学条目 ${item.id} 引用了不存在的正文楼层：${missing.join('、')}`, { id: item.id, missing });
     byId.set(item.id, {
       id: item.id,
       anchor: item.anchor.trim(),
@@ -388,7 +390,7 @@ function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: A
   return [...byId.values()];
 }
 
-function applyChronologyPatches_ACU(existing: AgentChronologyEntry_ACU[], patches: AgentChronologyPatch_ACU[], settledIndex: number): AgentChronologyEntry_ACU[] {
+function applyChronologyPatches_ACU(existing: AgentChronologyEntry_ACU[], patches: AgentChronologyPatch_ACU[], settledIndex: number, evidenceFloorIndexes?: ReadonlySet<number>): AgentChronologyEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
   for (const patch of patches) {
     const current = byId.get(patch.id);
@@ -404,6 +406,8 @@ function applyChronologyPatches_ACU(existing: AgentChronologyEntry_ACU[], patche
       if (future.length) {
         reject_ACU(`年代学条目 ${patch.id} 引用了尚未结算的未来楼层：${future.join('、')}（本次结算水位=${settledIndex}）。时间事实只能引用已发生的真实正文`, { id: patch.id, future, settledIndex });
       }
+      const missing = normalized.filter(index => evidenceFloorIndexes !== undefined && !evidenceFloorIndexes.has(index));
+      if (missing.length) reject_ACU(`年代学条目 ${patch.id} 引用了不存在的正文楼层：${missing.join('、')}`, { id: patch.id, missing });
       evidenceIndexes = normalized;
     }
     const anchor = patch.anchor?.trim() || current.anchor;
@@ -633,6 +637,7 @@ export function applyAgentModuleDelta_ACU(
   settledIndex: number,
   completedStageNumbers: readonly number[] = [],
   options?: AgentModuleApplyOptions_ACU,
+  evidenceFloorIndexes?: ReadonlySet<number>,
 ): AgentModuleApplyResult_ACU {
   assertWritePermission_ACU(delta, allowedWrites);
   const touched = collectTouchedModules_ACU(delta);
@@ -674,8 +679,8 @@ export function applyAgentModuleDelta_ACU(
   const chronology = chronologyTouched
     ? isolateModule_ACU('chronology', snapshot.chronology, () => {
       assertModuleRevision_ACU('chronology', delta, snapshot);
-      let next = delta.chronology.length ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex) : snapshot.chronology;
-      if (delta.chronologyPatches.length) next = applyChronologyPatches_ACU(next, delta.chronologyPatches, settledIndex);
+      let next = delta.chronology.length ? applyChronologyDelta_ACU(snapshot.chronology, delta.chronology, settledIndex, evidenceFloorIndexes) : snapshot.chronology;
+      if (delta.chronologyPatches.length) next = applyChronologyPatches_ACU(next, delta.chronologyPatches, settledIndex, evidenceFloorIndexes);
       return next;
     }, pending, applied, options, settledIndex)
     : snapshot.chronology;
@@ -961,8 +966,9 @@ export async function applyAgentModuleDeltaViaSql_ACU(
   settledIndex: number,
   completedStageNumbers: readonly number[] = [],
   options?: AgentModuleApplyOptions_ACU,
+  evidenceFloorIndexes?: ReadonlySet<number>,
 ): Promise<AgentModuleApplyResult_ACU> {
-  const applied = applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers, options);
+  const applied = applyAgentModuleDelta_ACU(snapshot, delta, allowedWrites, settledIndex, completedStageNumbers, options, evidenceFloorIndexes);
   if (!applied.appliedModules.length) return applied;
   try {
     await verifyAgentModuleRowsViaSql_ACU(snapshot, applied.snapshot, applied.appliedModules);

@@ -392,6 +392,9 @@ describe('Agent 年代学写集事务', () => {
     const normalized = appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU({ evidenceIndexes: [5, 4, 5] })] }), ['chronology'], 6);
     expect(normalized.chronology.find(entry => entry.id === 'T2')!.evidenceIndexes).toEqual([4, 5]);
 
+    expect(() => appliedDelta_ACU(baseSnapshot_ACU(), delta_ACU({ chronology: [chronologyItem_ACU()] }), ['chronology'], 6, [], undefined, new Set([1, 3, 4])))
+      .toThrowError(/不存在的正文楼层：5/);
+
     const snapshot = baseSnapshot_ACU();
     const future = delta_ACU({ chronology: [chronologyItem_ACU({ id: 'T2' }), chronologyItem_ACU({ id: 'T3', evidenceIndexes: [9] })] });
     expect(() => appliedDelta_ACU(snapshot, future, ['chronology'], 6)).toThrowError(/未来楼层/);
