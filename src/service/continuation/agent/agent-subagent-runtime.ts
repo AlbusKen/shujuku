@@ -176,6 +176,8 @@ export interface AgentSubagentRunInput_ACU {
   createIdentity: (agentName: string, attempt: number) => ContinuationInternalAiRequestIdentity_ACU;
   isCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   signal?: AbortSignal | null;
+  /** 修正轮只允许维护员触碰仍待修复的模块；首轮不传则使用职责固定写集。 */
+  targetModules?: readonly AgentWritableModule_ACU[];
   writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean }) => Promise<AgentModuleFieldReceipt_ACU>;
   /** 主会话为本轮备好的世界书全文和已有检索。传入后子代理不能再读这些范围。 */
   sharedMaterials?: string;
@@ -643,7 +645,9 @@ export class AgentSubagentRuntime_ACU {
     if (!definition) {
       rejectDelegation_ACU(`目录里没有名为 ${input.delegation.agentName} 的子代理`, { agentName: input.delegation.agentName });
     }
-    const writes = [...KIND_FIXED_WRITES_ACU[definition.kind]];
+    const writes = definition.kind === 'maintain' && input.targetModules?.length
+      ? [...KIND_FIXED_WRITES_ACU[definition.kind]].filter((module): module is AgentWritableModule_ACU => input.targetModules!.includes(module))
+      : [...KIND_FIXED_WRITES_ACU[definition.kind]];
     const gate: SubagentGate_ACU = {
       state: createAgentReadGateState_ACU(),
       config: {

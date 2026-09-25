@@ -1694,6 +1694,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         const preset = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
         const result = await this.dependencies.subagentRuntime.run({
           delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
+          targetModules: call.targetModules,
           settings: request.settings,
           resolveContext: context,
           budget,

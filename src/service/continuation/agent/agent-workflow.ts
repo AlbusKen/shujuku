@@ -141,7 +141,7 @@ function deltaTouched_ACU(delta: AgentMaintainerOutput_ACU['delta'] | null | und
 
 function formatFixes_ACU(fixes: readonly AgentPendingFix_ACU[]): string {
   if (!fixes.length) return '无';
-  return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => violation.message).join('；') || item.lastError}`).join(' | ');
+  return fixes.map(item => `${item.module} 第 ${item.attempts} 次：${item.violations.map(violation => `${violation.path}: ${violation.message}`).join('；') || item.lastError}`).join(' | ');
 }
 
 function acceptedKeysForModule_ACU(keys: readonly string[] | undefined, module: AgentWritableModule_ACU): string[] {
@@ -284,63 +284,83 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   if (!input.hasUnsettledHistory && !maintainerPending) {
     steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: '没有未结算正文，也没有待修复的结算模块' });
   } else {
-    const maintainer = await runSafe_ACU({
+    let maintainer = await runSafe_ACU({
       agentName: MAINTAINER_NAME_ACU,
       billing: 'pipeline',
       prompt: maintainerPrompt_ACU(input.opening.focus, snapshot),
     });
-    const writes = (maintainer.writes ?? [...MAINTAINER_MODULES_ACU])
-      .filter((module): module is AgentWritableModule_ACU => (MAINTAINER_MODULES_ACU as readonly string[]).includes(module));
-    let completion: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'> = maintainer.completion
-      ?? (!maintainer.ok ? 'failed' : maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta) ? 'complete_no_change' : 'complete_changed');
-    let modules = completionModules_ACU(maintainer, writes, completion);
-    const appliedModules = maintainer.ok
-      ? await applyMaintainerLike_ACU(maintainer.usedFieldWrites ? null : maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
-      : [];
-    const issues = [...(maintainer.unresolvedIssues ?? [])];
-    if (!maintainer.ok && !issues.length) {
-      for (const module of writes.length ? writes : [...MAINTAINER_MODULES_ACU]) {
-        issues.push({ module, source: 'invoke_failed', path: module, message: maintainer.summary || '维护子代理调用失败' });
-        modules[module] = 'failed';
+    let repairAttempts = 0;
+    const maxRepairAttempts = Math.max(0, input.settings.workflow.reviseLimit);
+    while (true) {
+      const writes = (maintainer.writes ?? [...MAINTAINER_MODULES_ACU])
+        .filter((module): module is AgentWritableModule_ACU => (MAINTAINER_MODULES_ACU as readonly string[]).includes(module));
+      let completion: Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'> = maintainer.completion
+        ?? (!maintainer.ok ? 'failed' : maintainer.noChange || !deltaTouched_ACU(maintainer.maintainer?.delta) ? 'complete_no_change' : 'complete_changed');
+      let modules = completionModules_ACU(maintainer, writes, completion);
+      const appliedModules = maintainer.ok
+        ? await applyMaintainerLike_ACU(maintainer.usedFieldWrites ? null : maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
+        : [];
+      const issues = [...(maintainer.unresolvedIssues ?? [])];
+      if (!maintainer.ok && !issues.length) {
+        for (const module of writes.length ? writes : [...MAINTAINER_MODULES_ACU]) {
+          issues.push({ module, source: 'invoke_failed', path: module, message: maintainer.summary || '维护子代理调用失败' });
+          modules[module] = 'failed';
+        }
       }
-    }
-    if (issues.length) {
-      snapshot = recordWorkflowIssues_ACU(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
-      completion = appliedModules.length ? 'partial' : 'failed';
-    }
-    const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module));
-    if (transactionPending.length) {
-      for (const fix of transactionPending) {
-        const moduleAccepted = appliedModules.includes(fix.module) || acceptedKeysForModule_ACU(maintainer.acceptedKeys, fix.module).length > 0;
-        modules[fix.module] = moduleAccepted ? 'partial' : 'failed';
+      if (issues.length) {
+        snapshot = recordWorkflowIssues_ACU(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
+        completion = appliedModules.length ? 'partial' : 'failed';
       }
-      completion = appliedModules.length ? 'partial' : 'failed';
-    } else {
-      snapshot = clearCompletedPending_ACU(snapshot, modules);
-    }
-    const now = Date.now();
-    snapshot = {
-      ...snapshot,
-      materialCompletion: {
-        state: completion,
-        rangeStartIndex: settlementStartIndex,
-        rangeEndIndex: settlementEndIndex,
-        modules,
-        updatedAt: now,
-      },
-      updatedAt: Math.max(snapshot.updatedAt, now),
-    };
-    if (completion === 'complete_changed' || completion === 'complete_no_change') {
-      snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
-    }
-    if (!maintainer.ok || completion === 'failed') {
-      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
-    } else if (completion === 'complete_no_change') {
-      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
-    } else if (completion === 'partial') {
-      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: `${maintainer.summary || '已保留部分资料'}；仍有待补条目` });
-    } else {
-      steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'ok', summary: maintainer.summary });
+      const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module));
+      if (transactionPending.length) {
+        for (const fix of transactionPending) {
+          const moduleAccepted = appliedModules.includes(fix.module) || acceptedKeysForModule_ACU(maintainer.acceptedKeys, fix.module).length > 0;
+          modules[fix.module] = moduleAccepted ? 'partial' : 'failed';
+        }
+        completion = appliedModules.length ? 'partial' : 'failed';
+      } else {
+        snapshot = clearCompletedPending_ACU(snapshot, modules);
+      }
+      const now = Date.now();
+      snapshot = {
+        ...snapshot,
+        materialCompletion: {
+          state: completion,
+          rangeStartIndex: settlementStartIndex,
+          rangeEndIndex: settlementEndIndex,
+          modules,
+          updatedAt: now,
+        },
+        updatedAt: Math.max(snapshot.updatedAt, now),
+      };
+      if (completion === 'complete_changed' || completion === 'complete_no_change') {
+        snapshot = { ...snapshot, settledThroughIndex: Math.max(snapshot.settledThroughIndex, input.settledIndex) };
+      }
+      if (!maintainer.ok || completion === 'failed') {
+        steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: maintainer.summary });
+      } else if (completion === 'complete_no_change') {
+        steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: maintainer.summary || '结算没有新事实' });
+      } else if (completion === 'partial') {
+        steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'failed', summary: `${maintainer.summary || '已保留部分资料'}；仍有待补条目` });
+      } else {
+        steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'ok', summary: maintainer.summary });
+      }
+      const repairPending = snapshot.pendingFixes.filter(item =>
+        (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module)
+        && item.source !== 'truncated');
+      if (!repairPending.length || repairAttempts >= maxRepairAttempts) break;
+      repairAttempts += 1;
+      const repairModules = [...new Set(repairPending.map(item => item.module))];
+      maintainer = await runSafe_ACU({
+        agentName: MAINTAINER_NAME_ACU,
+        billing: 'pipeline',
+        targetModules: repairModules,
+        prompt: [
+          `上一轮资料写入仍有待修复项（第 ${repairAttempts} 次定向修正）：`,
+          formatFixes_ACU(repairPending),
+          '只修复上述模块和字段；不要重发已成功保存的其它模块。先 read 对应权威模块，再提交最小 write_sql；仍无法确定时明确返回 unresolvedIssues。',
+        ].join('\n'),
+      });
     }
   }
 

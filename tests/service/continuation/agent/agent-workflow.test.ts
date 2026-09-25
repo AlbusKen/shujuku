@@ -184,7 +184,11 @@ describe('续写固定工作流', () => {
       },
     });
     const failedResult = await failed.run();
-    expect(failedCalls.filter(call => call.agentName === 'hook-cognition-maintainer')).toHaveLength(1);
+    const failedMaintainerCalls = failedCalls.filter(call => call.agentName === 'hook-cognition-maintainer');
+    expect(failedMaintainerCalls).toHaveLength(4);
+    expect(failedMaintainerCalls.slice(1).every(call => call.targetModules)).toBe(true);
+    expect(failedMaintainerCalls.slice(1).every(call => call.targetModules?.includes('hooks'))).toBe(true);
+    expect(failedMaintainerCalls[1].prompt).toContain('hooks#H1.status: 缺栏');
     expect(failedCalls.every(call => call.billing !== 'repair')).toBe(true);
     expect(failedResult).toMatchObject({ outcome: 'escalate', escalationKind: 'pending_fix' });
     expect(failedResult.pendingFixes[0].violations).toContainEqual({ path: 'hooks#H1.status', message: '缺栏' });
