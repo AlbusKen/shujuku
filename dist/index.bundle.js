@@ -155933,11 +155933,16 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             if (!item.topic.trim())
                 reject_ACU$5(`信息差条目 ${item.id} 的 topic 不能为空`, { id: item.id });
-            // 未揭示的事件不允许携带揭示楼层，否则等于把计划写成了已发生事实。
+            const current = byId.get(item.id);
+            let revealIndex = item.revealIndex;
+            // 仅修复既有条目已经携带的同一份历史脏楼层；新建、显式变更或混入其他状态仍拒绝。
             if (item.revealStatus === 'unrevealed' && item.revealIndex !== null) {
-                reject_ACU$5(`信息差条目 ${item.id} 标记为未揭示，揭示楼层必须为空`, { id: item.id, revealIndex: item.revealIndex });
+                if (current?.revealStatus === 'unrevealed' && current.revealIndex === item.revealIndex)
+                    revealIndex = null;
+                else
+                    reject_ACU$5(`信息差条目 ${item.id} 标记为未揭示，揭示楼层必须为空`, { id: item.id, revealIndex: item.revealIndex });
             }
-            if (item.revealStatus !== 'unrevealed' && item.revealIndex === null) {
+            if (item.revealStatus !== 'unrevealed' && revealIndex === null) {
                 reject_ACU$5(`信息差条目 ${item.id} 已揭示，必须给出揭示楼层`, { id: item.id });
             }
             byId.set(item.id, {
@@ -155947,7 +155952,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 readerKnown: item.readerKnown,
                 characterKnowledge: item.characterKnowledge,
                 revealStatus: item.revealStatus,
-                revealIndex: item.revealIndex,
+                revealIndex,
                 retired: false,
                 retiredReason: '',
             });

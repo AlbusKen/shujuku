@@ -323,6 +323,35 @@ describe('Agent 写集事务', () => {
     expect(() => appliedDelta_ACU(baseSnapshot_ACU(), missingIndex, ['infoGap'], 6)).toThrowError(/必须给出揭示楼层/);
   });
 
+  it('upsert 只清理既有条目中完全相同的历史脏揭示楼层', () => {
+    const existingDirty = baseSnapshot_ACU();
+    existingDirty.infoGap = existingDirty.infoGap.map(entry => ({ ...entry, revealIndex: 4 }));
+
+    const repaired = appliedDelta_ACU(
+      existingDirty,
+      delta_ACU({ expectedRevisions: { infoGap: 3 }, infoGap: [infoGapItem_ACU({ revealIndex: 4 })] }),
+      ['infoGap'],
+      6,
+    );
+    expect(repaired.infoGap[0]).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null });
+
+    const newInconsistent = delta_ACU({
+      expectedRevisions: { infoGap: 3 },
+      infoGap: [infoGapItem_ACU({ id: 'E2', revealIndex: 4 })],
+    });
+    expect(() => appliedDelta_ACU(baseSnapshot_ACU(), newInconsistent, ['infoGap'], 6)).toThrowError(/揭示楼层必须为空/);
+
+    const differentDirtyIndex = delta_ACU({
+      expectedRevisions: { infoGap: 3 },
+      infoGap: [infoGapItem_ACU({ revealIndex: 5 })],
+    });
+    expect(() => appliedDelta_ACU(existingDirty, differentDirtyIndex, ['infoGap'], 6)).toThrowError(/揭示楼层必须为空/);
+
+    const differentExistingStatus = baseSnapshot_ACU();
+    differentExistingStatus.infoGap = differentExistingStatus.infoGap.map(entry => ({ ...entry, revealStatus: 'partial' as const, revealIndex: 4 }));
+    expect(() => appliedDelta_ACU(differentExistingStatus, delta_ACU({ expectedRevisions: { infoGap: 3 }, infoGap: [infoGapItem_ACU({ revealIndex: 4 })] }), ['infoGap'], 6)).toThrowError(/揭示楼层必须为空/);
+  });
+
   it('patch 只改给定字段并保留其余字段，版本号照常递增', () => {
     const applied = appliedDelta_ACU(
       baseSnapshot_ACU(),
