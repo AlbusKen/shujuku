@@ -93,7 +93,6 @@ import {
 import { AgentSubagentRuntime_ACU, type AgentSubagentRunResult_ACU } from './agent-subagent-runtime';
 import {
   continuationBeatObligation_ACU,
-  continuationMajorTurn_ACU,
   runContinuationAgentWorkflow_ACU,
   type ContinuationWorkflowAgentPayload_ACU,
   type ContinuationWorkflowResult_ACU,
@@ -1677,7 +1676,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       },
       hasUnsettledHistory: !unsettled.startsWith('没有尚未结算的真实历史'),
       beatObligation: continuationBeatObligation_ACU(context.execution.turn),
-      majorTurn: continuationMajorTurn_ACU(context.execution.turn),
+      turnNumber: context.execution.turnNumber ?? 1,
       settledIndex: Math.max(0, chat.length - 1),
       completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
       runAgent: async call => {

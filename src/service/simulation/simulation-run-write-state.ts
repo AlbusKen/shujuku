@@ -79,7 +79,7 @@ export class WorldSimulationRunWriteState_ACU {
   private readonly refs = new Set<string>();
   private readonly written = new Map<string, Set<string>>();
 
-  constructor(private readonly read: () => WorldSimulationRunWriteView_ACU, baseRevision: number, proof?: WorldSimulationRunWriteProof_ACU) {
+  constructor(private readonly read: () => WorldSimulationRunWriteView_ACU, baseRevision: number, proof?: WorldSimulationRunWriteProof_ACU, adoptedWritten: Record<string, string[]> = {}) {
     const initial = read();
     if (proof) {
       if (proof.baseLedgerRevision !== baseRevision || proof.ledgerRevision !== initial.ledger.revision
@@ -87,7 +87,10 @@ export class WorldSimulationRunWriteState_ACU {
       this.confirmed = proof.confirmedWrites;
       for (const ref of proof.evidenceRefs) this.refs.add(ref);
       for (const [module, ids] of Object.entries(proof.written)) this.written.set(module, new Set(ids));
-    } else if (initial.ledger.revision !== baseRevision) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+    } else {
+      if (initial.ledger.revision !== baseRevision && !Object.keys(adoptedWritten).length) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+      for (const [module, ids] of Object.entries(adoptedWritten)) this.written.set(module, new Set(ids));
+    }
     this.expected = canonical_ACU(initial);
     this.ledgerRevision = initial.ledger.revision;
   }
@@ -156,6 +159,29 @@ export class WorldSimulationRunWriteState_ACU {
     }
   }
 
+  stripConfirmedWrites(candidate: WorldSimulationCandidate_ACU): WorldSimulationCandidate_ACU | null {
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(candidate.patch)) {
+      const module = key === 'chronicleArchive' ? 'chronicle' : key;
+      const written = this.written.get(module);
+      if (!written?.size) {
+        patch[key] = value;
+        continue;
+      }
+      if (key === 'clock' || key === 'player' || key === 'guidance' || key === 'chronicle' || key === 'chronicleArchive') continue;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const changes = value as { upsert?: unknown; remove?: unknown };
+      const filterRows = (rows: unknown): unknown[] => Array.isArray(rows)
+        ? rows.filter(row => !!row && typeof row === 'object' && !Array.isArray(row)
+          && typeof (row as { id?: unknown }).id === 'string'
+          && !written.has((row as { id: string }).id))
+        : [];
+      const next = { ...changes, upsert: filterRows(changes.upsert), remove: filterRows(changes.remove) };
+      if (next.upsert.length || next.remove.length) patch[key] = next;
+    }
+    return Object.keys(patch).length ? { ...candidate, patch } : null;
+  }
+
   get confirmedWrites(): number { return this.confirmed; }
   get currentLedgerRevision(): number { return this.ledgerRevision; }
   get hasConfirmedWrites(): boolean { return this.confirmed > 0; }
@@ -191,9 +217,18 @@ export function restoreWorldSimulationRunWrites_ACU(read: () => WorldSimulationR
   // 别的运行的证明仅可证明与当前完全一致的旧基线，不能为本运行签发已确认写入。
   if (!proof) {
     const current = read();
-    if (hasPartialWorldSimulationRunWrites_ACU(current) && (!stored || stored.fingerprint !== canonical_ACU(current))) {
-      throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+    const sameTaskStage = stored?.taskId === identity.taskId && stored.stageId === identity.stageId;
+    if (hasPartialWorldSimulationRunWrites_ACU(current) && sameTaskStage) {
+      const adoptedWritten: Record<string, string[]> = {};
+      for (const [module, records] of Object.entries(current.fields?.records ?? {})) {
+        const ids = Object.entries(records ?? {})
+          .filter(([, record]) => record.status === 'partial' && Object.keys(record.fields).length > 0)
+          .map(([id]) => id);
+        if (ids.length) adoptedWritten[module] = ids;
+      }
+      return new WorldSimulationRunWriteState_ACU(read, current.ledger.revision, undefined, adoptedWritten);
     }
+    if (hasPartialWorldSimulationRunWrites_ACU(current) && (!stored || stored.fingerprint !== canonical_ACU(current))) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
   }
   return new WorldSimulationRunWriteState_ACU(read, identity.baseLedgerRevision, proof);
 }

@@ -122,6 +122,10 @@ function candidateModules_ACU(candidate: WorldSimulationCandidate_ACU | undefine
   return [...new Set(Object.keys(candidate.patch).map(ledgerModule_ACU).filter((module): module is WorldSimulationLedgerModule_ACU => module !== null))];
 }
 
+function isRunWriteOverlap_ACU(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('WORLD_SIMULATION_RUN_WRITE_OVERLAP');
+}
+
 function pendingAnchor_ACU(identity: WorldSimulationRunIdentity_ACU): WorldSimulationPendingAnchor_ACU {
   return {
     messageKey: identity.anchorMessageKey,
@@ -452,8 +456,17 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     return replay.ledger;
   };
   const applyPending = async (preview: WorldSimulationLedger_ACU, candidates: readonly WorldSimulationCandidate_ACU[]) => {
-    input.runWrites?.assertCandidatesDisjoint(candidates);
-    return applySafely_ACU(preview, candidates, authorized, input.settings, anchorMessage);
+    try {
+      input.runWrites?.assertCandidatesDisjoint(candidates);
+      return applySafely_ACU(preview, candidates, authorized, input.settings, anchorMessage);
+    } catch (error) {
+      if (!isRunWriteOverlap_ACU(error)) throw error;
+      return {
+        ledger: preview,
+        accepted: [],
+        rejected: candidates.map(candidate => failedOutcome_ACU(candidate.agentName, error, 'transaction_rejected', candidateModules_ACU(candidate))),
+      };
+    }
   };
   const nextSeq = (agentName: string): number => {
     const value = (seq.get(agentName) ?? 0) + 1;
@@ -486,7 +499,20 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
         directorMaterials: input.directorMaterials,
         triggeredWorldbook: input.triggeredWorldbook,
       });
-      return restrictOutcome_ACU(outcome, targetModules);
+      const restricted = restrictOutcome_ACU(outcome, targetModules);
+      if (restricted.candidate && input.runWrites) {
+        const stripped = input.runWrites.stripConfirmedWrites(restricted.candidate);
+        if (!stripped) {
+          return failedOutcome_ACU(
+            restricted.agentName,
+            new Error('WORLD_SIMULATION_RUN_WRITE_OVERLAP:confirmed write fully covered candidate'),
+            'transaction_rejected',
+            targetModules,
+          );
+        }
+        restricted.candidate = stripped;
+      }
+      return restricted;
     } catch (error) {
       return failedOutcome_ACU(agentName, error, 'invoke_failed', targetModules);
     }
@@ -529,15 +555,17 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
   outcomes.push(...primary.rejected);
   ledger = recordWorkflowIssues_ACU(ledger, [...primaryOutcomes, ...primary.rejected], input.identity);
 
-  const shouldChronicle = (!requestedTargets || requestedTargets.has('chronicle'))
+  const shouldChronicle = (!requestedTargets || requestedTargets.has('chronicle') || requestedTargets.has('rumors'))
     && !agentSkipped_ACU('chronicler', skipModules) && (
-    input.opening.dispatchChronicler
+    !requestedTargets
+    || input.opening.dispatchChronicler
     || ledger.chronicle.length >= input.settings.workflow.chroniclerHotThreshold
     || seedsClosedThisRound_ACU(base, ledger)
   );
   if (shouldChronicle) {
     expectedModules.add('chronicle');
-    const chronicler = await runAgent('chronicler', ledger, ['chronicle']);
+    expectedModules.add('rumors');
+    const chronicler = await runAgent('chronicler', ledger, ['chronicle', 'rumors'].filter(module => !skipModules.has(module)) as WorldSimulationLedgerModule_ACU[]);
     outcomes.push(chronicler);
     ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [chronicler]);
     if (chronicler.candidate) {

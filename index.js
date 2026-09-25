@@ -87844,9 +87844,42 @@ $CONTENT
         }
         return current;
     }
+    const CONTINUATION_CURRENT_MAIN_WORKFLOW_RULES_ACU = '【当前固定工作流补充】\nopen_round 的固定工作流遵循逻辑递进序：先完成正文资料结算，再让 mainline-planner 与 beat-planner 在同一层并发；beat-planner 首轮且无伏笔义务时可以跳过，第二轮起保底派遣，由其以 no_change 结束无真实操作的轮次。不要派 continuity-reviewer；策划建议之间的冲突由 instruction-composer 自查并保守取舍，红线、硬事实与最终冲突由 finalReviewer 终审。特别重要的资料是 hooks、infoGap、chronology，不能只看目录摘要。';
+    const CONTINUATION_CURRENT_COMPOSER_RULES_ACU = '【当前冲突自查与资料清单】\n写作指令交付前必须通读并核对 hooks、infoGap、chronology，以及本轮结算和策划回执。检查策划建议之间、建议与本轮 pacing、建议与已结算硬事实或长期约束之间的冲突；冲突时采用更保守的一方，并在 summary 说明取舍，不得拼接互相矛盾的建议。';
+    const CONTINUATION_CURRENT_FINAL_REVIEW_RULES_ACU = '【当前终审补充】\n终审必须核对 hooks、infoGap、chronology 与本轮正文事实，检查红线、已结算硬事实、长期约束和策划冲突；发现冲突时拒绝不合规指导并列出可执行修正，不把 continuity-reviewer 作为独立派工角色。';
+    function appendCurrentDefaultRule_ACU(segments, rule) {
+        const taskSegment = segments.find(segment => segment.content.includes('$AGENT_TASK'));
+        if (taskSegment) {
+            return segments.map(segment => segment === taskSegment
+                ? { ...segment, content: `${segment.content}\n${rule}` }
+                : segment);
+        }
+        return segments.map((segment, index) => index === segments.length - 1
+            ? { ...segment, content: `${segment.content}\n${rule}` }
+            : segment);
+    }
+    function applyCurrentContinuationPromptRules_ACU(prompts) {
+        const main = prompts.main.map(segment => {
+            if (!segment.content.startsWith('我的行动规则：'))
+                return segment;
+            return {
+                ...segment,
+                content: segment.content
+                    .replace('仅在本轮有伏笔操作义务时派 beat-planner，仅在策划冲突或大转折时派 continuity-reviewer，然后由 instruction-composer 写出 instruction。', '第二轮起固定工作流保底派 beat-planner，首轮且无伏笔义务时可跳过；不再派 continuity-reviewer，由 instruction-composer 写出 instruction。')
+                    .replace('不要 delegate hook-cognition-maintainer、mainline-planner、beat-planner、continuity-reviewer 或 instruction-composer。', '不要 delegate hook-cognition-maintainer、mainline-planner、beat-planner、continuity-reviewer 或 instruction-composer；这些角色由固定工作流按上述顺序处理。')
+                    + `\n${CONTINUATION_CURRENT_MAIN_WORKFLOW_RULES_ACU}`,
+            };
+        });
+        return {
+            ...prompts,
+            main,
+            instructionComposer: appendCurrentDefaultRule_ACU(prompts.instructionComposer, CONTINUATION_CURRENT_COMPOSER_RULES_ACU),
+            finalReviewer: appendCurrentDefaultRule_ACU(prompts.finalReviewer, CONTINUATION_CURRENT_FINAL_REVIEW_RULES_ACU),
+        };
+    }
     /** 仅替换每个 Agent 默认组的最后一段；V36 默认组保留供历史迁移使用。 */
     function buildDefaultContinuationAgentPrompts_ACU() {
-        const prompts = buildV36ContinuationAgentPrompts_ACU();
+        const prompts = applyCurrentContinuationPromptRules_ACU(buildV36ContinuationAgentPrompts_ACU());
         for (const role of Object.keys(prompts)) {
             const segments = prompts[role];
             segments[segments.length - 1] = { ...segments[segments.length - 1], role: 'user', content: USER_PREFILL_CONTENT_ACU };
@@ -90879,8 +90912,8 @@ $CONTENT
         { name: 'world-stage-planner', kind: 'planner', description: '兼容展示名：单轮焦点与流程参数已由主会话开局决策吸收，不再独立派工', triggers: ['兼容展示'], promptKey: 'world-stage-planner', apiRole: 'world-stage-planner', writableModules: [] },
         { name: 'timekeeper', kind: 'specialist', description: '推演世界时钟的幕后推进，产出 clockAdvance 候选', triggers: ['正文出现时间跨度或需要校对时钟'], promptKey: 'timekeeper', apiRole: 'timekeeper', writableModules: ['clock'] },
         { name: 'undercurrent-analyst', kind: 'specialist', description: '推演维度压力与暗流种子生命周期的幕后演变', triggers: ['维度或暗流需要更新'], promptKey: 'undercurrent-analyst', apiRole: 'undercurrent-analyst', writableModules: ['dimensions', 'seeds'] },
-        { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界、玩家位置接触与传闻的幕后演变', triggers: ['人物移动、生死或玩家位置变化'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player', 'rumors'] },
-        { name: 'chronicler', kind: 'specialist', description: '仅在事件完结或热层编年过长时记录幕后编年并提交归档，不是每轮常规角色', triggers: ['事件完结或热层编年过长需要归档'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle'] },
+        { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界与玩家位置接触的幕后演变', triggers: ['人物移动、生死或玩家位置变化'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player'] },
+        { name: 'chronicler', kind: 'specialist', description: '综合暗流完结、人物结局与错过清扫，记录台面下重大事件并维护世界里正在传播的传闻', triggers: ['每轮编年与传闻维护'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle', 'rumors'] },
         { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，不写入 guidance', triggers: ['用户路径候选终审'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: [] },
         { name: 'guidance-composer', kind: 'specialist', description: '通读全量账本、锚点正文与玩家信息边界，决定哪些事实以何语态进入台面投影', triggers: ['投影相关字段变化后'], promptKey: 'guidance-composer', apiRole: 'guidance-composer', writableModules: ['guidance'] },
         { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
@@ -90932,7 +90965,7 @@ $CONTENT
             'evidenceRef 由服务端读取成功后颁发，不得写入 read/search 请求；不要添加 purpose 或其他字段。',
             'open_round 必须包含 action、summary、focus、dispatchChronicler；skipModules 可选，且只能使用账本模块名。常规自动推演必须用 open_round，工作流执行期间中途不再回主会话派工。',
             'delegate 只能包含 action、delegations，delegations 条目只能包含 agentName、instruction、reads；仅当用户明确要求维护某份资料时才 delegate 给对应 specialist。block 只能包含 action、reason、unresolved，unresolved 必须是非空字符串数组。',
-            'dispatchChronicler 仅在事件完结或热层编年过长时为 true。pendingFixes 非空时必须在 focus 中写明优先修复的模块。',
+            'dispatchChronicler 仅在你判断本轮发生必须立即编年的台面下重大事件时为 true；编年与传闻由固定工作流每轮保底派遣 chronicler 维护，不依赖你的判断。pendingFixes 非空时必须在 focus 中写明优先修复的模块。',
             '派工预算耗尽即终止并输出 block 卡片。用户维护路径被拦派工不会调用子代理；预算耗尽时用现有候选 finalize 或输出 block。',
             'evidenceRefs 只允许出现在 finalize 顶层；read、search、open_round、delegate、block 一律禁止携带 evidenceRefs 或其他未列出的字段。',
             '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
@@ -91140,15 +91173,15 @@ $CONTENT
         if (definition.kind === 'planner')
             workflow += '兼容展示：单轮焦点已由主会话 open_round 吸收。若仍被调用，计划必须优先覆盖 $WORLD_COLLISIONS；若有 seed 距过期 ≤ 2 天，列入临界暗流。不要再计划 world-analyst。';
         if (definition.kind === 'director')
-            workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。focus 写法：点名本轮幕后焦点的模块、具体对象与预期变化方向（如「推进九江水寨监视网扩张、藏剑山庄财务危机发酵」），禁止「更新世界动态」这类空泛套话。';
+            workflow += '每轮只做一次开局决策：read/search 取证后输出 open_round，写明 focus、是否 dispatchChronicler、可选 skipModules。工作流按固定顺序自治执行：先由 timekeeper 建立时间真值，再并发 undercurrent-analyst 与 dramatis-keeper，落账后串行保底调用 chronicler 维护 chronicle 与 rumors，最后按投影变化调用 guidance-composer。中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper、chronicler 或 guidance-composer。clock、seeds、chronicle、rumors 是连续性红线，不能只看目录摘要。delegate 只用于用户明确要求维护某份资料。runtimeContext.pendingFixes 非空且 attempts≥3 或自动修复关闭时，向用户说明阻塞模块，不要空转。碰撞报告含 playerContact/secludedNote：secluded 时本轮不存在传闻输入。focus 写法：点名本轮幕后焦点的模块、具体对象与预期变化方向（如「推进九江水寨监视网扩张、藏剑山庄财务危机发酵」），禁止「更新世界动态」这类空泛套话。';
         if (name === 'timekeeper')
             workflow += '只写入 clock。clockAdvance.days 由正文时间跨度决定；禁止直接写 day。时间判定细则：days 按正文明确经过的昼夜与旬月推算，正文无时间流逝证据时 days=0；storyTime 沿用世界既有历法句式（如「九月初十·午后」），不发明新历法；slot 用粗粒度时段词（清晨/午后/入夜等）；precision 按证据强度取 exact/approximate/unknown，正文有明确日期才用 exact。没有时间推进证据时输出 no_change，不要为凑字段编造跨度。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
         if (name === 'undercurrent-analyst')
             workflow += '只写入 dimensions 与 seeds。维度细则：rationale 必须写清当前值由什么事实支撑、为何是这个趋势（30~80字）；value 是 0-100 的当前烈度，trend 由本轮证据方向决定，无变化证据时沿用原值并置 stable。种子细则：catalyst 必须写清什么条件触发升级或显形（具体到事件或天数）；status 按生命周期迁移（established→incubating→active→converging→resolved/retired），只前进不后退，retired 必须给 retiredReason；level 0-4 按影响范围定级（0 局部琐事 → 4 世界级风暴）；visibility 反映玩家当前可感知度；exposePolicy 决定揭示节奏（on_collision 撞见才暴露，gradual 逐轮渗漏，public 公开信息）。空间纪律：新建事件类 seed 必须给 location.region。时效纪律：有时限事件必须给 expiresAtDay 与 missedOutcome（错过后的世界代价）。不得写入 clock、actors、chronicle。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
         if (name === 'dramatis-keeper')
-            workflow += '只写入 actors、player、rumors。行动者细则：interests 写核心利益诉求（1~3 条短语），goals 写当前阶段目标，informationSources 写其实际信息获取渠道，knownFacts 写其确实掌握的事实清单。每条 knownFact 都必须能由 informationSources 中至少一个具体渠道支撑（亲历、目击、听闻、阅读、转述或可验证推断）；不能只写「情报网」「消息灵通」这类无法追溯的泛化渠道。客观事实存在、读者知道或账本已记录，都不等于该 actor 知道；NPC 言行不得超出 knownFacts 与 informationSources 可达范围。新增 knownFact 时必须同步保留支撑渠道，渠道不足就不写入并放进 uncertainties；resources/constraints 写可调动资源与行动限制。传闻细则：fact 是传闻内容本体，channels 是传播渠道（市井/商会/官府等），originDay 为事发日，earliestRevealDay 为玩家最早可能得知日且不得早于 originDay。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。迟知纪律：幕后真相写全，能否上台面由程序层判定。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
+            workflow += '只写入 actors、player。行动者细则：interests 写核心利益诉求（1~3 条短语），goals 写当前阶段目标，informationSources 写其实际信息获取渠道，knownFacts 写其确实掌握的事实清单。每条 knownFact 都必须能由 informationSources 中至少一个具体渠道支撑（亲历、目击、听闻、阅读、转述或可验证推断）；不能只写「情报网」「消息灵通」这类无法追溯的泛化渠道。客观事实存在、读者知道或账本已记录，都不等于该 actor 知道；NPC 言行不得超出 knownFacts 与 informationSources 可达范围。新增 knownFact 时必须同步保留支撑渠道，渠道不足就不写入并放进 uncertainties；resources/constraints 写可调动资源与行动限制。空间纪律：actor 移动必须同步 locationRef；玩家位置按正文地标 upsert player，并维护 contact。生死纪律：NPC 死亡 = life:dead + diedAtDay + deathSummary。迟知纪律：幕后真相写全，能否上台面由程序层判定。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
         if (name === 'chronicler')
-            workflow += '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。编年细则：summary 只记录幕后世界线的事实性事件（什么发生了、什么变了），不评价、不复述玩家对话；relatedIds 关联涉及的 seed/actor/rumor id。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行（oneLine 句式：「第3日 · 北岭矿洞塌方，三人受伤」）；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
+            workflow += '只写入 chronicle、rumors，并可成对提交 chronicleArchive 与 chronicleOverview。编年只记录未在正文发生的台面下重大事件：暗流或传闻错过、角色幕后死亡、势力纷争结束、重大事件完结；正文已经发生的事件不得重复记录。chronicle 是事件权威事实，chronicleOverview 是一句话概要目录，详情按 chronicle-archive:{archiveRef} 按需读取，默认不展开。编年事件若有外部可感知结果，可派生传闻回音：传闻主体可以是事件、地点、组织或人物，不绑定 actor；originDay 为事件日，earliestRevealDay 不早于事件日并留出传播延迟，channels 表示传播范围，只写公开可传结果；纯内部变化不派生。每轮无真实变化时明确 no_change。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。';
         if (definition.kind === 'reviewer')
             workflow += '你只审核时间、空间、因果、revision、权限与证据。审核清单逐项过：(1) 时间——clockAdvance 与正文跨度一致，expiresAtDay/originDay 不早于当前日；(2) 空间——新建事件 seed 有 location.region，actor 移动带 locationRef；(3) 因果——状态迁移有证据链支撑，无证据的跳变按 EVIDENCE_GAP 打回；(4) 字段——rationale/catalyst/knownFacts 等说明性字段非空且有实质内容，空壳条目按 MISSING_FIELD 打回；(5) 信息边界——每条新增 knownFact 都能追溯到该 actor 的 informationSources 中至少一个亲历、目击、听闻、阅读、转述或可验证推断渠道；仅因事实客观存在、读者知道或账本有记录而赋知，按 EVIDENCE_GAP 打回；(6) 权限——候选只写其 writableModules 内模块。不得输出 guidance。投影由 guidance-composer 通读全量账本后专责决定。';
         if (name === 'guidance-composer')
@@ -154557,13 +154590,6 @@ Expected function or array of functions, received type ${typeof value}.`
             promptKey: 'beatPlanner',
         },
         {
-            name: 'continuity-reviewer',
-            kind: 'review',
-            description: '审查策划结果的连续性与约束合规：输出 pass / revise / block 判词，只读不写',
-            triggers: ['策划结果之间存在冲突', '本轮触碰长期约束红线', '大阶段转折或伏笔密集轮次'],
-            promptKey: 'reviewer',
-        },
-        {
             name: AGENT_WEB_RESEARCHER_NAME_ACU,
             kind: 'research',
             description: '从互联网查原作与公开设定：优先萌娘百科、维基百科、百度百科，查不到再用搜索引擎与网页抓取；把有用的页面写成带摘要的百科资料库条目（$WEB_REFS）供其它代理阅读。只登记原作/公开常识，不写本故事剧情',
@@ -159164,34 +159190,22 @@ Expected function or array of functions, received type ${typeof value}.`
     /**
      * service/continuation/agent/agent-workflow.ts — 续写固定工作流
      *
-     * 程序按固定顺序驱动结算、策划、条件审查、容错提交与写作指令编排。
+     * 程序按固定顺序驱动结算、策划、容错提交与写作指令编排。
      * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
      */
     const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
     const MAINLINE_NAME_ACU = 'mainline-planner';
     const BEAT_NAME_ACU = 'beat-planner';
-    const REVIEWER_NAME_ACU = 'continuity-reviewer';
     const ARC_NAME_ACU = 'arc-architect';
     const WEB_NAME_ACU = 'web-researcher';
     const MAINTAINER_MODULES_ACU = ['hooks', 'infoGap', 'chronology'];
     const BEAT_OBLIGATION_PATTERN_ACU = /伏笔|埋设|回收|误导|信息差|揭示/;
-    const CONFLICT_PATTERN_ACU = /冲突|矛盾|红线/;
     function continuationBeatObligation_ACU(turn) {
         if (!turn)
             return false;
         if (turn.function === 'payoff' || turn.function === 'reveal')
             return true;
         return BEAT_OBLIGATION_PATTERN_ACU.test(turn.goal ?? '');
-    }
-    function continuationMajorTurn_ACU(turn) {
-        if (!turn)
-            return false;
-        return turn.pacing === 'turn' || turn.function === 'reveal';
-    }
-    function continuationContinuityReviewRequired_ACU(input) {
-        if (input.majorTurn)
-            return true;
-        return CONFLICT_PATTERN_ACU.test([...input.recommendations, ...input.risks].join('\n'));
     }
     function isStale_ACU(error) {
         return error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE';
@@ -159286,8 +159300,6 @@ Expected function or array of functions, received type ${typeof value}.`
         let snapshot = input.snapshot;
         const steps = [];
         const plannerNotes = [];
-        const plannerRisks = [];
-        let reviewerNote = '';
         const pendingRangeStarts = snapshot.pendingFixes.map(item => item.rangeStartIndex).filter(index => Number.isInteger(index) && index >= 0);
         const settlementStartIndex = pendingRangeStarts.length ? Math.min(...pendingRangeStarts) : Math.max(0, snapshot.settledThroughIndex + 1);
         const settlementEndIndex = input.settledIndex;
@@ -159399,11 +159411,13 @@ Expected function or array of functions, received type ${typeof value}.`
         const plannerCalls = [
             { agentName: MAINLINE_NAME_ACU, billing: 'pipeline', prompt: `策划本轮场景。焦点：${input.opening.focus}` },
         ];
-        if (input.beatObligation) {
-            plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', prompt: `本轮有伏笔操作义务。焦点：${input.opening.focus}` });
+        // 编排不变量：mainline-planner 与 beat-planner 写集不相交、判定互不依赖，属同层并发批（Promise.all）；
+        // beat-planner 第二轮起保底派遣，是否操作由其 no_change 出口判断，仅首轮且无义务时跳过。
+        if (input.turnNumber >= 2 || input.beatObligation) {
+            plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', prompt: `策划本轮伏笔操作与情绪节拍；本轮没有真实需要时明确 no_change，不虚构钩子。焦点：${input.opening.focus}` });
         }
         else {
-            steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '本轮没有伏笔操作义务' });
+            steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '首轮且无伏笔义务，节拍策划跳过' });
         }
         const planners = await Promise.all(plannerCalls.map(call => runSafe_ACU(call)));
         for (let index = 0; index < planners.length; index += 1) {
@@ -159411,34 +159425,14 @@ Expected function or array of functions, received type ${typeof value}.`
             steps.push({ agentName: plannerCalls[index].agentName, status: planner.ok ? 'ok' : 'failed', summary: planner.summary });
             if (planner.planner) {
                 plannerNotes.push(planner.planner.recommendation);
-                plannerRisks.push(...planner.planner.risks);
             }
-        }
-        const reviewRequired = continuationContinuityReviewRequired_ACU({
-            majorTurn: input.majorTurn,
-            recommendations: plannerNotes,
-            risks: plannerRisks,
-        });
-        if (!reviewRequired) {
-            steps.push({ agentName: REVIEWER_NAME_ACU, status: 'skipped', summary: '没有策划冲突或大转折' });
-        }
-        else {
-            const reviewer = await runSafe_ACU({
-                agentName: REVIEWER_NAME_ACU,
-                billing: 'pipeline',
-                prompt: `审查策划是否冲突。焦点：${input.opening.focus}\n${plannerNotes.join('\n')}`,
-            });
-            steps.push({ agentName: REVIEWER_NAME_ACU, status: reviewer.ok ? 'ok' : 'failed', summary: reviewer.summary });
-            if (reviewer.reviewer)
-                reviewerNote = `${reviewer.reviewer.verdict} ${reviewer.reviewer.reason} ${reviewer.reviewer.fixes.join('；')}`;
         }
         const composerBase = [
             `本轮焦点：${input.opening.focus}`,
             input.opening.summary ? `开局摘要：${input.opening.summary}` : '',
             `策划建议：${plannerNotes.join('\n') || '无'}`,
-            `审查结论：${reviewerNote || '未触发连续性审查'}`,
             `待修复：${formatFixes_ACU$1(snapshot.pendingFixes)}`,
-            '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。',
+            '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。产出前自查：策划建议之间是否互相冲突、是否与本轮 pacing 冲突、是否与已结算的硬事实/长期约束冲突；发现冲突时取更保守的一方并在 summary 注明取舍，不得原样拼接两份矛盾建议。',
         ].filter(Boolean).join('\n');
         const composer = await input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {
             if (isStale_ACU(error))
@@ -161067,7 +161061,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 },
                 hasUnsettledHistory: !unsettled.startsWith('没有尚未结算的真实历史'),
                 beatObligation: continuationBeatObligation_ACU(context.execution.turn),
-                majorTurn: continuationMajorTurn_ACU(context.execution.turn),
+                turnNumber: context.execution.turnNumber ?? 1,
                 settledIndex: Math.max(0, chat.length - 1),
                 completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
                 runAgent: async (call) => {
@@ -166990,7 +166984,9 @@ Expected function or array of functions, received type ${typeof value}.`
             '$WORLD_STAGE_PLAN': () => serialize_ACU(context.worldStagePlan),
             '$WORLD_CHRONICLE': () => {
                 if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
-                    return serialize_ACU(buildInUseWorldCatalog_ACU(context.worldState).chronicleHot);
+                    const ledger = context.worldState;
+                    const catalog = buildInUseWorldCatalog_ACU(ledger);
+                    return serialize_ACU({ hot: catalog.chronicleHot, overview: ledger.chronicleOverview });
                 }
                 return serialize_ACU(context.worldChronicle);
             },
@@ -167334,6 +167330,9 @@ Expected function or array of functions, received type ${typeof value}.`
             return [];
         return [...new Set(Object.keys(candidate.patch).map(ledgerModule_ACU).filter((module) => module !== null))];
     }
+    function isRunWriteOverlap_ACU(error) {
+        return error instanceof Error && error.message.startsWith('WORLD_SIMULATION_RUN_WRITE_OVERLAP');
+    }
     function pendingAnchor_ACU(identity) {
         return {
             messageKey: identity.anchorMessageKey,
@@ -167620,8 +167619,19 @@ Expected function or array of functions, received type ${typeof value}.`
             return replay.ledger;
         };
         const applyPending = async (preview, candidates) => {
-            input.runWrites?.assertCandidatesDisjoint(candidates);
-            return applySafely_ACU(preview, candidates, authorized, input.settings, anchorMessage);
+            try {
+                input.runWrites?.assertCandidatesDisjoint(candidates);
+                return applySafely_ACU(preview, candidates, authorized, input.settings, anchorMessage);
+            }
+            catch (error) {
+                if (!isRunWriteOverlap_ACU(error))
+                    throw error;
+                return {
+                    ledger: preview,
+                    accepted: [],
+                    rejected: candidates.map(candidate => failedOutcome_ACU(candidate.agentName, error, 'transaction_rejected', candidateModules_ACU(candidate))),
+                };
+            }
         };
         const nextSeq = (agentName) => {
             const value = (seq.get(agentName) ?? 0) + 1;
@@ -167650,7 +167660,15 @@ Expected function or array of functions, received type ${typeof value}.`
                     directorMaterials: input.directorMaterials,
                     triggeredWorldbook: input.triggeredWorldbook,
                 });
-                return restrictOutcome_ACU(outcome, targetModules);
+                const restricted = restrictOutcome_ACU(outcome, targetModules);
+                if (restricted.candidate && input.runWrites) {
+                    const stripped = input.runWrites.stripConfirmedWrites(restricted.candidate);
+                    if (!stripped) {
+                        return failedOutcome_ACU(restricted.agentName, new Error('WORLD_SIMULATION_RUN_WRITE_OVERLAP:confirmed write fully covered candidate'), 'transaction_rejected', targetModules);
+                    }
+                    restricted.candidate = stripped;
+                }
+                return restricted;
             }
             catch (error) {
                 return failedOutcome_ACU(agentName, error, 'invoke_failed', targetModules);
@@ -167690,13 +167708,15 @@ Expected function or array of functions, received type ${typeof value}.`
         accepted = primary.accepted;
         outcomes.push(...primary.rejected);
         ledger = recordWorkflowIssues_ACU(ledger, [...primaryOutcomes, ...primary.rejected], input.identity);
-        const shouldChronicle = (!requestedTargets || requestedTargets.has('chronicle'))
-            && !agentSkipped_ACU('chronicler', skipModules) && (input.opening.dispatchChronicler
+        const shouldChronicle = (!requestedTargets || requestedTargets.has('chronicle') || requestedTargets.has('rumors'))
+            && !agentSkipped_ACU('chronicler', skipModules) && (!requestedTargets
+            || input.opening.dispatchChronicler
             || ledger.chronicle.length >= input.settings.workflow.chroniclerHotThreshold
             || seedsClosedThisRound_ACU(base, ledger));
         if (shouldChronicle) {
             expectedModules.add('chronicle');
-            const chronicler = await runAgent('chronicler', ledger, ['chronicle']);
+            expectedModules.add('rumors');
+            const chronicler = await runAgent('chronicler', ledger, ['chronicle', 'rumors'].filter(module => !skipModules.has(module)));
             outcomes.push(chronicler);
             ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [chronicler]);
             if (chronicler.candidate) {
@@ -170297,7 +170317,7 @@ ${rejectionText}` : delegationFeedback,
     }
     /** Only confirmed writes of this in-flight run can advance its expected ledger. */
     class WorldSimulationRunWriteState_ACU {
-        constructor(read, baseRevision, proof) {
+        constructor(read, baseRevision, proof, adoptedWritten = {}) {
             this.read = read;
             this.confirmed = 0;
             this.refs = new Set();
@@ -170313,8 +170333,12 @@ ${rejectionText}` : delegationFeedback,
                 for (const [module, ids] of Object.entries(proof.written))
                     this.written.set(module, new Set(ids));
             }
-            else if (initial.ledger.revision !== baseRevision)
-                throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+            else {
+                if (initial.ledger.revision !== baseRevision && !Object.keys(adoptedWritten).length)
+                    throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+                for (const [module, ids] of Object.entries(adoptedWritten))
+                    this.written.set(module, new Set(ids));
+            }
             this.expected = canonical_ACU$1(initial);
             this.ledgerRevision = initial.ledger.revision;
         }
@@ -170384,6 +170408,31 @@ ${rejectionText}` : delegationFeedback,
                     }
                 }
         }
+        stripConfirmedWrites(candidate) {
+            const patch = {};
+            for (const [key, value] of Object.entries(candidate.patch)) {
+                const module = key === 'chronicleArchive' ? 'chronicle' : key;
+                const written = this.written.get(module);
+                if (!written?.size) {
+                    patch[key] = value;
+                    continue;
+                }
+                if (key === 'clock' || key === 'player' || key === 'guidance' || key === 'chronicle' || key === 'chronicleArchive')
+                    continue;
+                if (!value || typeof value !== 'object' || Array.isArray(value))
+                    continue;
+                const changes = value;
+                const filterRows = (rows) => Array.isArray(rows)
+                    ? rows.filter(row => !!row && typeof row === 'object' && !Array.isArray(row)
+                        && typeof row.id === 'string'
+                        && !written.has(row.id))
+                    : [];
+                const next = { ...changes, upsert: filterRows(changes.upsert), remove: filterRows(changes.remove) };
+                if (next.upsert.length || next.remove.length)
+                    patch[key] = next;
+            }
+            return Object.keys(patch).length ? { ...candidate, patch } : null;
+        }
         get confirmedWrites() { return this.confirmed; }
         get currentLedgerRevision() { return this.ledgerRevision; }
         get hasConfirmedWrites() { return this.confirmed > 0; }
@@ -170414,9 +170463,20 @@ ${rejectionText}` : delegationFeedback,
         // 别的运行的证明仅可证明与当前完全一致的旧基线，不能为本运行签发已确认写入。
         if (!proof) {
             const current = read();
-            if (hasPartialWorldSimulationRunWrites_ACU(current) && (!stored || stored.fingerprint !== canonical_ACU$1(current))) {
-                throw new Error('WORLD_SIMULATION_LEDGER_STALE');
+            const sameTaskStage = stored?.taskId === identity.taskId && stored.stageId === identity.stageId;
+            if (hasPartialWorldSimulationRunWrites_ACU(current) && sameTaskStage) {
+                const adoptedWritten = {};
+                for (const [module, records] of Object.entries(current.fields?.records ?? {})) {
+                    const ids = Object.entries(records ?? {})
+                        .filter(([, record]) => record.status === 'partial' && Object.keys(record.fields).length > 0)
+                        .map(([id]) => id);
+                    if (ids.length)
+                        adoptedWritten[module] = ids;
+                }
+                return new WorldSimulationRunWriteState_ACU(read, current.ledger.revision, undefined, adoptedWritten);
             }
+            if (hasPartialWorldSimulationRunWrites_ACU(current) && (!stored || stored.fingerprint !== canonical_ACU$1(current)))
+                throw new Error('WORLD_SIMULATION_LEDGER_STALE');
         }
         return new WorldSimulationRunWriteState_ACU(read, identity.baseLedgerRevision, proof);
     }

@@ -62,6 +62,7 @@ describe('世界推演固定工作流', () => {
       timekeeper: [noChange('timekeeper')],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
+      chronicler: [noChange('chronicler')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
@@ -69,7 +70,7 @@ describe('世界推演固定工作流', () => {
       subagents: env.subagents,
     });
     expect(env.calls[0]).toBe('timekeeper');
-    expect(env.calls.slice(1).sort()).toEqual(['dramatis-keeper', 'undercurrent-analyst']);
+    expect(env.calls.slice(1).sort()).toEqual(['chronicler', 'dramatis-keeper', 'undercurrent-analyst']);
     expect(env.calls).not.toContain('guidance-composer');
     expect(result.outcome).toBe('no_change');
   });
@@ -107,7 +108,7 @@ describe('世界推演固定工作流', () => {
     expect(result.commitCandidate?.acceptedCandidates).toEqual([expect.objectContaining({ candidateId: dimension.candidateId, patch: dimension.patch })]);
   });
 
-  it('已确认即时写入与终局候选重叠时拒绝，而不悄悄丢弃候选', async () => {
+  it('已确认即时写入与终局候选重叠时降级为 rejected，而不抛出工作流异常', async () => {
     const initial = buildEmptyWorldSimulationLedger_ACU();
     const env = harness(initial, {});
     let current = initial;
@@ -123,11 +124,13 @@ describe('世界推演固定工作流', () => {
       }
       return noChange(delegation.agentName);
     });
-    await expect(runWorldSimulationWorkflow_ACU({
+    const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
       opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
       targetModules: ['clock'], subagents: env.subagents, readCurrent: () => current, runWrites,
-    })).rejects.toThrow('WORLD_SIMULATION_RUN_WRITE_OVERLAP');
+    });
+    expect(result.outcome).toBe('escalate');
+    expect(result.pendingFixes).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'clock', source: 'transaction_rejected' })]));
   });
 
   it('正文指纹未变且预期模块均完成时不调用任何子代理', async () => {
@@ -163,6 +166,7 @@ describe('世界推演固定工作流', () => {
       timekeeper: [noChange('timekeeper')],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
+      chronicler: [noChange('chronicler')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
@@ -195,6 +199,7 @@ describe('世界推演固定工作流', () => {
       timekeeper: [clock],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
+      chronicler: [noChange('chronicler')],
       'guidance-composer': [badGuidance],
     });
     const result = await runWorldSimulationWorkflow_ACU({
@@ -223,6 +228,7 @@ describe('世界推演固定工作流', () => {
       timekeeper: [fixed],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
+      chronicler: [noChange('chronicler')],
       'guidance-composer': [noChange('guidance-composer')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
@@ -242,6 +248,7 @@ describe('世界推演固定工作流', () => {
         unresolvedIssues: [{ module: 'clock', source: 'missing_field', path: 'clock#singleton.storyTime', message: '缺字段' }] }],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
+      chronicler: [noChange('chronicler')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,

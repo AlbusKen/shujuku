@@ -436,16 +436,19 @@ describe('world simulation field commit compound writes', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
-  it('合法 actor 与孤儿 rumor 同批隔离：前者完整、后者仅 partial', async () => {
+  it('分离角色提交：合法 actor 完整保存，孤儿 rumor 仅保留 partial', async () => {
     const { chat, input, saveChat } = fixture();
-    const sql = "INSERT INTO actors (id, name, interests, location, goals, information_sources, known_facts, expected_revision) VALUES ('actor-ok', '水手', '[]', '港口', '[]', '[]', '[]', 0); INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-bad', '不存在的人', 1, '[\"酒馆\"]', '[\"ghost\"]', 0)";
-    const result = await commitWorldSimulationFieldWrites_ACU({ ...input, role: 'dramatis-keeper', sql });
+    const actorSql = "INSERT INTO actors (id, name, interests, location, goals, information_sources, known_facts, life, died_at_day, death_summary, expected_revision) VALUES ('actor-ok', '水手', '[]', '港口', '[]', '[]', '[]', 'alive', NULL, NULL, 0)";
+    const actorResult = await commitWorldSimulationFieldWrites_ACU({ ...input, role: 'dramatis-keeper', sql: actorSql });
+    expect(actorResult).toMatchObject({ status: 'committed', ledgerRevision: 1 });
+    const rumorSql = "INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-bad', '不存在的人', 1, '[\"酒馆\"]', '[\"ghost\"]', 0)";
+    const result = await commitWorldSimulationFieldWrites_ACU({ ...input, role: 'chronicler', sql: rumorSql, updatedAt: 101 });
     expect(result).toMatchObject({ status: 'committed', ledgerRevision: 1 });
     expect(result.partials).toEqual([expect.objectContaining({ id: 'rumor-bad', promotionError: expect.any(String) })]);
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.actors).toHaveLength(1);
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.rumors).toEqual([]);
     expect(foldWorldSimulationLedger_ACU(chat)?.fields.records.rumors?.['rumor-bad'].status).toBe('partial');
-    expect(saveChat).toHaveBeenCalledTimes(1);
+    expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
   it('保存期间切换聊天不签发 accepted，不覆盖新聊天', async () => {
@@ -543,14 +546,14 @@ describe('world simulation subagent production write loop', () => {
       stagePlan: {}, candidates: [], chronicle: [], projectionPreview: {},
       liveLedger: () => foldWorldSimulationLedger_ACU(chat, input.anchor.messageIndex) ?? { ledger: chat[0]._qrf_world_simulation.ledger, fields: undefined } });
     const requests: Array<readonly { role: string; content: string }[]> = [];
-    const responses = [
-      { action: 'write_sql', sql: input.sql },
-      { action: 'write_sql', sql: complete },
+    const responses: unknown[] = [
+      { content: '', toolCalls: [{ id: 'call-write-1', name: 'write_sql', arguments: JSON.stringify({ sql: input.sql }) }] },
+      { content: '', toolCalls: [{ id: 'call-write-2', name: 'write_sql', arguments: JSON.stringify({ sql: complete }) }] },
       { status: 'no_change', agentName: 'undercurrent-analyst', summary: '分栏已提交', evidenceRefs: [], uncertainties: [] },
     ];
     const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[]) => {
       requests.push(messages.map(message => ({ ...message })));
-      return JSON.stringify(responses.shift());
+      return responses.shift() as any;
     });
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke: invoke as any, countTokens: async () => 1,
       apiPreset: { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) } });
@@ -565,10 +568,13 @@ describe('world simulation subagent production write loop', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.dimensions).toHaveLength(1);
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.dimensions[0].name).toBe('风暴');
-    const firstReceipt = JSON.parse(requests[1].at(-2)!.content).results[0];
+    const firstReceiptMessage = requests[1].find(message => message.role === 'tool'
+      && (message as { tool_call_id?: string }).tool_call_id === 'call-write-1');
+    if (!firstReceiptMessage) throw new Error('未找到 call-write-1 的原生工具回执');
+    const firstReceipt = JSON.parse(firstReceiptMessage.content).results[0];
     expect(firstReceipt).toMatchObject({ status: 'committed', accepted: [expect.objectContaining({ field: 'name' })], ledgerRevision: 0 });
     expect(requests[1].at(-3)!.content).toContain('write_sql');
-    expect(requests[1].at(-1)).toMatchObject({ role: 'assistant', content: '{' });
+    expect(requests[1].at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('<thinking>') });
     expect(requests[2].some(message => message.content.includes('\"ledgerRevision\":1'))).toBe(true);
     const otherRequests: Array<readonly { role: string; content: string }[]> = [];
     const fresh = new WorldSimulationSubagentRuntime_ACU({ invoke: (async (_role: string, messages: readonly { role: string; content: string }[]) => {

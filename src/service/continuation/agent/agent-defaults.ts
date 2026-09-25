@@ -1049,9 +1049,47 @@ export function buildV36ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts
   return current;
 }
 
+const CONTINUATION_CURRENT_MAIN_WORKFLOW_RULES_ACU = '【当前固定工作流补充】\nopen_round 的固定工作流遵循逻辑递进序：先完成正文资料结算，再让 mainline-planner 与 beat-planner 在同一层并发；beat-planner 首轮且无伏笔义务时可以跳过，第二轮起保底派遣，由其以 no_change 结束无真实操作的轮次。不要派 continuity-reviewer；策划建议之间的冲突由 instruction-composer 自查并保守取舍，红线、硬事实与最终冲突由 finalReviewer 终审。特别重要的资料是 hooks、infoGap、chronology，不能只看目录摘要。';
+const CONTINUATION_CURRENT_COMPOSER_RULES_ACU = '【当前冲突自查与资料清单】\n写作指令交付前必须通读并核对 hooks、infoGap、chronology，以及本轮结算和策划回执。检查策划建议之间、建议与本轮 pacing、建议与已结算硬事实或长期约束之间的冲突；冲突时采用更保守的一方，并在 summary 说明取舍，不得拼接互相矛盾的建议。';
+const CONTINUATION_CURRENT_FINAL_REVIEW_RULES_ACU = '【当前终审补充】\n终审必须核对 hooks、infoGap、chronology 与本轮正文事实，检查红线、已结算硬事实、长期约束和策划冲突；发现冲突时拒绝不合规指导并列出可执行修正，不把 continuity-reviewer 作为独立派工角色。';
+
+function appendCurrentDefaultRule_ACU(
+  segments: ContinuationPromptSegment_ACU[],
+  rule: string,
+): ContinuationPromptSegment_ACU[] {
+  const taskSegment = segments.find(segment => segment.content.includes('$AGENT_TASK'));
+  if (taskSegment) {
+    return segments.map(segment => segment === taskSegment
+      ? { ...segment, content: `${segment.content}\n${rule}` }
+      : segment);
+  }
+  return segments.map((segment, index) => index === segments.length - 1
+    ? { ...segment, content: `${segment.content}\n${rule}` }
+    : segment);
+}
+
+function applyCurrentContinuationPromptRules_ACU(prompts: ContinuationAgentPrompts_ACU): ContinuationAgentPrompts_ACU {
+  const main = prompts.main.map(segment => {
+    if (!segment.content.startsWith('我的行动规则：')) return segment;
+    return {
+      ...segment,
+      content: segment.content
+        .replace('仅在本轮有伏笔操作义务时派 beat-planner，仅在策划冲突或大转折时派 continuity-reviewer，然后由 instruction-composer 写出 instruction。', '第二轮起固定工作流保底派 beat-planner，首轮且无伏笔义务时可跳过；不再派 continuity-reviewer，由 instruction-composer 写出 instruction。')
+        .replace('不要 delegate hook-cognition-maintainer、mainline-planner、beat-planner、continuity-reviewer 或 instruction-composer。', '不要 delegate hook-cognition-maintainer、mainline-planner、beat-planner、continuity-reviewer 或 instruction-composer；这些角色由固定工作流按上述顺序处理。')
+        + `\n${CONTINUATION_CURRENT_MAIN_WORKFLOW_RULES_ACU}`,
+    };
+  });
+  return {
+    ...prompts,
+    main,
+    instructionComposer: appendCurrentDefaultRule_ACU(prompts.instructionComposer, CONTINUATION_CURRENT_COMPOSER_RULES_ACU),
+    finalReviewer: appendCurrentDefaultRule_ACU(prompts.finalReviewer, CONTINUATION_CURRENT_FINAL_REVIEW_RULES_ACU),
+  };
+}
+
 /** 仅替换每个 Agent 默认组的最后一段；V36 默认组保留供历史迁移使用。 */
 export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
-  const prompts = buildV36ContinuationAgentPrompts_ACU();
+  const prompts = applyCurrentContinuationPromptRules_ACU(buildV36ContinuationAgentPrompts_ACU());
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     const segments = prompts[role];
     segments[segments.length - 1] = { ...segments[segments.length - 1], role: 'user', content: USER_PREFILL_CONTENT_ACU };

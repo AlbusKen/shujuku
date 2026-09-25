@@ -18,7 +18,7 @@ function plan(sql: string, role: string, options: Partial<Parameters<typeof plan
 describe('推演提示中的 SQL 范例与逐栏提交契约', () => {
   const roles = [
     ['timekeeper', 'clock'], ['undercurrent-analyst', 'dimensions'], ['undercurrent-analyst', 'seeds'],
-    ['dramatis-keeper', 'actors'], ['dramatis-keeper', 'player'], ['dramatis-keeper', 'rumors'],
+    ['dramatis-keeper', 'actors'], ['dramatis-keeper', 'player'], ['chronicler', 'rumors'],
     ['chronicler', 'chronicle'], ['guidance-composer', 'guidance'],
   ] as const;
   const exampleFor = (module: string) => {
@@ -95,10 +95,14 @@ describe('世界推演逐栏领域规划', () => {
     expect(result.ledger.dimensions).toEqual([]);
   });
 
-  it('死者与传闻可以在同批满足跨模块一致性', () => {
-    const result = plan("INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-a', '失踪', 1, '[\"码头\"]', '[\"actor-a\"]', 0); INSERT INTO actors (id, name, interests, location, goals, information_sources, known_facts, life, died_at_day, death_summary, expected_revision) VALUES ('actor-a', '水手', '[]', '港口', '[]', '[]', '[]', 'dead', 1, '暴风中失踪', 0)", 'dramatis-keeper');
+  it('传闻引用既有死者可以满足跨模块一致性', () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    ledger.actors = [{ id: 'actor-a', name: '水手', interests: [], location: '港口', locationRef: null, life: 'dead', diedAtDay: 1,
+      deathSummary: '暴风中失踪', resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'public', revision: 1 }];
+    const result = plan("INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-a', '失踪', 1, '[\"码头\"]', '[\"actor-a\"]', 0)", 'chronicler', { ledger });
     expect(result.rejected).toEqual([]);
     expect(result.ledger.actors).toEqual([expect.objectContaining({ id: 'actor-a', life: 'dead' })]);
+    expect(result.ledger.rumors).toEqual([expect.objectContaining({ id: 'rumor-a', relatedActorIds: ['actor-a'] })]);
   });
 
   it('仅已保存的编年草稿允许按 ID 补缺栏，完整编年不可 UPDATE', () => {
@@ -149,7 +153,7 @@ describe('世界推演逐栏批次边界', () => {
 
   it('合法完整条目不因另一个领域违规的新 ID 被整体撤销', () => {
     const result = plan("INSERT INTO dimensions (id, name, kind, value, trend, rationale, evidence_refs, expected_revision) VALUES ('dim-a', '风暴', 'pressure', 10, 'rising', '海风', '[]', 0); INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-b', '并不存在的人', 1, '[\"酒馆\"]', '[\"ghost\"]', 0)", 'undercurrent-analyst');
-    // 不同角色无权写 rumor，因此此断言专门保证已授权的完整条目保留。
+    // undercurrent-analyst 无权写 rumor，因此此断言专门保证已授权的完整条目保留。
     expect(result.ledger.dimensions).toHaveLength(1);
     expect(result.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'sql[1].rumors' })]));
   });
@@ -166,13 +170,17 @@ describe('世界推演逐栏批次边界', () => {
 });
 
 describe('推演逐栏隔离与归档', () => {
-  it('同一角色的合法 actor 与孤儿 rumor 可独立保存，孤儿仅保留 partial', () => {
-    const result = plan("INSERT INTO actors (id, name, interests, location, goals, information_sources, known_facts, expected_revision) VALUES ('actor-ok', '水手', '[]', '港口', '[]', '[]', '[]', 0); INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-bad', '不存在的人', 1, '[\"酒馆\"]', '[\"ghost\"]', 0)", 'dramatis-keeper');
+  it('分离角色的合法 actor 与孤儿 rumor 可独立保存，孤儿仅保留 partial', () => {
+    const actor = plan("INSERT INTO actors (id, name, interests, location, goals, information_sources, known_facts, life, died_at_day, death_summary, expected_revision) VALUES ('actor-ok', '水手', '[]', '港口', '[]', '[]', '[]', 'alive', NULL, NULL, 0)", 'dramatis-keeper');
+    expect(actor.rejected).toEqual([]);
+    expect(actor.ledger.actors).toEqual([expect.objectContaining({ id: 'actor-ok', life: 'alive' })]);
+    const result = plan("INSERT INTO rumors (id, fact, origin_day, channels, related_actor_ids, expected_revision) VALUES ('rumor-bad', '不存在的人', 1, '[\"酒馆\"]', '[\"ghost\"]', 0)", 'chronicler', { ledger: actor.ledger });
     expect(result.ledger.actors.map(item => item.id)).toEqual(['actor-ok']);
     expect(result.ledger.rumors).toEqual([]);
     expect(result.partials).toEqual([expect.objectContaining({ id: 'rumor-bad', promotionError: expect.any(String) })]);
-    expect(result.accepted.some(item => item.module === 'actors')).toBe(true);
-    expect(result.ledger.revision).toBe(1);
+    expect(actor.accepted.some(item => item.module === 'actors')).toBe(true);
+    expect(result.accepted.some(item => item.module === 'actors')).toBe(false);
+    expect(result.ledger.revision).toBe(actor.ledger.revision);
   });
 
   it('成对归档单独写入时仅推进一次账本 revision', () => {

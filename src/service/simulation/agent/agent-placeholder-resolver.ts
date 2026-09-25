@@ -98,7 +98,9 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
     '$WORLD_STAGE_PLAN': () => serialize_ACU(context.worldStagePlan),
     '$WORLD_CHRONICLE': () => {
       if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
-        return serialize_ACU(buildInUseWorldCatalog_ACU(context.worldState).chronicleHot);
+        const ledger = context.worldState;
+        const catalog = buildInUseWorldCatalog_ACU(ledger);
+        return serialize_ACU({ hot: catalog.chronicleHot, overview: ledger.chronicleOverview });
       }
       return serialize_ACU(context.worldChronicle);
     },

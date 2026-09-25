@@ -60,7 +60,7 @@ describe('Agent 目录渲染', () => {
   it('子代理目录暴露公开职责与读写权限，但隐藏固定工作流内部角色和提示词', () => {
     const catalog = renderAgentSubagentCatalog_ACU();
     expect(catalog).toContain('hook-cognition-maintainer');
-    expect(catalog).toContain('continuity-reviewer');
+    expect(catalog).not.toContain('continuity-reviewer');
     expect(catalog).toContain('无（只返回建议）');
     expect(catalog).not.toContain('你只输出一个 JSON 对象');
     expect(catalog).not.toContain('requirements-maintainer');

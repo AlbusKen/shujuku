@@ -1,7 +1,7 @@
 /**
  * service/continuation/agent/agent-workflow.ts — 续写固定工作流
  *
- * 程序按固定顺序驱动结算、策划、条件审查、容错提交与写作指令编排。
+ * 程序按固定顺序驱动结算、策划、容错提交与写作指令编排。
  * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
  */
 
@@ -94,7 +94,7 @@ export interface ContinuationWorkflowInput_ACU {
   opening: ContinuationWorkflowOpening_ACU;
   hasUnsettledHistory: boolean;
   beatObligation: boolean;
-  majorTurn: boolean;
+  turnNumber: number;
   settledIndex: number;
   completedStageNumbers: readonly number[];
   runAgent: (call: ContinuationWorkflowAgentCall_ACU) => Promise<ContinuationWorkflowAgentPayload_ACU>;
@@ -106,31 +106,15 @@ export interface ContinuationWorkflowInput_ACU {
 const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
 const MAINLINE_NAME_ACU = 'mainline-planner';
 const BEAT_NAME_ACU = 'beat-planner';
-const REVIEWER_NAME_ACU = 'continuity-reviewer';
 const ARC_NAME_ACU = 'arc-architect';
 const WEB_NAME_ACU = 'web-researcher';
 const MAINTAINER_MODULES_ACU = ['hooks', 'infoGap', 'chronology'] as const;
 const BEAT_OBLIGATION_PATTERN_ACU = /伏笔|埋设|回收|误导|信息差|揭示/;
-const CONFLICT_PATTERN_ACU = /冲突|矛盾|红线/;
 
 export function continuationBeatObligation_ACU(turn: { goal?: string; function?: string } | null): boolean {
   if (!turn) return false;
   if (turn.function === 'payoff' || turn.function === 'reveal') return true;
   return BEAT_OBLIGATION_PATTERN_ACU.test(turn.goal ?? '');
-}
-
-export function continuationMajorTurn_ACU(turn: { pacing?: string; function?: string } | null): boolean {
-  if (!turn) return false;
-  return turn.pacing === 'turn' || turn.function === 'reveal';
-}
-
-export function continuationContinuityReviewRequired_ACU(input: {
-  majorTurn: boolean;
-  recommendations: readonly string[];
-  risks: readonly string[];
-}): boolean {
-  if (input.majorTurn) return true;
-  return CONFLICT_PATTERN_ACU.test([...input.recommendations, ...input.risks].join('\n'));
 }
 
 function isStale_ACU(error: unknown): boolean {
@@ -243,8 +227,6 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   let snapshot = input.snapshot;
   const steps: ContinuationWorkflowStep_ACU[] = [];
   const plannerNotes: string[] = [];
-  const plannerRisks: string[] = [];
-  let reviewerNote = '';
   const pendingRangeStarts = snapshot.pendingFixes.map(item => item.rangeStartIndex).filter(index => Number.isInteger(index) && index >= 0);
   const settlementStartIndex = pendingRangeStarts.length ? Math.min(...pendingRangeStarts) : Math.max(0, snapshot.settledThroughIndex + 1);
   const settlementEndIndex = input.settledIndex;
@@ -364,10 +346,12 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   const plannerCalls: ContinuationWorkflowAgentCall_ACU[] = [
     { agentName: MAINLINE_NAME_ACU, billing: 'pipeline', prompt: `策划本轮场景。焦点：${input.opening.focus}` },
   ];
-  if (input.beatObligation) {
-    plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', prompt: `本轮有伏笔操作义务。焦点：${input.opening.focus}` });
+  // 编排不变量：mainline-planner 与 beat-planner 写集不相交、判定互不依赖，属同层并发批（Promise.all）；
+  // beat-planner 第二轮起保底派遣，是否操作由其 no_change 出口判断，仅首轮且无义务时跳过。
+  if (input.turnNumber >= 2 || input.beatObligation) {
+    plannerCalls.push({ agentName: BEAT_NAME_ACU, billing: 'pipeline', prompt: `策划本轮伏笔操作与情绪节拍；本轮没有真实需要时明确 no_change，不虚构钩子。焦点：${input.opening.focus}` });
   } else {
-    steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '本轮没有伏笔操作义务' });
+    steps.push({ agentName: BEAT_NAME_ACU, status: 'skipped', summary: '首轮且无伏笔义务，节拍策划跳过' });
   }
   const planners = await Promise.all(plannerCalls.map(call => runSafe_ACU(call)));
   for (let index = 0; index < planners.length; index += 1) {
@@ -375,34 +359,15 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     steps.push({ agentName: plannerCalls[index].agentName, status: planner.ok ? 'ok' : 'failed', summary: planner.summary });
     if (planner.planner) {
       plannerNotes.push(planner.planner.recommendation);
-      plannerRisks.push(...planner.planner.risks);
     }
-  }
-
-  const reviewRequired = continuationContinuityReviewRequired_ACU({
-    majorTurn: input.majorTurn,
-    recommendations: plannerNotes,
-    risks: plannerRisks,
-  });
-  if (!reviewRequired) {
-    steps.push({ agentName: REVIEWER_NAME_ACU, status: 'skipped', summary: '没有策划冲突或大转折' });
-  } else {
-    const reviewer = await runSafe_ACU({
-      agentName: REVIEWER_NAME_ACU,
-      billing: 'pipeline',
-      prompt: `审查策划是否冲突。焦点：${input.opening.focus}\n${plannerNotes.join('\n')}`,
-    });
-    steps.push({ agentName: REVIEWER_NAME_ACU, status: reviewer.ok ? 'ok' : 'failed', summary: reviewer.summary });
-    if (reviewer.reviewer) reviewerNote = `${reviewer.reviewer.verdict} ${reviewer.reviewer.reason} ${reviewer.reviewer.fixes.join('；')}`;
   }
 
   const composerBase = [
     `本轮焦点：${input.opening.focus}`,
     input.opening.summary ? `开局摘要：${input.opening.summary}` : '',
     `策划建议：${plannerNotes.join('\n') || '无'}`,
-    `审查结论：${reviewerNote || '未触发连续性审查'}`,
     `待修复：${formatFixes_ACU(snapshot.pendingFixes)}`,
-    '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。',
+    '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。产出前自查：策划建议之间是否互相冲突、是否与本轮 pacing 冲突、是否与已结算的硬事实/长期约束冲突；发现冲突时取更保守的一方并在 summary 注明取舍，不得原样拼接两份矛盾建议。',
   ].filter(Boolean).join('\n');
 
   const composer = await input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {

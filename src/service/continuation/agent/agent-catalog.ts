@@ -69,13 +69,6 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     promptKey: 'beatPlanner',
   },
   {
-    name: 'continuity-reviewer',
-    kind: 'review',
-    description: '审查策划结果的连续性与约束合规：输出 pass / revise / block 判词，只读不写',
-    triggers: ['策划结果之间存在冲突', '本轮触碰长期约束红线', '大阶段转折或伏笔密集轮次'],
-    promptKey: 'reviewer',
-  },
-  {
     name: AGENT_WEB_RESEARCHER_NAME_ACU,
     kind: 'research',
     description: '从互联网查原作与公开设定：优先萌娘百科、维基百科、百度百科，查不到再用搜索引擎与网页抓取；把有用的页面写成带摘要的百科资料库条目（$WEB_REFS）供其它代理阅读。只登记原作/公开常识，不写本故事剧情',
