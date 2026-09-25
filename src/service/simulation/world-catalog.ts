@@ -19,7 +19,7 @@ export interface WorldInUseCatalog_ACU {
   readHint: string;
 }
 
-export const WORLD_CATALOG_READ_HINT_ACU = '目录中任一条目可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结经 chronicle-archive:{archiveRef}）。';
+export const WORLD_CATALOG_READ_HINT_ACU = '目录中任一条目可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}；逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title；归档总结经 chronicle-archive:{archiveRef}）。不得省略 field 地址中的条目 ID。';
 export const WORLD_SUBAGENT_DEDUP_HINT_ACU = '以下目录包含正在生效的资料与已经发生的事情（含已归档总结索引）；若你正要推演的事件与已发生目录中某条实质相同，不要重复推演。';
 
 function clip_ACU(value: string, max = 80): string {

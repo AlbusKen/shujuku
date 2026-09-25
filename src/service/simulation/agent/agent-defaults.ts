@@ -1,6 +1,6 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
-import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
+import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
@@ -196,6 +196,10 @@ export function applyWorldSimulationNativeToolPrompt_ACU(name: WorldSimulationAg
       '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要把 read 或 search 写成 JSON。',
     )
     .replace(
+      `read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`,
+      `read 地址只能使用：${formatWorldSimulationToolAddressHints_ACU()}。字段地址必须包含模块名和条目 ID，例如 field:dimensions:dim-a；不得使用 field:dimensions 这类裸模块地址。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`,
+    )
+    .replace(
       '合法示例：{"action":"read","reads":["ledger:current","summary:current"]}',
       '调阅示例：调用 read 函数，参数 {"reads":["ledger:current","summary:current"]}。',
     )
@@ -205,12 +209,12 @@ export function applyWorldSimulationNativeToolPrompt_ACU(name: WorldSimulationAg
     )
     .replace('经 write_sql 提交缺栏', '调用 write_sql 函数提交缺栏')
     .replace(
-      '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。',
-      '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。',
+      '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}；不得省略条目 ID）。',
+      '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}；不得省略条目 ID）。参数 reads 是地址数组。',
     )
     .replace(
       '目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。',
-      '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。',
+      '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title；归档总结如 chronicle-archive:{archiveRef}；不得省略 field 地址中的条目 ID）。参数 reads 是地址数组。',
     );
   const boundary = '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。';
   if (definition && definition.kind !== 'planner' && next.includes(boundary)) {

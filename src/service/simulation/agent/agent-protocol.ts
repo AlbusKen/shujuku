@@ -1,9 +1,9 @@
-import { WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationStagePlan_ACU } from '../model';
+import { WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WORLD_SIMULATION_SINGLETON_ID_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationStagePlan_ACU } from '../model';
 import { applyWorldSimulationProjection_ACU } from '../simulation-projection';
 import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerceWorldSimulationStringArray_ACU } from '../simulation-patch-normalize';
 import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
-import { WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
+import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU } from './agent-catalog';
 import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
 
@@ -155,6 +155,14 @@ function normalizeToolRequestMetadata_ACU(value: Record<string, unknown>, action
 }
 
 function isAuthorizedToolAddress_ACU(address: string): boolean {
+  if (address.startsWith('field:')) {
+    const match = address.match(/^field:([a-z]+):([^:]+)(?::([^:]+))?$/);
+    if (!match || !Object.prototype.hasOwnProperty.call(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU, match[1])) return false;
+    const module = match[1] as keyof typeof WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU;
+    const id = ['clock', 'player', 'guidance'].includes(module) ? WORLD_SIMULATION_SINGLETON_ID_ACU : match[2];
+    if (id !== match[2]) return false;
+    return !match[3] || WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module].fields.includes(match[3]);
+  }
   return WORLD_SIMULATION_TOOL_ADDRESSES_ACU.some(allowed => allowed.endsWith(':')
     ? address.startsWith(allowed) && address.length > allowed.length
     : address === allowed);
@@ -205,7 +213,7 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
     const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
     const reads = requiredList_ACU(raw.reads, '$.reads');
     const invalid = reads.find(address => !isAuthorizedToolAddress_ACU(address));
-    if (invalid) fail_ACU('INVALID_TOOL_ADDRESS', '$.reads', WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | '), invalid);
+    if (invalid) fail_ACU('INVALID_TOOL_ADDRESS', '$.reads', formatWorldSimulationToolAddressHints_ACU(), invalid);
     return { kind: 'read', reads };
   }
   if (action === 'search') {
@@ -748,6 +756,7 @@ export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldS
     `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
     'read 与 search 使用函数调用，不要写成 JSON。推理写在思维链里，闭合后再输出一个决策 JSON。不要 Markdown 围栏，也不要输出 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
     '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+    `字段地址必须使用 ${formatWorldSimulationToolAddressHints_ACU()}；必须包含模块名和条目 ID，例如 field:dimensions:dim-a；不得使用 field:dimensions 这类裸模块地址。`,
     'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
     'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
     '调阅时调用函数，决策动作格式必须是下面之一：',

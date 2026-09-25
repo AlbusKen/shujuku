@@ -10,6 +10,12 @@ export const WORLD_SIMULATION_TOOL_ADDRESSES_ACU = [
   'player:current', 'rumors:current',
   'seeds:', 'actors:', 'rumors:', 'chronicle:', 'dimensions:', 'chronicle-archive:', 'field:',
 ] as const;
+
+export function formatWorldSimulationToolAddressHints_ACU(): string {
+  return WORLD_SIMULATION_TOOL_ADDRESSES_ACU
+    .flatMap(address => address === 'field:' ? ['field:<module>:<id>', 'field:<module>:<id>:<field>'] : [address])
+    .join(' | ');
+}
 export interface WorldSimulationToolReadResult_ACU { status: WorldSimulationEvidenceStatus_ACU; content?: string; summary?: string; exact?: boolean; truncated?: boolean; directory?: boolean; }
 export interface WorldSimulationToolSearchHit_ACU { address: string; summary: string; }
 export interface WorldSimulationToolSearchResult_ACU { status: WorldSimulationEvidenceStatus_ACU; hits: readonly WorldSimulationToolSearchHit_ACU[]; summary?: string; }

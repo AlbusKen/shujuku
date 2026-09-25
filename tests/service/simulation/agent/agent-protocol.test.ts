@@ -170,6 +170,12 @@ describe('世界推演 Agent 协议', () => {
     expect(parseWorldSimulationMainOutput_ACU(
       '<WORLD_SIMULATION_ENGINE_SEAM:READ>{"address":"ledger:current"}</WORLD_SIMULATION_ENGINE_SEAM:READ>',
     )).toEqual({ kind: 'tools', calls: [{ kind: 'read', reads: ['ledger:current'] }] });
+    expect(parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['field:dimensions:dim-a'] })).toEqual({ kind: 'read', reads: ['field:dimensions:dim-a'] });
+    for (const address of ['field:seeds', 'field:actors', 'field:dimensions']) {
+      expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: [address] })).toThrowError(/INVALID_TOOL_ADDRESS/);
+    }
+    expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['field:dimensions:dim-a:unknown'] })).toThrowError(/INVALID_TOOL_ADDRESS/);
+
     expect(() => parseWorldSimulationMainOutput_ACU('{"address":"unknown:address"}')).toThrowError(/INVALID_ACTION/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: ['unknown:address'] })).toThrowError(/INVALID_TOOL_ADDRESS/);
     expect(() => parseWorldSimulationMainAction_ACU({ action: 'read', reads: [] })).toThrowError(/REQUIRED_TEXT_LIST/);
@@ -181,6 +187,8 @@ describe('世界推演 Agent 协议', () => {
     const message = renderWorldSimulationDirectorProtocolRejection_ACU({ reasonCode: 'UNKNOWN_FIELD', path: '$.evidenceRef', expected: 'no additional fields', actual: 'evidence:run:2' }, true);
     expect(message).toContain('调用 read 时参数 reads');
     expect(message).toContain('不要添加 evidenceRef、purpose');
+    expect(message).toContain('field:<module>:<id>');
+    expect(message).toContain('不得使用 field:dimensions 这类裸模块地址');
     expect(message).toContain('由服务端在读取成功后随工具结果颁发');
     expect(message).toContain('finalize 顶层只能包含 action、outcome、summary、evidenceRefs');
     expect(message).toContain('candidateId、acceptedCandidateIds、status、verdict 禁止出现');
