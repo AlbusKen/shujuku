@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ContinuationWorldbookContext_ACU,
+  isSummaryIndexEntryComment_ACU,
   normalizeAmCode_ACU,
   type ContinuationWorldbookAdapterDependencies_ACU,
 } from '../../../src/service/continuation/worldbook-context';
@@ -31,6 +32,13 @@ describe('ContinuationWorldbookContext_ACU', () => {
     }));
     const options = vi.mocked(dependencies.buildRelevantWorldbookContent).mock.calls[0][0] as any;
     expect(options.excludeEntry({ comment: 'ACU-[chat-a]-总结条目1' })).toBe(true);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-小总结条目2' })).toBe(true);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-TavernDB-ACU-CustomExport-纪要索引' })).toBe(true);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-TavernDB-ACU-CustomExport-纪要索引-1' })).toBe(true);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-TavernDB-ACU-CustomExport-纪要索引-2' })).toBe(true);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-TavernDB-ACU-CustomExport-角色表-1' })).toBe(false);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-TavernDB-ACU-CustomExport-角色表-索引' })).toBe(false);
+    expect(options.excludeEntry({ comment: 'ACU-[chat-a]-TavernDB-ACU-OutlineTable-1' })).toBe(false);
     expect(options.excludeEntry({ comment: '普通设定' })).toBe(false);
     expect(dependencies.resolveInjectionTarget).not.toHaveBeenCalled();
     expect(dependencies.readLorebookEntries).not.toHaveBeenCalled();
@@ -52,6 +60,15 @@ describe('ContinuationWorldbookContext_ACU', () => {
     await expect(context.readRelevantBackground('剧情')).resolves.toBe('');
     expect(dependencies.buildRelevantWorldbookContent).not.toHaveBeenCalled();
     expect(dependencies.logReadFailure).not.toHaveBeenCalled();
+  });
+});
+
+describe('纪要索引识别', () => {
+  it('只识别纪要索引及数字分片，不屏蔽普通表格及其索引', () => {
+    expect(isSummaryIndexEntryComment_ACU('TavernDB-ACU-CustomExport-纪要索引')).toBe(true);
+    expect(isSummaryIndexEntryComment_ACU('TavernDB-ACU-CustomExport-纪要索引-12')).toBe(true);
+    expect(isSummaryIndexEntryComment_ACU('TavernDB-ACU-CustomExport-角色表-索引')).toBe(false);
+    expect(isSummaryIndexEntryComment_ACU('TavernDB-ACU-CustomExport-纪要索引-说明')).toBe(false);
   });
 });
 

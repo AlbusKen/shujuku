@@ -1,4 +1,5 @@
 import type { WorldSimulationConversationCompaction_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationConversationView_ACU, WorldSimulationHandoffState_ACU } from './agent-model';
+import { toOpenAiToolCalls_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 import { summarizeWorldSimulationHandoff_ACU, type WorldSimulationHandoffSemanticAdapter_ACU } from './agent-handoff-summarizer';
 import type { WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { measureWorldSimulationPrompt_ACU } from './agent-token-budget';
@@ -36,15 +37,21 @@ function closed_ACU(group: readonly WorldSimulationConversationMessage_ACU[]): b
 }
 
 /** 与 readWorldSimulationDirectorHistory_ACU 同一投影：模型可见楼层消息 → 请求消息。 */
-function renderView_ACU(messages: readonly WorldSimulationConversationMessage_ACU[]): Array<{ role: string; content: string }> {
-  return messages.map(message => ({ role: message.kind === 'model_agent' ? 'assistant' : 'user', content: message.text }));
+function renderView_ACU(messages: readonly WorldSimulationConversationMessage_ACU[]): AiWireMessage_ACU[] {
+  return messages.map(message => message.kind === 'model_agent'
+    ? { role: 'assistant', content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) }
+    : message.toolCallId
+      ? { role: 'tool', content: message.text, tool_call_id: message.toolCallId }
+      : { role: 'user', content: message.text });
 }
 
 /** 在最终准备发送的消息里逐条定位当前历史投影并替换为压缩后投影；找不到时返回 null，调用方不得用算术差值冒充实测。 */
-function replaceHistory_ACU(prepared: readonly { role: string; content: string }[], before: readonly { role: string; content: string }[], after: readonly { role: string; content: string }[]): Array<{ role: string; content: string }> | null {
+function replaceHistory_ACU(prepared: readonly AiWireMessage_ACU[], before: readonly AiWireMessage_ACU[], after: readonly AiWireMessage_ACU[]): AiWireMessage_ACU[] | null {
   if (!before.length) return null;
   for (let start = 0; start <= prepared.length - before.length; start += 1) {
-    if (before.every((message, offset) => message.role === prepared[start + offset].role && message.content === prepared[start + offset].content)) {
+    if (before.every((message, offset) => message.role === prepared[start + offset].role && message.content === prepared[start + offset].content
+      && message.tool_call_id === prepared[start + offset].tool_call_id
+      && JSON.stringify(message.tool_calls) === JSON.stringify(prepared[start + offset].tool_calls))) {
       return [...prepared.slice(0, start), ...after, ...prepared.slice(start + before.length)];
     }
   }

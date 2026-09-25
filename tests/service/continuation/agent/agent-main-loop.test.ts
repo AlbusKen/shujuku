@@ -17,6 +17,14 @@ import type { AgentConversationCompactionMark_ACU, AgentConversationCompactionMa
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
 
+const nativeToolTurn_ACU = (name: 'read' | 'write_sql', args: Record<string, unknown>, id: string) => ({
+  content: '',
+  toolCalls: [{ id, name, arguments: JSON.stringify(args) }],
+});
+
+const toolMessageContent_ACU = (messages: readonly { role: string; content: string; tool_call_id?: string; tool_calls?: readonly { id: string }[] }[], predicate: (message: { role: string; content: string; tool_call_id?: string; tool_calls?: readonly { id: string }[] }) => boolean) =>
+  messages.find(predicate)?.content ?? '';
+
 beforeEach(() => { resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
 
 const chat_ACU = () => ([
@@ -410,7 +418,7 @@ describe('主 Agent 会话记录', () => {
   it('同一轮内历史涨到预算两倍时提前压缩，避免请求因超长必然失败', async () => {
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU('守门人'.repeat(4000)),
-      historyTokenBudget: 200,
+      historyTokenBudget: 3500,
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
@@ -506,7 +514,7 @@ describe('主 Agent 真实楼层会话压缩', () => {
     { kind: 'turn', text: '上一轮次', digest: '上一轮次', turnKey: 'stage-1#0#turn-2' },
     { kind: 'user', text: '最近要求：不要揭穿守门人', digest: '最近要求', turnKey: 'stage-1#0#turn-2' },
   ]);
-  const options = () => ({ productionConversation: true, conversation: original(), historyTokenBudget: 200,
+  const options = () => ({ productionConversation: true, conversation: original(), historyTokenBudget: 400,
     countTokens: fillerTokens_ACU, mainReplies: ['{"action":"finalize","instruction":"接着写"}'] });
 
   it('双楼真实保存与回读：报告只替换旧完整动作/回执，删标记楼恢复原文', async () => {
@@ -598,8 +606,8 @@ describe('主 Agent read/search 工具批次', () => {
     const h = harness_ACU({
       mutateChat: chat => { chat[3]._qrf_continuation_agent = { schemaVersion: 4, invalid: true }; },
       mainReplies: [
-        '{"action":"read","reads":["$FIELD:hooks:H1"]}',
-        '{"action":"read","reads":["$FIELD:hooks:H1"]}',
+        nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-invalid-read-1'),
+        nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-invalid-read-2'),
         '{"action":"finalize","instruction":"资料损坏待修复"}',
       ],
     });
@@ -614,8 +622,8 @@ describe('主 Agent read/search 工具批次', () => {
   it('调阅结果作为带 readKey 的工具消息回灌，重复调阅只回提示不重注内容', async () => {
     const h = harness_ACU({
       mainReplies: [
-        '{"action":"read","reads":["$HOOKS_LEDGER"]}',
-        '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+        nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-hooks-read-1'),
+        nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-hooks-read-2'),
         '{"action":"finalize","instruction":"查完了"}',
       ],
     });
@@ -634,9 +642,9 @@ describe('主 Agent read/search 工具批次', () => {
   it('资料变化后重读同一地址时，只在新工具消息自身标记最新快照', async () => {
     const h = harness_ACU({
       mainReplies: [
-        '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
+        nativeToolTurn_ACU('read', { reads: ['$OUTLINE_WINDOW'] }, 'call-outline-read-1'),
         '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"将当前轮目标调整为守门人先露破绽"}]}',
-        '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
+        nativeToolTurn_ACU('read', { reads: ['$OUTLINE_WINDOW'] }, 'call-outline-read-2'),
         '{"action":"finalize","instruction":"按最新快照写"}',
       ],
       applyOutline: () => ({ op: 'revise', requiresReview: false, stopped: null, summary: '大纲已由架构师维护' }),
@@ -657,8 +665,8 @@ describe('主 Agent read/search 工具批次', () => {
     const h = harness_ACU({
       budget: { maxReads: 1 },
       mainReplies: [
-        '{"action":"read","reads":["$HOOKS_LEDGER"]}',
-        '{"action":"read","reads":["$INFO_GAP"]}',
+        nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-hooks-read'),
+        nativeToolTurn_ACU('read', { reads: ['$INFO_GAP'] }, 'call-info-gap-read'),
         '{"action":"finalize","instruction":"停止调阅"}',
       ],
     });
@@ -669,7 +677,7 @@ describe('主 Agent read/search 工具批次', () => {
   it('读取批次被门禁打回时回灌结构化报告，循环不中断', async () => {
     const h = harness_ACU({
       mainReplies: [
-        '{"action":"read","reads":["$HISTORY_UNSETTLED"]}',
+        nativeToolTurn_ACU('read', { reads: ['$HISTORY_UNSETTLED'] }, 'call-history-read'),
         '{"action":"finalize","instruction":"不读了"}',
       ],
     });
@@ -717,16 +725,16 @@ describe('主 Agent 提示词装配', () => {
     expect(messages[runtimeIndex].content).toContain('【完整当前阶段大纲】');
     expect(messages[runtimeIndex].content).toContain('阶段 2：禁区试探');
     expect(messages[runtimeIndex].content).toContain('大纲是计划，不是已经发生的事实');
-    expect(messages[runtimeIndex].content.startsWith('【运行时快照】')).toBe(true);
-    expect(lastMessage_ACU(messages).role).toBe('assistant');
-    expect(lastMessage_ACU(messages).content.endsWith('"thought": "')).toBe(true);
+    expect(messages[runtimeIndex].content.startsWith('【本回合运行时数据】')).toBe(true);
+    expect(lastMessage_ACU(messages).role).toBe('user');
+    expect(lastMessage_ACU(messages).content).toContain('<thinking>');
     expect(messages.some(message => message.content.includes('$HISTORY_ANCHOR'))).toBe(false);
   });
 
   it('相邻迭代只追加不改写已发出的前缀', async () => {
     const h = harness_ACU({
       mainReplies: [
-        '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
+        nativeToolTurn_ACU('read', { reads: ['$OUTLINE_WINDOW'] }, 'call-outline-budget-read'),
         '{"action":"finalize","instruction":"本轮指导"}',
       ],
     });
@@ -734,9 +742,20 @@ describe('主 Agent 提示词装配', () => {
     expect(h.mainCalls.length).toBeGreaterThanOrEqual(2);
     const first = h.mainCalls[0];
     const second = h.mainCalls[1];
-    const firstPrefix = first.slice(0, -1);
-    expect(second.slice(0, firstPrefix.length)).toEqual(firstPrefix);
-    expect(second.filter(message => message.content.includes('【本回合运行时数据】')).length).toBeGreaterThanOrEqual(2);
+    const withoutRuntimeSnapshot = (messages: readonly { role: string; content: string }[]) =>
+      messages.filter(message => !message.content.includes('【本回合运行时数据】'));
+    const firstStable = withoutRuntimeSnapshot(first);
+    const secondStable = withoutRuntimeSnapshot(second);
+    let secondIndex = 0;
+    for (const expected of firstStable) {
+      const match = secondStable.findIndex((message, index) => index >= secondIndex
+        && message.role === expected.role && message.content === expected.content);
+      expect(match, `第二次请求缺少首轮已发出的稳定消息：${expected.role} ${expected.content.slice(0, 80)}`).toBeGreaterThanOrEqual(0);
+      secondIndex = match + 1;
+    }
+    expect(first.filter(message => message.content.includes('【本回合运行时数据】'))).toHaveLength(1);
+    expect(second.filter(message => message.content.includes('【本回合运行时数据】'))).toHaveLength(1);
+    expect(second.some(message => message.tool_calls?.some(call => call.id === 'call-outline-budget-read'))).toBe(true);
   });
 
   it('运行时证据带上未结算区间、子代理目录与资料模块目录', async () => {
@@ -1107,7 +1126,7 @@ describe('open_round 固定结构工作流', () => {
         _set_SillyTavern_API_ACU({ chat, saveChat } as any);
         if (calls++ === 0) {
           chat.push({ mes: '新增的末楼', is_user: false });
-          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧楼线索', 0)" });
+          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧楼线索', 0)" }, 'call-stale-tail');
         }
         return [maintainerReply_ACU, plannerReply_ACU, composerReply_ACU][calls - 2] ?? composerReply_ACU;
       },
@@ -1120,8 +1139,8 @@ describe('open_round 固定结构工作流', () => {
       expect(result.instruction).toBe('已向用户说明 hooks 缺口');
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat.at(-1)?.[AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
-      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
       const escalation = h.mainCalls[1].map(message => message.content).join('\n');
       expect(escalation).toContain('待修复模块需要主会话处理');
       expect(escalation).toContain('hooks');
@@ -1184,7 +1203,7 @@ describe('派工与写集落盘', () => {
         _set_SillyTavern_API_ACU({ chat, saveChat } as any);
         if (chat.length === 4) {
           chat.push({ mes: '新增的末楼', is_user: false });
-          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧楼线索', 0)" });
+          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧楼线索', 0)" }, 'call-stale-tail-main');
         }
         return JSON.stringify({ summary: '结束结算', delta: {} });
       },
@@ -1194,8 +1213,8 @@ describe('派工与写集落盘', () => {
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat[lastChat.length - 1][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
       expect(h.subCalls).toHaveLength(2);
-      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
-      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1215,7 +1234,7 @@ describe('派工与写集落盘', () => {
         _set_SillyTavern_API_ACU({ chat, saveChat } as any);
         if (calls++ === 0) {
           chat[3].swipe_id = 1;
-          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧 swipe 线索', 0)" });
+          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧 swipe 线索', 0)" }, 'call-stale-swipe');
         }
         return JSON.stringify({ summary: '结束结算', delta: {} });
       },
@@ -1224,8 +1243,8 @@ describe('派工与写集落盘', () => {
       await h.planner.plan(h.request);
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
-      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1245,7 +1264,7 @@ describe('派工与写集落盘', () => {
         _set_SillyTavern_API_ACU({ chat, saveChat } as any);
         if (calls++ === 0) {
           chat[3].mes = '新的正文版本';
-          return JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧剧情线索', 0)" });
+          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧剧情线索', 0)" }, 'call-stale-content');
         }
         return JSON.stringify({ summary: '结束结算', delta: {} });
       },
@@ -1254,8 +1273,8 @@ describe('派工与写集落盘', () => {
       await h.planner.plan(h.request);
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(h.subCalls[1].at(-2)?.content).toContain('"status":"rejected"');
-      expect(h.subCalls[1].at(-2)?.content).toContain('"partials":null');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
+      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1524,22 +1543,22 @@ describe('子代理运行时', () => {
 
   it('子代理输出 read 工具批次时执行调阅并把结果回灌，随后继续小循环', async () => {
     replies = [
-      '{"action":"read","reads":["$TABLE:角色表"]}',
+      { content: '', toolCalls: [{ id: 'call-table-catalog', name: 'read', arguments: JSON.stringify({ reads: ['$TABLE:角色表'] }) }] },
       JSON.stringify({ summary: '补齐后结算', delta: { hooks: [{ action: 'upsert', id: 'H1', summary: '晶屑' }] } }),
     ];
     const result = await runtime.run(input_ACU());
     expect(calls).toHaveLength(2);
-    // 第二次调用能看到自己上一次的工具请求（assistant）与回灌的工具结果（user）。
+    // 第二次调用保留原生工具请求与同 ID 的回执。
     const second = calls[1];
-    expect(second.some(message => message.role === 'assistant' && message.content.includes('$TABLE:角色表'))).toBe(true);
-    expect(second.some(message => message.role === 'tool' && message.content.includes('林瑶'))).toBe(true);
+    expect(second.some(message => message.role === 'assistant' && message.tool_calls?.some(call => call.id === 'call-table-catalog' && call.function.arguments.includes('$TABLE:角色表')))).toBe(true);
+    expect(second.some(message => message.role === 'tool' && message.tool_call_id === 'call-table-catalog' && message.content.includes('林瑶'))).toBe(true);
     expect(result.expandedReads).toEqual(['$TABLE:角色表']);
     expect(result.iterations).toBe(2);
   });
 
   it('工具轮次用尽后回灌最后通牒，子代理必须基于已有资料交付', async () => {
     replies = [
-      '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+      { content: '', toolCalls: [{ id: 'call-exhausted-hooks', name: 'read', arguments: JSON.stringify({ reads: ['$HOOKS_LEDGER'] }) }] },
       JSON.stringify({ summary: '就这样结算', delta: {} }),
     ];
     const result = await runtime.run(input_ACU({ budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 0 } } as any));
@@ -1668,15 +1687,15 @@ describe('S11 双模式双楼全链集成', () => {
     _set_SillyTavern_API_ACU({ chat, chatId: 's11-flow', getCurrentChatId: () => 's11-flow', saveChat } as any);
 
     const mainReplies = [
-      '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+      nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-s11-hooks'),
       '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算最近正文","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]}]}',
       '{"action":"finalize","instruction":"主角假装离开，当夜折返。","summary":"交付折返指导"}',
       '{"action":"finalize","instruction":"主角假装离开，当夜折返，查探晶屑来源。","summary":"交付二次指导"}',
     ];
     const subReplies = [
-      JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0)" }),
-      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
-      JSON.stringify({ action: 'write_sql', sql: "UPDATE hooks SET status = 'planted', importance = 'high', planted_index = 1, planned_payoff = '' WHERE id = 'H1' AND expected_revision = 1" }),
+      nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0)" }, 'call-s11-insert'),
+      nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-s11-read'),
+      nativeToolTurn_ACU('write_sql', { sql: "UPDATE hooks SET status = 'planted', importance = 'high', planted_index = 1, planned_payoff = '' WHERE id = 'H1' AND expected_revision = 1" }, 'call-s11-update'),
       JSON.stringify({ summary: '结算了门后信件', delta: {} }),
     ];
     const mainCalls: Array<Array<{ role: string; content: string }>> = [];

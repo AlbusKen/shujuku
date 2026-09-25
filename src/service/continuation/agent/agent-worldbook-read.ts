@@ -4,8 +4,8 @@
  * 运行起点一次性预取启用条目做运行内快照，之后目录 / 精读 / 命中提示 / 搜索都基于
  * 同一份快照（世界书读取是异步宿主调用，预取后地址在一次运行内不漂移）。
  *
- * 暴露范围：已启用集合内的普通条目全部可读可搜（含插件生成的重要人物条目等）；
- * 遗留的总结条目（旧总结系统的残留）不再暴露；未启用条目不进目录、不进搜索、不可读。
+ * 暴露范围：已启用集合内除纪要与纪要索引外的条目全部可读可搜；
+ * 未启用条目不进目录、不进搜索、不可读。
  */
 
 import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine-state';
@@ -14,6 +14,7 @@ import { getCurrentWorldbookConfig_ACU } from '../../settings/settings-readers';
 import { isEntryBlocked_ACU, logWarn_ACU } from '../../../shared/utils';
 import { getWorldbookEntryKeywords_ACU } from '../../worldbook/pipeline';
 import {
+  isSummaryIndexEntryComment_ACU,
   isSummaryEntryComment_ACU,
   normalizeGeneratedComment_ACU,
   resolveRelevantBookNames_ACU,
@@ -82,8 +83,8 @@ async function countEntryTokens_ACU(bookName: string, uid: string, content: stri
  * 预取当前已启用的世界书条目为运行内快照。
  *
  * 启用判定与提示词注入管线一致：条目自身 enabled 为真、且通过插件侧 enabledEntries
- * 勾选表、且不属于屏蔽名单（当前屏蔽词为空，逻辑保留备用）。遗留总结条目直接跳过。
- * 内部插件条目（TavernDB-ACU- 前缀）是存储载体而非叙事资料，不暴露。
+ * 勾选表、且不属于屏蔽名单（当前屏蔽词为空，逻辑保留备用）。纪要与纪要索引直接跳过。
+ * 其余已启用条目按正常世界书资料域暴露。
  * 每条条目在预取时统计 token 数（结果缓存跨运行复用），供目录标注读取预算。
  * @returns 快照；宿主读取失败时返回 available=false 的空快照
  */
@@ -103,13 +104,14 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
         const uid = String(raw.uid ?? '').trim();
         const title = normalizeGeneratedComment_ACU(raw, isolationPrefix);
         const content = String(raw.content ?? '').trim();
-        // 旧总结系统的残留条目不再是可用资料域，静默跳过。
+        // 纪要另由快照显示，不在世界书资料域重复暴露。
         if (isSummaryEntryComment_ACU(title)) continue;
         if (!uid || !content) continue;
         if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap)) continue;
         if (isEntryBlocked_ACU(raw)) continue;
-        // CustomExport 是插件生成的普通表格世界书内容；其余内部载体仍不暴露。
-        if (title.startsWith('TavernDB-ACU-') && !title.startsWith('TavernDB-ACU-CustomExport-')) continue;
+        // 纪要索引及其分片由快照单独显示。
+        if (isSummaryIndexEntryComment_ACU(title)) continue;
+        // 其余已启用条目交由正常世界书读取方案处理，不按插件前缀额外屏蔽。
         entries.push({
           bookName,
           uid,

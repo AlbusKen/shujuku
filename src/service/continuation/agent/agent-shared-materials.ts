@@ -104,7 +104,8 @@ export function omitSnapshotSectionsForSubagent_ACU(
   for (const block of prefix.split(/\n\n/)) {
     const first = block.split('\n')[0].trim();
     const heading = first.startsWith('【') || first.startsWith('以下是用户对任务曾经提过的要求');
-    if (heading) skipping = drop.has(first);
+    const normalizedHeading = first.match(/^【[^】]+】/)?.[0] ?? first;
+    if (heading) skipping = drop.has(first) || drop.has(normalizedHeading);
     if (!skipping) keptBlocks.push(block);
   }
   if (appendixAt < 0) return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();

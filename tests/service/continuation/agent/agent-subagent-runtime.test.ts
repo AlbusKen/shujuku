@@ -7,6 +7,13 @@ import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/co
 import type { AiUsageMetadata_ACU } from '../../../../src/service/continuation/internal-ai-call';
 
 const preset_ACU = { presetName: 'p1', source: 'settings', reason: 'test' } as any;
+type SentMessage_ACU = { role: string; content: string; tool_call_id?: string };
+const toolContent_ACU = (messages: readonly SentMessage_ACU[], id: string): string =>
+  messages.find(message => message.role === 'tool' && message.tool_call_id === id)?.content ?? '';
+const nativeToolTurn_ACU = (name: 'read' | 'write_sql', args: Record<string, unknown>, id: string) => ({
+  content: '',
+  toolCalls: [{ id, name, arguments: JSON.stringify(args) }],
+});
 
 it('主会话已读到的全文会附在快照后面，重复调阅提示不带上', () => {
   const text = renderMainSessionReadAppendix_ACU([
@@ -53,7 +60,7 @@ it('附录正文中的空行和伪标题不会误删按 ID 调阅内容', () => 
   expect(filtered).toContain('细读结尾');
 });
 
-const readReply_ACU = '{"action":"read","reads":["$TABLE:角色表"]}';
+const readReply_ACU = nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'call-table-read');
 const finalReply_ACU = JSON.stringify({ summary: '结算完成', delta: {} });
 
 function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
@@ -212,33 +219,39 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
 
     const messages = calls[0];
     const last = messages[messages.length - 1];
-    expect(last.role).toBe('assistant');
-    expect(last.content).toBe('{\n  "summary": "');
+    expect(last.role).toBe('user');
+    expect(last.content).toContain('"role": "assistant"');
     // 读取预算状态是运行时信息，紧贴预填充注入，是模型看到的最后一条 user 消息。
-    expect(messages[messages.length - 2].role).toBe('user');
-    expect(messages[messages.length - 2].content).toContain('【读取预算状态】');
-    expect(messages[messages.length - 3].role).toBe('user');
-    expect(messages[messages.length - 3].content).toContain('【本回合运行时数据】');
-    expect(messages[messages.length - 4].role).toBe('user');
-    expect(messages[messages.length - 4].content).toContain('【总纲卷数计划】');
+    const budgetMessage = messages.find(message => message.content.includes('【读取预算状态】'));
+    expect(budgetMessage).toMatchObject({ role: 'user' });
+    const runtimeSnapshot = messages.find(message => message.content.includes('【本回合运行时数据】'));
+    expect(runtimeSnapshot).toMatchObject({ role: 'user' });
+    const volumePlan = messages.find(message => message.content.includes('【总纲卷数计划】'));
+    expect(volumePlan).toBeDefined();
+    expect(messages.indexOf(volumePlan!)).toBeLessThan(messages.length - 1);
     // 总纲保留正文、总纲和全部已启用世界书目录，自行查阅；快照不再重复目录，也不注入命中全文。
-    expect(messages[messages.length - 5].content).toContain('【本次任务】\n立总纲');
-    expect(messages[messages.length - 5].content).toContain('【故事总纲现状】');
-    expect(messages[messages.length - 5].content).toContain('追查真相');
-    expect(messages[messages.length - 5].content).toContain('【完整当前阶段大纲】');
-    expect(messages[messages.length - 5].content).toContain('【事件概览】');
-    expect(messages[messages.length - 5].content).toContain('【最近正文】');
-    expect(messages[messages.length - 5].content).toContain('【已启用世界书目录】');
-    expect(messages[messages.length - 5].content).toContain('不是命中清单');
-    expect(messages[messages.length - 5].content).not.toContain('【本轮语境命中的世界书条目】');
-    expect(messages[messages.length - 5].content).not.toContain('不要再对这些条目调用 read');
-    expect(messages[messages.length - 3].content).not.toContain('【已启用世界书目录】');
-    expect(messages[messages.length - 3].content).not.toContain('【故事总纲状态】');
-    expect(messages[messages.length - 3].content).not.toContain('【当前故事总纲】');
-    expect(messages[messages.length - 3].content).not.toContain('追查真相');
-    expect(messages[messages.length - 3].content).not.toContain('【完整当前阶段大纲】');
-    expect(messages[messages.length - 3].content).not.toContain('【当前启用的阶段大纲】');
-    expect(messages[messages.length - 3].content).not.toContain('【本轮语境命中的世界书条目】');
+    const taskSnapshot = messages.find(message => message.content.includes('【本次任务】\n立总纲') && message.content.includes('【故事总纲现状】'));
+    expect(taskSnapshot).toMatchObject({ role: 'user' });
+    expect(taskSnapshot?.content).toContain('【故事总纲现状】');
+    expect(taskSnapshot?.content).toContain('追查真相');
+    expect(taskSnapshot?.content).toContain('【完整当前阶段大纲】');
+    expect(taskSnapshot?.content).toContain('【事件概览】');
+    expect(taskSnapshot?.content).toContain('【最近正文】');
+    expect(taskSnapshot?.content).toContain('【已启用世界书目录】');
+    expect(taskSnapshot?.content).toContain('不是命中清单');
+    expect(taskSnapshot?.content).toContain('总纲不注入命中条目全文');
+    expect(taskSnapshot?.content).toContain('请用已启用世界书目录自行选择 read');
+    const runtimeContent = runtimeSnapshot?.content ?? '';
+    const taskMaterialStart = runtimeContent.indexOf('以下是用户对任务曾经提过的要求：');
+    expect(taskMaterialStart).toBeGreaterThan(0);
+    const runtimePrefix = runtimeContent.slice(0, taskMaterialStart);
+    expect(runtimePrefix).not.toContain('【已启用世界书目录】');
+    expect(runtimePrefix).not.toContain('【故事总纲状态】');
+    expect(runtimePrefix).not.toContain('【当前故事总纲】');
+    expect(runtimePrefix).not.toContain('追查真相');
+    expect(runtimePrefix).not.toContain('【完整当前阶段大纲】');
+    expect(runtimePrefix).not.toContain('【当前启用的阶段大纲】');
+    expect(runtimePrefix).not.toContain('【本轮语境命中的世界书条目】');
   });
 
   it('runs final review through its own channel, evidence gate, and read-only tool loop', async () => {
@@ -252,7 +265,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const roles: string[] = [];
     const calls: Array<Array<{ role: string; content: string }>> = [];
     const replies = [
-      '{"action":"read","reads":["$TABLE:角色表"]}',
+      nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'call-review-table-read'),
       JSON.stringify({ verdict: 'revise', summary: '晶屑去向需要遵守设定', emotionFindings: [], worldFindings: ['晶屑不能带离铁门'], logicFindings: [], requiredFixes: ['保留铁门限制'], preserve: ['守门人边界'] }),
     ];
     const runtime = new AgentSubagentRuntime_ACU({
@@ -371,12 +384,12 @@ describe('子代理逐栏工具会话', () => {
     const firstSql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0)";
     const restSql = "UPDATE hooks SET status = 'planted', importance = 'mid', planted_index = 1, planned_payoff = '' WHERE id = 'H1' AND expected_revision = 1";
     const replies = [
-      JSON.stringify({ action: 'write_sql', sql: firstSql }),
-      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
-      JSON.stringify({ action: 'write_sql', sql: restSql }),
+      nativeToolTurn_ACU('write_sql', { sql: firstSql }, 'call-first-write'),
+      nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-hooks-read'),
+      nativeToolTurn_ACU('write_sql', { sql: restSql }, 'call-second-write'),
       finalReply_ACU,
     ];
-    const messages: Array<readonly { role: string; content: string }[]> = [];
+    const messages: Array<readonly SentMessage_ACU[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async value => { messages.push(value); return replies.shift() ?? finalReply_ACU; },
@@ -385,8 +398,8 @@ describe('子代理逐栏工具会话', () => {
       const result = await runtime.run(input);
       expect(result.usedFieldWrites).toBe(true);
       expect(result.iterations).toBe(4);
-      expect(messages.slice(0, 4).every(request => request.at(-1)?.role === 'assistant' && request.at(-1)?.content.startsWith('{'))).toBe(true);
-      expect(messages[1].at(-2)?.role).toBe('tool');
+      expect(messages.slice(0, 4).every(request => request.some(item => item.content.startsWith('{')))).toBe(true);
+      expect(toolContent_ACU(messages[1], 'call-first-write')).not.toBe('');
       expect(saveChat).toHaveBeenCalledTimes(2);
       expect(messages[1].map(item => item.content).join('\n')).toContain('"status":"committed"');
       expect(messages[1].map(item => item.content).join('\n')).toContain('"field":"summary","revision":1');
@@ -411,7 +424,7 @@ describe('子代理逐栏工具会话', () => {
     const saveChat = vi.fn().mockResolvedValue(undefined);
     _set_SillyTavern_API_ACU({ chat, saveChat } as any);
     const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
-    const replies = [JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const replies = [nativeToolTurn_ACU('write_sql', { sql }, 'call-partial-write'), finalReply_ACU];
     const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async () => replies.shift() ?? finalReply_ACU });
     input.writeSql = ({ role, sql: statement, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql: statement, isCurrent });
@@ -433,9 +446,9 @@ describe('子代理逐栏工具会话', () => {
     const saveChat = vi.fn().mockResolvedValue(undefined);
     _set_SillyTavern_API_ACU({ chat, saveChat } as any);
     const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
-    const replies = [JSON.stringify({ action: 'write_sql', sql, extra: 'forbidden' }),
-      JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
-    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const replies = [nativeToolTurn_ACU('write_sql', { sql, extra: 'forbidden' }, 'call-invalid-write'),
+      nativeToolTurn_ACU('write_sql', { sql }, 'call-valid-write'), finalReply_ACU];
+    const sent: Array<readonly SentMessage_ACU[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
@@ -445,48 +458,48 @@ describe('子代理逐栏工具会话', () => {
       const result = await runtime.run(input);
       expect(result.iterations).toBe(3);
       expect(saveChat).toHaveBeenCalledOnce();
-      expect(sent[1].at(-2)?.content).toContain('工具动作未执行');
-      expect(sent[1].at(-2)?.content).not.toContain('"status":"committed"');
-      expect(sent[2].at(-2)?.content).toContain('"status":"committed"');
+      expect(toolContent_ACU(sent[1], 'call-invalid-write')).toContain('工具动作未执行');
+      expect(toolContent_ACU(sent[1], 'call-invalid-write')).not.toContain('"status":"committed"');
+      expect(toolContent_ACU(sent[2], 'call-valid-write')).toContain('"status":"committed"');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
   it('只有合法 ID 的栏目拒绝可给权威读取地址，不确定状态不提供旧地址', async () => {
     const input = input_ACU();
     const sql = "UPDATE hooks SET status = 'invalid' WHERE id = 'H1' AND expected_revision = 0";
-    const replies = [JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
-    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const replies = [nativeToolTurn_ACU('write_sql', { sql }, 'call-rejected-write'), finalReply_ACU];
+    const sent: Array<readonly SentMessage_ACU[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; } });
     input.writeSql = async () => ({ status: 'rejected', accepted: [], rejected: [{ path: 'hooks#H1.status', reason: 'invalid status' },
       { path: 'sql[0].hooks.unknown', reason: 'invalid column' }, { path: 'host', reason: 'not an ID' }],
     partials: [], revisions: buildEmptyAgentModuleSnapshot_ACU().revisions, constraintProposals: [] });
     await runtime.run(input);
-    expect(sent[1].at(-2)?.content).toContain('"readAddresses":["$FIELD:hooks:H1"]');
-    expect(sent[1].at(-2)?.content).not.toContain('$FIELD:hooks:host');
+    expect(toolContent_ACU(sent[1], 'call-rejected-write')).toContain('"readAddresses":["$FIELD:hooks:H1"]');
+    expect(toolContent_ACU(sent[1], 'call-rejected-write')).not.toContain('$FIELD:hooks:host');
 
     sent.length = 0;
-    replies.push(JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU);
+    replies.push(nativeToolTurn_ACU('write_sql', { sql }, 'call-readback-write'), finalReply_ACU);
     input.writeSql = async () => ({ status: 'readback_failed', accepted: [], rejected: [{ path: 'hooks#H1.status', reason: 'readback' }],
       partials: null, revisions: null, constraintProposals: [], recovery: 'unavailable' });
     await runtime.run(input);
-    expect(sent[1].at(-2)?.content).toContain('"readAddresses":[]');
+    expect(toolContent_ACU(sent[1], 'call-readback-write')).toContain('"readAddresses":[]');
   });
 
   it('提交端口抛出上下文失效时回执标明状态未知与剩余额度，不伪造权威缺栏', async () => {
     const input = input_ACU();
     const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
     input.writeSql = async () => { throw new Error('聊天锚点已变化'); };
-    const replies = [JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
-    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const replies = [nativeToolTurn_ACU('write_sql', { sql }, 'call-stale-write'), finalReply_ACU];
+    const sent: Array<readonly SentMessage_ACU[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; } });
     const result = await runtime.run(input);
-    const receipt = JSON.parse(sent[1].at(-2)?.content.match(/\{.*"action":"write_sql".*\}/)?.[0] ?? '{}');
+    const receipt = JSON.parse(toolContent_ACU(sent[1], 'call-stale-write').match(/\{.*"action":"write_sql".*\}/)?.[0] ?? '{}');
     expect(receipt).toMatchObject({ status: 'rejected', accepted: [], partials: null, revisions: null,
       readAddresses: [], remainingToolRounds: 1, remainingWriteRounds: 3 });
     expect(receipt.reason).toContain('聊天锚点已变化');
-    expect(sent[1].at(-2)?.content).toContain('先 read 对应 $FIELD:模块:ID 权威帧');
+    expect(toolContent_ACU(sent[1], 'call-stale-write')).toContain('先 read 对应 $FIELD:模块:ID 权威帧');
     expect(result.usedFieldWrites).toBe(false);
   });
 
@@ -496,11 +509,11 @@ describe('子代理逐栏工具会话', () => {
     input.budget.maxExtraReads = 2;
     input.resolveContext.chat[1][AGENT_MODULE_FIELD_ACU] = { schemaVersion: 4, invalid: true };
     const replies = [
-      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
-      JSON.stringify({ action: 'read', reads: ['$FIELD:hooks:H1'] }),
+      nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-damaged-read-1'),
+      nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-damaged-read-2'),
       finalReply_ACU,
     ];
-    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const sent: Array<readonly SentMessage_ACU[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async messages => {
@@ -510,11 +523,11 @@ describe('子代理逐栏工具会话', () => {
       },
     });
     await runtime.run(input);
-    expect(sent[1].at(-2)?.content).toContain('"status":"failed"');
-    expect(sent[1].at(-2)?.content).toContain('资料帧校验失败');
-    expect(sent[2].at(-2)?.content).toContain('"status":"unwritten"');
-    expect(sent[2].at(-2)?.content).not.toContain('已放行');
-    expect(sent[2].at(-1)).toMatchObject({ role: 'assistant', content: '{\n  "summary": "' });
+    expect(toolContent_ACU(sent[1], 'call-damaged-read-1')).toContain('"status":"failed"');
+    expect(toolContent_ACU(sent[1], 'call-damaged-read-1')).toContain('资料帧校验失败');
+    expect(toolContent_ACU(sent[2], 'call-damaged-read-2')).toContain('"status":"unwritten"');
+    expect(toolContent_ACU(sent[2], 'call-damaged-read-2')).not.toContain('已放行');
+    expect(sent[2].some(message => message.content.includes('"summary"'))).toBe(true);
   });
 
   it('损坏资料帧的派工种子读取立即失败，不发送模型请求', async () => {
@@ -538,13 +551,13 @@ describe('子代理逐栏工具会话', () => {
     const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockRejectedValueOnce(new Error('rollback failed'));
     _set_SillyTavern_API_ACU({ chat, saveChat } as any);
     input.writeSql = ({ role, sql, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent });
-    const replies = [JSON.stringify({ action: 'write_sql', sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)" }), finalReply_ACU];
+    const replies = [nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)" }, 'call-recovery-write'), finalReply_ACU];
     const messages: Array<readonly { role: string; content: string }[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
       callInternalAi: async value => { messages.push(value); return replies.shift() ?? finalReply_ACU; } });
     try {
       await runtime.run(input);
-      const feedback = messages[1].at(-2)?.content ?? '';
+      const feedback = messages[1].find(message => message.role === 'tool' && message.tool_call_id === 'call-recovery-write')?.content ?? '';
       expect(feedback).toContain('"recovery":"failed"');
       expect(feedback).toContain('"partials":null');
       expect(feedback).toContain('"revisions":null');
@@ -568,7 +581,7 @@ describe('子代理逐栏工具会话', () => {
     _set_SillyTavern_API_ACU({ chat, saveChat } as any);
     input.writeSql = ({ role, sql }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql });
     const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
-    const replies = [JSON.stringify({ action: 'write_sql', sql }), JSON.stringify({ action: 'write_sql', sql }), finalReply_ACU];
+    const replies = [nativeToolTurn_ACU('write_sql', { sql }, 'call-persist-failed-1'), nativeToolTurn_ACU('write_sql', { sql }, 'call-persist-failed-2'), finalReply_ACU];
     const messages: Array<readonly { role: string; content: string }[]> = [];
     const runtime = new AgentSubagentRuntime_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
@@ -614,8 +627,10 @@ describe('子代理逐栏工具会话', () => {
       callInternalAi: async value => {
         messages.push(value);
         return messages.length === 1
-          ? JSON.stringify({ summary: '立卷', sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, status, expected_revision, sustaining_threads) VALUES ('VOL-01', 'volume', '入府', '进入明府', '身份落下', 'active', 0, '一句经营线')" })
-          : JSON.stringify({ summary: '补栏', sql: "UPDATE story_arc SET withheld = '名器未激活' WHERE id = 'VOL-01' AND expected_revision = 0" });
+          ? nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, status, expected_revision, sustaining_threads) VALUES ('VOL-01', 'volume', '入府', '进入明府', '身份落下', 'active', 0, '一句经营线')" }, 'call-volume-insert')
+          : messages.length === 2
+            ? nativeToolTurn_ACU('write_sql', { sql: "UPDATE story_arc SET withheld = '名器未激活' WHERE id = 'VOL-01' AND expected_revision = 0" }, 'call-volume-repair')
+            : finalReply_ACU;
       },
     });
     const result = await runtime.run(input);
@@ -655,7 +670,9 @@ describe('子代理逐栏工具会话', () => {
         messages.push(value);
         return messages.length === 1
           ? '{"summary":"资料已充分，直接交付总纲契约"}'
-          : JSON.stringify({ summary: '补写', sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)" });
+          : messages.length === 2
+            ? nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)" }, 'call-arc-bootstrap')
+            : finalReply_ACU;
       },
     });
     const result = await runtime.run(input);

@@ -66,7 +66,7 @@ export function worldSimulationDirectorProtocolInstruction_ACU(): string {
 
 /** 各账本模块的 write_sql 时机、列和需替换证据与事实的格式范例。 */
 export function renderWorldSimulationSqlGuide_ACU(modules: readonly string[]): string {
-  const lines = ['【write_sql 格式】只在对应资料确实变化时调用。字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON。evidence_refs 只能填本轮已经颁发的引用。没有可验证的事实依据就不要编造新条目，把缺口写进 uncertainties；无可写事实时交 no_change。'];
+  const lines = ['【write_sql 格式】只在对应资料确实变化时调用。尽可能把本次要写的全部语句用分号隔开，放进同一次调用的同一个 sql 参数里一次完成，不要拆成几批分多次调用。字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON。evidence_refs 只能填本轮已经颁发的引用。没有可验证的事实依据就不要编造新条目，把缺口写进 uncertainties；无可写事实时交 no_change。'];
   if (modules.includes('clock')) lines.push('clock：正文明确经过昼夜或更长时间时 UPDATE。days 是推进量，不是绝对日。没有时间证据不要写。范例：UPDATE clock SET days = 1, story_time = \'次日午后\', slot = \'午后\', evidence_refs = \'["evidence:已颁发引用"]\' WHERE expected_revision = 0;');
   if (modules.includes('dimensions')) lines.push(`dimensions：维度烈度或趋势变了才写。必填 name、kind（pressure 或 growth）、value（0-100）、trend（rising、stable、falling）、rationale（说明依据与趋势，建议 30 到 80 字）、evidence_refs。范例：INSERT INTO dimensions (name, kind, value, trend, rationale, evidence_refs, expected_revision) VALUES ('城中戒备', 'pressure', 40, 'rising', '守门人开始盘查入城者，烈度上升', '["evidence:已颁发引用"]', 0);`);
   if (modules.includes('seeds')) lines.push(`seeds：暗流生命周期前进时写。必填 title、status（established、incubating、active、converging、resolved、retired）、level（0-100 的整数；建议按 0-4 的影响层级评估）、catalyst、visibility（hidden、limited、public）、location（带 region 的 JSON 对象或 null）、evidence_refs。有时限时同时给 expires_at_day 和 missed_outcome。范例：INSERT INTO seeds (title, status, level, catalyst, visibility, location, evidence_refs, expected_revision) VALUES ('禁区外泄', 'incubating', 2, '守门人连续三夜离岗', 'limited', '{"region":"禁区门口"}', '["evidence:已颁发引用"]', 0);`);
@@ -116,7 +116,7 @@ export function renderWorldSimulationWriteRepair_ACU(
     return '【write_sql 补栏】保存或恢复状态无法确认。先 read ledger:current 及 field:模块:ID 权威栏目，核实已存内容和当前 revision；不要按旧号重发 SQL。';
   }
   if (!receipt.rejected.length && !receipt.partials.some(item => item.missingFields.length || item.promotionError)) return '';
-  const lines = ['【write_sql 补栏】只以 status=committed 的 accepted 为已保存。字段对照示例：原 INSERT A/B/C/D，回执确认 A/C 已存而 B/D 未存，下次按实际 ID/revision 仅 UPDATE B/D；不要重新 INSERT 或重发 A/C。示例值只演示语法，须换成本轮真实事实和已颁发的证据引用。'];
+  const lines = ['【write_sql 补栏】只以 status=committed 的 accepted 为已保存。修复步骤：先 read 回执指出的 field:模块:ID 核实已存栏目与当前 revision，再只 UPDATE 未保存的栏目；不重新 INSERT 已存在的草稿，也不重发已存栏目。真实示例：seeds 草稿 seed-1 只缺 title 与 status，就提交 UPDATE seeds SET title = \'禁区外泄\', status = \'incubating\' WHERE id = \'seed-1\' AND expected_revision = 0;（草稿补栏 expected_revision 用 0）。示例值只演示语法，正文须换成本轮真实事实与已颁发的证据引用。'];
   for (const item of receipt.partials) {
     if (!modules.includes(item.module) || (!item.missingFields.length && !item.promotionError)) continue;
     lines.push(`${item.module}#${item.id} 已是草稿；缺 ${item.missingFields.join('、') || '领域校验所需的修正'}。先 read field:${item.module}:${item.id} 核实已存栏目。`);
@@ -229,7 +229,7 @@ function alignThinkPrefillProtocol_ACU(content: string): string {
 }
 
 export function worldSimulationDirectorRuntimeProtocolInstruction_ACU(): string {
-  return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU()));
+  return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU())).replace(/<UNTRUSTED_READ_BUDGET>[\s\S]*?<\/UNTRUSTED_READ_BUDGET>/g, '<UNTRUSTED_READ_BUDGET>阅读预算见本轮运行时快照。</UNTRUSTED_READ_BUDGET>');
 }
 
 export function worldSimulationSpecialistRuntimeProtocolInstruction_ACU(

@@ -27,16 +27,19 @@ export function normalizeGeneratedComment_ACU(entry: Record<string, unknown>, is
   return isolationPrefix && raw.startsWith(isolationPrefix) ? raw.slice(isolationPrefix.length) : raw;
 }
 
+/** 纪要索引和数字分片由纪要快照负责；普通表格的索引不得误屏蔽。 */
+export function isSummaryIndexEntryComment_ACU(comment: string): boolean {
+  return /^TavernDB-ACU-CustomExport-纪要索引(?:-[1-9]\d*)?$/.test(comment);
+}
+
 /** 是否为纪要（总结）条目的显示名。 */
 export function isSummaryEntryComment_ACU(comment: string): boolean {
   return /^(?:总结条目|小总结条目)\d+$/.test(comment);
 }
 
 function isGeneratedEntryComment_ACU(comment: string): boolean {
-  return comment.startsWith('TavernDB-ACU-')
-    || comment.startsWith('总结条目')
-    || comment.startsWith('小总结条目')
-    || comment.startsWith('重要人物条目');
+  // 纪要由快照显示；其他已启用世界书条目（包括表格导出）仍由世界书方案决定是否注入。
+  return isSummaryIndexEntryComment_ACU(comment) || isSummaryEntryComment_ACU(comment);
 }
 
 /** 解析当前生效的世界书名单（手动选择或角色绑定）。同时供 Agent 世界书读取工具使用。 */

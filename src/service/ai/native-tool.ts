@@ -78,7 +78,7 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
       type: 'function',
       function: {
         name: 'write_sql',
-        description: '把资料写入你负责的表。何时使用：要新增、修改或删除一条已有资料，而且系统提示里给你的表允许写。没有变化不要调用。sql 是一条或多条用分号隔开的 INSERT、UPDATE 或 DELETE。字符串用单引号，正文里的单引号写成两个单引号；数组和对象写成单引号包裹的 JSON。新行是否须显式给 expected_revision=0 依具体角色的表契约：推演 dimensions/seeds/actors/rumors 必须给 0，续写新行可省略；已有数组行的 WHERE 带 id 与当前条目/模块修订号，单例模块只带当前账本修订号；已保存 partial 仅按 missingFields 补未存栏目，状态不确定先 read。具体表、必填列和范例以系统提示中你这个角色的 write_sql 说明为准。范例：INSERT INTO hooks (summary, status, importance, planted_index, planned_payoff) VALUES (\'守门人藏着晶屑\', \'planted\', \'mid\', 3, \'稍后交出\');',
+        description: '把资料写入你负责的表。何时使用：要新增、修改或删除一条已有资料，而且系统提示里给你的表允许写。没有变化不要调用。sql 是一条或多条用分号隔开的 INSERT、UPDATE 或 DELETE。尽可能把本次要写的全部语句放进同一次调用的同一个 sql 参数里一次完成，不要拆成几批分多次调用。字符串用单引号，正文里的单引号写成两个单引号；数组和对象写成单引号包裹的 JSON。新行是否须显式给 expected_revision=0 依具体角色的表契约：推演 dimensions/seeds/actors/rumors 必须给 0，续写新行可省略；已有数组行的 WHERE 带 id 与当前条目/模块修订号，单例模块只带当前账本修订号；已保存 partial 仅按 missingFields 补未存栏目，状态不确定先 read。具体表、必填列和范例以系统提示中你这个角色的 write_sql 说明为准。范例：INSERT INTO hooks (summary, status, importance, planted_index, planned_payoff) VALUES (\'守门人藏着晶屑\', \'planted\', \'mid\', 3, \'稍后交出\');',
         parameters: objectSchema_ACU({
           sql: { type: 'string' },
           evidenceRefs: { type: 'array', items: { type: 'string' } },
@@ -153,6 +153,20 @@ export function normalizeStoredToolCall_ACU(raw: unknown): AiNativeToolCall_ACU[
   if (!id || !name) return [];
   const args = typeof value.arguments === 'string' ? value.arguments : JSON.stringify(value.arguments ?? {});
   return [{ id, name, arguments: args }];
+}
+
+/** 原生调用的协议边界：不从 assistant.content 猜工具动作，参数先验证再交领域解析器。 */
+export function nativeToolArguments_ACU(calls: readonly AiNativeToolCall_ACU[]): Array<{ call: AiNativeToolCall_ACU; payload: Record<string, unknown> }> {
+  const ids = new Set<string>();
+  return calls.map(call => {
+    if (!call.id.trim() || !call.name.trim() || ids.has(call.id)) throw new Error('原生工具调用 ID 或函数名无效、或 ID 重复');
+    ids.add(call.id);
+    const args: unknown = JSON.parse(call.arguments);
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error(`工具 ${call.name} 的参数必须是 JSON 对象`);
+    const payload = args as Record<string, unknown>;
+    if ('action' in payload) throw new Error(`工具 ${call.name} 的参数不得包含文本协议 action`);
+    return { call, payload: { ...payload, action: call.name } };
+  });
 }
 
 /** 文本协议里的 read/search/write_sql 也要落成工具记录；混有其它动作时返回空，交给原路径。 */
@@ -230,7 +244,7 @@ export function nativeToolExchange_ACU(content: string, calls: readonly AiNative
     ...calls.map((call, index) => ({
       role: 'tool',
       tool_call_id: call.id,
-      content: results[index] ?? results[0] ?? '',
+      content: results[index] ?? '工具未返回对应结果',
     })),
   ];
 }

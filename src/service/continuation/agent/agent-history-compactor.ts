@@ -43,18 +43,6 @@ function groups_ACU(messages: readonly AgentConversationMessage_ACU[]): AgentCon
   return result;
 }
 
-function replaceHistory_ACU(prepared: readonly { role: string; content: string }[], before: AgentConversationSnapshot_ACU, after: AgentConversationSnapshot_ACU): Array<{ role: string; content: string }> | null {
-  const source = renderAgentConversationMessages_ACU(before);
-  const replacement = renderAgentConversationMessages_ACU(after);
-  if (!source.length) return null;
-  for (let start = 0; start <= prepared.length - source.length; start += 1) {
-    if (source.every((message, offset) => message.role === prepared[start + offset].role && message.content === prepared[start + offset].content)) {
-      return [...prepared.slice(0, start), ...replacement, ...prepared.slice(start + source.length)];
-    }
-  }
-  return null;
-}
-
 async function measurePrepared_ACU(messages: readonly { role: string; content: string }[], count: TokenCounter_ACU): Promise<number> {
   let total = 0;
   for (const message of messages) total += await count(message.content);
@@ -79,9 +67,7 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
   let droppedTurns = 1;
   const currentTokens = async (turns: number): Promise<number> => {
     const candidateSnapshot = { ...input.snapshot, messages: grouped.slice(turns).flat() };
-    if (!input.preparedMessages) return measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
-    const prepared = replaceHistory_ACU(input.preparedMessages, input.snapshot, candidateSnapshot);
-    return prepared ? measurePrepared_ACU(prepared, input.countTokens) : Infinity;
+    return measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
   };
   while (droppedTurns < maxDropped && (await currentTokens(droppedTurns)) + maxHandoffTokens > targetTokens) droppedTurns += 1;
   const kept = grouped.slice(droppedTurns).flat();
@@ -125,9 +111,9 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
     at,
   };
   const candidateSnapshot: AgentConversationSnapshot_ACU = { ...input.snapshot, messages: [handoff, ...kept] };
-  const preparedAfter = input.preparedMessages ? replaceHistory_ACU(input.preparedMessages, input.snapshot, candidateSnapshot) : null;
-  if (input.preparedMessages && !preparedAfter) return unchanged('incompressible', beforeTokens, targetTokens);
-  const afterTokens = preparedAfter ? await measurePrepared_ACU(preparedAfter, input.countTokens) : await measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+  // 候选体量按「骨架开销 + 候选会话渲染」估算：待发消息里的会话区段会被运行时快照折叠改写，
+  // 不能逐字替换定位；真正的越界防线是压缩提交后对最终请求的重新计量。
+  const afterTokens = await measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
   if (afterTokens >= beforeTokens) return unchanged('no_progress', beforeTokens, targetTokens);
   const mark: AgentConversationCompactionMarkV2_ACU = {
     schemaVersion: 2,

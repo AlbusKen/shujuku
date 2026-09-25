@@ -27,6 +27,10 @@ function fixture(runId = 'runtime') {
 }
 
 describe('世界推演 Agent runtime', () => {
+  const toolTurn = (name: 'read' | 'write_sql', args: Record<string, unknown>, id: string) => ({
+    content: '', toolCalls: [{ id, name, arguments: JSON.stringify(args) }],
+  });
+
   beforeEach(() => { resetWorldSimulationRunCacheForTests_ACU(); resetWorldSimulationSessionLogForTests_ACU(); vi.clearAllMocks(); });
 
   it('锚定主会话第二次请求见首次 read 原文，重启后不会从展示卡片重复投影', async () => {
@@ -39,9 +43,9 @@ describe('世界推演 Agent runtime', () => {
       triggerConversationMessageId: null, anchorMessageId: anchor.messageId, anchorMessageKey: anchor.messageKey,
       anchorSwipeId: anchor.swipeId, anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 0,
       taskId: 'task-history', stageId: 'stage-history', stageRevision: 1 };
-    const read = JSON.stringify({ action: 'read', reads: ['anchor:message'] });
+    const read = { content: '', toolCalls: [{ id: 'call_0_read', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] };
     const blocked = JSON.stringify({ action: 'block', reason: '待续', unresolved: ['稍后继续'] });
-    const sent: Array<readonly { role: string; content: string }[]> = [];
+    const sent: Array<readonly { role: string; content: string; tool_calls?: unknown; tool_call_id?: string }[]> = [];
     const invoke = vi.fn(async (_role, messages) => { sent.push(messages); return sent.length === 1 ? read : blocked; });
     const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1 });
     const result = await loop.run({ identity, anchor, chat, settings: settings(), promptContext, registry,
@@ -49,21 +53,21 @@ describe('世界推演 Agent runtime', () => {
       persistSessionEvent: async () => undefined });
     expect(result.outcome).toBe('blocked');
     expect(sent).toHaveLength(2);
-    expect(sent[1].filter(item => item.content === read)).toHaveLength(1);
+    expect(sent[1].filter(item => item.role === 'assistant' && item.tool_calls)).toHaveLength(1);
     expect(sent[1].filter(item => item.content.includes('已读完整正文'))).toHaveLength(1);
     expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
-      { role: 'assistant', content: read, tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
       { role: 'tool', tool_call_id: 'call_0_read', content: expect.stringContaining('已读完整正文') },
       { role: 'assistant', content: blocked }, { role: 'user', content: expect.stringContaining('\"outcome\":\"blocked\"') },
     ]);
     expect(readWorldSimulationConversation_ACU(chat).messages.filter(item => item.kind === 'model_agent')).toHaveLength(2);
     resetWorldSimulationRunCacheForTests_ACU();
-    const freshSent: Array<readonly { role: string; content: string }[]> = [];
+    const freshSent: Array<readonly { role: string; content: string; tool_calls?: unknown; tool_call_id?: string }[]> = [];
     const fresh = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async (_role, messages) => {
       freshSent.push(messages); return JSON.stringify({ action: 'block', reason: '暂停', unresolved: ['待用户'] });
     }), subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1 });
     await fresh.run({ identity, anchor, chat, settings: settings(), promptContext, registry, tools, persistSessionEvent: async () => undefined });
-    expect(freshSent[0].filter(item => item.content === read)).toHaveLength(1);
+    expect(freshSent[0].filter(item => item.role === 'assistant' && item.tool_calls)).toHaveLength(1);
     expect(freshSent[0].filter(item => item.content.includes('已读完整正文'))).toHaveLength(1);
     expect(freshSent[0].some(item => item.content.includes('主 Agent 正在读取资料'))).toBe(false);
   });
@@ -237,7 +241,7 @@ describe('世界推演 Agent runtime', () => {
     const sent: Array<readonly { role: string; content: string }[]> = [];
     let calls = 0;
     const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[]) => {
-      sent.push(messages); calls += 1; return calls < 6 ? read : block;
+      sent.push(messages); calls += 1; return calls < 6 ? { content: '', toolCalls: [{ id: `call-volatile-${calls}`, name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] } : block;
     });
     const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: markerCount })
       .run({ identity: { ...baseIdentity, runId: 'volatile-run', taskId: 'volatile-task-run' }, settings: { ...runSettings, agentHistoryTokenBudget: budget },
@@ -252,8 +256,8 @@ describe('世界推演 Agent runtime', () => {
 
   it('实际导演请求稳定协议在动态用户要求之前，模型历史追加在末位预填充之前', async () => {
     const { registry, promptContext } = fixture('director-prefix');
-    const sent: Array<readonly { role: string; content: string }[]> = [];
-    const read = JSON.stringify({ action: 'read', reads: ['anchor:message'] });
+    const sent: Array<readonly { role: string; content: string; tool_calls?: unknown; tool_call_id?: string }[]> = [];
+    const read = { content: '', toolCalls: [{ id: 'call-director-prefix', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] };
     const invoke = vi.fn(async (_role, messages) => {
       sent.push(messages);
       return sent.length === 1 ? read : JSON.stringify({ action: 'block', reason: '等待', unresolved: ['后续'] });
@@ -268,9 +272,9 @@ describe('世界推演 Agent runtime', () => {
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
     expect(sent[0][0].content).toContain('read 与 search 使用函数调用');
     expect(sent[0][5].content).toContain('只推演北境');
-    expect(sent[1].slice(5, -1).some(item => item.content === read)).toBe(true);
-    expect(sent[1].at(-2)).toMatchObject({ role: 'tool', content: expect.stringContaining('已读北境正文') });
-    expect(sent[1].at(-1)).toEqual({ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-director'] });
+    expect(sent[1].some(item => item.role === 'assistant' && item.tool_calls)).toBe(true);
+    expect(sent[1].find(item => item.tool_call_id === 'call-director-prefix')).toMatchObject({ role: 'tool', content: expect.stringContaining('已读北境正文') });
+    expect(sent[1].at(-1)?.role).toBe('user');
   });
 
   it('旧 run-state 比楼层投影多一对时只迁移缺失后缀，重启后没有重复', async () => {
@@ -354,7 +358,7 @@ describe('世界推演 Agent runtime', () => {
       triggerConversationMessageId: null, anchorMessageId: anchor.messageId, anchorMessageKey: anchor.messageKey,
       anchorSwipeId: anchor.swipeId, anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 0,
       taskId: 'task-run-save-failed', stageId: 'stage-run-save-failed', stageRevision: 1 };
-    const read = JSON.stringify({ action: 'read', reads: ['anchor:message'] });
+    const read = { content: '', toolCalls: [{ id: 'call-save-failed', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] };
     const invoke = vi.fn(async () => read);
     const runSettings = settings();
     saveChat.mockImplementation(async () => {
@@ -367,15 +371,15 @@ describe('世界推演 Agent runtime', () => {
     expect(invoke).toHaveBeenCalledOnce();
     expect(chat[0]._qrf_world_simulation_agent_run).toBeUndefined();
     expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
-      { role: 'assistant', content: read, tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
-      { role: 'tool', tool_call_id: 'call_0_read', content: expect.stringContaining('read reply') },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call-save-failed', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
+      { role: 'tool', tool_call_id: 'call-save-failed', content: expect.stringContaining('read reply') },
     ]);
     resetWorldSimulationRunCacheForTests_ACU();
     saveChat.mockResolvedValue(undefined);
     const next = vi.fn(async () => JSON.stringify({ action: 'block', reason: '暂停', unresolved: ['等待'] }));
     await new WorldSimulationMainLoop_ACU({ invoke: next, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset,
       countTokens: async () => 1 }).run({ identity, anchor, chat, settings: runSettings, promptContext, registry, tools });
-    expect(next.mock.calls[0][1].filter((item: { content: string }) => item.content === read)).toHaveLength(1);
+    expect(next.mock.calls[0][1].filter((item: { role: string; tool_calls?: unknown }) => item.role === 'assistant' && item.tool_calls)).toHaveLength(1);
     expect(next.mock.calls[0][1].filter((item: { content: string }) => item.content.includes('read reply'))).toHaveLength(1);
     _set_SillyTavern_API_ACU(undefined);
   });
@@ -445,9 +449,9 @@ describe('世界推演 Agent runtime', () => {
     const sql1 = "INSERT INTO dimensions (id, name, kind, expected_revision) VALUES ('dim-loop', '山雨', 'not_a_kind', 0)";
     const sql2 = "UPDATE dimensions SET kind = 'pressure', value = 10, trend = 'rising', rationale = '山雨', evidence_refs = '[]' WHERE id = 'dim-loop' AND expected_revision = 0";
     const replies = [
-      JSON.stringify({ action: 'write_sql', sql: sql1 }),
-      JSON.stringify({ action: 'write_sql', sql: sql1 }),
-      JSON.stringify({ action: 'write_sql', sql: sql2 }),
+      toolTurn('write_sql', { sql: sql1 }, 'call-sql-1'),
+      toolTurn('write_sql', { sql: sql1 }, 'call-sql-2'),
+      toolTurn('write_sql', { sql: sql2 }, 'call-sql-3'),
       JSON.stringify({ status: 'no_change', summary: '分栏已保存', evidenceRefs: [], uncertainties: [] }),
       JSON.stringify({ status: 'no_change', summary: '下次独立派工', evidenceRefs: [], uncertainties: [] }),
     ];
@@ -460,25 +464,26 @@ describe('世界推演 Agent runtime', () => {
 
     const completed = await runtime.run(input);
     expect(completed).toMatchObject({ status: 'no_change', completion: 'complete_changed', acceptedKeys: expect.arrayContaining(['dimensions:dim-loop:name', 'dimensions:dim-loop:kind']) });
-    expect(sent.slice(0, 4).every(request => request.at(-1)?.role === 'assistant' && request.at(-1)?.content === WORLD_SIMULATION_AGENT_PREFILLS_ACU['undercurrent-analyst'])).toBe(true);
+    expect(sent.slice(0, 4).every(request => request.some(message => message.role === 'system' && message.content.includes('只输出一个 specialist JSON')))).toBe(true);
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
     expect(sent[0][0].content).toContain('只输出一个 specialist JSON');
-    expect(sent[1][5].content).toContain('以下是用户对任务曾经提过的要求');
-    expect(sent[1].at(-2)?.role).toBe('tool');
+    expect(sent[1].some(message => message.content.includes('以下是用户对任务曾经提过的要求'))).toBe(true);
+    const receipt = (request: number, id: string) => sent[request].find(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === id)?.content ?? '';
+    expect(receipt(1, 'call-sql-1')).not.toBe('');
     expect(saveChat).toHaveBeenCalledTimes(2);
-    expect(sent[1].at(-2)?.content).toContain('"status":"committed"');
-    expect(sent[1].at(-2)?.content).toContain('"missingFields"');
-    const supplement = sent[1].at(-2)?.content ?? '';
+    expect(receipt(1, 'call-sql-1')).toContain('"status":"committed"');
+    expect(receipt(1, 'call-sql-1')).toContain('"missingFields"');
+    const supplement = receipt(1, 'call-sql-1');
     expect(supplement).toContain("仅补缺栏范例：UPDATE dimensions SET kind = 'pressure', value = 40, trend = 'rising'");
     expect(supplement).toContain("WHERE id = 'dim-loop' AND expected_revision = 0;");
     expect(supplement).not.toContain('UPDATE dimensions SET name =');
     expect(supplement).not.toContain('纠错范例：INSERT INTO dimensions');
-    expect(sent[1].at(-2)?.content).toContain('field:dimensions:dim-loop');
-    expect(sent[1].at(-2)?.content).toContain('"path":"dimensions#dim-loop.kind"');
-    expect(sent[2].at(-2)?.content).toContain('"status":"rejected"');
-    expect(sent[2].at(-2)?.content).toContain('id_exists');
-    expect(sent[2].at(-2)?.content).toContain('"accepted":[]');
-    expect(sent[3].at(-2)?.content).toContain('"field":"kind"');
+    expect(supplement).toContain('field:dimensions:dim-loop');
+    expect(supplement).toContain('"path":"dimensions#dim-loop.kind"');
+    expect(receipt(2, 'call-sql-2')).toContain('"status":"rejected"');
+    expect(receipt(2, 'call-sql-2')).toContain('id_exists');
+    expect(receipt(2, 'call-sql-2')).toContain('"accepted":[]');
+    expect(receipt(3, 'call-sql-3')).toContain('"field":"kind"');
     expect(foldWorldSimulationLedger_ACU(chat)?.ledger.dimensions).toEqual([expect.objectContaining({ id: 'dim-loop', revision: 1 })]);
     expect(writes.confirmedWrites).toBe(2);
     const reloaded = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
@@ -494,7 +499,7 @@ describe('世界推演 Agent runtime', () => {
 
   it('逐栏写入只覆盖部分 ID 时模型 no_change 不能结束合格派工', async () => {
     const { registry, promptContext, runId } = fixture('partial-terminal');
-    const replies = [JSON.stringify({ action: 'write_sql', sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '山雨')" }),
+    const replies = [toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '山雨')" }, 'call-partial'),
       JSON.stringify({ status: 'no_change', summary: '结束', evidenceRefs: [], uncertainties: [] })];
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke: vi.fn(async () => replies.shift()!), apiPreset, countTokens: async () => 1 });
     const fields = { records: { dimensions: { d1: { module: 'dimensions' as const, id: 'd1', status: 'partial' as const,
@@ -543,8 +548,8 @@ describe('世界推演 Agent runtime', () => {
   it('无效写动作回灌协议错误，不虚记一次写入或成功回执', async () => {
     const { registry, promptContext, runId } = fixture('write-protocol-repair');
     const sql = "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')";
-    const replies = [JSON.stringify({ action: 'write_sql', sql, extra: true }),
-      JSON.stringify({ action: 'write_sql', sql }),
+    const replies = [toolTurn('write_sql', { sql, extra: true }, 'call-invalid-write'),
+      toolTurn('write_sql', { sql }, 'call-valid-write'),
       JSON.stringify({ status: 'no_change', summary: '完成', evidenceRefs: [], uncertainties: [] })];
     const sent: Array<readonly { role: string; content: string }[]> = [];
     const invoke = vi.fn(async (_role, messages) => { sent.push(messages); return replies.shift()!; });
@@ -553,9 +558,9 @@ describe('世界推演 Agent runtime', () => {
     await runtime.run({ delegation: { agentName: 'undercurrent-analyst', instruction: '分析', reads: [] },
       settings: settings(), promptContext, registry, tools, runId, writeSql });
     expect(writeSql).toHaveBeenCalledOnce();
-    expect(sent[1].at(-2)?.content).toContain('你上一次的输出没有被采纳');
-    expect(sent[1].at(-2)?.content).not.toContain('"status":"committed"');
-    expect(sent[2].at(-2)?.content).toContain('"remainingWriteRounds":2');
+    expect(sent[1].some(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === 'call-invalid-write' && message.content.includes('你上一次的输出没有被采纳'))).toBe(true);
+    expect(sent[1].some(message => message.role === 'tool' && message.content.includes('"status":"committed"'))).toBe(false);
+    expect(sent[2].find(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === 'call-valid-write')?.content).toContain('"remainingWriteRounds":2');
   });
 
   it('重复写动作超过额度后停止发请求，且不会继续触发提交端口', async () => {
@@ -564,7 +569,7 @@ describe('世界推演 Agent runtime', () => {
     limited.agentRunBudget.maxIterations = 1;
     limited.agentRunBudget.maxExtraReads = 0;
     const writeSql = vi.fn(async () => ({ status: 'rejected' as const, accepted: [], rejected: [], partials: [], ledgerRevision: 0 }));
-    const invoke = vi.fn(async () => JSON.stringify({ action: 'write_sql', sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }));
+    const invoke = vi.fn(async () => toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }, 'call-write-limit'));
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1, protocolRetries: 0 });
 
     await expect(runtime.run({ delegation: { agentName: 'undercurrent-analyst', instruction: '分析', reads: [] },
@@ -572,13 +577,13 @@ describe('世界推演 Agent runtime', () => {
     expect(invoke).toHaveBeenCalledTimes(3);
     expect(writeSql).toHaveBeenCalledTimes(1);
     const last = invoke.mock.calls[2][1] as readonly { role: string; content: string }[];
-    expect(last.at(-2)?.content).toContain('write_sql 轮次已用尽');
-    expect(last.at(-2)?.content).toContain('"remainingWriteRounds":0');
+    expect(last.find(message => message.role === 'tool' && message.content.includes('write_sql 轮次已用尽'))?.content).toContain('write_sql 轮次已用尽');
+    expect(last.find(message => message.role === 'tool' && message.content.includes('"remainingWriteRounds":0'))?.content).toContain('"remainingWriteRounds":0');
   });
 
   it('恢复失败回执没有旧 revision 和缺栏，也不进入新派工历史', async () => {
     const { registry, promptContext, runId } = fixture('uncertain-write');
-    const replies = [JSON.stringify({ action: 'write_sql', sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }),
+    const replies = [toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }, 'call-uncertain'),
       JSON.stringify({ status: 'no_change', summary: '写入结果不确定', evidenceRefs: [], uncertainties: [] }),
       JSON.stringify({ status: 'no_change', summary: '新派工', evidenceRefs: [], uncertainties: [] })];
     const sent: Array<readonly { role: string; content: string }[]> = [];
@@ -589,9 +594,9 @@ describe('世界推演 Agent runtime', () => {
     const input = { delegation: { agentName: 'undercurrent-analyst', instruction: '分析', reads: [] },
       settings: settings(), promptContext, registry, tools, runId, writeSql };
     await runtime.run(input);
-    expect(sent[1].at(-2)?.content).toContain('"partials":null');
-    expect(sent[1].at(-2)?.content).toContain('"ledgerRevision":null');
-    expect(sent[1].at(-2)?.content).toContain('"readAddresses":[]');
+    expect(sent[1].find(message => message.role === 'tool' && message.content.includes('"partials":null'))?.content).toContain('"partials":null');
+    expect(sent[1].find(message => message.role === 'tool' && message.content.includes('"ledgerRevision":null'))?.content).toContain('"ledgerRevision":null');
+    expect(sent[1].find(message => message.role === 'tool' && message.content.includes('"readAddresses":[]'))?.content).toContain('"readAddresses":[]');
     await runtime.run(input);
     expect(sent[2].some(message => message.content.includes('"recovery":"failed"'))).toBe(false);
   });
@@ -599,12 +604,12 @@ describe('世界推演 Agent runtime', () => {
   it('生产端口抛出失效错误时写回状态未知的结构化回执与读写剩余额度', async () => {
     const { registry, promptContext, runId } = fixture('throwing-write');
     const sent: Array<readonly { role: string; content: string }[]> = [];
-    const replies = [JSON.stringify({ action: 'write_sql', sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }),
+    const replies = [toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }, 'call-throwing'),
       JSON.stringify({ status: 'no_change', summary: '暂停写入', evidenceRefs: [], uncertainties: [] })];
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke: vi.fn(async (_role, messages) => { sent.push(messages); return replies.shift()!; }), apiPreset, countTokens: async () => 1 });
     const outcome = await runtime.run({ delegation: { agentName: 'undercurrent-analyst', instruction: '分析', reads: [] },
       settings: settings(), promptContext, registry, tools, runId, writeSql: async () => { throw new Error('锚点已失效'); } });
-    const receipt = JSON.parse(sent[1].at(-2)!.content).results[0];
+    const receipt = JSON.parse(sent[1].find(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === 'call-throwing')!.content).results[0];
     expect(receipt).toMatchObject({ status: 'rejected', accepted: [], partials: null, ledgerRevision: null,
       readAddresses: [], remainingReadRounds: 1, remainingWriteRounds: 2 });
     expect(receipt.reason).toContain('锚点已失效');
@@ -617,7 +622,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, promptContext, runId } = fixture('rejected-address');
     const sql = "UPDATE dimensions SET kind = 'invalid' WHERE id = 'dim-a' AND expected_revision = 0";
     const sent: Array<readonly { role: string; content: string }[]> = [];
-    const replies = [JSON.stringify({ action: 'write_sql', sql }), JSON.stringify({ status: 'no_change', summary: '结束', evidenceRefs: [], uncertainties: [] })];
+    const replies = [toolTurn('write_sql', { sql }, 'call-rejected-address'), JSON.stringify({ status: 'no_change', summary: '结束', evidenceRefs: [], uncertainties: [] })];
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke: vi.fn(async (_role, messages) => { sent.push(messages); return replies.shift()!; }), apiPreset, countTokens: async () => 1 });
     const input = { delegation: { agentName: 'undercurrent-analyst', instruction: '核对维度', reads: [] },
       settings: settings(), promptContext, registry, tools, runId,
@@ -625,12 +630,12 @@ describe('世界推演 Agent runtime', () => {
         { path: 'dimensions#dim-a.kind', reason: 'invalid kind' }, { path: 'sql[0].dimensions.fake', reason: 'invalid column' }],
         partials: [], ledgerRevision: 0 })) };
     await runtime.run(input);
-    expect(sent[1].at(-2)?.content).toContain('"readAddresses":["field:dimensions:dim-a"]');
+    expect(sent[1].find(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === 'call-rejected-address')?.content).toContain('"readAddresses":["field:dimensions:dim-a"]');
     sent.length = 0;
-    replies.push(JSON.stringify({ action: 'write_sql', sql }), JSON.stringify({ status: 'no_change', summary: '结束', evidenceRefs: [], uncertainties: [] }));
+    replies.push(toolTurn('write_sql', { sql }, 'call-readback-failed'), JSON.stringify({ status: 'no_change', summary: '结束', evidenceRefs: [], uncertainties: [] }));
     input.writeSql.mockResolvedValueOnce({ status: 'readback_failed', accepted: [], rejected: [{ path: 'dimensions#dim-a.kind', reason: 'readback' }], partials: null, ledgerRevision: null } as any);
     await runtime.run(input);
-    expect(sent[1].at(-2)?.content).toContain('"readAddresses":[]');
+    expect(sent[1].find(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === 'call-readback-failed')?.content).toContain('"readAddresses":[]');
   });
 
   it('模型响应返回前租约失效时不执行 write_sql，也不再发下一次请求', async () => {
@@ -691,7 +696,7 @@ describe('世界推演 Agent runtime', () => {
     limited.agentRunBudget.maxExtraReads = 0;
     const candidate = { candidateId: 'review-limit', agentName: 'timekeeper', patch: { clock: { days: 1 } },
       summary: '时间候选', evidenceRefs: [], uncertainties: [], writableModules: ['clock'] };
-    const invoke = vi.fn(async () => JSON.stringify({ action: 'read', reads: ['ledger:current'] }));
+    const invoke = vi.fn(async () => toolTurn('read', { reads: ['ledger:current'] }, 'call-review-limit'));
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1, protocolRetries: 0 });
 
     await expect(runtime.runReviewer({ candidates: [candidate], settings: limited, promptContext, registry, tools }))
@@ -699,8 +704,8 @@ describe('世界推演 Agent runtime', () => {
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(tools.read).not.toHaveBeenCalled();
     const last = invoke.mock.calls[1][1] as readonly { role: string; content: string }[];
-    expect(last.at(-2)?.content).toContain('read/search 轮次已用尽');
-    expect(last.at(-1)?.content).toBe(WORLD_SIMULATION_AGENT_PREFILLS_ACU['causality-reviewer']);
+    expect(last.find(message => message.role === 'tool' && message.content.includes('read/search 轮次已用尽'))?.content).toContain('read/search 轮次已用尽');
+    expect(last.at(-1)?.role).toBe('user');
   });
 
   it('reviewer 模型响应迟到且派工租约失效时不执行读取', async () => {
@@ -998,9 +1003,8 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'blocked', summary: '修正后阻断' });
     expect(invoke).toHaveBeenCalledTimes(2);
-    expect(sent.every(messages => messages[messages.length - 1]?.role === 'assistant'
-      && messages[messages.length - 1]?.content === WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-director'])).toBe(true);
-    expect(sent[1][sent[1].length - 2]).toMatchObject({ role: 'user', content: expect.stringContaining('INVALID_ACTION') });
+    expect(sent.every(messages => messages.some(message => message.role === 'system' && message.content.includes('read 与 search 使用函数调用')))).toBe(true);
+    expect(sent[1].find(message => message.role === 'user' && message.content.includes('INVALID_ACTION'))).toMatchObject({ role: 'user', content: expect.stringContaining('INVALID_ACTION') });
     expect(sent[1].some(message => message.role === 'assistant' && message.content.includes('"action":"unknown"'))).toBe(true);
     expect(subagents.run).not.toHaveBeenCalled();
   });
@@ -1052,7 +1056,7 @@ describe('世界推演 Agent runtime', () => {
     const { registry, promptContext } = fixture('tool-live');
     const subagents = { run: vi.fn(), runReviewer: vi.fn() };
     const responses = [
-      JSON.stringify({ action: 'read', reads: ['ledger:current'] }),
+      toolTurn('read', { reads: ['ledger:current'] }, 'call-tool-live'),
       JSON.stringify({ action: 'block', reason: '取证完成后暂停', unresolved: ['next'] }),
     ];
     let resolveRead!: (value: { status: 'empty'; summary: string }) => void;
@@ -1463,7 +1467,7 @@ describe('世界推演 Agent runtime', () => {
     };
 
     // 第一段：仅做一次读取即耗尽迭代预算，形成 'iteration budget exhausted' 恢复标记。
-    const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action:'read', reads: ['$CLOCK'] })), subagents, apiPreset, countTokens: async () => 1 });
+    const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => ({ content: '', toolCalls: [{ id: 'call-budget-clock', name: 'read', arguments: JSON.stringify({ reads: ['$CLOCK'] }) }] })), subagents, apiPreset, countTokens: async () => 1 });
     await expect(firstLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
       .resolves.toMatchObject({ outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽' });
     const exhausted = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
@@ -1933,7 +1937,7 @@ describe('世界推演 Agent runtime', () => {
     };
     const responses = [
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: candidate.agentName, instruction: '分析时间', reads: [] }] }),
-      JSON.stringify({ action: 'read', reads: ['ledger:current'] }),
+      { content: '', toolCalls: [{ id: 'call-invalidate-ledger', name: 'read', arguments: JSON.stringify({ reads: ['ledger:current'] }) }] },
       JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '取证后提交', evidenceRefs: [evidence] }),
     ];
     const liveTools = {
@@ -1971,15 +1975,15 @@ describe('世界推演 Agent runtime', () => {
       sent.push(messages);
       return replies.shift()!;
     });
-    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1, nativeTools: true });
+    const loop = new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1 });
     const identity = { runId: 'native-tool', chatIdentity: 'chat', triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1 };
     const result = await loop.run({
       identity, settings: settings(), promptContext, registry,
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '山雨将至', summary: '正文' })), search: tools.search },
     });
     expect(result).toMatchObject({ outcome: 'blocked' });
-    expect(sent[0]?.at(-1)).toMatchObject({ role: 'assistant', content: '<think>\n' });
-    expect(sent[1]?.at(-1)).toMatchObject({ role: 'assistant', content: '<think>\n' });
+    expect(sent[0]?.some(message => message.role === 'user' && message.content.includes('本次世界推演最新快照'))).toBe(true);
+    expect(sent[1]?.some(message => message.role === 'user' && message.content.includes('本次世界推演最新快照'))).toBe(true);
     expect(sent[1]?.some(message => message.role === 'tool' && message.tool_call_id === 'call-rain' && message.content.includes('山雨将至'))).toBe(true);
   });
 
@@ -2039,15 +2043,15 @@ describe('S11 推演双楼全链集成', () => {
     };
     const liveTools = createWorldSimulationToolDependencies_ACU(scene);
     const mainReplies = [
-      JSON.stringify({ action: 'read', reads: ['anchor:message'] }),
+      { content: '', toolCalls: [{ id: 'call-first-anchor', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] },
       JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'undercurrent-analyst', instruction: '把山雨写入维度', reads: [] }] }),
       JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '提交山雨维度', evidenceRefs: [evidence] }),
-      JSON.stringify({ action: 'read', reads: ['anchor:message'] }),
+      { content: '', toolCalls: [{ id: 'call-next-anchor', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] },
       JSON.stringify({ action: 'block', reason: '下一正文已锚定，本轮不重复提交', unresolved: ['等待后续正文再推演'] }),
     ];
     const subReplies = [
-      JSON.stringify({ action: 'write_sql', sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-rain', '山雨', 0)" }),
-      JSON.stringify({ action: 'write_sql', sql: "UPDATE dimensions SET kind = 'pressure', value = 10, trend = 'rising', rationale = '江面压低', evidence_refs = '[]' WHERE id = 'dim-rain' AND expected_revision = 0" }),
+      { content: '', toolCalls: [{ id: 'call-insert-rain', name: 'write_sql', arguments: JSON.stringify({ sql: "INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-rain', '山雨', 0)" }) }] },
+      { content: '', toolCalls: [{ id: 'call-update-rain', name: 'write_sql', arguments: JSON.stringify({ sql: "UPDATE dimensions SET kind = 'pressure', value = 10, trend = 'rising', rationale = '江面压低', evidence_refs = '[]' WHERE id = 'dim-rain' AND expected_revision = 0" }) }] },
       JSON.stringify({ status: 'no_change', summary: '山雨已入账', evidenceRefs: [], uncertainties: [] }),
     ];
     const mainCalls: Array<readonly { role: string; content: string }[]> = [];
@@ -2089,8 +2093,10 @@ describe('S11 推演双楼全链集成', () => {
       expect(delegationFeedback).toContain('山雨已入账');
       expect(mainCalls.map(call => call.map(message => message.content).join('\n')).join('\n')).not.toContain('"status":"committed"');
       expect(subCalls).toHaveLength(3);
-      const firstReceipt = subCalls[1].at(-2)?.content ?? '';
-      const secondReceipt = subCalls[2].at(-2)?.content ?? '';
+      const firstReceipt = (subCalls[1] as readonly { role: string; content: string; tool_call_id?: string }[])
+        .find(message => message.role === 'tool' && message.tool_call_id === 'call-insert-rain')?.content ?? '';
+      const secondReceipt = (subCalls[2] as readonly { role: string; content: string; tool_call_id?: string }[])
+        .find(message => message.role === 'tool' && message.tool_call_id === 'call-update-rain')?.content ?? '';
       expect(firstReceipt).toContain('"status":"committed"');
       expect(firstReceipt).toContain('"missingFields"');
       expect(firstReceipt).toContain('field:dimensions:dim-rain');

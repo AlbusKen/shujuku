@@ -258,7 +258,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
       });
       const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1]) =>
         invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal);
-      const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke, nativeTools: true });
+      const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
       const writeSql = (runIdentity: WorldSimulationRunIdentity_ACU) => async (write: Parameters<NonNullable<import('./agent/agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql']>>[0]) => {
         if (signal.aborted) throw new Error('WORLD_SIMULATION_RUN_STALE');
         return commitWorldSimulationFieldWrites_ACU({ identity: runIdentity, anchor: currentAnchor, ...write,
@@ -271,7 +271,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
           confirmRunLedger: (view, refs, accepted) => runWrites.confirm(view, refs, accepted),
         });
       };
-      const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents, nativeTools: true });
+      const mainLoop = new WorldSimulationMainLoop_ACU({ invoke, subagents });
       if (identity.triggerKind === 'agent_chat_message') {
         await seedWorldSimulationUserRequirementsIfEmpty_ACU(envelope.task?.originInstruction ?? instruction, currentAnchor, chat);
         promptContext.userRequirements = renderWorldSimulationUserRequirements_ACU(

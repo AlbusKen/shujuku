@@ -413,7 +413,7 @@ export async function appendWorldSimulationDirectorHistory_ACU(input: {
       stageRevision: input.stageRevision,
       appends: input.messages.map(item => ({
         kind: item.role === 'assistant' ? 'model_agent' as const : 'model_feedback' as const,
-        text: item.content || (item.tool_calls?.length || item.tool_call_id ? ' ' : item.content),
+        text: item.content,
         ...(item.tool_call_id ? { toolCallId: item.tool_call_id } : {}),
         ...(item.tool_calls?.length ? { toolCalls: item.tool_calls.map(call => ({ id: call.id, name: call.function.name, arguments: call.function.arguments })) } : {}),
       })),

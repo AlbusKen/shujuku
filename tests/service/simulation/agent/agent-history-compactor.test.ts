@@ -71,6 +71,29 @@ describe('世界推演 handoff 与非破坏压缩', () => {
     expect(result.afterTokens).toBe(result.beforeTokens - 150000 - 3 - 'OLD_HANDOFF'.length + result.mark!.report.length);
   });
 
+  it('压缩真实原生工具历史时保持调用与回执配对，并拒绝元数据不一致的待发请求', async () => {
+    const current = view(150000, 10000);
+    const call = { id: 'call_read_1', type: 'function' as const, function: { name: 'read', arguments: '{"reads":["ledger:current"]}' } };
+    current.messages[2].toolCalls = [{ id: call.id, name: call.function.name, arguments: call.function.arguments }];
+    current.messages[3].toolCallId = call.id;
+    const prepared = [{ role: 'system', content: 'F'.repeat(1200) }, ...current.messages.map(item => item.kind === 'model_agent'
+      ? { role: 'assistant', content: item.text, ...(item.toolCalls?.length ? { tool_calls: [call] } : {}) }
+      : item.toolCallId ? { role: 'tool', content: item.text, tool_call_id: item.toolCallId }
+        : { role: 'user', content: item.text })];
+    const result = await planWorldSimulationHistoryCompaction_ACU({ view: current, triggerTokens: 120000,
+      fixedPromptTokens: 0, preparedMessages: prepared, countTokens: count });
+    expect(result.mark).toMatchObject({ compactedThroughId: 2 });
+    expect(result.view.messages[1].toolCalls).toEqual([{ id: call.id, name: call.function.name, arguments: call.function.arguments }]);
+    expect(result.view.messages[2].toolCallId).toBe(call.id);
+    const corrupted = prepared.map(item => ({ ...item }));
+    const receipt = corrupted.find(item => 'tool_call_id' in item);
+    if (!receipt) throw new Error('test fixture has no tool receipt');
+    receipt.tool_call_id = 'unknown-call';
+    const rejected = await planWorldSimulationHistoryCompaction_ACU({ view: current, triggerTokens: 120000,
+      fixedPromptTokens: 0, preparedMessages: corrupted, countTokens: count });
+    expect(rejected).toMatchObject({ status: 'incompressible', mark: null });
+  });
+
   it('待发送请求与权威投影逐条不一致时不压缩，不用算术差值冒充计量', async () => {
     const current = view(150000, 10000);
     // 全按 user 渲染的伪历史块：真实投影里 model_agent 是 assistant，替换定位必须失败。

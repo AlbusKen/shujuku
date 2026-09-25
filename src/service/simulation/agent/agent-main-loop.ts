@@ -14,7 +14,7 @@ import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
 import { summarizeWorldSimulationHandoff_ACU } from './agent-handoff-summarizer';
 import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { compactWorldSimulationProtocolError_ACU, createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
+import { compactWorldSimulationProtocolError_ACU, createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { clearWorldSimulationRunState_ACU, readWorldSimulationRunState_ACU, saveWorldSimulationRunState_ACU } from './agent-run-cache';
 import { persistWorldSimulationRunState_ACU, restoreWorldSimulationRunState_ACU, clearWorldSimulationRunStateAtAnchor_ACU } from './agent-run-state-store';
@@ -30,15 +30,13 @@ import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
-import { isModelExchangeSequence_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
+import { isModelExchangeSequence_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run' | 'runReviewer'>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
-  /** 生产路径使用原生 tool_calls。测试缺省关闭。 */
-  nativeTools?: boolean;
 }
 export interface WorldSimulationMainLoopInput_ACU {
   identity: WorldSimulationRunIdentity_ACU;
@@ -80,9 +78,9 @@ function latestOutcomes_ACU(items: readonly WorldSimulationSubagentOutcome_ACU[]
 }
 
 
-function rounds_ACU(transcript: readonly { role: string; content: string }[]): Array<Array<{ role: string; content: string }>> {
-  const rounds: Array<Array<{ role: string; content: string }>> = [];
-  let current: Array<{ role: string; content: string }> = [];
+function rounds_ACU(transcript: readonly AiWireMessage_ACU[]): AiWireMessage_ACU[][] {
+  const rounds: AiWireMessage_ACU[][] = [];
+  let current: AiWireMessage_ACU[] = [];
   for (const message of transcript) {
     if (message.role === 'assistant' && current.length) {
       rounds.push(current);
@@ -99,13 +97,13 @@ export const WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU = 4;
 export const WORLD_SIMULATION_TRANSCRIPT_COMPACTION_RATIO_ACU = 0.8;
 
 export async function compactWorldSimulationTranscriptIfNeeded_ACU(input: {
-  transcript: Array<{ role: string; content: string }>;
+  transcript: AiWireMessage_ACU[];
   unsettledCandidates: number;
   historyTokenBudget: number;
   countTokens: WorldSimulationTokenCounter_ACU;
   /** 调用方已按最终完整请求判定需要压缩时传 0；缺省按 transcript 自身的预算比例触发线。 */
   transcriptTriggerTokens?: number;
-}): Promise<{ compacted: boolean; transcript: Array<{ role: string; content: string }> }> {
+}): Promise<{ compacted: boolean; transcript: AiWireMessage_ACU[] }> {
   if (input.unsettledCandidates > 0 || input.historyTokenBudget <= 0 || input.transcript.length === 0) {
     return { compacted: false, transcript: input.transcript };
   }
@@ -117,15 +115,26 @@ export async function compactWorldSimulationTranscriptIfNeeded_ACU(input: {
   if (grouped.length <= WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU) {
     return { compacted: false, transcript: input.transcript };
   }
+  const cutoff = grouped.length - WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU;
+  // Never summarize an unfinished native function call, or split its tool receipts.
+  for (const group of grouped.slice(0, cutoff)) {
+    const calls = group.flatMap(item => item.tool_calls ?? []);
+    const receipts = group.filter(item => item.role === 'tool').map(item => item.tool_call_id);
+    if (calls.length !== receipts.length || calls.some(call => !receipts.includes(call.id)) || receipts.some(id => !calls.some(call => call.id === id))) {
+      return { compacted: false, transcript: input.transcript };
+    }
+  }
   const dropped = grouped.slice(0, grouped.length - WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU).flat();
   const kept = grouped.slice(-WORLD_SIMULATION_TRANSCRIPT_COMPACTION_KEEP_ROUNDS_ACU).flat();
   const messages: WorldSimulationConversationMessage_ACU[] = dropped.map((item, index) => ({
     id: index + 1,
-    kind: item.role === 'assistant' ? 'agent' : 'user',
+    kind: item.role === 'assistant' ? 'agent' : item.role === 'tool' ? 'model_feedback' : 'user',
     text: item.content,
     digest: item.content.slice(0, 240),
     turnKey: `compact-${index + 1}`,
     at: 0,
+    ...(item.tool_calls?.length ? { toolCalls: item.tool_calls.map(call => ({ id: call.id, name: call.function.name, arguments: call.function.arguments })) } : {}),
+    ...(item.tool_call_id ? { toolCallId: item.tool_call_id } : {}),
   }));
   try {
     const summary = await summarizeWorldSimulationHandoff_ACU({
@@ -465,7 +474,13 @@ export class WorldSimulationMainLoop_ACU {
       try {
         const rendered = await renderWorldSimulationPrompt_ACU(
           input.settings.agentPrompts[director], director,
-          createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }),
+          // 阅读预算属于本轮运行时快照；不要把每次 read/search 后变化的数值
+          // 混入导演请求的稳定提示前缀，否则历史请求的前缀会随配额漂移。
+          createWorldSimulationPlaceholderResolvers_ACU({
+            ...requestContext,
+            evidenceRegistry: requestSnapshot,
+            readBudgetText: '阅读预算见本轮运行时快照。',
+          }),
         );
         const fixed = [{ role: 'system', content: worldSimulationDirectorRuntimeProtocolInstruction_ACU() }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
         const snapshotText = [
@@ -486,11 +501,9 @@ export class WorldSimulationMainLoop_ACU {
         const tail = [...(input.anchor && handoffHint ? [handoffHint] : [])];
         const prefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
           ? { role: 'user', content: USER_PREFILL_CONTENT_ACU }
-          : this.dependencies.nativeTools ? null : { role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[director] };
+          : null;
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
-        const assemble = (body: typeof transcript) => this.dependencies.nativeTools
-          ? withNativeToolThinkPrefill_ACU([...fixed, ...body, ...tail, { role: 'user', content: snapshotText }, ...(prefill ? [prefill] : [])])
-          : [...fixed, ...body, ...tail, { role: 'user', content: snapshotText }, ...(prefill ? [prefill] : [])];
+        const assemble = (body: typeof transcript) => withNativeToolThinkPrefill_ACU([...fixed, ...body, ...tail, { role: 'user', content: snapshotText }, ...(prefill ? [prefill] : [])]);
         let prepared = assemble(transcript);
         // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
         // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。
@@ -569,21 +582,18 @@ export class WorldSimulationMainLoop_ACU {
         throw new Error(sent.reason);
       }
       const turn = normalizeAgentModelReply_ACU(sent.response);
-      const nativeCalls: AiNativeToolCall_ACU[] = this.dependencies.nativeTools ? turn.toolCalls : [];
-      let raw = typeof sent.response === 'string' ? sent.response : turn.content;
-      if (nativeCalls.length) {
-        try { raw = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
-        catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
-          await persist(iteration + 1, reason);
-          continue;
-        }
-      }
+      const nativeCalls: AiNativeToolCall_ACU[] = turn.toolCalls;
+      const raw = typeof sent.response === 'string' ? sent.response : turn.content;
       const allowDelegate = delegationsUsed < input.settings.agentRunBudget.maxDelegations;
       let action;
       try {
-        action = parseWorldSimulationMainOutput_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[director], allowDelegate, requestSnapshot);
+        action = nativeCalls.length
+          ? { kind: 'tools' as const, calls: nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+            if (call.name !== 'read' && call.name !== 'search') throw new Error(`主 Agent 不允许调用 ${call.name}`);
+            return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot) as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
+          }) }
+          : parseWorldSimulationMainOutput_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[director], allowDelegate, requestSnapshot);
+        if (!nativeCalls.length && (action.kind === 'read' || action.kind === 'search' || action.kind === 'tools')) throw new Error('read/search 必须使用原生函数调用');
       } catch (error) {
         const exhausted = compactWorldSimulationProtocolError_ACU(error);
         if (exhausted.reasonCode === 'DELEGATION_BUDGET_EXHAUSTED') {
@@ -649,9 +659,7 @@ export class WorldSimulationMainLoop_ACU {
           await persistEntry(toolEntryId, `tool-${iteration}-failed`);
           throw error;
         }
-        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(calls);
-        if (boundCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content || raw, boundCalls, perCallResults.map(toolResultText_ACU)));
-        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolResultText_ACU(perCallResults.flat()) });
+        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(toolResultText_ACU)));
         pendingReview = null;
         await persist(iteration + 1);
         continue;

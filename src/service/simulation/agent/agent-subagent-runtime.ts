@@ -22,16 +22,16 @@ import type {
   WorldSimulationSubagentOutcome_ACU,
 } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { renderWorldSimulationSnapshotTemplate_ACU, splitWorldSimulationSubagentPrompt_ACU } from './agent-shared-materials';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
-import { nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string | AiChatTurn_ACU>; }
-export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; nativeTools?: boolean; }
+export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; }
 export interface WorldSimulationSubagentRunInput_ACU {
   delegation: WorldSimulationDelegation_ACU;
   settings: WorldSimulationSettings_ACU;
@@ -372,8 +372,8 @@ export class WorldSimulationSubagentRuntime_ACU {
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
       const drafted = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
         ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
-        : this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
-      const messages = this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(drafted) : drafted;
+        : [])];
+      const messages = withNativeToolThinkPrefill_ACU(drafted);
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
@@ -383,19 +383,19 @@ export class WorldSimulationSubagentRuntime_ACU {
       if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
       const turn = normalizeAgentModelReply_ACU(sent.response);
-      const nativeCalls: AiNativeToolCall_ACU[] = this.dependencies.nativeTools ? turn.toolCalls : [];
-      let raw = typeof sent.response === 'string' ? sent.response : turn.content;
-      if (nativeCalls.length) {
-        try { raw = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
-        catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
-          continue;
-        }
-      }
+      const nativeCalls: AiNativeToolCall_ACU[] = turn.toolCalls;
+      const raw = typeof sent.response === 'string' ? sent.response : turn.content;
       let calls: ReturnType<typeof parseWorldSimulationSubagentToolCalls_ACU>;
       try {
-        calls = parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0);
+        calls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+          if (call.name === 'write_sql') {
+            if (!input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key))) throw new Error('write_sql 未授权或参数非法');
+            return parseWorldSimulationSubagentToolCalls_ACU(JSON.stringify(payload), '', requestSnapshot, true)![0];
+          }
+          if (call.name !== 'read' && call.name !== 'search') throw new Error(`未知工具 ${call.name}`);
+          return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot) as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
+        }) : null;
+        if (!nativeCalls.length && parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0)) throw new Error('工具必须使用原生函数调用');
       } catch (error) {
         const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
         if (!failure.retry && writeAttempted) return checkedOutcome({ agentName, status: 'failed', summary: '逐栏工具协议重试耗尽',
@@ -405,7 +405,7 @@ export class WorldSimulationSubagentRuntime_ACU {
         if (!failure.retry) throw error;
         const reason = renderWorldSimulationSpecialistProtocolRejection_ACU(failure.issue, agentName, writableModules);
         if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
-        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: reason });
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: reason }); // 非工具协议纠错
         continue;
       }
       if (calls) {
@@ -464,9 +464,7 @@ export class WorldSimulationSubagentRuntime_ACU {
           }
         }
         const summary = { remainingReadRounds: Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds), remainingWriteRounds: maxWriteRounds - writeRounds };
-        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(calls);
-        if (boundCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content || raw, boundCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
-        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: JSON.stringify({ results: perCall.flat(), ...summary }) });
+        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCall.map(items => JSON.stringify({ results: items, ...summary }))));
         continue;
       }
       try {
@@ -546,9 +544,9 @@ export class WorldSimulationSubagentRuntime_ACU {
       const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
       const reviewerDraft = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
         ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
-        : this.dependencies.nativeTools ? [] : [{ role: 'assistant', content: WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName] }])];
+        : [])];
       const sent = await executeWorldSimulationFinalRequest_ACU({
-        messages: this.dependencies.nativeTools ? withNativeToolThinkPrefill_ACU(reviewerDraft) : reviewerDraft,
+        messages: withNativeToolThinkPrefill_ACU(reviewerDraft),
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => this.dependencies.invoke(agentName, value, preset),
@@ -556,23 +554,25 @@ export class WorldSimulationSubagentRuntime_ACU {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
       const reviewerTurn = normalizeAgentModelReply_ACU(sent.response);
-      const reviewerNative = this.dependencies.nativeTools ? reviewerTurn.toolCalls : [];
-      let raw = typeof sent.response === 'string' ? sent.response : reviewerTurn.content;
-      if (reviewerNative.length) {
-        try { raw = nativeToolCallsToProtocolJson_ACU(reviewerNative); }
-        catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => reason)));
-          continue;
-        }
+      const reviewerNative = reviewerTurn.toolCalls;
+      const raw = typeof sent.response === 'string' ? sent.response : reviewerTurn.content;
+      let calls: ReturnType<typeof toolCalls_ACU>;
+      try {
+        calls = reviewerNative.length ? nativeToolArguments_ACU(reviewerNative).map(({ call, payload }) => {
+          if (call.name !== 'read' && call.name !== 'search') throw new Error(`reviewer 不允许调用 ${call.name}`);
+          return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot) as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
+        }) : null;
+        if (!reviewerNative.length && toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot)) throw new Error('read/search 必须使用原生函数调用');
+      } catch (error) {
+        if (!reviewerNative.length) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => reason)));
+        continue;
       }
-      const calls = toolCalls_ACU(raw, reviewerNative.length ? '' : WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot);
       if (calls) {
         if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
           const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
-          const exhaustedBound = reviewerNative.length ? reviewerNative : synthesizeProtocolToolCalls_ACU(calls);
-          if (exhaustedBound.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content || raw, exhaustedBound, exhaustedBound.map(() => exhausted)));
-          else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: exhausted });
+          transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
           continue;
         }
         toolRounds += 1;
@@ -588,9 +588,7 @@ export class WorldSimulationSubagentRuntime_ACU {
           },
         }));
         if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
-        const reviewerBound = reviewerNative.length ? reviewerNative : synthesizeProtocolToolCalls_ACU(calls);
-        if (reviewerBound.length) transcript.push(...nativeToolExchange_ACU(reviewerTurn.content || raw, reviewerBound, perCallResults.map(toolText_ACU)));
-        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: toolText_ACU(perCallResults.flat()) });
+        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, perCallResults.map(toolText_ACU)));
         continue;
       }
       try {

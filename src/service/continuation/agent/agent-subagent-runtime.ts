@@ -25,7 +25,7 @@ import {
 } from '../model';
 import { AGENT_PREFILLS_ACU, buildDefaultContinuationAgentPrompts_ACU } from './agent-defaults';
 import { keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
-import { agentNativeTools_ACU, nativeToolCallsToProtocolJson_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
@@ -37,11 +37,12 @@ import {
   parseAgentFinalReviewerOutput_ACU,
   parseAgentJsonPayload_ACU,
   parseAgentJsonPayloadDraft_ACU,
+  parseAgentToolCall_ACU,
+  parseAgentWebToolCall_ACU,
   parseAgentMaintainerOutputDraft_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentResearcherOutput_ACU,
   parseAgentResearcherToolCalls_ACU,
-  parseAgentResearcherWorkingNotes_ACU,
   parseAgentReviewerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
   parseAgentWritableToolCalls_ACU,
@@ -222,8 +223,6 @@ export interface AgentSubagentRuntimeDependencies_ACU {
   webClient?: AgentWebClient_ACU;
   /** 酒馆自身 origin，用于拒绝 web_read 抓自己；缺省取 location.origin。 */
   hostOrigin?: () => string;
-  /** 生产路径使用原生 tool_calls。测试缺省关闭，仍走文本 JSON。 */
-  nativeTools?: boolean;
 }
 
 const defaultDependencies_ACU: AgentSubagentRuntimeDependencies_ACU = {
@@ -758,11 +757,6 @@ export class AgentSubagentRuntime_ACU {
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
     const transcript: Array<{ role: string; content: string; tool_calls?: NonNullable<ReturnType<typeof nativeToolExchange_ACU>[number]['tool_calls']>; tool_call_id?: string }> = [];
     const trailingPrefill = (baseMessages[baseMessages.length - 1]?.role === 'assistant' || baseMessages[baseMessages.length - 1]?.content === USER_PREFILL_CONTENT_ACU) ? baseMessages.pop() : undefined;
-    /**
-     * 待消费的网页正文：只临时附在下一次模型调用里，绝不能写入 transcript。
-     * 模型借本次输出里的 notes 将有用事实压进历史后，这块正文即被释放。
-     */
-    let pendingResearchEvidence = '';
     const expandedReads: string[] = [];
     let toolRoundsUsed = 0;
     let writeRoundsUsed = 0;
@@ -822,6 +816,7 @@ export class AgentSubagentRuntime_ACU {
     let protocolRejections = 0;
     let attempt = 0;
     let lastReason = '';
+    let committedWriteObserved = false;
     // 本次派工的累计用量。只有每次已观测调用都报告某字段时，该字段才具备可求和的完整性。
     let usageTotal: AiUsageMetadata_ACU | null = null;
     const addCompleteCount = (current: number | undefined, incoming: number | undefined): number | undefined => (
@@ -832,10 +827,10 @@ export class AgentSubagentRuntime_ACU {
       // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
       cacheScope: `sub-${definition.name}`,
       cacheTools: ['read', 'search', ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []), ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU([
+      tools: agentNativeTools_ACU([
         ...(ownReads ? [...(ownReads.length ? ['read' as const] : []), ...(input.writeSql && writes.length ? ['write_sql' as const] : [])] : (input.writeSql && writes.length ? ['read' as const, 'search' as const, 'write_sql' as const] : ['read' as const, 'search' as const])),
         ...(isResearch ? ['encyclopedia_search' as const, 'encyclopedia_read' as const, 'web_search' as const, 'web_read' as const] : []),
-      ]) } : {}),
+      ]),
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
       onUsage: usage => {
         usageTotal = usageTotal
@@ -939,10 +934,7 @@ export class AgentSubagentRuntime_ACU {
       const requestSnapshot = await renderRequestSnapshot();
       const raw = await callContinuationInternalAiWithRetry_ACU(
         () => this.dependencies.callInternalAi(
-          this.dependencies.nativeTools
-            ? withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : []), { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])])
-            : [...baseMessages, ...transcript, ...(pendingResearchEvidence ? [{ role: 'user', content: pendingResearchEvidence }] : []),
-              { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill ? [trailingPrefill] : [])],
+          withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]),
           input.preset,
           identity,
           input.signal,
@@ -958,25 +950,33 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
       }
       const turn = normalizeAgentModelReply_ACU(raw);
-      const nativeCalls: AiNativeToolCall_ACU[] = this.dependencies.nativeTools ? turn.toolCalls : [];
-      let protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
-      if (nativeCalls.length) {
-        try { protocolText = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
-        catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
-          continue;
-        }
-      }
+      const nativeCalls: AiNativeToolCall_ACU[] = turn.toolCalls;
+      const protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
       const rawText = protocolText.trim();
-      const parseRaw = protocolText;
 
-      // 普通可写角色独享即时写端口；主 Agent、终审和只读角色仍只解析 read/search。
+      // 函数调用参数保留原生 ID；权限和领域校验仍由对应的解析器执行。
       let toolCalls: ReturnType<typeof parseAgentWritableToolCalls_ACU>;
       try {
-        toolCalls = input.writeSql && writes.length
-          ? parseAgentWritableToolCalls_ACU(parseRaw, nativeCalls.length ? '' : prefill, isResearch)
-          : isResearch ? parseAgentResearcherToolCalls_ACU(parseRaw, nativeCalls.length ? '' : prefill) : parseAgentSubagentToolCalls_ACU(parseRaw, nativeCalls.length ? '' : prefill);
+        toolCalls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+          if (call.name === 'write_sql') {
+            if (!input.writeSql || !writes.length || typeof payload.sql !== 'string' || !payload.sql.trim()
+              || Object.keys(payload).some(key => key !== 'action' && key !== 'sql')) throw new Error('write_sql 未授权或参数非法');
+            return { kind: 'write_sql' as const, sql: payload.sql.trim() };
+          }
+          const { notes: _notes, ...argumentsWithoutNotes } = payload;
+          if (['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name)) {
+            if (!isResearch) throw new Error(`出网工具 ${call.name} 未授权`);
+            return parseAgentWebToolCall_ACU(argumentsWithoutNotes);
+          }
+          if (call.name !== 'read' && call.name !== 'search') throw new Error(`未知工具 ${call.name}`);
+          if (_notes !== undefined && !isResearch) throw new Error('非研究角色不得传 notes');
+          return parseAgentToolCall_ACU(argumentsWithoutNotes);
+        }) : null;
+        if (!nativeCalls.length && (input.writeSql && writes.length
+          ? parseAgentWritableToolCalls_ACU(protocolText, prefill, isResearch)
+          : isResearch ? parseAgentResearcherToolCalls_ACU(protocolText, prefill) : parseAgentSubagentToolCalls_ACU(protocolText, prefill))) {
+          throw new Error('工具必须通过原生函数调用，不能作为 JSON 文本输出');
+        }
       } catch (error) {
         protocolRejections += 1;
         if (protocolRejections > retries) {
@@ -989,46 +989,25 @@ export class AgentSubagentRuntime_ACU {
         }
         const reason = `工具动作未执行：${compactAgentProtocolError_ACU(error)}。请修正 action / sql 后重试。`;
         if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
-        else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: reason });
+        else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: reason }); // 非工具协议纠错，不是工具回执
         continue;
       }
       if (toolCalls) {
-        // 当前输出正是对上一批临时网页正文的归纳机会。只持久保留模型显式给出的短笔记。
-        if (isResearch && pendingResearchEvidence) {
-          const notes = parseAgentResearcherWorkingNotes_ACU(protocolText, nativeCalls.length ? '' : prefill);
-          if (notes.length) {
-            transcript.push({
-              role: 'user',
-              content: `【已归纳的网页检索笔记】\n${notes.map((note, index) => `${index + 1}. ${note}`).join('\n')}\n以上是此前网页的压缩笔记；原网页正文已释放，不能再凭记忆补细节。`,
-            });
-          } else {
-            transcript.push({
-              role: 'user',
-              content: '你刚读过的网页正文已经释放，但你没有写 notes。后续只能基于已保留的资料与新页面工作；若该网页的事实仍重要，请重新抓取并在下一次工具动作里用 notes 写下精炼要点。',
-            });
-          }
-          pendingResearchEvidence = '';
-        }
         const readsAllowed = toolRoundsUsed < maxToolRounds;
         if (!readsAllowed && toolCalls.every(item => item.kind !== 'write_sql')) {
           const exhausted = isResearch
             ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
             : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-          const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(toolCalls);
-          if (boundCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content || rawText, boundCalls, boundCalls.map(() => exhausted)));
-          else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: exhausted });
+          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
           continue;
         }
         if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql')) toolRoundsUsed += 1;
-        const toolResultSections: string[] = [];
         const perCallResults: string[] = [];
-        const temporaryWebSections: string[] = [];
         for (const call of toolCalls) {
           if (call.kind === 'write_sql') {
             if (writeRoundsUsed >= maxWriteRounds) {
               const exhausted = JSON.stringify({ action: 'write_sql', originalSql: call.sql, status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽',
                 remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: 0 });
-              toolResultSections.push(exhausted);
               perCallResults.push(exhausted);
               continue;
             }
@@ -1046,6 +1025,7 @@ export class AgentSubagentRuntime_ACU {
               if (!input.isCurrent(identity) || input.signal?.aborted) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
               recordWriteReceipt(receipt);
               if (receipt.status === 'committed') {
+                committedWriteObserved = true;
                 usedFieldWrites = true;
                 input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(input.resolveContext.chat);
                 for (const key of gate.granted) if (key.startsWith('$FIELD:') || key.startsWith('$HOOKS_LEDGER') || key.startsWith('$INFO_GAP') || key.startsWith('$CHRONOLOGY') || key.startsWith('$STORY_ARC') || key.startsWith('$WEB_REFS')) gate.granted.delete(key);
@@ -1064,7 +1044,6 @@ export class AgentSubagentRuntime_ACU {
                 ])],
                 remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: maxWriteRounds - writeRoundsUsed });
               const writeResult = repair ? `${receiptText}\n${repair}` : receiptText;
-              toolResultSections.push(writeResult);
               perCallResults.push(writeResult);
             } catch (error) {
               if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
@@ -1074,95 +1053,32 @@ export class AgentSubagentRuntime_ACU {
                 rejected: [{ path: 'host', reason: compactAgentProtocolError_ACU(error) }], partials: null, revisions: null,
                 readAddresses: [], reason: compactAgentProtocolError_ACU(error),
                 remainingToolRounds: maxToolRounds - toolRoundsUsed, remainingWriteRounds: maxWriteRounds - writeRoundsUsed })}\n【write_sql 补栏】保存状态无法确认。先 read 对应 $FIELD:模块:ID 权威帧与当前修订号，不要重发原 SQL。`;
-              toolResultSections.push(unknownResult);
               perCallResults.push(unknownResult);
             }
           } else {
             if (!readsAllowed) {
               const denied = JSON.stringify({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽',
                 remainingToolRounds: 0, remainingWriteRounds: maxWriteRounds - writeRoundsUsed });
-              toolResultSections.push(denied);
               perCallResults.push(denied);
               continue;
             }
             const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads,
               isResearch ? { settings: input.settings, cache: pageCache } : undefined);
-            if (['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.kind)) {
-              temporaryWebSections.push(result);
-              perCallResults.push('临时网页结果仅在下一轮请求注入，后续历史不保留原文。');
-            } else {
-              toolResultSections.push(result);
-              perCallResults.push(result);
-            }
+            perCallResults.push(result);
           }
         }
-        if (maxWriteRounds) toolResultSections.push(`write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。`);
         const roundNote = maxWriteRounds ? `write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。` : '';
-        const stableResult = toolResultSections.join('\n\n');
-        const boundCalls = nativeCalls.length ? nativeCalls : synthesizeProtocolToolCalls_ACU(toolCalls);
-        if (boundCalls.length) {
-          const note = renderReadBudgetNote(toolRoundsUsed);
-          const results = boundCalls.map((_, index) => [perCallResults[index] || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
-          transcript.push(...nativeToolExchange_ACU(turn.content || rawText, boundCalls, results));
-        } else {
-          transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-          if (stableResult || !temporaryWebSections.length) transcript.push({ role: 'user', content: `${stableResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
-        }
-        if (temporaryWebSections.length) {
-          pendingResearchEvidence = `【本次临时网页检索结果】\n以下网页正文仅供本次回答归纳。若还要继续调用工具，请把本次保留的事实压缩写入每个工具对象的 notes 字段（字符串或字符串数组，建议每页 1–3 条），系统不会在后续历史中保留网页原文。\n\n${temporaryWebSections.join('\n\n')}\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-        }
+        const note = renderReadBudgetNote(toolRoundsUsed);
+        const results = nativeCalls.map((_, index) => [perCallResults[index] || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
+        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
         continue;
       }
-
-      const commitContractSql = async (sql: string): Promise<AgentModuleFieldReceipt_ACU> => {
-        if (!input.writeSql) throw new Error('没有逐栏写入端口');
-        if (!input.isCurrent(identity) || input.signal?.aborted) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入请求已失效', false));
-        }
-        writeAttempted = true;
-        const receipt = await input.writeSql({
-          role: definition.name, sql,
-          isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
-          resolvePage: handle => {
-            const page = pageCache.pages.get(handle.trim().toUpperCase());
-            return page?.status === 'ok' && page.text ? { title: page.title, source: page.source, url: page.url, query: page.query, sourceStatus: page.status } : null;
-          },
-        });
-        if (!input.isCurrent(identity) || input.signal?.aborted) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
-        }
-        recordWriteReceipt(receipt);
-        if (receipt.status === 'committed') {
-          usedFieldWrites = true;
-          input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(input.resolveContext.chat);
-          for (const key of gate.granted) if (key.startsWith('$FIELD:') || key.startsWith('$HOOKS_LEDGER') || key.startsWith('$INFO_GAP') || key.startsWith('$CHRONOLOGY') || key.startsWith('$STORY_ARC') || key.startsWith('$WEB_REFS')) gate.granted.delete(key);
-        }
-        return receipt;
-      };
-      const continueIncompleteFieldWrite = (receipt: AgentModuleFieldReceipt_ACU): boolean => {
-        const follow = renderIncompleteFieldWrite_ACU(receipt);
-        if (!follow || continuationsUsed >= maxContinuations) return false;
-        continuationsUsed += 1;
-        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-        transcript.push({ role: 'user', content: follow });
-        return true;
-      };
 
       try {
         if (isResearch) {
           const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU.research);
-          if (input.writeSql && writes.length && typeof payload.sql === 'string' && payload.sql.trim()) {
-            const receipt = await commitContractSql(payload.sql);
-            if (continueIncompleteFieldWrite(receipt)) continue;
-            return {
-              agentName: definition.name, kind: definition.kind, writes, arc: null, maintainer: null, planner: null, reviewer: null,
-              researcher: null, requirements: null, iterations: attempt, usedFieldWrites, attempts: attempt, expandedReads: [...expandedReads], readRevisions, usage: usageTotal,
-            };
-          }
+          if (payload.sql !== undefined) throw new Error('文本契约中的 sql 不会执行；请调用原生 write_sql 函数提交写入');
           const draft = parseAgentResearcherOutput_ACU(payload);
-          if (payload.sql !== undefined && draft.expectedRevision !== undefined && draft.expectedRevision !== readRevisions.webRefs) {
-            throw new Error(`web_refs SQL expected_revision 与派工读集 revision 不一致：声明 ${draft.expectedRevision}，读集 ${readRevisions.webRefs}`);
-          }
           const researcher = resolveResearcherDraft_ACU(draft, pageCache);
           return {
             agentName: definition.name,
@@ -1184,23 +1100,8 @@ export class AgentSubagentRuntime_ACU {
         }
         if (contractKind) {
           const draft = parseAgentJsonPayloadDraft_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
-          if (input.writeSql && writes.length && typeof draft.payload.sql === 'string' && draft.payload.sql.trim()) {
-            const receipt = await commitContractSql(draft.payload.sql);
-            if (continueIncompleteFieldWrite(receipt)) continue;
-            const output = blankMaintainerOutput_ACU(typeof draft.payload.summary === 'string' ? draft.payload.summary : '');
-            output.delta.constraintProposals = receipt.constraintProposals ?? [];
-            const follow = renderIncompleteFieldWrite_ACU(receipt);
-            return deliverContract(output, follow ? [{ module: writes[0] as AgentContractRejection_ACU['module'], index: 0, id: '', reason: follow }] : []);
-          }
+          if (draft.payload.sql !== undefined) throw new Error('文本契约中的 sql 不会执行；请调用原生 write_sql 函数提交写入');
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
-          if (draft.payload.sql !== undefined) {
-            for (const [module, revision] of Object.entries(parsed.output.delta.expectedRevisions)) {
-              const readRevision = readRevisions[module as keyof AgentModuleRevisions_ACU];
-              if (revision !== readRevision) {
-                throw new Error(`${module} SQL expected_revision 与派工读集 revision 不一致：声明 ${revision}，读集 ${readRevision}`);
-              }
-            }
-          }
           accumulated = accumulated ? mergeAgentMaintainerOutputs_ACU(accumulated, parsed.output) : parsed.output;
           // 上一轮被拒的条目：本轮重发了合法版本即清偿；没有 id 的条目无法匹配，本轮过后不再追讨。
           const nowAccepted = acceptedKeys(parsed.output);
@@ -1212,7 +1113,8 @@ export class AgentSubagentRuntime_ACU {
           const emptyArcBootstrap = definition.kind === 'arc'
             && !hasActiveStoryArc_ACU(input.resolveContext.moduleSnapshot)
             && !accumulated.delta.storyArc.length
-            && !accumulated.delta.storyArcPatches.length;
+            && !accumulated.delta.storyArcPatches.length
+            && !committedWriteObserved;
           if (emptyArcBootstrap && !pending.length && !draft.truncated && input.writeSql) {
             const request = renderArcSqlBootstrap_ACU(input.resolveContext.chat, maxWriteRounds - writeRoundsUsed);
             if (continuationsUsed >= maxContinuations) {
@@ -1273,7 +1175,7 @@ export class AgentSubagentRuntime_ACU {
         // 被拒原文也要留在小循环对话里：模型必须看到自己上一次写了什么才能真正修正。
         transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
         const protocolRepair = input.writeSql && writes.length
-          ? `你上一次的输出没有被采纳。原因：${lastReason}\n不要写说明、Markdown 或 delta。${maxWriteRounds - writeRoundsUsed > 0 ? '调用一次 write_sql，把全部语句放进同一个 sql 参数。' : 'write_sql 轮次已用尽，不要再调用函数，只输出 {"sql":"全部 INSERT 或 UPDATE，用分号连在一起"}。'}新行 expected_revision 写 0，补已有行共用回执里的模块修订号。sustaining_threads 与 payoff_targets 写成 '["条目"]'。volume 同时只能有一条 active，其余 planned。`
+          ? `你上一次的输出没有被采纳。原因：${lastReason}\n不要写说明、Markdown 或 delta。${maxWriteRounds - writeRoundsUsed > 0 ? '调用一次 write_sql，把全部语句放进同一个 sql 参数。' : 'write_sql 轮次已用尽，不要再调用函数；如实报告未完成的缺口。'}新行 expected_revision 写 0，补已有行共用回执里的模块修订号。sustaining_threads 与 payoff_targets 写成 '["条目"]'。volume 同时只能有一条 active，其余 planned。`
           : `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合契约的 JSON 对象。`;
         transcript.push({ role: 'user', content: protocolRepair });
       }
@@ -1374,7 +1276,7 @@ export class AgentSubagentRuntime_ACU {
       promptCacheEnabled: true,
       cacheScope: 'final-reviewer',
       cacheTools: ['read', 'search', 'review'],
-      ...(this.dependencies.nativeTools && input.sharedMaterials === undefined ? { tools: agentNativeTools_ACU(['read', 'search']) } : {}),
+      tools: input.sharedMaterials === undefined ? agentNativeTools_ACU(['read', 'search']) : [],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
       onUsage: usage => {
         usageTotal = usageTotal
@@ -1396,9 +1298,7 @@ export class AgentSubagentRuntime_ACU {
       }
       const reviewTail = await renderReviewTail();
       const raw = await callContinuationInternalAiWithRetry_ACU(
-        () => this.dependencies.callInternalAi(this.dependencies.nativeTools
-          ? withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])])
-          : [...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill ? [trailingPrefill] : [])], preset, identity, input.signal, callOptions),
+        () => this.dependencies.callInternalAi(withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]), preset, identity, input.signal, callOptions),
         {
           transportRetries: retries,
           retryDelaySeconds: input.settings.retryDelaySeconds,
@@ -1409,31 +1309,39 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审结果已失效', false));
       }
       const turn = normalizeAgentModelReply_ACU(raw);
-      const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
-      let protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
-      if (nativeCalls.length) {
-        try { protocolText = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
-        catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+      const nativeCalls = turn.toolCalls;
+      const protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
+      const rawText = protocolText.trim();
+      let toolCalls: ReturnType<typeof parseAgentSubagentToolCalls_ACU>;
+      try {
+        toolCalls = nativeCalls.length
+          ? nativeToolArguments_ACU(nativeCalls).map(({ payload }) => parseAgentToolCall_ACU(payload))
+          : parseAgentSubagentToolCalls_ACU(protocolText, prefill);
+        if (!nativeCalls.length && toolCalls) {
+          protocolRejections += 1;
+          if (protocolRejections > retries) throw new Error('read/search 必须使用原生函数调用');
+          transcript.push(
+            { role: 'assistant', content: rawText || '(空输出)' },
+            { role: 'user', content: 'read/search 必须使用原生函数调用，不能作为 JSON 文本输出。请改用原生函数后重试。' },
+          );
           continue;
         }
+      } catch (error) {
+        if (!nativeCalls.length) throw error;
+        const reason = compactAgentProtocolError_ACU(error);
+        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+        continue;
       }
-      const rawText = protocolText.trim();
-      const toolCalls = parseAgentSubagentToolCalls_ACU(protocolText, nativeCalls.length ? '' : prefill);
       if (toolCalls) {
-        if (!nativeCalls.length) transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
         if (toolRoundsUsed >= maxToolRounds) {
           const exhausted = `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-          if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
-          else transcript.push({ role: 'user', content: exhausted });
+          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
           continue;
         }
         toolRoundsUsed += 1;
         const perCallResults: string[] = [];
         for (const toolCall of toolCalls) perCallResults.push(await this.executeToolCalls_ACU([toolCall], input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null));
-        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
-        else transcript.push({ role: 'user', content: `${perCallResults.join('\n\n')}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
         continue;
       }
       try {

@@ -20,7 +20,7 @@ import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
-import { agentNativeTools_ACU, nativeToolCallsToProtocolJson_ACU, normalizeAgentModelReply_ACU, synthesizeProtocolToolCalls_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, nativeToolArguments_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
@@ -65,7 +65,7 @@ import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
 import { commitAgentModuleFieldWrites_ACU, type AgentFieldPage_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
-import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU } from './agent-protocol';
+import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
 import {
   buildAgentWorldbookScanText_ACU,
   extractAgentRecallCodesFromChat_ACU,
@@ -134,8 +134,6 @@ export interface ContinuationAgentTurnPlannerDependencies_ACU {
     options?: ContinuationInternalAiCallOptions_ACU,
   ) => Promise<string | import('../../ai/native-tool').AiChatTurn_ACU | null>;
   subagentRuntime: AgentSubagentRuntime_ACU;
-  /** 生产路径打开后，工具走原生 tool_calls，回执用 role=tool。测试缺省关闭。 */
-  nativeTools?: boolean;
   readChat: () => any[];
   readModuleSnapshot: (chat: any[]) => AgentModuleSnapshot_ACU;
   writeModuleSnapshot: (chat: any[], targetIndex: number, snapshot: AgentModuleSnapshot_ACU) => Promise<void>;
@@ -496,14 +494,10 @@ const readCurrentStageCursor_ACU = (request: ContinuationAgentTurnPlanRequest_AC
 export class ContinuationAgentTurnPlanner_ACU {
   private readonly dependencies: ContinuationAgentTurnPlannerDependencies_ACU;
   constructor(dependencies: Partial<ContinuationAgentTurnPlannerDependencies_ACU> = {}) {
-    const nativeTools = dependencies.nativeTools === true;
     this.dependencies = {
       ...defaultDependencies_ACU,
       ...dependencies,
-      nativeTools,
-      subagentRuntime: dependencies.subagentRuntime ?? (nativeTools
-        ? new AgentSubagentRuntime_ACU({ nativeTools: true })
-        : defaultDependencies_ACU.subagentRuntime),
+      subagentRuntime: dependencies.subagentRuntime ?? defaultDependencies_ACU.subagentRuntime,
     };
   }
 
@@ -1189,7 +1183,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       cacheTools: ['read', 'search', 'open_round', 'delegate', 'finalize', 'block'],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.main,
       onUsage: usage => { callUsage = usage; },
-      ...(this.dependencies.nativeTools ? { tools: agentNativeTools_ACU(['read', 'search']) } : {}),
+      tools: agentNativeTools_ACU(['read', 'search']),
     };
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -1200,9 +1194,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
       const latestSnapshot = lastRuntimeSnapshotText_ACU(session.snapshot());
-      let messages = this.dependencies.nativeTools
-        ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history(), latestSnapshot))
-        : this.spliceHistory_ACU(rendered, session.history(), latestSnapshot);
+      let messages = withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history(), latestSnapshot));
       // 发送前只在越过两倍越界线时压缩，避免这次请求因超长失败。
       // 没到两倍不总结；下一轮开始时直接丢弃上一轮的会话、工具调用和快照。
       const budgetTokens = request.settings.agentHistoryTokenBudget;
@@ -1211,9 +1203,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         let promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
         if (promptTokens > ceilingTokens) {
           if (await session.compact(true, messages)) {
-            messages = this.dependencies.nativeTools
-              ? withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history(), latestSnapshot))
-              : this.spliceHistory_ACU(rendered, session.history(), latestSnapshot);
+            messages = withNativeToolThinkPrefill_ACU(this.spliceHistory_ACU(rendered, session.history(), latestSnapshot));
             promptTokens = await measureAgentPromptTokens_ACU(messages, counter);
           }
         }
@@ -1255,36 +1245,34 @@ export class ContinuationAgentTurnPlanner_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
       }
       const turn = normalizeAgentModelReply_ACU(raw);
-      const nativeCalls = this.dependencies.nativeTools ? turn.toolCalls : [];
-      let rawText = turn.content.trim();
-      if (nativeCalls.length) {
-        try { rawText = nativeToolCallsToProtocolJson_ACU(nativeCalls); }
-        catch (error) {
-          lastReason = error instanceof Error ? error.message : String(error);
-          this.recordNativeToolFailure_ACU(session, turn.content, nativeCalls, lastReason);
-          await session.flush();
-          continue;
-        }
-      }
+      const nativeCalls = turn.toolCalls;
+      const rawText = turn.content.trim();
       try {
-        // 统一入口：输出里出现任意 read/search 对象即视为工具并发批次，否则按单动作解析。
-        const action = parseAgentMainOutput_ACU(rawText, nativeCalls.length ? '' : AGENT_PREFILLS_ACU.main, allowDelegate);
+        // 工具只从 provider 的 tool_calls 读取；文本协议只保留非工具决策。
+        const action = nativeCalls.length
+          ? { kind: 'tools' as const, thought: '', calls: nativeToolArguments_ACU(nativeCalls).map(({ payload }) => parseAgentToolCall_ACU(payload)) }
+          : parseAgentMainOutput_ACU(rawText, AGENT_PREFILLS_ACU.main, allowDelegate);
+        if (!nativeCalls.length && action.kind === 'tools') throw new Error('read/search 必须使用原生函数调用');
         // 没有可执行的大纲轮次就不存在「本轮」，finalize 无从谈起；拒绝并回灌，让主 Agent 先走大纲子代理。
         if (action.kind === 'finalize' && !request.readContext().turn) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '当前没有可执行的大纲轮次，不能 finalize；请先派工 outline-architect 创建或继续大纲', false));
         }
-        const boundCalls = nativeCalls.length || action.kind !== 'tools' ? nativeCalls : synthesizeProtocolToolCalls_ACU(action.calls);
         session.record([{
           kind: 'agent',
           text: turn.content.trim() || rawText || '(空输出)',
           digest: describeAgentActionLabel_ACU(action),
           turnKey: session.turnKey,
-          ...(boundCalls.length ? { toolCalls: boundCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
+          ...(nativeCalls.length ? { toolCalls: nativeCalls.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) } : {}),
         }]);
         await session.flush();
-        return { action, nativeCalls: boundCalls, attempts: attempt + 1, usage: callUsage };
+        return { action, nativeCalls, attempts: attempt + 1, usage: callUsage };
       } catch (error) {
         lastReason = compactAgentProtocolError_ACU(error);
+        if (nativeCalls.length) {
+          this.recordNativeToolFailure_ACU(session, turn.content, nativeCalls, lastReason);
+          await session.flush();
+          continue;
+        }
         // 被拒绝的原文也要留在会话里：模型必须看到自己上一次到底写了什么才能真正修正。
         session.record([
           { kind: 'agent', text: rawText || '(空输出)', digest: '输出被协议层拒绝', turnKey: session.turnKey },
@@ -1434,7 +1422,7 @@ export class ContinuationAgentTurnPlanner_ACU {
   ): Promise<void> {
     if (toolUsage.batchesUsed >= budget.maxReads) {
       const text = `read/search 工具批次已用尽（上限 ${budget.maxReads} 个批次）。请基于已有资料输出决策动作（delegate / finalize / block）；大纲调整请委派 outline-architect 或 arc-architect。`;
-      session.record([{ kind: 'tool', text, digest: '工具批次已用尽', turnKey: session.turnKey }]);
+      session.record(nativeCalls.map(call => ({ kind: 'tool' as const, text, digest: '工具批次已用尽', turnKey: session.turnKey, toolCallId: call.id })));
       logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 工具批次已用尽`, detail: text, ok: false });
       await session.flush();
       return;

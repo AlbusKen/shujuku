@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from '../../../../src/service/continuation/agent/agent-defaults';
 import {
   buildEmptyAgentWorldbookSnapshot_ACU,
   renderAgentWorldbookCatalog_ACU,
@@ -19,6 +20,14 @@ function snapshot_ACU(): AgentWorldbookSnapshot_ACU {
     ],
   };
 }
+
+describe('运行时快照资料边界', () => {
+  it('不再单独注入表格目录；世界书仍通过命中条目和读取地址访问', () => {
+    expect(AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU).not.toContain('$TABLE_CATALOG');
+    expect(AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU).toContain('$WORLDBOOK_HITS');
+    expect(AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU).toContain('$AGENT_READ_CATALOG');
+  });
+});
 
 describe('世界书目录渲染', () => {
   it('每条一行：标题、关键词、10 字摘要、token 估算与精读地址', () => {
