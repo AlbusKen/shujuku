@@ -1,4 +1,4 @@
-import { WORLD_CHRONICLE_HOT_WINDOW_ACU, type WorldChronicleOverviewRow_ACU, type WorldSimulationLedger_ACU } from './model';
+import { WORLD_CHRONICLE_HOT_WINDOW_ACU, type WorldChronicleOverviewRow_ACU, type WorldLocationRef_ACU, type WorldSimulationLedger_ACU } from './model';
 import { buildArchiveHints_ACU, type WorldArchiveHint_ACU } from './archive-hints';
 
 export interface WorldCatalogRow_ACU {
@@ -27,8 +27,17 @@ function clip_ACU(value: string, max = 80): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-function row_ACU(id: string, name: string, summary: string, module: string): WorldCatalogRow_ACU {
-  return { id, name, summary: clip_ACU(summary), readAddress: `${module}:${id}` };
+function row_ACU(id: string, name: string, summary: string, module: string, max = 80): WorldCatalogRow_ACU {
+  return { id, name, summary: clip_ACU(summary, max), readAddress: `${module}:${id}` };
+}
+
+function locationText_ACU(ref: WorldLocationRef_ACU | null | undefined, fallback = ''): string {
+  return ref ? [ref.region, ref.place].filter(Boolean).join('·') : fallback;
+}
+
+/** 目录摘要是条目整体的浓缩：状态、位置、驱动因素与关联，一眼可判断是否需要精读。 */
+function joinParts_ACU(parts: ReadonlyArray<string | false | 0 | null | undefined>): string {
+  return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join('；');
 }
 
 export function buildInUseWorldCatalog_ACU(ledger: WorldSimulationLedger_ACU): WorldInUseCatalog_ACU {
@@ -39,8 +48,20 @@ export function buildInUseWorldCatalog_ACU(ledger: WorldSimulationLedger_ACU): W
     clock: ledger.clock,
     player: ledger.player,
     dimensions: ledger.dimensions.map(item => row_ACU(item.id, item.name, `${item.kind} ${item.value} ${item.trend} ${item.rationale}`, 'dimensions')),
-    seeds: activeSeeds.map(item => row_ACU(item.id, item.title, `${item.status} lv${item.level} ${item.location?.region ?? ''}`, 'seeds')),
-    actors: ledger.actors.map(item => row_ACU(item.id, item.name, `${item.life} ${item.locationRef?.region ?? item.location}`, 'actors')),
+    seeds: activeSeeds.map(item => row_ACU(item.id, item.title, joinParts_ACU([
+      `${item.status} lv${item.level} ${item.visibility}`,
+      locationText_ACU(item.location) && `@${locationText_ACU(item.location)}`,
+      item.catalyst && `催化：${item.catalyst}`,
+      item.expiresAtDay !== null && `时限第${item.expiresAtDay}日`,
+      item.actorIds.length > 0 && `人物：${item.actorIds.join(',')}`,
+    ]), 'seeds', 140)),
+    actors: ledger.actors.map(item => row_ACU(item.id, item.name, joinParts_ACU([
+      `${item.life} ${item.visibility}`,
+      `@${locationText_ACU(item.locationRef, item.location) || '未知'}`,
+      item.life === 'dead' && item.deathSummary && `死因：${item.deathSummary}`,
+      item.goals.length > 0 && `目标：${item.goals.slice(0, 2).join('、')}`,
+      item.interests.length > 0 && `关切：${item.interests.slice(0, 2).join('、')}`,
+    ]), 'actors', 140)),
     rumors: activeRumors.map(item => row_ACU(item.id, item.fact, `${item.status} ${item.channels.join(',')}`, 'rumors')),
     chronicleHot: hot.map(item => ({
       id: item.id,

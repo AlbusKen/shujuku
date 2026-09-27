@@ -91284,8 +91284,15 @@ $CONTENT
         const text = value.replace(/\s+/g, ' ').trim();
         return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
     }
-    function row_ACU(id, name, summary, module) {
-        return { id, name, summary: clip_ACU(summary), readAddress: `${module}:${id}` };
+    function row_ACU(id, name, summary, module, max = 80) {
+        return { id, name, summary: clip_ACU(summary, max), readAddress: `${module}:${id}` };
+    }
+    function locationText_ACU(ref, fallback = '') {
+        return ref ? [ref.region, ref.place].filter(Boolean).join('·') : fallback;
+    }
+    /** 目录摘要是条目整体的浓缩：状态、位置、驱动因素与关联，一眼可判断是否需要精读。 */
+    function joinParts_ACU(parts) {
+        return parts.filter((part) => typeof part === 'string' && part.length > 0).join('；');
     }
     function buildInUseWorldCatalog_ACU(ledger) {
         const activeSeeds = ledger.seeds.filter(seed => seed.status !== 'resolved' && seed.status !== 'retired');
@@ -91295,8 +91302,20 @@ $CONTENT
             clock: ledger.clock,
             player: ledger.player,
             dimensions: ledger.dimensions.map(item => row_ACU(item.id, item.name, `${item.kind} ${item.value} ${item.trend} ${item.rationale}`, 'dimensions')),
-            seeds: activeSeeds.map(item => row_ACU(item.id, item.title, `${item.status} lv${item.level} ${item.location?.region ?? ''}`, 'seeds')),
-            actors: ledger.actors.map(item => row_ACU(item.id, item.name, `${item.life} ${item.locationRef?.region ?? item.location}`, 'actors')),
+            seeds: activeSeeds.map(item => row_ACU(item.id, item.title, joinParts_ACU([
+                `${item.status} lv${item.level} ${item.visibility}`,
+                locationText_ACU(item.location) && `@${locationText_ACU(item.location)}`,
+                item.catalyst && `催化：${item.catalyst}`,
+                item.expiresAtDay !== null && `时限第${item.expiresAtDay}日`,
+                item.actorIds.length > 0 && `人物：${item.actorIds.join(',')}`,
+            ]), 'seeds', 140)),
+            actors: ledger.actors.map(item => row_ACU(item.id, item.name, joinParts_ACU([
+                `${item.life} ${item.visibility}`,
+                `@${locationText_ACU(item.locationRef, item.location) || '未知'}`,
+                item.life === 'dead' && item.deathSummary && `死因：${item.deathSummary}`,
+                item.goals.length > 0 && `目标：${item.goals.slice(0, 2).join('、')}`,
+                item.interests.length > 0 && `关切：${item.interests.slice(0, 2).join('、')}`,
+            ]), 'actors', 140)),
             rumors: activeRumors.map(item => row_ACU(item.id, item.fact, `${item.status} ${item.channels.join(',')}`, 'rumors')),
             chronicleHot: hot.map(item => ({
                 id: item.id,
@@ -169660,7 +169679,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     : module === 'actors'
                         ? [...input.givenLedger.actors].sort((a, b) => Number(b.life === 'alive') - Number(a.life === 'alive') || b.revision - a.revision).slice(0, 30)
                         : module === 'rumors'
-                            ? input.givenLedger.rumors.filter(row => row.status !== 'dead').slice(0, 30)
+                            // 传闻单行很短，不设上限整组完整注入；只排除已消亡条目。
+                            ? input.givenLedger.rumors.filter(row => row.status !== 'dead')
                             : rows;
                 own[module] = selected;
                 const kept = new Set(selected.map(row => row.id));
@@ -169677,6 +169697,11 @@ Expected function or array of functions, received type ${typeof value}.`
                     related[module] = input.givenLedger[module];
                 else if (module === 'chronicle')
                     related[module] = catalog.chronicleHot;
+                // 维度与传闻单行很短，直接注入完整行，不再拆成目录与详情；种子与人物字段多，仍用浓缩目录。
+                else if (module === 'dimensions')
+                    related[module] = input.givenLedger.dimensions;
+                else if (module === 'rumors')
+                    related[module] = input.givenLedger.rumors.filter(row => row.status !== 'dead');
                 else if (module in catalog)
                     related[module] = catalog[module];
             }
@@ -169691,7 +169716,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。编年 day、传闻 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
                     : `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
                 `单例修订号：${input.baseLedgerRevision}`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
-                `【关联只读目录】${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
+                `【关联只读资料】维度与传闻为完整行；种子与人物为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
                 ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
                 ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].join('\n');
             const resolvers = createWorldSimulationPlaceholderResolvers_ACU({ ...input.promptContext, worldState: input.givenLedger });

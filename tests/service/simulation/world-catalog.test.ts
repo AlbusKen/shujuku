@@ -132,4 +132,13 @@ describe('world catalog injection', () => {
     })]);
     expect(JSON.stringify(summary)).not.toContain('ch-x');
   });
+
+  it('种子与人物目录摘要浓缩条目整体信息', () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    ledger.seeds = [{ ...seed('seed-gate', '城门盘查'), catalyst: '守门人离岗', actorIds: ['actor-guard'], location: { region: '江南府', place: '城门' } }];
+    ledger.actors = [{ ...actor('actor-guard', '守门人'), goals: ['查明失窃', '保住差事'], interests: ['赌坊'] }];
+    const catalog = buildInUseWorldCatalog_ACU(ledger);
+    expect(catalog.seeds[0].summary).toBe('active lv10 hidden；@江南府·城门；催化：守门人离岗；时限第20日；人物：actor-guard');
+    expect(catalog.actors[0].summary).toBe('alive public；@北岭；目标：查明失窃、保住差事；关切：赌坊');
+  });
 });
