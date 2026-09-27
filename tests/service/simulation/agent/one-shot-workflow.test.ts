@@ -1,0 +1,173 @@
+import { describe, expect, it, vi } from 'vitest';
+import { buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedger_ACU } from '../../../../src/service/simulation/defaults';
+import { runWorldSimulationOneShotWorkflow_ACU } from '../../../../src/service/simulation/agent/agent-workflow';
+import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
+import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
+import type { WorldSimulationSubagentOutcome_ACU } from '../../../../src/service/simulation/agent/agent-model';
+
+const noChange = (agentName: string): WorldSimulationSubagentOutcome_ACU => ({ agentName, status: 'no_change', summary: '无变化', evidenceRefs: [], uncertainties: [] });
+function setup() {
+  const ledger = buildEmptyWorldSimulationLedger_ACU();
+  const registry = createWorldSimulationEvidenceRegistry_ACU('one-shot-workflow');
+  const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'anchor:message', status: 'ok', summary: '正文', exact: true }).evidenceRef!;
+  const identity = { runId: 'one-shot-workflow', chatIdentity: 'one-shot-workflow', triggerKind: 'assistant_completed' as const,
+    triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0',
+    anchorContentDigest: 'digest', baseLedgerRevision: ledger.revision, taskId: 'task', stageId: 'stage', stageRevision: 1 };
+  const promptContext = { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '',
+    worldState: ledger, anchorMessage: '锚点正文', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [],
+    worldCollisions: { playerRegion: null, playerContact: 'open' as const, secludedNote: null, collidedSeeds: [], ripeRumors: [] },
+    evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
+  const settings = buildDefaultWorldSimulationSettings_ACU();
+  const tools = { read: vi.fn(), search: vi.fn() };
+  const run = (runOneShot: (input: any) => Promise<WorldSimulationSubagentOutcome_ACU>) =>
+    runWorldSimulationOneShotWorkflow_ACU({ identity, settings, promptContext, registry, tools,
+      opening: { summary: '开局', focus: '锚点', dispatchChronicler: false, skipModules: [] }, subagents: { runOneShot } });
+  return { ledger, ref, run };
+}
+
+describe('两批一次性世界推演工作流', () => {
+  it('第一批同一轮并发启动，全部无变化时不运行第二批', async () => {
+    const env = setup();
+    const entered: string[] = [];
+    const waits: Array<() => void> = [];
+    const runOneShot = vi.fn((input: any) => new Promise<WorldSimulationSubagentOutcome_ACU>(resolve => {
+      entered.push(input.agentName);
+      waits.push(() => resolve(noChange(input.agentName)));
+    }));
+    const pending = env.run(runOneShot);
+    expect(entered).toEqual(['undercurrent-analyst', 'dramatis-keeper']);
+    waits.forEach(release => release());
+    const result = await pending;
+    expect(result.outcome).toBe('no_change');
+    expect(runOneShot).toHaveBeenCalledTimes(2);
+  });
+
+  it('全部派工失败时阻断而不升级导演', async () => {
+    const env = setup();
+    const runOneShot = vi.fn(async () => { throw new Error('传输失败'); });
+    const result = await env.run(runOneShot);
+    expect(result.outcome).toBe('blocked');
+    expect(result.escalated).toBe(false);
+    expect(result.commitCandidate).toBeUndefined();
+    expect(runOneShot).toHaveBeenCalledTimes(2);
+  });
+
+  it('第二批等待并发的第一批结束，按相同 base 重放并保留被接受的候选', async () => {
+    const env = setup();
+    const entered: string[] = [];
+    const release: Array<() => void> = [];
+    const clock = { candidateId: 'one-shot-workflow:undercurrent-analyst:1', agentName: 'undercurrent-analyst',
+      summary: '推进一天', patch: { clock: { days: 1, expectedRevision: 0, evidenceRefs: [env.ref] } },
+      evidenceRefs: [env.ref], uncertainties: [], writableModules: ['clock'] };
+    const runOneShot = vi.fn((input: any) => new Promise<WorldSimulationSubagentOutcome_ACU>(resolve => {
+      entered.push(input.agentName);
+      if (input.agentName === 'guidance-composer') {
+        expect(input.givenLedger.clock.day).toBe(env.ledger.clock.day + 1);
+        expect(input.baseLedgerRevision).toBe(env.ledger.revision);
+        resolve(noChange(input.agentName));
+      } else release.push(() => resolve(input.agentName === 'undercurrent-analyst'
+        ? { agentName: input.agentName, status: 'candidate', summary: '推进一天', candidate: clock,
+          evidenceRefs: [env.ref], uncertainties: [] } as WorldSimulationSubagentOutcome_ACU
+        : noChange(input.agentName)));
+    }));
+    const pending = env.run(runOneShot);
+    expect(entered).toEqual(['undercurrent-analyst', 'dramatis-keeper']);
+    release[0]();
+    await Promise.resolve();
+    expect(entered).toHaveLength(2);
+    release[1]();
+    const result = await pending;
+    expect(entered).toEqual(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer']);
+    expect(result.outcome).toBe('commit');
+    expect(result.commitCandidate?.acceptedCandidates.map(item => item.candidateId)).toEqual([clock.candidateId]);
+  });
+
+  it('第二批 guidance 使用运行 base 修订号并与第一批一次性重放', async () => {
+    const env = setup();
+    const calls: string[] = [];
+    const runOneShot = vi.fn(async (input: any): Promise<WorldSimulationSubagentOutcome_ACU> => {
+      calls.push(input.agentName);
+      if (input.agentName === 'undercurrent-analyst') return {
+        agentName: input.agentName, status: 'candidate', summary: '推进一天', evidenceRefs: [env.ref], uncertainties: [],
+        candidate: { candidateId: 'clock-1', agentName: input.agentName,
+          patch: { clock: { days: 1, expectedRevision: env.ledger.revision, evidenceRefs: [env.ref] } },
+          summary: '推进一天', evidenceRefs: [env.ref], uncertainties: [], writableModules: ['clock'] },
+      };
+      if (input.agentName === 'guidance-composer') {
+        expect(input.givenLedger.revision).toBeGreaterThan(env.ledger.revision);
+        return { agentName: input.agentName, status: 'candidate', summary: '投影钟声', evidenceRefs: [env.ref], uncertainties: [],
+          candidate: { candidateId: 'guidance-2', agentName: input.agentName,
+            patch: { guidance: { signals: [{ text: '远处传来钟声', voice: 'ambient', sourceId: 'clock' }],
+              expectedRevision: input.baseLedgerRevision, evidenceRefs: [env.ref] } },
+            summary: '投影钟声', evidenceRefs: [env.ref], uncertainties: [], writableModules: ['guidance'] } };
+      }
+      return noChange(input.agentName);
+    });
+    const result = await env.run(runOneShot);
+    expect(calls).toEqual(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer']);
+    expect(result.outcome).toBe('commit');
+    expect(result.commitCandidate?.acceptedCandidates.map(item => item.candidateId)).toEqual(['clock-1', 'guidance-2']);
+    expect(result.pendingFixes).toEqual([]);
+  });
+
+  it('人物死亡与伴生传闻同候选可落账；遗漏传闻则拒绝该候选而保留另一批次一候选', async () => {
+    for (const withRumor of [true, false]) {
+      const env = setup();
+      const dead = { id: 'actor-dead', name: '死者', interests: [], location: '', locationRef: null,
+        life: 'dead', diedAtDay: 1, deathSummary: '战死', resources: [], goals: [], constraints: [],
+        informationSources: [], knownFacts: [], visibility: 'hidden', expectedRevision: 0 };
+      const rumor = { id: 'rumor-death', fact: '有人战死', originDay: 1, earliestRevealDay: 1,
+        channels: ['north'], relatedActorIds: ['actor-dead'], status: 'latent', revealedAtDay: null, expectedRevision: 0 };
+      const runOneShot = vi.fn(async (input: any): Promise<WorldSimulationSubagentOutcome_ACU> => {
+        if (input.agentName === 'guidance-composer') return noChange(input.agentName);
+        const candidate = input.agentName === 'undercurrent-analyst'
+          ? { candidateId: 'clock', agentName: input.agentName, patch: { clock: { days: 1, evidenceRefs: [env.ref], expectedRevision: 0 } },
+            summary: '推进一天', evidenceRefs: [env.ref], uncertainties: [], writableModules: ['clock'] }
+          : { candidateId: 'death', agentName: input.agentName,
+            patch: { actors: { upsert: [dead] }, ...(withRumor ? { rumors: { upsert: [rumor] } } : {}) },
+            summary: '人物死亡', evidenceRefs: [env.ref], uncertainties: [], writableModules: ['actors', 'rumors'] };
+        return { agentName: input.agentName, status: 'candidate', summary: candidate.summary,
+          evidenceRefs: [env.ref], uncertainties: [], candidate } as WorldSimulationSubagentOutcome_ACU;
+      });
+      const result = await env.run(runOneShot);
+      expect(result.outcome).toBe('commit');
+      expect(result.commitCandidate?.acceptedCandidates.map(item => item.candidateId)).toEqual(withRumor ? ['clock', 'death'] : ['clock']);
+      if (withRumor) {
+        expect(result.ledger.actors[0].life).toBe('dead');
+        expect(result.ledger.rumors[0].relatedActorIds).toContain('actor-dead');
+      } else {
+        expect(result.ledger.actors).toEqual([]);
+        expect(result.pendingFixes).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'actors' })]));
+      }
+    }
+  });
+
+  it('一次性运行时对非法 JSON 仅修正一次，合法回复可恢复，持续非法返回失败', async () => {
+    const env = setup();
+    const registry = createWorldSimulationEvidenceRegistry_ACU('runtime-repair');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'anchor:message', status: 'ok', summary: '锚点', exact: true }).evidenceRef!;
+    const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
+    const input = { agentName: 'undercurrent-analyst' as const, settings, registry, tools: { read: vi.fn(), search: vi.fn() },
+      promptContext: { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '',
+        worldState: env.ledger, anchorMessage: '锚点正文', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [],
+        worldCollisions: { playerRegion: null, playerContact: 'open' as const, secludedNote: null, collidedSeeds: [], ripeRumors: [] },
+        evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} },
+      runId: 'runtime-repair', candidateSeq: 1, focus: '锚点', anchorEvidenceRef: ref, givenLedger: env.ledger,
+      baseLedgerRevision: env.ledger.revision, injectWorldbook: false };
+    const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: '' }) };
+    const invoke = vi.fn().mockResolvedValueOnce('not json').mockResolvedValueOnce(JSON.stringify({ status: 'no_change', summary: '无变化' }));
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    expect((await runtime.runOneShot(input)).status).toBe('no_change');
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const invalid = vi.fn(async () => 'not json');
+    const failed = await new WorldSimulationSubagentRuntime_ACU({ invoke: invalid, apiPreset, countTokens: async () => 1 }).runOneShot(input);
+    expect(failed.status).toBe('failed');
+    expect(invalid).toHaveBeenCalledTimes(2);
+    const forbidden = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'write-1', name: 'write_sql', arguments: '{}' }] })
+      .mockResolvedValueOnce(JSON.stringify({ status: 'no_change', summary: '修正完成' }));
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: forbidden, apiPreset, countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
+    expect(forbidden).toHaveBeenCalledTimes(2);
+    expect(input.tools.read).not.toHaveBeenCalled();
+  });
+});
